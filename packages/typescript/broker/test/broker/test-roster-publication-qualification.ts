@@ -290,13 +290,13 @@ check('A main- and subagent-shaped sessions publish the identical status sequenc
     status: 'working',
     control: {
       drive: { supported: true, state: 'unavailable' },
-      terminalSync: { supported: true, syncAvailable: true, active: true },
+      terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' },
     },
   }));
   attachPlans.set(id, { next: () => upgraded, gate: new Promise<void>((r) => { release = r; }) });
   const syncActive = {
     drive: { supported: true, state: 'unavailable' },
-    terminalSync: { supported: true, syncAvailable: true, active: true },
+    terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' },
   } as SessionInfo['control'];
   boundary.submitWatcherSnapshot(watcherIdle(id, { title: 'S1 stale', control: syncActive, updatedAt: 11_000 }));
   await Bun.sleep(20); // the held reconcile is now in flight
@@ -345,7 +345,7 @@ check('A main- and subagent-shaped sessions publish the identical status sequenc
   boundary.submitWatcherSnapshot(watcherIdle(id, {
     control: {
       drive: { supported: true, state: 'unavailable' },
-      terminalSync: { supported: true, syncAvailable: true, active: true },
+      terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' },
     },
     updatedAt: 11_000,
   }));
@@ -477,6 +477,121 @@ if (boundaryModule) {
   await raceHub.dispose();
 }
 
+// ── Lane C4 — an unread adapter cannot retire the owner that superseded it ────────────────────
+//
+// The shape that makes this dangerous: a leg abandoned at its budget does not
+// return nothing, it returns its CARRY -- the rows of the last sweep that did
+// read the adapter. That carry predates the replacement by construction, so the
+// old incarnation arrives alone in its native-identity group. Alone reads as
+// unambiguous, unambiguous selects it as canonical, and canonical retires the
+// live owner that replaced it -- closing a connection somebody is using, on the
+// strength of evidence from an adapter nobody managed to read.
+//
+// Seeded with the selection a REAL broker would already be holding. An authority
+// that has never reconciled accepts every watcher id, which makes any assertion
+// about watcher admission pass for the wrong reason.
+if (boundaryModule) {
+  const staleStore = new RosterRevisionStore(64);
+  const staleHub = new Hub(registry);
+  const authority = new boundaryModule.NativeIncarnationPublicationAuthority();
+  const nativeId = 'claude-bridge:unread-leg';
+  const oldInfo = { ...codexInfo('carried-old', { nativeId, status: 'idle' }), tool: 'claude' };
+  const newInfo = { ...codexInfo('live-new', { nativeId, status: 'working' }), tool: 'claude' };
+  // Read normally in every sweep below, so the withholding is visibly per adapter
+  // rather than a blanket refusal to select anything.
+  const ompInfo = { ...codexInfo('omp-live', { nativeId: 'omp:whole-leg' }), tool: 'omp' };
+  const newConn = fakeConn(newInfo);
+
+  // The state production is actually in: a complete sweep has already selected
+  // the old incarnation, and only afterwards does the replacement appear as a
+  // live owner.
+  authority.reconcile([oldInfo, ompInfo]);
+  staleHub.adopt('claude', newInfo.id, newConn);
+  const staleBoundary = boundaryModule.createRosterPublicationBoundary({
+    liveOwners: () => staleHub.liveSnapshot(),
+    publish: (info: SessionInfo) => staleStore.observe(info, MACHINE),
+    acceptWatcher: (info: SessionInfo) => authority.acceptsWatcher(info),
+    reconcile: async () => {},
+  });
+
+  // The next sweep settles with Claude abandoned, so `carried-old` is all it has
+  // to say about that adapter.
+  const canonical = authority.reconcile([oldInfo, ompInfo], { withheldTools: ['claude'] });
+  const retired = await staleHub.retireSupersededOwners(canonical);
+  check(
+    'C4 a carry from an unread leg selects no canonical incarnation',
+    !canonical.some((info: SessionInfo) => info.id === oldInfo.id),
+    JSON.stringify(canonical.map((info: SessionInfo) => info.id)),
+  );
+  check(
+    'C4 and the live owner that superseded it is neither retired nor closed',
+    retired.length === 0 &&
+      staleHub.getConn('claude', newInfo.id)?.conn === newConn &&
+      !newConn.closed(),
+    `retired=${JSON.stringify(retired.map((info: SessionInfo) => info.id))} closed=${newConn.closed()}`,
+  );
+  check(
+    'C4 the withholding is per adapter: a leg that WAS read still selects',
+    canonical.length === 1 && canonical[0]?.id === ompInfo.id,
+    JSON.stringify(canonical.map((info: SessionInfo) => info.id)),
+  );
+
+  // The retained selection is NOT disturbed by a sweep that could not read the
+  // adapter -- it still names the old id, which is the documented contract and
+  // the thing that keeps a late watcher frame from reversing a real selection.
+  // Its cost is that watcher-INFERRED frames for the new owner are withheld
+  // until a sweep reads Claude again, so what has to survive in the meantime is
+  // the owner's own EXACT frame, which is a publication path and never consults
+  // the selection.
+  check(
+    'C4 an unread leg neither promotes nor demotes the retained selection',
+    authority.acceptsWatcher(oldInfo) && !authority.acceptsWatcher(newInfo),
+    `old=${authority.acceptsWatcher(oldInfo)} new=${authority.acceptsWatcher(newInfo)}`,
+  );
+  //
+  // Asserted on `title` rather than on status: an owner frame is still
+  // owner-qualified, so run state answers to the live connection (R0b) and an
+  // injected status would prove nothing about the route being open.
+  const frameStart = staleStore.revision;
+  staleBoundary.publishOwnerFrame({ ...newInfo, title: 'exact owner frame' });
+  await staleBoundary.settle();
+  const framed = staleStore.eventsAfter(frameStart).deltas;
+  check(
+    'C4 the surviving owner can still publish its own exact frame',
+    framed.some((delta) => delta.sessionId === newInfo.id && delta.session?.title === 'exact owner frame'),
+    JSON.stringify(framed.map((delta) => ({ id: delta.sessionId, title: delta.session?.title }))),
+  );
+
+  // ...while the watcher path for the same session stays closed, which is the
+  // cost this lane is measuring rather than a defect it is hiding.
+  const watcherStart = staleStore.revision;
+  staleBoundary.submitWatcherSnapshot({ ...newInfo, title: 'inferred watcher frame' });
+  await staleBoundary.settle();
+  check(
+    'C4 and its watcher-inferred frames stay withheld until a sweep reads the adapter',
+    staleStore.eventsAfter(watcherStart).deltas.every(
+      (delta) => delta.session?.title !== 'inferred watcher frame',
+    ),
+    JSON.stringify(staleStore.eventsAfter(watcherStart).deltas.map((delta) => delta.session?.title)),
+  );
+
+  // ...and once the leg is read again, selection moves normally: this defers the
+  // retirement rather than disabling it.
+  const recovered = authority.reconcile([newInfo, ompInfo]);
+  staleHub.adopt('claude', oldInfo.id, fakeConn(oldInfo));
+  const retiredAfter = await staleHub.retireSupersededOwners(recovered);
+  check(
+    'C4 a recovered leg retires the superseded incarnation as before',
+    retiredAfter.length === 1 &&
+      retiredAfter[0]?.id === oldInfo.id &&
+      !newConn.closed() &&
+      authority.acceptsWatcher(newInfo) &&
+      !authority.acceptsWatcher(oldInfo),
+    JSON.stringify(retiredAfter.map((info: SessionInfo) => info.id)),
+  );
+  await staleHub.dispose();
+}
+
 // ── Lane D — no live Hub owner → truthful watcher status is accepted raw ───────────────────────
 {
   const id = 's-unowned';
@@ -506,6 +621,15 @@ if (boundaryModule) {
     watcherBlock.slice(0, 200));
   check('E runtime.ts publishes Hub owner frames through the same boundary',
     /onSessionInfo: \(info\) => \{\s*rosterPublication\.publishOwnerFrame\(info\);/.test(runtimeSource));
+  // Selection needs complete evidence, and the only thing that can supply it is
+  // the call site. A mid-sweep snapshot must not reach the authority at all, and
+  // a settled one must name the legs it could not read -- neither of which this
+  // class can check for itself.
+  check('E runtime.ts never selects an incarnation from a snapshot taken mid-sweep',
+    /if \(swept\.coverage\.kind !== 'sweeping'\) \{\s*\n\s*const canonicalReplacements = nativePublicationAuthority\.reconcile\(/
+      .test(runtimeSource));
+  check('E and hands the settled sweep its unread adapters',
+    /nativePublicationAuthority\.reconcile\(sessions, \{ withheldTools \}\)/.test(runtimeSource));
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);

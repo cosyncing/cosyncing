@@ -31,7 +31,24 @@ check(
 );
 check(
   'omp bridge asset is exactly the dialect rewrite of the pi asset',
-  OMP_BRIDGE_EMBEDDED_SOURCE === piBridgeEmbeddedSourceForDialect({ routePrefix: '/omp/bridge', toolId: 'omp' }),
+  OMP_BRIDGE_EMBEDDED_SOURCE === piBridgeEmbeddedSourceForDialect({
+    routePrefix: '/omp/bridge',
+    toolId: 'omp',
+    nativeVersionModule: '@oh-my-pi/pi-utils/dirs',
+  }),
+);
+check(
+  'omp bridge attests the version exported by the native package that loaded it',
+  OMP_BRIDGE_EMBEDDED_SOURCE.includes(
+    "import { VERSION as COSYNCING_NATIVE_VERSION } from '@oh-my-pi/pi-utils/dirs';",
+  )
+    && OMP_BRIDGE_EMBEDDED_SOURCE.includes('nativeVersion: COSYNCING_NATIVE_VERSION,'),
+);
+check(
+  'pi bridge carries no sibling runtime-version import',
+  !PI_BRIDGE_EMBEDDED_SOURCE.includes('@oh-my-pi/pi-utils/dirs')
+    && !PI_BRIDGE_EMBEDDED_SOURCE.includes('COSYNCING_NATIVE_VERSION')
+    && !PI_BRIDGE_EMBEDDED_SOURCE.includes('__COSYNCING_NATIVE_VERSION_'),
 );
 // The integration credential is scoped per tool: the omp asset must present omp's own record
 // (secrets/omp-integration.json, kind 'omp-bridge', COSYNCING_OMP_INTEGRATION_* overrides) — the
@@ -83,6 +100,12 @@ for (const [label, source] of [['pi', PI_BRIDGE_EMBEDDED_SOURCE], ['omp', OMP_BR
   check(
     `${label} bridge asset keeps the resource loader guard`,
     source.includes('ctx?.resourceLoader?.getSkills?.()'),
+  );
+  check(
+    `${label} bridge asset carries the broker-owned durable RPC prompt transport`,
+    source.includes("RPC_PROMPT_COMMAND = '__cosyncing_rpc_prompt'")
+      && source.includes('process.env.COSYNCING_NO_BRIDGE')
+      && source.includes("customType: COLLAB_PROMPT_TYPE"),
   );
 }
 

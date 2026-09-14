@@ -127,7 +127,11 @@ try {
   const completionRaceStaging = new UploadStaging({
     home: join(root, 'completion-race-state'),
     maxBytes: 1024,
-    ttlMs: 25,
+    // Long enough that init + patch + starting the held completion cannot
+    // themselves fall past it under load. Expiry still lands mid-completion —
+    // the hash is held open until this scenario releases it — and the wait
+    // below is on the record's own `expiresAt`, so the timing stays exact.
+    ttlMs: 1_000,
     hashFile: async (path) => {
       markHashStarted();
       await hashHeld;

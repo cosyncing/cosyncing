@@ -19,6 +19,10 @@
       "name": "@cosyncing/poc-ui",
       "version": "0.0.0",
     },
+    "packages/typescript/acp-client": {
+      "name": "@cosyncing/acp-client",
+      "version": "0.0.0",
+    },
     "packages/typescript/adapter-api": {
       "name": "@cosyncing/adapter-api",
       "version": "0.0.0",
@@ -40,6 +44,15 @@
         "@cosyncing/adapter-api": "workspace:*",
       },
     },
+    "packages/typescript/adapters/cline": {
+      "name": "@cosyncing/adapter-cline",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/acp-client": "workspace:*",
+        "@cosyncing/adapter-api": "workspace:*",
+        "@cosyncing/protocol": "workspace:*",
+      },
+    },
     "packages/typescript/adapters/codex": {
       "name": "@cosyncing/adapter-codex",
       "version": "0.0.0",
@@ -52,6 +65,22 @@
       "version": "0.0.0",
       "dependencies": {
         "@cosyncing/adapter-api": "workspace:*",
+      },
+    },
+    "packages/typescript/adapters/grok": {
+      "name": "@cosyncing/adapter-grok",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/acp-client": "workspace:*",
+        "@cosyncing/adapter-api": "workspace:*",
+      },
+    },
+    "packages/typescript/adapters/kilocode": {
+      "name": "@cosyncing/adapter-kilocode",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/adapter-api": "workspace:*",
+        "@cosyncing/opencode-wire": "workspace:*",
       },
     },
     "packages/typescript/adapters/kimi": {
@@ -74,6 +103,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@cosyncing/adapter-api": "workspace:*",
+        "@cosyncing/opencode-wire": "workspace:*",
       },
     },
     "packages/typescript/adapters/pi": {
@@ -84,18 +114,30 @@
         "@cosyncing/pi-engine": "workspace:*",
       },
     },
+    "packages/typescript/adapters/reasonix": {
+      "name": "@cosyncing/adapter-reasonix",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/acp-client": "workspace:*",
+        "@cosyncing/adapter-api": "workspace:*",
+      },
+    },
     "packages/typescript/broker": {
       "name": "@cosyncing/broker",
       "dependencies": {
         "@cosyncing/adapter-antigravity": "workspace:*",
         "@cosyncing/adapter-api": "workspace:*",
         "@cosyncing/adapter-claude": "workspace:*",
+        "@cosyncing/adapter-cline": "workspace:*",
         "@cosyncing/adapter-codex": "workspace:*",
         "@cosyncing/adapter-dsh": "workspace:*",
+        "@cosyncing/adapter-grok": "workspace:*",
+        "@cosyncing/adapter-kilocode": "workspace:*",
         "@cosyncing/adapter-kimi": "workspace:*",
         "@cosyncing/adapter-omp": "workspace:*",
         "@cosyncing/adapter-opencode": "workspace:*",
         "@cosyncing/adapter-pi": "workspace:*",
+        "@cosyncing/adapter-reasonix": "workspace:*",
         "@cosyncing/crypto": "workspace:*",
         "@cosyncing/protocol": "workspace:*",
         "@cosyncing/transport": "workspace:*",
@@ -105,6 +147,13 @@
     "packages/typescript/crypto": {
       "name": "@cosyncing/crypto",
       "version": "0.0.0",
+    },
+    "packages/typescript/opencode-wire": {
+      "name": "@cosyncing/opencode-wire",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/adapter-api": "workspace:*",
+      },
     },
     "packages/typescript/pi-engine": {
       "name": "@cosyncing/pi-engine",
@@ -135,15 +184,23 @@
 
     "@clack/prompts": ["@clack/prompts@1.7.0", "", { "dependencies": { "@clack/core": "1.4.3", "fast-string-width": "^3.0.2", "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-y7/yvZ2TPAnR9+jnc00klvNNLkJiXFFrQA/hlLCcxA9a2A4zQIOimyFQ9XfwYKiGD1fb5GY8vbKIIgO8d5Tb2A=="],
 
+    "@cosyncing/acp-client": ["@cosyncing/acp-client@workspace:packages/typescript/acp-client"],
+
     "@cosyncing/adapter-antigravity": ["@cosyncing/adapter-antigravity@workspace:packages/typescript/adapters/antigravity"],
 
     "@cosyncing/adapter-api": ["@cosyncing/adapter-api@workspace:packages/typescript/adapter-api"],
 
     "@cosyncing/adapter-claude": ["@cosyncing/adapter-claude@workspace:packages/typescript/adapters/claude"],
 
+    "@cosyncing/adapter-cline": ["@cosyncing/adapter-cline@workspace:packages/typescript/adapters/cline"],
+
     "@cosyncing/adapter-codex": ["@cosyncing/adapter-codex@workspace:packages/typescript/adapters/codex"],
 
     "@cosyncing/adapter-dsh": ["@cosyncing/adapter-dsh@workspace:packages/typescript/adapters/dsh"],
+
+    "@cosyncing/adapter-grok": ["@cosyncing/adapter-grok@workspace:packages/typescript/adapters/grok"],
+
+    "@cosyncing/adapter-kilocode": ["@cosyncing/adapter-kilocode@workspace:packages/typescript/adapters/kilocode"],
 
     "@cosyncing/adapter-kimi": ["@cosyncing/adapter-kimi@workspace:packages/typescript/adapters/kimi"],
 
@@ -153,9 +210,13 @@
 
     "@cosyncing/adapter-pi": ["@cosyncing/adapter-pi@workspace:packages/typescript/adapters/pi"],
 
+    "@cosyncing/adapter-reasonix": ["@cosyncing/adapter-reasonix@workspace:packages/typescript/adapters/reasonix"],
+
     "@cosyncing/broker": ["@cosyncing/broker@workspace:packages/typescript/broker"],
 
     "@cosyncing/crypto": ["@cosyncing/crypto@workspace:packages/typescript/crypto"],
+
+    "@cosyncing/opencode-wire": ["@cosyncing/opencode-wire@workspace:packages/typescript/opencode-wire"],
 
     "@cosyncing/pi-engine": ["@cosyncing/pi-engine@workspace:packages/typescript/pi-engine"],
 

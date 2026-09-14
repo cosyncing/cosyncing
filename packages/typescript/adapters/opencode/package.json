@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@cosyncing/adapter-api": "workspace:*"
+    "@cosyncing/adapter-api": "workspace:*",
+    "@cosyncing/opencode-wire": "workspace:*"
   }
 }

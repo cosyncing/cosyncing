@@ -182,24 +182,78 @@ export function captureWindowsProcessSnapshot(): WindowsProcessSnapshot | null {
 export interface HostProcessProviderOptions {
   platform?: NodeJS.Platform;
   runWindowsSnapshot?: WindowsProcessSnapshotRunner;
+  /** Test seam for Linux `/proc/<pid>/stat`: null means absent, undefined unreadable. */
+  readLinuxStat?: (pid: number) => string | null | undefined;
+  /** Test seam for macOS `ps` ancestry: null means absent, undefined unreadable. */
+  readPosixProcess?: (pid: number) => LinuxProcessStat | null | undefined;
   now?: () => number;
   windowsSnapshotTtlMs?: number;
+  /** Test seam for POSIX executable discovery. */
+  resolveExecutable?: (name: string) => string | null;
+  /** Test seam for the bounded asynchronous listener probe. */
+  posixListenerTimeoutMs?: number;
+}
+
+export interface LinuxProcessStat {
+  parentPid: number;
+  start: string;
+}
+
+/** Parse only the identity fields needed for fail-closed Linux ancestry. */
+export function parseLinuxProcessStat(raw: string): LinuxProcessStat | null {
+  const rparen = raw.lastIndexOf(')');
+  if (rparen < 0) return null;
+  const fields = raw.slice(rparen + 1).trim().split(/\s+/);
+  const parentPid = Number(fields[1]);
+  const start = fields[19];
+  return Number.isInteger(parentPid) && parentPid >= 0 && typeof start === 'string' && /^\d+$/.test(start)
+    ? { parentPid, start }
+    : null;
 }
 
 /** Shared, fail-closed process identity and listener attribution provider. */
 export class HostProcessProvider {
   private readonly platform: NodeJS.Platform;
   private readonly runWindowsSnapshot: WindowsProcessSnapshotRunner;
+  private readonly readLinuxStat: (pid: number) => string | null | undefined;
+  private readonly readPosixProcess: (pid: number) => LinuxProcessStat | null | undefined;
   private readonly now: () => number;
   private readonly windowsSnapshotTtlMs: number;
+  private readonly resolveExecutable: (name: string) => string | null;
+  private readonly posixListenerTimeoutMs: number;
   private windowsCache: { at: number; value: WindowsProcessSnapshot | null } | null = null;
   private bootId: string | undefined;
 
   constructor(options: HostProcessProviderOptions = {}) {
     this.platform = options.platform ?? process.platform;
     this.runWindowsSnapshot = options.runWindowsSnapshot ?? captureWindowsProcessSnapshot;
+    this.readLinuxStat = options.readLinuxStat ?? ((pid) => {
+      try { return readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch (error) {
+        return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT' ? null : undefined;
+      }
+    });
+    this.readPosixProcess = options.readPosixProcess ?? ((pid) => {
+      const ps = Bun.which('ps');
+      if (!ps) return undefined;
+      try {
+        const result = Bun.spawnSync([ps, '-o', 'ppid=', '-o', 'lstart=', '-p', String(pid)], {
+          stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env }, timeout: 3_000,
+        });
+        const value = new TextDecoder().decode(result.stdout).trim();
+        const noise = new TextDecoder().decode(result.stderr).trim();
+        if (result.exitCode === 1 && !value && !noise) return null;
+        if (result.exitCode !== 0 || !value || noise) return undefined;
+        const match = /^(\d+)\s+(.+)$/.exec(value);
+        if (!match || !positiveInteger(Number(match[1])) || !Number.isFinite(Date.parse(match[2]!))) return undefined;
+        return { parentPid: Number(match[1]), start: match[2]! };
+      } catch {
+        return undefined;
+      }
+    });
     this.now = options.now ?? (() => Date.now());
     this.windowsSnapshotTtlMs = options.windowsSnapshotTtlMs ?? WINDOWS_SNAPSHOT_TTL_MS;
+    this.resolveExecutable = options.resolveExecutable ?? ((name) => Bun.which(name));
+    this.posixListenerTimeoutMs = options.posixListenerTimeoutMs ?? 3_000;
   }
 
   private windowsSnapshot(fresh: boolean): WindowsProcessSnapshot | null {
@@ -247,17 +301,14 @@ export class HostProcessProvider {
     if (this.platform === 'linux') {
       const boot = this.readBootId();
       if (!boot) return { state: 'unknown' };
-      let stat: string;
-      try { stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch (error) {
-        return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT' ? { state: 'absent' } : { state: 'unknown' };
-      }
-      const rparen = stat.lastIndexOf(')');
-      if (rparen < 0) return { state: 'unknown' };
-      const start = stat.slice(rparen + 1).trim().split(/\s+/)[19];
+      const raw = this.readLinuxStat(pid);
+      if (raw === null) return { state: 'absent' };
+      if (raw === undefined) return { state: 'unknown' };
+      const stat = parseLinuxProcessStat(raw);
       let comm = '';
       try { comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { /* classified below */ }
-      return start && comm
-        ? { state: 'running', identity: { pid, start, boot, comm } }
+      return stat && comm
+        ? { state: 'running', identity: { pid, start: stat.start, boot, comm } }
         : { state: 'unknown' };
     }
     const ps = Bun.which('ps');
@@ -296,6 +347,62 @@ export class HostProcessProvider {
   descendsFrom(pid: number, ancestorPid: number, options: { fresh?: boolean } = {}): 'yes' | 'no' | 'unknown' {
     if (!positiveInteger(pid) || !positiveInteger(ancestorPid)) return 'unknown';
     if (pid === ancestorPid) return 'yes';
+    if (this.platform === 'linux') {
+      let currentPid = pid;
+      let expectedStart: string | null = null;
+      const seen = new Set<number>();
+      for (let hop = 0; hop < 32; hop += 1) {
+        if (seen.has(currentPid)) return 'unknown';
+        seen.add(currentPid);
+        const raw = this.readLinuxStat(currentPid);
+        if (raw === null || raw === undefined) return 'unknown';
+        const current = parseLinuxProcessStat(raw);
+        if (!current) return 'unknown';
+        // The preceding hop already read this process as its parent. Re-read it
+        // before following the next edge and require the same start token. This
+        // prevents an ancestry proof from being spliced through a recycled pid.
+        if (expectedStart !== null && current.start !== expectedStart) return 'unknown';
+        if (!positiveInteger(current.parentPid)) return 'no';
+        const parentRaw = this.readLinuxStat(current.parentPid);
+        if (parentRaw === null || parentRaw === undefined) return 'unknown';
+        const parent = parseLinuxProcessStat(parentRaw);
+        if (!parent) return 'unknown';
+        try {
+          if (BigInt(parent.start) > BigInt(current.start)) return 'no';
+        } catch {
+          return 'unknown';
+        }
+        if (current.parentPid === ancestorPid) return 'yes';
+        expectedStart = parent.start;
+        currentPid = current.parentPid;
+      }
+      return 'unknown';
+    }
+    if (this.platform === 'darwin') {
+      let currentPid = pid;
+      let expectedStart: string | null = null;
+      const seen = new Set<number>();
+      for (let hop = 0; hop < 32; hop += 1) {
+        if (seen.has(currentPid)) return 'unknown';
+        seen.add(currentPid);
+        const current = this.readPosixProcess(currentPid);
+        if (!current) return 'unknown';
+        // `lstart` is the macOS process identity token. As on Linux, every
+        // parent is re-read at the next hop and must still be the same process.
+        if (expectedStart !== null && current.start !== expectedStart) return 'unknown';
+        if (!positiveInteger(current.parentPid)) return 'no';
+        const parent = this.readPosixProcess(current.parentPid);
+        if (!parent) return 'unknown';
+        const parentStart = Date.parse(parent.start);
+        const currentStart = Date.parse(current.start);
+        if (!Number.isFinite(parentStart) || !Number.isFinite(currentStart)) return 'unknown';
+        if (parentStart > currentStart) return 'no';
+        if (current.parentPid === ancestorPid) return 'yes';
+        expectedStart = parent.start;
+        currentPid = current.parentPid;
+      }
+      return 'unknown';
+    }
     if (this.platform !== 'win32') return 'unknown';
     const snapshot = this.windowsSnapshot(options.fresh === true);
     if (!snapshot || !snapshot.processesOk) return 'unknown';
@@ -330,7 +437,7 @@ export class HostProcessProvider {
       if (pids.size === 0) return { state: 'absent' };
       return pids.size === 1 ? { state: 'identified', pid: [...pids][0]! } : { state: 'unknown' };
     }
-    const lsof = Bun.which('lsof');
+    const lsof = this.resolveExecutable('lsof');
     if (!lsof) return { state: 'unknown' };
     try {
       const result = Bun.spawnSync([lsof, '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
@@ -341,6 +448,43 @@ export class HostProcessProvider {
       const noise = new TextDecoder().decode(result.stderr).trim();
       if (result.exitCode !== 0) {
         return result.exitCode === 1 && pids.size === 0 && !noise ? { state: 'absent' } : { state: 'unknown' };
+      }
+      return pids.size === 1 ? { state: 'identified', pid: [...pids][0]! } : { state: 'unknown' };
+    } catch { return { state: 'unknown' }; }
+  }
+
+  /**
+   * The listener proof used from request-serving paths. `lsof` can take seconds
+   * on a loaded machine, so the synchronous compatibility method above must not
+   * run on the broker event loop during roster discovery.
+   */
+  async listenerAsync(port: number, options: { fresh?: boolean } = {}): Promise<HostListenerRead> {
+    if (!positiveInteger(port) || port > 65_535) return { state: 'unknown' };
+    if (this.platform === 'win32') return this.listener(port, options);
+    const lsof = this.resolveExecutable('lsof');
+    if (!lsof) return { state: 'unknown' };
+    try {
+      const child = Bun.spawn([lsof, '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+        stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env },
+      });
+      const stdout = new Response(child.stdout).text();
+      const stderr = new Response(child.stderr).text();
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        try { child.kill(); } catch { /* the probe already exited */ }
+      }, this.posixListenerTimeoutMs);
+      timeout.unref?.();
+      const exitCode = await child.exited;
+      clearTimeout(timeout);
+      const [value, noise] = await Promise.all([stdout, stderr]);
+      if (timedOut) return { state: 'unknown' };
+      const pids = new Set(value.trim().split(/\s+/)
+        .filter(Boolean).map(Number).filter(positiveInteger));
+      if (exitCode !== 0) {
+        return exitCode === 1 && pids.size === 0 && !noise.trim()
+          ? { state: 'absent' }
+          : { state: 'unknown' };
       }
       return pids.size === 1 ? { state: 'identified', pid: [...pids][0]! } : { state: 'unknown' };
     } catch { return { state: 'unknown' }; }

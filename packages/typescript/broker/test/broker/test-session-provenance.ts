@@ -524,6 +524,237 @@ try {
     check('non-private app model change updates durable hint', reloaded.recordAppMutation(changed) === true);
     const updated = new SessionMetadataStore(root).currentModelHint(changed);
     check('later app model selection replaces create-time hint', updated?.providerID === 'volcengine-coding-plan' && updated.modelID === 'deepseek-v4-pro' && updated.variant === 'volcengine');
+
+    const native = {
+      tool: changed.tool,
+      id: changed.id,
+      nativeId: changed.nativeId,
+      currentModel: { providerID: 'native-provider', modelID: 'native-model' },
+    };
+    check('authoritative native model evidence replaces the provisional durable hint',
+      reloaded.recordCurrentModelHint(native) === true);
+    const nativeUpdated = new SessionMetadataStore(root).currentModelHint(native);
+    check('native model evidence survives metadata-store reload',
+      nativeUpdated?.providerID === 'native-provider' && nativeUpdated.modelID === 'native-model');
+
+    // The human LABEL has to survive too. The wire permits `currentModel.label`,
+    // adapters with a host-authored catalogue publish one (Cline and Kimi both
+    // do), and the client deliberately refuses to invent one from a raw model id
+    // -- so a label erased here is a session that renders the generic `Model`
+    // chip with no way to recover the name. `cleanCurrentModel` rebuilt the
+    // record field by field and dropped it for EVERY adapter.
+    //
+    // The fixture label is a real one (`Qwen3.8 Flash Next (HPC vLLM)`, as
+    // measured in the installed Kilo composer) rather than a model id. A test
+    // that passed an id here would still pass while proving nothing a client can
+    // use: the client discards an id-shaped label on arrival.
+    const labelRoot = tempRoot('model-label');
+    const labelStore = new SessionMetadataStore(labelRoot);
+    const labelled: SessionInfo = {
+      ...withControl('absent'),
+      id: 'labelled-a',
+      nativeId: 'native-labelled',
+      title: 'Labelled',
+      currentModel: {
+        providerID: 'vllm-hpc',
+        modelID: 'qwen3.8-flash-next',
+        label: 'Qwen3.8 Flash Next (HPC vLLM)',
+      },
+    };
+    labelStore.recordAppCreatedSession(labelled);
+    const labelReloaded = new SessionMetadataStore(labelRoot).currentModelHint(labelled);
+    check('the model label survives cleaning and a metadata-store reload',
+      labelReloaded?.label === 'Qwen3.8 Flash Next (HPC vLLM)');
+
+    // A label arriving for an already-known model must register as a change, or
+    // a client missing the label never receives it.
+    const relabelled = {
+      tool: labelled.tool,
+      id: labelled.id,
+      nativeId: labelled.nativeId,
+      currentModel: { providerID: 'vllm-hpc', modelID: 'qwen3.8-flash-next', label: 'Qwen3.8 Flash Next' },
+    };
+    check('a label-only change is recorded rather than read as no change',
+      new SessionMetadataStore(labelRoot).recordCurrentModelHint(relabelled) === true);
+  }
+
+  // 13) exact native prompt correlations are bounded, durable, replaceable, and revoked with writer provenance.
+  {
+    const root = tempRoot('prompt-correlations');
+    const info = { tool: 'cline', id: 'cline-session', nativeId: 'cline-native' };
+    const store = new SessionMetadataStore(root);
+    store.recordAppCreatedSession(info);
+    const digest = `sha256:${'a'.repeat(64)}`;
+    check('a valid prompt correlation is recorded', store.recordAppPromptCorrelation({
+      ...info,
+      correlation: {
+        nativeMessageId: 'native-user-1', nativeMessageDigest: digest,
+        key: 'app-key-1', clientKey: 'client-key-1',
+      },
+    }) === true);
+    check('a malformed prompt digest is refused', store.recordAppPromptCorrelation({
+      ...info,
+      correlation: {
+        nativeMessageId: 'native-user-bad', nativeMessageDigest: 'not-a-digest', key: 'bad-key',
+      },
+    }) === false);
+    store.recordAppPromptCorrelation({
+      ...info,
+      correlation: {
+        nativeMessageId: 'native-user-1', nativeMessageDigest: digest,
+        key: 'app-key-replaced', clientKey: 'client-key-replaced',
+      },
+    });
+    for (let index = 2; index <= 70; index += 1) {
+      store.recordAppPromptCorrelation({
+        ...info,
+        correlation: {
+          nativeMessageId: `native-user-${index}`,
+          nativeMessageDigest: `sha256:${index.toString(16).padStart(64, '0')}`,
+          key: `app-key-${index}`,
+        },
+      });
+    }
+    const reloaded = new SessionMetadataStore(root);
+    const correlations = reloaded.appPromptCorrelations(info);
+    check('prompt correlations survive reload and remain bounded',
+      correlations.length === 64
+        && correlations.at(-1)?.nativeMessageId === 'native-user-70'
+        && !correlations.some((entry) => entry.nativeMessageId === 'native-user-1'));
+
+    for (let sessionIndex = 1; sessionIndex <= 4; sessionIndex += 1) {
+      const sibling = {
+        tool: 'cline', id: `cline-session-${sessionIndex}`, nativeId: `cline-native-${sessionIndex}`,
+      };
+      store.recordAppCreatedSession(sibling);
+      for (let index = 0; index < 64; index += 1) {
+        store.recordAppPromptCorrelation({
+          ...sibling,
+          correlation: {
+            nativeMessageId: `native-${sessionIndex}-${index}`,
+            nativeMessageDigest: `sha256:${(sessionIndex * 100 + index).toString(16).padStart(64, '0')}`,
+            key: `app-${sessionIndex}-${index}`,
+          },
+        });
+      }
+    }
+    const globallyReloaded = new SessionMetadataStore(root);
+    const globalCount = [info, ...Array.from({ length: 4 }, (_, index) => ({
+      tool: 'cline', id: `cline-session-${index + 1}`, nativeId: `cline-native-${index + 1}`,
+    }))].reduce((total, candidate) => total + globallyReloaded.appPromptCorrelations(candidate).length, 0);
+    check('prompt correlations have one global bounded-retention ceiling', globalCount === 256);
+    reloaded.revokeAppCreatedSession(info);
+    check('writer revocation also removes every stored prompt correlation',
+      new SessionMetadataStore(root).appPromptCorrelations(info).length === 0);
+  }
+
+  // 14) authoritative terminal summaries share the exact durable history boundary.
+  {
+    const root = tempRoot('terminal-summaries');
+    const info = { tool: 'grok', id: 'grok-session', nativeId: 'grok-native' };
+    const store = new SessionMetadataStore(root);
+    store.recordAppCreatedSession(info);
+    const historyBoundary = {
+      sourceId: '/fixture/updates.jsonl',
+      revision: 'fixture-revision-1',
+      appendPosition: 42,
+      rewriteToken: 'fixture-prefix-1',
+    };
+    check('a terminal summary is recorded atomically with its exact history boundary',
+      store.recordAppHistoryBoundary({
+        ...info,
+        historyBoundary,
+        terminalSummary: {
+          type: 'run-summary',
+          key: 'grok:turn-1:acp-terminal',
+          turnId: 'grok:turn-1',
+          userMessageKey: 'grok:user-1',
+          assistantMessageKey: 'grok:assistant-1',
+          status: 'done',
+        },
+      }) === true);
+    const reloaded = new SessionMetadataStore(root);
+    check('the history boundary and terminal summary survive one metadata-store reload',
+      JSON.stringify(reloaded.appHistoryBoundary(info)) === JSON.stringify(historyBoundary)
+        && reloaded.appTerminalSummaries(info).length === 1
+        && reloaded.appTerminalSummaries(info)[0]?.status === 'done');
+    check('re-recording the same terminal key replaces rather than duplicates it',
+      reloaded.recordAppHistoryBoundary({
+        ...info,
+        historyBoundary: { ...historyBoundary, revision: 'fixture-revision-2', appendPosition: 43 },
+        terminalSummary: {
+          type: 'run-summary',
+          key: 'grok:turn-1:acp-terminal',
+          turnId: 'grok:turn-1',
+          status: 'cancelled',
+        },
+      }) === true
+        && reloaded.appTerminalSummaries(info).length === 1
+        && reloaded.appTerminalSummaries(info)[0]?.status === 'cancelled');
+    check('a malformed non-terminal summary is refused without advancing the boundary',
+      reloaded.recordAppHistoryBoundary({
+        ...info,
+        historyBoundary: { ...historyBoundary, revision: 'must-not-persist' },
+        terminalSummary: {
+          type: 'run-summary',
+          key: 'invalid-running',
+          turnId: 'grok:turn-invalid',
+          status: 'running' as never,
+        },
+      }) === false
+        && reloaded.appHistoryBoundary(info)?.revision === 'fixture-revision-2');
+    // Token counts must survive the store, and a summary REPUBLISHED with them
+    // must actually be written. `cleanTerminalSummary` rebuilds a stored summary
+    // field by field and `terminalSummariesEqual` decides whether anything
+    // changed -- a field missing from either is dropped silently, which is what
+    // hid Cline's per-turn usage while the summary itself survived.
+    check('a terminal summary carries its token counts through the store',
+      reloaded.recordAppHistoryBoundary({
+        ...info,
+        historyBoundary: { ...historyBoundary, revision: 'fixture-revision-3', appendPosition: 44 },
+        terminalSummary: {
+          type: 'run-summary',
+          key: 'grok:turn-1:acp-terminal',
+          turnId: 'grok:turn-1',
+          status: 'done',
+          tokens: { input: 3945, output: 289, cacheRead: 0 },
+        },
+      }) === true
+        && new SessionMetadataStore(root).appTerminalSummaries(info)[0]?.tokens?.input === 3945
+        && new SessionMetadataStore(root).appTerminalSummaries(info)[0]?.tokens?.output === 289);
+    check('republishing the same summary with counts is not mistaken for no change',
+      reloaded.recordAppHistoryBoundary({
+        ...info,
+        historyBoundary: { ...historyBoundary, revision: 'fixture-revision-4', appendPosition: 45 },
+        terminalSummary: {
+          type: 'run-summary',
+          key: 'grok:turn-1:acp-terminal',
+          turnId: 'grok:turn-1',
+          status: 'done',
+          tokens: { input: 4100, output: 512 },
+        },
+      }) === true
+        && new SessionMetadataStore(root).appTerminalSummaries(info)[0]?.tokens?.input === 4100);
+    check('counts that are not finite non-negative numbers are refused, not stored',
+      reloaded.recordAppHistoryBoundary({
+        ...info,
+        historyBoundary: { ...historyBoundary, revision: 'fixture-revision-5', appendPosition: 46 },
+        terminalSummary: {
+          type: 'run-summary',
+          key: 'grok:turn-1:acp-terminal',
+          turnId: 'grok:turn-1',
+          status: 'done',
+          tokens: { input: Number.NaN, output: -3, cacheRead: 7 } as never,
+        },
+      }) === true
+        && JSON.stringify(new SessionMetadataStore(root).appTerminalSummaries(info)[0]?.tokens)
+          === JSON.stringify({ cacheRead: 7 }));
+
+    reloaded.revokeAppCreatedSession(info);
+    const revoked = new SessionMetadataStore(root);
+    check('writer revocation removes the shared boundary and every terminal summary',
+      revoked.appHistoryBoundary(info) === undefined
+        && revoked.appTerminalSummaries(info).length === 0);
   }
 } catch (err) {
   console.error('ERROR:', err);

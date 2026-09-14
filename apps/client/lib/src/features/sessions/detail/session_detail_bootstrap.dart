@@ -3,9 +3,19 @@
 // ignore_for_file: invalid_use_of_visible_for_testing_member
 part of 'session_detail_controller.dart';
 
-/// Max wait for the first authoritative history event after attach.
+/// Max wait for the broker's authoritative session frame after transport open.
+final sessionDetailInitialSessionTimeoutProvider = Provider<Duration>(
+  (ref) => const Duration(seconds: 20),
+);
+
+/// Max wait for the first authoritative history event after the session frame.
+///
+/// The broker brackets a bounded native history read with source-identity
+/// reads. OpenCode-lineage hosts may therefore take a little over ten seconds
+/// while remaining inside every server-side deadline. Keep this aligned with
+/// the history-page budget so a slow valid history read is not abandoned first.
 final sessionDetailInitialHistoryTimeoutProvider = Provider<Duration>(
-  (ref) => const Duration(seconds: 10),
+  (ref) => const Duration(seconds: 20),
 );
 
 extension _SessionDetailBootstrap on SessionDetailController {
@@ -24,6 +34,8 @@ extension _SessionDetailBootstrap on SessionDetailController {
     final actionAbort = Completer<void>();
     _bootstrapActionAbort = actionAbort;
     _cancelInitialHistoryTimeout();
+    _initialSessionObservedAttempt = null;
+    _initialSessionObservedAt = null;
     final hasVisibleTranscript =
         state.bootstrapState.hasCachedMessages ||
         state.messageEvents.isNotEmpty;
@@ -274,7 +286,14 @@ extension _SessionDetailBootstrap on SessionDetailController {
             hasCachedMessages: hasCachedMessages,
           ),
         );
-        _startInitialHistoryTimeout(attempt);
+        if (_initialSessionObservedAttempt == attempt) {
+          _startInitialHistoryTimeout(
+            attempt,
+            elapsed: DateTime.now().difference(_initialSessionObservedAt!),
+          );
+        } else {
+          _startInitialSessionTimeout(attempt);
+        }
       }
       await _refreshAgentActions(
         loadAgents: client.listAgents,
@@ -395,10 +414,21 @@ extension _SessionDetailBootstrap on SessionDetailController {
         bootstrapState.isWaitingForInitialHistory;
     if (attempt != bootstrapState.attempt ||
         !acceptsInitialHistory ||
-        event is! HistoryWireEvent ||
         !_isCurrentBootstrapAttempt(attempt)) {
       return;
     }
+
+    if (event is SessionWireEvent) {
+      if (_initialSessionObservedAttempt != attempt) {
+        _initialSessionObservedAttempt = attempt;
+        _initialSessionObservedAt = DateTime.now();
+        if (bootstrapState.isWaitingForInitialHistory) {
+          _startInitialHistoryTimeout(attempt);
+        }
+      }
+      return;
+    }
+    if (event is! HistoryWireEvent) return;
 
     _cancelInitialHistoryTimeout();
     final hasVisibleMessages = event.reset
@@ -415,11 +445,29 @@ extension _SessionDetailBootstrap on SessionDetailController {
     );
   }
 
-  void _startInitialHistoryTimeout(int attempt) {
+  void _startInitialSessionTimeout(int attempt) {
     _initialHistoryTimeout?.cancel();
-    final timeout = ref.read(sessionDetailInitialHistoryTimeoutProvider);
+    final timeout = ref.read(sessionDetailInitialSessionTimeoutProvider);
     _initialHistoryTimeout = Timer(
       timeout,
+      () => _onInitialSessionTimeout(attempt),
+    );
+  }
+
+  void _startInitialHistoryTimeout(
+    int attempt, {
+    Duration elapsed = Duration.zero,
+  }) {
+    _initialHistoryTimeout?.cancel();
+    final timeout = ref.read(sessionDetailInitialHistoryTimeoutProvider);
+    final remaining = timeout - elapsed;
+    if (remaining <= Duration.zero) {
+      _initialHistoryTimeout = null;
+      _onInitialHistoryTimeout(attempt);
+      return;
+    }
+    _initialHistoryTimeout = Timer(
+      remaining,
       () => _onInitialHistoryTimeout(attempt),
     );
   }
@@ -450,6 +498,37 @@ extension _SessionDetailBootstrap on SessionDetailController {
       // The attach/history deadline is also the bound on the temporary
       // Restoring Drive claim. Keep provenance for retry, but never leave a
       // disconnected page claiming that arbitration is still in flight.
+      driveRestorePhase: SessionDriveRestorePhase.idle,
+    );
+    _requestedDriveReason = null;
+    _liveAttachArmed = false;
+    _cancelInitialHistoryTimeout();
+    _abortBootstrapActionRefresh(attempt: attempt);
+    final connection = _connection;
+    if (connection != null) {
+      connection.disarmDriveAuthority();
+      _abandonBootstrapConnection(connection, attempt);
+    }
+  }
+
+  void _onInitialSessionTimeout(int attempt) {
+    final bootstrapState = state.bootstrapState;
+    if (attempt != bootstrapState.attempt ||
+        bootstrapState.readiness !=
+            SessionDetailBootstrapReadiness.awaitingInitialHistory ||
+        _initialSessionObservedAttempt == attempt ||
+        !_isCurrentBootstrapAttempt(attempt)) {
+      return;
+    }
+
+    state = state.copyWith(
+      connectionStatus: SessionDetailConnectionStatus.closed,
+      bootstrapState: bootstrapState.failure(
+        attempt: attempt,
+        kind: FailureKind.offline,
+        source: SessionDetailBootstrapFailureSource.attach,
+        hasCachedMessages: bootstrapState.hasCachedMessages,
+      ),
       driveRestorePhase: SessionDriveRestorePhase.idle,
     );
     _requestedDriveReason = null;

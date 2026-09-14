@@ -1575,16 +1575,13 @@ try {
     const attachedInfo = attached.find(
       (message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
         message.type === 'metadata-update' && message.key === 'sessionInfo');
-    check('the status overlay carries the session modes, not the model alone',
+    check('the status overlay carries the declared session mode, not the model alone',
       JSON.stringify(attachedInfo?.value) === JSON.stringify({
         model: 'kimi-code/k3-256k',
-        thinkingLevel: 'high',
         // `currentMode` is the CONTRACT field the mode picker preselects from.
         // Under any other name the broker still assigns the value onto the
         // session info, where nothing declares it and nothing reads it.
         currentMode: 'manual',
-        planMode: false,
-        swarmMode: false,
       }),
       JSON.stringify(attachedInfo?.value));
 
@@ -1597,7 +1594,7 @@ try {
     const base = FIXTURE.rest.status!.data as Record<string, unknown>;
     statusPayload = {
       ...FIXTURE.rest.status!,
-      data: { ...base, context_tokens: 12_345, thinking_level: 'low' },
+      data: { ...base, context_tokens: 12_345, permission: 'auto' },
     };
     statusTick?.();
     await Bun.sleep(60);
@@ -1606,9 +1603,9 @@ try {
         && JSON.stringify(overlayRows('contextUsage')[0]?.value)
           === JSON.stringify({ used: 12_345, max: 262_144 }),
       JSON.stringify(overlayRows('contextUsage').map((row) => row.value)));
-    check('a changed mode re-emits the enriched session info, exactly once',
+    check('a changed mode re-emits the declared session info, exactly once',
       overlayRows('sessionInfo').length === 1
-        && (overlayRows('sessionInfo')[0]?.value as { thinkingLevel?: string }).thinkingLevel === 'low',
+        && (overlayRows('sessionInfo')[0]?.value as { currentMode?: string }).currentMode === 'auto',
       JSON.stringify(overlayRows('sessionInfo').map((row) => row.value)));
 
     statusTick?.();

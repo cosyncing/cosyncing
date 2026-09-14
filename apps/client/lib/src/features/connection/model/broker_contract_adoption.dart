@@ -31,6 +31,7 @@ const _adopted = BrokerContractAdoption(
 const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
   '/api/agents': _adopted,
   '/api/agents/{id}/models': _adopted,
+  '/api/agents/{id}/modes': _adopted,
   '/api/agents/codex/sync': BrokerContractAdoption(
     BrokerContractAdoptionDisposition.deferred,
     'Managed Codex sync/setup remains a broker-first lifecycle feature.',

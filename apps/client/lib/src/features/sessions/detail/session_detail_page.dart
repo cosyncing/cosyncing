@@ -931,10 +931,23 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     if (success) {
       _lastSubmittedPrompt = _SubmittedPromptSnapshot(trimmedPrompt);
       // The composer stays editable while the prompt waits for its terminal
-      // receipt. Only the exact submitted revision owns this clear; a later
-      // draft must survive a slow adapter or reconnect-delayed ACK.
-      if (_promptRevision == submittedRevision &&
-          _promptController.text == submittedText) {
+      // receipt, so a later draft must survive a slow adapter or a
+      // reconnect-delayed ACK. What decides that is the TEXT: if the composer
+      // still holds exactly what was sent, clearing it is right no matter how
+      // it got there, and if the user has typed anything else it differs and
+      // the clear is skipped.
+      //
+      // This also required `_promptRevision == submittedRevision`, which
+      // counts every controller mutation -- "including remote/programmatic
+      // changes and edits that return to the same empty value", per its own
+      // comment. A composition drain, a draft hydration re-applying the same
+      // string, or a shared-draft echo landing during the send await bumped
+      // that counter without touching the text, and the sent prompt stayed in
+      // the composer. It then publishes as the shared draft and goes durable.
+      // Measured on installed v61: 28 sessions were holding an already
+      // executed `rm -f <path> && touch <path>` this way, one Enter from
+      // running it again.
+      if (_promptController.text == submittedText) {
         _cancelAttachmentIntakeForAcceptedSend();
         // The draft row was already associated with the durable outbox prompt
         // inside sendPrompt. Suppress an empty draft write for this clear.
@@ -2291,7 +2304,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         : archivedCount;
     final progressBadge = _primaryLiveStateProgress(liveItems);
     final canRename =
-        hasActiveBrokerClient && (state.agentActions?.canRenameNative ?? false);
+        hasActiveBrokerClient &&
+        (state.agentActions?.canRenameDisplay ?? false);
     _schedulePermissionModeReconciliation(state.sessionInfo?.currentMode);
 
     // U3: the strip shows the title this client already knows from the first

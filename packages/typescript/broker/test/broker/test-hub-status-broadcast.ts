@@ -63,6 +63,15 @@ conn.emit({ type: 'model-output', key: 'k1', delta: 'hello' } as AgentMessage);
 conn.emit({ type: 'status', status: 'running' } as AgentMessage);
 check('D1 streamed text and a repeated `running` broadcast nothing', sessionFrames.length === 1, `frames=${sessionFrames.length}`);
 
+conn.emit({ type: 'model-output', key: 'oversized-live', delta: 'x'.repeat(2 * 1024 * 1024) } as AgentMessage);
+const boundedLive = mc.liveSnapshot();
+const boundedRow = boundedLive.find((message) => message.type === 'model-output' && message.key === 'oversized-live');
+check('D2 attach-time live text is cumulatively bounded and reports truncation',
+  boundedRow?.type === 'model-output'
+    && Buffer.byteLength(boundedRow.text ?? '', 'utf8') <= 256 * 1024
+    && boundedLive.some((message) => message.type === 'notice' && message.message.includes('replay window')),
+  `bytes=${boundedRow?.type === 'model-output' ? Buffer.byteLength(boundedRow.text ?? '', 'utf8') : -1}`);
+
 // ── C: the agent blocks on the user, then unblocks ──────────────────────────────────────────────
 conn.emit({ type: 'permission-request', requestId: 'r1', title: 'may i' } as AgentMessage);
 check('C1 a permission-request broadcasts needs-input', sessionFrames.length === 2 && sessionFrames.at(-1)?.status === 'needs-input',
@@ -76,10 +85,12 @@ check('C2 resolving it broadcasts the derived status (still running → working)
 conn.emit({ type: 'status', status: 'idle' } as AgentMessage);
 check('B1 an `idle` status broadcasts a session frame', sessionFrames.length === 4, `frames=${sessionFrames.length}`);
 check('B2 the frame carries idle, so the app drops the stale "Working"', sessionFrames.at(-1)?.status === 'idle', String(sessionFrames.at(-1)?.status));
+check('B3 idle clears the bounded live replay and its truncation notice',
+  !mc.liveSnapshot().some((message) => message.type === 'model-output' || message.type === 'notice'));
 
 // ── D (part 2): a repeated terminal status stays quiet ──────────────────────────────────────────
 conn.emit({ type: 'status', status: 'idle' } as AgentMessage);
-check('D2 a repeated `idle` broadcasts nothing', sessionFrames.length === 4, `frames=${sessionFrames.length}`);
+check('D3 a repeated `idle` broadcasts nothing', sessionFrames.length === 4, `frames=${sessionFrames.length}`);
 
 // ── F: replacement starts from the adapter's exact projection ──────────────────────────────────
 const replacement = fakeConn({ ...info('s1'), status: 'needs-input' });

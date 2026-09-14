@@ -41,7 +41,7 @@ import {
 import { readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { resolveLocalOpencodeBaseUrl } from './implementation.ts';
+import { opencodeChildEnv, resolveLocalOpencodeBaseUrl } from './implementation.ts';
 
 const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;
 
@@ -448,7 +448,10 @@ async function ensureManagedOpencodeServeInternal(shouldContinue: () => boolean)
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
-      env: { ...process.env },
+      // The managed server is long-lived, so it is the OpenCode child most able
+      // to replace the binary underneath a running broker. Suppressing the
+      // in-place updater here does not touch the user's own `opencode upgrade`.
+      env: opencodeChildEnv(process.env),
       windowsHide: process.platform === 'win32',
     });
     child = spawned;
@@ -563,7 +566,9 @@ function installedOpencodeVersion(): string | undefined {
     // timeout: this runs synchronously ON the broker event loop (every poll + every status GET) — a
     // hung binary must not freeze the whole broker.
     const result = bunSpawnSyncResolvedInvocation(invocation, ['--version'], {
-      stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env },
+      // Also the most FREQUENT OpenCode child, per the comment above, which is
+      // why leaving it unguarded gave the updater the most chances to fire.
+      stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: opencodeChildEnv(process.env),
       timeout: 3000, windowsHide: process.platform === 'win32',
     });
     if (result.exitCode !== 0) return undefined;

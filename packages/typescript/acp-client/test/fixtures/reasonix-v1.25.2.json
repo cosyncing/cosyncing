@@ -1,0 +1,234 @@
+{
+  "schemaVersion": 1,
+  "probe": {
+    "date": "2026-08-27",
+    "agent": "reasonix",
+    "agentVersion": "v1.25.2",
+    "client": "@cosyncing/acp-client",
+    "model": "minimax-cn/MiniMax-M3",
+    "isolatedReasonixHome": true,
+    "workspaceOnly": true,
+    "prompt": "Reply with exactly R1_OK. Do not use tools."
+  },
+  "redactions": [
+    "The generated session UUID is replaced with <session-id>.",
+    "Absolute scratch paths are replaced with <reasonix-home> and <workspace>.",
+    "The configured model catalog is summarized by count and item shape because it is host-specific.",
+    "Timestamps, content digests, writer identity, environment probes, usage databases, and cache files are omitted."
+  ],
+  "initializeResult": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+      "loadSession": true,
+      "sessionCapabilities": {
+        "list": {},
+        "resume": {},
+        "close": {},
+        "delete": {}
+      },
+      "promptCapabilities": {
+        "image": false,
+        "audio": false,
+        "embeddedContext": true
+      },
+      "mcpCapabilities": {
+        "http": true,
+        "sse": false
+      },
+      "_meta": {
+        "_reasonix.io/session/status": {
+          "schemaVersion": 1
+        },
+        "_reasonix.io/session/status_update": {
+          "schemaVersion": 1
+        },
+        "reasonix.io": {
+          "sessionSteer": {
+            "method": "_reasonix.io/session/steer"
+          },
+          "sessionInbox": {
+            "schemaVersion": 1,
+            "methods": {
+              "delete": "_reasonix.io/session/inbox/delete",
+              "enqueue": "_reasonix.io/session/inbox/enqueue",
+              "get": "_reasonix.io/session/inbox/get",
+              "list": "_reasonix.io/session/inbox/list",
+              "move": "_reasonix.io/session/inbox/move",
+              "refresh": "_reasonix.io/session/inbox/refresh",
+              "retry": "_reasonix.io/session/inbox/retry",
+              "setPaused": "_reasonix.io/session/inbox/setPaused",
+              "update": "_reasonix.io/session/inbox/update"
+            }
+          },
+          "sessionReloadExtensions": {
+            "method": "_reasonix.io/session/reloadExtensions"
+          },
+          "extensionSurface": {
+            "supported": true,
+            "schemaVersion": 1
+          }
+        }
+      }
+    },
+    "agentInfo": {
+      "name": "reasonix",
+      "version": "v1.25.2"
+    },
+    "authMethods": [
+      {
+        "id": "reasonix-setup",
+        "name": "Reasonix setup",
+        "description": "Configure Reasonix providers and credentials in a terminal",
+        "type": "terminal",
+        "args": [
+          "setup"
+        ]
+      }
+    ]
+  },
+  "sessionNewResultShape": {
+    "topLevelKeys": [
+      "sessionId",
+      "models",
+      "modes",
+      "configOptions"
+    ],
+    "sessionId": "<session-id>",
+    "models": {
+      "availableModelCount": 15,
+      "availableModelItemKeys": [
+        "modelId",
+        "name",
+        "description"
+      ],
+      "currentModelId": "minimax-cn/MiniMax-M3"
+    },
+    "modes": {
+      "currentModeId": "normal",
+      "availableModeIds": [
+        "normal",
+        "plan",
+        "goal"
+      ]
+    },
+    "configOptions": [
+      {
+        "id": "model",
+        "category": "model",
+        "type": "select",
+        "currentValue": "minimax-cn/MiniMax-M3"
+      },
+      {
+        "id": "effort",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": "auto"
+      },
+      {
+        "id": "agent_preset",
+        "category": "agent_preset",
+        "type": "select",
+        "currentValue": "balanced"
+      },
+      {
+        "id": "work_mode",
+        "category": "work_mode",
+        "type": "select",
+        "currentValue": "balanced"
+      },
+      {
+        "id": "tool_approval",
+        "category": "tool_approval",
+        "type": "select",
+        "currentValue": "ask"
+      }
+    ]
+  },
+  "sessionUpdateSequence": [
+    "available_commands_update",
+    "agent_message_chunk",
+    "agent_message_chunk"
+  ],
+  "agentMessageText": "R1_OK",
+  "extensionMethodSequence": [
+    "_reasonix.io/session/status_update",
+    "_reasonix.io/session/status_update",
+    "_reasonix.io/session/status_update"
+  ],
+  "permissionRequestCount": 0,
+  "traceKinds": [],
+  "promptResult": {
+    "stopReason": "end_turn",
+    "transcriptPath": "<reasonix-home>/sessions/<session-id>.jsonl"
+  },
+  "sessionLoadProbe": {
+    "requestedSessionId": "<session-id>",
+    "responseIncludesSessionId": false,
+    "replayedSessionId": "<session-id>",
+    "replayedUpdateSequence": [
+      "user_message_chunk",
+      "agent_message_chunk",
+      "available_commands_update"
+    ],
+    "storeFileSetUnchanged": true
+  },
+  "permissionProbe": {
+    "requestCount": 1,
+    "toolCall": {
+      "toolCallId": "gate-1",
+      "title": "bash <outside-workspace-write>",
+      "kind": "execute",
+      "status": "pending",
+      "rawInput": {
+        "command": "<outside-workspace-write>"
+      }
+    },
+    "options": [
+      { "optionId": "allow_once", "name": "Allow", "kind": "allow_once" },
+      { "optionId": "allow_always", "name": "Allow Bash(<rule>) for this session", "kind": "allow_always" },
+      { "optionId": "reject_once", "name": "Reject", "kind": "reject_once" }
+    ],
+    "clientOutcome": "cancelled",
+    "promptStopReason": "cancelled",
+    "toolUpdateStatus": "failed",
+    "toolUpdateText": "blocked: context canceled",
+    "outsideWorkspaceTargetCreated": false
+  },
+  "modelSwitchProbe": {
+    "requestedSessionId": "<session-id>",
+    "requestedModel": "vllm-hpc/qwen3.8-27B-FP8",
+    "storedModelBefore": "minimax-cn/MiniMax-M3",
+    "storedModelAfter": "minimax-cn/MiniMax-M3",
+    "sameSessionLoaded": true,
+    "promptStopReason": "end_turn",
+    "newAnswer": "R9_OK",
+    "modelChanged": false,
+    "capabilityDecision": "supportsModelSwitch=false"
+  },
+  "storeIdentity": {
+    "acpSessionId": "<session-id>",
+    "acpMetadataSessionId": "<session-id>",
+    "transcriptMetadataId": "<session-id>",
+    "fileStem": "<session-id>",
+    "allEqual": true
+  },
+  "sessionStoreArtifacts": [
+    "sessions/<session-id>.acp.json",
+    "sessions/<session-id>.ckpt/turn-0.json",
+    "sessions/<session-id>.display-index.json",
+    "sessions/<session-id>.event-index.json",
+    "sessions/<session-id>.events.jsonl",
+    "sessions/<session-id>.inbox/transaction.lock",
+    "sessions/<session-id>.jsonl",
+    "sessions/<session-id>.jsonl.meta",
+    "sessions/<session-id>.recovery.json"
+  ],
+  "storeSummary": {
+    "model": "minimax-cn/MiniMax-M3",
+    "turns": 1,
+    "messageCount": 3,
+    "statusState": "idle",
+    "statusPhase": "completed",
+    "turnOutcome": "completed"
+  }
+}

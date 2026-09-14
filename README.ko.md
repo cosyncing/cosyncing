@@ -64,19 +64,24 @@ Broker는 에이전트가 실행되는 컴퓨터에서 동작합니다. 각 세�
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
   <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
+  <a href="https://github.com/can1357/oh-my-pi" title="omp (oh-my-pi)"><img src="docs/assets/agents/pills/omp.svg" alt="omp (oh-my-pi)" height="34"></a>
+  <a href="https://reasonix.io/" title="Reasonix"><img src="docs/assets/agents/pills/reasonix.svg" alt="Reasonix" height="34"></a>
+  <a href="https://grok.com/" title="Grok Build"><img src="docs/assets/agents/pills/grok.svg" alt="Grok Build" height="34"></a>
+  <a href="https://cline.bot/" title="Cline"><img src="docs/assets/agents/pills/cline.svg" alt="Cline" height="34"></a>
+  <a href="https://kilocode.ai/" title="Kilo Code"><img src="docs/assets/agents/pills/kilocode.svg" alt="Kilo Code" height="34"></a>
 </p>
 
-일곱 가지 모두를 하나의 프로토콜로 다룹니다. 조작할 수 있는 범위는 에이전트마다 다르며,
+열두 가지 모두를 하나의 프로토콜로 다룹니다. 조작할 수 있는 범위는 에이전트마다 다르며,
 Claude Code 세션은 제어권을 가져오기 전까지 읽기 전용으로 열립니다. 버전과 설치 방법은
 [지원 에이전트 설정](docs/supported_agents/README.md)을, 기능 대응표는
 [어댑터 지원 현황](docs/protocol/adapter-support.md)을 참고하세요.
 
-포그라운드 클라이언트는 네이티브 Resume를 하나 더 띄우지 않고도 Broker가 소유한 같은 Codex 또는
-Pi 조작 세션에 참여할 수 있습니다. Claude Code는 다른 클라이언트에서 보기/제어권 가져오기 흐름을
+포그라운드 클라이언트는 네이티브 Resume를 하나 더 띄우지 않고도 Broker가 소유한 같은 Codex, Pi,
+omp 또는 Reasonix 조작 세션에 참여할 수 있습니다. Claude Code는 다른 클라이언트에서 보기/제어권 가져오기 흐름을
 유지하고, OpenCode는 공유 라이브 동작을 유지합니다. 백그라운드 보기 연결은 읽기 전용으로
 유지됩니다.
 
-**실험적:** 소스 기여자를 위한 잠정 어댑터가 세 개 있습니다.
+**실험적:** 소스 기여자를 위한 잠정 어댑터가 여덟 개 있습니다.
 [Kimi Code](docs/supported_agents/kimi.md)는 `kimi web` 서버의 모든 세션을 읽기
 전용으로 관찰하고, cosyncing이 만든 세션은 직접 조작하며(프롬프트, 승인, 모델 선택), 그렇지 않은
 세션은 명시적으로 제어권을 가져옵니다. [DeepSeek Harness](docs/supported_agents/dsh.md)는
@@ -87,8 +92,21 @@ Pi 조작 세션에 참여할 수 있습니다. Claude Code는 다른 클라이�
 Antigravity CLI 자체의 대화 저장소를 읽고(서버가 없습니다) 모든 대화를 읽기 전용으로 재생하며,
 Broker가 소유한 `agy` 자식 프로세스를 통해 조작합니다. 두 클라이언트가 하나의 Drive를 공유할 수
 있고, 터미널에서 쓰기가 일어나면 세션을 돌려줍니다.
+[omp](docs/supported_agents/omp.md)는 전용 패키지 브리지와 RPC 방언으로 세션 검색, 실시간 동기화,
+프롬프트, 승인, 명령, 모델, 파일 입력, 세션 생성을 지원합니다.
+[Reasonix](docs/supported_agents/reasonix.md)는 크기가 제한된 로컬 저장소를 관찰하고 필요할 때 Broker가
+소유한 ACP 자식 프로세스로 재개합니다. 여러 클라이언트가 하나의 writer를 공유하지만 터미널 true
+sync와 파일 입력은 지원하지 않습니다. [Grok Build](docs/supported_agents/grok-build.md)는 크기가 제한된
+로컬 저장소를 읽기 전용으로 관찰합니다. 네이티브 ACP 승인이 끝날 때까지 새 세션과 Resume은 비활성화되며,
+터미널 true sync와 파일 입력도 지원하지 않습니다.
+[Cline](docs/supported_agents/cline.md)은 상위 세션과 하위 에이전트의 크기 제한 스냅샷을 읽기
+전용으로 관찰합니다. 네이티브 hub 또는 ACP 계약을 측정할 때까지 새 세션, Drive, 네이티브 승인,
+모델 및 모드 변경은 비활성화됩니다.
+[Kilo Code](docs/supported_agents/kilocode.md)는 크기가 제한된 로컬 SQLite 스냅샷을 읽기
+전용으로 관찰합니다. CLI와 라이브 통신 계약을 측정할 때까지 새 세션, Drive, 관리형 serve,
+터미널 인계, 모델 및 에이전트 변경은 비활성화됩니다.
 
-셋 다 롤아웃 플래그가 필요 없습니다. 서버를 쓰는 두 어댑터는 터미널을 열어 둘 필요도 없습니다. 설치된 cosyncing 서비스가
+여덟 어댑터 모두 롤아웃 플래그가 필요 없습니다. 서버를 쓰는 두 어댑터는 터미널을 열어 둘 필요도 없습니다. 설치된 cosyncing 서비스가
 호스트가 실행 중이 아니면 시작하고, 죽으면 다시 시작하며, 자신이 시작한 것만 중지합니다.
 사용자가 직접 시작한 호스트는 중지되거나 교체되거나 재설정되지 않으며, 설정 과정에서 관리에
 동의하기 전에 두 호스트의 이름을 모두 알려 줍니다. DeepSeek Harness는

@@ -64,19 +64,24 @@ cliente y el broker.
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
   <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
+  <a href="https://github.com/can1357/oh-my-pi" title="omp (oh-my-pi)"><img src="docs/assets/agents/pills/omp.svg" alt="omp (oh-my-pi)" height="34"></a>
+  <a href="https://reasonix.io/" title="Reasonix"><img src="docs/assets/agents/pills/reasonix.svg" alt="Reasonix" height="34"></a>
+  <a href="https://grok.com/" title="Grok Build"><img src="docs/assets/agents/pills/grok.svg" alt="Grok Build" height="34"></a>
+  <a href="https://cline.bot/" title="Cline"><img src="docs/assets/agents/pills/cline.svg" alt="Cline" height="34"></a>
+  <a href="https://kilocode.ai/" title="Kilo Code"><img src="docs/assets/agents/pills/kilocode.svg" alt="Kilo Code" height="34"></a>
 </p>
 
-Un solo protocolo cubre los siete. Lo que puedes controlar cambia según el agente, y las sesiones de
+Un solo protocolo cubre los doce. Lo que puedes controlar cambia según el agente, y las sesiones de
 Claude Code se abren en solo lectura hasta que tomas el control. Consulta la
 [configuración de agentes compatibles](docs/supported_agents/README.md) para versiones e instalación,
 y el [soporte de adaptadores](docs/protocol/adapter-support.md) para la tabla de capacidades.
 
-Los clientes en primer plano pueden unirse a la misma sesión de Codex o Pi que controla el broker sin
+Los clientes en primer plano pueden unirse a la misma sesión de Codex, Pi, omp o Reasonix que controla el broker sin
 lanzar un segundo Resume nativo. Claude Code mantiene su flujo de Observar/Tomar el control en otro
 cliente, y OpenCode mantiene su comportamiento compartido en vivo. Las conexiones de observación en
 segundo plano siguen siendo de solo lectura.
 
-**Experimental:** hay tres adaptadores provisionales para quienes trabajan desde el código fuente.
+**Experimental:** hay ocho adaptadores provisionales para quienes trabajan desde el código fuente.
 [Kimi Code](docs/supported_agents/kimi.md)
 observa en solo lectura todas las sesiones de un servidor `kimi web`, controla las que creó cosyncing
 —mensajes, aprobaciones, elección de modelo— y toma el control de las demás de forma explícita.
@@ -89,6 +94,20 @@ suscripciones residentes en segundo plano y parte de la presentación de mensaje
 de Antigravity —sin servidor de por medio—, reproduce cada conversación en solo lectura y la controla
 a través de un proceso hijo `agy` propiedad del broker; dos clientes pueden compartir un Drive, y una
 escritura desde la terminal devuelve la sesión.
+[omp](docs/supported_agents/omp.md) usa su propio puente empaquetado y dialecto RPC para descubrir
+sesiones, sincronizarlas en vivo, enviar mensajes, resolver aprobaciones, ejecutar comandos, elegir
+modelos, adjuntar archivos y crear sesiones. [Reasonix](docs/supported_agents/reasonix.md) observa su
+almacén local acotado y reanuda mediante un proceso ACP del broker que arranca bajo demanda; los
+clientes comparten un solo escritor, mientras que la sincronización real con terminal y los archivos
+no están disponibles. [Grok Build](docs/supported_agents/grok-build.md) observa su almacén local
+acotado en modo de solo lectura. La creación y Resume permanecen desactivados hasta completar la
+aceptación ACP nativa; tampoco hay sincronización real con terminal ni entrada de archivos.
+[Cline](docs/supported_agents/cline.md) observa en solo lectura instantáneas acotadas de sesiones
+principales y subagentes. La creación, Drive, las aprobaciones nativas y el cambio de modelo o modo
+permanecen desactivados hasta medir el contrato nativo de hub o ACP.
+[Kilo Code](docs/supported_agents/kilocode.md) observa en solo lectura instantáneas acotadas de SQLite
+local. La creación, Drive, el servidor gestionado, la entrega a terminal y el cambio de modelo o
+agente permanecen desactivados hasta medir el CLI y el contrato en vivo.
 
 Ninguno necesita un indicador de despliegue. Los dos adaptadores con servidor tampoco necesitan una
 terminal abierta: un servicio cosyncing instalado

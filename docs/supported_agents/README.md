@@ -2,7 +2,7 @@
 
 Install only the coding agents you intend to use. Each desired agent must be
 installed on the server and visible in a new login shell before the
-`cosyncing setup` run that should enable it. You do not need to install all four.
+`cosyncing setup` run that should enable it. You do not need to install every agent.
 Setup checks the executable, version, and runtime, then installs only
 cosyncing-owned integration files; it does not install the coding agent.
 
@@ -34,25 +34,37 @@ shared `.cosyncing/outbox` path is still not supported. Codex writes through
 | [Kimi Code](kimi.md) | 0.38.0 | Registered by default; uses a `kimi web` host cosyncing can start | Discovery, observe, Drive and takeover, create/rename, prompts, file and image attachments, slash commands, model selection |
 | [DeepSeek Harness](dsh.md) | 0.1.0-rc.6 | Registered by default; uses a `dsh web` host cosyncing can start | Discovery, history, shared live control, create/rename, prompts, models, permission presets, native commands, image input, reconnect, and removal |
 | [Antigravity](antigravity.md) | 1.1.22 | Registered by default; reads the `agy` CLI's own store and drives through a broker-owned `agy` child | Discovery, observe, Drive with cross-client join and terminal handback, create, prompts, model and reasoning-effort selection |
+| [omp](omp.md) | 17.4.2 | Registered by default; setup installs its packaged in-session bridge after the CLI passes preflight | Discovery, replay, Resume/live bridge, prompts, approvals, commands, models, file input, create/name |
+| [Reasonix](reasonix.md) | 1.25.2 | Registered by default; reads the local store and lazily starts a broker-owned `reasonix acp` child | Discovery, observe, ACP Resume, create, queued prompts, answer/reasoning stream, approvals, cross-client Drive |
+| [Grok Build](grok-build.md) | 1.0.13 floor; measured on 1.0.13 and 1.0.24 | Registered by default; Observe plus authenticated Create/Resume on 1.0.13 or newer | Discovery, history replay/tail, answer/reasoning/tool/task display, model/effort controls, permissions, context usage |
+| [Cline](cline.md) | 3.0.61 Drive floor (Hub core 0.0.82) + 3.0.60 Observe | Registered by default; default-profile Observe plus an isolated broker-owned Hub on dedicated port 25464 | Parent/subagent discovery, replay/rewrite tail, managed Create/Resume, prompts, Stop, approvals, create-time model/mode, rename, token/cost/status display |
+| [Kilo Code](kilocode.md) | 7.4.23 floor; CLI/serve/store contract | Registered by default; Observe plus an authenticated broker-owned host on dedicated port 4097 | Discovery, replay/live Drive, create/rename, prompts, approvals, model selection, token/cost/status display; native tool display pending capture |
 
-All three are provisional. Kimi Code and DeepSeek Harness talk to a local
-server rather than a CLI; Antigravity needs no host at all — cosyncing reads
-the `agy` CLI's own conversation store and starts a broker-owned `agy` child
-only when you drive a session. Setup
-does not install those servers, but an installed cosyncing service starts,
-supervises, and stops one it owns, so the agents work without keeping a terminal
-open — setup lists both and names their hosts in the consent it asks you for.
+All eight are provisional. Kimi Code and DeepSeek Harness talk to a local
+server rather than a CLI. Antigravity and Reasonix need no managed host:
+cosyncing reads their local stores and starts a broker-owned child only when a
+session is driven. Grok Build keeps Observe process-free and starts an
+authenticated ACP child only for eligible floored-version Create or Resume.
+Cline keeps the user's profile process-free and Observe-only; app-created
+sessions use a separate managed profile and owned Hub, without reading the
+user's native provider-settings file. Kilo Code uses a
+broker-owned authenticated host on dedicated loopback port 4097 and never
+adopts the user's customary port 4096 server. omp uses its packaged in-session
+bridge. Setup does not install those servers, but an installed cosyncing service
+starts, supervises, and stops only the managed hosts it owns, so they work
+without keeping a terminal open. Setup lists them and names their hosts in the
+consent it asks you for.
 cosyncing never stops or reconfigures a host you started yourself; see
 [managed hosts](kimi.md#managed-hosts) for what ownership means.
 
-Install both hosts globally, with npm for DeepSeek Harness
+Install each host you intend to use; install DeepSeek Harness globally with npm
 (`npm install -g @deepseek-ai/dsh`). cosyncing locates a host binary on your
 PATH, so an `npx`-only DeepSeek Harness install can be talked to but never
 started, restarted, or version-checked — see
 [installing the host](dsh.md#install-the-host). Clients older
-than the contract revision that added tolerant agent decoding are not shown
-either agent, because one row they cannot decode would cost them their whole
-agent list.
+than the contract revision that added tolerant agent decoding are not shown a
+newer integration row, because one row they cannot decode would cost them their
+whole agent list.
 
 ## Requirements
 
@@ -113,6 +125,21 @@ pi --version
 
 type -a claude
 claude --version
+
+type -a bun omp
+omp --version
+
+type -a reasonix
+reasonix --version
+
+type -a grok
+grok --version
+
+type -a cline
+cline --version
+
+type -a kilo
+kilo --version
 ```
 
 ## Apple Silicon macOS example
@@ -185,7 +212,15 @@ new Node but temporarily hides Claude Code, Pi, or cosyncing because it was
 installed only under the old npm prefix.
 
 Environment overrides are available for deliberate nonstandard installations:
-`COSYNCING_CODEX_BIN`, `COSYNCING_PI_BIN`, and `COSYNCING_CLAUDE_BIN`. Each
+`COSYNCING_CODEX_BIN`, `COSYNCING_PI_BIN`, `COSYNCING_CLAUDE_BIN`,
+`COSYNCING_GROK_BIN`, `COSYNCING_CLINE_BIN`, and `COSYNCING_KILO_BIN`. Each
 value must resolve to the intended executable; do not use an override to bypass
-a failed version or runtime check. OpenCode must be discoverable as `opencode`
-on the setup shell's `PATH`.
+a failed version or runtime check. `CLINE_DIR` and `CLINE_DATA_DIR` select
+deliberate non-default Cline store paths. OpenCode, omp, and Reasonix must be
+discoverable on the setup shell's `PATH` under those command names.
+`KILO_DATA_DIR` selects a deliberate non-default Kilo Code data directory.
+`COSYNCING_OMP_AGENT_DIR` selects a deliberate non-default omp agent directory;
+`COSYNCING_OMP_SESSIONS_ROOT` independently selects its session store. Rerun
+setup after changing either value so the receipt-owned bridge and service
+environment are reconciled together. Repair blocks a pending path move and
+directs the operator to setup.

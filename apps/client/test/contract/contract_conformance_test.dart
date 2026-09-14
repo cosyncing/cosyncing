@@ -525,9 +525,9 @@ void main() {
       );
     });
 
-    test('BROKER_ERROR_CODES has 103 entries and typed control failures', () {
+    test('BROKER_ERROR_CODES has 106 entries and typed control failures', () {
       final codes = _registryFromSnapshot(snapshotSource, 'BROKER_ERROR_CODES');
-      expect(codes, hasLength(103));
+      expect(codes, hasLength(106));
       expect(codes, isNot(contains('DUPLICATE_CLIENT_MESSAGE_ID')));
       expect(
         codes,
@@ -544,6 +544,7 @@ void main() {
           'DRIVE_OWNERSHIP_UNKNOWN',
           'DRIVE_NATIVE_SESSION_UNRESUMABLE',
           'DRIVE_RESTORE_FAILED',
+          'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED',
           'JOIN_OWNER_NOT_FOUND',
           'JOIN_OWNER_STALE',
           'JOIN_NOT_SUPPORTED',
@@ -562,6 +563,8 @@ void main() {
           'UPLOAD_CAPACITY',
           'UPLOAD_SCOPE_MISMATCH',
           'MODEL_CATALOG_UNAVAILABLE',
+          'MODEL_UNSUPPORTED',
+          'MODE_CATALOG_UNAVAILABLE',
           'MODEL_SELECTION_UNSUPPORTED',
           'SESSION_CREATE_TEMPORARILY_UNAVAILABLE',
           // CR4: a user-initiated fork of an agent-spawned session is a typed
@@ -569,7 +572,7 @@ void main() {
           'SESSION_AGENT_OWNED',
         ]),
       );
-      expect(brokerErrorCodes, hasLength(103));
+      expect(brokerErrorCodes, hasLength(106));
     });
 
     test('ack and nack are typed wire frame and client message kinds', () {

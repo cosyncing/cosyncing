@@ -35,6 +35,114 @@ void main() {
     );
   });
 
+  test(
+    'a superseded modes load cannot retire the catalog that replaced it',
+    () async {
+      // Measured on v38: opencode is FIRST in the roster and reports
+      // canSelectPermissionModeAtCreation:false. The sheet auto-selects the
+      // first agent, so loadModes('opencode') is already in flight — behind a
+      // slow model-catalog fetch — when the user picks Cline. Its early return
+      // sets unavailable/modes:[] and, unlike the success and failure paths, is
+      // NOT generation-guarded, so it lands last and wipes Cline's catalog. The
+      // sheet renders a mode row only while the phase is loading or ready, so
+      // Cline showed no permission control at all despite /modes returning 200.
+      final fake = _FakeBrokerClient(
+        agents: [
+          _agent('opencode', canCreate: true),
+          _agent(
+            'cline',
+            canCreate: true,
+            canSelectPermissionModeAtCreation: true,
+          ),
+        ],
+        modes: const [
+          ModeOption(value: 'ask', label: 'Ask permission'),
+          ModeOption(value: 'auto', label: 'Approve for me'),
+        ],
+      );
+      final container = _container(fake);
+      addTearDown(container.dispose);
+
+      final controller = container.read(newSessionControllerProvider.notifier);
+      await controller.loadAgents();
+
+      // The initial agent's load is issued FIRST and settles LAST.
+      final superseded = controller.loadModes('opencode');
+      await controller.loadModes('cline');
+      await superseded;
+
+      final state = container.read(newSessionControllerProvider);
+      expect(
+        state.modes.map((mode) => mode.value),
+        ['ask', 'auto'],
+        reason: 'an older load must not retire the catalog that replaced it',
+      );
+      expect(state.modeCatalogPhase, NewSessionModeCatalogPhase.ready);
+      expect(state.modeTool, 'cline');
+    },
+  );
+
+  test(
+    'a roster refresh that still lists the tool keeps its loaded catalogs',
+    () async {
+      // Regression: "this agent has no create-time modes" and "this agent is
+      // not in the roster I hold right now" are different facts. Collapsing
+      // them retired a permission mode the broker still advertised, hid the
+      // field, and made the sheet refuse Create with "That permission mode is
+      // no longer available" — naming a control it had stopped showing.
+      // Measured in the browser against Reasonix, whose /modes endpoint kept
+      // returning ask/auto/yolo throughout.
+      final fake = _FakeBrokerClient(
+        agents: [
+          _agent(
+            'reasonix',
+            canCreate: true,
+            canSelectModelAtCreation: false,
+            canSelectPermissionModeAtCreation: true,
+          ),
+        ],
+        modes: const [
+          ModeOption(value: 'ask', label: 'Ask'),
+          ModeOption(value: 'auto', label: 'Auto'),
+        ],
+      );
+      final container = _container(fake);
+      addTearDown(container.dispose);
+
+      final controller = container.read(newSessionControllerProvider.notifier);
+      await controller.loadAgents();
+      await controller.loadModes('reasonix');
+      expect(
+        container.read(newSessionControllerProvider).modes.map((m) => m.value),
+        ['ask', 'auto'],
+      );
+
+      // An ordinary roster refresh while the sheet is open. The tool is still
+      // offered, so nothing about the user's choice has become untrue.
+      await controller.loadAgents();
+
+      final state = container.read(newSessionControllerProvider);
+      expect(
+        state.modes.map((mode) => mode.value),
+        ['ask', 'auto'],
+        reason:
+            'a refresh that still offers the tool must not retire its modes',
+      );
+      expect(state.modeCatalogPhase, NewSessionModeCatalogPhase.ready);
+      expect(state.modeTool, 'reasonix');
+
+      // A refresh that genuinely stops offering the tool still drops it.
+      fake.agents = const [];
+      await controller.loadAgents();
+      final dropped = container.read(newSessionControllerProvider);
+      expect(dropped.modes, isEmpty);
+      expect(
+        dropped.modeCatalogPhase,
+        NewSessionModeCatalogPhase.unavailable,
+      );
+    },
+  );
+
   test('pre-session catalog retention is explicitly bounded', () async {
     final fake = _FakeBrokerClient(
       agents: [_agent('codex', canCreate: true)],
@@ -260,7 +368,7 @@ void main() {
   );
 
   test(
-    'preserves a live create intent without minting Resume provenance',
+    'persists the exact live restore mode with the one-shot create intent',
     () async {
       final fake = _FakeBrokerClient(
         agents: [_agent('kimi', canCreate: true)],
@@ -284,7 +392,8 @@ void main() {
       expect(intents.takeMode(_scope('other-profile'), key), isNull);
       expect(intents.takeMode(_scope('local'), key), 'live');
       expect(intents.takeMode(_scope('local'), key), isNull);
-      expect(driveStore.appCreatedKeys, isEmpty);
+      expect(driveStore.appCreatedKeys, ['${_scope('local')}/kimi/created']);
+      expect(driveStore.restoreModes, [SessionDriveRestoreMode.live]);
     },
   );
 
@@ -492,6 +601,7 @@ AgentInfo _agent(
   String id, {
   required bool canCreate,
   bool canSelectModelAtCreation = true,
+  bool canSelectPermissionModeAtCreation = false,
 }) => AgentInfo(
   id: id,
   displayName: id.toUpperCase(),
@@ -508,6 +618,7 @@ AgentInfo _agent(
   ),
   canCreateSession: canCreate,
   canSelectModelAtCreation: canSelectModelAtCreation,
+  canSelectPermissionModeAtCreation: canSelectPermissionModeAtCreation,
   canRenameNative: false,
   canFork: false,
   canClone: false,
@@ -555,11 +666,13 @@ final class _FakeBrokerClient extends BrokerClient {
   _FakeBrokerClient({
     required this.agents,
     this.models = const [],
+    this.modes = const [],
     this.attachMode = 'resume',
   }) : super(baseUrl: 'http://test');
 
-  final List<AgentInfo> agents;
+  List<AgentInfo> agents;
   final List<ModelOption> models;
+  final List<ModeOption> modes;
   final String attachMode;
   String? lastDirectory;
   String? lastTitle;
@@ -595,11 +708,16 @@ final class _FakeBrokerClient extends BrokerClient {
   }
 
   @override
+  Future<ModeCatalogResponse> listAgentModes(String tool) async =>
+      ModeCatalogResponse(tool: tool, modes: modes, refreshedAt: 1);
+
+  @override
   Future<CreateSessionResponse> createSession(
     String tool, {
     String? directory,
     String? title,
     SessionCurrentModel? model,
+    String? permissionMode,
   }) async {
     if (closeCalls > 0) {
       createdAfterClose = true;
@@ -625,6 +743,7 @@ final class _FakeBrokerClient extends BrokerClient {
 
 final class _RecordingDriveIntentStore implements SessionDriveIntentStore {
   final List<String> appCreatedKeys = [];
+  final List<SessionDriveRestoreMode> restoreModes = [];
 
   @override
   Future<SessionDriveProvenance?> read({
@@ -638,8 +757,10 @@ final class _RecordingDriveIntentStore implements SessionDriveIntentStore {
     required String brokerProfileId,
     required String tool,
     required String sessionId,
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
   }) async {
     appCreatedKeys.add('$brokerProfileId/$tool/$sessionId');
+    restoreModes.add(restoreMode);
   }
 
   @override

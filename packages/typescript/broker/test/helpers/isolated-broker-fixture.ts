@@ -115,6 +115,11 @@ export function isolatedBrokerFixtureEnvironment(
     // default; a collision test must opt back into the shared variables explicitly.
     COSYNCING_OMP_AGENT_DIR: join(root, 'omp-agent'),
     COSYNCING_OMP_SESSIONS_ROOT: join(root, 'omp-sessions'),
+    REASONIX_HOME: join(root, 'reasonix-home'),
+    GROK_HOME: join(root, 'grok-home'),
+    CLINE_DIR: join(root, 'cline-home'),
+    CLINE_DATA_DIR: join(root, 'cline-data'),
+    KILO_DATA_DIR: join(root, 'kilo-data'),
     COSYNCING_HOME: join(root, 'cosyncing-home'),
     // Windows per-user locations, owned for the same reason HOME is owned above.
     //
@@ -164,6 +169,11 @@ export function isolatedBrokerFixtureEnvironment(
     // machine by a test — is worse.
     COSYNCING_KIMI_MANAGED_HOST: '0',
     COSYNCING_DSH_MANAGED_HOST: '0',
+    // Cline is snapshot-only, but a host PATH can still contain the CLI. Pin
+    // the command to an absent fixture-local path so tests cannot probe or
+    // hand off to a developer installation by accident.
+    COSYNCING_CLINE_BIN: join(root, 'missing-bin', 'cline'),
+    COSYNCING_KILO_BIN: join(root, 'missing-bin', 'kilo'),
   };
   return {
     ...environment,

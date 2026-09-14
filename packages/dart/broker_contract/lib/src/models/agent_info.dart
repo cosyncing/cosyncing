@@ -176,6 +176,8 @@ class AgentInfo {
     required this.canClone,
     required this.canTranscriptExport,
     this.canSelectModelAtCreation = false,
+    this.canSelectPermissionModeAtCreation = false,
+    this.canRenameDisplay = false,
     this.syncEnabled,
   });
 
@@ -204,6 +206,15 @@ class AgentInfo {
   /// probing an endpoint the older broker does not have.
   @JsonKey(name: 'canSelectModelAtCreation', defaultValue: false)
   final bool canSelectModelAtCreation;
+
+  /// Whether this agent exposes exact approval modes before session creation.
+  @JsonKey(name: 'canSelectPermissionModeAtCreation', defaultValue: false)
+  final bool canSelectPermissionModeAtCreation;
+
+  /// Whether cosyncing can rename the displayed session title. This includes
+  /// the broker-owned alias fallback when the native tool has no rename API.
+  @JsonKey(name: 'canRenameDisplay', defaultValue: false)
+  final bool canRenameDisplay;
 
   /// Whether this agent supports native session rename.
   @JsonKey(name: 'canRenameNative', defaultValue: false)

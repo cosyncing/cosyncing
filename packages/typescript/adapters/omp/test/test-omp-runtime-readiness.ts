@@ -10,13 +10,17 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import {
+  diagnoseOmpBunRuntime,
   inspectOmpRuntimeReadiness,
   OMP_DEFAULT_BUN_MINIMUM_VERSION,
   OMP_MINIMUM_SUPPORTED_VERSION,
@@ -35,12 +39,15 @@ function makeBun(version: string, name: string): string {
   return makeExecutable(join(root, name, 'bun'), `#!/bin/sh\nprintf '%s\\n' '${version}'\n`);
 }
 
-function makeOmpPackage(name: string, opts: { version?: string; bunEngine?: string; shebang?: string } = {}): {
+function makeOmpPackage(name: string, opts: { version?: string; bunEngine?: string; shebang?: string; paddingBytes?: number } = {}): {
   executable: string;
   binDir: string;
 } {
   const packageRoot = join(root, name, 'lib', 'node_modules', '@oh-my-pi', 'pi-coding-agent');
-  const executable = makeExecutable(join(packageRoot, 'dist', 'cli.js'), `${opts.shebang ?? '#!/usr/bin/env bun'}\n// fixture\n`);
+  const executable = makeExecutable(
+    join(packageRoot, 'dist', 'cli.js'),
+    `${opts.shebang ?? '#!/usr/bin/env bun'}\n// fixture\n${'x'.repeat(opts.paddingBytes ?? 0)}`,
+  );
   writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
     name: '@oh-my-pi/pi-coding-agent',
     version: opts.version ?? '17.4.2',
@@ -80,6 +87,51 @@ try {
     PATH: `${dirname(newerBun)}:${pathOmp.binDir}`,
   });
   assert.equal(newer.ready, true);
+
+  const futureOmp = makeOmpPackage('future-omp', { version: '17.4.3' });
+  const futurePackage = inspectOmpRuntimeReadiness({
+    PATH: `${dirname(floorBun)}:${futureOmp.binDir}`,
+  });
+  assert.equal(futurePackage.ready, false, 'an uncaptured future RPC surface must not be writable');
+  assert.equal(futurePackage.detailCode, 'omp-package-version-above-verified');
+  assert.equal('blocksSessionAccess' in futurePackage, false,
+    'an uncaptured future version remains eligible for read-only store discovery');
+
+  // Doctor needs only the shebang prefix. A real omp bundle is much larger
+  // than the old whole-file ceiling, and PATH exposes it through a symlink.
+  const largeOmp = makeOmpPackage('large-doctor-omp', { paddingBytes: 9 * 1024 * 1024 });
+  let prefixBytes = 0;
+  const doctorContext: SetupDiagnosisContext = {
+    effects: 'forbidden', platform: 'linux', arch: 'x64',
+    env: { PATH: `${dirname(floorBun)}:${largeOmp.binDir}` }, homeDir: root,
+    resolveExecutable: (command) => command === 'bun' ? floorBun : undefined,
+    inspectPath: (path) => ({ status: 'file', readable: true, displayPath: path }),
+    readText: (path, maxBytes = 256 * 1024) => {
+      try {
+        const size = statSync(path).size;
+        return size > maxBytes
+          ? { ok: false as const, reason: 'too-large' as const }
+          : { ok: true as const, text: readFileSync(path, 'utf8') };
+      } catch {
+        return { ok: false as const, reason: 'missing' as const };
+      }
+    },
+    readTextPrefix: (path, maxBytes) => {
+      prefixBytes = maxBytes;
+      return { ok: true, text: readFileSync(path).subarray(0, maxBytes).toString('utf8') };
+    },
+    listDirectory: () => ({ ok: false, reason: 'missing' }),
+    processAlive: () => false,
+    readPackageVersion: () => undefined,
+    runReadOnly: async () => ({ status: 'ok', exitCode: 0, stdout: '1.3.14\n', stderr: '' }),
+    fetchJson: async () => ({ status: 'unreachable' }),
+    probeTcp: async () => 'closed',
+    displayPath: (path) => path,
+  };
+  const doctorRuntime = await diagnoseOmpBunRuntime(doctorContext, join(largeOmp.binDir, 'omp'));
+  assert.equal(doctorRuntime.status, 'pass');
+  assert.equal(doctorRuntime.detailCode, 'bun-runtime-supported');
+  assert.equal(prefixBytes, 4096, 'doctor reads only the bounded launcher prefix');
 
   const oldOmp = makeOmpPackage('old-version-omp', { version: '17.4.1' });
   const oldOmpResult = inspectOmpRuntimeReadiness({
@@ -167,6 +219,13 @@ try {
   assert.equal(nativeBelow.ready, false);
   assert.equal(nativeBelow.detailCode, 'omp-native-version-below-minimum');
   assert.equal(nativeBelow.packageVersion, '17.3.9');
+
+  const nativeFuture = inspectOmpRuntimeReadiness(
+    { COSYNCING_OMP_BIN: nativeBin, PATH: '' },
+    nativeProbe('17.4.3'),
+  );
+  assert.equal(nativeFuture.ready, false);
+  assert.equal(nativeFuture.detailCode, 'omp-native-version-above-verified');
 
   const nativeForeign = inspectOmpRuntimeReadiness(
     { COSYNCING_OMP_BIN: nativeBin, PATH: '' },
@@ -270,6 +329,15 @@ try {
   assert.equal(belowFloor.detailCode, 'omp-batch-version-below-minimum');
   assert.equal(belowFloor.packageVersion, '17.0.0');
   assert.match(belowFloor.message, new RegExp(OMP_MINIMUM_SUPPORTED_VERSION.replaceAll('.', '\\.')));
+
+  const futureWindowsPackage = describeWindowsHost({
+    executables: [SHIM, BUN_EXE],
+    files: { [packageJsonPath]: ompPackageJson('18.0.0') },
+    versions: { [SHIM]: '18.0.0', [BUN_EXE]: '1.4.0' },
+  });
+  const futureWindows = inspectOmpRuntimeReadiness(PREFIX_ON_PATH, futureWindowsPackage.host);
+  assert.equal(futureWindows.ready, false);
+  assert.equal(futureWindows.detailCode, 'omp-batch-version-above-verified');
 
   const replacedShim = describeWindowsHost({
     executables: [SHIM, BUN_EXE],

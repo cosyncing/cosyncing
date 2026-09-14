@@ -1176,6 +1176,58 @@ void main() {
         expect(response.attachMode, 'live');
       });
 
+      // Without a bound the launch page waits on this request forever. Its
+      // failure and Retry UI already exist and catch anything thrown -- the
+      // only reason an operator never saw them is that nothing ever threw.
+      test(
+        'bounds the wait, so a stalled create can reach the Retry UI',
+        () async {
+          Duration? createTimeout;
+          Duration? forkTimeout;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/sessions/opencode')) {
+                  createTimeout = options.receiveTimeout;
+                }
+                if (options.path.endsWith('/fork')) {
+                  forkTimeout = options.receiveTimeout;
+                }
+                handler.next(options);
+              },
+            ),
+          );
+          dioAdapter
+            ..onPost(
+              'http://127.0.0.1:7734/api/sessions/opencode',
+              data: Matchers.any,
+              (server) => server.reply(200, {
+                'session': {
+                  'id': 'new-session',
+                  'tool': 'opencode',
+                  'title': 'New Session',
+                  'status': 'idle',
+                  'attachMode': 'live',
+                },
+                'attachMode': 'live',
+              }),
+            )
+            ..onPost(
+              'http://127.0.0.1:7734/api/sessions/opencode/session-1/fork',
+              data: Matchers.any,
+              (server) => server.reply(200, {'ok': true}),
+            );
+
+          await client.createSession('opencode');
+          expect(createTimeout, createSessionReceiveTimeout);
+
+          // Additive: every other POST keeps Dio's own default, so this cannot
+          // have shortened a request that was deliberately unbounded.
+          await client.forkSession('opencode', 'session-1');
+          expect(forkTimeout, isNull);
+        },
+      );
+
       test('sends directory and title in body', () async {
         dioAdapter.onPost(
           'http://127.0.0.1:7734/api/sessions/opencode',

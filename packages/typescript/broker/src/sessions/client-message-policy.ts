@@ -1,5 +1,5 @@
 import { PROMPT_ATTACHMENT_LIMITS } from '@cosyncing/protocol';
-import type { AgentMessage, AgentOption, ModeOption, PlanAction, PlanSemantic, SessionConnection } from '@cosyncing/protocol';
+import type { AgentMessage, AgentOption, ModeOption, ModelOption, ModelSelection, PlanAction, PlanSemantic, SessionConnection } from '@cosyncing/protocol';
 import { isNativeSessionUnresumableError, isOwnershipConflictError } from '@cosyncing/adapter-api';
 import { trustTierForAddress } from '../security/r2-policy.ts';
 import { isJoinExistingError } from './session-owner.ts';
@@ -31,6 +31,7 @@ export function driveAttachRefusalCode(error: unknown): DriveAttachRefusalCode {
 
 export type ClientMessagePolicyErrorCode =
   | 'AGENT_UNSUPPORTED'
+  | 'MODEL_UNSUPPORTED'
   | 'PERMISSION_MODE_UNSUPPORTED'
   | 'PLAN_ACTION_INVALID'
   | 'PLAN_ACTION_STALE'
@@ -214,6 +215,67 @@ export function validatePlanActionRequest(
 
 function advertisedModeValues(options: ModeOption[]): Set<string> {
   return new Set(options.map((option) => option?.value).filter(isModeToken));
+}
+
+function isBoundedOpaqueIdentity(value: unknown, maxLength = 500): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= maxLength
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function requestedModel(value: unknown): ModelSelection | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (!Object.keys(row).every((key) => [
+    'providerID', 'modelID', 'reasoningEffort', 'variant',
+  ].includes(key))) return undefined;
+  // Provider/model ids are host-owned opaque identities. In particular, valid model ids commonly
+  // contain `/`; exact catalog membership below is the authority, not a broker token vocabulary.
+  if (!isBoundedOpaqueIdentity(row.providerID) || !isBoundedOpaqueIdentity(row.modelID)) return undefined;
+  if (row.reasoningEffort !== undefined && !isShortPolicyToken(row.reasoningEffort)) return undefined;
+  if (row.variant !== undefined && !isShortPolicyToken(row.variant)) return undefined;
+  return {
+    providerID: row.providerID,
+    modelID: row.modelID,
+    ...(typeof row.reasoningEffort === 'string' ? { reasoningEffort: row.reasoningEffort } : {}),
+    ...(typeof row.variant === 'string' ? { variant: row.variant } : {}),
+  };
+}
+
+function modelOptionMatches(request: ModelSelection, option: ModelOption): boolean {
+  if (request.providerID !== option.providerID || request.modelID !== option.modelID) return false;
+  if ((request.variant ?? undefined) !== (option.variant ?? undefined)) return false;
+  if (request.reasoningEffort === undefined) return true;
+  return Array.isArray(option.reasoningEfforts)
+    && option.reasoningEfforts.some((effort) => effort.effort === request.reasoningEffort);
+}
+
+/** Validate a per-turn model against the live adapter catalog. Native ids remain exact identities;
+ * the broker never accepts a label, guesses a provider, or forwards a stale selection. */
+export async function validateRequestedModel(
+  conn: SessionConnection,
+  supplied: boolean,
+  raw: unknown,
+): Promise<ModelSelection | undefined> {
+  if (!supplied) return undefined;
+  const selection = requestedModel(raw);
+  if (!selection) {
+    throw new ClientMessagePolicyError(
+      'MODEL_UNSUPPORTED',
+      'model must be an exact adapter-advertised model selection',
+    );
+  }
+  let options: ModelOption[];
+  try {
+    options = conn.listModels ? await conn.listModels() : [];
+  } catch {
+    throw new ClientMessagePolicyError('MODEL_UNSUPPORTED', 'model selection is unavailable for this session');
+  }
+  if (!(Array.isArray(options) ? options : []).some((option) => modelOptionMatches(selection, option))) {
+    throw new ClientMessagePolicyError('MODEL_UNSUPPORTED', 'model is not advertised for this session');
+  }
+  return selection;
 }
 
 /**

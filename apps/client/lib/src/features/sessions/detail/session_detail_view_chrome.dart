@@ -521,20 +521,30 @@ class _SessionTitleEditorState extends State<_SessionTitleEditor>
       return Align(alignment: Alignment.centerLeft, child: label);
     }
 
-    return Tooltip(
-      message: l10n.sessionDetailRenameTooltip,
-      child: InkWell(
-        key: const Key('session-detail-rename-button'),
-        borderRadius: BorderRadius.circular(8),
-        onTap: widget.busy ? null : _begin,
-        onHover: (hovered) {
-          if (hovered != _hovered && mounted) {
-            setState(() => _hovered = hovered);
-          }
-        },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-          child: Align(alignment: Alignment.centerLeft, child: label),
+    return Semantics(
+      key: const Key('session-detail-rename-button'),
+      container: true,
+      button: true,
+      enabled: !widget.busy,
+      label: widget.title,
+      hint: l10n.sessionDetailRenameTooltip,
+      child: ExcludeSemantics(
+        child: Tooltip(
+          message: l10n.sessionDetailRenameTooltip,
+          excludeFromSemantics: true,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: widget.busy ? null : _begin,
+            onHover: (hovered) {
+              if (hovered != _hovered && mounted) {
+                setState(() => _hovered = hovered);
+              }
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              child: Align(alignment: Alignment.centerLeft, child: label),
+            ),
+          ),
         ),
       ),
     );

@@ -7,6 +7,7 @@
  *   bun run packages/typescript/broker/test/broker/test-roster-http.ts
  */
 export {};
+import { join } from 'node:path';
 import {
   AgentRegistry,
   type SessionDiscoveryOptions,
@@ -18,6 +19,7 @@ import {
   ifNoneMatchMatches,
   jsonMaybe,
   parseSessionWindowMs,
+  rosterRepresentationIsReusable,
   sessionWindowRepresentationExpiry,
 } from '../../src/roster/roster-http.ts';
 
@@ -249,6 +251,65 @@ check('jsonMaybe: If-None-Match list containing our tag → 304', list304.status
 
 const small = jsonMaybe(reqWith({ 'accept-encoding': 'gzip' }), { ok: true });
 check('tiny body is not gzipped (below threshold)', small.headers.get('content-encoding') === null);
+
+// ---- rosterRepresentationIsReusable: what may still answer 304 ----------------------------------
+//
+// The INCOMPLETE case is the one with teeth. A roster served ahead of its sweep
+// can reconcile to exactly the same rows, so the revision never moves -- and
+// since a 304 returns above discovery, the poll that would notice the roster is
+// now complete never runs. Without this rule a client holds `complete: false`
+// forever on a roster that was complete all along.
+const reusable = (over: Partial<Parameters<typeof rosterRepresentationIsReusable>[0]> & object = {}) =>
+  rosterRepresentationIsReusable(
+    { revision: 7, complete: true, ...over },
+    { force: false, revision: 7, now: 1_000 },
+  );
+check('reusable: complete body at the current revision → 304 allowed', reusable() === true);
+check('reusable: incomplete body is never reusable, even at the current revision',
+  reusable({ complete: false }) === false);
+check('reusable: a moved revision retires the body', reusable({ revision: 6 }) === false);
+check('reusable: an expired window cutoff retires the body',
+  reusable({ expiresAt: 1_000 }) === false);
+check('reusable: a cutoff still in the future does not',
+  reusable({ expiresAt: 1_001 }) === true);
+check('reusable: refresh=1 never reuses',
+  rosterRepresentationIsReusable({ revision: 7, complete: true }, { force: true, revision: 7, now: 1_000 }) === false);
+check('reusable: nothing cached is not reusable',
+  rosterRepresentationIsReusable(undefined, { force: false, revision: 7, now: 1_000 }) === false);
+
+// ── the early answer is gated on the caller's declared revision ─────────────
+//
+// `BROKER_MINIMUM_CLIENT_CONTRACT_REVISION` stays at 17 across revision 23, and
+// that is only honest if a pre-22 caller never meets the condition `complete`
+// exists to describe. The gate is one argument at the /api/sessions call site,
+// which is exactly the kind of thing a later edit drops without noticing -- the
+// withheld-adapter list was computed and then discarded the same way. Asserted
+// against the source because the route is a closure with no test seam.
+{
+  const runtimeSource = await Bun.file(
+    join(import.meta.dir, '..', '..', 'src', 'runtime', 'runtime.ts'),
+  ).text();
+  check(
+    '/api/sessions asks for an early answer only when the caller declares revision 23+',
+    /discoverLocalRoster\(\s*\n\s*force \|\| cutoffExpired,\s*\n\s*windowMs,\s*\n\s*requestNow,\s*\n\s*parseAgentRosterClientRevision\(url\.searchParams\) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,/
+      .test(runtimeSource),
+  );
+  check(
+    'and the flag it publishes is the sweep\'s coverage, not the filtered row count',
+    /complete: roster\.coverage\.kind === 'complete'/.test(runtimeSource),
+  );
+}
+
+{
+  const protocolSource = await Bun.file(
+    join(import.meta.dir, '..', '..', '..', 'protocol', 'src', 'index.ts'),
+  ).text();
+  check(
+    'the gate constant is the contract revision that introduced the flag',
+    /CLIENT_REVISION_WITH_ROSTER_COMPLETENESS = 23 as const/.test(protocolSource)
+      && /BROKER_CONTRACT_REVISION = 23 as const/.test(protocolSource),
+  );
+}
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${failed.length === 0 ? '✅' : '❌'} ${results.length - failed.length}/${results.length} roster-http checks passed.`);

@@ -27,6 +27,7 @@ function send(id, payload) {
   process.stdout.write(JSON.stringify({ type: 'response', id, ...payload }) + '\\n');
 }
 let buffered = '';
+let statsReads = 0;
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
   buffered += String(chunk);
@@ -40,7 +41,14 @@ process.stdin.on('data', (chunk) => {
     } else if (req.type === 'get_messages') {
       send(req.id, { success: true, data: { messages: [] } });
     } else if (req.type === 'get_session_stats') {
-      send(req.id, { success: true, data: { tokens: { input: 11, output: 7, cacheRead: 3, cacheWrite: 2, cost: 0.04 }, contextWindow: 128000 } });
+      statsReads++;
+      send(req.id, { success: true, data: {
+        tokens: { input: 11, output: 7, cacheRead: 3, cacheWrite: 2, total: 23 },
+        cost: 0.04,
+        contextUsage: statsReads === 3
+          ? { tokens: -1, contextWindow: 128000 }
+          : { tokens: 1234, contextWindow: 128000 },
+      } });
     } else if (req.type === 'abort') {
       send(req.id, { success: true, data: {} });
     } else {
@@ -62,12 +70,17 @@ try {
   const id = Buffer.from(sessionFile, 'utf8').toString('base64url');
   const conn = await adapter.attach(id, 'resume');
   const history = await conn.getHistory();
+  const replay = await conn.getHistory();
+  const invalid = await conn.getHistory();
   await conn.close();
 
   const stats = history.find((m: any) => m.type === 'metadata-update' && m.key === 'sessionStats') as any;
-  const token = history.find((m: any) => m.type === 'token-count') as any;
-  check('Pi stats maps to sessionStats metadata-update', stats?.value?.contextWindow === 128000, JSON.stringify(stats));
-  check('Pi stats maps token fields to token-count', token?.input === 11 && token.output === 7 && token.cacheRead === 3 && token.cacheWrite === 2 && token.cost === 0.04, JSON.stringify(token));
+  const context = history.find((m: any) => m.type === 'metadata-update' && m.key === 'contextUsage') as any;
+  const replayContext = replay.find((m: any) => m.type === 'metadata-update' && m.key === 'contextUsage') as any;
+  check('Pi stats retains the raw cumulative sessionStats payload', stats?.value?.tokens?.input === 11 && stats?.value?.cost === 0.04, JSON.stringify(stats));
+  check('Pi stats maps exact native contextUsage to canonical used/max', context?.value?.used === 1234 && context?.value?.max === 128000, JSON.stringify(context));
+  check('repeat stats replay context without adding cumulative token-count frames', replayContext?.value?.used === 1234 && !history.concat(replay).some((m: any) => m.type === 'token-count'), JSON.stringify(history.concat(replay)));
+  check('invalid native context usage is rejected while raw stats remain available', !invalid.some((m: any) => m.type === 'metadata-update' && m.key === 'contextUsage') && invalid.some((m: any) => m.type === 'metadata-update' && m.key === 'sessionStats'), JSON.stringify(invalid));
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

@@ -93,7 +93,7 @@ export function bridgeCheck(labels: PiDialectDiagnosticLabels, context: SetupDia
         detailCode: 'bridge-unowned-collision',
         summary: `The ${labels.displayName} bridge target contains unowned content and will not be overwritten.`,
         evidence: { path, requiresConfirmation: true },
-        remediation: { kind: 'manual', message: 'Back up or relocate the existing extension, then rerun `cosyncing repair`.' },
+        remediation: { kind: 'manual', message: 'Back up or relocate the existing extension, then rerun `cosyncing setup`.' },
       };
     case 'unsafe':
       return {

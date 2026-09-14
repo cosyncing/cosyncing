@@ -18,20 +18,28 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  fixtureWsUrl,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
   waitForBrokerHealth,
 } from "../helpers/isolated-broker-fixture.ts";
 import { BROKER_CONTRACT } from "../../../protocol/src/index.ts";
+import { CLINE_MINIMUM_SUPPORTED_VERSION } from "../../../adapters/cline/src/store.ts";
 
 type RunningBroker = {
   base: string;
+  wsBase: string;
   broker: Bun.Subprocess;
   creationDir: string;
   claudeConfigDir: string;
   deliveryMarker: string;
   opencodeServer: ReturnType<typeof Bun.serve>;
   opencodeCreates: Array<Record<string, unknown>>;
+  clineParentId: string;
+  clineChildId: string;
+  clineNativeParentTitle: string;
+  clineNativeChildTitle: string;
+  clineInvocationMarker: string;
 };
 
 const token = "model-session-creation-token";
@@ -44,6 +52,66 @@ async function spawnBroker(root: string): Promise<RunningBroker> {
   mkdirSync(creationDir, { recursive: true });
   mkdirSync(config, { recursive: true });
   mkdirSync(bin, { recursive: true });
+
+  const clineParentId = "1788091200000_brk01";
+  const clineChildSuffix = "agent_1788091200001_brk01";
+  const clineChildId = `${clineParentId}__${clineChildSuffix}`;
+  const clineNativeParentTitle = "Native Cline parent";
+  const clineNativeChildTitle = "Cline subagent 1788091200001_brk01";
+  const clineDataRoot = join(root, "cline-data");
+  const clineSessionDir = join(clineDataRoot, "sessions", clineParentId);
+  mkdirSync(clineSessionDir, { recursive: true });
+  writeFileSync(join(clineSessionDir, `${clineParentId}.json`), `${JSON.stringify({
+    session_id: clineParentId,
+    cwd: creationDir,
+    provider: "openai-compatible",
+    model: "fixture/model",
+    started_at: "2026-09-01T12:00:00.000Z",
+    status: "idle",
+    metadata: { title: clineNativeParentTitle },
+  })}\n`);
+  writeFileSync(join(clineSessionDir, `${clineParentId}.messages.json`), `${JSON.stringify({
+    version: 1,
+    agent: "lead",
+    sessionId: clineParentId,
+    origin: {
+      source: "cli",
+      mode: "user",
+      sessionId: clineParentId,
+      version: "3.0.60",
+    },
+    updated_at: "2026-09-01T12:00:01.000Z",
+    messages: [],
+  })}\n`);
+  writeFileSync(join(clineSessionDir, `${clineChildSuffix}.messages.json`), `${JSON.stringify({
+    version: 1,
+    agent: "subagent",
+    taskType: "subagent_task",
+    sessionId: clineChildId,
+    origin: {
+      source: "cli",
+      mode: "subagent",
+      sessionId: clineChildId,
+      parentThreadId: clineParentId,
+      subagent: clineChildSuffix,
+      version: "3.0.60",
+    },
+    updated_at: "2026-09-01T12:00:02.000Z",
+    messages: [],
+  })}\n`);
+  const clineInvocationMarker = join(root, "cline-invocations.jsonl");
+  const fakeCline = join(bin, "cline");
+  writeFileSync(fakeCline, `#!/usr/bin/env bun
+import { appendFileSync } from 'node:fs';
+const marker = ${JSON.stringify(clineInvocationMarker)};
+appendFileSync(marker, JSON.stringify(process.argv.slice(2)) + '\\n');
+if (process.argv.includes('--version')) {
+  process.stdout.write(${JSON.stringify(`${CLINE_MINIMUM_SUPPORTED_VERSION}\n`)});
+  process.exit(0);
+}
+process.exit(0);
+`);
+  chmodSync(fakeCline, 0o755);
   const fakeClaude = join(bin, "claude");
   writeFileSync(
     fakeClaude,
@@ -126,6 +194,7 @@ for await (const chunk of Bun.stdin.stream()) {
       overrides: {
         CLAUDE_CONFIG_DIR: config,
         COSYNCING_CLAUDE_BIN: fakeClaude,
+        COSYNCING_CLINE_BIN: fakeCline,
         PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
         PORT: String(port),
         HOST: "127.0.0.1",
@@ -141,6 +210,7 @@ for await (const chunk of Bun.stdin.stream()) {
     stderr: "ignore",
   });
   const base = `http://127.0.0.1:${port}`;
+  const wsBase = `ws://127.0.0.1:${port}`;
   // Readiness gets no wall-clock budget of its own: a broker booting beside
   // other suites is slow, not broken, and the fixed 10s here was really a
   // claim about how fast the host is.
@@ -148,12 +218,18 @@ for await (const chunk of Bun.stdin.stream()) {
     await waitForBrokerHealth(broker, `${base}/api/health`);
     return {
       base,
+      wsBase,
       broker,
       creationDir,
       claudeConfigDir: config,
       deliveryMarker,
       opencodeServer,
       opencodeCreates,
+      clineParentId,
+      clineChildId,
+      clineNativeParentTitle,
+      clineNativeChildTitle,
+      clineInvocationMarker,
     };
   } catch (error) {
     broker.kill();
@@ -161,6 +237,30 @@ for await (const chunk of Bun.stdin.stream()) {
     opencodeServer.stop(true);
     assert.fail(`broker starts for model session-creation test: ${(error as Error).message}`);
   }
+}
+
+function clineInvocations(path: string): string[][] {
+  try {
+    return readFileSync(path, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+async function waitForSocketFrame(
+  frames: any[],
+  predicate: (frame: any) => boolean,
+  startAt = 0,
+): Promise<any> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const frame = frames.slice(startAt).find(predicate);
+    if (frame) return frame;
+    await Bun.sleep(25);
+  }
+  assert.fail("Cline rename socket did not receive the expected frame");
 }
 
 async function request(
@@ -228,6 +328,7 @@ async function waitForDeliveryRecords(path: string): Promise<any[]> {
 
 const root = mkdtempSync(join(tmpdir(), "cosyncing-model-create-"));
 let running: RunningBroker | undefined;
+let clineRenameSocket: WebSocket | undefined;
 try {
   running = await spawnBroker(root);
   const agents = await request(running.base, "/api/agents");
@@ -248,6 +349,136 @@ try {
   assert.equal(opus.length, 1, "Claude alias has one selectable identity");
   assert.equal(opus[0].label, "Opus", "Claude alias label is version-neutral");
   assert.equal(typeof catalog.body.refreshedAt, "number");
+
+  // Cline exposes a native rename hook only for app-created sessions in its
+  // managed profile. Ordinary native parents and subagents must still use the
+  // broker's generic display-alias route—even when a floor-or-newer binary is
+  // available—without launching `cline history update`. The fixture reports
+  // CLINE_MINIMUM_SUPPORTED_VERSION rather than a literal: pinned at 3.0.60 it
+  // silently stopped proving this once the floor moved to 3.0.61, because the
+  // assertion was then satisfied by the version gate refusing the binary.
+  const clineFrames: any[] = [];
+  const clineSocketUrl = await fixtureWsUrl(
+    running.base,
+    running.wsBase,
+    { "x-cosyncing-token": token },
+    "cline",
+    running.clineParentId,
+    {
+      contractRevision: String(BROKER_CONTRACT.revision),
+      minimumBrokerRevision: "0",
+    },
+  );
+  clineRenameSocket = new WebSocket(clineSocketUrl);
+  clineRenameSocket.onmessage = (event) => {
+    try {
+      clineFrames.push(JSON.parse(String(event.data)));
+    } catch {
+      // Malformed traffic is not evidence for any assertion below.
+    }
+  };
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Cline rename socket did not open")), 5_000);
+    clineRenameSocket!.onopen = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    clineRenameSocket!.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error("Cline rename socket failed"));
+    };
+  });
+  const clineInitialFrame = await waitForSocketFrame(
+    clineFrames,
+    (frame) => frame.kind === "session" && frame.info?.id === running!.clineParentId,
+  );
+  assert.equal(
+    clineInitialFrame.info.title,
+    running.clineNativeParentTitle,
+    "open Cline parent begins with its native title",
+  );
+  const clineInvocationsBeforeRename = clineInvocations(running.clineInvocationMarker);
+  const parentAlias = "Broker alias for Cline parent";
+  const parentRename = await request(
+    running.base,
+    `/api/sessions/cline/${encodeURIComponent(running.clineParentId)}/rename`,
+    "PATCH",
+    { title: parentAlias },
+  );
+  assert.equal(parentRename.status, 200, "ordinary Cline parent rename falls back to a broker alias");
+  assert.equal(parentRename.body.title, parentAlias);
+  assert.equal(parentRename.body.session?.title, parentAlias);
+  await waitForSocketFrame(
+    clineFrames,
+    (frame) => frame.kind === "session" && frame.info?.title === parentAlias,
+  );
+
+  const childAlias = "Broker alias for Cline child";
+  const childRename = await request(
+    running.base,
+    `/api/sessions/cline/${encodeURIComponent(running.clineChildId)}/rename`,
+    "PATCH",
+    { title: childAlias },
+  );
+  assert.equal(childRename.status, 200, "Cline subagent rename falls back to a broker alias");
+  assert.equal(childRename.body.title, childAlias);
+  assert.equal(childRename.body.session?.title, childAlias);
+  const currentRosterPath = `/api/sessions?refresh=1&contractRevision=${BROKER_CONTRACT.revision}`;
+  const aliasedRoster = await request(running.base, currentRosterPath);
+  assert.equal(
+    aliasedRoster.body.sessions?.find((session: any) => session.tool === "cline"
+      && session.id === running!.clineParentId)?.title,
+    parentAlias,
+    "parent alias persists through roster rediscovery",
+  );
+  assert.equal(
+    aliasedRoster.body.sessions?.find((session: any) => session.tool === "cline"
+      && session.id === running!.clineChildId)?.title,
+    childAlias,
+    "subagent alias persists through roster rediscovery",
+  );
+  const framesBeforeClear = clineFrames.length;
+  const clearParentAlias = await request(
+    running.base,
+    `/api/sessions/cline/${encodeURIComponent(running.clineParentId)}/rename`,
+    "PATCH",
+    { title: null },
+  );
+  assert.equal(clearParentAlias.status, 200);
+  assert.equal(clearParentAlias.body.title, running.clineNativeParentTitle);
+  await waitForSocketFrame(
+    clineFrames,
+    (frame) => frame.kind === "session" && frame.info?.title === running!.clineNativeParentTitle,
+    framesBeforeClear,
+  );
+  const clearChildAlias = await request(
+    running.base,
+    `/api/sessions/cline/${encodeURIComponent(running.clineChildId)}/rename`,
+    "PATCH",
+    { title: null },
+  );
+  assert.equal(clearChildAlias.status, 200);
+  assert.equal(clearChildAlias.body.title, running.clineNativeChildTitle);
+  const restoredRoster = await request(running.base, currentRosterPath);
+  assert.equal(
+    restoredRoster.body.sessions?.find((session: any) => session.tool === "cline"
+      && session.id === running!.clineParentId)?.title,
+    running.clineNativeParentTitle,
+    "clearing the parent alias restores its native title",
+  );
+  assert.equal(
+    restoredRoster.body.sessions?.find((session: any) => session.tool === "cline"
+      && session.id === running!.clineChildId)?.title,
+    running.clineNativeChildTitle,
+    "clearing the subagent alias restores its native title",
+  );
+  assert.equal(
+    clineInvocations(running.clineInvocationMarker)
+      .slice(clineInvocationsBeforeRename.length)
+      .some((argv) => argv[0] === "history" && argv[1] === "update"),
+    false,
+    "setting and clearing broker aliases never launches a native Cline rename child",
+  );
 
   const openCodeCatalog = await request(
     running.base,
@@ -317,6 +548,14 @@ try {
     { ...selected, label: "Opus" },
     "exact immediate selection reaches the adapter",
   );
+  const metadata = JSON.parse(
+    readFileSync(join(root, "home", ".cache", "cosyncing", "session-metadata.json"), "utf8"),
+  );
+  assert.equal(
+    Object.values(metadata.sessions).some((record: any) => record?.title === "Selected Opus"),
+    true,
+    "create persists the requested title as a broker alias when native rename is unavailable",
+  );
 
   const defaultCreate = await request(
     running.base,
@@ -367,7 +606,7 @@ try {
   assert.equal(delivered.lastOutcome, "delivered");
   const deliveredRecords = await waitForDeliveryRecords(running.deliveryMarker);
   const deliveredArgv = deliveredRecords.find(
-    (record) => record.kind === "argv",
+    (record) => record.kind === "argv" && record.argv?.includes("--model"),
   )?.argv;
   const deliveredPrompt = deliveredRecords.find(
     (record) => record.kind === "stdin" && record.value?.type === "user",
@@ -551,6 +790,7 @@ try {
     "PASS model catalog and immediate/scheduled session creation contract",
   );
 } finally {
+  clineRenameSocket?.close();
   if (running) {
     running.broker.kill();
     await running.broker.exited.catch(() => undefined);

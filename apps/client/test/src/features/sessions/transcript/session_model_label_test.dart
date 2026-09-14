@@ -15,7 +15,19 @@ void main() {
     expect(sessionModelLabel(session), 'Opus 4.8');
   });
 
-  test('derives a compact known-family label from a technical id', () {
+  test('keeps a dotted version in an adapter-authored human label', () {
+    final session = _session(
+      currentModel: const SessionCurrentModel(
+        providerID: 'openai',
+        modelID: 'gpt-5.4-codex',
+        label: 'GPT-5.4',
+      ),
+    );
+
+    expect(sessionModelLabel(session), 'GPT-5.4');
+  });
+
+  test('does not derive a family label from a technical id', () {
     final session = _session(
       currentModel: const SessionCurrentModel(
         providerID: 'openai',
@@ -23,37 +35,37 @@ void main() {
       ),
     );
 
-    expect(sessionModelLabel(session), 'GPT-5.4');
+    expect(sessionModelLabel(session), isNull);
     expect(sessionModelTechnicalId(session), 'openai/gpt-5.4-codex');
   });
 
-  test('finds family versions on either side and ignores release dates', () {
-    final cases = <String, String>{
-      'claude-3-7-sonnet-20250219': 'Sonnet 3.7',
-      'claude-opus-4-8-20260701': 'Opus 4.8',
-      'gpt-5.4-codex': 'GPT-5.4',
-    };
+  test('does not invent labels from family/version-shaped ids', () {
+    final cases = <String>[
+      'claude-3-7-sonnet-20250219',
+      'claude-opus-4-8-20260701',
+      'gpt-5.4-codex',
+    ];
 
-    for (final entry in cases.entries) {
+    for (final modelId in cases) {
       expect(
         sessionModelLabel(
           _session(
             currentModel: SessionCurrentModel(
               providerID: 'provider',
-              modelID: entry.key,
+              modelID: modelId,
             ),
           ),
         ),
-        entry.value,
-        reason: entry.key,
+        isNull,
+        reason: modelId,
       );
     }
   });
 
-  test('derives and exposes a legacy model id without currentModel', () {
+  test('keeps a legacy model id technical-only without an authored label', () {
     final session = _session(model: 'claude-3-7-sonnet-20250219');
 
-    expect(sessionModelLabel(session), 'Sonnet 3.7');
+    expect(sessionModelLabel(session), isNull);
     expect(
       sessionModelTechnicalId(session),
       'claude-3-7-sonnet-20250219',

@@ -73,11 +73,31 @@ export class NativeIncarnationPublicationAuthority {
     return info.nativeId ? `${info.tool}\0${info.nativeId}` : undefined;
   }
 
-  /** Reconcile exact identities observed in one complete adapter snapshot and return only
-   * unambiguous replacement rows that may retire older Hub owners. */
-  reconcile(sessions: readonly SessionInfo[]): SessionInfo[] {
+  /**
+   * Reconcile exact identities observed in one complete adapter snapshot and return only
+   * unambiguous replacement rows that may retire older Hub owners.
+   *
+   * `withheldTools` names the backends this snapshot did NOT read -- a discovery leg abandoned at
+   * its budget, or one that threw. Their rows are dropped before grouping rather than merely
+   * excluded from retirement, because an unread adapter's evidence is unusable in both directions:
+   * what such a leg contributes is the carry of the last sweep that did read it, so a replacement
+   * that has appeared since is simply absent from it. Grouped anyway, the sole surviving row looks
+   * unambiguous, gets selected as canonical, and retires the live owner it was superseded BY --
+   * killing the newer connection and then rejecting its watcher frames as stale. An adapter that
+   * was not read contributes nothing about its own incarnations, and nothing is exactly what this
+   * must do with it.
+   *
+   * A snapshot taken while the sweep is still RUNNING must not reach here at all; that is the
+   * caller's guard, because this class cannot tell a mid-sweep partial from a settled one.
+   */
+  reconcile(
+    sessions: readonly SessionInfo[],
+    options: { withheldTools?: readonly string[] } = {},
+  ): SessionInfo[] {
+    const withheld = new Set(options.withheldTools ?? []);
     const grouped = new Map<string, Map<string, SessionInfo>>();
     for (const info of sessions) {
+      if (withheld.has(info.tool)) continue;
       const key = this.key(info);
       if (!key) continue;
       const ids = grouped.get(key) ?? new Map<string, SessionInfo>();

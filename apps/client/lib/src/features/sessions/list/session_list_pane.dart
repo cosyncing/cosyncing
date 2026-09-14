@@ -1227,6 +1227,24 @@ class _SessionRow extends StatelessWidget {
                 : resolvedParent.title,
           )
         : null;
+    // The accessible NAME of this control used to be the bare count ("1"): the
+    // sentence saying what activation does lived only in `tooltip`, which is a
+    // description, not a name. Anything driving the page by name — assistive
+    // technology included — got a control called "1".
+    //
+    // What this does NOT fix, and why it cannot from here: on web `RawChip`
+    // emits `checked: widget.selected` (`material/chip.dart:1511`, guarded by
+    // `kIsWeb`; the `selected` flag is null there), so every chip carries a
+    // CHECKED state and Flutter web resolves checkable before button. This
+    // control therefore renders `role="checkbox"`, and measurement on the
+    // installed client says a click does not reach its tap action. Escaping
+    // that means not using `ActionChip`/`RawChip` at all, which is a visual
+    // change and a separate decision — it is NOT achieved here.
+    void toggleChildren() =>
+        onToggleChildren(session, revealed: row.childrenRevealed);
+    final childrenToggleLabel = row.childrenRevealed
+        ? l10n.sessionRosterHideChildren(childCount)
+        : l10n.sessionRosterShowChildren(childCount);
     final content = Material(
       type: selected ? MaterialType.canvas : MaterialType.transparency,
       color: selected ? tokens.surface2 : null,
@@ -1313,19 +1331,38 @@ class _SessionRow extends StatelessWidget {
                               'session-children-${sessionRosterKey(session)}',
                             ),
                             visualDensity: VisualDensity.compact,
-                            tooltip: row.childrenRevealed
-                                ? l10n.sessionRosterHideChildren(childCount)
-                                : l10n.sessionRosterShowChildren(childCount),
+                            // No `tooltip:`. It carried this same sentence, and
+                            // the engine folds label and tooltip into ONE
+                            // accessible name -- measured on the installed
+                            // client as `aria-label="Show 1 linked session\nShow
+                            // 1 linked session"`, which a screen reader reads
+                            // twice. It also emitted a 1440x1000 `z-index: 2`
+                            // node whose text child kept `pointer-events: auto`
+                            // at (18, 327): a 123x17 clickable strip lying over
+                            // the NEXT roster row.
                             avatar: Icon(
                               row.childrenRevealed
                                   ? Icons.expand_less
                                   : Icons.account_tree_outlined,
                             ),
-                            label: Text('$childCount'),
-                            onPressed: () => onToggleChildren(
-                              session,
-                              revealed: row.childrenRevealed,
+                            // Name the CHIP'S OWN node rather than wrapping
+                            // the chip in one. Excluding just the count `Text`
+                            // keeps every semantic the chip supplies itself --
+                            // the focusability from `Focus`, the enabled state
+                            // from `RawChip` -- while replacing the bare "1"
+                            // with a name that says what activating it does.
+                            //
+                            // Wrapping the chip and setting
+                            // `excludeSemantics: true` on the WRAPPER is what
+                            // not to do: `visitChildrenForSemantics` drops the
+                            // whole subtree, so the control leaves the browser
+                            // tab order -- a worse defect than the one fixed.
+                            label: Semantics(
+                              label: childrenToggleLabel,
+                              excludeSemantics: true,
+                              child: Text('$childCount'),
                             ),
+                            onPressed: toggleChildren,
                           ),
                         ],
                       ),
@@ -1414,6 +1451,10 @@ String _toolLabel(AppLocalizations l10n, String tool) =>
       'opencode' => l10n.sessionRosterAgentOpenCode,
       'pi' => l10n.sessionRosterAgentPi,
       'omp' => l10n.sessionRosterAgentOmp,
+      'reasonix' => l10n.sessionRosterAgentReasonix,
+      'grok' => l10n.sessionRosterAgentGrok,
+      'cline' => l10n.sessionRosterAgentCline,
+      'kilo' => l10n.sessionRosterAgentKilo,
       // The backend id and the product name differ here, so the fallback below
       // would render the command (`agy`) where every other row renders a name.
       'agy' => l10n.sessionRosterAgentAntigravity,

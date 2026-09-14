@@ -145,6 +145,8 @@ const DEFAULT_PROJECTS_ROOT = join(DEFAULT_CONFIG_DIR, 'projects');
 const DEFAULT_BIN = process.env.COSYNCING_CLAUDE_BIN?.trim() || 'claude';
 /** Deferred rows are process-local and disappear on restart, so retain only a bounded FIFO working set. */
 export const CLAUDE_MAX_PENDING_CREATES = 256;
+/** Bound cold `agents --json` process fan-out when many local Claude wrappers exist. */
+export const CLAUDE_STORE_STATUS_CONCURRENCY = 4;
 
 /** Why a takeover was refused, in the caller's language: the terminal owner is mid-turn, so driving
  *  now would be a guaranteed two-writer collision on one transcript (issue 15a). */
@@ -1352,14 +1354,24 @@ export class ClaudeAdapter implements AgentBackend {
   }
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
+    throwIfClaudeDiscoveryAborted(options?.signal);
     const out: SessionInfo[] = [];
     const now = Date.now();
     let scannedFiles = 0;
     // Scan EVERY store: the official ~/.claude plus each wrapper's CLAUDE_CONFIG_DIR (claude-mi,
     // claude-minimax, …). Without this, ~729 wrapper sessions are invisible. (Issue D.)
-    for (const store of claudeStores()) {
+    const stores = claudeStores().filter((store) => existsSync(store.projectsRoot));
+    // Seven configured stores each pay a bounded first `agents --json` probe.
+    // Awaiting those probes one store at a time consumed the complete 20s
+    // roster budget before transcript projection began. Run independent reads
+    // in a bounded pool and retain their input order.
+    const liveByStore = await readClaudeStoreStatuses(stores, liveStatusByStore);
+    throwIfClaudeDiscoveryAborted(options?.signal);
+    for (let storeIndex = 0; storeIndex < stores.length; storeIndex += 1) {
+      const store = stores[storeIndex]!;
+      throwIfClaudeDiscoveryAborted(options?.signal);
       if (!existsSync(store.projectsRoot)) continue;
-      const live = await liveStatusByStore(store); // per-store `<bin> agents --json` overlay (no model cost)
+      const live = liveByStore[storeIndex]!; // per-store `<bin> agents --json` overlay (no model cost)
       const incarnations = nativeIncarnations(store);
       const bridged = bridgedUuids(store); // uuids Anthropic's own remote-control owns → Drive unavailable
       const syncedSet = syncedUuids(store); // uuids with a live claude/channel bridge socket
@@ -1394,7 +1406,7 @@ export class ClaudeAdapter implements AgentBackend {
           if (!ent.isFile() || !ent.name.endsWith('.jsonl')) continue;
           // Cold authority recovery yields every 128 KiB. This outer yield still bounds metadata/
           // title work across many small transcripts that resolve without a long authority scan.
-          if (++scannedFiles % 25 === 0) await new Promise((r) => setTimeout(r, 0));
+          if (++scannedFiles % 25 === 0) await yieldClaudeDiscoveryTurn(options?.signal);
           const full = join(slugDir, ent.name);
           const st = statSafe(full);
           if (!st) continue;
@@ -1478,7 +1490,7 @@ export class ClaudeAdapter implements AgentBackend {
           for (const child of subagents) {
             // Same outer yield budget as the parent sweep — a fan-out session's children count toward
             // the every-25-files yield instead of extending the sweep silently.
-            if (++scannedFiles % 25 === 0) await new Promise((r) => setTimeout(r, 0));
+            if (++scannedFiles % 25 === 0) await yieldClaudeDiscoveryTurn(options?.signal);
             // A Task may select a different model from its parent, so model identity must come from
             // the child's own transcript. Attach already performs this bounded tail/head lookup; doing
             // it here too keeps the cold roster truthful without making users open every child first.
@@ -6867,6 +6879,64 @@ export type LiveStatusProbe = { ok: true; map: LiveStatusMap } | { ok: false; ma
 const liveStatusCache = new Map<string, { at: number; map: LiveStatusMap }>();
 const liveStatusInflight = new Map<string, Promise<LiveStatusMap>>();
 
+/** Read independent store statuses concurrently, with bounded process fan-out and stable order. */
+export async function readClaudeStoreStatuses<T>(
+  stores: readonly ClaudeStore[],
+  read: (store: ClaudeStore) => Promise<T>,
+): Promise<T[]> {
+  if (stores.length === 0) return [];
+  const width = Math.min(CLAUDE_STORE_STATUS_CONCURRENCY, stores.length);
+  const results = new Array<T>(stores.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < stores.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await read(stores[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: width }, () => worker()));
+  return results;
+}
+
+function throwIfClaudeDiscoveryAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new Error('Claude session discovery aborted.');
+}
+
+async function yieldClaudeDiscoveryTurn(signal: AbortSignal | undefined): Promise<void> {
+  throwIfClaudeDiscoveryAborted(signal);
+  await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+  throwIfClaudeDiscoveryAborted(signal);
+}
+
+/**
+ * Wait for every in-flight `agents --json` refresh to land.
+ *
+ * The stale-while-revalidate path below deliberately does not await its
+ * refresh: a caller takes the previous map and the probe lands for the next
+ * read. The broker outlives its probes, so that costs nothing there.
+ *
+ * A SHORT-LIVED process does not. A suite that ends in `process.exit()` while a
+ * refresh is still running orphans the `claude agents --json` child it spawned,
+ * and the verification lane reports that — correctly — as a process outliving
+ * its owner. It was the intermittent `strays` failure on
+ * `claude-transcript-mapping`: caught in the act, the survivor was
+ * `…/claude/versions/2.1.263 agents --json` in state R, clearing on its own in
+ * 22-46ms. Not a leak, but a real unawaited child, and the fix belongs at the
+ * spawn site rather than in a grace window that would blind the check.
+ *
+ * Loops because draining is itself a suspension point: a probe started while we
+ * awaited the previous batch must also be waited for.
+ */
+export async function drainClaudeLiveStatusProbes(): Promise<void> {
+  while (liveStatusInflight.size > 0) {
+    await Promise.allSettled([...liveStatusInflight.values()]);
+  }
+}
+
 /** A failed native probe is unknown, not an authoritative empty process list. Preserve the last
  * successful snapshot briefly so a one-off CLI timeout cannot flip every active row Idle. A
  * successful empty array remains authoritative and clears stale Working immediately. */
@@ -6886,7 +6956,23 @@ async function liveStatusByStore(store: ClaudeStore): Promise<LiveStatusMap> {
   const hit = liveStatusCache.get(key);
   if (hit && Date.now() - hit.at < LIVE_STATUS_TTL_MS) return hit.map;
   const inflight = liveStatusInflight.get(key);
-  if (inflight) return inflight;
+  // Stale-while-revalidate, for the same reason the TTL exists at all. The TTL
+  // is 2500ms and a roster sweep measures ~5500ms, so a store was re-probed
+  // PART WAY THROUGH the very sweep this cache exists to serve. Instrumenting
+  // the broker's children showed `claude agents --json` spawned SIX times in
+  // one 5.5s sweep -- three around t=2.9s and three more around t=5.1s, once
+  // per store per expiry -- while the sweep is 74% non-CPU wait.
+  //
+  // A caller holding a previous map now takes it and lets the refresh land for
+  // the next read, so discovery never blocks on a subprocess spawn. The FIRST
+  // probe still waits: there is nothing else to show.
+  //
+  // The staleness is bounded and already accepted here — the TTL means callers
+  // tolerate a map up to 2.5s old, and this extends that by one refresh. Live
+  // attach state does not come from this map anyway: the roster overlays
+  // `hub.liveSnapshot()` on top of it, and per-session status is re-derived
+  // from the transcript by `claudeSessionStatus`.
+  if (inflight) return hit ? hit.map : inflight;
   const p = runAgentsJson(store)
     .then((probe) => {
       const now = Date.now();
@@ -6897,6 +6983,14 @@ async function liveStatusByStore(store: ClaudeStore): Promise<LiveStatusMap> {
       liveStatusInflight.delete(key);
     });
   liveStatusInflight.set(key, p);
+  if (hit) {
+    // Nothing awaits `p` on this path. `runAgentsJson` resolves rather than
+    // rejects even on probe failure, so this is defence and not a known throw --
+    // but a `.then` that threw would otherwise surface as an unhandled rejection
+    // in the broker process, from a cache refresh no caller asked to observe.
+    void p.catch(() => {});
+    return hit.map;
+  }
   return p;
 }
 

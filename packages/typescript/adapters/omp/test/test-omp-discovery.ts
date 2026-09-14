@@ -5,7 +5,7 @@
  * and the XDG/PI_CONFIG_DIR/PI_CODING_AGENT_DIR path rules. Fixture JSONL only — no real omp.
  */
 export {};
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -30,6 +30,7 @@ writeFileSync(sessionA, [
   JSON.stringify({ type: 'model_change', id: 'm1', parentId: null, timestamp: '2026-08-20T00:00:01.000Z', model: 'openai/gpt-5.2', resolvedModelIsFallback: false }),
   JSON.stringify({ type: 'title_change', id: 't1', parentId: 'm1', timestamp: '2026-08-20T00:01:00.000Z', title: 'First name', source: 'user' }),
   JSON.stringify({ type: 'title_change', id: 't2', parentId: 't1', timestamp: '2026-08-20T00:02:00.000Z', title: 'Renamed session', previousTitle: 'First name', source: 'user', trigger: 'manual' }),
+  JSON.stringify({ type: 'message', id: 'u1', parentId: 't2', timestamp: '2026-08-20T00:02:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'durable observe marker' }] } }),
 ].join('\n') + '\n');
 
 // Session B: pi-shaped session_info naming still reads (migrated/hand-built files).
@@ -46,6 +47,21 @@ writeFileSync(sessionC, [
   JSON.stringify({ type: 'session', version: 3, id: 'sess-c', timestamp: '2026-08-22T00:00:00.000Z', cwd: cwdA }),
 ].join('\n') + '\n');
 
+// OMP persists subagents beneath the owning transcript rather than as ordinary
+// top-level sessions: `<parent-without-.jsonl>/<AgentId>.jsonl`, recursively.
+const sessionAChildren = sessionA.slice(0, -'.jsonl'.length);
+const childSession = join(sessionAChildren, 'ReviewChild.jsonl');
+const grandchildSession = join(sessionAChildren, 'ReviewChild', 'NestedScout.jsonl');
+mkdirSync(join(sessionAChildren, 'ReviewChild'), { recursive: true });
+writeFileSync(childSession, [
+  JSON.stringify({ type: 'session', version: 3, id: 'child-native', timestamp: '2026-08-20T00:03:00.000Z', cwd: cwdA }),
+  JSON.stringify({ type: 'title_change', id: 'ct1', parentId: null, timestamp: '2026-08-20T00:03:01.000Z', title: 'Review child', source: 'auto' }),
+].join('\n') + '\n');
+writeFileSync(grandchildSession, [
+  JSON.stringify({ type: 'session', version: 3, id: 'grandchild-native', timestamp: '2026-08-20T00:04:00.000Z', cwd: cwdA }),
+].join('\n') + '\n');
+symlinkSync(childSession, join(sessionAChildren, 'LinkedChild.jsonl'));
+
 try {
   process.env.HOME = root;
   process.env.COSYNCING_OMP_SESSIONS_ROOT = sessionsRoot;
@@ -55,7 +71,7 @@ try {
   delete process.env.PI_CONFIG_DIR;
   delete process.env.XDG_DATA_HOME;
 
-  const { OmpAdapter } = await import('../src/index.ts');
+  const { OmpAdapter, resetOmpRuntimeReadinessCache } = await import('../src/index.ts');
   const adapter = new OmpAdapter({ brokerUrl: 'http://127.0.0.1:7734' });
   check('omp adapter id/displayName', adapter.id === 'omp' && adapter.displayName === 'omp', `${adapter.id}/${adapter.displayName}`);
   check('omp omits fork/clone hooks', typeof (adapter as any).forkSession === 'undefined' && typeof (adapter as any).cloneSession === 'undefined');
@@ -66,7 +82,11 @@ try {
   const a = byId.get(idOf(sessionA));
   const b = byId.get(idOf(sessionB));
   const c = byId.get(idOf(sessionC));
-  check('discovers all three fixture sessions', sessions.length === 3 && !!a && !!b && !!c, `${sessions.length}`);
+  const child = byId.get(idOf(childSession));
+  const grandchild = byId.get(idOf(grandchildSession));
+  check('discovers ordinary sessions and the recursive OMP subagent tree once',
+    sessions.length === 5 && !!a && !!b && !!c && !!child && !!grandchild,
+    `${sessions.length}`);
 
   check('cwd comes from the session header AFTER the leading title slot', a?.cwd === cwdA, String(a?.cwd));
   check('title_change is last-write-wins', a?.title === 'Renamed session', String(a?.title));
@@ -77,6 +97,40 @@ try {
   );
   check('model label comes from the split modelId', a?.model === 'gpt-5.2', String(a?.model));
   check('session rows stamp tool=omp', a?.tool === 'omp' && b?.tool === 'omp', '');
+  check('ordinary row publishes its native header id', a?.nativeId === 'sess-a', String(a?.nativeId));
+  check('subagent row links to the parent native header id',
+    child?.origin === 'subagent'
+      && child.nativeId === 'child-native'
+      && child.parentThreadId === 'sess-a',
+    JSON.stringify(child));
+  check('nested subagent row links to its immediate parent native header id',
+    grandchild?.origin === 'subagent'
+      && grandchild.nativeId === 'grandchild-native'
+      && grandchild.parentThreadId === 'child-native',
+    JSON.stringify(grandchild));
+  check('subagent row advertises observation only',
+    child?.control?.drive.supported === false
+      && child.control.terminalSync?.supported === false,
+    JSON.stringify(child?.control));
+  check('symlinked transcript is not followed or published',
+    !sessions.some((session) => session.id === idOf(join(sessionAChildren, 'LinkedChild.jsonl'))));
+
+  const childObserve = await adapter.attach(child!.id, 'observe');
+  check('subagent attach preserves roster lineage',
+    childObserve.info.origin === 'subagent'
+      && childObserve.info.nativeId === 'child-native'
+      && childObserve.info.parentThreadId === 'sess-a',
+    JSON.stringify(childObserve.info));
+  childObserve.close();
+  let childDriveRefusal = '';
+  try {
+    await adapter.attach(child!.id, 'resume');
+  } catch (error) {
+    childDriveRefusal = String(error);
+  }
+  check('subagent resume is refused before a second writer starts',
+    /owned by their parent.*only be observed/i.test(childDriveRefusal),
+    childDriveRefusal);
 
   check('session_info naming still reads', b?.title === 'Legacy pi-shaped name', String(b?.title));
   check('non-empty leading title slot names the session', c?.title === 'Durable Title', String(c?.title));
@@ -89,6 +143,51 @@ try {
     `${blockedSessions.length}/${adapter.canCreateSession()}`);
   delete process.env.PI_CODING_AGENT_DIR;
   delete process.env.PI_CODING_AGENT_SESSION_DIR;
+
+  // A readable store is deliberately not hidden when a future native protocol is present. Every
+  // writer, bridge installer, and native rename surface must nevertheless fail closed.
+  const futureBin = join(root, 'omp-future');
+  const futureSpawnMarker = join(root, 'future-runtime-spawned');
+  writeFileSync(futureBin, `#!/usr/bin/env bun
+import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--version')) { console.log('17.4.3'); process.exit(0); }
+writeFileSync(${JSON.stringify(futureSpawnMarker)}, 'spawned');
+process.exit(73);
+`);
+  chmodSync(futureBin, 0o755);
+  process.env.COSYNCING_OMP_BIN = futureBin;
+  process.env.COSYNCING_OMP_BRIDGE_AUTOINSTALL = '1';
+  resetOmpRuntimeReadinessCache();
+  const futureAdapter = new OmpAdapter({ brokerUrl: 'http://127.0.0.1:7734' });
+  const futureSessions = await futureAdapter.discoverSessions();
+  const futureParent = futureSessions.find((session) => session.id === idOf(sessionA));
+  check('future omp preserves store-backed Observe while advertising no mutable control',
+    futureSessions.length === 5
+      && futureParent?.control?.drive.supported === false
+      && futureParent.control.terminalSync?.supported === false
+      && futureAdapter.canCreateSession() === false
+      && futureAdapter.canRenameNative() === false,
+    JSON.stringify(futureParent?.control));
+  const futureObserve = await futureAdapter.attach(idOf(sessionA), 'observe');
+  const futureHistory = await futureObserve.getHistory();
+  check('future omp Observe still replays the durable transcript',
+    futureHistory.some((message) => message.type === 'user-message' && message.text === 'durable observe marker'),
+    `${futureHistory.length}`);
+  await futureObserve.close();
+  let futureResumeRefusal = '';
+  let futureRenameRefusal = '';
+  try { await futureAdapter.attach(idOf(sessionA), 'resume'); } catch (error) { futureResumeRefusal = String(error); }
+  try { await futureAdapter.renameSession(idOf(sessionA), 'must not persist'); } catch (error) { futureRenameRefusal = String(error); }
+  check('future omp refuses Resume and native rename before spawning the unverified runtime',
+    /verified only for 17\.4\.2/.test(futureResumeRefusal)
+      && /verified only for 17\.4\.2/.test(futureRenameRefusal)
+      && !existsSync(futureSpawnMarker),
+    JSON.stringify({ futureResumeRefusal, futureRenameRefusal }));
+  check('future omp discovery does not auto-install its bridge',
+    !existsSync(join(root, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts')));
+  delete process.env.COSYNCING_OMP_BIN;
+  process.env.COSYNCING_OMP_BRIDGE_AUTOINSTALL = '0';
+  resetOmpRuntimeReadinessCache();
 
   // ── Path rules (pure dialect resolution; no adapter needed) ──
   const { inspectOmpPathCollision, OMP_DIALECT } = await import('../src/dialect.ts');

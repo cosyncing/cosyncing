@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  linkSync,
   lstatSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmdirSync,
   unlinkSync,
 } from 'node:fs';
@@ -44,6 +46,7 @@ import {
 import {
   assertNoSymlinkComponents,
   atomicWriteOwnerOnly,
+  createOwnerOnlyFileExclusive,
   enforceOwnerOnlyFile,
 } from '../security/secure-files.ts';
 import {
@@ -84,8 +87,13 @@ import {
 import {
   inspectPiBridgeOwnership,
   inspectOmpBridgeOwnership,
+  inspectOmpBridgeReceiptTarget,
+  inspectOmpBridgeTargetMigration,
+  ompBridgeReceiptTargetPrecondition,
+  ompBridgeTargetMigrationPrecondition,
   piBridgeOwnershipPrecondition,
   piBridgeReplaceable,
+  sameCanonicalPath,
 } from './pi-bridge-ownership.ts';
 
 interface FileSnapshot {
@@ -100,6 +108,17 @@ interface FileSnapshot {
    * scattered across the host. Absent on journals written before this field existed: nothing to remove.
    */
   createdDirectories?: string[];
+  /**
+   * For an absent target, the only bytes rollback may remove. Null means this action never creates the
+   * target, so a concurrently appearing file must be preserved. Undefined retains legacy action behavior.
+   */
+  expectedCreatedSha256?: string | null;
+  /** Transaction-private leaf holding the exact existing file removed by apply. */
+  retiredPath?: string;
+  /** Deterministic adjacent staging leaf used if rollback must restore from its cross-filesystem backup. */
+  restoreStagePath?: string;
+  /** The path was absent at prepare and is reserved by this transaction id; partial bytes are removable. */
+  transactionPrivate?: boolean;
 }
 
 interface FileRollbackData extends Record<string, unknown> {
@@ -120,6 +139,13 @@ export interface SetupActionInputs {
   installOmpBridge: boolean;
   /** Locked-plan identity for the separate omp bridge target and receipt. */
   ompBridgePrecondition?: string;
+  /** Previous receipt-owned target when setup is transactionally moving the omp bridge. */
+  ompBridgePreviousTarget?: string;
+  /** Locked-plan identity for the old receipt, old bytes, and missing destination. */
+  ompBridgeMigrationPrecondition?: string;
+  /** Deterministic race seams used only by transactional setup acceptance fixtures. */
+  ompBridgeMigrationBeforeRetire?: () => void;
+  ompBridgeMigrationAfterRetire?: () => void;
   /** Current-schema, owner-held files whose only defect is a loose mode. */
   durableStatePermissionRepairs?: readonly DurableStatePermissionRepair[];
   agentSkillTargets: readonly AgentSkillTarget[];
@@ -166,58 +192,214 @@ function missingAncestorDirectories(target: string): string[] {
   return missing;
 }
 
+function retiredSetupPath(
+  context: Readonly<SetupTransactionContext>,
+  actionId: string,
+  index: number,
+  target: string,
+): string {
+  // Keep retirement on the source filesystem. COSYNCING_HOME and a custom agent directory may be on
+  // different mounts/Windows volumes, where rename into the transaction directory fails with EXDEV.
+  return join(dirname(target), `.${basename(target)}.${actionId}.${context.plan.id}.${index}.retired`);
+}
+
+function stagedSetupPath(
+  context: Readonly<SetupTransactionContext>,
+  actionId: string,
+  target: string,
+): string {
+  return join(dirname(target), `.${basename(target)}.${actionId}.${context.plan.id}.stage`);
+}
+
 export function snapshotSetupFiles(
   context: Readonly<SetupTransactionContext>,
   actionId: string,
   targets: readonly string[],
+  options: {
+    absentExpectations?: Readonly<Record<string, string | null>>;
+    retireTargets?: readonly string[];
+    transactionPrivateTargets?: readonly string[];
+  } = {},
 ): SetupRollbackRecord {
+  const retireTargets = new Set((options.retireTargets ?? []).map((target) => resolve(target)));
+  const transactionPrivateTargets = new Set(
+    (options.transactionPrivateTargets ?? []).map((target) => resolve(target)),
+  );
   const files = targets.map((target, index): FileSnapshot => {
     assertNoSymlinkComponents(target, false);
     if (!existsSync(target)) {
       const createdDirectories = missingAncestorDirectories(target);
-      return { target, existed: false, ...(createdDirectories.length ? { createdDirectories } : {}) };
+      const hasExpectation = !!options.absentExpectations
+        && Object.prototype.hasOwnProperty.call(options.absentExpectations, target);
+      return {
+        target,
+        existed: false,
+        ...(createdDirectories.length ? { createdDirectories } : {}),
+        ...(hasExpectation ? { expectedCreatedSha256: options.absentExpectations![target]! } : {}),
+        ...(transactionPrivateTargets.has(resolve(target)) ? { transactionPrivate: true } : {}),
+      };
     }
     const stat = lstatSync(target);
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`unsafe setup target: ${actionId}`);
     const backupPath = join(context.transactionDirectory, `${actionId}-${index}-${basename(target)}.backup`);
     atomicWriteOwnerOnly(backupPath, readFileSync(target), { mode: 0o600 });
-    return { target, existed: true, backupPath, mode: stat.mode & 0o777 };
+    return {
+      target,
+      existed: true,
+      backupPath,
+      mode: stat.mode & 0o777,
+      ...(retireTargets.has(resolve(target))
+        ? {
+            retiredPath: retiredSetupPath(context, actionId, index, target),
+            restoreStagePath: join(
+              dirname(target),
+              `.${basename(target)}.${actionId}.${context.plan.id}.${index}.restore-stage`,
+            ),
+          }
+        : {}),
+    };
   });
   return { kind: 'files-v1', data: { files } satisfies FileRollbackData };
 }
 
-export function rollbackSetupFiles(record: Readonly<SetupRollbackRecord>): void {
+function restoreRetiredSetupFile(snapshot: Readonly<Partial<FileSnapshot>>): void {
+  if (typeof snapshot.target !== 'string' || typeof snapshot.retiredPath !== 'string') {
+    throw new Error('invalid retired setup snapshot');
+  }
+  if (!existsSync(snapshot.retiredPath)) return;
+  assertNoSymlinkComponents(snapshot.retiredPath, false);
+  const retired = lstatSync(snapshot.retiredPath);
+  if (retired.isSymbolicLink() || !retired.isFile()) throw new Error('retired setup source is unsafe');
+  const retiredSha256 = sha256(readFileSync(snapshot.retiredPath));
+  if (existsSync(snapshot.target)) {
+    const current = lstatSync(snapshot.target);
+    if (current.isSymbolicLink() || !current.isFile()
+        || sha256(readFileSync(snapshot.target)) !== retiredSha256) {
+      throw new Error('refusing to overwrite a concurrent replacement while restoring retired setup source');
+    }
+  } else {
+    try {
+      // The retirement leaf is adjacent to the source, so a hard-link is an atomic no-replace restore of
+      // the exact inode. It needs no second staging file and remains recoverable if the process dies before
+      // the private retirement link is removed.
+      linkSync(snapshot.retiredPath, snapshot.target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error('retired setup source destination became occupied during restore');
+      }
+      throw error;
+    }
+    enforceOwnerOnlyFile(snapshot.target, typeof snapshot.mode === 'number' ? snapshot.mode : 0o600);
+  }
+  unlinkSync(snapshot.retiredPath);
+}
+
+function removeTransactionPrivateFile(target: string): void {
+  if (!existsSync(target)) return;
+  assertNoSymlinkComponents(target, false);
+  const current = lstatSync(target);
+  if (current.isSymbolicLink() || !current.isFile()) {
+    throw new Error('transaction-private setup target is unsafe');
+  }
+  unlinkSync(target);
+}
+
+function retireSetupFile(
+  context: Readonly<SetupTransactionContext>,
+  actionId: string,
+  target: string,
+  expectedSha256: string,
+  afterRetire?: () => void,
+): void {
+  const retiredPath = retiredSetupPath(context, actionId, 0, target);
+  if (existsSync(retiredPath)) throw new Error('omp bridge retirement target is occupied');
+  assertNoSymlinkComponents(target, false);
+  const source = lstatSync(target);
+  if (source.isSymbolicLink() || !source.isFile()) throw new Error('omp bridge migration source is unsafe');
+  renameSync(target, retiredPath);
+  afterRetire?.();
+  const snapshot = { target, retiredPath, mode: source.mode & 0o777 } satisfies Partial<FileSnapshot>;
+  const retired = lstatSync(retiredPath);
+  if (retired.isSymbolicLink() || !retired.isFile()
+      || sha256(readFileSync(retiredPath)) !== expectedSha256) {
+    restoreRetiredSetupFile(snapshot);
+    throw new Error('omp bridge migration source changed before retirement');
+  }
+}
+
+export function rollbackSetupFiles(
+  record: Readonly<SetupRollbackRecord>,
+  options: { restoreAfterOpen?: () => void } = {},
+): void {
   if (record.kind !== 'files-v1' || !Array.isArray(record.data.files)) {
     throw new Error('invalid setup rollback record');
   }
   const files = record.data.files as unknown[];
+  let firstFailure: unknown;
   for (const candidate of [...files].reverse()) {
-    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      throw new Error('invalid setup rollback snapshot');
-    }
-    const snapshot = candidate as Partial<FileSnapshot>;
-    if (typeof snapshot.target !== 'string' || typeof snapshot.existed !== 'boolean') {
-      throw new Error('invalid setup rollback snapshot');
-    }
-    assertNoSymlinkComponents(snapshot.target, false);
-    if (snapshot.existed) {
-      if (typeof snapshot.backupPath !== 'string' || !existsSync(snapshot.backupPath)) {
-        throw new Error('setup rollback backup is missing');
+    try {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        throw new Error('invalid setup rollback snapshot');
       }
-      const backup = lstatSync(snapshot.backupPath);
-      if (backup.isSymbolicLink() || !backup.isFile()) throw new Error('setup rollback backup is unsafe');
-      atomicWriteOwnerOnly(snapshot.target, readFileSync(snapshot.backupPath), {
-        mode: typeof snapshot.mode === 'number' ? snapshot.mode : 0o600,
-      });
-      continue;
+      const snapshot = candidate as Partial<FileSnapshot>;
+      if (typeof snapshot.target !== 'string' || typeof snapshot.existed !== 'boolean') {
+        throw new Error('invalid setup rollback snapshot');
+      }
+      assertNoSymlinkComponents(snapshot.target, false);
+      if (snapshot.existed) {
+        if (typeof snapshot.backupPath !== 'string' || !existsSync(snapshot.backupPath)) {
+          throw new Error('setup rollback backup is missing');
+        }
+        const backup = lstatSync(snapshot.backupPath);
+        if (backup.isSymbolicLink() || !backup.isFile()) throw new Error('setup rollback backup is unsafe');
+        if (typeof snapshot.retiredPath === 'string') {
+          if (typeof snapshot.restoreStagePath === 'string') {
+            removeTransactionPrivateFile(snapshot.restoreStagePath);
+          }
+          if (existsSync(snapshot.retiredPath)) {
+            restoreRetiredSetupFile(snapshot);
+          } else if (!existsSync(snapshot.target)) {
+            if (createOwnerOnlyFileExclusive(
+              snapshot.target,
+              readFileSync(snapshot.backupPath),
+              typeof snapshot.mode === 'number' ? snapshot.mode : 0o600,
+              typeof snapshot.restoreStagePath === 'string'
+                ? { stagePath: snapshot.restoreStagePath, afterOpen: options.restoreAfterOpen }
+                : {},
+            ) !== 'created') {
+              throw new Error('setup rollback target became occupied during restore');
+            }
+          }
+          // With no retirement leaf, apply either never moved this source or already restored the exact
+          // file whose changed identity made its precondition fail. Never overwrite that present path.
+          continue;
+        }
+        atomicWriteOwnerOnly(snapshot.target, readFileSync(snapshot.backupPath), {
+          mode: typeof snapshot.mode === 'number' ? snapshot.mode : 0o600,
+        });
+        continue;
+      }
+      if (existsSync(snapshot.target)) {
+        const current = lstatSync(snapshot.target);
+        if (current.isSymbolicLink() || !current.isFile()) throw new Error('refusing unsafe rollback removal');
+        if (snapshot.transactionPrivate === true) {
+          unlinkSync(snapshot.target);
+          removeCreatedEmptyDirectories(snapshot.createdDirectories);
+          continue;
+        }
+        if (snapshot.expectedCreatedSha256 === null) continue;
+        if (typeof snapshot.expectedCreatedSha256 === 'string'
+            && sha256(readFileSync(snapshot.target)) !== snapshot.expectedCreatedSha256) {
+          throw new Error('refusing rollback removal of concurrently replaced file');
+        }
+        unlinkSync(snapshot.target);
+      }
+      removeCreatedEmptyDirectories(snapshot.createdDirectories);
+    } catch (error) {
+      firstFailure ??= error;
     }
-    if (existsSync(snapshot.target)) {
-      const current = lstatSync(snapshot.target);
-      if (current.isSymbolicLink() || !current.isFile()) throw new Error('refusing unsafe rollback removal');
-      unlinkSync(snapshot.target);
-    }
-    removeCreatedEmptyDirectories(snapshot.createdDirectories);
   }
+  if (firstFailure) throw firstFailure;
 }
 
 /**
@@ -515,6 +697,111 @@ export function createPiBridgeSetupAction(inputs: SetupActionInputs): SetupTrans
 }
 
 export function createOmpBridgeSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
+  if (inputs.ompBridgePreviousTarget && inputs.ompBridgeMigrationPrecondition) {
+    const target = inspectOmpBridgeAsset(inputs.ompAgentDir).path;
+    const previousTarget = resolve(inputs.ompBridgePreviousTarget);
+    const assertMigrationPrecondition = (expected: string) => {
+      const decision = inspectOmpBridgeTargetMigration(inspectInstallState(inputs.home), inputs.ompAgentDir);
+      if (decision.status !== 'eligible'
+          || !sameCanonicalPath(decision.previousTarget ?? '', previousTarget)
+          || ompBridgeTargetMigrationPrecondition(decision) !== expected) {
+        throw new Error('omp bridge target migration changed after planning');
+      }
+      return decision;
+    };
+    let retiredSourcePath: string | undefined;
+    let retiredSourceSha256: string | undefined;
+    return {
+      id: 'omp-bridge.install',
+      prepare: (context) => {
+        const stagePath = stagedSetupPath(context, 'omp-bridge.install', target);
+        return snapshotSetupFiles(context, 'omp-bridge.install', [previousTarget, target, stagePath], {
+          absentExpectations: {
+            [previousTarget]: null,
+            [target]: OMP_BRIDGE_EMBEDDED_SHA256,
+            [stagePath]: OMP_BRIDGE_EMBEDDED_SHA256,
+          },
+          retireTargets: [previousTarget],
+          transactionPrivateTargets: [stagePath],
+        });
+      },
+      apply: (context) => {
+        const before = assertMigrationPrecondition(inputs.ompBridgeMigrationPrecondition!);
+        const receiptBefore = inspectOmpBridgeReceiptTarget(inspectInstallState(inputs.home));
+        if ((receiptBefore.status !== 'owned' && receiptBefore.status !== 'missing')
+            || !receiptBefore.target
+            || !sameCanonicalPath(receiptBefore.target, previousTarget)) {
+          throw new Error('omp bridge receipt target changed after planning');
+        }
+        const receiptPrecondition = ompBridgeReceiptTargetPrecondition(receiptBefore);
+        assertMigrationPrecondition(inputs.ompBridgeMigrationPrecondition!);
+        if (createOwnerOnlyFileExclusive(target, OMP_BRIDGE_EMBEDDED_SOURCE, 0o600, {
+          stagePath: stagedSetupPath(context, 'omp-bridge.install', target),
+        }) !== 'created') {
+          throw new Error('omp bridge migration destination became occupied');
+        }
+        if (inspectOmpBridgeAsset(inputs.ompAgentDir).status !== 'owned') {
+          throw new Error('omp bridge migration destination verification failed');
+        }
+        const receiptAfterWrite = inspectOmpBridgeReceiptTarget(inspectInstallState(inputs.home));
+        if ((receiptAfterWrite.status !== 'owned' && receiptAfterWrite.status !== 'missing')
+            || !receiptAfterWrite.target
+            || !sameCanonicalPath(receiptAfterWrite.target, previousTarget)
+            || ompBridgeReceiptTargetPrecondition(receiptAfterWrite) !== receiptPrecondition) {
+          throw new Error('omp bridge receipt target changed during migration');
+        }
+        if (receiptAfterWrite.status === 'owned') {
+          inputs.ompBridgeMigrationBeforeRetire?.();
+          retireSetupFile(
+            context,
+            'omp-bridge.install',
+            previousTarget,
+            receiptAfterWrite.actualSha256!,
+            inputs.ompBridgeMigrationAfterRetire,
+          );
+          // The migrated-FROM directory is now empty and nothing else removes it:
+          // `removeCreatedEmptyDirectories` runs only on rollback and
+          // `removeEmptyOwnedDirectory` only on uninstall, so a committed
+          // migration left `<oldAgentDir>/extensions/cosyncing-bridge/` behind
+          // forever. Guarded twice over: the helper removes only a real,
+          // non-symlink, EMPTY directory, and the basename check keeps that from
+          // ever pointing at a directory this installer does not own (the target
+          // shape is asserted at pi-bridge-ownership.ts:108-110).
+          const retiredBridgeDirectory = dirname(previousTarget);
+          if (basename(retiredBridgeDirectory) === 'cosyncing-bridge') {
+            removeCreatedEmptyDirectories([retiredBridgeDirectory]);
+          }
+          retiredSourcePath = retiredSetupPath(context, 'omp-bridge.install', 0, previousTarget);
+          retiredSourceSha256 = receiptAfterWrite.actualSha256;
+        }
+        return {
+          resources: [{
+            id: 'omp-bridge',
+            kind: 'agent-integration',
+            target,
+            ownership: { proof: 'package-hash', installedSha256: OMP_BRIDGE_EMBEDDED_SHA256 },
+          } satisfies InstalledResourceRecord],
+        };
+      },
+      verify: () => {
+        if (existsSync(previousTarget) || inspectOmpBridgeAsset(inputs.ompAgentDir).status !== 'owned') return false;
+        if (retiredSourcePath) {
+          assertNoSymlinkComponents(retiredSourcePath, false);
+          const retired = lstatSync(retiredSourcePath);
+          if (retired.isSymbolicLink() || !retired.isFile()
+              || !retiredSourceSha256
+              || sha256(readFileSync(retiredSourcePath)) !== retiredSourceSha256) {
+            throw new Error('omp bridge retired source changed before transaction verification');
+          }
+          unlinkSync(retiredSourcePath);
+          retiredSourcePath = undefined;
+          retiredSourceSha256 = undefined;
+        }
+        return true;
+      },
+      rollback: (_context, record) => { rollbackSetupFiles(record); },
+    };
+  }
   return createBridgeSetupAction({
     actionId: 'omp-bridge.install',
     displayName: 'omp',
@@ -802,6 +1089,8 @@ export function setupActionContentHash(inputs: SetupActionInputs): string {
     piBridgePrecondition: inputs.piBridgePrecondition,
     installOmpBridge: inputs.installOmpBridge,
     ompBridgePrecondition: inputs.ompBridgePrecondition,
+    ompBridgePreviousTarget: inputs.ompBridgePreviousTarget,
+    ompBridgeMigrationPrecondition: inputs.ompBridgeMigrationPrecondition,
     durableStatePermissionRepairs: inputs.durableStatePermissionRepairs,
     agentSkillTargets: inputs.agentSkillTargets,
     installAgentSkill: inputs.installAgentSkill,

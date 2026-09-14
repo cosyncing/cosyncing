@@ -103,6 +103,107 @@ check(
   JSON.stringify(incarnationDeltas.map((delta) => ({ id: delta.sessionId, removed: delta.removed }))),
 );
 
+// ── removal authority is per-adapter ────────────────────────────────────────
+//
+// Broker contract 23. `reconcile` reads its argument as the whole truth and
+// removes everything absent from it. That is right when the sweep behind it read
+// every adapter, and a fabrication when one leg was abandoned at its budget or
+// threw: what such a leg returns is the carry of the last sweep that DID read
+// the adapter, so the rows it never reached are not deleted rows, and a removal
+// delta says they are. The sweep names those adapters and the
+// journal withholds removals for exactly them -- not for the rest, or a single
+// slow adapter would freeze deletion for the whole machine.
+{
+  const authority = new RosterRevisionStore(16);
+  const row = (tool: string, id: string): SessionInfo => ({
+    ...session('idle'), tool, id, title: `${tool} ${id}`,
+  });
+  authority.reconcile([row('cline', 'c1'), row('codex', 'x1'), row('omp', 'o1')], 'host-a');
+  const before = authority.revision;
+
+  // Cline's leg was lost; codex and omp answered. All three rows are absent from
+  // this sweep, but only two of those absences are information.
+  authority.reconcile([row('omp', 'o1')], 'host-a', { withheldTools: ['cline'] });
+  const deltas = authority.eventsAfter(before).deltas;
+  check(
+    'a lost adapter leg cannot remove its rows',
+    !deltas.some((delta) => delta.sessionId === 'c1'),
+    JSON.stringify(deltas.map((delta) => ({ id: delta.sessionId, removed: delta.removed }))),
+  );
+  check(
+    'and an adapter that DID answer still removes what it no longer reports',
+    deltas.some((delta) => delta.sessionId === 'x1' && delta.removed === true),
+    JSON.stringify(deltas.map((delta) => delta.sessionId)),
+  );
+
+  // The withheld row is held, not forgotten: the next sweep that can speak for
+  // cline removes it normally, so this defers a removal rather than blocking it.
+  const beforeRecovery = authority.revision;
+  authority.reconcile([row('omp', 'o1')], 'host-a');
+  check(
+    'a recovered adapter removes the row that was held for it',
+    authority.eventsAfter(beforeRecovery).deltas.some(
+      (delta) => delta.sessionId === 'c1' && delta.removed === true,
+    ),
+    JSON.stringify(authority.eventsAfter(beforeRecovery).deltas.map((delta) => delta.sessionId)),
+  );
+}
+
+// ── a carry cannot retire what appeared after it ────────────────────────────
+//
+// The case the row count hid. Cline's leg is abandoned at its budget, so the
+// registry hands the sweep its CARRY -- the rows of the last sweep that actually
+// read Cline. Non-empty, so the leg looks healthy in the breakdown, and by row
+// count alone it would be granted removal authority. But the carry is a snapshot
+// of an earlier moment: the session opened since then is in the journal (a live
+// owner announced it) and not in the carry. Reconciling against that absence
+// tells every connected client a session they are looking at was deleted.
+{
+  const carry = new RosterRevisionStore(16);
+  const row = (tool: string, id: string): SessionInfo => ({
+    ...session('idle'), tool, id, title: `${tool} ${id}`,
+  });
+  // The last sweep that read cline. This is what its carry will restate.
+  carry.reconcile([row('cline', 'carried'), row('omp', 'o1')], 'host-a');
+  // ...and then a new cline session opens. No sweep has read cline since, so the
+  // journal knows about it and the carry never can.
+  carry.observe(row('cline', 'opened-since'), 'host-a');
+  const before = carry.revision;
+
+  // The sweep settles. Cline was abandoned; what it contributed is the carry.
+  carry.reconcile(
+    [row('cline', 'carried'), row('omp', 'o1')],
+    'host-a',
+    { withheldTools: ['cline'] },
+  );
+  const deltas = carry.eventsAfter(before).deltas;
+  check(
+    'a non-empty carry cannot retire the session that opened after it',
+    !deltas.some((delta) => delta.sessionId === 'opened-since'),
+    JSON.stringify(deltas.map((delta) => ({ id: delta.sessionId, removed: delta.removed }))),
+  );
+}
+
+// Anti-drift: the journal guard above is only worth anything if the runtime
+// actually hands it the sweep's verdict. This is a source assertion because
+// `discoverLocalRoster` is a closure inside the runtime with no test seam, and
+// the alternative -- trusting that the wiring stays -- is what let the withheld
+// list be computed and then dropped in the first place.
+{
+  const runtimeSource = await Bun.file(
+    join(import.meta.dir, '..', '..', 'src', 'runtime', 'runtime.ts'),
+  ).text();
+  const wired = /withheldTools\s*=\s*withheldBackends\(\s*swept\.coverage\s*\)/.test(runtimeSource)
+    && (runtimeSource.match(/reconcile\(decorated, MACHINE, \{ withheldTools \}\)/g) ?? []).length >= 2
+    // ...and that the sweep's verdict is the row-count-free one. A filter that
+    // reads `leg.rows` here is the defect this block exists for.
+    && /const withheld = unconfirmedBackends\(legs\);/.test(runtimeSource);
+  check(
+    'runtime.ts passes the sweep\'s withheld adapters into every reconcile it drives',
+    wired,
+  );
+}
+
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {

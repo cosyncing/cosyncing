@@ -47,6 +47,7 @@ const OMP_INTEGRATION: PeerRoutePolicy = { kind: 'integration', integration: 'om
 export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/agents', methods: ['GET'], policy: OBSERVE },
   { route: '/api/agents/{id}/models', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/agents/{id}/modes', methods: ['GET'], policy: OBSERVE },
   { route: '/api/agents/codex/sync', methods: ['GET'], policy: OBSERVE },
   { route: '/api/agents/codex/sync', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/agent-runtime-updates', methods: ['GET'], policy: OBSERVE },

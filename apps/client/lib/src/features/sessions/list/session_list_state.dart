@@ -167,6 +167,7 @@ class SessionListState {
     this.revision = 0,
     this.cachedRoster,
     this.source,
+    this.rosterComplete = true,
   });
 
   /// The current loading status.
@@ -195,6 +196,17 @@ class SessionListState {
   /// Newest authoritative broker roster revision applied by this client.
   final int revision;
 
+  /// Whether [sessions] is the whole roster the broker can see.
+  ///
+  /// False while the broker is still sweeping, or after a sweep that finished
+  /// without reading every adapter. A row's ABSENCE is then not evidence it is
+  /// gone, which is why an incomplete roster never removes a known session —
+  /// see the load path in the controller.
+  ///
+  /// True for a broker older than contract revision 23, which never answered
+  /// ahead of a sweep and so never sent a roster that was not the whole one.
+  final bool rosterComplete;
+
   /// Last-known identity rows for the active profile, when they are currently
   /// standing in for an authoritative roster.
   ///
@@ -209,7 +221,12 @@ class SessionListState {
       status == SessionListStatus.refreshing;
 
   /// Whether there are no sessions to display.
-  bool get isEmpty => sessions.isEmpty && !isLoading;
+  ///
+  /// An INCOMPLETE roster is never empty in this sense. "No sessions" is a
+  /// claim the broker has not made: it said it had not finished looking, and
+  /// showing an empty-state to someone whose session is still being discovered
+  /// tells them the opposite of the truth.
+  bool get isEmpty => sessions.isEmpty && !isLoading && rosterComplete;
 
   /// Returns a copy with optional overrides.
   SessionListState copyWith({
@@ -221,6 +238,7 @@ class SessionListState {
     CachedRosterPresentation? cachedRoster,
     bool clearCachedRoster = false,
     RosterSource? source,
+    bool? rosterComplete,
   }) {
     return SessionListState(
       status: status ?? this.status,
@@ -232,6 +250,7 @@ class SessionListState {
           ? null
           : cachedRoster ?? this.cachedRoster,
       source: source ?? this.source,
+      rosterComplete: rosterComplete ?? this.rosterComplete,
     );
   }
 
@@ -239,6 +258,6 @@ class SessionListState {
   String toString() =>
       'SessionListState(status: $status, sessions: ${sessions.length}, '
       'error: $error, machine: $machine, revision: $revision, '
-      'source: $source, '
+      'source: $source, complete: $rosterComplete, '
       'cachedRows: ${cachedRoster?.snapshot.rows.length ?? 0})';
 }

@@ -41,6 +41,7 @@ void main() {
       required Map<String, dynamic> control,
       Map<String, dynamic>? currentModel,
       String? currentAgent,
+      String? currentMode,
       String? lineageId,
       String status = 'idle',
     }) {
@@ -54,6 +55,7 @@ void main() {
           if (lineageId != null) 'lineageId': lineageId,
           if (currentModel != null) 'currentModel': currentModel,
           if (currentAgent != null) 'currentAgent': currentAgent,
+          if (currentMode != null) 'currentMode': currentMode,
           'control': control,
         }),
       );
@@ -111,6 +113,43 @@ void main() {
         defaultReasoningEffort: 'medium',
       ),
     ];
+
+    testWidgets('permission selector semantics name the propagated mode', (
+      tester,
+    ) async {
+      final connection = ScriptedSessionDetailConnection(
+        events: [
+          sessionEvent(
+            control: const {
+              'drive': {'state': 'driving', 'supported': true},
+              'terminalSync': {
+                'supported': false,
+                'syncAvailable': false,
+                'active': false,
+              },
+            },
+            currentMode: 'default',
+          ),
+          const OptionsWireEvent(
+            models: [],
+            agents: [],
+            modes: [ModeOption(value: 'default', label: 'Default')],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byTooltip(
+          'Permission mode: Default. Applies to prompts and slash commands '
+          'sent from this composer.',
+        ),
+        findsOneWidget,
+      );
+    });
 
     const drivingControl = {
       'drive': {'state': 'driving', 'supported': true},
@@ -178,6 +217,109 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets('composer keeps the model label when the catalog is empty', (
+      tester,
+    ) async {
+      // Regression: the chip was derived solely from the per-session model
+      // catalog, which is empty for a moment after a reload, so the composer
+      // forgot the model it had just been showing and fell back to the generic
+      // placeholder. Measured in the browser: the chip read
+      // "Qwen3 4B (local chat comp…" before a reload and "Model" after, while
+      // the status page and the context pair both still knew the model. No
+      // OptionsWireEvent here, so the catalog stays empty on purpose.
+      final connection = ScriptedSessionDetailConnection(
+        events: [
+          sessionEvent(
+            control: drivingControl,
+            currentModel: const {
+              'providerID': 'ollama-chat-local',
+              'modelID': 'qwen3:4b',
+              'label': 'Qwen3 4B (local chat completions)',
+            },
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Qwen3 4B (local chat completions)'),
+        findsOneWidget,
+        reason: 'the session reports its own label; the bar must use it',
+      );
+    });
+
+    testWidgets(
+      'composer keeps the permission mode when the catalog is empty',
+      (
+        tester,
+      ) async {
+        // The same regression as the model chip above, one control to its
+        // right, and it outlived that fix because the mode control was gated
+        // on the catalog being non-empty -- so its own label fallback could
+        // never run. Browser-measured on Cline at v56: the composer showed
+        // `Ask permission` in one run and no mode control at all in the next,
+        // on identical bytes, decided by whether an options frame happened to
+        // arrive after reload. A session that knows its mode must say so;
+        // only PICKING needs a catalog. No OptionsWireEvent here, so `modes`
+        // stays empty on purpose.
+        final connection = ScriptedSessionDetailConnection(
+          events: [
+            sessionEvent(control: drivingControl, currentMode: 'ask'),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('session-detail-permission-selector')),
+          findsOneWidget,
+          reason: 'the session knows its mode, so the control stays visible',
+        );
+        expect(
+          find.text('ask'),
+          findsOneWidget,
+          reason: 'the native mode id is true; the generic word is not',
+        );
+        // The other half of the change, which the two assertions above do NOT
+        // lock: the control is visible but must not be PICKABLE, because there
+        // is no catalog to pick from. Reverting `onPressed` to `enabled` alone
+        // leaves both assertions above green while a tap opens a sheet whose
+        // option loop yields nothing -- a two-thirds-height empty sheet you can
+        // only dismiss by dragging. `interactive` is `onPressed != null`, and
+        // the chevron is drawn only when interactive ("no chevron without a
+        // menu behind it"), so its absence is the visible proof of the gate.
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('session-detail-permission-selector')),
+            matching: find.byIcon(Icons.keyboard_arrow_down),
+          ),
+          findsNothing,
+          reason: 'an empty catalog must not promise a menu',
+        );
+        // And it must not explain that gate with something untrue. This
+        // session is accepting prompts; only the catalog is missing. The
+        // tooltip read the disabled state as read-only and said so, and
+        // because B5/B6 make the control VISIBLE in exactly this case, those
+        // fixes are what newly exposed the false sentence.
+        final tooltip = tester.widget<Tooltip>(
+          find.descendant(
+            of: find.byKey(const Key('session-detail-permission-selector')),
+            matching: find.byType(Tooltip),
+          ),
+        );
+        expect(
+          tooltip.message,
+          isNot(contains('Read-only for this session.')),
+          reason: 'the session is writable; only the catalog is empty',
+        );
+      },
+    );
 
     testWidgets(
       'compatibility notice is localized and selectable',
@@ -1569,45 +1711,48 @@ void main() {
       expect(tooltip.message, contains('High'));
     });
 
-    testWidgets('an unadvertised model shows a short name, never the raw id', (
-      tester,
-    ) async {
-      // The reported bug: the session runs a model the broker never advertised,
-      // so there is no ModelOption to read a label from. The bar used to fall
-      // back to the raw id (`claude-opus-4-8`).
-      final connection = ScriptedSessionDetailConnection(
-        events: [
-          sessionEvent(
-            control: drivingControl,
-            currentModel: const {
-              'providerID': 'anthropic',
-              'modelID': 'claude-opus-4-8',
-              'reasoningEffort': 'high',
-            },
+    testWidgets(
+      'an unadvertised model shows the generic label, never the raw id',
+      (
+        tester,
+      ) async {
+        // The reported bug: the session runs a model the broker never
+        // advertised, so there is no ModelOption to read a label from. The bar
+        // used to fall back to the raw id (`claude-opus-4-8`).
+        final connection = ScriptedSessionDetailConnection(
+          events: [
+            sessionEvent(
+              control: drivingControl,
+              currentModel: const {
+                'providerID': 'anthropic',
+                'modelID': 'claude-opus-4-8',
+                'reasoningEffort': 'high',
+              },
+            ),
+            const OptionsWireEvent(models: models, agents: []),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Model'), findsOneWidget);
+        expect(find.textContaining('claude-opus-4-8'), findsNothing);
+        // No effort suffix leaks in, in either the labelled or raw spelling.
+        expect(find.textContaining('high'), findsNothing);
+        expect(find.textContaining('High'), findsNothing);
+
+        final tooltip = tester.widget<Tooltip>(
+          find.descendant(
+            of: find.byKey(const Key('session-detail-model-selector')),
+            matching: find.byType(Tooltip),
           ),
-          const OptionsWireEvent(models: models, agents: []),
-        ],
-      );
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: const [], connection: connection),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Opus'), findsOneWidget);
-      expect(find.textContaining('claude-opus-4-8'), findsNothing);
-      // No effort suffix leaks in, in either the labelled or raw spelling.
-      expect(find.textContaining('high'), findsNothing);
-      expect(find.textContaining('High'), findsNothing);
-
-      final tooltip = tester.widget<Tooltip>(
-        find.descendant(
-          of: find.byKey(const Key('session-detail-model-selector')),
-          matching: find.byType(Tooltip),
-        ),
-      );
-      expect(tooltip.message, contains('claude-opus-4-8'));
-      expect(tooltip.message, contains('high'));
-    });
+        );
+        expect(tooltip.message, contains('claude-opus-4-8'));
+        expect(tooltip.message, contains('high'));
+      },
+    );
 
     // The broker's advertised label is untrusted input: it is plain JSON, and
     // real brokers ship labels that already embed the id. Pumps one advertised
@@ -1681,7 +1826,7 @@ void main() {
         modelID: 'opus',
       );
 
-      expect(find.text('Opus'), findsOneWidget);
+      expect(find.text('Model'), findsOneWidget);
       final modelButton = find.byKey(
         const Key('session-detail-model-selector'),
       );
@@ -1707,7 +1852,7 @@ void main() {
         label: 'claude-opus-4-8',
       );
 
-      expect(find.text('Opus'), findsOneWidget);
+      expect(find.text('Model'), findsOneWidget);
       expect(find.textContaining('claude-opus-4-8'), findsNothing);
       expect(tooltip.message, contains('claude-opus-4-8'));
       expect(tooltip.message, contains('High'));

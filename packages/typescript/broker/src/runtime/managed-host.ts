@@ -311,6 +311,8 @@ export interface ManagedHostEffects {
    * every ambiguous result (two listeners on one port) is 'unknown'.
    */
   listener(port: number): ManagedHostLocation;
+  /** Non-blocking listener proof for request-serving paths. */
+  listenerAsync?(port: number): Promise<ManagedHostLocation>;
   liveProcess(pid: number, options?: { fresh?: boolean }): LiveProcess;
   spawn(launch: ManagedHostLaunch): ManagedHostChild;
   /** Send a signal. Must be a no-op for a pid that no longer exists. */
@@ -334,6 +336,7 @@ export interface ManagedHostEffects {
    * OPTIONAL, and absent means 'unknown'. Only a 'yes' is ever acted on, so an
    * effects set that omits this — every existing fixture, and every platform
    * whose provider declines to answer — keeps exactly the behaviour it had.
+   * Unknown never authorizes adoption.
    */
   descendsFrom?(pid: number, ancestorPid: number, options?: { fresh?: boolean }): 'yes' | 'no' | 'unknown';
 }
@@ -550,7 +553,17 @@ export async function startManagedHost(
   // address either way: `stopManagedHost` decides from the record's own pid and
   // re-proves that identity before every signal, so a foreign host is untouched
   // whether or not it happens to sit where our record used to.
-  const predecessor = store.read(plan.agent);
+  let predecessor = store.read(plan.agent);
+  // A durable record can temporarily name a launcher wrapper while its native
+  // descendant owns the socket. Reconcile that crash window before the generic
+  // predecessor path mistakes the wrapper and listener for competing hosts.
+  if (predecessor && addressServing && atAddress.state === 'identified' && atAddress.pid !== predecessor.pid) {
+    const adopted = provenListenerDescendant(predecessor, atAddress.pid, effects);
+    if (adopted) {
+      store.write(adopted);
+      predecessor = adopted;
+    }
+  }
   let stranded: ManagedHostVerdict | undefined;
   if (predecessor && reapablePredecessor(predecessor, atAddress, addressServing)) {
     const settled = await stopRecordedManagedHost(predecessor, effects, store, plan.stopGraceMs);
@@ -689,28 +702,93 @@ export async function startManagedHost(
     store.write(record);
     return true;
   };
+  /**
+   * The serving descendant, once one has been proven and written into the
+   * record. Held because ancestry is only provable WHILE the launcher is alive:
+   * the walk runs server -> parent -> ... -> child, so a launcher that exits
+   * reparents its server and erases the only evidence that it is ours. A
+   * launcher that daemonises — spawn and exit, rather than `spawnSync` and
+   * block — gives no second chance, so the proof has to be taken during the
+   * readiness wait or not at all.
+   */
+  let adoptedServingPid: number | undefined;
+  const tryAdoptServing = async (): Promise<void> => {
+    if (adoptedServingPid !== undefined || childGone()) return;
+    const located = await plan.locate().catch(() => HOST_UNKNOWN);
+    if (located.state !== 'identified' || located.pid === child.pid) return;
+    if (!provenDescendantTwice(effects, located.pid, child.pid)) return;
+    if (adoptServingProcess(located.pid)) adoptedServingPid = located.pid;
+  };
   /** Give up the child and the record together, but only once it is proven gone. */
   const abandonChild = async (detailCode: string): Promise<ManagedHostStartOutcome> => {
+    // The child may be a LAUNCHER holding the address through a server it
+    // started, and that is not a Windows-only shape: `cline/bin/cline` is a
+    // Node resolver that `spawnSync`s the platform binary, so the launcher
+    // stays alive while the process actually bound to the port is its child,
+    // and SIGTERM to the launcher does not touch it. Without the adoption
+    // below, a start that merely ran out of readiness budget left that server
+    // holding the address while `store.clear` dropped the one record that could
+    // ever reap it — measured here as a permanently occupied 25464 and a cline
+    // lane stuck at `canCreateSession: false`, with `doctor` reporting nothing
+    // and `repair` finding no action, because an orphan is not a receipt-owned
+    // resource.
+    //
+    // Descent is proven and the record repointed BEFORE anything is signalled:
+    // the walk runs server -> parent -> ... -> child, so killing the child first
+    // reparents the server and destroys the only proof that it is ours.
+    // Adoption must SUCCEED to be relied on. `adoptServingProcess` returns false
+    // when the serving identity cannot be read, and an unreadable process is not
+    // proof of anything — signalling on the strength of a walk whose subject we
+    // could not then identify is exactly the stranger case this module forbids.
+    await tryAdoptServing();
+    const servingPid = adoptedServingPid;
+    // `terminate`'s `gone()` is an IDENTITY proof, not a liveness test: it runs
+    // again between SIGTERM and SIGKILL, and a bare "is something at this pid"
+    // hands the escalation to whatever the OS gave the number to. `record` was
+    // just repointed onto this process, so the same classification
+    // `stopManagedHost` uses is available and costs nothing.
+    const servingStillOurs = (options?: { fresh?: boolean }): boolean =>
+      servingPid !== undefined
+      && classifyManagedHost(record, effects.liveProcess(servingPid, options), record.identityKey) === 'owned';
     const stopped = await terminate(child.pid, plan.stopGraceMs, effects, childGone);
-    // A child that would not die keeps its record: it is still running, it is
-    // still ours, and the record is the only thing that will ever let it be
-    // stopped. See `stopManagedHost` for the same rule on the shutdown path.
-    if (stopped.gone) store.clear(plan.agent);
+    const servingStopped = servingPid === undefined
+      || (await terminate(servingPid, plan.stopGraceMs, effects, (options) => !servingStillOurs(options))).gone;
+    // Anything of ours still running keeps the record: it is the only thing that
+    // will ever authorize another attempt at it. See `stopManagedHost` for the
+    // same rule on the shutdown path.
+    //
+    // Which process the surviving record must NAME depends on which one lived.
+    // Repointing happened before the signals, so a server that died while its
+    // launcher refused to would otherwise leave the record on a dead pid and the
+    // live process unreapable — the same leak, arrived at from the other side.
+    if (stopped.gone && servingStopped) {
+      store.clear(plan.agent);
+    } else if (!stopped.gone && servingStopped && servingPid !== undefined) {
+      const launcher = effects.liveProcess(child.pid, { fresh: true });
+      if (launcher.state === 'running') {
+        record = { ...record, ...launcher.identity };
+        store.write(record);
+      }
+    }
     return { action: 'start-failed', detailCode, capturedOutput: child.readOutput() };
   };
 
   const pollMs = plan.readyPollMs ?? 150;
+  let polls = 0;
   for (;;) {
     if (await probeReady(plan, effects, deadline - effects.now())) {
       const serving = await plan.locate();
-      // Ours if it IS the child, or if it is proven to descend from the child.
-      // Only a 'yes' counts: 'no' and 'unknown' both fall through to the branch
-      // below, so a machine that cannot read its process table — and every
-      // platform whose provider declines to answer, which is all of them except
-      // Windows — behaves exactly as it did before this was added.
+      // Ours if it IS the child, or if two fresh walks both prove it descends
+      // from the child. Only 'yes' counts: 'no' and 'unknown' both fall through
+      // to the branch below, so a machine that cannot read its process table
+      // behaves exactly as it did before this was added. That is a smaller set
+      // than it reads: `descendsFrom` answers on Linux from /proc and on macOS
+      // from `ps`, not on Windows alone, and the launcher-plus-server shape it
+      // was written for turns up on Linux too — `cline/bin/cline` is a Node
+      // resolver that `spawnSync`s the platform binary.
       if (serving.state === 'identified'
         && (serving.pid === child.pid
-          || effects.descendsFrom?.(serving.pid, child.pid, { fresh: true }) === 'yes')) {
+          || provenDescendantTwice(effects, serving.pid, child.pid))) {
         if (serving.pid !== child.pid && !adoptServingProcess(serving.pid)) {
           // Proven ours, but its identity could not be read, so the record keeps
           // naming the child. The start succeeded; what is unproven is which
@@ -722,6 +800,13 @@ export async function startManagedHost(
         return { action: 'started', pid: serving.pid, servingProven: true };
       }
       if (serving.state === 'identified') {
+        const adopted = provenListenerDescendant(record, serving.pid, effects);
+        if (adopted) {
+          record = adopted;
+          store.write(record);
+          await recordObserved();
+          return { action: 'started', pid: serving.pid, servingProven: true };
+        }
         // Another host won the address while ours was starting. Ours is proven
         // ours and is demonstrably not the one serving, so it is stopped rather
         // than leaked — and the winner is classified and left strictly alone.
@@ -737,7 +822,15 @@ export async function startManagedHost(
       return { action: 'started', pid: child.pid, servingProven: false };
     }
     if (childGone()) {
-      // Proven exited, so the record describes nothing and is safe to drop.
+      // Exited — but a LAUNCHER exiting is not the same event as a host dying.
+      // If a serving descendant was proven while it was still alive, the record
+      // now names that server and dropping it here would strand exactly the
+      // orphan the abandon path exists to prevent. Reap it on the same terms.
+      if (adoptedServingPid !== undefined) {
+        return await abandonChild('host-exited-during-start');
+      }
+      // Nothing of ours was ever proven to be serving, so the record describes
+      // a process that has exited and is safe to drop.
       store.clear(plan.agent);
       return { action: 'start-failed', detailCode: 'host-exited-during-start', capturedOutput: child.readOutput() };
     }
@@ -747,8 +840,77 @@ export async function startManagedHost(
       // forever.
       return await abandonChild('host-not-ready-in-time');
     }
+    // Take the ancestry proof while the launcher can still supply it. Not every
+    // poll: `locate()` is an address lookup, and at a 150ms poll against a 30s
+    // budget that would be two hundred of them for a fact that does not change
+    // once true. Every eighth is ~1.2s — far inside the window between a server
+    // binding the address and a daemonising launcher exiting.
+    if (polls % ADOPT_PROBE_EVERY_POLLS === 0) await tryAdoptServing();
+    polls += 1;
     await effects.sleep(pollMs);
   }
+}
+
+/**
+ * Two independent walks, because one proves nothing durable. This branch RE-KEYS
+ * the ownership record onto the serving pid, so a listener reparented — or an
+ * intermediate pid recycled — immediately after a single walk would be adopted
+ * as ours and stay adopted. `provenListenerDescendant` below already holds an
+ * adoption to this standard; a spawn-time adoption is no weaker a claim.
+ *
+ * Absent support answers `undefined`, which is not 'yes', so a platform that
+ * cannot walk its process table adopts nothing.
+ */
+/**
+ * How often, in readiness polls, the launcher is asked whether a serving
+ * descendant has appeared yet. See the call site for why it is not every poll.
+ */
+const ADOPT_PROBE_EVERY_POLLS = 8;
+
+function provenDescendantTwice(effects: ManagedHostEffects, pid: number, ancestorPid: number): boolean {
+  return effects.descendsFrom?.(pid, ancestorPid, { fresh: true }) === 'yes'
+    && effects.descendsFrom?.(pid, ancestorPid, { fresh: true }) === 'yes';
+}
+
+/**
+ * Replace a launcher record with its native listener only under a complete,
+ * fresh ancestry and identity proof. Every missing or changing fact refuses.
+ */
+function provenListenerDescendant(
+  launcher: ManagedHostOwnership,
+  listenerPid: number,
+  effects: ManagedHostEffects,
+): ManagedHostOwnership | null {
+  if (listenerPid === launcher.pid) return launcher;
+  if (classifyManagedHost(launcher, effects.liveProcess(launcher.pid, { fresh: true }), launcher.identityKey) !== 'owned') {
+    return null;
+  }
+  const listenerBefore = effects.liveProcess(listenerPid, { fresh: true });
+  if (listenerBefore.state !== 'running') return null;
+  if (effects.descendsFrom?.(listenerPid, launcher.pid, { fresh: true }) !== 'yes') return null;
+  if (classifyManagedHost(launcher, effects.liveProcess(launcher.pid, { fresh: true }), launcher.identityKey) !== 'owned') {
+    return null;
+  }
+  const listenerMiddle = effects.liveProcess(listenerPid, { fresh: true });
+  if (!sameProcessRead(listenerBefore, listenerMiddle)) return null;
+  // Re-prove the relation after stable endpoint reads. Without this second
+  // proof, a listener can be reparented (or an intermediate pid recycled)
+  // immediately after the first walk and be durably adopted as ours.
+  if (effects.descendsFrom?.(listenerPid, launcher.pid, { fresh: true }) !== 'yes') return null;
+  if (classifyManagedHost(launcher, effects.liveProcess(launcher.pid, { fresh: true }), launcher.identityKey) !== 'owned') {
+    return null;
+  }
+  const listenerAfter = effects.liveProcess(listenerPid, { fresh: true });
+  if (listenerAfter.state !== 'running' || !sameProcessRead(listenerBefore, listenerAfter)) return null;
+  return { ...launcher, ...listenerAfter.identity };
+}
+
+function sameProcessRead(before: LiveProcess, after: LiveProcess): boolean {
+  return before.state === 'running'
+    && after.state === 'running'
+    && after.identity.pid === before.identity.pid
+    && after.identity.start === before.identity.start
+    && after.identity.boot === before.identity.boot;
 }
 
 /**
@@ -1178,6 +1340,7 @@ export async function ensureManagedHost(
       readyTimeoutMs: number;
       stopGraceMs: number;
     } | null>;
+    isManagedHostReady?(options?: { signal?: AbortSignal }): Promise<boolean>;
     isAvailable(options?: { signal?: AbortSignal }): Promise<boolean>;
   },
   effects: ManagedHostEffects,
@@ -1203,7 +1366,7 @@ export async function ensureManagedHost(
     {
       agent: backend.id,
       identityKey: descriptor.identityKey,
-      ready: (signal) => backend.isAvailable({ signal }),
+      ready: (signal) => (backend.isManagedHostReady ?? backend.isAvailable).call(backend, { signal }),
       // RE-DESCRIBED on every call, not closed over the descriptor above.
       //
       // A frozen locator cannot see the process this start creates. Kimi finds
@@ -1333,6 +1496,10 @@ export interface ManagedHostRestartLedger {
   allow(agent: string, now: number, budget: ManagedHostRestartBudget): boolean;
   record(agent: string, now: number): void;
   forget(agent: string): void;
+  /** Remove ONE recorded attempt — the one made at `now`. Distinct from
+   *  {@link ManagedHostRestartLedger.forget}, which clears an agent's whole
+   *  history because a host is serving again. */
+  withdraw(agent: string, now: number): void;
 }
 
 /** In-memory, and deliberately so: a broker restart is itself a fresh chance. */
@@ -1348,6 +1515,14 @@ export function managedHostRestartLedger(): ManagedHostRestartLedger {
       attempts.set(agent, [...(attempts.get(agent) ?? []), now]);
     },
     forget: (agent) => { attempts.delete(agent); },
+    withdraw: (agent, now) => {
+      const recent = attempts.get(agent);
+      if (!recent) return;
+      const index = recent.lastIndexOf(now);
+      if (index < 0) return;
+      recent.splice(index, 1);
+      if (recent.length === 0) attempts.delete(agent);
+    },
   };
 }
 
@@ -1396,10 +1571,26 @@ export type ManagedHostRecoveryOutcome =
  *     replace — and it is stopped through the ordinary ownership-checked path,
  *     re-proving identity before every signal like any other stop.
  *
- * Everything else declines. A foreign host is never restarted "for" the user; an
- * address this machine will not describe is never acted on; and a host that is
- * merely slow is protected by the same readiness deadline a fresh start uses,
- * because the tick asks the adapter's own probe before concluding anything.
+ * Everything else declines. A foreign host is never restarted "for" the user,
+ * and an address this machine will not describe is never acted on.
+ *
+ * What protects a host that is merely slow is OWNERSHIP, not a deadline. One
+ * unready answer is enough to act, and deliberately so: the probe's answer only
+ * selects which of the two states above applies, and state 2 still has to PROVE
+ * the host is ours — pid, start time, boot id — before anything is signalled. A
+ * stranger on the address ends `already-serving`, never a stop. So the worst a
+ * spurious unready answer can cost is a restart of a host this broker started,
+ * bounded by the crash-loop budget.
+ *
+ * (An earlier version of this comment claimed the protection was "the same
+ * readiness deadline a fresh start uses". That was never true — recovery asks
+ * one probe carrying its own short timeout, not the 20s window a fresh start
+ * waits out. Confirming with a SECOND readiness probe was tried and reverted:
+ * readiness cannot tell our host from a stranger on the same port, so a
+ * confirming probe that catches a stranger taking the address reports `healthy`
+ * and silently adopts a foreign host — a fail-open worse than the spurious
+ * restart it was meant to prevent. `test-managed-host-ownership` pins that
+ * race.)
  */
 export async function recoverManagedHost(
   backend: Parameters<typeof ensureManagedHost>[0],
@@ -1415,7 +1606,7 @@ export async function recoverManagedHost(
   if (!managedHostStartAuthorized(backend.id, env)) {
     return { action: 'not-authorized', variable: managedHostGateEnv(backend.id) };
   }
-  if (await backend.isAvailable()) {
+  if (await (backend.isManagedHostReady ?? backend.isAvailable).call(backend)) {
     // Serving. Forgetting the attempts here is what makes the budget a
     // CRASH-LOOP guard rather than a lifetime cap: a host that recovers and then
     // fails again months later gets its full allowance back.
@@ -1467,14 +1658,22 @@ async function restart(
   if (!ledger.allow(backend.id, now, budget)) return { action: 'declined', reason: 'budget-exhausted' };
   ledger.record(backend.id, now);
   const outcome = await ensureManagedHost(backend, effects, store, env) as ManagedHostStartOutcome;
-  // Nothing to launch is an ABSENCE, not a failed restart. An agent that is not installed reaches here
-  // on every tick, and counting it spent the restart budget on a host that never existed -- after which
-  // the supervisor warned that the host "keeps failing to stay up" once a minute, about software the
-  // operator had never installed and that setup's own preflight had already listed as missing. Hand the
-  // attempt back so the budget belongs to hosts that CAN be restarted, and report an absence as declined
-  // rather than failed, so nothing is journalled for doctor to report in the morning.
+  // Nothing to launch is an ABSENCE, not a failed restart. An agent that is not
+  // installed reaches here on every tick, and counting it spent the restart
+  // budget on a host that never existed -- after which the supervisor warned
+  // that the host "keeps failing to stay up" once a minute, about software the
+  // operator had never installed and that setup's own preflight had already
+  // listed as missing. Hand the attempt back so the budget belongs to hosts that
+  // CAN be restarted, and report an absence as declined rather than failed, so
+  // nothing is journalled for doctor to report in the morning.
   if (outcome.action === 'not-launchable') {
-    ledger.forget(backend.id);
+    // WITHDRAW this attempt, do not forget every attempt. An absent CLI means
+    // this tick should cost nothing -- not that the crashes already recorded
+    // stop counting. `forget` erased those too, so a host that crashed twice and
+    // then momentarily read as not-launchable (a CLI transiently off PATH) got
+    // its whole budget back, and the crash-loop guard this function documents at
+    // MANAGED_HOST_RESTART_BUDGET became unbounded.
+    ledger.withdraw(backend.id, now);
     return { action: 'declined', reason: 'not-launchable' };
   }
   // A restart is a RECOVERY only if OUR host is serving at the end of it. Most
@@ -1636,6 +1835,7 @@ function boundedCapture(stream: ReadableStream<Uint8Array> | undefined | null): 
 export function defaultManagedHostEffects(): ManagedHostEffects {
   return {
     listener: (port) => hostProcessProvider.listener(port),
+    listenerAsync: (port) => hostProcessProvider.listenerAsync(port),
     liveProcess: readLiveProcess,
     spawn: (launch) => {
       const env = launch.env ? { ...process.env, ...launch.env } : { ...process.env };

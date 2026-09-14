@@ -12,5 +12,8 @@ import { OMP_DIALECT } from './dialect.ts';
 export const OMP_BRIDGE_EMBEDDED_SOURCE = piBridgeEmbeddedSourceForDialect({
   routePrefix: OMP_DIALECT.bridgeRoutePrefix,
   toolId: OMP_DIALECT.toolId,
+  // Resolved inside the calling OMP process, so hello attests the native package that actually
+  // loaded the extension rather than merely echoing the broker's configured executable.
+  nativeVersionModule: '@oh-my-pi/pi-utils/dirs',
 });
 export const OMP_BRIDGE_EMBEDDED_SHA256 = createHash('sha256').update(OMP_BRIDGE_EMBEDDED_SOURCE).digest('hex');

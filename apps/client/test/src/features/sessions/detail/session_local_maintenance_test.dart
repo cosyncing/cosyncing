@@ -409,4 +409,57 @@ void main() {
       expect(rows, isEmpty);
     });
   });
+
+  group('expiry restores only text that never left this device', () {
+    test(
+      'a dispatched prompt is expired but never restored as a draft',
+      () async {
+        // Measured on the installed client: the broker's ack for a prompt held
+        // behind a permission gate does not arrive before the client burns its
+        // three replay attempts, so the row is never terminal. Expiry then put
+        // that prompt -- an `rm -f <path> && touch <path>` that had ALREADY RUN
+        // and been approved -- back into the durable draft, and from there into
+        // every client's composer, one Enter from running again. Diagnostics
+        // from that run show the gated prompt receiving no ack of any kind:
+        //   ack ca.hlzl7d7360.1 pending=false            <- the idle prompt
+        //   expiring ca.hlzl7jtk1k.3            <- the gated one, unacked
+        //
+        // A dispatched prompt is not unsent text. It is a prompt whose outcome
+        // this device lost track of, and it stays in the transcript to copy
+        // from; guessing that it never ran is the one guess that re-arms a
+        // destructive command.
+        await outbox.upsert(promptRow('cm-dispatched', text: 'rm -rf /tmp/x'));
+        await outbox.markSending('cm-dispatched');
+
+        final report = await maintenance.runOnce(
+          now: now.add(const Duration(minutes: 5)),
+        );
+
+        expect(report.restoredDrafts, 0, reason: 'it already went out');
+        expect(
+          (await drafts.load(brokerProfileId: 'local', sessionKey: key))?.text,
+          anyOf(isNull, isEmpty),
+          reason: 'a sent prompt must never reappear as unsent text',
+        );
+      },
+    );
+
+    test('a prompt that never left is still restored', () async {
+      // The case the restore exists for: nothing was ever dispatched, so this
+      // copy is the only one and dropping it would lose the user's typing.
+      await outbox.upsert(
+        promptRow('cm-never-sent', text: 'typed, never sent'),
+      );
+
+      final report = await maintenance.runOnce(
+        now: now.add(const Duration(minutes: 5)),
+      );
+
+      expect(report.restoredDrafts, 1);
+      expect(
+        (await drafts.load(brokerProfileId: 'local', sessionKey: key))?.text,
+        'typed, never sent',
+      );
+    });
+  });
 }

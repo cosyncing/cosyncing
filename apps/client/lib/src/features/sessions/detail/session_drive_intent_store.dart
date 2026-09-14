@@ -25,6 +25,20 @@ const String kDriveAttachReasonJoinExisting = 'join-existing';
 /// Wire value for an explicit, user-confirmed Take over.
 const String kDriveAttachReasonTakeover = 'takeover';
 
+/// Native attach mode an app-created session must use when restoring control.
+enum SessionDriveRestoreMode {
+  /// Resume-capable adapters arbitrate durable Drive through `mode=resume`.
+  resume('resume'),
+
+  /// Live-only adapters reacquire their verified managed native writer.
+  live('live');
+
+  const SessionDriveRestoreMode(this.token);
+
+  /// Stable wire/storage value.
+  final String token;
+}
+
 /// Why the app holds Drive provenance for a session.
 enum SessionDriveProvenanceKind {
   /// The session was created from the app. This is a durable control
@@ -45,10 +59,19 @@ enum SessionDriveProvenanceKind {
 /// One durable Drive provenance record.
 class SessionDriveProvenance {
   /// Creates a provenance record.
-  const SessionDriveProvenance({required this.kind, required this.recordedAt});
+  const SessionDriveProvenance({
+    required this.kind,
+    required this.recordedAt,
+    this.restoreMode = SessionDriveRestoreMode.resume,
+  });
 
   /// Why the app may restore Drive for this session.
   final SessionDriveProvenanceKind kind;
+
+  /// Attach mode needed to restore an app-created session's native writer.
+  /// Takeover leases and legacy rows always use
+  /// [SessionDriveRestoreMode.resume].
+  final SessionDriveRestoreMode restoreMode;
 
   /// When the record was written or last refreshed.
   final DateTime recordedAt;
@@ -82,6 +105,7 @@ abstract interface class SessionDriveIntentStore {
     required String brokerProfileId,
     required String tool,
     required String sessionId,
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
   });
 
   /// Records or refreshes the explicit terminal-takeover sliding lease.
@@ -153,11 +177,13 @@ class DriftSessionDriveIntentStore implements SessionDriveIntentStore {
     required String brokerProfileId,
     required String tool,
     required String sessionId,
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
   }) => _write(
     brokerProfileId,
     tool,
     sessionId,
     SessionDriveProvenanceKind.appCreated,
+    restoreMode: restoreMode,
   );
 
   @override
@@ -176,7 +202,13 @@ class DriftSessionDriveIntentStore implements SessionDriveIntentStore {
     final kind = existing?.kind == SessionDriveProvenanceKind.appCreated
         ? SessionDriveProvenanceKind.appCreated
         : SessionDriveProvenanceKind.terminalTakeover;
-    await _write(brokerProfileId, tool, sessionId, kind);
+    await _write(
+      brokerProfileId,
+      tool,
+      sessionId,
+      kind,
+      restoreMode: existing?.restoreMode ?? SessionDriveRestoreMode.resume,
+    );
   }
 
   @override
@@ -190,14 +222,17 @@ class DriftSessionDriveIntentStore implements SessionDriveIntentStore {
     String brokerProfileId,
     String tool,
     String sessionId,
-    SessionDriveProvenanceKind kind,
-  ) async {
+    SessionDriveProvenanceKind kind, {
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
+  }) async {
     await database
         .into(database.appSettingRows)
         .insertOnConflictUpdate(
           AppSettingRowsCompanion.insert(
             key: _key(brokerProfileId, tool, sessionId),
-            value: '${kind.token}:${_now().millisecondsSinceEpoch}',
+            value:
+                '${kind.token}:${restoreMode.token}:'
+                '${_now().millisecondsSinceEpoch}',
             updatedAt: _now(),
           ),
         );
@@ -213,16 +248,24 @@ class DriftSessionDriveIntentStore implements SessionDriveIntentStore {
         recordedAt: DateTime.fromMillisecondsSinceEpoch(legacy),
       );
     }
-    final separator = raw.lastIndexOf(':');
-    if (separator <= 0) return null;
-    final token = raw.substring(0, separator);
-    final at = int.tryParse(raw.substring(separator + 1));
+    final segments = raw.split(':');
+    if (segments.length != 2 && segments.length != 3) return null;
+    final token = segments[0];
+    final restoreModeToken = segments.length == 3 ? segments[1] : null;
+    final at = int.tryParse(segments.last);
     if (at == null) return null;
+    final restoreMode = restoreModeToken == null
+        ? SessionDriveRestoreMode.resume
+        : SessionDriveRestoreMode.values
+              .where((candidate) => candidate.token == restoreModeToken)
+              .firstOrNull;
+    if (restoreMode == null) return null;
     for (final kind in SessionDriveProvenanceKind.values) {
       if (kind.token == token) {
         return SessionDriveProvenance(
           kind: kind,
           recordedAt: DateTime.fromMillisecondsSinceEpoch(at),
+          restoreMode: restoreMode,
         );
       }
     }

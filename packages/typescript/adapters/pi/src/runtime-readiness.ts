@@ -674,7 +674,10 @@ export async function diagnosePiNodeRuntime(
     contract = identity.contract;
     nodeCandidates = batchNodeCandidates(executable);
   } else {
-    const launcher = context.readText(executable, 8 * 1024 * 1024);
+    const launcherPath = canonical(executable);
+    const launcher = context.readTextPrefix
+      ? context.readTextPrefix(launcherPath, LAUNCHER_PREFIX_MAX_BYTES)
+      : context.readText(launcherPath, LAUNCHER_PREFIX_MAX_BYTES);
     if (!launcher.ok) {
       return {
         id: 'pi.node-runtime',
@@ -684,7 +687,7 @@ export async function diagnosePiNodeRuntime(
         remediation: { kind: 'manual', message: 'Repair the Pi installation, then rerun doctor.' },
       };
     }
-    const nodeCommand = nodeCommandFromShebang(launcher.text.slice(0, LAUNCHER_PREFIX_MAX_BYTES));
+    const nodeCommand = nodeCommandFromShebang(launcher.text);
     if (nodeCommand === null) {
       const probe = await boundedDoctorProbe(context, executable);
       if (probe.status === 'timeout') {

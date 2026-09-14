@@ -20,7 +20,6 @@ import type {
   AgentSetupDiagnosis,
   AttachMode,
   CommandResult,
-  FileChange,
   FileInput,
   HistorySourceIdentity,
   ModelOption,
@@ -31,10 +30,6 @@ import type {
   SessionDiscoveryOptions,
   SessionInfo,
   SlashCommand,
-  ToolCommandState,
-  ToolDisplayClass,
-  ToolSearchGroup,
-  ToolSemantic,
   SetupDiagnosisContext,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
@@ -42,16 +37,8 @@ import type {
 import {
   PRODUCT_IDENTITY,
   SessionCreateTemporarilyUnavailableError,
-  boundToolSemantic,
-  boundedStream,
   bunSpawnResolvedInvocation,
-  commandSemantic,
-  fileReadSemantic,
-  searchGroup,
-  searchSemantic,
   resolveInvocation,
-  splitUnifiedDiffFiles,
-  webSemantic,
 } from '@cosyncing/adapter-api';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, statSync, watch, type FSWatcher } from 'node:fs';
@@ -60,6 +47,7 @@ import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { attachedTuiSessions, tuiPresenceSupported } from './tui-presence.ts';
 import { diagnoseOpenCodeSetup } from './diagnostics.ts';
+import { mapOpenCodePart as mapSharedOpenCodePart } from '@cosyncing/opencode-wire';
 
 const OPENCODE_RETRY_DETAIL_MAX_SCALARS = 240;
 
@@ -1136,6 +1124,7 @@ export function opencodeControlState(terminalSyncHint: SessionInfo['terminalSync
           // Co-ownership PROVEN: a same-host `opencode attach` TUI for this session is alive right
           // now (tui-presence.ts) — terminal and app share the one serve owner.
           active: true,
+          presence: 'shared',
           label: 'Synced with OpenCode terminal',
           note: 'A terminal is attached to this session via `opencode attach` — it and the app share the same live server.',
         }
@@ -2365,7 +2354,9 @@ class OpenCodeConnection implements SessionConnection {
         this.emit({
           type: 'permission-resolved',
           requestId: p.requestID ?? '',
-          decision: p.reply === 'reject' ? 'reject' : p.reply === 'always' ? 'approve-session' : 'approve',
+          decision: p.reply === 'reject'
+            ? 'reject'
+            : p.reply === 'always' ? 'approve-session' : 'approve',
         });
         return;
       }
@@ -3467,345 +3458,16 @@ function writeInboxFile(cwd: string | undefined, file: FileInput): string | unde
  * one of them.
  */
 export function mapOpenCodePart(part: unknown, historical = true): AgentMessage[] {
-  return mapPart(part, historical);
+  return mapSharedOpenCodePart(part, { historical, productId: 'opencode' });
 }
 
 /** Map an OpenCode Part to zero or more normalized AgentMessages. */
 function mapPart(part: any, _historical: boolean): AgentMessage[] {
-  if (!part || typeof part !== 'object') return [];
-  switch (part.type) {
-    case 'text':
-      return part.text ? [{ type: 'model-output', text: part.text, key: part.id, final: false }] : [];
-    case 'reasoning':
-      return part.text ? [{ type: 'thinking', text: part.text, key: part.id }] : [];
-    case 'file':
-      return [
-        {
-          type: 'file-artifact',
-          path: part.filename ?? part.url ?? part.id,
-          name: part.filename ?? 'file',
-          mimeType: part.mime ?? 'application/octet-stream',
-          url: part.url,
-        },
-      ];
-    case 'tool': {
-      const state = part.state ?? {};
-      const status: string = state.status ?? 'pending';
-      const tool: string = part.tool ?? 'tool';
-      const callId = part.callID ?? part.id;
-      const input = state.input ?? {};
-      // The `question` tool is represented by the interactive question card (from question.asked /
-      // fetchPending), so don't also render its raw-JSON tool block.
-      if (tool === 'question') return [];
-      if (tool === 'todowrite') {
-        const taskList = taskListStateFromTodoWrite(part);
-        // TodoWrite is a session-state surface, not transcript tool chatter. If a future OpenCode
-        // shape is malformed, suppress the raw JSON block instead of showing duplicate args/output.
-        // Contract: docs/architecture/client-ui.md
-        return taskList ? [taskList] : [];
-      }
-      const activity = tool === 'task' ? agentActivityFromOpenCodeTask(part, _historical) : undefined;
-      if (status === 'completed' || status === 'error') {
-        const md = state.metadata ?? {};
-        const fd = md.filediff ?? {};
-        const path: string | undefined = input.filePath ?? md.filepath ?? fd.file;
-        const exitCode = tool === 'bash' && md.exit != null ? Number(md.exit) : undefined;
-        const diff: string | undefined = md.diff ?? fd.patch;
-        // Canonical per-file change set from the event-time diff (single file for OpenCode's edit tool).
-        let fileChanges: FileChange[] | undefined;
-        if (typeof diff === 'string' && diff) {
-          const changes = splitUnifiedDiffFiles(diff);
-          if (changes.length) fileChanges = changes.map((c) => (c.path ? c : { ...c, path: path ?? '' }));
-          else if (path) fileChanges = [{ path, operation: 'edit', diff, additions: fd.additions, deletions: fd.deletions }];
-        }
-        return [
-          ...(activity ? [activity] : []),
-          {
-            type: 'tool-result',
-            callId,
-            toolName: tool,
-            toolClass: openCodeToolDisplayClass(tool),
-            ...(() => {
-              const semantic = openCodeToolSemantic(tool, input, state, { status });
-              return semantic ? { semantic } : {};
-            })(),
-            isError: status === 'error' || (exitCode != null && exitCode !== 0),
-            result: tool === 'bash' ? (md.output ?? state.output) : (state.output ?? state.error),
-            title: toolSummary(tool, input, md, status === 'error'),
-            path,
-            diff,
-            fileChanges,
-            additions: fd.additions,
-            deletions: fd.deletions,
-            exitCode,
-            truncated: md.truncated || undefined,
-            durationMs: elapsedMsFromOpenCodePart(part),
-          },
-        ];
-      }
-      return [
-        ...(activity ? [activity] : []),
-        {
-          type: 'tool-call',
-          callId,
-          toolName: tool,
-          toolClass: openCodeToolDisplayClass(tool),
-          ...(() => {
-            const semantic = openCodeToolSemantic(tool, input, state, { status });
-            return semantic ? { semantic } : {};
-          })(),
-          title: state.title ?? toolSummary(tool, input, {}, false),
-          args: input,
-        },
-      ];
-    }
-    default:
-      return [];
-  }
-}
-
-function taskListStateFromTodoWrite(part: any): AgentMessage | undefined {
-  const todos = todoArrayFromOpenCodeState(part?.state);
-  if (!todos?.length) return undefined;
-  const items: Array<{ id: string; title: string; status: 'open' | 'in-progress' | 'done' | 'cancelled'; priority?: 'low' | 'normal' | 'high' }> = [];
-  for (const [index, todo] of todos.entries()) {
-    const title = String(todo?.content ?? todo?.title ?? '').trim();
-    if (!title) continue;
-    items.push({
-      id: todo?.id != null ? String(todo.id) : String(index),
-      title,
-      status: normalizeTodoStatus(todo?.status),
-      priority: normalizeTodoPriority(todo?.priority),
-    });
-  }
-  if (!items.length) return undefined;
-  const terminal = items.every((item) => item.status === 'done' || item.status === 'cancelled');
-  return {
-    type: 'task-list-state',
-    key: `opencode:todo:${part.sessionID ?? 'current'}`,
-    title: 'Tasks',
-    status: terminal ? 'done' : 'running',
-    source: 'tool-call',
-    sourceTool: 'todowrite',
-    updatedAt: openCodePartTime(part),
-    items,
-  };
-}
-
-function todoArrayFromOpenCodeState(state: any): any[] | undefined {
-  if (Array.isArray(state?.input?.todos)) return state.input.todos;
-  if (Array.isArray(state?.metadata?.todos)) return state.metadata.todos;
-  return parseTodoOutput(state?.output);
-}
-
-function parseTodoOutput(output: unknown): any[] | undefined {
-  if (Array.isArray(output)) return output;
-  if (typeof output !== 'string' || !output.trim()) return undefined;
-  const parsed = parseJsonObject(output);
-  if (Array.isArray(parsed)) return parsed;
-  if (Array.isArray(parsed?.todos)) return parsed.todos;
-  return undefined;
-}
-
-function normalizeTodoStatus(status: unknown): 'open' | 'in-progress' | 'done' | 'cancelled' {
-  const s = String(status ?? '').toLowerCase().replace(/[_\s-]+/g, '-');
-  if (s === 'completed' || s === 'complete' || s === 'done') return 'done';
-  if (s === 'in-progress' || s === 'running' || s === 'active') return 'in-progress';
-  if (s === 'cancelled' || s === 'canceled') return 'cancelled';
-  return 'open';
-}
-
-function normalizeTodoPriority(priority: unknown): 'low' | 'normal' | 'high' | undefined {
-  const p = String(priority ?? '').toLowerCase();
-  if (p === 'low' || p === 'high') return p;
-  if (p === 'medium' || p === 'normal') return 'normal';
-  return undefined;
-}
-
-function agentActivityFromOpenCodeTask(part: any, historical: boolean): AgentMessage | undefined {
-  const state = part?.state ?? {};
-  const status = String(state.status ?? 'pending');
-  // Historical OpenCode rows can contain stale `running` task states from old sessions. Only live
-  // SSE/raw-run frames may create/clear the transient activity bar; history keeps the durable task
-  // tool result only. Governing contract: docs/architecture/client-ui.md
-  if (historical) return undefined;
-  if (status !== 'running' && status !== 'completed' && status !== 'error') return undefined;
-  const input = state.input ?? {};
-  const title = String(input.description ?? firstLine(input.prompt) ?? 'Subagent task').trim();
-  const subtitle = input.subagent_type ? String(input.subagent_type) : undefined;
-  return {
-    type: 'agent-activity',
-    key: `agent:${part.callID ?? part.id}`,
-    kind: 'subagent',
-    title,
-    subtitle,
-    status: status === 'completed' ? 'done' : status === 'error' ? 'error' : 'running',
-    elapsedMs: elapsedMsFromOpenCodePart(part),
-    agentsDone: status === 'running' ? 0 : 1,
-    agentsTotal: 1,
-  };
-}
-
-function firstLine(value: unknown): string | undefined {
-  const line = String(value ?? '').split('\n').find((s) => s.trim());
-  return line?.trim();
+  return mapSharedOpenCodePart(part, { historical: _historical, productId: 'opencode' });
 }
 
 function openCodePartTime(part: any): number | undefined {
   return Number(part.timeUpdated ?? part.time?.end ?? part.time?.updated ?? part.time?.created ?? part.timeCreated) || undefined;
-}
-
-function elapsedMsFromOpenCodePart(part: any): number | undefined {
-  const start = Number(part.time?.start ?? part.timeCreated ?? 0);
-  const end = Number(part.time?.end ?? part.timeUpdated ?? 0);
-  return start && end && end >= start ? end - start : undefined;
-}
-
-/**
- * The one place OpenCode maps a native tool name to a normalized presentation
- * family; `null` keeps a tool on the bounded structured fallback.
- */
-function openCodeToolFamily(toolName: string): 'command' | 'file-read' | 'search' | 'web' | null {
-  switch (String(toolName || '')) {
-    case 'bash':
-    case 'interactive_bash':
-      return 'command';
-    case 'read':
-      return 'file-read';
-    case 'grep':
-    case 'glob':
-    case 'list':
-      return 'search';
-    case 'webfetch':
-    case 'websearch':
-    case 'google_search':
-      return 'web';
-    default:
-      return null;
-  }
-}
-
-/**
- * OpenCode tool part → the canonical normalized family.
- *
- * OpenCode redelivers the complete accumulated `output` on every
- * `message.part.updated` frame, so this must never rescan history: the bounded
- * stream/preview builders take a tail (or head) slice sized to the bound, which
- * is why per-frame work stays proportional to the bound and not to the run.
- */
-function openCodeToolSemantic(
-  tool: string,
-  input: any,
-  state: any,
-  options: { status: string },
-): ToolSemantic | undefined {
-  const family = openCodeToolFamily(tool);
-  if (!family) return undefined;
-  const args = input && typeof input === 'object' ? input : {};
-  const md = state?.metadata && typeof state.metadata === 'object' ? state.metadata : {};
-  const terminal = options.status === 'completed' || options.status === 'error';
-  switch (family) {
-    case 'command': {
-      const exit = md.exit != null ? Number(md.exit) : undefined;
-      const state_: ToolCommandState = !terminal
-        ? 'running'
-        : md.aborted === true
-          ? 'interrupted'
-          : exit !== undefined && Number.isFinite(exit)
-            ? (exit === 0 ? 'completed' : 'failed')
-            : options.status === 'error'
-              ? 'failed'
-              : 'unknown';
-      return boundToolSemantic(commandSemantic({
-        command: args.command,
-        cwd: args.cwd ?? md.cwd,
-        state: state_,
-        stdout: boundedStream(md.stdout),
-        stderr: boundedStream(md.stderr),
-      }));
-    }
-    case 'file-read':
-      return boundToolSemantic(fileReadSemantic({
-        path: args.filePath ?? md.filepath,
-        startLine: typeof args.offset === 'number' ? args.offset + 1 : undefined,
-        preview: terminal ? (md.preview ?? state?.output) : undefined,
-        totalLines: md.totalLines ?? md.lines,
-        previewTruncated: md.truncated === true,
-      }));
-    case 'search': {
-      const groups: (ToolSearchGroup | undefined)[] = [];
-      const files = Array.isArray(md.files)
-        ? md.files
-        : Array.isArray(md.filenames)
-          ? md.filenames
-          : [];
-      for (const file of files) {
-        groups.push(typeof file === 'string'
-          ? searchGroup({ path: file })
-          : searchGroup({ path: file?.path, matchCount: file?.count, matches: file?.matches }));
-      }
-      return boundToolSemantic(searchSemantic({
-        query: args.pattern ?? args.query,
-        scope: args.path ?? args.glob ?? args.include,
-        matchCount: md.matches,
-        fileCount: md.count ?? (files.length || undefined),
-        groups,
-      }));
-    }
-    case 'web':
-      return boundToolSemantic(webSemantic({
-        query: args.query,
-        url: args.url,
-        results: Array.isArray(md.results) ? md.results : undefined,
-      }));
-  }
-}
-
-/** OpenCode owns its native tool-name taxonomy; the shared client sees only this canonical class. */
-function openCodeToolDisplayClass(toolName: string): ToolDisplayClass {
-  const name = String(toolName || '').toLowerCase();
-  if (/^(bash|shell|exec|interactive_bash|background_task)$/.test(name)) return 'execute';
-  if (/(^|[_-])(edit|write|patch|create|delete|move|rename)([_-]|$)/.test(name)) return 'edit';
-  if (
-    /^(read|grep|glob|list|ls|webfetch|websearch|google_search|look_at|todoread|codesearch)$/.test(name)
-    || /(^|[_-])(read|grep|glob|search|fetch|list|query|diagnostic|symbols)([_-]|$)/.test(name)
-    || /directory_tree/.test(name)
-  ) return 'lookup';
-  return 'other';
-}
-
-/** Friendly, verb-first one-liner per tool (so the UI stays tool-agnostic — it just renders this). */
-function toolSummary(tool: string, input: any, md: any, isError: boolean): string {
-  // basename handles both `/` and `\`, so a Windows-style path from OpenCode still summarizes cleanly.
-  const base = (p?: string) => (p ? basename(p) || p : '');
-  switch (tool) {
-    case 'edit':
-    case 'apply_patch':
-      return `Edited ${base(input?.filePath ?? md?.filepath)}`;
-    case 'write':
-      return `${md?.exists ? 'Edited' : 'Created'} ${base(input?.filePath ?? md?.filepath)}`;
-    case 'read':
-      return `Read ${base(input?.filePath)}`;
-    case 'bash':
-      return input?.description || input?.command || 'Ran command';
-    case 'glob':
-      return md?.count != null ? `Found ${md.count} file${md.count === 1 ? '' : 's'}` : `Glob ${input?.pattern ?? ''}`;
-    case 'grep':
-      return md?.matches != null ? `${md.matches} match${md.matches === 1 ? '' : 'es'} for "${input?.pattern ?? ''}"` : `Grep "${input?.pattern ?? ''}"`;
-    case 'list':
-      return `Listed ${base(input?.path) || 'directory'}`;
-    case 'webfetch':
-      return `Fetched ${input?.url ?? ''}`;
-    case 'websearch':
-    case 'google_search':
-      return `Searched "${input?.query ?? ''}"`;
-    case 'task':
-      return `${input?.subagent_type ?? 'subagent'}: ${input?.description ?? ''}`.trim();
-    case 'todowrite':
-      return Array.isArray(input?.todos) ? `${input.todos.length} todo${input.todos.length === 1 ? '' : 's'}` : 'Updated todos';
-    default:
-      return (isError ? `${tool} failed` : tool);
-  }
 }
 
 /** The session's current model as {providerID, modelID, variant?}, or undefined if unknown. */
@@ -4145,6 +3807,21 @@ function resolveBin(bin: string): string | null {
   return resolveInvocation(bin, { env: process.env, platform: process.platform })?.originalPath ?? null;
 }
 
+/**
+ * The environment every OpenCode child starts with, in-place updater off.
+ *
+ * Only children Cosyncing spawns are affected; the user's own `opencode
+ * upgrade` is untouched. Grok drifted eleven releases under an unattended
+ * broker because its children were left unguarded, and OpenCode has the same
+ * shape: a long-lived managed serve plus short-lived per-prompt children, any
+ * of which can replace the binary underneath a running broker.
+ */
+export function opencodeChildEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  return { ...env, OPENCODE_DISABLE_AUTOUPDATE: '1' };
+}
+
 function spawnOpenCode<
   const In extends Bun.SpawnOptions.Writable,
   const Out extends Bun.SpawnOptions.Readable,
@@ -4157,7 +3834,10 @@ function spawnOpenCode<
   const env = (options.env ?? process.env) as Readonly<Record<string, string | undefined>>;
   const invocation = resolveInvocation(executable, { env, platform: process.platform });
   if (!invocation) throw new Error(`OpenCode executable is unavailable: ${executable}`);
-  return bunSpawnResolvedInvocation(invocation, args, options);
+  // Suppressed at the choke point rather than per call site: `opencode export`
+  // and the per-prompt `opencode run` both land here, and both were spawning
+  // with a raw `process.env`.
+  return bunSpawnResolvedInvocation(invocation, args, { ...options, env: opencodeChildEnv(env) });
 }
 
 async function safeText(res: Response): Promise<string> {

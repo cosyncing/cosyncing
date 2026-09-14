@@ -6,8 +6,10 @@
  * and drive the SAME session the terminal is in — no second `pi` process, no JSONL corruption.
  *
  * Outbound: batches session events (status, streaming deltas, tool calls/results, finals, tokens)
- * to POST /pi/bridge/events. Inbound: long-polls GET /pi/bridge/commands and injects prompts via
- * pi.sendUserMessage / aborts via ctx.abort. Also registers a `send_file` tool (reuses the broker's
+ * to POST /pi/bridge/events. Inbound: long-polls GET /pi/bridge/commands and injects app prompts as
+ * durable attributed custom messages (advertised skill commands are expanded to native skill
+ * messages inside the extension), or
+ * aborts via ctx.abort. It also registers a `send_file` tool (reuses the broker's
  * /api/tool/send_file endpoint). On shutdown it POSTs /pi/bridge/bye.
  *
  * Dormant when COSYNCING_NO_BRIDGE is set — that marks a pi the broker itself spawned (resume-under-
@@ -22,7 +24,8 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+/*__COSYNCING_NATIVE_VERSION_IMPORT__*/
 
 const CONFIG = readBridgeConfig();
 const INTEGRATION = readPiIntegration();
@@ -33,8 +36,117 @@ const BROKER = (process.env.COSYNCING_BROKER ?? INTEGRATION.internalUrl ?? 'http
 const TOKEN = (process.env.COSYNCING_PI_INTEGRATION_TOKEN ?? INTEGRATION.credential ?? '').trim();
 const authHeaders = (): Record<string, string> => (TOKEN ? { 'x-cosyncing-integration-token': TOKEN } : {});
 const APPROVAL_MODE = (process.env.COSYNCING_BRIDGE_APPROVALS ?? CONFIG.approvalMode ?? 'dangerous').toLowerCase();
-const APPROVAL_TIMEOUT_MS = Number(process.env.COSYNCING_BRIDGE_APPROVAL_TIMEOUT_MS ?? CONFIG.approvalTimeoutMs ?? 300_000);
+const CONFIGURED_APPROVAL_TIMEOUT_MS = Number(process.env.COSYNCING_BRIDGE_APPROVAL_TIMEOUT_MS ?? CONFIG.approvalTimeoutMs ?? 300_000);
+// The host bounds `tool_call` handlers and fails them CLOSED, so a permission
+// handler that blocks past the budget does not buy a longer approval window --
+// it buys `Extension error (...cosyncing-bridge/index.ts): handler timed out
+// after 30000ms` and a tool result the model cannot act on. Measured on omp
+// 17.4.2: the model retried the read, retried it again, tried to write
+// `xd://report_issue`, tried bash, then gave up. Four dead turns, no readable
+// cause, and the configured 300_000 never reachable by construction.
+//
+// The budget is the host's `extensionHandlers.toolCallTimeoutMs`, default
+// 30_000. That IS an operator setting, so an operator who wants a longer
+// approval window raises it there and sets this to match; the two have to move
+// together, because raising only one of them changes nothing. An extension
+// cannot read the host's settings, hence the env override rather than a probe.
+//
+// Scope: this cap belongs to the `tool_call` gate ONLY. `ask_user` is a
+// registered tool, and a registered tool's `execute` is not routed through the
+// host's handler-timeout wrapper -- the wrapper exists precisely to stop a hung
+// extension parking tool dispatch. Capping the question window there would cut
+// a human's answer time from five minutes to twenty-five seconds for no reason
+// the host imposes, so it keeps the configured value.
+const HOST_HANDLER_BUDGET_MS = Number(process.env.COSYNCING_BRIDGE_HOST_HANDLER_BUDGET_MS ?? 30_000);
+const APPROVAL_WAIT_CEILING_MS = Number.isFinite(HOST_HANDLER_BUDGET_MS) && HOST_HANDLER_BUDGET_MS > 5_000
+  ? HOST_HANDLER_BUDGET_MS - 5_000
+  : 25_000;
+const APPROVAL_TIMEOUT_MS = Number.isFinite(CONFIGURED_APPROVAL_TIMEOUT_MS) && CONFIGURED_APPROVAL_TIMEOUT_MS > 0
+  ? Math.min(CONFIGURED_APPROVAL_TIMEOUT_MS, APPROVAL_WAIT_CEILING_MS)
+  : CONFIGURED_APPROVAL_TIMEOUT_MS;
+const APPROVAL_TIMEOUT_CAPPED = Number.isFinite(CONFIGURED_APPROVAL_TIMEOUT_MS)
+  && APPROVAL_TIMEOUT_MS !== CONFIGURED_APPROVAL_TIMEOUT_MS;
+// The question window the host does not bound. Unchanged from before the cap.
+const ASK_USER_TIMEOUT_MS = CONFIGURED_APPROVAL_TIMEOUT_MS;
+// A `session_shutdown` handler gets its OWN budget, far smaller than the
+// tool_call gate's above and not configurable from this side: the host prints
+// `handler timed out after 2000ms` and moves on. This handler used to await an
+// unbounded flush and then an unbounded `/pi/bridge/bye`, so under broker load
+// every reviewed OMP exit -- parent, native child and approval run -- printed
+// that timeout, and the shutdown REASON that tells the broker a reload from a
+// quit could be lost with it. Losing it silently downgrades an explicit
+// handover to disconnect-and-grace cleanup.
+const SHUTDOWN_BUDGET_MS = Number(process.env.COSYNCING_BRIDGE_SHUTDOWN_BUDGET_MS ?? 2_000);
+// Returned to the host rather than spent, so the handler resolves INSIDE the
+// budget instead of exactly on it.
+const SHUTDOWN_SAFETY_MS = 250;
+// Reserved for `bye` before the flush may have the rest. `bye` carries the
+// ownership boundary and cannot be reconstructed; buffered events can, from the
+// native transcript on the next replay. So the transcript yields to it.
+const SHUTDOWN_BYE_RESERVE_MS = 600;
 const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const COLLAB_PROMPT_TYPE = 'collab-prompt';
+const SKILL_PROMPT_TYPE = 'skill-prompt';
+const REMOTE_USER_KEY_PREFIX = 'u:remote:';
+const RPC_PROMPT_COMMAND = '__cosyncing_rpc_prompt';
+
+function boundedString(value: unknown, max = 256): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text && text.length <= max ? text : undefined;
+}
+
+/** Exact, durable app-prompt carrier. Requiring every provenance field prevents an unrelated
+ *  extension/custom row from claiming an app optimistic identity. */
+function collabPromptCorrelation(message: any): { messageKey: string; clientKey?: string; sentAt: number } | undefined {
+  // OMP preserves attribution; Pi 0.78.1 drops it while retaining the exact extension details.
+  // Reject an explicit non-user attribution, but accept its known legacy omission.
+  if (
+    message?.customType !== COLLAB_PROMPT_TYPE
+    || (message?.attribution !== undefined && message.attribution !== 'user')
+  ) return undefined;
+  const details = message?.details;
+  if (!details || typeof details !== 'object' || details.from !== 'cosyncing') return undefined;
+  const messageKey = boundedString(details.messageKey);
+  if (!messageKey?.startsWith(REMOTE_USER_KEY_PREFIX)) return undefined;
+  const clientKey = details.clientKey == null ? undefined : boundedString(details.clientKey);
+  if (details.clientKey != null && !clientKey) return undefined;
+  const sentAt = timeMs(details.sentAt);
+  if (sentAt === undefined) return undefined;
+  return { messageKey, ...(clientKey ? { clientKey } : {}), sentAt };
+}
+
+/** Compact transcript identity for the native expanded skill envelope. Never mirror the expanded
+ *  skill body into the user bubble: the invocation is the user's action, while the body is injected
+ *  model context. */
+function skillPromptInvocation(message: any): { text: string; sentAt?: number } | undefined {
+  if (
+    message?.customType !== SKILL_PROMPT_TYPE
+    || message?.display !== true
+    || (message?.attribution !== undefined && message.attribution !== 'user')
+  ) return undefined;
+  const details = message?.details;
+  if (!details || typeof details !== 'object') return undefined;
+  const name = boundedString(details.name, 128);
+  const path = boundedString(details.path, 4096);
+  const args = details.args == null ? undefined : boundedString(details.args, 4096);
+  // Cosyncing-injected skills carry a durable details clock; terminal-native skill prompts do not.
+  const sentAt = timeMs(details.sentAt) ?? timeMs(message.timestamp);
+  if (
+    !name
+    || !/^[A-Za-z0-9._:-]+$/.test(name)
+    || !path
+    || !isAbsolute(path)
+    || (details.args != null && !args)
+    || !Number.isInteger(details.lineCount)
+    || details.lineCount < 0
+    || details.lineCount > 1_000_000
+  ) return undefined;
+  return {
+    text: `/skill:${name}${args ? ` ${args}` : ''}`,
+    ...(sentAt !== undefined ? { sentAt } : {}),
+  };
+}
 
 function timeMs(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
@@ -47,8 +159,83 @@ function timeMs(value: unknown): number | undefined {
   return undefined;
 }
 
+/** Preserve Pi's native context snapshot without deriving it from cumulative session totals. */
+function contextUsageEvent(ctx: any): { t: 'context-usage'; value: { tokens: number; contextWindow: number } } | undefined {
+  let value: any;
+  try {
+    value = ctx?.getContextUsage?.();
+  } catch {
+    return undefined;
+  }
+  const tokens = value?.tokens;
+  const contextWindow = value?.contextWindow;
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) return undefined;
+  if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+  return { t: 'context-usage', value: { tokens, contextWindow } };
+}
+
 export default function (pi: ExtensionAPI) {
-  if (process.env.COSYNCING_NO_BRIDGE) return; // broker-owned pi → stay dormant (no self-bridge)
+  if (process.env.COSYNCING_NO_BRIDGE) {
+    // Native RPC accepts only a plain prompt string, which cannot persist the app's correlation.
+    // Register one broker-child-only transport command that injects the same durable custom row as
+    // the live bridge. It never appears in a user's terminal session, and the adapter filters it
+    // from the broker-owned child's command palette.
+    pi.registerCommand(RPC_PROMPT_COMMAND, {
+      handler: async (args: string, ctx: { isIdle(): boolean }) => {
+        if (!args || args.length > 24 * 1024 * 1024 || !/^[A-Za-z0-9_-]+$/.test(args)) {
+          throw new Error('Cosyncing RPC prompt payload is invalid.');
+        }
+        let payload: any;
+        try {
+          payload = JSON.parse(Buffer.from(args, 'base64url').toString('utf8'));
+        } catch {
+          throw new Error('Cosyncing RPC prompt payload is invalid.');
+        }
+        const text = typeof payload?.text === 'string' && payload.text.length <= 8 * 1024 * 1024
+          ? payload.text
+          : undefined;
+        const messageKey = boundedString(payload?.messageKey);
+        const clientKey = payload?.clientKey == null ? undefined : boundedString(payload.clientKey);
+        const sentAt = timeMs(payload?.sentAt);
+        const rawImages = Array.isArray(payload?.images) ? payload.images : [];
+        const images = rawImages.map((image: any) => ({
+          type: 'image' as const,
+          data: typeof image?.data === 'string' ? image.data : '',
+          mimeType: typeof image?.mimeType === 'string' ? image.mimeType : '',
+        }));
+        if (
+          text === undefined
+          || (!text.trim() && images.length === 0)
+          || !messageKey?.startsWith(REMOTE_USER_KEY_PREFIX)
+          || (payload?.clientKey != null && !clientKey)
+          || sentAt === undefined
+          || images.length > 16
+          || images.some((image: any) => !image.data || !/^image\/[A-Za-z0-9.+-]+$/.test(image.mimeType))
+        ) {
+          throw new Error('Cosyncing RPC prompt payload is invalid.');
+        }
+        const content = images.length
+          ? [...(text ? [{ type: 'text' as const, text }] : []), ...images]
+          : text;
+        pi.sendMessage({
+          customType: COLLAB_PROMPT_TYPE,
+          content,
+          display: true,
+          attribution: 'user',
+          details: {
+            from: 'cosyncing',
+            messageKey,
+            sentAt,
+            ...(clientKey ? { clientKey } : {}),
+          },
+        }, {
+          triggerTurn: true,
+          ...(ctx.isIdle() ? {} : { deliverAs: 'steer' as const }),
+        });
+      },
+    });
+    return; // broker-owned child: no self-bridge
+  }
 
   let id: string | undefined; // bridge session id (broker-assigned; base64url of the session file)
   let alive = false;
@@ -79,6 +266,7 @@ export default function (pi: ExtensionAPI) {
   let agentStartAt: number | undefined;
   /** Usage summed across the OPEN TURN's message_ends, reported on that turn's summary. */
   let currentRunTokens: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined;
+  let retryActive = false;
   let lastUserMessageKey: string | undefined;
   // Per-user-message key counter. Pi's UserMessage has NO id field (message_start emits a bare
   // Message), so we mint a stable `u<n>` key ourselves — without it the app can't dedupe a user
@@ -89,6 +277,10 @@ export default function (pi: ExtensionAPI) {
   let lastCtx: any; // most recent handler ctx — used to abort from the (ctx-less) poll loop
   const buf: any[] = []; // outbound event batch
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Preserve native event order across batches. Without a chain, a timer flush
+   *  and a size-triggered flush can POST concurrently, letting a later terminal
+   *  summary reach the broker before the earlier running summary. */
+  let flushChain: Promise<void> = Promise.resolve();
   // Tool-call args by callId — Pi's tool_execution_end carries no args, but the broker needs them to
   // recover the edited file's path for the canonical tool-result `path` chip. Cached at start, read
   // (and cleared) at end. See enrichPiToolResult in
@@ -124,17 +316,46 @@ export default function (pi: ExtensionAPI) {
     return isBusyNow() ? 'steer' : undefined;
   };
 
-  const injectUserMessage = async (text: string, requestedDeliverAs?: string): Promise<void> => {
+  const injectUserMessage = async (
+    text: string,
+    messageKey: unknown,
+    clientKey: unknown,
+    sentAt: unknown,
+    requestedDeliverAs?: string,
+  ): Promise<void> => {
+    const durableMessageKey = boundedString(messageKey);
+    const durableClientKey = clientKey == null ? undefined : boundedString(clientKey);
+    const durableSentAt = timeMs(sentAt);
+    if (
+      !durableMessageKey?.startsWith(REMOTE_USER_KEY_PREFIX)
+      || (clientKey != null && !durableClientKey)
+      || durableSentAt === undefined
+    ) {
+      emit({ t: 'error', message: 'Remote input was rejected: missing or invalid durable correlation.' });
+      return;
+    }
     const deliverAs = normalizeDeliverAs(requestedDeliverAs);
+    const message = {
+      customType: COLLAB_PROMPT_TYPE,
+      content: text,
+      display: true,
+      attribution: 'user' as const,
+      details: {
+        from: 'cosyncing',
+        messageKey: durableMessageKey,
+        sentAt: durableSentAt,
+        ...(durableClientKey ? { clientKey: durableClientKey } : {}),
+      },
+    };
     try {
-      await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+      pi.sendMessage(message, { triggerTurn: true, ...(deliverAs ? { deliverAs } : {}) });
       return;
     } catch (first) {
       // Pi throws if the agent started streaming after the broker queued the command but before this
       // extension injected it. Retry once using Pi's streaming-safe path, then make failure visible.
       if (!deliverAs) {
         try {
-          await pi.sendUserMessage(text, { deliverAs: 'steer' });
+          pi.sendMessage(message, { triggerTurn: true, deliverAs: 'steer' });
           return;
         } catch (second) {
           emit({ t: 'error', message: `Remote input was not delivered: ${oneLine(second)}` });
@@ -142,6 +363,74 @@ export default function (pi: ExtensionAPI) {
         }
       }
       emit({ t: 'error', message: `Remote input was not delivered: ${oneLine(first)}` });
+    }
+  };
+
+  /** Expand only a skill the native resource loader already admitted and the bridge advertised.
+   *  OMP's sendUserMessage deliberately sets expandPromptTemplates:false, so forwarding `/skill:*`
+   *  literally would send the command token to the model. Reproduce OMP's native skill-prompt
+   *  envelope instead; unmeasured prompt templates remain unadvertised. */
+  const injectSkillCommand = async (name: string, args: string, requestedDeliverAs?: string): Promise<void> => {
+    const skillName = name.startsWith('skill:') ? name.slice('skill:'.length) : '';
+    const skills = availableSkills(lastCtx);
+    const skill = skillName ? skills.find((candidate) => candidate?.name === skillName) : undefined;
+    if (!skill || typeof skill.filePath !== 'string' || typeof skill.baseDir !== 'string') {
+      emit({ t: 'error', message: `Remote command was not delivered: skill /${name} is unavailable.` });
+      return;
+    }
+    let body: string;
+    try {
+      // This asset is loaded in-process by BOTH hosts, and they do not share a runtime: omp is
+      // `#!/usr/bin/env bun`, but Pi is `#!/usr/bin/env node` with `engines.node >= 22.19.0`.
+      // `Bun.file` is therefore undefined under Pi; the ReferenceError was caught two lines below
+      // and surfaced as "Remote command was not delivered: Bun is not defined", so every
+      // app-invoked skill command failed there. `node:fs` is already imported and works on both.
+      body = readFileSync(skill.filePath, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+    } catch (error) {
+      emit({ t: 'error', message: `Remote command was not delivered: ${oneLine(error)}` });
+      return;
+    }
+    const trimmedArgs = args.trim();
+    const content = [
+      `[IMPORTANT: User invoked the "${skillName}" skill; follow its instructions. Full skill below.]`,
+      '',
+      body,
+      '',
+      '---',
+      '',
+      `[Skill directory: ${skill.baseDir}]`,
+      'Resolve relative paths in this skill (e.g. `scripts/foo.js`, `templates/config.yaml`) against this absolute directory; read referenced assets and templates; run scripts with the terminal tool when skill instructions call for it.',
+      ...(trimmedArgs ? [`User: ${trimmedArgs}`] : []),
+    ].join('\n').trim();
+    const deliverAs = normalizeDeliverAs(requestedDeliverAs);
+    const invocationSentAt = Date.now();
+    const message = {
+      customType: SKILL_PROMPT_TYPE,
+      content,
+      display: true,
+      attribution: 'user',
+      details: {
+        name: skillName,
+        path: skill.filePath,
+        ...(trimmedArgs ? { args: trimmedArgs } : {}),
+        lineCount: body ? body.split('\n').length : 0,
+        sentAt: invocationSentAt,
+      },
+    };
+    try {
+      pi.sendMessage(message, { triggerTurn: true, ...(deliverAs ? { deliverAs } : {}) });
+      return;
+    } catch (first) {
+      if (!deliverAs) {
+        try {
+          pi.sendMessage(message, { triggerTurn: true, deliverAs: 'steer' });
+          return;
+        } catch (second) {
+          emit({ t: 'error', message: `Remote command was not delivered: ${oneLine(second)}` });
+          return;
+        }
+      }
+      emit({ t: 'error', message: `Remote command was not delivered: ${oneLine(first)}` });
     }
   };
 
@@ -165,6 +454,7 @@ export default function (pi: ExtensionAPI) {
       modelID: String(model.id),
       label: String(model.name ?? model.id),
       reasoning: model.reasoning === true,
+      thinking: model.thinking && typeof model.thinking === 'object' ? model.thinking : undefined,
       thinkingLevelMap: model.thinkingLevelMap && typeof model.thinkingLevelMap === 'object' ? model.thinkingLevelMap : undefined,
       ...(thinkingLevel ? { reasoningEffort: thinkingLevel } : {}),
     };
@@ -203,14 +493,40 @@ export default function (pi: ExtensionAPI) {
     relayModelState(ctx ? { ...ctx, model } : { model });
   };
 
-  const post = async (path: string, body: unknown): Promise<any> => {
+  /** `timeoutMs` aborts the request itself. Only the shutdown path sets it: every
+   *  other caller is free to wait, and capping them would turn a slow broker
+   *  into dropped transcript. An AbortController rather than
+   *  `AbortSignal.timeout` because this runs inside a foreign extension host. */
+  const post = async (path: string, body: unknown, timeoutMs?: number): Promise<any> => {
+    const controller = timeoutMs !== undefined && timeoutMs > 0 ? new AbortController() : undefined;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
     try {
       const r = await fetch(`${BROKER}${path}`, {
         method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
+        ...(controller ? { signal: controller.signal } : {}),
       });
       return r.ok ? await r.json().catch(() => ({})) : undefined;
     } catch {
       return undefined; // broker down → drop (the session keeps working locally)
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  /** Wait for `work`, but never past `ms`. Resolves true only if the work won.
+   *  The loser is ABANDONED, not cancelled: the point is to stop this handler
+   *  overrunning the host's budget, and every `post` already swallows its own
+   *  failures, so nothing here can surface as an unhandled rejection. */
+  const waitAtMost = async (work: Promise<unknown>, ms: number): Promise<boolean> => {
+    if (!(ms > 0)) return false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work.then(() => true, () => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), ms); }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 
@@ -224,8 +540,12 @@ export default function (pi: ExtensionAPI) {
   const flush = async (): Promise<void> => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
     if (!id || !buf.length) return;
+    const flushId = id;
     const events = buf.splice(0, buf.length);
-    await post('/pi/bridge/events', { id, events });
+    flushChain = flushChain.then(async () => {
+      await post('/pi/bridge/events', { id: flushId, events });
+    });
+    await flushChain;
   };
 
   // ── inbound: long-poll the broker for commands and act on them ──
@@ -250,13 +570,9 @@ export default function (pi: ExtensionAPI) {
       for (const c of commands) {
         try {
           if (c.kind === 'prompt' && c.text) {
-            await injectUserMessage(c.text, c.deliverAs);
+            await injectUserMessage(c.text, c.messageKey, c.clientKey, c.sentAt, c.deliverAs);
           } else if (c.kind === 'command' && c.name) {
-            // A user template (/name) or skill (/skill:name): Pi expands these from a normal user
-            // message, so we inject '/name args' the same way the resume adapter's runCommand does.
-            // (Built-in TUI commands like /compact aren't promptable → stay terminal-only for now.)
-            const line = '/' + c.name + (c.args ? ' ' + c.args : '');
-            await injectUserMessage(line, c.deliverAs);
+            await injectSkillCommand(String(c.name), String(c.args ?? ''), c.deliverAs);
           } else if (c.kind === 'abort') {
             lastCtx?.abort?.();
           } else if (c.kind === 'permission' && c.requestId) {
@@ -388,7 +704,7 @@ export default function (pi: ExtensionAPI) {
         resolve(answers);
       };
       const onAbort = () => finish(null);
-      if (APPROVAL_TIMEOUT_MS > 0) timeout = setTimeout(() => finish(null), APPROVAL_TIMEOUT_MS);
+      if (ASK_USER_TIMEOUT_MS > 0) timeout = setTimeout(() => finish(null), ASK_USER_TIMEOUT_MS);
       ctx?.signal?.addEventListener?.('abort', onAbort, { once: true });
       if (mirrorToApp) {
         pendingQuestions.set(requestId, { resolve: (answers) => finish(answers), cleanup });
@@ -413,25 +729,43 @@ export default function (pi: ExtensionAPI) {
     });
   };
 
-  const requestPermission = (event: any, ctx: any, scope: string): Promise<boolean> => {
+  // `expired` is kept distinct from `reject` so the blocked tool can say the
+  // approval was never answered rather than claim someone denied it.
+  const requestPermission = (event: any, ctx: any, scope: string): Promise<'approve' | 'reject' | 'expired'> => {
     const requestId = `ca-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    return new Promise<boolean>((resolve) => {
+    return new Promise<'approve' | 'reject' | 'expired'>((resolve) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
         if (timeout) clearTimeout(timeout);
         ctx?.signal?.removeEventListener?.('abort', onAbort);
       };
-      const finish = (ok: boolean) => {
+      const finish = (verdict: 'approve' | 'reject' | 'expired') => {
         if (!pendingPermissions.has(requestId)) return;
         pendingPermissions.delete(requestId);
         cleanup();
-        emit({ t: 'permission-resolved', requestId, decision: ok ? 'approve' : 'reject' });
-        resolve(ok);
+        // An expiry is not a rejection, and the card the human looks at should
+        // not say it was. `reject` renders as "Rejected" against a request
+        // nobody touched, and the cap makes that a 25-second wait rather than a
+        // five-minute one. `external` is the existing wire value for "settled,
+        // but not by you, and no user choice is being reported" -- which is
+        // exactly what a timeout is. The tool result carries the specifics.
+        emit({
+          t: 'permission-resolved',
+          requestId,
+          decision: verdict === 'approve' ? 'approve' : verdict === 'expired' ? 'external' : 'reject',
+        });
+        resolve(verdict);
       };
-      const onAbort = () => finish(false);
-      if (APPROVAL_TIMEOUT_MS > 0) timeout = setTimeout(() => finish(false), APPROVAL_TIMEOUT_MS);
+      const onAbort = () => finish('reject');
+      if (APPROVAL_TIMEOUT_MS > 0) timeout = setTimeout(() => finish('expired'), APPROVAL_TIMEOUT_MS);
       ctx?.signal?.addEventListener?.('abort', onAbort, { once: true });
-      pendingPermissions.set(requestId, { resolve, cleanup, scope });
+      // `resolvePermission` deletes the entry before calling this, so it must
+      // resolve directly rather than route back through the membership check.
+      pendingPermissions.set(requestId, {
+        resolve: (ok: boolean) => resolve(ok ? 'approve' : 'reject'),
+        cleanup,
+        scope,
+      });
       emit({
         t: 'permission-request',
         requestId,
@@ -456,8 +790,11 @@ export default function (pi: ExtensionAPI) {
     userKeySeq = countUserMessages(ctx); // continue user keys above the backfilled history's u0..u(k-1)
     const thinkingLevel = currentThinkingLevel();
     const model = (ctx as any).model;
+    const nativeId = ctx.sessionManager.getSessionId?.();
     const res = await post('/pi/bridge/hello', {
       sessionFile,
+      ...(nativeId ? { nativeId } : {}),
+      /*__COSYNCING_NATIVE_VERSION_PAYLOAD__*/
       cwd: ctx.cwd,
       title: sessionFile.split('/').pop(),
       model: modelPayload(model, thinkingLevel),
@@ -465,7 +802,7 @@ export default function (pi: ExtensionAPI) {
       models: modelCatalog(ctx),
       // Backfill the conversation so far — without this the app shows only events relayed AFTER
       // attach (a freshly-opened phone saw a blank session). Mapped to the same wire shapes as live.
-      history: buildHistory(ctx),
+      history: [...buildHistory(ctx), ...([contextUsageEvent(ctx)].filter(Boolean))],
       // The user's skills/templates so the palette isn't just /stop (best-effort; see buildCommands).
       commands: buildCommands(ctx),
     });
@@ -543,8 +880,18 @@ export default function (pi: ExtensionAPI) {
     lastCtx = ctx;
     const scope = approvalScope(event);
     if (!shouldRequestApproval(event) || !id || approvedScopes.has(scope)) return undefined;
-    const ok = await requestPermission(event, ctx, scope);
-    if (!ok) return { block: true, reason: 'Denied from cosyncing' };
+    const verdict = await requestPermission(event, ctx, scope);
+    if (verdict === 'expired') {
+      return {
+        block: true,
+        reason: `No cosyncing approval arrived within ${Math.round(APPROVAL_TIMEOUT_MS / 1000)}s`
+          + (APPROVAL_TIMEOUT_CAPPED
+            ? `, the most this extension host allows to be waited for (its handler budget is ${HOST_HANDLER_BUDGET_MS / 1000}s, so the configured ${Math.round(CONFIGURED_APPROVAL_TIMEOUT_MS / 1000)}s cannot be honoured)`
+            : '')
+          + '. Nobody denied this; approve it in cosyncing and ask again.',
+      };
+    }
+    if (verdict !== 'approve') return { block: true, reason: 'Denied from cosyncing' };
     return undefined;
   });
 
@@ -553,12 +900,29 @@ export default function (pi: ExtensionAPI) {
     alive = false;
     for (const requestId of [...pendingPermissions.keys()]) resolvePermission(requestId, 'reject');
     for (const requestId of [...pendingQuestions.keys()]) resolveQuestion(requestId, null);
-    await flush();
+    // Budgeted from here on. The flush gets whatever is left after `bye`'s
+    // reserve, and losing the race abandons the wait rather than the events --
+    // they stay queued and the native transcript still holds them.
+    const endBy = Date.now() + Math.max(SHUTDOWN_BUDGET_MS - SHUTDOWN_SAFETY_MS, 0);
+    await waitAtMost(flush(), endBy - Date.now() - SHUTDOWN_BYE_RESERVE_MS);
     // Relay Pi's shutdown reason ('quit'|'reload'|'new'|'resume'|'fork') so the broker can tell a
     // reload (the SAME session re-hellos in a moment → keep the attached phone) apart from a genuine
     // quit / session replacement (tear down + send the phone a clean `ended` frame). See
     // packages/typescript/pi-engine/src/bridge.ts (PiBridgeRegistry.bye) and SessionShutdownEvent in Pi's types.
-    if (id) await post('/pi/bridge/bye', { id, reason: event?.reason });
+    //
+    // Sent even when the flush ran out of time, and with the whole remaining
+    // budget, because this is the call whose loss actually changes broker
+    // behaviour. `Math.max` keeps it a real attempt if the flush overran. The
+    // payload is unchanged: the broker reads `id` and `reason` and ignores the
+    // rest, so reporting a partial flush here would be a field nobody acts on.
+    if (id) {
+      const byeBudget = Math.max(endBy - Date.now(), SHUTDOWN_BYE_RESERVE_MS);
+      // Belt and braces. The abort releases the socket, but this handler's own
+      // deadline must not DEPEND on the host's fetch honouring a signal: an
+      // implementation that ignores it would put us straight back to overrunning
+      // the budget, which is the failure being fixed.
+      await waitAtMost(post('/pi/bridge/bye', { id, reason: event?.reason }, byeBudget), byeBudget);
+    }
     id = undefined;
   });
 
@@ -575,6 +939,7 @@ export default function (pi: ExtensionAPI) {
     currentRun = undefined;
     const tokens = currentRunTokens;
     currentRunTokens = undefined;
+    retryActive = false;
     if (!run) return;
     let last = run.lastAssistant;
     // Assistant streaming without a message_end (degraded stream) still earns the summary;
@@ -640,10 +1005,20 @@ export default function (pi: ExtensionAPI) {
   pi.on('agent_end', (event: any, ctx: any) => {
     lastCtx = ctx;
     toolArgs.clear(); // drop args of any uncompleted tool call
+    if (event?.willContinue === true || event?.isTerminal === false || retryActive) {
+      // OMP's ExtensionAPI declares `willContinue`; the RPC dialect declares
+      // `isTerminal`. Either nonterminal boundary ends only an attempt, never
+      // the native user turn.
+      emit({ t: 'status', running: true });
+      return;
+    }
     // Whatever turn is still open closes at the run's end clock — a stream with no terminal
     // stopReason evidence (abort) or none of the message_* events at all (degraded).
     closeLiveTurn(timeMs(event?.timestamp) ?? Date.now());
+    retryActive = false;
     agentStartAt = undefined;
+    const contextUsage = contextUsageEvent(ctx);
+    if (contextUsage) emit(contextUsage);
     emit({ t: 'status', running: false });
   });
   pi.on('turn_start', (event: any, ctx: any) => {
@@ -659,15 +1034,26 @@ export default function (pi: ExtensionAPI) {
     // for one user bubble. before_agent_start fires only ONCE per run, so queued prompts produced no
     // bubble; message_start fires per user message (the broker dedupes our optimistic echo by text).
     const m = event?.message;
-    if (m?.role !== 'user') return;
-    const text = contentText(m?.content);
+    const correlation = m?.role === 'custom' ? collabPromptCorrelation(m) : undefined;
+    const skill = m?.role === 'custom' ? skillPromptInvocation(m) : undefined;
+    if (m?.role !== 'user' && !correlation && !skill) return;
+    const text = skill?.text ?? contentText(m?.content);
+    const imageCount = contentImageCount(m?.content);
     // Mint a stable per-message key (Pi gives none) so the broker/app dedupe this against the
     // in-window history copy and across reattaches — parity with OpenCode's keyed user-messages.
     // The ordinal advances for EVERY user message (buildHistory does the same), so live keys and
     // the next backfill's keys stay in one space even across empty-content messages.
-    const key = `u${userKeySeq++}`;
+    const ordinalKey = `u${userKeySeq++}`;
+    const key = correlation?.messageKey ?? ordinalKey;
     lastUserMessageKey = key;
-    if (text) emit({ t: 'user', text, key, sentAt: timeMs(m.timestamp ?? event?.timestamp) ?? Date.now() });
+    if (text || imageCount > 0) emit({
+      t: 'user',
+      text,
+      key,
+      ...(correlation?.clientKey ? { clientKey: correlation.clientKey } : {}),
+      ...(imageCount ? { imageCount } : {}),
+      sentAt: correlation?.sentAt ?? skill?.sentAt ?? timeMs(m.timestamp ?? event?.timestamp) ?? Date.now(),
+    });
     // A user message ENTERING the conversation is the user-turn boundary, exactly as its entry
     // is for buildHistory: it closes the previous turn and opens its own. One summary per RUN
     // instead left a single row spanning every queued steer/follow-up turn, so summary count,
@@ -677,7 +1063,7 @@ export default function (pi: ExtensionAPI) {
       key: `pi:run:${key}`,
       turnId: key,
       userMessageKey: key,
-      startedAt: timeMs(m?.timestamp ?? event?.timestamp) ?? Date.now(),
+      startedAt: correlation?.sentAt ?? skill?.sentAt ?? timeMs(m?.timestamp ?? event?.timestamp) ?? Date.now(),
     };
     emit({ t: 'run-summary', key: currentRun.key, turnId: key, userMessageKey: key, startedAt: currentRun.startedAt, status: 'running', source: 'pi-bridge' });
   });
@@ -734,9 +1120,53 @@ export default function (pi: ExtensionAPI) {
         errored: !!m.error,
         completedAt: timeMs(event?.timestamp) ?? Date.now(),
       };
-      if (m.stopReason === 'stop' || m.stopReason === 'aborted' || m.stopReason === 'error' || !!m.error) {
+      if (m.stopReason === 'stop' || m.stopReason === 'aborted') {
         closeLiveTurn();
       }
+    }
+  });
+
+  pi.on('auto_retry_start', (event: any, ctx: any) => {
+    lastCtx = ctx;
+    ensureLiveTurn();
+    retryActive = true;
+    if (currentRun) {
+      emit({
+        t: 'run-summary',
+        key: currentRun.key,
+        turnId: currentRun.turnId,
+        userMessageKey: currentRun.userMessageKey,
+        startedAt: currentRun.startedAt,
+        status: 'running',
+        source: 'pi-bridge',
+      });
+    }
+    emit({
+      t: 'retry',
+      attempt: event?.attempt,
+      max: event?.maxAttempts,
+      message: String(event?.errorMessage ?? 'Transient API error; retrying.'),
+    });
+  });
+
+  pi.on('auto_retry_end', (event: any, ctx: any) => {
+    lastCtx = ctx;
+    const wasRetryActive = retryActive;
+    retryActive = false;
+    if (event?.success === false) {
+      ensureLiveTurn();
+      const completedAt = timeMs(event?.timestamp) ?? Date.now();
+      const last = currentRun!.lastAssistant;
+      if (last) {
+        last.stopReason = 'error';
+        last.errored = true;
+      } else {
+        currentRun!.lastAssistant = { stopReason: 'error', errored: true, completedAt };
+      }
+      emit({ t: 'error', message: String(event?.finalError ?? 'API retry gave up.') });
+      closeLiveTurn(completedAt);
+    } else if (wasRetryActive && currentRun) {
+      emit({ t: 'status', running: true });
     }
   });
 
@@ -838,6 +1268,12 @@ function contentText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((c: any) => (typeof c === 'string' ? c : c?.type === 'text' ? c.text : '')).join('');
   return '';
+}
+
+function contentImageCount(content: unknown): number {
+  return Array.isArray(content)
+    ? content.filter((block: any) => block?.type === 'image').length
+    : 0;
 }
 
 function readBridgeConfig(): { approvalMode?: string; approvalTimeoutMs?: number } {
@@ -966,6 +1402,29 @@ function thinkingText(content: unknown): string {
     .join('');
 }
 
+function assistantRetryIsSuperseded(message: any): boolean {
+  const recovery = message?.retryRecovery;
+  return recovery?.kind === 'auto-retry'
+    && (recovery.status === 'superseded' || recovery.status === 'recovered');
+}
+
+/** Active-leaf authority. getEntries() includes abandoned tree branches in both current Pi and OMP;
+ *  getBranch() is the transcript the user actually sees and the model actually continues. */
+function currentBranchEntries(ctx: any): any[] {
+  try {
+    const branch = ctx?.sessionManager?.getBranch?.();
+    if (Array.isArray(branch)) return branch;
+  } catch {
+    /* older runtime: fall through to the legacy linear store */
+  }
+  try {
+    const entries = ctx?.sessionManager?.getEntries?.();
+    return Array.isArray(entries) ? entries : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Map the session's stored entries to bridge wire events for history backfill. Pi entries are
  *  `{type:'message', id, message:{role:'user'|'assistant'|'toolResult', content:[…]}}`; content
  *  parts are `{type:'text'|'thinking'|'toolCall', …}`. Keyed by entry id so the app renders distinct
@@ -973,11 +1432,7 @@ function thinkingText(content: unknown): string {
 /** How many entries the session already has — used to seed the turn-key namespace above prior turns
  *  so a reload can't reuse a key the still-attached phone has already rendered (see session_start). */
 function entryCount(ctx: any): number {
-  try {
-    return (ctx?.sessionManager?.getEntries?.() ?? []).length;
-  } catch {
-    return 0;
-  }
+  return currentBranchEntries(ctx).length;
 }
 
 /** How many user messages the session already has — seeds the live user-key counter so it
@@ -987,22 +1442,15 @@ function entryCount(ctx: any): number {
  *  backfill gives the same turn. */
 function countUserMessages(ctx: any): number {
   let n = 0;
-  try {
-    for (const e of ctx?.sessionManager?.getEntries?.() ?? [])
-      if (e?.type === 'message' && e.message?.role === 'user') n++;
-  } catch {
-    /* getEntries unavailable → 0 (fresh session) */
+  for (const e of currentBranchEntries(ctx)) {
+    if (e?.type === 'message' && e.message?.role === 'user') n++;
+    else if (e?.type === 'custom_message' && (collabPromptCorrelation(e) || skillPromptInvocation(e))) n++;
   }
   return n;
 }
 
 function buildHistory(ctx: any): any[] {
-  let entries: any[] = [];
-  try {
-    entries = ctx?.sessionManager?.getEntries?.() ?? [];
-  } catch {
-    return [];
-  }
+  const entries = currentBranchEntries(ctx);
   // Tool-call args by id (a toolResult's file path lives on the originating call) — same recovery the
   // live relay does via toolArgs, but resolved here across the stored entries.
   const histArgs = new Map<string, any>();
@@ -1010,6 +1458,20 @@ function buildHistory(ctx: any): any[] {
     if (e?.type === 'message' && e.message?.role === 'assistant' && Array.isArray(e.message.content))
       for (const p of e.message.content)
         if (p?.type === 'toolCall' && p.id != null) histArgs.set(String(p.id), p.arguments);
+  // Validate uniqueness over the WHOLE snapshot before assigning an optimistic identity. If a
+  // rewritten/forged transcript duplicates either identity, both physical rows fall back to their
+  // distinct native entry ids and neither receives a clientKey.
+  const correlationCounts = new Map<string, number>();
+  const clientKeyCounts = new Map<string, number>();
+  for (const e of entries) {
+    if (e?.type !== 'custom_message') continue;
+    const correlation = collabPromptCorrelation(e);
+    if (!correlation) continue;
+    correlationCounts.set(correlation.messageKey, (correlationCounts.get(correlation.messageKey) ?? 0) + 1);
+    if (correlation.clientKey) {
+      clientKeyCounts.set(correlation.clientKey, (clientKeyCounts.get(correlation.clientKey) ?? 0) + 1);
+    }
+  }
   const out: any[] = [];
   let i = 0;
   let u = 0; // user-message ordinal → `u0,u1,…`; live message_start continues this space (userKeySeq)
@@ -1071,16 +1533,45 @@ function buildHistory(ctx: any): any[] {
     }
   };
   for (const e of entries) {
+    const key = String(e.id ?? `h${i++}`);
+    if (e?.type === 'custom_message') {
+      const correlation = collabPromptCorrelation(e);
+      const skill = skillPromptInvocation(e);
+      if (!correlation && !skill) continue;
+      const ordinalKey = `u${u++}`;
+      const unique = !!correlation
+        && correlationCounts.get(correlation.messageKey) === 1
+        && (!correlation.clientKey || clientKeyCounts.get(correlation.clientKey) === 1);
+      const userKey = correlation ? (unique ? correlation.messageKey : key) : ordinalKey;
+      const sentAt = correlation?.sentAt ?? skill?.sentAt ?? timeMs(e.timestamp);
+      const text = skill?.text ?? contentText(e.content);
+      const imageCount = contentImageCount(e.content);
+      closeTurn(true);
+      if (text || imageCount > 0) out.push({
+        t: 'user',
+        text,
+        key: userKey,
+        turnId: userKey,
+        ...(unique && correlation?.clientKey ? { clientKey: correlation.clientKey } : {}),
+        ...(imageCount ? { imageCount } : {}),
+        sentAt,
+      });
+      openTurn = { userKey, startedAt: sentAt };
+      continue;
+    }
     if (e?.type !== 'message') continue;
     const m = e.message ?? {};
-    const key = String(e.id ?? `h${i++}`);
     if (m.role === 'user') {
       const text = contentText(m.content);
+      const imageCount = contentImageCount(m.content);
       const userKey = `u${u++}`;
       const sentAt = timeMs(m.timestamp ?? e.timestamp);
       // A later prompt proves the previous run ended even without a terminal stopReason.
       closeTurn(true);
-      if (text) out.push({ t: 'user', text, key: userKey, turnId: userKey, sentAt });
+      if (text || imageCount > 0) out.push({
+        t: 'user', text, key: userKey, turnId: userKey, sentAt,
+        ...(imageCount ? { imageCount } : {}),
+      });
       openTurn = { userKey, startedAt: sentAt };
     } else if (m.role === 'assistant') {
       const think = thinkingText(m.content);
@@ -1092,15 +1583,18 @@ function buildHistory(ctx: any): any[] {
           if (p?.type === 'toolCall')
             out.push({ t: 'tool-call', callId: String(p.id ?? ''), name: String(p.name ?? 'tool'), args: p.arguments });
       openTurn ??= {};
-      openTurn.last = {
-        key,
-        stopReason: typeof m.stopReason === 'string' ? m.stopReason : undefined,
-        errored: !!m.error,
-        // Entry write time only: the message's own timestamp is its request-creation
-        // time and must never stand in for completion.
-        completedAt: timeMs(e.timestamp),
-        anchor: text ? `${key}:t` : think ? `${key}:r` : undefined,
-      };
+      const supersededRetry = assistantRetryIsSuperseded(m);
+      if (!supersededRetry) {
+        openTurn.last = {
+          key,
+          stopReason: typeof m.stopReason === 'string' ? m.stopReason : undefined,
+          errored: !!m.error,
+          // Entry write time only: the message's own timestamp is its request-creation
+          // time and must never stand in for completion.
+          completedAt: timeMs(e.timestamp),
+          anchor: text ? `${key}:t` : think ? `${key}:r` : undefined,
+        };
+      }
       if (m.usage) {
         const sum = openTurn.tokens ?? {};
         for (const [field, value] of [
@@ -1114,7 +1608,8 @@ function buildHistory(ctx: any): any[] {
         }
         openTurn.tokens = sum;
       }
-      const terminal = m.stopReason === 'stop' || m.stopReason === 'aborted' || m.stopReason === 'error' || !!m.error;
+      const terminal = !supersededRetry
+        && (m.stopReason === 'stop' || m.stopReason === 'aborted' || m.stopReason === 'error' || !!m.error);
       if (terminal) closeTurn(true);
     } else if (m.role === 'toolResult') {
       const callId = String(m.toolCallId ?? m.callId ?? m.id ?? '');
@@ -1140,13 +1635,18 @@ function buildHistory(ctx: any): any[] {
  *  Empty at session_start (skills load on resources_discover), so callers relay it later too. */
 function skillCommands(ctx: any): any[] {
   const out: any[] = [];
-  try {
-    for (const s of ctx?.resourceLoader?.getSkills?.()?.skills ?? [])
-      if (s?.name) out.push({ name: `skill:${s.name}`, description: s.description ? String(s.description) : undefined, kind: 'prompt' });
-  } catch {
-    /* resourceLoader not ready / not on ctx */
-  }
+  for (const s of availableSkills(ctx))
+    if (s?.name) out.push({ name: `skill:${s.name}`, description: s.description ? String(s.description) : undefined, kind: 'prompt' });
   return dedupeCommands(out);
+}
+
+function availableSkills(ctx: any): any[] {
+  try {
+    const skills = ctx?.resourceLoader?.getSkills?.()?.skills;
+    return Array.isArray(skills) ? skills : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Best-effort skills/templates at hello time (usually empty — skills load after session_start). */
@@ -1154,15 +1654,14 @@ function buildCommands(ctx: any): any[] {
   return skillCommands(ctx);
 }
 
-/** Skills (and any prompt templates) from a before_agent_start `systemPromptOptions` — verified to
- *  carry the full skill list (27 in testing) once the first turn begins. */
+/** Skills from a before_agent_start `systemPromptOptions` — verified to carry the full skill list
+ *  once the first turn begins. Prompt templates are intentionally not advertised: ExtensionAPI has
+ *  no expanded-command action, and sendUserMessage disables their expansion. */
 function commandsFromOptions(opts: any): any[] {
   if (!opts) return [];
   const out: any[] = [];
   for (const s of Array.isArray(opts.skills) ? opts.skills : [])
     if (s?.name) out.push({ name: `skill:${s.name}`, description: s.description ? String(s.description) : undefined, kind: 'prompt' });
-  for (const p of Array.isArray(opts.prompts) ? opts.prompts : opts.commands ?? [])
-    if (p?.name) out.push({ name: String(p.name), description: p.description ? String(p.description) : undefined, kind: 'prompt' });
   return dedupeCommands(out);
 }
 

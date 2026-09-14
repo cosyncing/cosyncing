@@ -1,7 +1,9 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "fad8a6c4b37e553f0d2aa287828f9618df964fe9",
+  "acceptedBase": "21e7a4800de25394929c5e5b9e29a20b2c2143fa",
   "requiredClaimIds": [
+    "broker.acp-client",
+    "broker.adapter-capability-contract",
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
     "broker.agent-create-readiness",
@@ -26,6 +28,14 @@
     "broker.claude-roster-subagents",
     "broker.claude-transcript",
     "broker.cli-package-boundary",
+    "broker.cline-diagnostics",
+    "broker.cline-drive",
+    "broker.cline-hub",
+    "broker.cline-mapping",
+    "broker.cline-observe",
+    "broker.cline-owner-port-refusal",
+    "broker.cline-registration-gate",
+    "broker.cline-store",
     "broker.codex-loaded-watch",
     "broker.codex-loaded-watch-unknown",
     "broker.codex-permissions",
@@ -55,9 +65,23 @@
     "broker.echo-correlation",
     "broker.fatal-startup-exit",
     "broker.fork-agent-owned",
+    "broker.grok-cross-client-join",
+    "broker.grok-diagnostics",
+    "broker.grok-drive",
+    "broker.grok-identity",
+    "broker.grok-mapping",
+    "broker.grok-observe",
+    "broker.grok-registration-gate",
+    "broker.grok-store",
     "broker.history-cache",
     "broker.history-paging",
     "broker.inbox-retention",
+    "broker.kilocode-diagnostics",
+    "broker.kilocode-drive",
+    "broker.kilocode-mapping",
+    "broker.kilocode-observe",
+    "broker.kilocode-registration-gate",
+    "broker.kilocode-store",
     "broker.kimi-attach-priming",
     "broker.kimi-cross-client-join",
     "broker.kimi-diagnosis",
@@ -88,15 +112,26 @@
     "broker.opencode-shim-symmetry",
     "broker.pairing",
     "broker.pi-bridge-reload",
+    "broker.pi-bridge-shutdown",
     "broker.pi-runtime-readiness",
     "broker.pi-tool-result",
     "broker.prompt-attachment-intake",
     "broker.protocol-journal",
+    "broker.reasonix-cross-client-join",
+    "broker.reasonix-drive",
+    "broker.reasonix-identity",
+    "broker.reasonix-mapping",
+    "broker.reasonix-observe",
+    "broker.reasonix-registration-gate",
+    "broker.reasonix-store",
+    "broker.reported-product-version",
     "broker.request-resolution",
     "broker.restart-identity",
     "broker.resync-serialization",
     "broker.roster-publication",
     "broker.roster-revision",
+    "broker.roster-stale-reconcile",
+    "broker.roster-sweep-cache",
     "broker.roster-window",
     "broker.service-lifecycle",
     "broker.session-truth-conformance",
@@ -147,7 +182,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:3f97d10a6d2922395986da936abd4e40b6cbbd0ca745c1cfdbda17097c7f2277"
+      "fingerprint": "sha256:f4d4e2549efb565a2d093aac1ebd93352bfd88e14ed9f748caa532629b05f50c"
     },
     {
       "id": "capabilities",
@@ -272,6 +307,14 @@
   ],
   "requiredBrokerSubSuiteBindings": [
     {
+      "id": "acp-client",
+      "fingerprint": "sha256:e7b0c7bac62e9424059dfc34c5e17721cfad2c4e8a784dc1b1db8063793f9b29"
+    },
+    {
+      "id": "adapter-capability-contract",
+      "fingerprint": "sha256:c6864389362c6877c8cf56c35f49cecc79192e8891a8dece0e348e97bc57f058"
+    },
+    {
       "id": "adapter-discovery-bounds",
       "fingerprint": "sha256:148836c12a57ba0663024e7213c6aeb86e3104ceb2c901fd74bbc29ccc68fdd5"
     },
@@ -336,6 +379,14 @@
       "fingerprint": "sha256:d322c0936555398f2e0102865a54ac0206f8ebba5506f85f90c22711c3a9dbd1"
     },
     {
+      "id": "broker-roster-stale-reconcile",
+      "fingerprint": "sha256:a1b918e8ac08b2b86bb6362983e3fe47c45610980b5dc7cfc04aed596349f29b"
+    },
+    {
+      "id": "broker-roster-sweep-cache",
+      "fingerprint": "sha256:36c98f4c6ca966b3e6a1d1c30afb65c1e439967d2bc88b5c00fd01533b2c03ef"
+    },
+    {
       "id": "broker-surface",
       "fingerprint": "sha256:a1ad557b18ad2734a2e2e5d404fb969dda05f5459f5b33aad7f2077ab23fdacd"
     },
@@ -382,6 +433,38 @@
     {
       "id": "cli-package-boundary",
       "fingerprint": "sha256:af0d804a5c3b7317775e790dc05de844c6befecb528c86f93e8e28a25fb0cfd4"
+    },
+    {
+      "id": "cline-diagnostics",
+      "fingerprint": "sha256:4b98ca15f1d874c8dae8943dd08368159e16defd12f4a878784fa9d4ef59110f"
+    },
+    {
+      "id": "cline-drive",
+      "fingerprint": "sha256:fa5f3b71b965fbd6efa5062bd0acb4b1799fda937d5f021cb1d18bef27e95704"
+    },
+    {
+      "id": "cline-hub",
+      "fingerprint": "sha256:de6da822babd1d0c4654dea99a7ee2439fdbdaca67569024ee97e550c70e8b99"
+    },
+    {
+      "id": "cline-mapping",
+      "fingerprint": "sha256:70d9a858ed1609df110c8b4e9d0410b74d5d9a9142c8f3dfcaa84b4e54d1cc05"
+    },
+    {
+      "id": "cline-observe",
+      "fingerprint": "sha256:3abed0c902bb948afb5fee813069084cab3f2963324f83940fdb366c70f772c6"
+    },
+    {
+      "id": "cline-owner-port-refusal",
+      "fingerprint": "sha256:d0f40c250046d8ba701cb78a6537d30f0b0db9ce260adfc1a482443eed6aa688"
+    },
+    {
+      "id": "cline-registration-gate",
+      "fingerprint": "sha256:51b9262b8cec469411b848793607654d97b00936219efca6791ab82948464f68"
+    },
+    {
+      "id": "cline-store",
+      "fingerprint": "sha256:88fffa6e4f784eefbcd98f882122110e63045db53dbee9574d4833272ce4fa9b"
     },
     {
       "id": "codex-loaded-watch",
@@ -492,6 +575,38 @@
       "fingerprint": "sha256:d1e2226426efad1d7b6e50e1cd2abebb837501c068b1f724801042719f697af6"
     },
     {
+      "id": "grok-cross-client-join",
+      "fingerprint": "sha256:dc99ab80b25a93edfddf7352873e64c89d459699e5fcc1153e540d87ad62308c"
+    },
+    {
+      "id": "grok-diagnostics",
+      "fingerprint": "sha256:64311bbb04a47ffa101fdbadeef311bf53e2ea788bb181d79126f85f39197377"
+    },
+    {
+      "id": "grok-drive",
+      "fingerprint": "sha256:b0f2b1f6b07a32e40f0ac327cda2587018e9848a733d6acad55909fdc8a93d5e"
+    },
+    {
+      "id": "grok-identity",
+      "fingerprint": "sha256:701246ffc271ca36c7d38edfa329ec5f4b018e7981f4f4245dbba0a5ce20e45d"
+    },
+    {
+      "id": "grok-mapping",
+      "fingerprint": "sha256:6583ab4f4e8c7265abecfe9aaf616671a8479ed8d4d20b8325d9f75cfe7f0c88"
+    },
+    {
+      "id": "grok-observe",
+      "fingerprint": "sha256:50551c8a917ae7e286a54d1cfa67c070c2c33060d3db0e129ea9ad2733512345"
+    },
+    {
+      "id": "grok-registration-gate",
+      "fingerprint": "sha256:217265197b853e058c9c23f74f246ecb83b1f65dfc537a49afb014ac7941924b"
+    },
+    {
+      "id": "grok-store",
+      "fingerprint": "sha256:abbe59574b2a36b5e72f9ea6cf6f5f7419ff845f922531561ee221469abad5c3"
+    },
+    {
       "id": "history-capture-liveness",
       "fingerprint": "sha256:63f9112cdfbe86f018929103b40f90eb53717382be9aaa0208d525cf95d6fbcd"
     },
@@ -518,6 +633,30 @@
     {
       "id": "invocation",
       "fingerprint": "sha256:08439f8e78d26f426a67ee6f9da3a23c0962582038c1f0c6df1ec3bab09ae177"
+    },
+    {
+      "id": "kilocode-diagnostics",
+      "fingerprint": "sha256:5880ace9093dc990397890c66aa59406573246c694898c41acc9ae6dee4545f6"
+    },
+    {
+      "id": "kilocode-drive",
+      "fingerprint": "sha256:efb74402d19ae957f5829d057784ee9dfb584b0eea138dda889630aba9b68d49"
+    },
+    {
+      "id": "kilocode-mapping",
+      "fingerprint": "sha256:db6228d195ecc4617aeced44e6f3022a9f1f18c986f6f9ba17ec84d1efcc31ac"
+    },
+    {
+      "id": "kilocode-observe",
+      "fingerprint": "sha256:2c8c03f4c4b91363dfe0b79c90c97546981802209444191a54a4ead5126fa129"
+    },
+    {
+      "id": "kilocode-registration-gate",
+      "fingerprint": "sha256:475b329e42801e71f49fda46b5960718351caba3a3ba574d634f5a4191526776"
+    },
+    {
+      "id": "kilocode-store",
+      "fingerprint": "sha256:29c0927b1b1f524be65f9c358d08609c20941b5263e263578cb66443742f4b85"
     },
     {
       "id": "kimi-attach-priming",
@@ -561,7 +700,7 @@
     },
     {
       "id": "lifecycle",
-      "fingerprint": "sha256:915143d5ad7bb7fda0d5c5c4ddd1e77a191ea9dacb6326c0a0595b3db011a201"
+      "fingerprint": "sha256:c2c40f89d58a186fd82eb65f501628f277032dad9d2e68f19af594efff1635c8"
     },
     {
       "id": "live-session-coherence",
@@ -636,6 +775,10 @@
       "fingerprint": "sha256:642a3c58d6bfae5b8ebd3557caf71f2d0fbfa96cad26c51d39389df88c6e4fd1"
     },
     {
+      "id": "pi-bridge-shutdown",
+      "fingerprint": "sha256:f93d337233a1ce7954abf2b42274a7e5fc4fe2a2819aeac63ea3a2d79b94dbbd"
+    },
+    {
       "id": "pi-runtime-readiness",
       "fingerprint": "sha256:66fcfbc7b206671a99b20985fcd00d5492f61c763cb19befb24af27e82c8a81e"
     },
@@ -652,8 +795,40 @@
       "fingerprint": "sha256:b8f7bdad71ab1348c47db9af54adf59d630783a7255eae8ead3e0d1a9fed601a"
     },
     {
+      "id": "reasonix-cross-client-join",
+      "fingerprint": "sha256:a92d09c2c221587d308779299f6e0ab98848f7080acab0d72916e1ef15a1a1cf"
+    },
+    {
+      "id": "reasonix-drive",
+      "fingerprint": "sha256:7f8994ac52762328523a42a8bb369002e065815a19c707199866f9506b40366b"
+    },
+    {
+      "id": "reasonix-identity",
+      "fingerprint": "sha256:710369b6acbbd60148d38cbd4ebe39107d92b69f356a7ab905097f8fcc77b985"
+    },
+    {
+      "id": "reasonix-mapping",
+      "fingerprint": "sha256:cdd1dded674007e8b92db13ddd1b279d45bdea5182628b254bba94aba0f116c1"
+    },
+    {
+      "id": "reasonix-observe",
+      "fingerprint": "sha256:bbe19f684a256737b0d6e626083256bdb038b1e8943cb467ed9b895f02741e7d"
+    },
+    {
+      "id": "reasonix-registration-gate",
+      "fingerprint": "sha256:8da998641d226ebc94afd6841d77bbb4322a27fb72990a00634e2dcf19063c87"
+    },
+    {
+      "id": "reasonix-store",
+      "fingerprint": "sha256:817a979716100773265e080333a7e77cd3f6d048fa9c8a734755f656679ab4db"
+    },
+    {
       "id": "release-supply-chain",
       "fingerprint": "sha256:fd68f1d273adebb59b81ae32e7c46f80c3104751944de3a246e7aef90108dc54"
+    },
+    {
+      "id": "reported-product-version",
+      "fingerprint": "sha256:b718b2a0d4b0689472ddf8122e0920a07e856eb0d840be8cd75491c83b4fc805"
     },
     {
       "id": "request-resolution-hygiene",
@@ -705,7 +880,7 @@
     },
     {
       "id": "systemd-fixtures",
-      "fingerprint": "sha256:b281c83e4adb752b1f911557b4f41155e541d1a7e5947694ddc21b75d476aec2"
+      "fingerprint": "sha256:eccb90650a51faa01a7230fc29be997fb65c5aa18c63264f8ad56440039af5f9"
     },
     {
       "id": "tokdash-report",
@@ -717,7 +892,7 @@
     },
     {
       "id": "transactional-setup",
-      "fingerprint": "sha256:f762bee6452a024b2d0f523d735e56ee3a08923e996cdf2c772561bc8520b3a0"
+      "fingerprint": "sha256:0ba20388f698b07e6db127670b686303bc08665d390f80834f4debe0e2121677"
     },
     {
       "id": "typecheck",

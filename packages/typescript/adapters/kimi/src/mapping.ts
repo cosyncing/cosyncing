@@ -1951,8 +1951,6 @@ export function mapKimiSessionStatus(raw: unknown, catalog?: readonly ModelOptio
   // and the obvious repair, defaulting the picker to a mode, would have been
   // the client inventing an approval posture the host never claimed.
   const currentMode = optionalString(status.permission);
-  const planMode = optionalBoolean(status.plan_mode);
-  const swarmMode = optionalBoolean(status.swarm_mode);
   // THE ROSTER LABEL, and the decision behind it: the HOST CATALOG's
   // `display_name` is authoritative — `K2.7 Coding`, `K3-256k` — and this
   // adapter builds no product mapping to `kimi-k3`-style names. A label the
@@ -1969,29 +1967,27 @@ export function mapKimiSessionStatus(raw: unknown, catalog?: readonly ModelOptio
   // behaviour rather than being given a name nothing reported.
   const entry = model ? catalog?.find((option) => option.modelID === model) : undefined;
   // A model the LOADED catalog does not know publishes an EXPLICIT
-  // `currentModel: undefined`: the broker folds this value with Object.assign,
-  // so an omitted key would leave the previous model's label on the roster
-  // after a switch. No catalog at all (none read yet) says nothing either way.
+  // `currentModel: undefined`: the broker applies this through its strict
+  // SessionInfo patch boundary, so an omitted key would leave the previous
+  // model's label on the roster after a switch. No catalog at all (none read
+  // yet) says nothing either way.
   const clearLabel = model !== undefined && entry === undefined && catalog !== undefined && catalog.length > 0;
   const sessionInfo = {
     ...(model ? { model } : {}),
     ...(entry && model
-      ? { currentModel: { providerID: entry.providerID, modelID: model, label: entry.label } }
+      ? { currentModel: {
+          providerID: entry.providerID,
+          modelID: model,
+          label: entry.label,
+          ...(thinkingLevel ? { reasoningEffort: thinkingLevel } : {}),
+        } }
       : clearLabel ? { currentModel: undefined } : {}),
-    ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(currentMode ? { currentMode } : {}),
-    ...(planMode !== undefined ? { planMode } : {}),
-    ...(swarmMode !== undefined ? { swarmMode } : {}),
   };
   if (Object.keys(sessionInfo).length > 0) {
     out.push({ type: 'metadata-update', key: 'sessionInfo', value: sessionInfo });
   }
   return out;
-}
-
-/** A REAL boolean only: `"true"`, 1, and null are not flags this adapter forwards. */
-function optionalBoolean(value: unknown): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined;
 }
 
 // ── WebSocket event payloads ────────────────────────────────────────────────

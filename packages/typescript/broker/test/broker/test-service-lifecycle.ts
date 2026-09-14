@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 /** Durable-service acceptance: typed systemd rendering, lifecycle, rollback, ownership, and WSL. */
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -31,6 +32,7 @@ import {
   brokerServiceEnvironmentEntries,
   createServiceCommandRunner,
   parseLaunchdPrintState,
+  serviceAgentConfigurationOverrides,
   serviceAgentDataPathOverrides,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
@@ -42,6 +44,7 @@ import {
   type ServiceCommandRunner,
   type ServiceLogsRequest,
   type ServiceAgentExecutableOverrides,
+  type ServiceAgentConfigurationOverrides,
   type SystemdProviderOptions,
 } from '../../src/installation/service-manager.ts';
 import {
@@ -66,6 +69,12 @@ import {
   type SetupTransactionContext,
 } from '../../src/installation/setup-transaction.ts';
 import { createSystemdSetupAction } from '../../src/installation/service-manager.ts';
+import { CLINE_VERIFIED_VERSION } from '../../../adapters/cline/src/store.ts';
+
+/** `3.0.61` -> `3.0.62`: one patch ahead of whatever the pin currently is. */
+function bumpPatch(version: string): string {
+  return version.replace(/(\d+)(?!.*\d)/, (patch) => String(Number(patch) + 1));
+}
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -182,6 +191,7 @@ class FakeServiceProvider implements DurableServiceProvider {
 function fixtureServiceEnvironment(root: string, options: {
   agentDirectories: readonly string[];
   agentOverrides: Readonly<ServiceAgentExecutableOverrides>;
+  agentConfiguration?: Readonly<ServiceAgentConfigurationOverrides>;
   runtimePath?: string | undefined;
 }): string {
   const entries = brokerServiceEnvironmentEntries({
@@ -191,6 +201,7 @@ function fixtureServiceEnvironment(root: string, options: {
     executablePath: join(root, '.cosyncing', 'bin', 'cosyncing'),
     agentExecutableDirectories: options.agentDirectories,
     agentExecutableOverrides: options.agentOverrides,
+    agentConfigurationOverrides: options.agentConfiguration,
     webDir: join(root, 'cosyncing-web'),
     ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
   });
@@ -200,6 +211,7 @@ function fixtureServiceEnvironment(root: string, options: {
 class AgentPathServiceProvider extends FakeServiceProvider {
   agentDirectories: readonly string[] = [];
   agentOverrides: Readonly<ServiceAgentExecutableOverrides> = {};
+  agentConfiguration: Readonly<ServiceAgentConfigurationOverrides> = {};
   runtimePath: string | undefined;
 
   override expectedEnvironment(): string {
@@ -299,7 +311,7 @@ function contextFor(options: {
   systemd?: boolean;
   wsl?: boolean;
   platform?: string;
-  agentExecutables?: Partial<Record<'codex' | 'opencode' | 'pi' | 'claude', string>>;
+  agentExecutables?: Partial<Record<'codex' | 'opencode' | 'pi' | 'claude' | 'cline', string>>;
   /**
    * The BUILD the healthy loopback broker answers as. A real `/api/health` always identifies the artifact
    * serving it, and setup's post-commit check binds that to the artifact it just installed — so a fixture
@@ -460,6 +472,7 @@ class RecordingRunner implements ServiceCommandRunner {
   enabled = false;
   active: 'active' | 'inactive' | 'failed' = 'inactive';
   lingering = false;
+  failDisableNow = false;
 
   async run(
     executable: string,
@@ -473,6 +486,9 @@ class RecordingRunner implements ServiceCommandRunner {
     }
     if (command === 'is-active') {
       return { status: this.active === 'active' ? 'ok' : 'error', exitCode: this.active === 'active' ? 0 : 3, stdout: `${this.active}\n`, stderr: '' };
+    }
+    if (command === 'disable' && args.includes('--now') && this.failDisableNow) {
+      return { status: 'error', exitCode: 1, stdout: '', stderr: 'fixture disable --now failure\n' };
     }
     if (command === 'enable') this.enabled = true;
     if (command === 'disable') { this.enabled = false; if (args.includes('--now')) this.active = 'inactive'; }
@@ -501,6 +517,7 @@ class LaunchctlRunner implements ServiceCommandRunner {
   private pendingBootoutPrints = 0;
   /** Set to replace `print` stdout with something the parser must refuse to guess at. */
   printOverride?: string;
+  failBootout = false;
 
   async run(executable: string, args: readonly string[]): Promise<ServiceCommandResult> {
     this.calls.push({ executable, args: [...args] });
@@ -533,6 +550,9 @@ class LaunchctlRunner implements ServiceCommandRunner {
       return { status: 'ok', exitCode: 0, stdout: '', stderr: '' };
     }
     if (command === 'bootout') {
+      if (this.failBootout) {
+        return { status: 'error', exitCode: 1, stdout: '', stderr: 'fixture bootout failure\n' };
+      }
       if (!this.loaded) return { status: 'error', exitCode: 113, stdout: '', stderr: 'Could not find service\n' };
       if (this.bootoutPrintLag > 0) this.pendingBootoutPrints = this.bootoutPrintLag;
       else {
@@ -901,6 +921,35 @@ try {
         !/not absolute|ignoring|Unknown key|Failed to parse|fatal/i.test(diagnostics),
         diagnostics.slice(0, 220) || 'no diagnostics');
     }
+  }
+
+  {
+    const machine = join(root, 'systemd-uninstall-stop-failure');
+    const runner = new RecordingRunner();
+    const provider = new SystemdUserServiceProvider({
+      context: contextFor({ root: machine, systemd: true }),
+      homeDir: machine,
+      stateHome: join(machine, '.cosyncing'),
+      cacheRoot: join(machine, '.cache', 'cosyncing'),
+      executablePath: join(machine, 'bin', 'cosyncing'),
+      distribution: 'native',
+      webDir: join(machine, 'web'),
+      configHome: join(machine, '.config'),
+      runner,
+      systemctlPath: '/usr/bin/systemctl',
+      journalctlPath: '/usr/bin/journalctl',
+      loginctlPath: '/usr/bin/loginctl',
+      userIdentifier: '1000',
+    });
+    await provider.installDefinition();
+    await provider.start();
+    runner.failDisableNow = true;
+    const refused = await provider.uninstall().then(() => false, () => true);
+    check('systemd uninstall preserves service files when disable --now fails and the broker remains active',
+      refused
+        && runner.active === 'active'
+        && existsSync(provider.definitionPath)
+        && existsSync(provider.environmentPath));
   }
 
   // The JavaScript distribution's durable service: an EXTERNAL Bun executing the receipt-owned application.
@@ -1426,6 +1475,149 @@ try {
         && installedEnvironment.includes(newDirectory)
         && !installedEnvironment.includes(dirname(join(machine, 'releases', '0.144.5-fixture', 'bin', 'codex'))),
       `${reconciled.status}: ${installedEnvironment.trim()}`);
+  }
+
+  // A package-manager update can leave the global `cline` at an unmeasured version while the installed
+  // service intentionally remains pinned to its receipt-owned executable. Exercise the complete
+  // repeat-setup transaction: inherited selection, provider rendering, receipt, and standalone doctor.
+  // Both versions derive from the pin. Written as literals they rot the moment the pin moves — and
+  // when it moved to 3.0.61, the literal standing in for the UNMEASURED global became the measured
+  // one, inverting the scenario this block exists to cover.
+  {
+    const machine = join(root, 'cline-repeat-setup');
+    const stateHome = join(machine, '.cosyncing');
+    const provider = new AgentPathServiceProvider(machine);
+    // The pin with its patch bumped. A prerelease suffix parses BELOW the pin
+    // and models a downgrade nobody ships; what actually happens — and what
+    // forced this branch's own pin move — is a package manager leaving the
+    // global cline one patch AHEAD. Derived so it cannot rot into the pin.
+    const unmeasuredClineVersion = bumpPatch(CLINE_VERIFIED_VERSION);
+    const exactCline = join(machine, 'tools', `cline-${CLINE_VERIFIED_VERSION}`, 'cline');
+    const globalCline = join(machine, 'global', `cline-${unmeasuredClineVersion}`, 'cline');
+    mkdirSync(dirname(exactCline), { recursive: true });
+    mkdirSync(dirname(globalCline), { recursive: true });
+    writeFileSync(exactCline, 'fixture exact Cline', { mode: 0o755 });
+    writeFileSync(globalCline, 'fixture global Cline', { mode: 0o755 });
+    let exactClineVersion: string = CLINE_VERIFIED_VERSION;
+    const serviceBuild = {
+      ...BUILD_INFO,
+      packaged: true,
+      target: 'bun-linux-x64',
+      distribution: 'native',
+    } satisfies BuildInfo;
+    const makeContext = (seed: boolean): SetupDiagnosisContext => {
+      const base = contextFor({
+        root: machine,
+        provider,
+        systemd: true,
+        agentExecutables: { cline: globalCline },
+        healthBuild: serviceBuild,
+      });
+      return {
+        ...base,
+        env: {
+          ...base.env,
+          ...(seed ? {
+            COSYNCING_CLINE_BIN: exactCline,
+            COSYNCING_CLINE_PROVIDER: 'openai-compatible',
+            COSYNCING_CLINE_MODEL: 'fixture-model',
+          } : {}),
+        },
+        resolveExecutable(command) {
+          if (command === exactCline || command === globalCline) return command;
+          return base.resolveExecutable(command);
+        },
+        async runReadOnly(executable, args, options) {
+          if (args.includes('--version') && executable === exactCline) {
+            return { status: 'ok', exitCode: 0, stdout: `${exactClineVersion}\n`, stderr: '' };
+          }
+          if (args.includes('--version') && executable === globalCline) {
+            return { status: 'ok', exitCode: 0, stdout: `${unmeasuredClineVersion}\n`, stderr: '' };
+          }
+          return base.runReadOnly(executable, args, options);
+        },
+      };
+    };
+    const providerFactory = (options: SystemdProviderOptions) => {
+      provider.agentDirectories = options.agentExecutableDirectories ?? [];
+      provider.agentOverrides = options.agentExecutableOverrides ?? {};
+      provider.agentConfiguration = options.agentConfigurationOverrides ?? {};
+      return provider;
+    };
+    const first = await runSetup({
+      ...setupOptions({
+        root: machine,
+        provider,
+        presenter: new ServicePresenter({ service: 'systemd' }),
+        buildInfo: serviceBuild,
+      }),
+      context: makeContext(true),
+      systemdProviderFactory: providerFactory,
+    });
+    const firstEnvironment = readFileSync(provider.environmentPath, 'utf8');
+    const firstInstall = inspectInstallState(stateHome);
+    const firstEnvironmentReceipts = firstInstall.committed
+      ? firstInstall.state.resources.filter((resource) => resource.id === 'service-environment')
+      : [];
+    const repeatInspection = await inspectSetupEnvironment({
+      buildInfo: serviceBuild,
+      executablePath: join(machine, 'bin', 'cosyncing'),
+      home: stateHome,
+      context: makeContext(false),
+      systemdProviderFactory: providerFactory,
+    });
+    const second = await runSetup({
+      ...setupOptions({
+        root: machine,
+        provider,
+        presenter: new ServicePresenter({ service: 'systemd' }),
+        buildInfo: serviceBuild,
+      }),
+      context: makeContext(false),
+      systemdProviderFactory: providerFactory,
+    });
+    const finalEnvironment = readFileSync(provider.environmentPath, 'utf8');
+    const install = inspectInstallState(stateHome);
+    const environmentReceipt = install.committed
+      ? install.state.resources.find((resource) => resource.id === 'service-environment')
+      : undefined;
+    const doctor = await collectDoctorReport({
+      buildInfo: serviceBuild,
+      context: makeContext(false),
+      assetReport: inspectRuntimeAssets(),
+      stateHome,
+    });
+    const clineVersion = doctor.sections.flatMap((section) => section.checks)
+      .find((candidate) => candidate.id === 'cline.version');
+    check('repeat setup retains Cline selection through service rendering, receipt commit, and standalone doctor',
+      first.status === 'complete'
+        && second.status === 'already-configured'
+        && finalEnvironment === firstEnvironment
+        && finalEnvironment.includes(`COSYNCING_CLINE_BIN="${exactCline}"`)
+        && finalEnvironment.includes('COSYNCING_CLINE_PROVIDER="openai-compatible"')
+        && finalEnvironment.includes('COSYNCING_CLINE_MODEL="fixture-model"')
+        && environmentReceipt?.ownership.proof === 'package-hash'
+        && environmentReceipt.ownership.installedSha256
+          === createHash('sha256').update(finalEnvironment).digest('hex')
+        && clineVersion?.status === 'pass',
+      `${first.status}/${second.status} actions=${second.actions.join(',')} firstReceipts=${JSON.stringify(firstEnvironmentReceipts)} inherited=${JSON.stringify(repeatInspection.agentConfigurationOverrides)} override=${repeatInspection.agentExecutableOverrides?.COSYNCING_CLINE_BIN} receipt=${environmentReceipt?.ownership.proof} doctor=${JSON.stringify(clineVersion)}`);
+    exactClineVersion = unmeasuredClineVersion;
+    const stale = await runSetup({
+      ...setupOptions({
+        root: machine,
+        provider,
+        presenter: new ServicePresenter({ service: 'systemd' }),
+        buildInfo: serviceBuild,
+      }),
+      context: makeContext(false),
+      systemdProviderFactory: providerFactory,
+    });
+    check('the real repeat-setup path blocks an in-place Cline replacement before service mutation',
+      stale.status === 'blocked'
+        && stale.actions.length === 0
+        && stale.issueCodes?.includes('cline-retained-executable-unavailable') === true
+        && readFileSync(provider.environmentPath, 'utf8') === finalEnvironment,
+      `${stale.status}:${stale.issueCodes?.join(',')}`);
   }
 
   // Removing agents is the inverse of installation/move discovery: doctor must flag the receipt-owned
@@ -2052,6 +2244,15 @@ try {
           === `/usr/bin/tail -f -n 120 ${provider.standardOutPath} ${provider.standardErrorPath}`);
 
     const installedMode = statSync(provider.definitionPath).mode & 0o777;
+    runner.failBootout = true;
+    const refusedUninstall = await provider.uninstall().then(() => false, () => true);
+    check('launchd uninstall preserves its plist and environment when bootout fails with a loaded broker',
+      refusedUninstall
+        && runner.loaded
+        && runner.running
+        && existsSync(provider.definitionPath)
+        && existsSync(provider.environmentPath));
+    runner.failBootout = false;
     await provider.uninstall();
     check('uninstall boots the job out and removes only the two owned files',
       installedMode === 0o600

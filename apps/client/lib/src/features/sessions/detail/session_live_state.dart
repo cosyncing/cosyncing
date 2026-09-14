@@ -46,7 +46,9 @@ final class SessionLiveState {
     // reported a status.
     if (message.type == AgentMessageType.status &&
         message.agentMessageStatus == AgentMessageStatus.idle) {
-      activities.clear();
+      activities.removeWhere(
+        (_, activity) => activity.status == AgentActivityStatus.running,
+      );
     }
 
     if (GoalStateSnapshot.fromMessage(message)
@@ -83,9 +85,9 @@ final class SessionLiveState {
         case final AgentActivitySnapshot activity) {
       switch (activity.status) {
         case AgentActivityStatus.running:
-          activities[activity.key] = activity;
         case AgentActivityStatus.done:
         case AgentActivityStatus.error:
+          activities[activity.key] = activity;
         case AgentActivityStatus.unknown:
           activities.remove(activity.key);
       }
@@ -106,7 +108,7 @@ final class SessionLiveState {
   /// Running or completed task ledgers, one per broker key.
   final List<TaskListStateSnapshot> taskLists;
 
-  /// Currently running subagents/workflows, one per broker key.
+  /// Latest subagent/workflow state, including terminal evidence until archived.
   final List<AgentActivitySnapshot> activities;
 
   /// Whether there is any state surface to display.

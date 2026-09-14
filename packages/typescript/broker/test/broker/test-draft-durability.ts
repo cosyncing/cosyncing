@@ -183,6 +183,34 @@ try {
   check('a stale update token never clears another device newer draft', refused === undefined);
   check("the other device's draft is intact", otherStore.get('claude', 'other')?.text === 'their newer draft');
 
+  // 10d. Both bookkeeping proofs miss, and the shared draft IS the sent text.
+  //      Measured on the installed broker: dozens of stored drafts across reasonix and cline held
+  //      the exact prompt that had already been sent and answered, and a reload put it back in the
+  //      composer — one Enter from re-running an `rm -f && touch`. Returning `undefined` here reads
+  //      to the caller as "nothing of this sender's to clear", so the sender deletes its local row
+  //      and never retries, and the sent text becomes everyone's permanent shared draft.
+  const strandedStore = new SharedDraftStore({ directory: join(root, 'stranded'), now });
+  const stranded = new ManagedConn({ ...fakeConn(), info: { ...info, id: 'stranded' } }, undefined, {}, strandedStore);
+  stranded.setDraft('sent prompt text', { updateId: 'stranded-1', baseRevision: 0 }); // revision 1
+  // A second publish of the SAME text — a debounced re-send of an unchanged composer — moves the
+  // revision and the update token past everything the prompt could have reported.
+  stranded.setDraft('sent prompt text', { updateId: 'stranded-2', baseRevision: 1 }); // revision 2
+  const rescuedByText = stranded.clearDraftAfterPrompt(1, 'stranded-1', 'sent prompt text');
+  check('the sent text itself proves the clear is this prompt to make', rescuedByText?.applied === true);
+  check('a sent prompt never survives as the shared draft', strandedStore.get('claude', 'stranded')?.text === '');
+
+  // 10e. And the text proof is not a licence to clear anything: it must be THIS prompt's text.
+  const rivalStore = new SharedDraftStore({ directory: join(root, 'rival'), now });
+  const rival = new ManagedConn({ ...fakeConn(), info: { ...info, id: 'rival' } }, undefined, {}, rivalStore);
+  rival.setDraft('my draft', { updateId: 'rival-1', baseRevision: 0 });
+  rival.setDraft('their newer draft', { updateId: 'rival-2', baseRevision: 1 });
+  const refusedByText = rival.clearDraftAfterPrompt(0, 'rival-1', 'my draft');
+  check('the text proof never clears a draft that is not what was sent', refusedByText === undefined);
+  check("the other device's work survives the text proof", rivalStore.get('claude', 'rival')?.text === 'their newer draft');
+  // An empty prompt proves nothing: every cleared record would otherwise match it.
+  const emptyProof = rival.clearDraftAfterPrompt(0, 'rival-1', '');
+  check('an empty sent text is never an ownership proof', emptyProof === undefined);
+
   // 11. A dirty retry against a cleared tombstone is still rejected (never silently resurrected over a NEWER value).
   const overClear = reopened.write('claude', 's1', 'old text', { updateId: 'u-9', baseRevision: 7 });
   check('stale retry over a clear tombstone is rejected', overClear.status === 'stale-base');

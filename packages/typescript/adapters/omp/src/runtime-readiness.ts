@@ -20,6 +20,8 @@ import {
 } from '@cosyncing/adapter-api';
 
 export const OMP_DEFAULT_BUN_MINIMUM_VERSION = '1.3.14';
+/** The mutable RPC/event contract physically captured by the parity fixture. */
+export const OMP_VERIFIED_VERSION = '17.4.2';
 export const OMP_MINIMUM_SUPPORTED_VERSION = '17.4.2';
 const OMP_PACKAGE_NAMES: readonly string[] = [
   '@oh-my-pi/pi-coding-agent',
@@ -395,10 +397,14 @@ export function inspectOmpRuntimeReadiness(
       );
     }
     const supportedOmp = compareSemanticVersions(reportedVersion, OMP_MINIMUM_SUPPORTED_VERSION);
-    if (supportedOmp === undefined || supportedOmp < 0) {
+    if (supportedOmp === undefined || supportedOmp !== 0) {
       return unsupportedReadiness(
-        'omp-batch-version-below-minimum',
-        `The resolved omp launcher is omp ${reportedVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} or newer is required. Upgrade omp, then restart cosyncing.`,
+        supportedOmp !== undefined && supportedOmp > 0
+          ? 'omp-batch-version-above-verified'
+          : 'omp-batch-version-below-minimum',
+        supportedOmp !== undefined && supportedOmp > 0
+          ? `The resolved omp launcher is omp ${reportedVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
+          : `The resolved omp launcher is omp ${reportedVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
         { executable, packageVersion: reportedVersion },
       );
     }
@@ -432,10 +438,14 @@ export function inspectOmpRuntimeReadiness(
         );
       }
       const comparison = compareSemanticVersions(version, OMP_MINIMUM_SUPPORTED_VERSION);
-      if (comparison === undefined || comparison < 0) {
+      if (comparison === undefined || comparison !== 0) {
         return unsupportedReadiness(
-          'omp-native-version-below-minimum',
-          `The configured omp executable is omp ${version}, but ${OMP_MINIMUM_SUPPORTED_VERSION} or newer is required. Upgrade omp, then restart cosyncing.`,
+          comparison !== undefined && comparison > 0
+            ? 'omp-native-version-above-verified'
+            : 'omp-native-version-below-minimum',
+          comparison !== undefined && comparison > 0
+            ? `The configured omp executable is omp ${version}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
+            : `The configured omp executable is omp ${version}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
           { executable, packageVersion: version },
         );
       }
@@ -476,10 +486,14 @@ export function inspectOmpRuntimeReadiness(
         );
       }
       const supportedOmp = compareSemanticVersions(launcherVersion, OMP_MINIMUM_SUPPORTED_VERSION);
-      if (supportedOmp === undefined || supportedOmp < 0) {
+      if (supportedOmp === undefined || supportedOmp !== 0) {
         return unsupportedReadiness(
-          'omp-posix-version-below-minimum',
-          `The configured Bun launcher is omp ${launcherVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} or newer is required. Upgrade omp, then restart cosyncing.`,
+          supportedOmp !== undefined && supportedOmp > 0
+            ? 'omp-posix-version-above-verified'
+            : 'omp-posix-version-below-minimum',
+          supportedOmp !== undefined && supportedOmp > 0
+            ? `The configured Bun launcher is omp ${launcherVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
+            : `The configured Bun launcher is omp ${launcherVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
           { executable, packageVersion: launcherVersion },
         );
       }
@@ -496,10 +510,12 @@ export function inspectOmpRuntimeReadiness(
           { executable, packageVersion: contract.version },
         );
       }
-      if (supportedOmp < 0) {
+      if (supportedOmp !== 0) {
         return unsupportedReadiness(
-          'omp-package-version-below-minimum',
-          `The installed omp package is ${packageVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} or newer is required. Upgrade omp, then restart cosyncing.`,
+          supportedOmp > 0 ? 'omp-package-version-above-verified' : 'omp-package-version-below-minimum',
+          supportedOmp > 0
+            ? `The installed omp package is ${packageVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
+            : `The installed omp package is ${packageVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
           { executable, packageVersion },
         );
       }
@@ -696,20 +712,34 @@ export async function diagnoseOmpBunRuntime(
         },
       };
     }
-    if (ompFloor === undefined || ompFloor < 0) {
+    if (ompFloor === undefined || ompFloor !== 0) {
       return {
         id: 'omp.bun-runtime',
         status: 'fail',
-        detailCode: 'bun-runtime-launcher-below-minimum',
-        summary: `The resolved omp launcher is omp ${reportedVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} or newer is required.`,
-        evidence: { installedVersion: reportedVersion, minimumVersion: OMP_MINIMUM_SUPPORTED_VERSION },
-        remediation: { kind: 'command', message: 'Update omp, then rerun doctor.', command: 'bun install -g @oh-my-pi/pi-coding-agent@latest' },
+        detailCode: ompFloor !== undefined && ompFloor > 0
+          ? 'bun-runtime-launcher-above-verified'
+          : 'bun-runtime-launcher-below-minimum',
+        summary: ompFloor !== undefined && ompFloor > 0
+          ? `The resolved omp launcher is omp ${reportedVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
+          : `The resolved omp launcher is omp ${reportedVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required.`,
+        evidence: { installedVersion: reportedVersion, verifiedVersion: OMP_VERIFIED_VERSION },
+        remediation: ompFloor !== undefined && ompFloor > 0
+          ? { kind: 'manual', message: `Use omp ${OMP_VERIFIED_VERSION} or wait for a new protocol capture, then rerun doctor.` }
+          : { kind: 'command', message: 'Update omp to the verified version, then rerun doctor.', command: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERIFIED_VERSION}` },
       };
     }
     contract = identity.contract;
     bunCandidates = batchBunCandidates(executable);
   } else {
-    const launcher = context.readText(executable, 8 * 1024 * 1024);
+    // PATH installations normally expose omp through a symlink (for example
+    // ~/.bun/bin/omp -> the package's dist/cli.js).  The diagnosis context
+    // intentionally refuses to read symlinks, so inspect the already-resolved
+    // target just as the runtime readiness path does.  Keep launching through
+    // `executable` below: canonicalization is only for the bounded read.
+    const launcherPath = canonical(executable);
+    const launcher = context.readTextPrefix
+      ? context.readTextPrefix(launcherPath, LAUNCHER_PREFIX_MAX_BYTES)
+      : context.readText(launcherPath, LAUNCHER_PREFIX_MAX_BYTES);
     if (!launcher.ok) {
       return {
         id: 'omp.bun-runtime',
@@ -719,7 +749,7 @@ export async function diagnoseOmpBunRuntime(
         remediation: { kind: 'manual', message: 'Repair the omp installation, then rerun doctor.' },
       };
     }
-    const bunCommand = bunCommandFromShebang(launcher.text.slice(0, LAUNCHER_PREFIX_MAX_BYTES));
+    const bunCommand = bunCommandFromShebang(launcher.text);
     if (bunCommand === null) {
       const probe = await boundedDoctorProbe(context, executable);
       if (probe.status === 'timeout') {
@@ -727,13 +757,19 @@ export async function diagnoseOmpBunRuntime(
       }
       const version = probe.status === 'ok' ? ompIdentityVersion(`${probe.stdout}\n${probe.stderr}`) : undefined;
       const comparison = version ? compareSemanticVersions(version, OMP_MINIMUM_SUPPORTED_VERSION) : undefined;
-      if (!version || comparison === undefined || comparison < 0) {
+      if (!version || comparison === undefined || comparison !== 0) {
         return {
           id: 'omp.bun-runtime',
           status: 'fail',
-          detailCode: version ? 'native-runtime-version-below-minimum' : 'native-runtime-identity-unverified',
+          detailCode: version
+            ? comparison !== undefined && comparison > 0
+              ? 'native-runtime-version-above-verified'
+              : 'native-runtime-version-below-minimum'
+            : 'native-runtime-identity-unverified',
           summary: version
-            ? `The configured omp executable is omp ${version}, but ${OMP_MINIMUM_SUPPORTED_VERSION} or newer is required.`
+            ? comparison !== undefined && comparison > 0
+              ? `The configured omp executable is omp ${version}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
+              : `The configured omp executable is omp ${version}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required.`
             : 'The configured omp executable did not provide a recognizable omp version response.',
           ...(version ? { evidence: { installedVersion: version, minimumVersion: OMP_MINIMUM_SUPPORTED_VERSION } } : {}),
           remediation: {
@@ -761,6 +797,27 @@ export async function diagnoseOmpBunRuntime(
         detailCode: 'bun-runtime-interpreter-unresolved',
         summary: 'omp launcher runtime could not be verified.',
         remediation: bunRuntimeRemediation(contract.minimumBunVersion),
+      };
+    }
+    const packageVersion = semanticVersionFromText(contract.version ?? '');
+    const packageComparison = packageVersion
+      ? compareSemanticVersions(packageVersion, OMP_VERIFIED_VERSION)
+      : undefined;
+    if (!packageVersion || packageComparison === undefined || packageComparison !== 0) {
+      return {
+        id: 'omp.bun-runtime',
+        status: 'fail',
+        detailCode: packageVersion && packageComparison !== undefined && packageComparison > 0
+          ? 'bun-runtime-package-above-verified'
+          : 'bun-runtime-package-version-unverified',
+        summary: packageVersion
+          ? `The installed omp package is ${packageVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
+          : 'The installed omp package version could not be verified.',
+        ...(packageVersion ? { evidence: { installedVersion: packageVersion, verifiedVersion: OMP_VERIFIED_VERSION } } : {}),
+        remediation: {
+          kind: 'manual',
+          message: `Use omp ${OMP_VERIFIED_VERSION} or wait for a new protocol capture, then rerun doctor.`,
+        },
       };
     }
     bunCandidates = [bunCommand];

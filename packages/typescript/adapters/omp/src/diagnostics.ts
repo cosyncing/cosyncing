@@ -41,7 +41,7 @@ export async function diagnoseOmpSetup(
     minimum: OMP_MINIMUM_VERSION,
     versionArgs: ['--version'],
     installMessage: 'Install the supported omp (oh-my-pi) package, then rerun doctor.',
-    upgradeCommand: 'bun install -g @oh-my-pi/pi-coding-agent@latest',
+    upgradeCommand: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_MINIMUM_SUPPORTED_VERSION}`,
   });
   const env = { ...context.env, HOME: context.homeDir };
   const paths = resolvePiDialectPaths(OMP_DIALECT, env);

@@ -34,6 +34,13 @@ import { PiAdapter } from '../../packages/typescript/adapters/pi/src/index.ts';
 import { OmpAdapter } from '../../packages/typescript/adapters/omp/src/index.ts';
 import { CodexAdapter } from '../../packages/typescript/adapters/codex/src/index.ts';
 import { ClaudeAdapter } from '../../packages/typescript/adapters/claude/src/index.ts';
+import { ReasonixAdapter } from '../../packages/typescript/adapters/reasonix/src/index.ts';
+import { GrokAdapter } from '../../packages/typescript/adapters/grok/src/index.ts';
+import { ClineAdapter } from '../../packages/typescript/adapters/cline/src/index.ts';
+import { KiloAdapter } from '../../packages/typescript/adapters/kilocode/src/index.ts';
+import { KimiAdapter } from '../../packages/typescript/adapters/kimi/src/index.ts';
+import { DshAdapter } from '../../packages/typescript/adapters/dsh/src/index.ts';
+import { AgyAdapter } from '../../packages/typescript/adapters/antigravity/src/index.ts';
 
 const ROOT = join(import.meta.dir, '..', '..');
 const APP_JS = join(ROOT, 'apps/poc-ui/public/app.js');
@@ -64,12 +71,26 @@ interface Report {
 
 // Enumerate EVERY registered adapter exactly like the broker (main.ts) — so a new adapter can never be
 // a conformance blind spot the way Codex/Claude were when this only knew opencode+pi. (Issue H.)
+//
+// That invariant had lapsed: the broker registers TWELVE adapters and this listed five, while the
+// human summary printed "capability parity (all registered adapters)". Reasonix, Grok, Cline, Kilo,
+// Kimi, DSH and Antigravity were exactly the blind spot the comment above exists to prevent — the
+// four-harness agents under review were not in their own conformance report. Every one constructs
+// with no live configuration (the options bags are resolver callbacks, all optional), and this
+// section is static: it reads `capabilities` and probes nothing.
 const ALL_ADAPTERS: AgentBackend[] = [
   new OpenCodeAdapter({ baseUrl: OC }),
   new PiAdapter(),
   new OmpAdapter(),
+  new ReasonixAdapter(),
+  new GrokAdapter({}),
+  new ClineAdapter({}),
+  new KiloAdapter({}),
   new CodexAdapter(),
   new ClaudeAdapter(),
+  new KimiAdapter(),
+  new DshAdapter(),
+  new AgyAdapter(),
 ];
 
 // ── 0. CAPABILITY PARITY (static, registry-enumerated, no live agent) ──────────

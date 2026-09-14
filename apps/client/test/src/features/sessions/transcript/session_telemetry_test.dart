@@ -22,6 +22,43 @@ void main() {
       expect(telemetry.totalTokens, 334019);
     });
 
+    test('a newer sparse token snapshot clears omitted buckets', () {
+      final telemetry = SessionTelemetry.fromMessages([
+        _message('token-count', {
+          'input': 10,
+          'output': 5,
+          'cacheRead': 3,
+          'cacheWrite': 2,
+        }),
+        _message('token-count', {'input': 4, 'output': 6}),
+      ]);
+
+      expect(telemetry.inputTokens, 4);
+      expect(telemetry.outputTokens, 6);
+      expect(telemetry.cacheReadTokens, isNull);
+      expect(telemetry.cacheWriteTokens, isNull);
+      expect(telemetry.totalTokens, 10);
+    });
+
+    test('an ordinary reading clears earlier cache-subset aggregation', () {
+      final telemetry = SessionTelemetry.fromMessages([
+        _message('metadata-update', {
+          'key': 'sessionUsage',
+          'value': {
+            'input': 100,
+            'output': 20,
+            'cacheReadSubset': 60,
+            'inputIncludesCacheSubsets': true,
+          },
+        }),
+        _message('token-count', {'input': 7, 'output': 3}),
+      ]);
+
+      expect(telemetry.inputIncludesCacheSubsets, isFalse);
+      expect(telemetry.cacheReadTokens, isNull);
+      expect(telemetry.totalTokens, 10);
+    });
+
     test('is empty before any reading arrives', () {
       final telemetry = SessionTelemetry.fromMessages([
         _message('model-output', {'text': 'hello'}),
@@ -107,6 +144,30 @@ void main() {
       expect(telemetry.totalTokens, 7);
     });
 
+    test(
+      'session usage preserves cache subsets without double counting input',
+      () {
+        final telemetry = SessionTelemetry.fromMessages([
+          _message('metadata-update', {
+            'key': 'sessionUsage',
+            'value': {
+              'input': 100,
+              'output': 20,
+              'cacheReadSubset': 60,
+              'cacheWriteSubset': 10,
+              'inputIncludesCacheSubsets': true,
+            },
+          }),
+        ]);
+
+        expect(telemetry.inputTokens, 100);
+        expect(telemetry.cacheReadTokens, 60);
+        expect(telemetry.cacheWriteTokens, 10);
+        expect(telemetry.inputIncludesCacheSubsets, isTrue);
+        expect(telemetry.totalTokens, 120);
+      },
+    );
+
     test('an unrelated metadata key changes nothing', () {
       final telemetry = SessionTelemetry.fromMessages([
         _message('metadata-update', {'key': 'model', 'value': 'opus'}),
@@ -130,6 +191,8 @@ void main() {
         'context-usage',
         'runtimeTotals',
         'sessionStats',
+        'sessionUsage',
+        'clineSessionUsage',
       ]) {
         expect(
           isSessionTelemetryMessage(

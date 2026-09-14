@@ -42,6 +42,39 @@ void main() {
       final response = ListSessionsResponse.fromJson(json);
       expect(response.sessions, isEmpty);
     });
+
+    test('an omitted complete flag reads as a whole roster', () {
+      // What a broker older than contract revision 23 sends — revision 22
+      // included, since the field arrived with 23. Those brokers never answered
+      // ahead of a sweep, so every roster they gave WAS the whole one; reading
+      // the absence as "incomplete" would make the client stop trusting
+      // removals against every one of them.
+      final response = ListSessionsResponse.fromJson({
+        'machine': 'test-machine',
+        'sessions': <Map<String, dynamic>>[],
+      });
+      expect(response.complete, isTrue);
+    });
+
+    test('an explicit false is carried, and survives a round trip', () {
+      final response = ListSessionsResponse.fromJson({
+        'machine': 'test-machine',
+        'sessions': <Map<String, dynamic>>[],
+        'complete': false,
+      });
+      expect(response.complete, isFalse);
+      final round = ListSessionsResponse.fromJson(response.toJson());
+      expect(round.complete, isFalse);
+    });
+
+    test('a null complete reads as a whole roster rather than throwing', () {
+      final response = ListSessionsResponse.fromJson({
+        'machine': 'test-machine',
+        'sessions': <Map<String, dynamic>>[],
+        'complete': null,
+      });
+      expect(response.complete, isTrue);
+    });
   });
 
   group('CreateSessionResponse', () {

@@ -533,7 +533,12 @@ List<_LiveStateItem> _liveStateItemsFromParts(
         value: activity,
         label: l10n.activity,
         title: activity.title,
-        statusLabel: l10n.running,
+        statusLabel: switch (activity.status) {
+          AgentActivityStatus.running => l10n.running,
+          AgentActivityStatus.done => l10n.done,
+          AgentActivityStatus.error => l10n.failed,
+          AgentActivityStatus.unknown => l10n.activity,
+        },
         icon: Icons.psychology_outlined,
         actionRequired: false,
         done: activity.agentsDone,

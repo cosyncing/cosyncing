@@ -694,6 +694,8 @@ export interface CreateSessionRequest {
   directory?: string;
   title?: string;
   model?: ModelSelection;
+  /** Exact adapter-advertised approval mode used to seed the created Drive. */
+  permissionMode?: string;
 }
 
 /** A selectable agent/mode (e.g. 'build', 'plan'). */
@@ -710,6 +712,13 @@ export interface ModeOption {
   description?: string;
   /** Universal grouping for UI copy and setup docs; adapters still own the native `value`. */
   category?: 'ask-permission' | 'approve-for-me' | 'full-access' | 'custom';
+}
+
+/** Pre-session permission-mode catalog from the selected adapter. */
+export interface ModeCatalogResponse {
+  tool: string;
+  modes: ModeOption[];
+  refreshedAt: number;
 }
 
 /** How a file was changed by an edit/write tool. */
@@ -1293,6 +1302,7 @@ export const CANONICAL_MESSAGE_TYPES = [
 export const BROKER_ROUTES = [
   '/api/agents',
   '/api/agents/{id}/models',
+  '/api/agents/{id}/modes',
   '/api/agents/codex/sync',
   '/api/agent-runtime-updates',
   '/api/agent-runtime-update-policy',
@@ -1430,7 +1440,9 @@ export const BROKER_ERROR_CODES = [
   'MACHINE_ROUTE_NOT_FOUND',
   'MACHINE_ROUTE_STALE',
   'MODEL_SELECTION_UNSUPPORTED',
+  'MODEL_UNSUPPORTED',
   'MODEL_CATALOG_UNAVAILABLE',
+  'MODE_CATALOG_UNAVAILABLE',
   'NOT_SUPPORTED',
   'NOT_FOUND',
   'NOT_REGULAR_FILE',
@@ -1447,6 +1459,7 @@ export const BROKER_ERROR_CODES = [
   'PUSH_NOT_CONFIGURED',
   'PUSH_TOKEN_NOT_FOUND',
   'PI_INTEGRATION_AUTH_REQUIRED',
+  'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED',
   'PLAN_ACTION_INVALID',
   'PLAN_ACTION_STALE',
   'PLAN_ACTION_UNSUPPORTED',
@@ -1633,17 +1646,63 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * and 17 have ever raised that floor, and this route widens no credential
  * boundary. Note what the overlap window does mean here: 18 is the revision
  * shipped clients advertise, and 20 puts them outside it, so a revision-19-or-
- * later client has to ship before a revision-20 broker does. Revision 21 adds
- * one block to that report's DTO: the version of the Tokdash that produced it
- * and whether that build clears the floor the report is written against. It
- * moves no route, so the surface hash holds; it is numbered because a client
- * reads it to tell "your Tokdash is too old to publish a window verdict" apart
- * from "Tokdash refused this period", and those two states are indistinguishable
- * without it. A revision-20 client simply does not receive the block and keeps
- * its earlier reading, which is wrong in exactly the way this fixes and safe in
- * every other way.
+ * later client has to ship before a revision-20 broker does.
+ *
+ * Revision 21 adds one block to the usage report's DTO: the version of the
+ * Tokdash that produced it and whether that build clears the floor the report is
+ * written against. It moves no route, so the surface hash holds; it is numbered
+ * because a client reads it to tell "your Tokdash is too old to publish a window
+ * verdict" apart from "Tokdash refused this period", and those two states are
+ * indistinguishable without it. A revision-20 client simply does not receive the
+ * block and keeps its earlier reading, which is wrong in exactly the way this
+ * fixes and safe in every other way.
+ *
+ * Revision 22 adds the adapter-advertised creation permission mode, the
+ * pre-session mode catalog route, the display-versus-native rename distinction
+ * on roster rows, strict decoding of adapter-authored SessionInfo snapshots,
+ * and a typed error code for OMP native-version attestation failure. Additive
+ * on the same terms: every new field is optional, the new route is one an older
+ * client never calls, and no credential boundary moves, so the minimum client
+ * revision stays at 17. The overlap arithmetic moves with the number — 21 is
+ * now the newest revision inside the window, so a revision-21-or-later client
+ * has to ship before a revision-22 broker does.
+ *
+ * Revision 23 adds `complete` to the `/api/sessions` roster. The broker now
+ * bounds how long a caller waits for a slow discovery leg and answers with the
+ * legs that have landed, so for the first time a roster can be served that is
+ * not the whole roster -- and a client that reads every roster as an
+ * authoritative replacement would render the shortfall as sessions that do not
+ * exist. The field is what lets it tell the difference. Adding no route, frame
+ * kind, message type or error code, it leaves the surface hash where revision 22
+ * left it; the number moves because the DTO did, which is the rule this comment
+ * opens with.
+ *
+ * The minimum client revision stays at 17, and that is a claim about behaviour
+ * rather than a hope about it. "An older client ignores the field" is only safe
+ * if the broker never creates the condition the field exists to explain, so the
+ * EARLY answer is gated on the caller: a roster that is short because the sweep
+ * is still running is served only to a caller declaring revision 23 or later
+ * (see {@link CLIENT_REVISION_WITH_ROSTER_COMPLETENESS}). An older client waits
+ * for the sweep, exactly as it did against a revision-22 broker.
+ *
+ * What an older client can still receive is `complete: false` on a sweep that
+ * FINISHED having lost a leg -- an adapter abandoned at its budget, or throwing.
+ * Whether such a leg returned rows does not enter into it: what it returns is
+ * the carry of the last sweep that did read the adapter, which cannot mention
+ * anything that appeared since. That condition predates this revision and is
+ * not gated:
+ * it persists for as long as the adapter stays down, so withholding the roster
+ * would mean not answering such a client at all. It reads that roster as it
+ * always has; revision 23 does not worsen its position, it gives a revision-23
+ * client the words to describe it. Removal deltas are withheld for the lost
+ * adapter for every client alike, since deltas carry no completeness of their
+ * own.
+ *
+ * The overlap arithmetic moves with the number -- 22 is now the newest revision
+ * inside the window, so a revision-22-or-later client has to ship before a
+ * revision-23 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 21 as const;
+export const BROKER_CONTRACT_REVISION = 23 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -1686,6 +1745,25 @@ export const CLIENT_REVISION_WITH_TOLERANT_ATTACH_MODE_DECODE = 15 as const;
 
 /** First first-party client revision with complete omp roster and creation UI identity. */
 export const CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY = 19 as const;
+
+/**
+ * First client revision that can read {@link LocalRosterResponse.complete}.
+ *
+ * A BROKER-SIDE gate, not a wire field. Revision 23 introduced the completeness
+ * flag and, in the same change, the early answer that makes it necessary: the
+ * broker bounds how long a caller waits for a slow discovery leg and replies
+ * with the legs that have landed. A client from before the flag reads every
+ * roster as an authoritative replacement, so an early answer would show it the
+ * sessions nobody has looked for yet as sessions that have been deleted.
+ *
+ * So it is not served one. It waits for the whole sweep, which is exactly what
+ * it did before early answers existed -- older behaviour for older clients,
+ * rather than a new failure mode they have no way to see coming.
+ *
+ * This is why the flag is additive rather than a compatibility break, and why
+ * {@link BROKER_MINIMUM_CLIENT_CONTRACT_REVISION} does not move with it.
+ */
+export const CLIENT_REVISION_WITH_ROSTER_COMPLETENESS = 23 as const;
 
 /**
  * The {@link AttachMode} members every supported client has always decoded.
@@ -1983,6 +2061,45 @@ export interface WakePushDispatchResult {
   provider: 'webhook';
 }
 
+/**
+ * `GET /api/sessions` — this machine's roster.
+ *
+ * Revision 23 adds {@link complete}.
+ */
+export interface LocalRosterResponse {
+  machine: string;
+  machineId: string;
+  /** When these rows were generated, in epoch milliseconds. */
+  generatedAt: number;
+  /** Monotonic roster content revision this snapshot was built at. */
+  revision: number;
+  sessions: SessionInfo[];
+  /**
+   * Whether these rows are the WHOLE roster this broker can see.
+   *
+   * False in two situations, and a client must not treat either as authoritative
+   * for absence:
+   *
+   * - A sweep is still running and this is what has landed so far. The broker
+   *   bounds how long a caller waits for a slow adapter before answering with
+   *   the rest, so an ordinary client would otherwise render an incomplete list
+   *   as if it were the roster. The complete answer follows within one sweep, as
+   *   a moved {@link revision}.
+   * - A sweep finished without reading every adapter — a leg abandoned at its
+   *   budget, or one that threw. Such a leg returns the rows of the last sweep
+   *   that DID read it, so what it contributes is a restatement rather than a
+   *   reading and cannot mention anything that appeared since; a leg with no
+   *   earlier sweep to restate returns nothing at all. Measured on a real
+   *   installation: an agent that was registered and creatable was absent from
+   *   its own roster because its discovery leg overran a 15-second budget.
+   *
+   * Absent from a pre-revision-23 broker, which a client reads as true: those
+   * brokers never answered ahead of a sweep, so every roster they sent was the
+   * whole one.
+   */
+  complete: boolean;
+}
+
 export type MachinePeerErrorCode =
   | 'MACHINE_PEER_BAD_CONFIG'
   | 'MACHINE_PEER_BAD_RESPONSE'
@@ -2111,6 +2228,8 @@ export interface HistoryQuery {
   since?: string;
   /** New clients can request artifact metadata references instead of inline bytes. */
   artifactMode?: 'inline' | 'reference';
+  /** Stop an attach-owned history read when its client socket is no longer alive. */
+  signal?: AbortSignal;
 }
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
@@ -2334,6 +2453,116 @@ export interface SessionInfo {
   control?: SessionControlState;
   /** Broker-derived session owner truth. Absence means unsupported/unknown; `none` is authoritative. */
   sessionOwner?: SessionOwnerProjection;
+}
+
+const SESSION_INFO_KEYS = new Set([
+  'id', 'lineageId', 'liveUuid', 'tool', 'machine', 'title', 'slug', 'cwd',
+  'projectName', 'origin', 'parentThreadId', 'nativeId', 'status', 'launchSurface',
+  'attachMode', 'model', 'currentModel', 'currentAgent', 'currentMode', 'createdAt',
+  'updatedAt', 'terminalSyncHint', 'control', 'sessionOwner',
+]);
+
+function sessionRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionalSessionString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function finiteOptionalSessionNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function validSessionCurrentModel(value: unknown): boolean {
+  return value === undefined || (sessionRecord(value)
+    && Object.keys(value).every((key) => [
+      'providerID', 'modelID', 'label', 'reasoningEffort', 'variant',
+    ].includes(key))
+    && typeof value.providerID === 'string' && value.providerID.length > 0
+    && typeof value.modelID === 'string' && value.modelID.length > 0
+    && optionalSessionString(value.label)
+    && optionalSessionString(value.reasoningEffort)
+    && optionalSessionString(value.variant));
+}
+
+function validSessionTerminalSyncHint(value: unknown): boolean {
+  return value === undefined || (sessionRecord(value)
+    && Object.keys(value).every((key) => ['label', 'command', 'note'].includes(key))
+    && typeof value.label === 'string'
+    && typeof value.command === 'string'
+    && optionalSessionString(value.note));
+}
+
+function validSessionControl(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!sessionRecord(value)
+    || !Object.keys(value).every((key) => ['drive', 'terminalSync'].includes(key))) return false;
+  const drive = value.drive;
+  const sync = value.terminalSync;
+  if (!sessionRecord(drive)
+    || !Object.keys(drive).every((key) => [
+      'state', 'supported', 'reason', 'handoffAvailable', 'takeoverAvailable', 'takeoverMode',
+    ].includes(key))
+    || !['observing', 'driving', 'unavailable', 'unknown'].includes(String(drive.state))
+    || typeof drive.supported !== 'boolean'
+    || !optionalSessionString(drive.reason)
+    || (drive.handoffAvailable !== undefined && typeof drive.handoffAvailable !== 'boolean')
+    || (drive.takeoverAvailable !== undefined && typeof drive.takeoverAvailable !== 'boolean')
+    || (drive.takeoverMode !== undefined && !['live', 'resume', 'observe'].includes(String(drive.takeoverMode)))) return false;
+  return sessionRecord(sync)
+    && Object.keys(sync).every((key) => [
+      'supported', 'syncAvailable', 'active', 'label', 'command', 'note', 'reason',
+      'input', 'presence', 'action', 'behind',
+    ].includes(key))
+    && typeof sync.supported === 'boolean'
+    && typeof sync.syncAvailable === 'boolean'
+    && typeof sync.active === 'boolean'
+    && optionalSessionString(sync.label)
+    && optionalSessionString(sync.command)
+    && optionalSessionString(sync.note)
+    && optionalSessionString(sync.reason)
+    && (sync.input === undefined || ['full', 'answer-only'].includes(String(sync.input)))
+    && (sync.presence === undefined || ['shared', 'private', 'absent', 'unknown'].includes(String(sync.presence)))
+    && (sync.action === undefined || ['join', 'handoff'].includes(String(sync.action)))
+    && (sync.behind === undefined || typeof sync.behind === 'boolean')
+    && (!sync.syncAvailable || sync.supported)
+    && (!sync.active || (sync.supported && sync.syncAvailable && sync.presence === 'shared'));
+}
+
+function validSessionOwner(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!sessionRecord(value)
+    || !Object.keys(value).every((key) => ['revision', 'state'].includes(key))
+    || !['none', 'drive', 'terminal-sync'].includes(String(value.state))) return false;
+  const revision = value.revision;
+  return sessionRecord(revision)
+    && Object.keys(revision).every((key) => ['epoch', 'seq'].includes(key))
+    && typeof revision.epoch === 'string' && revision.epoch.length > 0
+    && typeof revision.seq === 'number' && Number.isSafeInteger(revision.seq) && revision.seq >= 0;
+}
+
+/** Strict full-snapshot decoder for adapter-authored SessionInfo values.
+ * Unknown or malformed fields reject the entire row instead of reaching a strict client frame. */
+export function decodeSessionInfo(value: unknown): SessionInfo | undefined {
+  if (!sessionRecord(value) || !Object.keys(value).every((key) => SESSION_INFO_KEYS.has(key))) return undefined;
+  if (typeof value.id !== 'string' || value.id.length === 0
+    || typeof value.tool !== 'string' || value.tool.length === 0
+    || typeof value.title !== 'string'
+    || !['working', 'needs-input', 'idle'].includes(String(value.status))
+    || !['live', 'resume', 'observe'].includes(String(value.attachMode))) return undefined;
+  for (const key of [
+    'lineageId', 'liveUuid', 'machine', 'slug', 'cwd', 'projectName', 'parentThreadId',
+    'nativeId', 'model', 'currentAgent', 'currentMode',
+  ]) if (!optionalSessionString(value[key])) return undefined;
+  if (value.origin !== undefined && !['subagent', 'exec', 'vscode'].includes(String(value.origin))) return undefined;
+  if (value.launchSurface !== undefined && !['app', 'terminal', 'ide', 'unknown'].includes(String(value.launchSurface))) return undefined;
+  if (!finiteOptionalSessionNumber(value.createdAt) || !finiteOptionalSessionNumber(value.updatedAt)
+    || !validSessionCurrentModel(value.currentModel)
+    || !validSessionTerminalSyncHint(value.terminalSyncHint)
+    || !validSessionControl(value.control)
+    || !validSessionOwner(value.sessionOwner)) return undefined;
+  return { ...value } as unknown as SessionInfo;
 }
 
 /**

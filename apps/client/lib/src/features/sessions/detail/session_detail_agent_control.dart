@@ -75,6 +75,10 @@ class _ComposerAgentControl extends StatelessWidget {
       tooltip: tooltip,
       compact: compact,
       onPressed: enabled ? () => unawaited(_pick(context)) : null,
+      // This control is disabled ONLY when the session is read-only -- it is
+      // rendered at all only when the adapter advertised agents -- so here the
+      // read-only sentence is true.
+      readOnly: !enabled,
     );
   }
 }

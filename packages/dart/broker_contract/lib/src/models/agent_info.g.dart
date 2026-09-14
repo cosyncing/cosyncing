@@ -85,11 +85,17 @@ AgentInfo _$AgentInfoFromJson(Map<String, dynamic> json) => AgentInfo(
     json['capabilities'] as Map<String, dynamic>,
   ),
   canCreateSession: json['canCreateSession'] as bool? ?? false,
+  canRenameDisplay:
+      json['canRenameDisplay'] as bool? ??
+      json['canRenameNative'] as bool? ??
+      false,
   canRenameNative: json['canRenameNative'] as bool? ?? false,
   canFork: json['canFork'] as bool? ?? false,
   canClone: json['canClone'] as bool? ?? false,
   canTranscriptExport: json['canTranscriptExport'] as bool? ?? false,
   canSelectModelAtCreation: json['canSelectModelAtCreation'] as bool? ?? false,
+  canSelectPermissionModeAtCreation:
+      json['canSelectPermissionModeAtCreation'] as bool? ?? false,
   syncEnabled: json['syncEnabled'] as bool?,
 );
 
@@ -99,6 +105,9 @@ Map<String, dynamic> _$AgentInfoToJson(AgentInfo instance) => <String, dynamic>{
   'capabilities': instance.capabilities,
   'canCreateSession': instance.canCreateSession,
   'canSelectModelAtCreation': instance.canSelectModelAtCreation,
+  'canSelectPermissionModeAtCreation':
+      instance.canSelectPermissionModeAtCreation,
+  'canRenameDisplay': instance.canRenameDisplay,
   'canRenameNative': instance.canRenameNative,
   'canFork': instance.canFork,
   'canClone': instance.canClone,

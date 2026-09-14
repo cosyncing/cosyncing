@@ -19,7 +19,12 @@ const info = (): SessionInfo => ({
   attachMode: synced ? 'live' : 'observe',
   control: {
     drive: { supported: true, state: synced ? 'driving' : 'unavailable' },
-    terminalSync: { supported: true, syncAvailable: synced, active: synced },
+    terminalSync: {
+      supported: true,
+      syncAvailable: synced,
+      active: synced,
+      ...(synced ? { presence: 'shared' } : {}),
+    },
   },
 });
 function connection(): SessionConnection {

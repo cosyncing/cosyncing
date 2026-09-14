@@ -19,10 +19,10 @@
  * themselves, so a seventh adapter — or a renamed sixth — has no declared
  * answer and the suite goes red rather than skipping it.
  *
- * Then every declared answer is PROVEN against a recorded native record run
- * through that adapter's real mapper. No live agent, no network, no model
- * cost: each probe is the same native shape the adapter's own suite records,
- * driven through the same exported mapping function.
+ * Every supported answer is proven against a recorded native record run
+ * through that adapter's real mapper. Unsupported answers use the same proof
+ * when a recorded shape exists; an adapter with no captured native tool shape
+ * must instead carry an explicit reason and cannot claim path support.
  *
  * The proof runs in both directions, which is the part that makes the table
  * trustworthy: a declared `supported` must actually stamp, and a declared
@@ -53,6 +53,9 @@ import { createKimiMappingState, mapKimiMessage } from '../../../adapters/kimi/s
 import { mapOpenCodePart } from '../../../adapters/opencode/src/index.ts';
 import { mapPiJsonlText } from '../../../adapters/pi/src/index.ts';
 import { OMP_DIALECT } from '../../../adapters/omp/src/index.ts';
+import { mapReasonixSessionUpdate } from '../../../adapters/reasonix/src/index.ts';
+import { mapGrokUpdate } from '../../../adapters/grok/src/index.ts';
+import { mapClineMessage } from '../../../adapters/cline/src/index.ts';
 import { createAgyMapState, mapAgyStep, type AgyStep } from '../../../adapters/antigravity/src/index.ts';
 // agy's probe replays the package's recorded 1.1.17 fixture rather than an
 // inline reconstruction: the call row and the result row come from two
@@ -171,6 +174,46 @@ const DECLARED: Record<string, Record<Family, Answer>> = {
     edit: {
       status: 'supported',
       fields: ['result.path', 'result.fileChanges[].path'],
+    },
+  },
+  reasonix: {
+    read: {
+      status: 'unsupported',
+      reason: 'Reasonix ACP tool updates carry a title and opaque raw input/output but no measured file-path semantic; parsing vendor payloads without a pinned shape would invent a link.',
+    },
+    edit: {
+      status: 'unsupported',
+      reason: 'Reasonix ACP tool updates expose no measured unified diff or canonical changed-file field, so the adapter preserves the opaque result and stamps no guessed edit path.',
+    },
+  },
+  grok: {
+    read: {
+      status: 'unsupported',
+      reason: 'Grok ACP tool metadata identifies a read-only operation, but the measured contract does not define a canonical file-path field; rawInput remains opaque and is not promoted into a clickable path.',
+    },
+    edit: {
+      status: 'unsupported',
+      reason: 'Grok ACP tool updates expose opaque raw input/output and no measured unified diff or changed-file field, so the adapter stamps no guessed edit path.',
+    },
+  },
+  cline: {
+    read: {
+      status: 'unsupported',
+      reason: 'Cline tool_use input is preserved as bounded opaque arguments; the measured snapshot schema does not name a canonical file-path field, so the adapter creates no guessed link.',
+    },
+    edit: {
+      status: 'unsupported',
+      reason: 'Cline tool_result blocks expose bounded content but no measured unified diff or canonical changed-file field, so the adapter stamps no guessed edit path.',
+    },
+  },
+  kilo: {
+    read: {
+      status: 'unsupported',
+      reason: 'The reviewed Kilo SQLite inventory contains no native read-tool part, so OpenCode-lineage field parity cannot establish a Kilo file-path contract before a physical capture.',
+    },
+    edit: {
+      status: 'unsupported',
+      reason: 'The reviewed Kilo SQLite inventory contains no native edit-tool or diff part, so the adapter cannot claim a Kilo edit-path contract from a synthetic OpenCode-lineage object.',
     },
   },
   kimi: {
@@ -361,6 +404,88 @@ PROBES.omp = {
   ),
 };
 
+// Reasonix: a sanitized R2 ACP tool_call/tool_call_update pair using the
+// captured field names and terminal failed status. The raw payload stays
+// intentionally opaque until a versioned capture proves a canonical path.
+function reasonixPair(callId: string, title: string): RowPair {
+  const rows = [
+    ...mapReasonixSessionUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId: callId,
+      title,
+      rawInput: { target: 'src/a.ts' },
+    }),
+    ...mapReasonixSessionUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: callId,
+      status: 'failed',
+      rawOutput: { message: 'blocked: context canceled' },
+    }),
+  ];
+  return pair(rows, callId);
+}
+PROBES.reasonix = {
+  read: () => reasonixPair('reasonix-read', 'Read'),
+  edit: () => reasonixPair('reasonix-edit', 'Edit'),
+};
+
+// Grok: measured ACP tool_call/tool_call_update shapes. Even when rawInput
+// happens to contain a path-like value, the native contract does not name it
+// as canonical, so the mapper must preserve it as opaque args only.
+function grokPair(callId: string, name: string, readOnly: boolean): RowPair {
+  const sessionId = '019f9d70-e38e-7591-9a24-74a06ad89476';
+  const record = (sessionUpdate: string, update: Record<string, unknown>, lineIndex: number) =>
+    mapGrokUpdate({
+      method: 'session/update',
+      params: {
+        sessionId,
+        _meta: { eventId: `${callId}-${lineIndex}`, promptId: 'path-probe' },
+        update: { sessionUpdate, ...update },
+      },
+    }, { sessionId, lineIndex });
+  return pair([
+    ...record('tool_call', {
+      toolCallId: callId,
+      title: name,
+      rawInput: { path: 'src/a.ts' },
+      _meta: { 'x.ai/tool': { name, kind: readOnly ? 'read' : 'edit', label: name, read_only: readOnly } },
+    }, 0),
+    ...record('tool_call_update', {
+      toolCallId: callId,
+      title: name,
+      status: 'completed',
+      rawOutput: { changed: 'src/a.ts' },
+      _meta: { 'x.ai/tool': { name, kind: readOnly ? 'read' : 'edit', label: name, read_only: readOnly } },
+    }, 1),
+  ], callId);
+}
+PROBES.grok = {
+  read: () => grokPair('grok-read', 'read_file', true),
+  edit: () => grokPair('grok-edit', 'edit_file', false),
+};
+
+// Cline: rewritten-snapshot tool_use/tool_result blocks. A path-like input is
+// deliberately opaque until upstream gives the field a canonical meaning.
+function clinePair(callId: string, name: string): RowPair {
+  const sessionId = '1787424308272_2eapl';
+  return pair([
+    ...mapClineMessage({
+      id: `${callId}-call`,
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: callId, name, input: { path: 'src/a.ts' } }],
+    }, { sessionId }),
+    ...mapClineMessage({
+      id: `${callId}-result`,
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: callId, name, content: { changed: 'src/a.ts' } }],
+    }, { sessionId }),
+  ], callId);
+}
+PROBES.cline = {
+  read: () => clinePair('cline-read', 'read_file'),
+  edit: () => clinePair('cline-edit', 'edit_file'),
+};
+
 // Kimi: REST message rows, the shape test-kimi-mapping.ts records.
 function kimiPair(callId: string, toolName: string, input: unknown, output: unknown): RowPair {
   const state = createKimiMappingState();
@@ -490,8 +615,9 @@ for (const id of ADAPTER_IDS) {
     JSON.stringify(declared ?? null),
   );
   check(
-    `${id}: has a recorded probe for every family it answers`,
-    !!PROBES[id] && FAMILIES.every((family) => typeof PROBES[id]?.[family] === 'function'),
+    `${id}: has a recorded probe for every supported family`,
+    !!declared && FAMILIES.every((family) => declared[family]?.status === 'unsupported'
+      || typeof PROBES[id]?.[family] === 'function'),
     Object.keys(PROBES[id] ?? {}).join(','),
   );
 }

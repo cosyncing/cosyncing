@@ -1,0 +1,504 @@
+{
+  "schemaVersion": 2,
+  "recorded": "2026-08-31",
+  "adapters": {
+    "opencode": {
+      "capabilities": {
+        "integrationKind": "http-sse",
+        "attachModes": ["observe", "resume", "live"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": true,
+        "supportsNativeArtifact": true,
+        "supportsNativeFileInput": true,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": false,
+        "reason": "OpenCode's CAPS declares no supportsCrossClientDriveSharing key; the protocol field is optional and defaults to false, so the broker never offers a cross-client Drive join for OpenCode sessions. The adapter source records no decision on whether sharing would be safe, so this pins the observed baseline, not an endorsed answer."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "live-server",
+        "reason": "canCreateSession() probes the shared opencode serve URL (serverAvailable), so its resolved value needs a live server this static gate must not require; the structural answer — create exists, gated by a live probe — is what is pinned."
+      },
+      "terminalSyncHint": {
+        "status": "supported",
+        "reason": "Discovery rows stamp syncHint(session id, directory) unconditionally; the attach-time paths gate the same hint on server reachability (serverOk), so a row can legitimately omit it only when no serve URL answers."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Every roster row carries nativeId set to the OpenCode session id itself, and subagent children reference their parent through parentThreadId against it."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "subagentNesting", "nativeRename", "modelLabels", "tokenUsage", "costUsage", "runSummary", "slashCommands"],
+        "partial": ["contextUsage"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "currentMode": "No measured native permission-mode value is projected into SessionInfo.currentMode for this adapter."
+        },
+        "reason": "OpenCode adapter and broker suites pin these roster, composer, lifecycle, telemetry, and command answers."
+      }
+    },
+    "pi": {
+      "capabilities": {
+        "integrationKind": "jsonrpc-stdio",
+        "attachModes": ["observe", "resume", "live"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": true,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": true,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "CAPS declares supportsCrossClientDriveSharing: true explicitly; Drive runs through the broker-owned pi --mode rpc child, so a joining socket shares the existing single writer."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "canCreateSession() reads currentPiRuntimeReadiness() — local CLI/runtime readiness with no network — so it is safe to call but its boolean depends on the host installation; the structural answer is pinned, not the resolved value."
+      },
+      "terminalSyncHint": {
+        "status": "unsupported",
+        "reason": "No pi code path sets SessionInfo.terminalSyncHint; the terminal-sync affordance rides control.terminalSync, built by piControlState from terminalSyncCommand, so the hint field is deliberately unused by this adapter."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Persistent Pi rows read nativeId from the bounded native session header, create uses the RPC session id, and the bridge extension sends sessionManager.getSessionId() on hello; malformed headers omit identity rather than inventing one."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "nativeRename", "modelLabels", "contextUsage", "tokenUsage", "runSummary", "slashCommands"],
+        "partial": ["costUsage"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "currentMode": "No measured native permission-mode value is projected into SessionInfo.currentMode for this adapter.",
+          "subagentNesting": "No measured native child-session identity proves origin and parentThreadId for this adapter."
+        },
+        "reason": "Pi adapter and bridge suites pin these roster, composer, lifecycle, telemetry, and command answers."
+      }
+    },
+    "omp": {
+      "capabilities": {
+        "integrationKind": "jsonrpc-stdio",
+        "attachModes": ["observe", "resume", "live"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": true,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": true,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "OMP composes the shared Pi engine, whose capability literal explicitly declares cross-client Drive sharing; joining sockets reuse the same broker-owned RPC connection."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "The inherited PiEngineAdapter canCreateSession() reads OMP runtime readiness, including the local executable, storage, and Pi/OMP path-collision gate; only its structural answer is pinned."
+      },
+      "terminalSyncHint": {
+        "status": "unsupported",
+        "reason": "OMP uses control.terminalSync from the shared Pi engine and does not stamp SessionInfo.terminalSyncHint; the optional row hint is deliberately unused."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Persistent OMP rows read the bounded native session-header id and structurally discovered children link parentThreadId to it; create uses the RPC session id and live bridge hello sends sessionManager.getSessionId()."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "nativeRename", "modelLabels", "contextUsage", "tokenUsage", "runSummary", "slashCommands"],
+        "partial": ["costUsage"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "currentMode": "No measured native permission-mode value is projected into SessionInfo.currentMode for this adapter.",
+          "subagentNesting": "No measured native child-session identity proves origin and parentThreadId for this adapter."
+        },
+        "reason": "OMP adapter and bridge suites pin these roster, composer, lifecycle, telemetry, and command answers."
+      }
+    },
+    "reasonix": {
+      "capabilities": {
+        "integrationKind": "acp-stdio",
+        "attachModes": ["observe", "resume"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": false,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": false,
+        "supportsModelSwitch": false,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "Reasonix Drive owns one ACP child per connection, and joining broker sockets reuse that exact connection rather than opening a second native writer."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "canCreateSession() resolves the local Reasonix executable and runs a bounded --version probe; Create is offered only for exact v1.25.2, whose R1 probe proved session/new returns the same durable store id. The resolved boolean remains host-dependent."
+      },
+      "terminalSyncHint": {
+        "status": "unsupported",
+        "reason": "Reasonix v1.25.2 exposes --resume [QUERY], but the help does not pin an exact session-target query. The broker-owned ACP child has no true terminal join channel, so publishing a guessed SessionInfo.terminalSyncHint would be unsafe."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Every Reasonix discovery and create row stamps nativeId equal to the native store and ACP session id measured by the R1 identity probe."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "createPermissionModePropagation", "currentMode", "tokenUsage", "runSummary"],
+        "partial": ["costUsage", "slashCommands"],
+        "unsupported": {
+          "subagentNesting": "No measured native child-session identity proves origin and parentThreadId for this adapter.",
+          "nativeRename": "The shipped adapter has no renameSession hook backed by a measured native rename operation.",
+          "contextUsage": "No native used/max context-window reading is mapped; prompt-token totals are not substituted.",
+          "modelLabels": "Reasonix publishes no human model name to carry. listModels is built from doctor --json, whose providers list bare model id strings, so every catalog entry's label IS its modelID -- measured on the installed candidate as qwen3.8-flash-next, deepseek-v4-pro, glm-5.2. The client refuses to render an id as a human name, so the composer shows the generic Model chip with the exact id in its tooltip. test-reasonix-identity pins label === modelID over a fixture catalogue so this denial fails the moment a real name appears."
+        },
+        "reason": "Reasonix store, Drive, identity, and cross-client suites pin the supported and deliberately absent surfaces. createModelPropagation was declared unsupported while listModels shipped a bounded doctor --json catalog: physical review selected vllm-hpc/qwen3.8-flash-next in the New Session sheet and the create request, native session, attached metadata, prompt and token report all retained that exact pair. The same review measured that catalog's labels and found them to be the ids themselves, which is why modelLabels stays unsupported."
+      }
+    },
+    "grok": {
+      "capabilities": {
+        "integrationKind": "acp-stdio",
+        "attachModes": ["observe", "resume"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": false,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": false,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "Authenticated Grok Build 1.0.13 physically proved one broker-owned ACP writer shared by joined clients; durable app-created provenance and foreign-write demotion remain the ownership boundary."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "Create is offered only when Grok Build 1.0.13 or newer is installed and reusable cached-token ACP authentication succeeds; the resolved value remains host-dependent."
+      },
+      "terminalSyncHint": {
+        "status": "supported",
+        "reason": "Every Grok row carries the measured exact-id command `grok --cwd <cwd> --resume <uuid>` as a terminal handoff hint; control.terminalSync simultaneously records that this starts a separate terminal process and is not live synchronization."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Every supported Grok discovery and create row stamps nativeId equal to summary.info.id, the UUID directory name, and the ACP session id; mismatched store identities are refused."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "createPermissionModePropagation", "currentMode", "modelLabels", "contextUsage", "tokenUsage", "runSummary"],
+        "conditional": ["subagentNesting"],
+        "partial": ["slashCommands"],
+        "unsupported": {
+          "nativeRename": "The shipped adapter has no renameSession hook backed by a measured native rename operation.",
+          "costUsage": "The native surface supplies no attributable monetary cost, so the adapter does not invent one."
+        },
+        "reason": "Grok floor-gated ACP and store suites pin these answers; subagent roster exposure still requires native physical capture."
+      }
+    },
+    "cline": {
+      "capabilities": {
+        "integrationKind": "http-websocket",
+        "attachModes": ["observe", "resume"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": false,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": false,
+        "supportsModelSwitch": false,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "Cline explicitly declares true because app-created managed-profile sessions have one broker-owned Hub Drive connection that joining app clients share; default-profile sessions remain Observe-only."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "The shipped create method is dynamically ready only on Cline 3.0.61 or newer, explicit non-secret provider/model selection, and the exact ready broker-owned isolated Hub."
+      },
+      "terminalSyncHint": {
+        "status": "supported",
+        "reason": "Parent rows carry the measured `cline --id <sessionId>` handoff command while control state states that it starts a separate process; subagent rows omit the hint."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Parent rows use the measured directory/document session id; subagent rows use the document sessionId and publish the parent native id separately through parentThreadId."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "createPermissionModePropagation", "currentMode", "subagentNesting", "nativeRename", "modelLabels", "tokenUsage", "costUsage", "runSummary", "slashCommands"],
+        "unsupported": {
+          "contextUsage": "The durable snapshot and Hub usage events expose no trustworthy context-window maximum."
+        },
+        "reason": "Cline 3.0.61 store/Observe plus isolated Hub Drive, native rename, approval, model/mode, telemetry, and registration suites pin these cross-agent surface answers; ACP Drive remains fixture-only."
+      }
+    },
+    "kilo": {
+      "capabilities": {
+        "integrationKind": "http-sse",
+        "attachModes": ["live", "observe"],
+        "supportsObserve": true,
+        "supportsResume": false,
+        "supportsLiveAttach": true,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": false,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "Kilo explicitly declares true because joined broker clients reuse one retained HTTP/SSE writer; exact managed-host ownership, durable app-created provenance, and SQLite/SSE foreign-write demotion prevent a rival native writer."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "Create is offered only when a Kilo Code binary at or above the measured 7.4.23 floor and authenticated broker-owned loopback host are ready; the resolved value remains host-dependent."
+      },
+      "terminalSyncHint": {
+        "status": "unsupported",
+        "reason": "No exact-session Kilo terminal-join command has been captured; the adapter does not advertise a guessed handoff or live-sync route."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Every row uses the measured SQLite session id as nativeId; malformed or duplicate identities fail closed."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "nativeRename", "modelLabels", "tokenUsage", "costUsage", "runSummary"],
+        "conditional": ["subagentNesting"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "currentMode": "No measured native permission-mode value is projected into SessionInfo.currentMode for this adapter.",
+          "contextUsage": "No native used/max context-window reading is mapped; prompt-token totals are not substituted.",
+          "slashCommands": "No measured native command registry and invocation path is exposed through this adapter."
+        },
+        "reason": "Kilo floor-gated HTTP, SSE, SQLite, Drive, and managed-host suites pin these answers; child lineage still needs physical capture."
+      }
+    },
+    "codex": {
+      "capabilities": {
+        "integrationKind": "jsonrpc-stdio",
+        "attachModes": ["live", "resume", "observe"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": true,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": true,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "codexCapabilities() declares supportsCrossClientDriveSharing: true explicitly."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "canCreateSession() resolves the codex binary on PATH (resolveBin), a local check whose boolean depends on the host installation; the structural answer is pinned, the resolved value deliberately is not."
+      },
+      "terminalSyncHint": {
+        "status": "conditional",
+        "reason": "syncHint() returns a hint only when supportsLiveAttach is on (COSYNCING_CODEX_SYNC_SERVER, default on) and the session is not agent-owned; sync-disabled and agent-owned rows carry none."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "Discovery rows stamp nativeId from the rollout's thread id (nativeId: threadId || undefined); a rollout without a parseable thread id omits it rather than inventing one."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "currentMode", "subagentNesting", "nativeRename", "modelLabels", "tokenUsage", "runSummary"],
+        "partial": ["contextUsage", "slashCommands"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "costUsage": "The native surface supplies no attributable monetary cost, so the adapter does not invent one."
+        },
+        "reason": "Codex app-server, rollout, roster, and composer suites pin these declared cross-agent surface answers."
+      }
+    },
+    "claude": {
+      "capabilities": {
+        "integrationKind": "sdk-callback",
+        "attachModes": ["observe", "resume"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": false,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": true,
+        "supportsNativeFileInput": true,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-session"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "CAPS declares supportsCrossClientDriveSharing: true explicitly; the Drive owner is the broker's own claude -p --resume child and a joining socket is handed the existing connection, so the session keeps exactly one writer."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "canCreateSession() checks the default store exists and resolves the claude binary locally; the boolean depends on the host installation, so only the structural answer is pinned."
+      },
+      "terminalSyncHint": {
+        "status": "unsupported",
+        "reason": "No claude code path sets terminalSyncHint; true sync via the claude/channel bridge is unsupported (supportsLiveAttach: false), so there is no terminal handoff command for a row to advertise."
+      },
+      "nativeId": {
+        "status": "partial",
+        "reason": "Only rows with a bridge/incarnation identity or a subagent tree publish nativeId; a childless plain session publishes none, pinned by test-claude-roster-subagents.ts."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "currentMode", "subagentNesting", "modelLabels", "tokenUsage", "runSummary"],
+        "partial": ["contextUsage", "costUsage", "slashCommands"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "nativeRename": "The shipped adapter has no renameSession hook backed by a measured native rename operation."
+        },
+        "reason": "Claude hook, Drive, roster, model-label, telemetry, and command suites pin these cross-agent surface answers."
+      }
+    },
+    "kimi": {
+      "capabilities": {
+        "integrationKind": "http-websocket",
+        "attachModes": ["observe", "live"],
+        "supportsObserve": true,
+        "supportsResume": false,
+        "supportsLiveAttach": true,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": true,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-session"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "kimiCapabilities() declares supportsCrossClientDriveSharing: true explicitly, with the single-writer argument recorded beside the flag in the adapter source."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "live-server",
+        "reason": "The constructor assigns canCreateSession to probeCreateSession(), which probes the running Kimi server; the resolved boolean needs a live server this static gate must not require, so only the structural answer is pinned."
+      },
+      "terminalSyncHint": {
+        "status": "unsupported",
+        "reason": "No kimi code path sets terminalSyncHint; the adapter never owns a Kimi process (supportsResume: false), so there is no broker-advertised terminal handoff command."
+      },
+      "nativeId": {
+        "status": "partial",
+        "reason": "Only a parent with a subagent tree publishes a namespaced nativeId (kimiSessionNativeId) and subagent children carry their own; a childless plain row publishes none, pinned by test-kimi-roster-subagents.ts."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "subagentNesting", "nativeRename", "modelLabels", "contextUsage", "tokenUsage", "costUsage", "runSummary"],
+        "partial": ["slashCommands"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "currentMode": "No measured native permission-mode value is projected into SessionInfo.currentMode for this adapter."
+        },
+        "reason": "Kimi server, Drive, roster, model-label, rename, and telemetry suites pin these cross-agent surface answers."
+      }
+    },
+    "dsh": {
+      "capabilities": {
+        "integrationKind": "http-websocket",
+        "attachModes": ["live"],
+        "supportsObserve": false,
+        "supportsResume": false,
+        "supportsLiveAttach": true,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": true,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "The capabilities literal declares supportsCrossClientDriveSharing: true explicitly."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": true,
+        "hookReads": "live-server",
+        "reason": "canCreateSession() requires a reachable dsh host owning at least one workspace; the boolean is live-dependent, so only the structural answer is pinned."
+      },
+      "terminalSyncHint": {
+        "status": "unsupported",
+        "reason": "No dsh code path sets terminalSyncHint; sessions live in the dsh host and the adapter advertises no terminal handoff command."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "dsh ids are already native, so every row carries nativeId equal to its id (mapDshSession)."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "currentMode", "subagentNesting", "nativeRename", "modelLabels", "tokenUsage", "costUsage", "runSummary", "slashCommands"],
+        "partial": ["contextUsage"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice."
+        },
+        "reason": "DSH host, Drive, roster, model, mode, rename, telemetry, and command suites pin these surface answers."
+      }
+    },
+    "agy": {
+      "capabilities": {
+        "integrationKind": "sdk-callback",
+        "attachModes": ["observe", "resume"],
+        "supportsObserve": true,
+        "supportsResume": true,
+        "supportsLiveAttach": false,
+        "supportsCrossClientDriveSharing": true,
+        "supportsNativeArtifact": false,
+        "supportsNativeFileInput": false,
+        "supportsModelSwitch": true,
+        "permissionGranularity": "per-tool"
+      },
+      "crossClientDriveSharing": {
+        "declared": true,
+        "reason": "AGY_CAPABILITIES declares supportsCrossClientDriveSharing: true explicitly, with the single-writer argument recorded beside the flag in the adapter source."
+      },
+      "canCreateSession": {
+        "createSessionPresent": true,
+        "dynamicHook": false,
+        "hookReads": null,
+        "reason": "No canCreateSession hook exists, so the /api/agents derivation is constant true while createSession is present; createSession itself refuses at call time when the agy binary is missing."
+      },
+      "terminalSyncHint": {
+        "status": "supported",
+        "reason": "Every row emits terminalSyncHint carrying the agy --conversation <id> resume command; the adapter header documents this as emitted on every row from P0."
+      },
+      "nativeId": {
+        "status": "supported",
+        "reason": "id === nativeId === the conversation UUID on every row, from day one; no path encoding."
+      },
+      "reflectionSurfaces": {
+        "supported": ["createModelPropagation", "modelLabels", "tokenUsage", "runSummary"],
+        "partial": ["subagentNesting", "contextUsage"],
+        "unsupported": {
+          "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
+          "currentMode": "No measured native permission-mode value is projected into SessionInfo.currentMode for this adapter.",
+          "nativeRename": "The shipped adapter has no renameSession hook backed by a measured native rename operation.",
+          "costUsage": "The native surface supplies no attributable monetary cost, so the adapter does not invent one.",
+          "slashCommands": "No measured native command registry and invocation path is exposed through this adapter."
+        },
+        "reason": "Antigravity storage, Drive, roster, model, and telemetry suites pin these explicit cross-agent answers."
+      }
+    }
+  }
+}

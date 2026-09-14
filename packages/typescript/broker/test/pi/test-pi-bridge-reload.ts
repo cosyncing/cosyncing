@@ -42,6 +42,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const rand = () => Math.random().toString(36).slice(2, 8);
 const ROOT = join('/tmp', `cosyncing-pi-bridge-reload-${PORT}`);
 const DISCOVERY_CWD = join(ROOT, 'work');
+const RUNTIME_CWD = join(ROOT, 'runtime-work');
 const DISCOVERY_AGENT = join(ROOT, 'agent');
 const DISCOVERY_AGENT_LINK = join(ROOT, 'agent-link');
 const DISCOVERY_SESSION_DIR = join(DISCOVERY_AGENT, 'sessions', encodeCwdDir(DISCOVERY_CWD));
@@ -57,6 +58,7 @@ function encodeCwdDir(path: string): string {
 // not turn that interrupted run into an EEXIST failure in a later clean run.
 rmSync(ROOT, { recursive: true, force: true });
 mkdirSync(DISCOVERY_CWD, { recursive: true });
+mkdirSync(RUNTIME_CWD, { recursive: true });
 mkdirSync(DISCOVERY_SESSION_DIR, { recursive: true });
 writeFileSync(
   DISCOVERY_SESSION_FILE,
@@ -126,7 +128,15 @@ const results: { name: string; ok: boolean; detail: string }[] = [];
 async function test(name: string, fn: () => Promise<[boolean, string]>) {
   process.stdout.write(`• ${name} … `);
   try { const [ok, d] = await fn(); results.push({ name, ok, detail: d }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${d}`); }
-  catch (e) { results.push({ name, ok: false, detail: String(e) }); console.log('FAIL  threw: ' + e); }
+  catch (e) {
+    let detail = String(e);
+    if (broker.exitCode !== null) {
+      const tail = (await settledProcessOutput(brokerOutput)).trim().slice(-2_000);
+      detail += `; broker exited ${broker.exitCode}${tail ? `; tail=${tail}` : ''}`;
+    }
+    results.push({ name, ok: false, detail });
+    console.log(`FAIL  threw: ${detail}`);
+  }
 }
 
 try {
@@ -176,16 +186,16 @@ try {
 
   // 0 — sync latency/control upgrade: the phone may attach before the terminal bridge starts.
   await test('late bridge hello upgrades an open Observe socket without reconnect', async () => {
-    const sf = `/tmp/cabridge-late-${rand()}.jsonl`;
+    const sf = join(ROOT, `cabridge-late-${rand()}.jsonl`);
     await Bun.write(
       sf,
-      JSON.stringify({ type: 'session', version: 3, id: 'late', timestamp: new Date().toISOString(), cwd: '/tmp' }) + '\n',
+      JSON.stringify({ type: 'session', version: 3, id: 'late', timestamp: new Date().toISOString(), cwd: RUNTIME_CWD }) + '\n',
     );
     const id = enc(sf);
     const p = await attach(id);
     await sleep(400);
     const before = p.frames.find((f) => f.kind === 'session')?.info;
-    const id2 = await hello(sf, '/tmp');
+    const id2 = await hello(sf, RUNTIME_CWD);
     const upgraded = await p.waitFrame(
       (f) => f.kind === 'session' && f.info?.control?.terminalSync?.active === true && f.info?.control?.drive?.state === 'unavailable',
       3000,
@@ -201,8 +211,8 @@ try {
 
   // 1 — the bug: a reload must NOT orphan the attached phone.
   await test('reload keeps the phone attached (no orphan)', async () => {
-    const sf = `/tmp/cabridge-${rand()}.jsonl`;
-    const id = await hello(sf, '/tmp');
+    const sf = join(ROOT, `cabridge-${rand()}.jsonl`);
+    const id = await hello(sf, RUNTIME_CWD);
     const p = await attach(id);
     await sleep(400); // attach completes (session + history sent)
     const info = p.frames.find((f) => f.kind === 'session')?.info;
@@ -212,7 +222,7 @@ try {
     const gotPre = await p.waitFrame(isModelDelta('PRE'), 3000);
     // reload: old runtime byes, new runtime re-hellos the SAME session file (→ same id), immediately.
     await bye(id, 'reload');
-    const id2 = await hello(sf, '/tmp');
+    const id2 = await hello(sf, RUNTIME_CWD);
     await events(id, [{ t: 'delta', kind: 'text', key: 't1:t', delta: 'POST' }]);
     const gotPost = await p.waitFrame(isModelDelta('POST'), 3000);
     const noEnded = !p.frames.some((f) => f.kind === 'ended');
@@ -223,8 +233,8 @@ try {
 
   // 2 — quit: clean `ended` frame, then the bridge is gone.
   await test('quit sends a clean `ended` frame and removes the bridge', async () => {
-    const sf = `/tmp/cabridge-q-${rand()}.jsonl`;
-    const id = await hello(sf, '/tmp');
+    const sf = join(ROOT, `cabridge-q-${rand()}.jsonl`);
+    const id = await hello(sf, RUNTIME_CWD);
     const p = await attach(id);
     await sleep(400);
     await events(id, [{ t: 'status', running: true }]);
@@ -240,8 +250,8 @@ try {
   // 3 — new/resume/fork: immediate teardown, reason passed through.
   for (const reason of ['new', 'resume', 'fork'] as const) {
     await test(`${reason} ends immediately with reason='${reason}'`, async () => {
-      const sf = `/tmp/cabridge-${reason}-${rand()}.jsonl`;
-      const id = await hello(sf, '/tmp');
+      const sf = join(ROOT, `cabridge-${reason}-${rand()}.jsonl`);
+      const id = await hello(sf, RUNTIME_CWD);
       const p = await attach(id);
       await sleep(400);
       const t0 = Date.now();
@@ -257,8 +267,8 @@ try {
 
   // 4 — a reload whose re-hello never comes: grace expires → clean teardown, no leak.
   await test('reload with no re-hello tears down after the grace window', async () => {
-    const sf = `/tmp/cabridge-g-${rand()}.jsonl`;
-    const id = await hello(sf, '/tmp');
+    const sf = join(ROOT, `cabridge-g-${rand()}.jsonl`);
+    const id = await hello(sf, RUNTIME_CWD);
     const p = await attach(id);
     await sleep(400);
     await bye(id, 'reload'); // deferred GRACE_MS; no re-hello follows
@@ -268,6 +278,36 @@ try {
     p.close();
     const ok = bridgedDuringGrace === true && !!ended && bridgedAfter === false;
     return [ok, `bridgedDuringGrace=${bridgedDuringGrace} endedAfterGrace=${!!ended} stillBridged=${bridgedAfter}`];
+  });
+
+  await test('a re-hello that rewrites the transcript rotates the rewrite token', async () => {
+    // The broker's page cache keeps a client's earlier snapshot valid across a GROWING
+    // appendPosition only while `rewriteToken` is unchanged (history-page-cache.ts:142-146). A
+    // re-hello is an authoritative whole-session snapshot that can DROP rows, so it has to rotate
+    // that token or the cache goes on serving pages for rows the replacement removed.
+    const { PiBridgeConnection } = await import('../../../pi-engine/src/bridge.ts');
+    const { historySourceStillContainsSnapshot } = await import('../../src/sessions/history-page-cache.ts');
+    const userEvent = (key: string, text: string) => ({ t: 'user', key, text });
+    const connection = new PiBridgeConnection({
+      id: 'bridge-rewrite-token', tool: 'pi', title: 'rewrite token',
+      status: 'idle', attachMode: 'observe',
+    } as any);
+
+    connection.ingestHistory([userEvent('k1', 'first'), userEvent('k2', 'second')]);
+    const first = connection.getHistorySourceIdentity();
+    // Identical content is a no-op (ingestHistory returns early), so earlier pages stay valid.
+    connection.ingestHistory([userEvent('k1', 'first'), userEvent('k2', 'second')]);
+    const identical = connection.getHistorySourceIdentity();
+    // Any DIFFERENCE is a whole-session replacement; this one drops both rows.
+    connection.ingestHistory([userEvent('k9', 'rewritten')]);
+    const rewritten = connection.getHistorySourceIdentity();
+
+    const keptOnNoop = identical.rewriteToken === first.rewriteToken
+      && historySourceStillContainsSnapshot(first, identical);
+    const rotatedOnRewrite = rewritten.rewriteToken !== identical.rewriteToken
+      && !historySourceStillContainsSnapshot(identical, rewritten);
+    return [keptOnNoop && rotatedOnRewrite,
+      `keptOnNoop=${keptOnNoop} rotatedOnRewrite=${rotatedOnRewrite}`];
   });
 } finally {
   // Awaiting the exit is the point: signalling and returning left the broker

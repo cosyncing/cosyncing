@@ -939,11 +939,21 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
                 ),
             ],
           ),
-        const SizedBox(height: 8),
-        _RequestOutcomeBadge(
-          state: _outcome,
-          label: _requestOutcomeLabel(l10n, _outcome),
-        ),
+        // A resolved request is not pending. This badge describes THIS client's
+        // own submission and `pending` is its initial state, so a request
+        // answered anywhere else -- another client, or the terminal -- left the
+        // card reading "Approved" above the buttons and "Pending" below them.
+        // Measured on the installed client during the reasonix permission leg.
+        // `submitting` and `failed` still say something true here and are kept;
+        // only the contradiction is dropped.
+        if (!(resolvedElsewhere &&
+            _outcome == _RequestActionOutcomeState.pending)) ...[
+          const SizedBox(height: 8),
+          _RequestOutcomeBadge(
+            state: _outcome,
+            label: _requestOutcomeLabel(l10n, _outcome),
+          ),
+        ],
         if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
           const SizedBox(height: 4),
           Text(
@@ -1225,11 +1235,16 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
             ),
           ],
         ),
-        const SizedBox(height: 8),
-        _RequestOutcomeBadge(
-          state: _outcome,
-          label: _requestOutcomeLabel(l10n, _outcome),
-        ),
+        // Same contradiction as the permission card: "Answered elsewhere" above
+        // and "Pending" below.
+        if (!(widget.isResolved &&
+            _outcome == _RequestActionOutcomeState.pending)) ...[
+          const SizedBox(height: 8),
+          _RequestOutcomeBadge(
+            state: _outcome,
+            label: _requestOutcomeLabel(l10n, _outcome),
+          ),
+        ],
         if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
           const SizedBox(height: 4),
           Text(

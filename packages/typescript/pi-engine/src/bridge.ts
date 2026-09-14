@@ -49,7 +49,7 @@ import {
 } from '@cosyncing/adapter-api';
 // The bridge is Pi-specific, so it shares Pi's tool-result enrichment (diff/exitCode/path/truncation
 // → canonical chips) with the resume adapter — both paths enrich identically (shared-surface fix).
-import { enrichPiToolResult, piToolDisplayClass, piToolSemantic } from './implementation.ts';
+import { enrichPiToolResult, piContextUsageMessage, piToolDisplayClass, piToolSemantic } from './implementation.ts';
 import { PI_DIALECT, type PiDialect } from './dialect.ts';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -65,9 +65,42 @@ export interface BridgeCommand {
   decision?: PermissionDecision;
   answers?: string[][];
   deliverAs?: 'steer' | 'followUp' | 'nextTurn';
+  /** Broker-minted durable identity for an app-authored prompt. The extension persists this on
+   *  the exact native custom-message row; it must never be inferred later by text or FIFO order. */
+  messageKey?: string;
+  /** App optimistic-bubble identity, persisted beside messageKey for reload reconciliation. */
+  clientKey?: string;
+  /** Original broker acceptance clock, persisted on the native row for live/replay summary parity. */
+  sentAt?: number;
   providerID?: string;
   modelID?: string;
   reasoningEffort?: string;
+}
+
+const REMOTE_USER_KEY_PREFIX = 'u:remote:';
+
+function nonEmptyBoundedString(value: unknown, max = 256): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text && text.length <= max ? text : undefined;
+}
+
+/** Accept a correlation stamp only from the bridge's broker-minted namespace. A plain terminal
+ *  user event can carry a stable ordinal key, but it can never claim an app clientKey. */
+function bridgeUserMessage(ev: any): AgentMessage {
+  const key = nonEmptyBoundedString(ev?.key);
+  const clientKey = key?.startsWith(REMOTE_USER_KEY_PREFIX)
+    ? nonEmptyBoundedString(ev?.clientKey)
+    : undefined;
+  return {
+    type: 'user-message',
+    text: String(ev?.text ?? ''),
+    key,
+    turnId: key,
+    sentAt: nativeTimeMs(ev?.sentAt ?? ev?.createdAt),
+    ...(clientKey ? { clientKey } : {}),
+    ...(Number.isInteger(ev?.imageCount) && ev.imageCount > 0 ? { imageCount: ev.imageCount } : {}),
+  };
 }
 
 const PI_THINKING_LEVELS = [
@@ -173,9 +206,17 @@ function piCurrentModelFromWire(model: any, thinkingLevel?: unknown): SessionInf
 
 function piThinkingEfforts(model: any): ModelOption['reasoningEfforts'] | undefined {
   if (model?.reasoning !== true) return undefined;
+  const nativeEfforts = Array.isArray(model?.thinking)
+    ? model.thinking
+    : Array.isArray(model?.thinking?.efforts)
+      ? model.thinking.efforts
+      : undefined;
+  const nativeThinking = nativeEfforts
+    ? new Set(nativeEfforts.map((value: unknown) => normalizePiThinkingLevel(value)).filter(Boolean))
+    : undefined;
   const map = model?.thinkingLevelMap && typeof model.thinkingLevelMap === 'object' ? model.thinkingLevelMap : undefined;
   const efforts = PI_THINKING_LEVELS
-    .filter(({ effort }) => map?.[effort] !== null)
+    .filter(({ effort }) => nativeThinking ? nativeThinking.has(effort) : map?.[effort] !== null)
     .map(({ effort, label }) => ({ effort, label }));
   return efforts.length ? efforts : undefined;
 }
@@ -258,7 +299,11 @@ export class PiBridgeConnection implements SessionConnection {
    *  ride the stream; ManagedConn.liveSnapshot catches a mid-turn joiner up on in-flight text. */
   private readonly history: AgentMessage[] = [];
   private historyRevision = 0;
-  private readonly historySourceGeneration = randomUUID();
+  /** Rotated whenever the transcript is REPLACED, never on an append. The broker's page cache
+   *  keeps a stale snapshot valid across a growing appendPosition only while this token is
+   *  unchanged (`history-page-cache.ts:142-146`), so a replacement that kept it let the cache go on
+   *  serving rows the replacement had dropped. */
+  private historySourceGeneration = randomUUID();
   /** Outbound commands awaiting the extension's long-poll. */
   private queue: BridgeCommand[] = [];
   private waiter?: (cmds: BridgeCommand[]) => void;
@@ -330,12 +375,9 @@ export class PiBridgeConnection implements SessionConnection {
         return;
       }
       case 'user': {
-        // Carry the extension's stable key so the app dedupes the relayed user message against its
-        // own optimistic bubble (and across reattaches). The echo stays UNSTAMPED: Pi user messages
-        // have no native id and the relay gives an injected prompt no exact handle, so a terminal
-        // prompt with identical text is indistinguishable — the client's legacy reconcile applies.
-        const key = ev.key ? String(ev.key) : undefined;
-        const m: AgentMessage = { type: 'user-message', text: String(ev.text ?? ''), key, turnId: key, sentAt: nativeTimeMs(ev.sentAt ?? ev.createdAt) };
+        // App prompts arrive as exact, durable collab-prompt rows and therefore carry the broker's
+        // messageKey/clientKey. Native terminal rows retain only their ordinal key and stay unstamped.
+        const m = bridgeUserMessage(ev);
         this.appendHistory(m);
         this.emit(m);
         return;
@@ -349,6 +391,13 @@ export class PiBridgeConnection implements SessionConnection {
       }
       case 'runtime-totals': {
         const m: AgentMessage = { type: 'metadata-update', key: 'runtimeTotals', value: ev.value ?? ev };
+        this.appendHistory(m);
+        this.emit(m);
+        return;
+      }
+      case 'context-usage': {
+        const m = piContextUsageMessage(ev.value ?? ev.contextUsage);
+        if (!m) return;
         this.appendHistory(m);
         this.emit(m);
         return;
@@ -418,24 +467,39 @@ export class PiBridgeConnection implements SessionConnection {
     }
   }
 
-  /** Backfill the conversation-so-far on hello: map relayed wire events to history WITHOUT emitting
-   *  (no client is attached yet; live clients pick it up via getHistory on attach/resync). Idempotent
-   *  — a re-hello (extension reload) won't duplicate, since the history is already populated. */
+  /** Backfill the conversation-so-far on hello: map relayed wire events to history.
+   *
+   *  The FIRST hello emits nothing — no client is attached yet, and live clients pick the rows up via
+   *  getHistory on attach/resync. A re-hello is different, and the comment here used to claim it was
+   *  not: an extension reload delivers an authoritative whole-session snapshot, so when it differs
+   *  from the cache this REPLACES the rows, rotates `historySourceGeneration`, and emits
+   *  `history-reset` to make attached clients replay. Duplication is prevented by comparing the
+   *  mapped snapshot to the current history, NOT by the cache merely being non-empty. */
   ingestHistory(events: unknown): void {
-    if (this.history.length) return; // already backfilled
-    for (const ev of Array.isArray(events) ? events : []) {
-      const m = this.historyMessage(ev);
-      if (m) this.appendHistory(m);
+    if (!Array.isArray(events)) return;
+    const next = events
+      .map((ev) => this.historyMessage(ev))
+      .filter((m): m is AgentMessage => m !== undefined);
+    if (!this.history.length) {
+      for (const m of next) this.appendHistory(m);
+      return;
     }
+    // A re-hello is an authoritative whole-session snapshot. The previous extension may have
+    // persisted a prompt and crashed before POSTing its event; keeping the old non-empty cache
+    // would lose that row forever. Replace atomically and ask attached clients to replay. This also
+    // drops stale rows after branch/tree rewrites instead of transferring their correlation.
+    if (JSON.stringify(next) === JSON.stringify(this.history)) return;
+    this.history.splice(0, this.history.length, ...next);
+    this.historyRevision += 1;
+    // This is a rewrite, not an append: the rows a client already paged may no longer exist.
+    this.historySourceGeneration = randomUUID();
+    this.emit({ type: 'history-reset' });
   }
 
   private historyMessage(ev: any): AgentMessage | undefined {
     switch (ev?.t) {
       case 'user':
-        {
-          const key = ev.key ? String(ev.key) : undefined;
-          return { type: 'user-message', text: String(ev.text ?? ''), key, turnId: key, sentAt: nativeTimeMs(ev.sentAt ?? ev.createdAt) };
-        }
+        return bridgeUserMessage(ev);
       case 'final':
         return ev.kind === 'thinking'
           ? { type: 'thinking', text: String(ev.text ?? ''), key: String(ev.key ?? '') }
@@ -445,6 +509,8 @@ export class PiBridgeConnection implements SessionConnection {
         return bridgeRunSummary(ev, this.dialect);
       case 'runtime-totals':
         return { type: 'metadata-update', key: 'runtimeTotals', value: ev.value ?? ev };
+      case 'context-usage':
+        return piContextUsageMessage(ev.value ?? ev.contextUsage);
       case 'tool-call':
         return bridgeToolCall(ev);
       case 'tool-result':
@@ -564,10 +630,18 @@ export class PiBridgeConnection implements SessionConnection {
     }
     if (!text.trim()) return;
     this.enqueueModelOverride(input.model);
-    // NO optimistic echo here: the app already draws its own optimistic bubble, and the extension
-    // relays the real user message (message_start, role:user) which reconciles it. Echoing here too
-    // produced a SECOND, un-reconciled bubble (the "one send → two bubbles" report).
-    this.enqueue({ kind: 'prompt', text, deliverAs: this.streaming ? 'steer' : undefined });
+    // NO adapter echo here: the app already draws its own optimistic bubble. The extension persists
+    // this exact identity on a collab-prompt custom row, then relays it live and on every backfill.
+    // A broker-minted messageKey is required even when an older caller omits clientMessageId, so
+    // distinct identical prompts can never collapse or steal one another's correlation.
+    this.enqueue({
+      kind: 'prompt',
+      text,
+      deliverAs: this.streaming ? 'steer' : undefined,
+      messageKey: `${REMOTE_USER_KEY_PREFIX}${randomUUID()}`,
+      sentAt: Date.now(),
+      ...(input.clientMessageId ? { clientKey: input.clientMessageId } : {}),
+    });
   }
 
   async sendFile(file: FileInput): Promise<void> {

@@ -14,6 +14,10 @@ import { CodexAdapter } from '@cosyncing/adapter-codex';
 import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
 import { PiAdapter } from '@cosyncing/adapter-pi';
 import { OmpAdapter } from '@cosyncing/adapter-omp';
+import { ReasonixAdapter } from '@cosyncing/adapter-reasonix';
+import { GrokAdapter } from '@cosyncing/adapter-grok';
+import { ClineAdapter } from '@cosyncing/adapter-cline';
+import { KiloAdapter } from '@cosyncing/adapter-kilocode';
 import { ClaudeAdapter } from '@cosyncing/adapter-claude';
 import { KimiAdapter } from '@cosyncing/adapter-kimi';
 import { DshAdapter } from '@cosyncing/adapter-dsh';
@@ -29,6 +33,10 @@ export function shippedAdapters(): readonly AgentBackend[] {
     new OpenCodeAdapter(),
     new PiAdapter(),
     new OmpAdapter(),
+    new ReasonixAdapter(),
+    new GrokAdapter(),
+    new ClineAdapter(),
+    new KiloAdapter(),
     new CodexAdapter(),
     new ClaudeAdapter(),
     new KimiAdapter(),

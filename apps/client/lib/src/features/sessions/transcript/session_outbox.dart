@@ -225,6 +225,36 @@ abstract interface class SessionOutboxRepository {
   /// Marks a row retryable after transport failure or retriable nack.
   Future<void> markRetryable(String clientMessageId, String error);
 
+  /// Re-asks for a row that was ALREADY dispatched and is still awaiting its
+  /// ack, without spending an attempt.
+  ///
+  /// The attempt cap exists to stop retrying a prompt that keeps failing. A
+  /// reattach replay of a `sending` row is not a failure -- nothing went
+  /// wrong, the answer has simply not arrived -- so counting it burns the
+  /// budget on reconciliation. Measured on the installed broker: a prompt held
+  /// behind a permission gate is not acked until the whole turn resolves,
+  /// 12 seconds here (`sendPrompt-begin` 21:55:32, `sendPrompt-resolved` and
+  /// `ack-send` both 21:55:44). Two ordinary reattaches inside that window
+  /// exhausted `sessionOutboxMaxAttempts`, so the row stopped replaying before
+  /// the ack existed and was expired instead. The two-minute retry window is
+  /// what bounds this path.
+  Future<void> markResending(String clientMessageId);
+
+  /// Re-arms a row whose replay collided with its own original, still in
+  /// flight, and gives back the attempt that replay spent.
+  ///
+  /// The broker answers a duplicate claim it is still executing with
+  /// `pending: true`. That is neither a delivery receipt nor a failure -- the
+  /// original is running and its terminal result will be replayed to whoever
+  /// asks next. Counting it against [sessionOutboxMaxAttempts] spends the
+  /// replay budget on answers that were never attempts, and a row that runs
+  /// out is expired by maintenance, which RESTORES its prompt text into the
+  /// durable draft. Measured on the installed client: a prompt held behind a
+  /// permission gate collected three `pending` answers, hit the cap, and its
+  /// already-executed `rm -f <path> && touch <path>` reappeared as the shared
+  /// draft.
+  Future<void> markStillInFlight(String clientMessageId);
+
   /// Marks a row terminally failed.
   Future<void> markFailed(String clientMessageId, String error);
 
@@ -318,6 +348,25 @@ class DriftSessionOutboxRepository implements SessionOutboxRepository {
   }
 
   @override
+  Future<void> markResending(String clientMessageId) {
+    return _updateStatus(
+      clientMessageId,
+      status: SessionOutboxMessageStatus.sending,
+      clearError: true,
+    );
+  }
+
+  @override
+  Future<void> markStillInFlight(String clientMessageId) {
+    return _updateStatus(
+      clientMessageId,
+      status: SessionOutboxMessageStatus.retryable,
+      clearError: true,
+      refundAttempt: true,
+    );
+  }
+
+  @override
   Future<void> markFailed(String clientMessageId, String error) {
     return _updateStatus(
       clientMessageId,
@@ -339,6 +388,7 @@ class DriftSessionOutboxRepository implements SessionOutboxRepository {
     bool incrementAttempt = false,
     bool clearError = false,
     bool stripPayload = false,
+    bool refundAttempt = false,
     String? lastError,
   }) async {
     // ONE conditional statement, not read-then-write. Broker receipts are
@@ -358,6 +408,27 @@ class DriftSessionOutboxRepository implements SessionOutboxRepository {
     }
     if (incrementAttempt) {
       sets.add('attempt_count = attempt_count + 1');
+    }
+    if (refundAttempt) {
+      // Floored at ONE, not zero. This counter carries two facts: how much
+      // replay budget a row has spent, and -- read by the expiry pass --
+      // whether the row was ever dispatched. A refund to zero told that second
+      // reader "this never left the device", which is the one thing it must
+      // never say about a prompt the broker has already acknowledged as
+      // in flight: `markSending` (1) -> reattach `markResending` (still 1) ->
+      // a `pending: true` duplicate ack -> refund reaches 0 on a row whose
+      // command may already have run, and the expiry pass then hands that
+      // command back to every client's composer.
+      //
+      // The floor is the row's OWN zero-or-one, never a constant: a flat floor
+      // of one would RAISE a still-queued row from 0 to 1 and tell that same
+      // reader the opposite lie, losing text that genuinely never left. This
+      // form is monotonically non-increasing and never crosses the 0/1 boundary
+      // in either direction -- 0 stays 0, 1 stays 1, and anything above walks
+      // down to 1, which is all the refund was ever for.
+      sets.add(
+        'attempt_count = MAX(attempt_count - 1, MIN(attempt_count, 1))',
+      );
     }
     if (clearError) {
       sets.add('last_error = NULL');

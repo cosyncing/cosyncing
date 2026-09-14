@@ -76,6 +76,7 @@ import {
 } from '../../src/installation/install-state.ts';
 import { atomicWriteOwnerOnly } from '../../src/security/secure-files.ts';
 import { PI_BRIDGE_EMBEDDED_SOURCE } from '../../../adapters/pi/src/index.ts';
+import { OMP_BRIDGE_EMBEDDED_SOURCE } from '../../../adapters/omp/src/bridge-asset.ts';
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 const observedDoctorChecks: SetupCheck[] = [];
@@ -157,7 +158,13 @@ function literalDoctorCopy(): Array<{ file: string; text: string }> {
 }
 
 function displayed(path: string, home: string): string {
-  return path === home ? '~' : path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+  const normalizedPath = path.replaceAll('\\', '/');
+  const normalizedHome = home.replaceAll('\\', '/');
+  return normalizedPath === normalizedHome
+    ? '~'
+    : normalizedPath.startsWith(`${normalizedHome}/`)
+      ? `~/${normalizedPath.slice(normalizedHome.length + 1)}`
+      : path;
 }
 
 interface FakeContextOptions {
@@ -681,6 +688,62 @@ try {
   }
 
   {
+    const userHome = join(testRoot, 'omp-receipt-target-doctor');
+    const stateHome = join(userHome, '.cosyncing');
+    const defaultOmpAgentDir = join(userHome, '.omp', 'agent');
+    const installedOmpAgentDir = join(userHome, 'isolated-omp-review');
+    const bridge = join(installedOmpAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+    atomicWriteOwnerOnly(bridge, OMP_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+    const install = committedInstallState('2026-09-01T00:00:00.000Z');
+    install.resources.push({
+      id: 'omp-bridge',
+      kind: 'agent-integration',
+      target: bridge,
+      ownership: {
+        proof: 'package-hash',
+        installedSha256: createHash('sha256').update(OMP_BRIDGE_EMBEDDED_SOURCE).digest('hex'),
+      },
+    });
+    writeInstallState(install, stateHome);
+    const diagnosisAdapter = {
+      id: 'omp',
+      displayName: 'omp',
+      diagnoseSetup: async () => ({
+        agent: 'omp',
+        displayName: 'omp',
+        minimumVersion: {
+          version: '17.4.2',
+          requiredFeature: 'fixture',
+          evidenceUrl: 'https://example.invalid/fixture',
+          evidenceNote: 'fixture',
+        },
+        checks: [{
+          id: 'omp.bridge-asset',
+          status: 'warn',
+          detailCode: 'bridge-missing',
+          summary: 'The omp bridge extension is not installed.',
+          evidence: { path: join(defaultOmpAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts') },
+        }],
+      }),
+    } as unknown as AgentBackend;
+    const report = observeDoctorReport(await collectDoctorReport({
+      buildInfo: BUILD_INFO,
+      context: fakeContext({ homeDir: userHome }),
+      assetReport: inspectRuntimeAssets(),
+      adapters: [diagnosisAdapter],
+      stateHome,
+    }));
+    const installedBridge = report.sections.flatMap((section) => section.checks)
+      .find((candidate) => candidate.id === 'omp.bridge-asset');
+    check('doctor validates a migrated omp bridge through its committed receipt target without the setup-only profile override',
+      installedBridge?.status === 'pass'
+        && installedBridge.detailCode === 'bridge-owned-current'
+        && installedBridge.evidence?.path === '~/isolated-omp-review/extensions/cosyncing-bridge/index.ts',
+      JSON.stringify(installedBridge));
+  }
+
+  {
     // THE TWO HOMES, AT THE CALL SITE.
     //
     // The posture function takes the state home and the user home separately;
@@ -1078,6 +1141,10 @@ try {
           { id: 'opencode', displayName: 'OpenCode', canCreateSession: false },
           { id: 'pi', displayName: 'Pi', canCreateSession: false },
           { id: 'claude', displayName: 'Claude Code', canCreateSession: false },
+          {
+            id: 'cline', displayName: 'Cline', canCreateSession: false,
+            supportsCreateSession: false,
+          },
         ] };
       }
       return aggregateContext.fetchJson(url, headers, timeoutMs, maxBytes);
@@ -1099,6 +1166,7 @@ try {
   const serviceBlindChecks = serviceBlindReport.sections.flatMap((section) => section.checks);
   const codexServiceReadiness = serviceBlindChecks.find((item) => item.id === 'codex.broker-create-readiness');
   const piServiceReadiness = serviceBlindChecks.find((item) => item.id === 'pi.broker-create-readiness');
+  const clineServiceReadiness = serviceBlindChecks.find((item) => item.id === 'cline.broker-create-readiness');
   check('doctor separates interactive installation and sync configuration from live broker creation readiness',
     codexServiceReadiness?.status === 'fail'
       && codexServiceReadiness.detailCode === 'broker-session-creation-unavailable'
@@ -1106,8 +1174,12 @@ try {
       && codexServiceReadiness.evidence?.syncEnabled === true
       && codexServiceReadiness.evidence?.installedInInteractiveShell === true
       && piServiceReadiness?.status === 'skip'
-      && piServiceReadiness.detailCode === 'broker-agent-executable-unavailable',
-    `${codexServiceReadiness?.status}/${codexServiceReadiness?.detailCode} vs ${piServiceReadiness?.status}/${piServiceReadiness?.detailCode}`);
+      && piServiceReadiness.detailCode === 'broker-agent-executable-unavailable'
+      && clineServiceReadiness?.status === 'skip'
+      && clineServiceReadiness.detailCode === 'broker-session-creation-unsupported'
+      && clineServiceReadiness.evidence?.creationSupported === false
+      && clineServiceReadiness.remediation === undefined,
+    `${codexServiceReadiness?.status}/${codexServiceReadiness?.detailCode} vs ${piServiceReadiness?.status}/${piServiceReadiness?.detailCode} vs ${clineServiceReadiness?.status}/${clineServiceReadiness?.detailCode}`);
 
   // The persisted setup-failure record escalates with its rollback outcome. A completed rollback left the
   // host as it was, so the record is history (warn). An incomplete one means a transaction journal remains

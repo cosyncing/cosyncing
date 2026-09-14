@@ -133,14 +133,39 @@ export class RosterRevisionStore {
     return removed;
   }
 
-  /** Reconciles a complete local snapshot, including bounded removal events. */
-  reconcile(sessions: SessionInfo[], machine: string): void {
+  /**
+   * Reconciles a local snapshot, including bounded removal events.
+   *
+   * `withheldTools` names backends the snapshot could not speak for -- a
+   * discovery leg abandoned at its budget, or one that threw. Row count does not
+   * enter into it: such a leg returns the carry of the last sweep that DID read
+   * the adapter, which cannot mention anything that appeared since. Their rows
+   * are left alone; every other backend reconciles normally.
+   *
+   * Removal authority is per ADAPTER because absence means different things for
+   * different ones in the same sweep. Without this, one adapter timing out
+   * published a removal delta for every session it owned, and a connected client
+   * applied them the moment they arrived: the snapshot's own completeness flag
+   * cannot help, because deltas are a separate channel that never sees it. The
+   * whole agent's sessions vanished from the list and returned on the next
+   * healthy sweep.
+   *
+   * Withholding is not the same as suppressing removals altogether. A session
+   * deleted under a HEALTHY adapter still has to leave, and it does.
+   */
+  reconcile(
+    sessions: SessionInfo[],
+    machine: string,
+    options: { withheldTools?: readonly string[] } = {},
+  ): void {
     const seen = new Set(sessions.map((info) => keyOf(info, machine)));
+    const withheld = new Set(options.withheldTools ?? []);
     // Retire absent owners before admitting replacements. Native incarnations can change adapter id
     // while preserving one native identity; publishing the new row first exposes both logical
     // owners for one revision window and can leave the superseded Working row actionable.
     for (const [key, info] of [...this.current]) {
       if (!key.startsWith(`${machine}\0`) || seen.has(key)) continue;
+      if (withheld.has(info.tool)) continue;
       this.current.delete(key);
       this.append({
         revision: 0,

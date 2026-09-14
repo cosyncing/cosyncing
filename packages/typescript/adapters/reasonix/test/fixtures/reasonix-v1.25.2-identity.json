@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "probe": {
+    "date": "2026-08-27",
+    "agentVersion": "v1.25.2",
+    "source": "R1 ACP and store capture",
+    "normalization": "The two captured agent_message_chunk payloads are combined into their measured final text; ids and paths are sanitized. Display offsets and lengths are recalculated after sanitization using the measured v1.25.2 contract: each length includes its trailing LF."
+  },
+  "sessionId": "reasonix-identity-fixture",
+  "records": [
+    { "role": "system", "content": "<sanitized system context>" },
+    { "role": "user", "content": "Reply with exactly R1_OK. Do not use tools.", "raw_content": "Reply with exactly R1_OK. Do not use tools." },
+    { "role": "assistant", "content": "R1_OK", "workDurationMs": 1 }
+  ],
+  "displayEntries": [
+    { "index": 0, "offset": 0, "length": 57, "role": "system", "authoredTurn": 0 },
+    { "index": 1, "offset": 57, "length": 132, "role": "user", "authoredTurn": 1, "startsTurn": true },
+    { "index": 2, "offset": 189, "length": 58, "role": "assistant", "authoredTurn": 1 }
+  ],
+  "combinedLiveUpdates": [
+    { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "R1_OK" } }
+  ]
+}

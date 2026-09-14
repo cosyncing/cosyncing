@@ -82,6 +82,13 @@ export interface SetupDiagnosisContext {
   inspectPath(path: string): SetupPathInspection;
   readText(path: string, maxBytes?: number): { ok: true; text: string } | { ok: false; reason: 'missing' | 'unreadable' | 'too-large' };
   /**
+   * Read only the bounded prefix of a regular, non-symlink file.  Unlike
+   * `readText`, a larger file is valid: launcher diagnosis needs the shebang,
+   * not the whole bundled CLI.  Optional for compatibility with injected
+   * contexts; adapters fall back to `readText` in older fixtures.
+   */
+  readTextPrefix?(path: string, maxBytes: number): { ok: true; text: string } | { ok: false; reason: 'missing' | 'unreadable' | 'too-large' };
+  /**
    * Bounded read-only directory listing: entry NAMES only (no stat, no
    * recursion). `maxEntries` REQUESTS a ceiling; the implementation enforces
    * its own finite maximum, treats a non-finite or non-positive request as
@@ -114,7 +121,12 @@ export interface SetupDiagnosisContext {
    */
   windowsMachineArchitecture?(): 'x64' | 'arm64' | 'other' | 'unknown';
   readPackageVersion(executable: string, packageNames: readonly string[]): string | undefined;
-  runReadOnly(executable: string, args: readonly string[], timeoutMs?: number): Promise<SetupCommandProbe>;
+  runReadOnly(
+    executable: string,
+    args: readonly string[],
+    timeoutMs?: number,
+    envOverrides?: Readonly<Record<string, string | undefined>>,
+  ): Promise<SetupCommandProbe>;
   /**
    * `maxBytes` caps the DECODED body; over it the probe reports `invalid-response`, never `unreachable`,
    * because the endpoint did answer. Omit it for probing — the default suits a health check. Supply it
@@ -170,6 +182,169 @@ export function semanticVersionFromText(value: string): string | undefined {
   return `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}${match[4] ? `-${match[4]}` : ''}`;
 }
 
+const VERSION_TOKEN = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/u;
+
+/** The words of one line, with the punctuation that wraps them removed but the
+ *  word itself intact — `(5e9a58528b76)` and `3.1.0)` both lose their brackets,
+ *  `cline/3.0.60` keeps its slash, `kilo-code` keeps its hyphen. */
+function lineWords(line: string): string[] {
+  return line
+    .split(/\s+/u)
+    .map((word) => word.replace(/^[([{'"`]+/u, '').replace(/[)\]}'"`,;:.]+$/u, ''))
+    .filter((word) => word.length > 0);
+}
+
+/** The version this word IS, or undefined. A version inside a longer dotted
+ *  number (`3.0.60.1`) or inside a path (`~/.cache/cline/3.0.60/bin`) is not a
+ *  token and does not count. */
+function versionWord(word: string): string | undefined {
+  const match = VERSION_TOKEN.exec(word);
+  if (!match) return undefined;
+  return `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}${match[4] ? `-${match[4]}` : ''}`;
+}
+
+/** Fold a word to the letters and digits that could spell a product name, so
+ *  `Kilo-Code:` and `kilocode` compare equal. */
+function productToken(word: string): string {
+  return word.toLowerCase().replace(/[^a-z0-9]+/gu, '');
+}
+
+function namesProduct(word: string, productNames: readonly string[]): boolean {
+  const token = productToken(word);
+  return token.length > 0 && productNames.some((name) => productToken(name) === token);
+}
+
+/**
+ * The version this line reports FOR THIS PRODUCT, by adjacency.
+ *
+ * Adjacency is the whole rule. "The line mentions the product somewhere" is not
+ * enough and was measured wrong in both directions: `(node:1) Warning: cline is
+ * using deprecated API v0.9.1` handed a gate the phantom `0.9.1` and shut a
+ * correct install, and `node v22.11.0, reasonix v1.25.2` answered with the
+ * runtime. The product has to be the word immediately before the version, or
+ * joined to it as `name/version`.
+ *
+ * That also retires the update-notice special case. `cline 3.0.60 (update
+ * available: 3.1.0)` answers 3.0.60, because only that one is adjacent —
+ * whereas skipping notice lines wholesale lost the version entirely, and the
+ * `\blatest\b` in that filter ate `grok 1.0.13 (5e9a58528b76) [latest]`.
+ * `update available: 3.0.60 -> 3.1.0` still answers nothing: neither version
+ * has the product beside it.
+ */
+function namedVersionOnLine(line: string, productNames: readonly string[]): string | undefined {
+  const words = lineWords(line);
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index]!;
+    // `cline/3.0.60` is the oclif shape and names the product itself. Exactly
+    // one slash, so a PATH is not this shape however it ends — including
+    // `/usr/lib/node_modules/cline/3.0.60`, whose last segment is a version and
+    // which a last-segment rule accepted.
+    const slash = word.indexOf('/');
+    if (slash > 0 && word.indexOf('/', slash + 1) < 0) {
+      const version = versionWord(word.slice(slash + 1));
+      if (version !== undefined && namesProduct(word.slice(0, slash), productNames)) return version;
+      continue;
+    }
+    const version = versionWord(word);
+    if (version === undefined) continue;
+    const previous = index > 0 ? words[index - 1]! : undefined;
+    if (previous !== undefined && namesProduct(previous, productNames)) return version;
+  }
+  return undefined;
+}
+
+/**
+ * The version a `--version` probe reports FOR A NAMED PRODUCT.
+ *
+ * {@link semanticVersionFromText} answers "is there a version-shaped thing
+ * anywhere in this text", which is the right question for a diagnostic and the
+ * wrong one for a gate. The four version gates compare against it to decide
+ * whether to open a WRITE-CAPABLE child -- three as a floor, Reasonix still
+ * exactly -- and it has no right boundary,
+ * no token boundary and no product identity, so the first match in
+ * `stdout+stderr` wins. Measured against the real function:
+ *
+ *     3.0.60.1                                 -> 3.0.60
+ *     ~/.cache/cline/3.0.60/bin                -> 3.0.60
+ *     update available: 3.0.60 -> 3.1.0        -> 3.0.60
+ *
+ * — three ways for an unverified build to pass a gate that exists to keep
+ * unverified builds out. This asks the narrower question instead:
+ *
+ *   - the version must be a whole WORD, so `3.0.60.1` is not a version and
+ *     neither is any segment of a path;
+ *   - a line answers for this product only where the product name is ADJACENT
+ *     to the version — the word before it, or joined as `name/version` (the
+ *     oclif shape, `cline/3.0.60 linux-x64 node-v22.11.0`);
+ *   - failing that, a line that is nothing BUT a version answers, because cline
+ *     and kilo each print a bare `3.0.60\n` with no name to demand;
+ *   - two surviving lines that disagree answer nothing.
+ *
+ * Both passes are per LINE and not "the whole output is one version". That
+ * stricter form was tried and it is a lane-darkening bug: the gates feed this
+ * `stdout + "\n" + stderr`, so a single Node `DeprecationWarning`, a bun notice,
+ * or an update banner on any other line made a correct 3.0.60 install
+ * unverifiable and shut Drive — trading a narrow fail-open for a broad
+ * fail-closed. Noise lines are simply not version lines, and with adjacency a
+ * noise line that happens to name the product is not one either.
+ *
+ * Still fails closed where it matters: `undefined` means "this probe did not
+ * establish a version", never "any version will do".
+ */
+export function reportedProductVersion(
+  output: string,
+  productNames: readonly string[],
+): string | undefined {
+  const lines = output.split(/\r?\n/u);
+  const named = new Set<string>();
+  for (const line of lines) {
+    const version = namedVersionOnLine(line, productNames);
+    if (version !== undefined) named.add(version);
+  }
+  if (named.size > 0) return named.size === 1 ? [...named][0] : undefined;
+  const bare = new Set<string>();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const version = versionWord(trimmed);
+    if (version !== undefined) bare.add(version);
+  }
+  return bare.size === 1 ? [...bare][0] : undefined;
+}
+
+/**
+ * The lowest of a non-empty measured-version list, used as an adapter's floor.
+ *
+ * Adapters derived the floor from `MEASURED_VERSIONS[0]`, which made the floor
+ * an artifact of list ORDER: adding a newer build at the front — the natural
+ * "newest first" convention — would silently RAISE the floor and strand an
+ * older build the evidence still covers. Order must not carry meaning here.
+ *
+ * An unparsable entry is ignored rather than becoming the floor. A floor no
+ * version can be compared against does not loosen the gate — it REFUSES
+ * everything, because `compareSemanticVersions` returns `undefined` for every
+ * comparison and each adapter's standing function maps that to `unreadable`.
+ * `diagnoseBinaryVersion` then reports a hard failure for a correctly installed
+ * binary, so a typo here takes the adapter dark rather than opening it up.
+ */
+export function lowestSemanticVersion(versions: readonly string[]): string {
+  const first = versions[0];
+  if (first === undefined) throw new Error('lowestSemanticVersion requires a non-empty list');
+  // Seeded with the first PARSABLE entry, not `versions[0]`. Seeding with the
+  // raw first entry meant an unparsable one at the head could never be
+  // displaced -- every later comparison against it returns `undefined` -- so
+  // `['nightly', '3.0.60']` answered `nightly`, a floor against which every
+  // installed version reads as `unreadable` and is refused. Measured across
+  // 1.0.13, 99.99.99 and 0.0.1: all three refused.
+  const parsable = versions.filter((value) =>
+    compareSemanticVersions(value, value) !== undefined);
+  const seed = parsable[0];
+  if (seed === undefined) return first;
+  return parsable.reduce((lowest, candidate) => {
+    const order = compareSemanticVersions(candidate, lowest);
+    return order !== undefined && order < 0 ? candidate : lowest;
+  }, seed);
+}
+
 /** Compare normalized SemVer values. A prerelease is lower than the corresponding stable version. */
 export function compareSemanticVersions(left: string, right: string): number | undefined {
   const parse = (value: string): { core: number[]; prerelease?: string[] } | undefined => {
@@ -221,8 +396,38 @@ export async function diagnoseBinaryVersion(options: {
   command: string;
   versionArgs?: readonly string[];
   packageNames?: readonly string[];
+  /**
+   * Product names that may carry the version on a `--version` line, for
+   * {@link reportedProductVersion}. Supplying them makes doctor read the PROBE
+   * output the same way this agent's runtime gate does; omitting them keeps the
+   * looser {@link semanticVersionFromText} reading.
+   *
+   * Not a promise that doctor and the gate always agree: when the probe
+   * establishes nothing, doctor still falls back to `packageNames` and the gate
+   * has no fallback at all. That gap is narrow by construction — the gate reads
+   * exactly what this returns — but it exists, and a doctor `pass` beside a
+   * closed lane is what it would look like.
+   */
+  productNames?: readonly string[];
+  /**
+   * Ask the BINARY before `package.json`.
+   *
+   * Off by default, and that default is a safety property rather than an
+   * accident: for Codex and Pi, invoking the CLI is mutation-prone, and doctor
+   * deliberately reads installed metadata instead — `test-broker-doctor` pins
+   * it by name. Set this only for an agent whose runtime enforces an EXACT
+   * version by running `--version` itself. There, reading the manifest first
+   * lets doctor report a version the gate has never seen — a stale or
+   * hand-edited `package.json` beside a different executable, or an npm shim
+   * whose manifest names the wrapper rather than the platform binary — and
+   * present it as the definite installed build. The manifest stays as the
+   * fallback for when the probe establishes nothing.
+   */
+  preferVersionProbe?: boolean;
   /** Parse version from a package-managed/standalone executable path without invoking the CLI. */
   versionFromExecutable?: (executable: string) => string | undefined;
+  /** Extra environment required to keep a nominally read-only version probe side-effect-free. */
+  versionProbeEnv?: Readonly<Record<string, string | undefined>>;
   minimum: AgentMinimumVersion;
   installMessage: string;
   upgradeCommand: string;
@@ -255,16 +460,40 @@ export async function diagnoseBinaryVersion(options: {
     summary: `${options.displayName} executable found.`,
     evidence: { executable: options.context.displayPath(executable) },
   }];
-  let installedVersion = options.packageNames?.length
+  // Only a SUCCESSFUL probe establishes a version FOR A GATED ADAPTER. A
+  // non-zero exit means the command failed; its output may be a usage message,
+  // a crash trace, or an update notice, and mining a version out of it asserts
+  // something that was never demonstrated. All four version gates require
+  // exit 0.
+  //
+  // Everyone else keeps the older, lenient rule. `nonzero` was always accepted
+  // here, and a CLI that prints its version and exits non-zero — `--version`
+  // routed through a subcommand dispatcher that then reports "no command
+  // given" is the common shape — would otherwise turn a `pass` into a
+  // `version-unparsable` fail for eight adapters that this gate was never about.
+  const readProbe = (probe: SetupCommandProbe): string | undefined => {
+    if (options.productNames?.length) {
+      return probe.status === 'ok'
+        ? reportedProductVersion(`${probe.stdout}\n${probe.stderr}`, options.productNames)
+        : undefined;
+    }
+    return probe.status === 'ok' || probe.status === 'nonzero'
+      ? semanticVersionFromText(`${probe.stdout}\n${probe.stderr}`)
+      : undefined;
+  };
+  let probe: SetupCommandProbe | undefined;
+  let installedVersion: string | undefined;
+  if (options.preferVersionProbe && options.versionArgs) {
+    probe = await options.context.runReadOnly(executable, options.versionArgs, undefined, options.versionProbeEnv);
+    installedVersion = readProbe(probe);
+  }
+  installedVersion ??= options.packageNames?.length
     ? options.context.readPackageVersion(executable, options.packageNames)
     : undefined;
   installedVersion ??= options.versionFromExecutable?.(executable);
-  let probe: SetupCommandProbe | undefined;
-  if (!installedVersion && options.versionArgs) {
-    probe = await options.context.runReadOnly(executable, options.versionArgs);
-    if (probe.status === 'ok' || probe.status === 'nonzero') {
-      installedVersion = semanticVersionFromText(`${probe.stdout}\n${probe.stderr}`);
-    }
+  if (!installedVersion && !probe && options.versionArgs) {
+    probe = await options.context.runReadOnly(executable, options.versionArgs, undefined, options.versionProbeEnv);
+    installedVersion = readProbe(probe);
   }
   if (!installedVersion) {
     checks.push({

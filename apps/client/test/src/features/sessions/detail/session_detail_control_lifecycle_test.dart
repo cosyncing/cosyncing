@@ -824,6 +824,37 @@ void main() {
     );
 
     test(
+      'app-created live provenance restores the native writer after Observe '
+      'bootstrap',
+      () async {
+        fakeDriveIntentStore.seedAppCreated(
+          'claude',
+          'session-1',
+          restoreMode: SessionDriveRestoreMode.live,
+        );
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        expect(fakeConnection.connectCount, 1);
+        expect(fakeConnection.reattachModes, isEmpty);
+
+        await controller.attach();
+        expect(fakeConnection.connectCount, 1);
+        expect(fakeConnection.reattachModes, ['live']);
+        expect(
+          fakeConnection.reattachReasons,
+          [null],
+          reason: 'live-only adapters do not accept resume arbitration reasons',
+        );
+      },
+    );
+
+    test(
       'Pi background Observe joins the exact existing driver only after '
       'promotion',
       () async {

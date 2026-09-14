@@ -26,7 +26,7 @@ import type {
   SlashCommand,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
-import { OwnershipConflictError } from '@cosyncing/adapter-api';
+import { decodeSessionInfo, OwnershipConflictError } from '@cosyncing/adapter-api';
 import {
   artifactKeyFor,
   DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT,
@@ -140,6 +140,37 @@ const RESYNC_MAX_MESSAGES = (() => {
   return Number.isFinite(n) ? n : 500;
 })();
 
+/** Attach-time live text is a convenience replay window, not durable history. Bound it independently
+ *  of per-frame transport limits because a child may emit an unlimited number of small deltas. */
+const MAX_LIVE_TEXT_KEYS = 128;
+const MAX_LIVE_TEXT_PER_KEY_BYTES = 256 * 1024;
+const MAX_LIVE_TEXT_TOTAL_BYTES = 1024 * 1024;
+const MAX_LIVE_REPLAY_MESSAGES = 3_000;
+const MAX_LIVE_REPLAY_BYTES = 16 * 1024 * 1024;
+
+function retainedMessageBytes(message: AgentMessage): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(message), 'utf8') + 32;
+  } catch {
+    return MAX_LIVE_REPLAY_BYTES + 1;
+  }
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  const encoded = Buffer.from(value, 'utf8');
+  if (encoded.byteLength <= maxBytes) return value;
+  let end = Math.max(0, maxBytes);
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  while (end > 0) {
+    try {
+      return decoder.decode(encoded.subarray(0, end));
+    } catch {
+      end -= 1;
+    }
+  }
+  return '';
+}
+
 const MIME: Record<string, string> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
   '.webp': 'image/webp', '.svg': 'image/svg+xml', '.html': 'text/html', '.htm': 'text/html',
@@ -219,10 +250,16 @@ function controlPathState(
 }
 
 const SESSION_OPTIONAL_KEYS = [
+  'lineageId',
+  'liveUuid',
   'machine',
   'slug',
   'cwd',
   'projectName',
+  'origin',
+  'parentThreadId',
+  'nativeId',
+  'launchSurface',
   'model',
   'currentModel',
   'currentAgent',
@@ -231,18 +268,139 @@ const SESSION_OPTIONAL_KEYS = [
   'updatedAt',
   'terminalSyncHint',
   'control',
+  'sessionOwner',
 ] as const;
 
-function replaceInfo(target: SessionInfo, source: SessionInfo): void {
-  target.id = source.id;
-  target.tool = source.tool;
-  target.title = source.title;
-  target.status = source.status;
-  target.attachMode = source.attachMode;
+function replaceInfo(target: SessionInfo, source: SessionInfo): boolean {
+  const decoded = decodeSessionInfo(source);
+  if (!decoded) return false;
+  target.id = decoded.id;
+  target.tool = decoded.tool;
+  target.title = decoded.title;
+  target.status = decoded.status;
+  target.attachMode = decoded.attachMode;
   for (const key of SESSION_OPTIONAL_KEYS) {
-    if (key in source) (target as any)[key] = (source as any)[key];
+    if (key in decoded) (target as any)[key] = (decoded as any)[key];
     else delete (target as any)[key];
   }
+  return true;
+}
+
+const SESSION_INFO_PATCH_KEYS = new Set([
+  'title',
+  'status',
+  'attachMode',
+  'liveUuid',
+  'model',
+  'currentModel',
+  'currentAgent',
+  'currentMode',
+  'updatedAt',
+  'terminalSyncHint',
+  'control',
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function validCurrentModel(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  if (!Object.keys(value).every((key) => [
+    'providerID', 'modelID', 'label', 'reasoningEffort', 'variant',
+  ].includes(key))) return false;
+  return typeof value.providerID === 'string'
+    && value.providerID.length > 0
+    && typeof value.modelID === 'string'
+    && value.modelID.length > 0
+    && optionalString(value.label)
+    && optionalString(value.reasoningEffort)
+    && optionalString(value.variant);
+}
+
+function validTerminalSyncHint(value: unknown): boolean {
+  if (value === undefined) return true;
+  return isRecord(value)
+    && Object.keys(value).every((key) => ['label', 'command', 'note'].includes(key))
+    && typeof value.label === 'string'
+    && typeof value.command === 'string'
+    && optionalString(value.note);
+}
+
+function validDriveControl(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!Object.keys(value).every((key) => [
+    'state', 'supported', 'reason', 'handoffAvailable', 'takeoverAvailable', 'takeoverMode',
+  ].includes(key))) return false;
+  return ['observing', 'driving', 'unavailable', 'unknown'].includes(String(value.state))
+    && typeof value.supported === 'boolean'
+    && optionalString(value.reason)
+    && (value.handoffAvailable === undefined || typeof value.handoffAvailable === 'boolean')
+    && (value.takeoverAvailable === undefined || typeof value.takeoverAvailable === 'boolean')
+    && (value.takeoverMode === undefined || ['live', 'resume', 'observe'].includes(String(value.takeoverMode)));
+}
+
+function validTerminalSync(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!Object.keys(value).every((key) => [
+    'supported', 'syncAvailable', 'active', 'label', 'command', 'note', 'reason',
+    'input', 'presence', 'action', 'behind',
+  ].includes(key))) return false;
+  return typeof value.supported === 'boolean'
+    && typeof value.syncAvailable === 'boolean'
+    && typeof value.active === 'boolean'
+    && optionalString(value.label)
+    && optionalString(value.command)
+    && optionalString(value.note)
+    && optionalString(value.reason)
+    && (value.input === undefined || ['full', 'answer-only'].includes(String(value.input)))
+    && (value.presence === undefined || ['shared', 'private', 'absent', 'unknown'].includes(String(value.presence)))
+    && (value.action === undefined || ['join', 'handoff'].includes(String(value.action)))
+    && (value.behind === undefined || typeof value.behind === 'boolean')
+    && (!value.syncAvailable || value.supported)
+    && (!value.active || (value.supported && value.syncAvailable && value.presence === 'shared'));
+}
+
+function validControl(value: unknown): boolean {
+  return isRecord(value)
+    && Object.keys(value).every((key) => ['drive', 'terminalSync'].includes(key))
+    && validDriveControl(value.drive)
+    && validTerminalSync(value.terminalSync);
+}
+
+/** Decode the adapter-owned mutable SessionInfo projection. Identity, provenance, and broker-owned
+ * authority are intentionally absent: a malformed native event must not overwrite them. `undefined`
+ * is an explicit clear for optional fields, matching full-snapshot replacement semantics. */
+export function applySessionInfoPatch(target: SessionInfo, value: unknown): boolean {
+  if (!isRecord(value) || !Object.keys(value).every((key) => SESSION_INFO_PATCH_KEYS.has(key))) return false;
+  for (const [key, inner] of Object.entries(value)) {
+    const valid = key === 'title'
+      ? typeof inner === 'string'
+      : key === 'status'
+        ? ['working', 'needs-input', 'idle'].includes(String(inner))
+        : key === 'attachMode'
+          ? ['live', 'resume', 'observe'].includes(String(inner))
+          : ['liveUuid', 'model', 'currentAgent', 'currentMode'].includes(key)
+            ? optionalString(inner)
+            : key === 'updatedAt'
+              ? inner === undefined || (typeof inner === 'number' && Number.isFinite(inner))
+              : key === 'currentModel'
+                ? validCurrentModel(inner)
+                : key === 'terminalSyncHint'
+                  ? validTerminalSyncHint(inner)
+                : key === 'control' && (inner === undefined || validControl(inner));
+    if (!valid) return false;
+  }
+  for (const [key, inner] of Object.entries(value)) {
+    if (inner === undefined) delete (target as unknown as Record<string, unknown>)[key];
+    else (target as unknown as Record<string, unknown>)[key] = inner;
+  }
+  return true;
 }
 
 export interface DraftSetResult {
@@ -292,7 +450,8 @@ function canonicalMessageJson(message: AgentMessage): string {
 }
 
 export class ManagedConn {
-  private readonly ring: Array<{ seq: number; message: AgentMessage }> = [];
+  private readonly ring: Array<{ seq: number; message: AgentMessage; bytes: number }> = [];
+  private ringBytes = 0;
   private seq = 0;
   private readonly clients = new Set<Client>();
   private unsub: Unsubscribe;
@@ -308,7 +467,9 @@ export class ManagedConn {
   private readonly cwd?: string;
   /** Per-key accumulated in-flight text (model-output/thinking), so a client attaching mid-stream
    *  gets what was streamed BEFORE it joined (history's in-flight part is empty). Cleared each turn. */
-  private readonly liveText = new Map<string, { type: string; text: string }>();
+  private readonly liveText = new Map<string, { type: string; text: string; bytes: number }>();
+  private liveTextBytes = 0;
+  private liveTextTruncated = false;
   /** Whether a turn is currently running, so a mid-turn joiner gets a `running` status (not idle). */
   private liveRunning = false;
   private liveNeedsInput = false;
@@ -326,6 +487,9 @@ export class ManagedConn {
   private foldingAdapterStatus = false;
   /** Pending user action cards that are not part of transcript history. Replayed to late joiners. */
   private readonly pendingInput = new Map<string, AgentMessage>();
+  /** Accepted user rows awaiting their durable native echo. */
+  private readonly pendingQueuedUserKeys = new Set<string>();
+  private pendingQueuedRevision = 0;
   /** Generic live source evidence used to keep long work observable after the last UI disconnects. */
   private readonly activeRunKeys = new Set<string>();
   private readonly activeGoalKeys = new Set<string>();
@@ -342,6 +506,11 @@ export class ManagedConn {
    *  They still fan out immediately (holding them would stall live delivery across the read and its
    *  1.5s empty retry). Null outside a resync cycle. */
   private resyncReplay: AgentMessage[] | null = null;
+  private resyncReplayBytes = 0;
+  private resyncReplayOverflow = false;
+  private resyncResetPending = false;
+  private resyncResetNotice?: string;
+  private pendingResyncRetry?: ReturnType<typeof setTimeout>;
   /** Serializes overlapping resyncs: one read/broadcast cycle records raced frames at a time. */
   private resyncChain: Promise<void> = Promise.resolve();
   /** Full durable cursor for the last history projection accepted by a client. Unlike either read
@@ -353,6 +522,7 @@ export class ManagedConn {
    *  live delivery that raced that attach. Bounded like the live ring; overflow fails safe. */
   private readonly resyncBaselineLiveRows = new Map<string, number>();
   private resyncBaselineLiveRowCount = 0;
+  private resyncBaselineLiveRowBytes = 0;
   private resyncBaselineLiveRowsUsable = true;
 
   constructor(
@@ -384,6 +554,7 @@ export class ManagedConn {
     // eligible. Pre-fix cwd-outbox records carry no marker and fail closed.
     this.artifacts.push(...(this.artifactStore?.sessionQualifiedArtifacts(this.sessionRef()) ?? []));
     this.unsub = conn.subscribe((m) => this.push(m));
+    void this.refreshPendingQueuedUsers();
   }
 
   /** Push the latest SessionInfo to attached clients. This is the low-latency control-state path:
@@ -457,19 +628,35 @@ export class ManagedConn {
    * erase that device's unsent text; the clear is skipped instead. A legacy client sends nothing and
    * keeps the historical unconditional clear.
    */
-  clearDraftAfterPrompt(observedRevision?: number, observedUpdateId?: string): DraftSetResult | undefined {
+  clearDraftAfterPrompt(
+    observedRevision?: number,
+    observedUpdateId?: string,
+    sentText?: string,
+  ): DraftSetResult | undefined {
     if (observedRevision === undefined) return this.setDraft('');
     const record = this.draftStore?.get(this.conn.info.tool, this.conn.info.id);
     const current = this.draftStore ? (record?.revision ?? 0) : this.draft.revision;
     const lastUpdateId = this.draftStore ? record?.lastUpdateId : this.draft.updateId;
+    const currentText = this.draftStore ? (record?.text ?? '') : this.draft.text;
     // Revision alone is not enough. A client that presses Send while its own draft write is still
     // unacknowledged reports the PRE-write revision — the draft and the prompt travel the same
     // socket, so the broker applies the draft first and moves past it. That draft is this prompt's
     // own text, so its acceptance still makes the clear ours: an updateId match is equally valid
     // proof of ownership. Without it the just-sent text would survive as the shared unsent draft.
+    //
+    // Neither bookkeeping proof is complete. Measured on the installed broker: dozens of stored
+    // drafts across reasonix and cline sessions held the exact prompt that had already been sent
+    // and answered, and reload put it back in the composer — one Enter from re-running an
+    // `rm -f && touch`. Both proofs had missed, so this returned `undefined`, which the caller
+    // reads as "nothing of this sender's to clear", so the sender deleted its local row and never
+    // retried. TEXT EQUALITY is the ground truth the revision counters only approximate: if the
+    // shared draft still IS the text this prompt carried, it is this prompt's to clear however the
+    // revision got there. When another device has genuinely typed something else, the text differs,
+    // this stays `undefined`, and that device's unsent work is left alone exactly as before.
     const owned =
       current === observedRevision ||
-      (observedUpdateId !== undefined && lastUpdateId !== undefined && lastUpdateId === observedUpdateId);
+      (observedUpdateId !== undefined && lastUpdateId !== undefined && lastUpdateId === observedUpdateId) ||
+      (sentText !== undefined && sentText.length > 0 && currentText === sentText);
     if (!owned) return undefined;
     if (current === 0 && !this.draft.text) return undefined; // nothing shared to clear
     // Base the clear on the CURRENT revision, not the stale one the sender reported, so an
@@ -537,7 +724,10 @@ export class ManagedConn {
   }
 
   updateInfo(info: SessionInfo): void {
-    replaceInfo(this.conn.info, info);
+    if (!replaceInfo(this.conn.info, info)) {
+      console.warn(`[broker] rejected malformed SessionInfo update for ${this.conn.info.tool}/${this.conn.info.id}`);
+      return;
+    }
     // A broker write, not an adapter one: record it so the next fold does not read it back as an
     // adapter-side transition. Callers that must not weaken this owner already pass `mc.status`.
     this.observedConnStatus = this.conn.info.status;
@@ -560,14 +750,17 @@ export class ManagedConn {
     }
     this.conn = conn;
     this.unsub = conn.subscribe((m) => this.push(m));
-    this.liveText.clear();
+    this.clearLiveText();
     this.liveRunning = conn.info.status !== 'idle';
     this.liveNeedsInput = conn.info.status === 'needs-input';
     this.observedConnStatus = conn.info.status;
     this.pendingInput.clear();
+    this.pendingQueuedUserKeys.clear();
+    this.pendingQueuedRevision += 1;
     this.currentPlans.clear();
     this.clearLiveAttentionEvidence();
     this.updateInfo(conn.info);
+    void this.refreshPendingQueuedUsers();
     // A transport swap can hide turns that went through the OTHER owner before the swap: the new
     // conn's subscription only carries FUTURE events. Concretely: a terminal joins the codex daemon
     // and the user types within the sync-watch window (~2.5s poll + fold) — that message reached the
@@ -754,19 +947,23 @@ export class ManagedConn {
   private push(message: AgentMessage): void {
     if (
       message.type === 'metadata-update' &&
-      (message.key === 'sessionInfo' || message.key === 'session-info') &&
-      message.value &&
-      typeof message.value === 'object'
+      (message.key === 'sessionInfo' || message.key === 'session-info')
     ) {
-      Object.assign(this.conn.info as any, message.value);
-      this.broadcastSession(this.conn.info);
+      if (applySessionInfoPatch(this.conn.info, message.value)) {
+        this.broadcastSession(this.conn.info);
+      } else {
+        console.warn('[hub] rejected invalid sessionInfo metadata update');
+      }
       return;
     }
     // Out-of-band transcript change (undo/redo): re-pull the revert-filtered history and re-push
     // it wholesale instead of forwarding a chat message — the only way bubbles can *disappear*.
     if (message.type === 'history-reset') {
-      this.liveText.clear();
+      this.clearLiveText();
+      void this.refreshPendingQueuedUsers();
       this.currentPlans.clear();
+      this.resyncResetPending = true;
+      this.resyncResetNotice = message.notice;
       void this.resync(message.notice);
       return;
     }
@@ -779,8 +976,20 @@ export class ManagedConn {
     }
     // A resync snapshot read is in flight: record the frame for post-snapshot replay so the wire
     // ENDS as [snapshot][newer live frames] without stalling live delivery — see resyncNow().
-    this.resyncReplay?.push(message);
+    if (this.resyncReplay !== null && !this.resyncReplayOverflow) {
+      const bytes = retainedMessageBytes(message);
+      if (
+        this.resyncReplay.length >= MAX_LIVE_REPLAY_MESSAGES
+        || this.resyncReplayBytes + bytes > MAX_LIVE_REPLAY_BYTES
+      ) {
+        this.resyncReplayOverflow = true;
+      } else {
+        this.resyncReplay.push(message);
+        this.resyncReplayBytes += bytes;
+      }
+    }
     this.broadcastLive(message);
+    if (this.resyncResetPending && this.resyncReplay === null) this.scheduleResyncRetry();
     // After the tool-result is delivered, auto-surface a deliverable file the agent just wrote,
     // so "make an html/pdf and send it to me" works with no extra agent context.
     this.maybeSurfaceWrite(message);
@@ -788,10 +997,23 @@ export class ManagedConn {
 
   private broadcastLive(message: AgentMessage): void {
     this.recordLiveBeyondResyncBaseline(message);
-    const entry = { seq: ++this.seq, message };
-    this.ring.push(entry);
-    if (this.ring.length > 3000) this.ring.shift();
-    for (const c of this.clients) c({ kind: 'message', ...entry });
+    const seq = ++this.seq;
+    const bytes = retainedMessageBytes(message);
+    if (bytes <= MAX_LIVE_REPLAY_BYTES) {
+      while (
+        this.ring.length > 0
+        && (this.ring.length >= MAX_LIVE_REPLAY_MESSAGES || this.ringBytes + bytes > MAX_LIVE_REPLAY_BYTES)
+      ) {
+        const removed = this.ring.shift();
+        if (removed) this.ringBytes -= removed.bytes;
+      }
+      this.ring.push({ seq, message, bytes });
+      this.ringBytes += bytes;
+    } else {
+      this.ring.length = 0;
+      this.ringBytes = 0;
+    }
+    for (const c of this.clients) c({ kind: 'message', seq, message });
   }
 
   private recordLiveBeyondResyncBaseline(message: AgentMessage): void {
@@ -807,9 +1029,20 @@ export class ManagedConn {
         // partial budget: conservative replay may duplicate, whereas a partial budget can lose data.
         this.resyncBaselineLiveRowsUsable = false;
         this.resyncBaselineLiveRows.clear();
+        this.resyncBaselineLiveRowBytes = 0;
       } else {
         const json = canonicalMessageJson(message);
-        this.resyncBaselineLiveRows.set(json, (this.resyncBaselineLiveRows.get(json) ?? 0) + 1);
+        const previous = this.resyncBaselineLiveRows.get(json) ?? 0;
+        const bytes = previous === 0 ? Buffer.byteLength(json, 'utf8') : 0;
+        if (bytes > MAX_LIVE_REPLAY_BYTES
+          || this.resyncBaselineLiveRowBytes + bytes > MAX_LIVE_REPLAY_BYTES) {
+          this.resyncBaselineLiveRowsUsable = false;
+          this.resyncBaselineLiveRows.clear();
+          this.resyncBaselineLiveRowBytes = 0;
+        } else {
+          this.resyncBaselineLiveRows.set(json, previous + 1);
+          this.resyncBaselineLiveRowBytes += bytes;
+        }
       }
     }
   }
@@ -863,15 +1096,36 @@ export class ManagedConn {
   private accumulateLive(message: AgentMessage): void {
     const retainedBefore = this.requiresAttentionRetention;
     const statusBefore = this.conn.info.status;
+    if (message.type === 'user-message' && message.key) {
+      const before = this.pendingQueuedUserKeys.size;
+      if (message.queued === true) this.pendingQueuedUserKeys.add(message.key);
+      else this.pendingQueuedUserKeys.delete(message.key);
+      if (this.pendingQueuedUserKeys.size !== before) this.pendingQueuedRevision += 1;
+    }
     if ((message.type === 'model-output' || message.type === 'thinking') && message.key) {
       const cur = this.liveText.get(message.key);
-      const text = message.text != null ? message.text : (cur?.text ?? '') + (message.delta ?? '');
-      this.liveText.set(message.key, { type: message.type, text });
+      if (!cur && this.liveText.size >= MAX_LIVE_TEXT_KEYS) {
+        this.liveTextTruncated = true;
+      } else {
+        const candidate = message.text != null ? message.text : (cur?.text ?? '') + (message.delta ?? '');
+        const oldBytes = cur?.bytes ?? 0;
+        const allowedBytes = Math.min(
+          MAX_LIVE_TEXT_PER_KEY_BYTES,
+          MAX_LIVE_TEXT_TOTAL_BYTES - (this.liveTextBytes - oldBytes),
+        );
+        const text = utf8Prefix(candidate, Math.max(0, allowedBytes));
+        const bytes = Buffer.byteLength(text, 'utf8');
+        this.liveTextBytes += bytes - oldBytes;
+        this.liveText.set(message.key, { type: message.type, text, bytes });
+        if (bytes < Buffer.byteLength(candidate, 'utf8')) this.liveTextTruncated = true;
+      }
     } else if (message.type === 'permission-request' || message.type === 'question-request') {
+      this.pendingQueuedRevision += 1;
       this.liveNeedsInput = false;
       this.pendingInput.set(message.requestId, message);
       this.applyManagedStatus('needs-input');
     } else if (message.type === 'permission-resolved' || message.type === 'question-resolved') {
+      this.pendingQueuedRevision += 1;
       // A duplicate or orphan resolution is not a state transition. In
       // particular, do not let an old cached resolution recompute/broadcast
       // status for an unrelated live request.
@@ -884,7 +1138,7 @@ export class ManagedConn {
       this.liveNeedsInput = false;
       if (message.status === 'idle') {
         this.liveRunning = false;
-        this.liveText.clear(); // turn finished → those parts are now in history; reset the accumulator
+        this.clearLiveText(); // turn finished → those parts are now in history; reset the accumulator
       } else if (message.status === 'running') {
         this.liveRunning = true;
       }
@@ -917,8 +1171,77 @@ export class ManagedConn {
   liveSnapshot(): AgentMessage[] {
     const out: AgentMessage[] = [...this.liveText].map(([key, v]) => ({ type: v.type, key, text: v.text }) as AgentMessage);
     if (this.liveRunning) out.unshift({ type: 'status', status: 'running' });
+    if (this.liveTextTruncated) {
+      out.push({
+        type: 'notice',
+        message: 'Earlier in-flight output exceeded the broker replay window; reconnect after the turn completes to load durable history.',
+      });
+    }
     out.push(...this.pendingInput.values());
     return out;
+  }
+
+  private clearLiveText(): void {
+    this.liveText.clear();
+    this.liveTextBytes = 0;
+    this.liveTextTruncated = false;
+  }
+
+  private async refreshPendingQueuedUsers(): Promise<void> {
+    const conn = this.conn;
+    const revision = this.pendingQueuedRevision;
+    if (!conn.getPending) {
+      // Queued-user keys are re-derived from the refreshed history, so dropping them is safe.
+      // `pendingInput` is NOT: without `getPending` there is no authoritative pending list to
+      // rebuild it from, and the live `permission-request`/`question-request` map is the only
+      // record that this session is blocked on the user. Clearing it here made a blocked OpenCode
+      // or Antigravity session publish idle/working, hid its approval card with no way to answer,
+      // and dropped attention retention so the session became evictable while still waiting. A
+      // stale card the user can still act on is strictly better than a live one that vanishes.
+      this.pendingQueuedUserKeys.clear();
+      this.pendingQueuedRevision += 1;
+      return;
+    }
+    const retainedBefore = this.requiresAttentionRetention;
+    let pending: AgentMessage[];
+    try {
+      pending = await conn.getPending();
+    } catch {
+      return;
+    }
+    if (this.conn !== conn || this.pendingQueuedRevision !== revision) return;
+    this.pendingQueuedUserKeys.clear();
+    // The blocking set BEFORE this refresh replaces it. Every other site that
+    // mutates `pendingInput` recomputes status from it — the `permission-resolved`
+    // branch calls `applyManagedStatus(this.status)` exactly when a delete lands.
+    // This one did not, so a request answered in the tool's OWN terminal (which
+    // reaches us as a history-reset, not a resolution frame) emptied the map and
+    // left `needs-input` standing: the card disappears and the badge does not,
+    // with no later transition able to repair it because the folded status and
+    // the observed status already agree.
+    const blockingBefore = [...this.pendingInput.keys()].sort().join('\u0000');
+    this.pendingInput.clear();
+    for (const message of pending) {
+      if (message.type === 'user-message' && message.queued === true && message.key) {
+        this.pendingQueuedUserKeys.add(message.key);
+      } else if (message.type === 'permission-request' || message.type === 'question-request') {
+        this.pendingInput.set(message.requestId, message);
+      }
+    }
+    this.pendingQueuedRevision += 1;
+    // Only when it actually changed: an unchanged set must not broadcast, or every
+    // history-reset would republish a status nothing has moved.
+    if ([...this.pendingInput.keys()].sort().join('\u0000') !== blockingBefore) {
+      this.applyManagedStatus(this.status);
+    }
+    const retainedAfter = this.requiresAttentionRetention;
+    if (retainedBefore !== retainedAfter) {
+      try {
+        this.attentionHooks.onRetentionChanged?.(this.conn.info, retainedAfter);
+      } catch (error) {
+        console.warn('[hub] attention retention observer failed:', error instanceof Error ? error.message : String(error));
+      }
+    }
   }
 
   /** Re-fetch history and broadcast a fresh snapshot (+ optional system note) to all clients.
@@ -937,6 +1260,8 @@ export class ManagedConn {
     // that races the cycle and reconcile it after the snapshot: live delivery never stalls, and
     // every client converges on [authoritative snapshot][everything newer].
     this.resyncReplay = [];
+    this.resyncReplayBytes = 0;
+    this.resyncReplayOverflow = false;
     const acceptedCursor = this.resyncBaselineCursor;
     const preWindowLiveRows = this.resyncBaselineLiveRowsUsable
       ? new Map(this.resyncBaselineLiveRows)
@@ -962,6 +1287,9 @@ export class ManagedConn {
           full = refreshed;
         }
       }
+      // The reset would erase live frames we deliberately stopped retaining. Abort this resync;
+      // clients already received those frames live and can retry from durable history later.
+      if (this.resyncReplayOverflow) return;
       this.observeHistory(full);
       // Same shape as initial attach: durable rows travel in ONE authoritative frame — explicit
       // `reset` (the client replaces its window instead of inferring how to merge an unlabeled
@@ -996,6 +1324,7 @@ export class ManagedConn {
         ? backwardHistoryCursor(durable, durable.length - delta.truncated.shown)
         : undefined;
       this.ring.length = 0; // fresh baseline so a late joiner doesn't replay pre-revert live frames
+      this.ringBytes = 0;
       sent = { frame: delta.messages, derived, persistedAfterBaseline };
       for (const c of this.clients) {
         c({
@@ -1019,10 +1348,18 @@ export class ManagedConn {
       this.resyncBaselineCursor = delta.cursor;
       this.resyncBaselineLiveRows.clear();
       this.resyncBaselineLiveRowCount = 0;
+      this.resyncBaselineLiveRowBytes = 0;
       this.resyncBaselineLiveRowsUsable = true;
+      this.resyncResetPending = false;
+      this.resyncResetNotice = undefined;
+      if (this.pendingResyncRetry) clearTimeout(this.pendingResyncRetry);
+      this.pendingResyncRetry = undefined;
     } finally {
       const raced = this.resyncReplay;
+      const replayOverflow = this.resyncReplayOverflow;
       this.resyncReplay = null;
+      this.resyncReplayBytes = 0;
+      this.resyncReplayOverflow = false;
       // An aborted resync sent no snapshot: the raced frames were already delivered live and
       // nothing got ahead of them — no replay. They are now pre-window live evidence for the next
       // resync, however, so fold them into the accepted-cursor suffix accounting.
@@ -1030,8 +1367,27 @@ export class ManagedConn {
         this.replayAfterResync(raced ?? [], sent.frame, sent.derived, sent.persistedAfterBaseline);
       } else {
         for (const message of raced ?? []) this.recordLiveBeyondResyncBaseline(message);
+        if (replayOverflow) {
+          this.resyncBaselineLiveRowsUsable = false;
+          this.resyncBaselineLiveRows.clear();
+          this.resyncBaselineLiveRowBytes = 0;
+          this.scheduleResyncRetry();
+        }
       }
     }
+  }
+
+  /** Retry an overflow-aborted authoritative reset once live delivery goes quiet. */
+  private scheduleResyncRetry(): void {
+    if (!this.resyncResetPending) return;
+    if (this.pendingResyncRetry) clearTimeout(this.pendingResyncRetry);
+    this.pendingResyncRetry = setTimeout(() => {
+      this.pendingResyncRetry = undefined;
+      if (this.resyncResetPending && this.resyncReplay === null && this.clients.size > 0) {
+        void this.resync(this.resyncResetNotice).catch(() => {});
+      }
+    }, 100);
+    this.pendingResyncRetry.unref?.();
   }
 
   /** The authoritative reset frame just REPLACED every client's window. Re-deliver, with fresh
@@ -1209,7 +1565,11 @@ export class ManagedConn {
 
   /** True only for live conditions observed on this owned connection. It never infers from history. */
   get requiresAttentionRetention(): boolean {
-    return this.liveRunning || this.pendingInput.size > 0 || this.activeRunKeys.size > 0 || this.activeGoalKeys.size > 0;
+    return this.liveRunning
+      || this.pendingInput.size > 0
+      || this.pendingQueuedUserKeys.size > 0
+      || this.activeRunKeys.size > 0
+      || this.activeGoalKeys.size > 0;
   }
 
   /** Is a turn currently running on this live connection? Drives the roster's working/idle overlay
@@ -1255,7 +1615,15 @@ export class ManagedConn {
     }
     this.clients.clear(); // never fan out to a stale client after teardown
     this.ring.length = 0;
-    this.liveText.clear();
+    this.ringBytes = 0;
+    if (this.pendingResyncRetry) clearTimeout(this.pendingResyncRetry);
+    this.pendingResyncRetry = undefined;
+    this.resyncResetPending = false;
+    this.resyncResetNotice = undefined;
+    this.resyncBaselineLiveRows.clear();
+    this.resyncBaselineLiveRowCount = 0;
+    this.resyncBaselineLiveRowBytes = 0;
+    this.clearLiveText();
     this.pendingInput.clear();
     this.currentPlans.clear();
     this.clearLiveAttentionEvidence();
@@ -1566,6 +1934,9 @@ export class Hub {
   }
 
   private createManaged(conn: SessionConnection): ManagedConn {
+    const decoded = decodeSessionInfo(conn.info);
+    if (!decoded) throw new Error('Adapter returned malformed SessionInfo while attaching');
+    replaceInfo(conn.info, decoded);
     let managed!: ManagedConn;
     managed = new ManagedConn(conn, this.artifactStore, {
       onMessage: (info, message) => this.attentionHooks.onMessage?.(info, message),
@@ -2145,7 +2516,20 @@ export class Hub {
       return existing;
     }
     this.cancelEvict(key);
-    const mc = this.createManaged(conn);
+    let mc: ManagedConn;
+    try {
+      mc = this.createManaged(conn);
+    } catch (error) {
+      // `attach` closes on this path and AWAITS it; this one cannot, because
+      // `adopt` is synchronous for three callers. Not awaiting is acceptable
+      // here for the reason attach's await is not: a bridge hello has no
+      // provisional ownership to settle and no promotion latch to release, so
+      // nothing is admitted while this close is in flight. Leaving the
+      // connection open is not acceptable — it stays registered on the bridge
+      // and every re-hello repeats the failure against a socket nobody owns.
+      void conn.close().catch(() => { /* already failing; do not mask it */ });
+      throw error;
+    }
     this.conns.set(key, mc);
     this.pinned.add(key);
     this.reconcileSessionOwner(tool, id, mc.conn.info);

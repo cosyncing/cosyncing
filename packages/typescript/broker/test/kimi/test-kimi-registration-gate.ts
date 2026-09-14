@@ -225,11 +225,12 @@ try {
     ['opencode', 'pi', 'codex', 'claude'].every((id) =>
       withoutIds.includes(id) && withIds.includes(id)),
     `${withoutIds.join(',')} | ${withIds.join(',')}`);
-  // Kimi and dsh both declare the same minimum, so the tolerant view adds
-  // exactly those two. Asserted as a set difference rather than a count, so a
-  // third gated agent later fails this loudly instead of sliding past a number.
+  // Kimi, dsh, and Cline declare the same minimum, so the tolerant view adds
+  // exactly those three. Asserted as a set difference rather than a count, so
+  // another gated agent later fails this loudly instead of sliding past a
+  // number.
   check('the tolerant view adds exactly the agents that declare a minimum',
-    JSON.stringify(withIds.filter((id) => !withoutIds.includes(id)).sort()) === '["dsh","kimi"]'
+    JSON.stringify(withIds.filter((id) => !withoutIds.includes(id)).sort()) === '["cline","dsh","kimi"]'
       && withoutIds.every((id) => withIds.includes(id)),
     `${withoutIds.join(',')} -> ${withIds.join(',')}`);
 

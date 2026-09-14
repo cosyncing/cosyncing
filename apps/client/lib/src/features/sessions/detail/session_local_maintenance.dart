@@ -166,7 +166,7 @@ final class SessionLocalMaintenance {
     final rows = await database
         .customSelect(
           'SELECT client_message_id, broker_profile_id, tool, session_id, '
-          'kind, payload_json FROM session_outbox_rows '
+          'kind, payload_json, attempt_count FROM session_outbox_rows '
           "WHERE status IN ('queued', 'sending', 'retryable') "
           'AND (attempt_count >= ? OR created_at < ?) '
           'ORDER BY created_at ASC LIMIT ?',
@@ -186,9 +186,23 @@ final class SessionLocalMaintenance {
       final tool = row.read<String>('tool');
       final sessionId = row.read<String>('session_id');
       final kind = row.read<String>('kind');
+      // Restore ONLY text that never left this device.
+      //
+      // `attempt_count == 0` means the row was still `queued`: nothing was
+      // ever dispatched, so this copy is the only one and losing it would lose
+      // the user's typing. Any higher count means the prompt went out at least
+      // once and the broker may well have executed it -- measured on the
+      // installed client, exactly that happened, and restoring put an
+      // already-executed `rm -f <path> && touch <path>` back in every client's
+      // composer, one Enter from running again. A dispatched prompt is not
+      // "unsent text"; it is a prompt whose outcome this device lost track of,
+      // and it stays visible in the transcript to copy from. Guessing that it
+      // never ran is the one guess with a destructive failure mode.
+      final dispatched = row.read<int>('attempt_count') > 0;
       final promptText =
           kind == SessionOutboxMessageKind.prompt.name &&
-              brokerProfileId != null
+              brokerProfileId != null &&
+              !dispatched
           ? _promptText(row.read<String>('payload_json'))
           : null;
       final outcome = await _expireOneOutboxRow(

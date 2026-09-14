@@ -18,6 +18,8 @@ final class NewSessionLaunchRequest {
     required this.title,
     this.model,
     this.modelSource,
+    this.permissionMode,
+    this.permissionModeSource,
   });
 
   /// Adapter id selected in the New Session sheet.
@@ -34,6 +36,12 @@ final class NewSessionLaunchRequest {
 
   /// Exact source that supplied [model].
   final RosterSource? modelSource;
+
+  /// Exact optional native approval mode selected before creation.
+  final String? permissionMode;
+
+  /// Exact broker source that advertised [permissionMode].
+  final RosterSource? permissionModeSource;
 }
 
 /// Creates immediate sessions after the sheet has handed control to the page.
@@ -137,6 +145,13 @@ final class NewSessionLaunchService {
         'Refresh the model list and choose again.',
       );
     }
+    if (request.permissionMode != null &&
+        request.permissionModeSource != source) {
+      throw StateError(
+        'The selected permission mode belongs to a different server '
+        'connection. Refresh the mode list and choose again.',
+      );
+    }
     final client = await _ref.read(brokerClientFactoryProvider)(profile);
     try {
       final directory = request.directory.trim();
@@ -146,6 +161,7 @@ final class NewSessionLaunchService {
         directory: directory.isEmpty ? null : directory,
         title: title.isEmpty ? null : title,
         model: request.model,
+        permissionMode: request.permissionMode,
       );
       // Intents and provenance are recorded under the broker that OWNS the
       // created session — the captured source — never under whatever
@@ -176,10 +192,23 @@ final class NewSessionLaunchService {
           // first attach.
         }
       } else if (response.attachMode == 'live') {
-        // `live` is a socket-local foreground instruction, not durable Resume
-        // provenance. Persisting it in the Drive intent store would turn a
-        // later restart into mode=resume, which live-only adapters must
-        // refuse. The fresh roster can offer live again when appropriate.
+        // Live-only adapters cannot accept mode=resume, but an app-created
+        // session still has durable local control provenance. Record the
+        // exact restore mode before navigation so a restart does not depend
+        // on roster-vs-detail bootstrap ordering.
+        try {
+          await _ref
+              .read(sessionDriveIntentStoreProvider)
+              .rememberAppCreated(
+                brokerProfileId: source.storageKey,
+                tool: request.tool,
+                sessionId: response.session.id,
+                restoreMode: SessionDriveRestoreMode.live,
+              );
+        } on Object {
+          // Creation already succeeded. Storage failure leaves the later
+          // reopen Observe-first instead of inventing authority.
+        }
         _ref
             .read(createdSessionAttachIntentsProvider)
             .rememberLive(source.storageKey, createdKey);

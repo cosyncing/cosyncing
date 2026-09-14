@@ -297,6 +297,11 @@ const RUN_STREAM: Array<Record<string, unknown>> = [
     check('the roster reports observing again',
       (await adapter.discoverSessions()).find((row) => row.id === CONVERSATION)?.control?.drive.state === 'observing');
 
+    // Discovery deliberately starts a TTL'd `agy models` refresh without
+    // waiting for it. This fixture owns that fake child, so settle the same
+    // single-flight through the user-initiated catalog surface before exiting.
+    await adapter.listModels!();
+
     // A close AFTER deregistration is a no-op, not a resurrection or a throw.
     await first.close();
     check('closing an already-deregistered connection is a no-op',
@@ -376,6 +381,7 @@ const RUN_STREAM: Array<Record<string, unknown>> = [
       JSON.stringify(again.filter((row) => row.origin === 'subagent').map((row) => [row.id, row.parentThreadId]))
         === JSON.stringify(rows.filter((row) => row.origin === 'subagent').map((row) => [row.id, row.parentThreadId])),
       JSON.stringify(again.filter((row) => row.origin === 'subagent').map((row) => row.id)));
+    await adapter.listModels!();
   } finally {
     tree.cleanup();
   }
