@@ -58,8 +58,11 @@ body:
     id: broker-version
     attributes:
       label: Broker version
-      description: From the broker startup banner or `npm ls -g cosyncing`.
-      placeholder: "e.g. 0.3.0"
+      description: >-
+        From `cosyncing version --json` or the broker startup banner.
+        For npm-owned installations, `npm ls -g cosyncing` also reports the
+        package version.
+      placeholder: "e.g. 0.5.3"
     validations:
       required: true
 
@@ -68,7 +71,7 @@ body:
     attributes:
       label: Client version
       description: Release tag or in-app version. Skip if the bug is broker-only.
-      placeholder: "e.g. v0.3.0"
+      placeholder: "e.g. client-v0.5.3"
 
   - type: dropdown
     id: broker-os
@@ -76,7 +79,8 @@ body:
       label: Broker host OS
       options:
         - Linux
-        - macOS
+        - macOS (Apple Silicon)
+        - Windows x64
         - WSL
         - Other
     validations:
