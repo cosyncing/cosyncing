@@ -1925,20 +1925,25 @@ try {
       // A wedged child ignores SIGTERM, so the runner has to escalate — and must not report a result while
       // the process it gave up on is still running and still holding whatever it holds. The child prints its
       // own pid, so "is it really gone" is answerable at the instant the promise resolves.
-      const startedAt = Date.now();
+      const timeoutMs = 500;
+      const startedAt = performance.now();
       const wedged = await runTokdashCommand(process.execPath, [
         '-e',
         // writeSync, not console.log: a buffered pid would be lost to the SIGKILL this check is about.
         'import { writeSync } from "node:fs"; writeSync(1, String(process.pid));'
         + ' process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);',
-      ], 500);
-      const elapsedMs = Date.now() - startedAt;
+      ], timeoutMs);
+      const elapsedMs = performance.now() - startedAt;
       const pid = Number.parseInt(wedged.stdout.trim(), 10);
       let alive = true;
       try { process.kill(pid, 0); } catch { alive = false; }
-      check('a timed-out child is escalated to SIGKILL and awaited, never abandoned alive',
-        !wedged.ok && Number.isInteger(pid) && !alive && elapsedMs >= 500,
-        `ok=${wedged.ok} pid=${pid} alive=${alive} elapsed=${elapsedMs}ms`);
+      // Windows implements process.kill(SIGTERM) as termination rather than a
+      // catchable POSIX signal, and its timer/clock boundary can land just
+      // below the requested millisecond. The liveness check is the safety
+      // invariant; this lower bound only rejects an immediate false result.
+      check('a timed-out child is terminated and awaited, never abandoned alive',
+        !wedged.ok && Number.isInteger(pid) && !alive && elapsedMs >= timeoutMs - 50,
+        `ok=${wedged.ok} pid=${pid} alive=${alive} elapsed=${elapsedMs.toFixed(1)}ms`);
     }
   }
 
