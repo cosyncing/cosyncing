@@ -1,4 +1,4 @@
-export type AgentId = 'opencode' | 'pi' | 'omp' | 'claude' | 'codex';
+export type AgentId = 'opencode' | 'pi' | 'omp' | 'claude' | 'codex' | 'reasonix' | 'grok' | 'cline' | 'kilo';
 export type TraceTier = 'synthetic' | 'adapter-live' | 'product-trace' | 'drift';
 export type TracePriority = 'p0' | 'p1' | 'p2';
 
@@ -15,7 +15,7 @@ export interface TraceScenario {
   gaps?: string[];
 }
 
-export const AGENTS: AgentId[] = ['opencode', 'pi', 'omp', 'claude', 'codex'];
+export const AGENTS: AgentId[] = ['opencode', 'pi', 'omp', 'claude', 'codex', 'reasonix', 'grok', 'cline', 'kilo'];
 
 export const TRACE_SCENARIOS: TraceScenario[] = [
   {

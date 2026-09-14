@@ -6,6 +6,37 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 
+final class _ImmediateFrameWebSocketAdapter extends FakeWebSocketAdapter {
+  @override
+  Future<void> connect() async {
+    await super.connect();
+    simulateMessage({
+      'kind': 'session',
+      'info': {
+        'id': 'session-1',
+        'tool': 'opencode',
+        'title': 'Immediate session',
+        'status': 'idle',
+        'attachMode': 'observe',
+      },
+    });
+    simulateMessage({
+      'kind': 'history',
+      'reset': true,
+      'messages': const <Object?>[],
+      'cursor': 'immediate-cursor',
+    });
+  }
+}
+
+final class _ImmediateEndedWebSocketAdapter extends FakeWebSocketAdapter {
+  @override
+  Future<void> connect() async {
+    await super.connect();
+    simulateMessage({'kind': 'ended', 'reason': 'native-ended'});
+  }
+}
+
 void main() {
   group('SessionConnection', () {
     late FakeWebSocketAdapter adapter;
@@ -58,6 +89,48 @@ void main() {
     });
 
     group('connect', () {
+      test(
+        'captures frames emitted synchronously during adapter connect',
+        () async {
+          final immediateAdapter = _ImmediateFrameWebSocketAdapter();
+          connection = SessionConnection(
+            resolver: EndpointResolver(baseUrl: 'http://127.0.0.1:7734'),
+            tool: 'opencode',
+            sessionId: 'session-1',
+            adapterFactory: (_) => immediateAdapter,
+          );
+          connection.events.listen(receivedEvents.add);
+
+          await connection.connect();
+          await flush();
+
+          expect(receivedEvents.whereType<SessionWireEvent>(), hasLength(1));
+          expect(receivedEvents.whereType<HistoryWireEvent>(), hasLength(1));
+          expect(connection.cursor, 'immediate-cursor');
+        },
+      );
+
+      test(
+        'does not reconnect after synchronous ended during connect',
+        () async {
+          final immediateAdapter = _ImmediateEndedWebSocketAdapter();
+          connection = SessionConnection(
+            resolver: EndpointResolver(baseUrl: 'http://127.0.0.1:7734'),
+            tool: 'opencode',
+            sessionId: 'session-1',
+            adapterFactory: (_) => immediateAdapter,
+          );
+          connection.events.listen(receivedEvents.add);
+
+          await connection.connect();
+          await flush();
+
+          expect(receivedEvents.whereType<EndedWireEvent>(), hasLength(1));
+          expect(connection.state, SessionConnectionState.closed);
+          expect(immediateAdapter.isConnected, isFalse);
+        },
+      );
+
       test('transitions to connecting then connected', () async {
         await connection.connect();
         await flush();
@@ -702,6 +775,39 @@ void main() {
           expect(receivedEvents.first, isA<HistoryWireEvent>());
           expect(connection.messages, hasLength(2));
           expect(connection.cursor, 'cursor-abc');
+        },
+      );
+
+      test(
+        'unavailable incremental history preserves backward paging',
+        () async {
+          await connection.connect();
+          await flush();
+
+          adapter
+            ..simulateMessage({
+              'kind': 'history',
+              'reset': true,
+              'messages': const <Object?>[],
+              'cursor': 'tail-cursor',
+              'olderCursor': 'older-cursor',
+              'hasEarlier': true,
+            })
+            ..simulateMessage({
+              'kind': 'history',
+              'reset': false,
+              'messages': const <Object?>[],
+              'hasEarlier': true,
+              'gap': {
+                'code': 'HISTORY_PAGE_SOURCE_CHANGED',
+                'reason': 'source-changed',
+                'message': 'Native history is temporarily unavailable.',
+              },
+            });
+          await flush();
+
+          expect(connection.olderCursor, 'older-cursor');
+          expect(connection.hasEarlier, isTrue);
         },
       );
 
@@ -1556,6 +1662,74 @@ void main() {
 
         expect(connection.state, SessionConnectionState.closed);
       });
+
+      test(
+        'pre-bootstrap broker error closes once and preserves the attach cause',
+        () async {
+          await connection.connect();
+          await flush();
+
+          adapter
+            ..simulateMessage({
+              'kind': 'hello',
+              'brokerContract': {'revision': 20, 'surfaceHash': 'fixture'},
+              'clientContract': {'revision': 20, 'surfaceHash': 'fixture'},
+              'compatibility': {
+                'status': 'exact',
+                'readOnly': false,
+                'brokerRevision': 20,
+                'clientRevision': 20,
+              },
+            })
+            ..simulateMessage({
+              'kind': 'error',
+              'message': 'attach failed: native session refused',
+            })
+            ..simulateDisconnect();
+          await flush();
+
+          expect(connection.state, SessionConnectionState.closed);
+          expect(
+            connection.lastConnectionError,
+            isA<BrokerException>().having(
+              (error) => error.message,
+              'message',
+              'attach failed: native session refused',
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
+          expect(connection.state, SessionConnectionState.closed);
+        },
+      );
+
+      test(
+        'does not overwrite synchronous ended during reconnect',
+        () async {
+          final initialAdapter = FakeWebSocketAdapter();
+          final endedAdapter = _ImmediateEndedWebSocketAdapter();
+          var attempts = 0;
+          connection = SessionConnection(
+            resolver: EndpointResolver(baseUrl: 'http://127.0.0.1:7734'),
+            tool: 'opencode',
+            sessionId: 'session-1',
+            adapterFactory: (_) {
+              attempts += 1;
+              return attempts == 1 ? initialAdapter : endedAdapter;
+            },
+          );
+          connection.events.listen(receivedEvents.add);
+
+          await connection.connect();
+          initialAdapter.simulateDisconnect();
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
+          await flush();
+
+          expect(attempts, 2);
+          expect(receivedEvents.whereType<EndedWireEvent>(), hasLength(1));
+          expect(connection.state, SessionConnectionState.closed);
+          expect(endedAdapter.isConnected, isFalse);
+        },
+      );
 
       test('reattaches with ticket query from last history cursor', () async {
         await connection.connect();

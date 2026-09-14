@@ -144,6 +144,7 @@ Bun.serve({ hostname, port, fetch(request) {
     fixture: 'managed-broker',
     opencodeBin,
     opencodeUrl: `http://127.0.0.1:${managedPort}`,
+    startupTimeoutMs: 10_000,
     pi: badPi,
   });
   try {
@@ -155,16 +156,19 @@ Bun.serve({ hostname, port, fetch(request) {
       'live broker readiness must not advertise Pi under Node 22.14');
 
     let settled = false;
+    let earlyResponse: { status: number; body: any } | undefined;
     const request = fetch(`${managed.base}/api/sessions/opencode`, {
       method: 'POST',
       headers: createHeaders(),
       body: JSON.stringify({ directory: root }),
     }).then(async (response) => {
       settled = true;
-      return { status: response.status, body: await response.json() as any };
+      earlyResponse = { status: response.status, body: await response.json() as any };
+      return earlyResponse;
     });
     await Bun.sleep(150);
-    assert.equal(settled, false, 'immediate create must wait at the managed readiness boundary');
+    assert.equal(settled, false,
+      `immediate create must wait at the managed readiness boundary; early=${JSON.stringify(earlyResponse)}`);
     writeFileSync(gate, 'ready');
     const created = await request;
     assert.equal(created.status, 200, JSON.stringify(created.body));

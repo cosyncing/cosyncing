@@ -19,6 +19,7 @@ import {
 } from '../helpers/isolated-broker-fixture.ts';
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   ftruncateSync,
   mkdirSync,
@@ -76,6 +77,7 @@ async function startBroker(
   options: {
     historyReadMetrics?: (line: string) => void;
     captureHoldFile?: string;
+    overrides?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<RunningBroker> {
   const port = await freePort();
@@ -96,6 +98,7 @@ async function startBroker(
           ...(options.captureHoldFile
             ? { COSYNCING_TEST_CODEX_CAPTURE_HOLD_FILE: options.captureHoldFile }
             : {}),
+          ...options.overrides,
         },
       }),
       stdout: 'ignore',
@@ -804,4 +807,221 @@ try {
   broker.child.kill();
   await broker.child.exited.catch(() => undefined);
   rmSync(root, { recursive: true, force: true });
+}
+
+// -------------------- Ordinary-history refusal + closed-socket generation fence ----------------
+// Kilo's HTTP-backed Observe connection uses getHistory(), not compact capture.
+// Exercise that production path through a real broker so a native 503 cannot
+// become authoritative empty history and a closed tab cannot finish stale
+// bootstrap work after its replacement tab has attached.
+{
+  const fixtureRoot = mkdtempSync('/tmp/cosyncing-kilo-history-wire-');
+  const fixtureHome = join(fixtureRoot, 'broker');
+  const fixtureBin = join(fixtureRoot, 'bin');
+  mkdirSync(fixtureBin, { recursive: true });
+  const kiloBin = join(fixtureBin, 'kilo');
+  writeFileSync(kiloBin, '#!/bin/sh\nprintf "kilo 7.4.23\\n"\n');
+  chmodSync(kiloBin, 0o755);
+
+  const sessionId = 'kilo-history-fixture';
+  const directory = join(fixtureRoot, 'workspace');
+  mkdirSync(directory, { recursive: true });
+  let updated = 4;
+  let historyMode: 'normal' | 'fail' | 'hold' = 'normal';
+  let heldStarted = false;
+  let heldAborted = false;
+  let releaseHeld: (() => void) | undefined;
+  let promptPosts = 0;
+  let historyRows = Array.from({ length: 520 }, (_unused, index) => ({
+    info: { id: `assistant-${index}`, role: 'assistant', sessionID: sessionId },
+    parts: [{ id: `part-${index}`, type: 'text', text: `Kilo history row ${index}` }],
+  }));
+  const sessionRow = () => ({
+    id: sessionId,
+    title: 'Kilo history fixture',
+    directory,
+    time: { created: 1, updated },
+  });
+  const kiloPort = await freePort();
+  const kiloServer = Bun.serve({
+    hostname: '127.0.0.1',
+    port: kiloPort,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === '/global/health') {
+        return Response.json({ healthy: true, version: '7.4.23' });
+      }
+      if (url.pathname === '/global/event') {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(': ready\n\n'));
+          },
+        }), { headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (url.pathname === '/session' && request.method === 'GET') {
+        return Response.json([sessionRow()]);
+      }
+      if (url.pathname === '/session/status') {
+        return Response.json({ [sessionId]: { type: 'idle' } });
+      }
+      if (url.pathname === '/provider') {
+        return Response.json({ connected: [], all: [] });
+      }
+      if (url.pathname === '/permission') return Response.json([]);
+      if (url.pathname === `/session/${sessionId}` && request.method === 'GET') {
+        return Response.json(sessionRow());
+      }
+      if (url.pathname === `/session/${sessionId}/message` && request.method === 'GET') {
+        if (historyMode === 'fail') {
+          historyMode = 'normal';
+          return Response.json({ error: 'temporary history failure' }, { status: 503 });
+        }
+        if (historyMode === 'hold') {
+          historyMode = 'normal';
+          const staleRows = historyRows;
+          heldStarted = true;
+          request.signal.addEventListener('abort', () => { heldAborted = true; }, { once: true });
+          await new Promise<void>((resolve) => { releaseHeld = resolve; });
+          return Response.json(staleRows);
+        }
+        return Response.json(historyRows);
+      }
+      if (url.pathname.endsWith('/prompt_async') && request.method === 'POST') {
+        promptPosts += 1;
+        return Response.json({ ok: true });
+      }
+      return Response.json({ error: 'not found' }, { status: 404 });
+    },
+  });
+
+  let fixtureBroker: RunningBroker | undefined;
+  const fixtureSockets: WebSocket[] = [];
+  const openKiloClient = async (options: {
+    since?: string;
+    deferHistory?: boolean;
+  } = {}): Promise<SocketClient> => {
+    assert(fixtureBroker);
+    const frames: any[] = [];
+    const params = new URLSearchParams({
+      mode: 'observe',
+      artifactMode: 'reference',
+      contractRevision: '20',
+      minimumBrokerRevision: '2',
+      initialHistory: '100',
+      ...(options.since ? { since: options.since } : {}),
+    });
+    const ws = new WebSocket(
+      `${fixtureBroker.wsBase}/api/sessions/kilo/${sessionId}/stream?${params}`,
+    );
+    fixtureSockets.push(ws);
+    ws.onmessage = (event) => {
+      try { frames.push(JSON.parse(String(event.data))); } catch { /* asserted below */ }
+    };
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject(new Error('Kilo fixture WebSocket failed to open'));
+    });
+    try {
+      await waitFor(
+        () => frames.find((frame) => frame.kind === 'session'),
+        'Kilo fixture session frame',
+      );
+    } catch (error) {
+      throw new Error(`${String(error)}; frames=${JSON.stringify(frames)}`);
+    }
+    const attach = options.deferHistory
+      ? undefined
+      : await waitFor(
+        () => frames.find((frame) => frame.kind === 'history'),
+        'Kilo fixture history frame',
+      );
+    return { ws, frames, attach };
+  };
+
+  try {
+    fixtureBroker = await startBroker(
+      fixtureHome,
+      join(fixtureRoot, 'codex'),
+      {
+        overrides: {
+          KILO_URL: `http://127.0.0.1:${kiloPort}`,
+          KILO_SERVER_PASSWORD: 'fixture-password',
+          COSYNCING_KILO_BIN: kiloBin,
+          PATH: `${fixtureBin}:${process.env.PATH ?? ''}`,
+        },
+      },
+    );
+
+    const primed = await openKiloClient();
+    assert.equal(primed.attach.reset, true);
+    assert.equal(primed.attach.messages.length, 100);
+    assert(
+      Number(primed.attach.truncated?.total) > 100,
+      'fixture history must be large enough to seed the backward-page cache',
+    );
+    assert.equal(typeof primed.attach.cursor, 'string');
+    assert.equal(typeof primed.attach.olderCursor, 'string');
+    primed.ws.close();
+
+    historyMode = 'fail';
+    const refused = await openKiloClient({ since: primed.attach.cursor });
+    assert.equal(refused.attach.reset, false);
+    assert.deepEqual(refused.attach.messages, []);
+    assert.equal(refused.attach.cursor, undefined);
+    assert.equal(refused.attach.attachTicket, undefined);
+    assert.equal(refused.attach.hasEarlier, true);
+    assert.equal(refused.attach.gap?.code, 'HISTORY_PAGE_SOURCE_CHANGED');
+    const cachedPage = await requestPage(
+      refused,
+      primed.attach.olderCursor,
+      'kilo-cache-after-native-failure',
+    );
+    assert.equal(cachedPage.kind, 'history-page');
+    assert.equal(cachedPage.messages.length, 100);
+    refused.ws.close();
+
+    historyMode = 'hold';
+    const oldClient = await openKiloClient({ deferHistory: true });
+    await waitFor(() => heldStarted ? true : undefined, 'held old Kilo history request');
+    oldClient.ws.send(JSON.stringify({
+      kind: 'prompt',
+      text: 'must not replay from closed bootstrap',
+      clientMessageId: 'closed-bootstrap-prompt',
+    }));
+    oldClient.ws.close();
+    await waitFor(() => heldAborted ? true : undefined, 'old Kilo history request abort');
+
+    historyRows = [...historyRows, {
+      info: { id: 'assistant-current', role: 'assistant', sessionID: sessionId },
+      parts: [{ id: 'part-current', type: 'text', text: 'Kilo current replacement row' }],
+    }];
+    updated = 5;
+    const replacement = await openKiloClient();
+    assert(
+      replacement.attach.messages.some((message: any) =>
+        message.type === 'model-output' && message.text === 'Kilo current replacement row'),
+      'replacement socket must receive the current native history',
+    );
+    releaseHeld?.();
+    await Bun.sleep(100);
+    assert.equal(
+      oldClient.frames.filter((frame) => frame.kind === 'history').length,
+      0,
+      'closed socket must not receive its late history result',
+    );
+    assert.equal(
+      replacement.frames.filter((frame) => frame.kind === 'history').length,
+      1,
+      'replacement socket must receive exactly one authoritative history frame',
+    );
+    assert.equal(promptPosts, 0, 'closed bootstrap must discard its buffered prompt');
+    console.log('PASS ordinary Kilo history refusal preserves cache and closed bootstrap cannot finish stale work');
+  } finally {
+    releaseHeld?.();
+    for (const ws of fixtureSockets) ws.close();
+    fixtureBroker?.child.kill();
+    await fixtureBroker?.child.exited.catch(() => undefined);
+    kiloServer.stop(true);
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 }

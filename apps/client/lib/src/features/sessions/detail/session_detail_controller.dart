@@ -161,6 +161,8 @@ class SessionDetailController
   var _interruptTurnGeneration = 0;
   Timer? _historyPageTimeout;
   Timer? _initialHistoryTimeout;
+  int? _initialSessionObservedAttempt;
+  DateTime? _initialSessionObservedAt;
   var _bootstrapAttempt = 0;
   var _retryEventSequence = 0;
   var _disposed = false;
@@ -699,9 +701,9 @@ class SessionDetailController
       );
     }
 
-    final driveReason = await _driveRestoreReason(source.storageKey);
-    if (driveReason != null) {
-      return _InteractiveAttachRequest(mode: 'resume', reason: driveReason);
+    final driveRestore = await _driveRestoreRequest(source.storageKey);
+    if (driveRestore != null) {
+      return driveRestore;
     }
 
     // A fresh roster row is the broker's current per-session attach
@@ -822,7 +824,9 @@ class SessionDetailController
   /// transcript to decide. An app-created preference authorizes `app-restore`
   /// at any later time; a terminal-takeover lease authorizes `lease-restore`
   /// only while fresh.
-  Future<String?> _driveRestoreReason(String brokerProfileId) async {
+  Future<_InteractiveAttachRequest?> _driveRestoreRequest(
+    String brokerProfileId,
+  ) async {
     try {
       final provenance = await ref
           .read(sessionDriveIntentStoreProvider)
@@ -832,9 +836,18 @@ class SessionDetailController
             sessionId: arg.sessionId,
           );
       return switch (provenance?.kind) {
-        SessionDriveProvenanceKind.appCreated => kDriveAttachReasonAppRestore,
+        SessionDriveProvenanceKind.appCreated =>
+          provenance!.restoreMode == SessionDriveRestoreMode.live
+              ? const _InteractiveAttachRequest(mode: 'live')
+              : const _InteractiveAttachRequest(
+                  mode: 'resume',
+                  reason: kDriveAttachReasonAppRestore,
+                ),
         SessionDriveProvenanceKind.terminalTakeover =>
-          kDriveAttachReasonLeaseRestore,
+          const _InteractiveAttachRequest(
+            mode: 'resume',
+            reason: kDriveAttachReasonLeaseRestore,
+          ),
         null => null,
       };
     } on Object {
@@ -1475,21 +1488,41 @@ class SessionDetailController
         unawaited(_restoreLocalDraftForConnection());
         _scheduleLocalMaintenance();
       }
-      final connectionErrorText =
-          status == SessionDetailConnectionStatus.reconnecting
-          ? connection.lastConnectionErrorMessage
-          : null;
+      final connectionErrorText = switch (status) {
+        SessionDetailConnectionStatus.reconnecting ||
+        SessionDetailConnectionStatus.closed =>
+          connection.lastConnectionErrorMessage,
+        _ => null,
+      };
+      final terminalAttachFailure =
+          status == SessionDetailConnectionStatus.closed &&
+          connectionErrorText != null &&
+          !state.bootstrapState.hasFailed &&
+          (state.bootstrapState.readiness ==
+                  SessionDetailBootstrapReadiness.attachingSocket ||
+              state.bootstrapState.isWaitingForInitialHistory);
       // Transport text is broker- or platform-authored, so it stays in the
       // disclosure while the sentence the user reads comes from the lead.
       final connectionError = connectionErrorText == null
           ? null
           : LocalizedFailure(
               lead: FailureLead.connectSession,
-              kind: FailureKind.offline,
+              kind: terminalAttachFailure
+                  ? FailureKind.brokerFault
+                  : FailureKind.offline,
               detail: boundedTechnicalDetail(connectionErrorText),
             );
+      final bootstrapState = terminalAttachFailure
+          ? state.bootstrapState.failure(
+              attempt: bootstrapAttempt,
+              kind: FailureKind.brokerFault,
+              source: SessionDetailBootstrapFailureSource.attach,
+              hasCachedMessages: state.bootstrapState.hasCachedMessages,
+            )
+          : state.bootstrapState;
       state = state.copyWith(
         connectionStatus: status,
+        bootstrapState: bootstrapState,
         interruptPhase: status == SessionDetailConnectionStatus.connected
             ? state.interruptPhase
             : SessionInterruptPhase.idle,
@@ -1512,6 +1545,14 @@ class SessionDetailController
         clearSessionInfo: status != SessionDetailConnectionStatus.connected,
         clearTransientRetryStatus: true,
       );
+      if (terminalAttachFailure) {
+        _requestedDriveReason = null;
+        _liveAttachArmed = false;
+        _cancelInitialHistoryTimeout();
+        _abortBootstrapActionRefresh(attempt: bootstrapAttempt);
+        connection.disarmDriveAuthority();
+        _abandonBootstrapConnection(connection, bootstrapAttempt);
+      }
     });
     _eventSub = connection.events.listen((event) {
       if (!_isCurrentBootstrapAttempt(bootstrapAttempt) ||
@@ -1766,7 +1807,10 @@ class SessionDetailController
         historyPageErrorCode: historyPageErrorCode,
         clearHistoryPageError: clearHistoryPageError,
         historyStartReached: historyStartReached,
-        clearError: true,
+        clearError:
+            event is! ErrorWireEvent ||
+            connection.state != SessionDetailConnectionStatus.closed ||
+            connection.lastConnectionErrorMessage == null,
         forkSessionActionState: clearAgentOwnedForkRefusal
             ? const SessionActionState.idle()
             : null,
@@ -1859,6 +1903,11 @@ class SessionDetailController
         _completeHandoff(false);
       }
       _enqueueTranscriptPersistence(event);
+      if (event is HistoryWireEvent || event is MessageWireEvent) {
+        // State is committed by here, so the transcript this reads is the one
+        // the frame just produced.
+        retractRecoveredPromptOfferInTranscript();
+      }
       if (event is DraftWireEvent) {
         unawaited(_handleSharedDraftEvent(event));
       }
@@ -2065,7 +2114,24 @@ class SessionDetailController
         :final draftCleared,
         :final draftRevision,
       ):
-        if (clientMessageId == null || clientMessageId.isEmpty || pending) {
+        if (clientMessageId == null || clientMessageId.isEmpty) {
+          return;
+        }
+        if (pending) {
+          // Our own replay collided with the original, still executing. Not a
+          // receipt, so this must not mark the row delivered -- but not a
+          // failure either, and the attempt the replay spent bought nothing.
+          // Give it back and stay live, so the row is still replaying when the
+          // journal turns terminal and hands back the real result.
+          //
+          // Before this, three such answers exhausted
+          // `sessionOutboxMaxAttempts` for any prompt held behind a permission
+          // gate. Maintenance then expired the row and RESTORED its prompt
+          // into the durable draft, putting an already-executed
+          // `rm -f <path> && touch <path>` back in every client's composer.
+          await ref
+              .read(sessionOutboxRepositoryProvider)
+              .markStillInFlight(clientMessageId);
           return;
         }
         // DR1: the prompt landed, but the handoff only completes when the
@@ -2113,7 +2179,15 @@ class SessionDetailController
             .markFailed(clientMessageId, detail);
         _removeOptimisticPrompt(clientMessageId);
         // DR1: terminal delivery failure restores/exposes the unsent text.
-        await _restoreDraftForFailedSend(clientMessageId);
+        // Except when the nack cannot say the prompt went unexecuted: a
+        // duplicate-id conflict answers a mutation that may already have run,
+        // and an unknown outcome says so in its own name.
+        await _restoreDraftForFailedSend(
+          clientMessageId,
+          outcomeAmbiguous:
+              code == 'CLIENT_MESSAGE_ID_CONFLICT' ||
+              code == 'CLIENT_MESSAGE_OUTCOME_UNKNOWN',
+        );
         final isAttachmentFailure =
             _attachmentPromptClientMessageId == clientMessageId;
         if (isAttachmentFailure) {

@@ -62,17 +62,22 @@ Broker 运行在智能体工作的那台机器上，负责观察它们的会话�
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
   <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
+  <a href="https://github.com/can1357/oh-my-pi" title="omp (oh-my-pi)"><img src="docs/assets/agents/pills/omp.svg" alt="omp (oh-my-pi)" height="34"></a>
+  <a href="https://reasonix.io/" title="Reasonix"><img src="docs/assets/agents/pills/reasonix.svg" alt="Reasonix" height="34"></a>
+  <a href="https://grok.com/" title="Grok Build"><img src="docs/assets/agents/pills/grok.svg" alt="Grok Build" height="34"></a>
+  <a href="https://cline.bot/" title="Cline"><img src="docs/assets/agents/pills/cline.svg" alt="Cline" height="34"></a>
+  <a href="https://kilocode.ai/" title="Kilo Code"><img src="docs/assets/agents/pills/kilocode.svg" alt="Kilo Code" height="34"></a>
 </p>
 
-七者共用同一套协议；各家智能体开放的能力并不一致，应用会如实显示某个会话实际支持什么。
+十二者共用同一套协议；各家智能体开放的能力并不一致，应用会如实显示某个会话实际支持什么。
 Claude Code 的会话在接管之前保持只读。版本与安装方法见
 [支持的智能体](docs/supported_agents/README.md)，逐项能力见
 [适配器支持](docs/protocol/adapter-support.md)（均为英文）。
 
-前台客户端可以加入同一个由 Broker 托管的 Codex 或 Pi Drive 会话，而不会再次启动原生 Resume。
+前台客户端可以加入同一个由 Broker 托管的 Codex、Pi、omp 或 Reasonix Drive 会话，而不会再次启动原生 Resume。
 Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode 继续使用共享实时会话；后台观察连接始终只读。
 
-**实验性支持：** 源码贡献者可以试用三个暂定适配器。
+**实验性支持：** 源码贡献者可以试用八个暂定适配器。
 [Kimi Code](docs/supported_agents/kimi.md) 对 `kimi web` 服务器上的每个会话提供只读观察，对 cosyncing
 自己创建的会话提供 Drive（提示词、审批、模型选择），对其余会话提供显式接管。
 [DeepSeek Harness](docs/supported_agents/dsh.md) 连接 `dsh web` 宿主，多个前台客户端可以共享对话记录
@@ -81,11 +86,22 @@ Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode �
 [Antigravity](docs/supported_agents/antigravity.md) 读取 Antigravity CLI 自己的会话存储（不经过
 任何服务器），以只读方式回放全部会话，并通过 Broker 托管的 `agy` 子进程进行 Drive；两个客户端可以
 共享同一个 Drive，终端一旦写入就把会话交还。
+[omp](docs/supported_agents/omp.md) 使用独立的内置桥接和 RPC 方言，支持会话发现、实时同步、提示词、
+审批、命令、模型、文件输入和新建会话。[Reasonix](docs/supported_agents/reasonix.md) 以只读方式观察
+受限的本地存储，并在需要 Drive 时启动由 Broker 托管的 ACP 子进程；多个客户端共享同一个写入者，
+但不支持与终端 true sync，也不支持文件输入。[Grok Build](docs/supported_agents/grok-build.md)
+观察受限的本地存储，并在 1.0.13 及更高版本上提供经过身份验证、由 Broker 托管的 ACP 新建/Resume、
+提示词、审批、命令以及模型/推理强度/模式控制。[Cline](docs/supported_agents/cline.md) 以只读方式观察受限的
+默认配置父会话和子智能体快照；应用创建的会话则通过隔离、由 Broker 托管的 Hub 支持新建/Resume、
+提示词、停止、审批、新建时模型/模式选择以及共享 Drive。精确 ID 的终端交接仍与该写入器分离。
+[Kilo Code](docs/supported_agents/kilocode.md) 观察受限的本地
+SQLite 快照，并在 7.4.23 及更高版本上通过 Broker 托管的专用回环端口 4097 宿主，提供经过身份验证的
+新建/Drive、审批、模型选择和重命名。这三个适配器都不支持与终端 true sync。
 
-三者都不需要开关标志。两个基于服务器的适配器也不需要一直开着终端：安装后的 cosyncing 服务会在宿主未运行时启动它、在它崩溃后
-重启它，并且只停止自己启动的那一个。你自己启动的宿主不会被停止、替换或重新配置，安装流程也会在征求同意
-前列出它将托管的两个宿主。DeepSeek Harness 请全局安装：`npm install -g @deepseek-ai/dsh` —— cosyncing
-只在 PATH 上查找 `dsh`，因此仅用 `npx` 的安装可以通信，但无法被启动或校验版本。两个宿主的安装说明见
+这八个适配器都不需要开关标志。托管宿主适配器也不需要一直开着终端：安装后的 cosyncing 服务会在宿主未运行时启动它、在它崩溃后
+重启它，并且只停止自己启动的那个进程。你自己启动的宿主不会被停止、替换或重新配置，安装流程也会在征求同意
+前列出每个将托管的运行时。DeepSeek Harness 请全局安装：`npm install -g @deepseek-ai/dsh` —— cosyncing
+只在 PATH 上查找 `dsh`，因此仅用 `npx` 的安装可以通信，但无法被启动或校验版本。各运行时的安装说明见
 [支持的智能体](docs/supported_agents/README.md)（英文）。
 
 ## 前置要求

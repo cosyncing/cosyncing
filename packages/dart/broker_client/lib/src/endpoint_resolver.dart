@@ -91,6 +91,10 @@ class EndpointResolver {
   String agentModelsEndpoint(String tool) =>
       '$agentsEndpoint/${Uri.encodeComponent(tool)}/models';
 
+  /// Pre-session permission-mode catalog endpoint for a specific tool.
+  String agentModesEndpoint(String tool) =>
+      '$agentsEndpoint/${Uri.encodeComponent(tool)}/modes';
+
   /// The sessions endpoint.
   ///
   /// Deliberately unqualified, like [agentsEndpoint]: it is a prefix other

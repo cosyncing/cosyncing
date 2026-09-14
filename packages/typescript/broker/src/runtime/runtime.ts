@@ -21,6 +21,7 @@ import {
   evaluateBrokerClientCompatibility,
   isAgentOwnedSessionError,
   isHistorySnapshotRefusal,
+  isNativeSessionRenameUnsupportedError,
   isOwnershipConflictError,
   OwnershipConflictError,
   isSessionCreateTemporarilyUnavailableError,
@@ -37,6 +38,7 @@ import {
   type MachineRoster,
   type ModelOption,
   type ModelSelection,
+  type ModeOption,
   type PlanActionInput,
   type ScheduleAction,
   type ScheduleCron,
@@ -51,7 +53,11 @@ import {
 } from '@cosyncing/adapter-api';
 import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
 import { PiAdapter } from '@cosyncing/adapter-pi';
-import { inspectOmpPathCollision, OmpAdapter, OMP_DIALECT } from '@cosyncing/adapter-omp';
+import { currentOmpRuntimeReadiness, inspectOmpPathCollision, OmpAdapter, OMP_DIALECT, OMP_VERIFIED_VERSION } from '@cosyncing/adapter-omp';
+import { ReasonixAdapter } from '@cosyncing/adapter-reasonix';
+import { GrokAdapter } from '@cosyncing/adapter-grok';
+import { ClineAdapter, clineManagedHubPort } from '@cosyncing/adapter-cline';
+import { KiloAdapter } from '@cosyncing/adapter-kilocode';
 import {
   CodexAdapter,
   codexLiveSyncEnabled,
@@ -90,9 +96,17 @@ import {
   ifNoneMatchMatches,
   jsonMaybe,
   parseSessionWindowMs,
+  rosterRepresentationIsReusable,
   sessionWindowRepresentationExpiry,
 } from '../roster/roster-http.ts';
 import { RosterRevisionStore } from '../roster/roster-revision.ts';
+import {
+  ROSTER_COVERAGE_COMPLETE,
+  RosterSweepCache,
+  unconfirmedBackends,
+  withheldBackends,
+  type RosterSweepAnswer,
+} from '../roster/roster-sweep-cache.ts';
 import {
   ArtifactStore,
   artifactCacheRoot,
@@ -203,7 +217,11 @@ import {
   validateScheduleCron,
 } from '../scheduling/schedule-store.ts';
 import { ScheduledSendRunner, type ScheduleDeliveryResult } from '../scheduling/schedule-runner.ts';
-import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
+import {
+  CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
+  PRODUCT_IDENTITY,
+  type LocalRosterResponse,
+} from '@cosyncing/protocol';
 import { BUILD_INFO, buildFingerprint } from './build-info.ts';
 import { currentApplicationIdentity } from './application-identity.ts';
 import { serveWebHandoff, WEB_HANDOFF_PATH } from '../artifacts/web-handoff.ts';
@@ -216,6 +234,7 @@ import {
   ClientMessagePolicyError,
   validatePlanActionRequest,
   validateRequestedAgent,
+  validateRequestedModel,
   validateRequestedPermissionMode,
 } from '../sessions/client-message-policy.ts';
 import {
@@ -245,12 +264,14 @@ import {
   recordManagedRuntimeFailure,
 } from './managed-runtime-state.ts';
 import {
+  mergeLegRows,
   rosterRepresentationKey,
   rosterVisibility,
   visibleSessions,
   type RosterVisibility,
 } from './roster-visibility.ts';
 import {
+  classifyManagedHost,
   defaultManagedHostEffects,
   ensureManagedHost,
   managedHostRestartLedger,
@@ -663,6 +684,45 @@ const UPLOAD_CHUNK_MAX_BYTES = envNumber('COSYNCING_UPLOAD_CHUNK_MAX_BYTES', UPL
 // every agent (measured ~30-40s of mostly-synchronous I/O on a real machine) while the app polls
 // /api/sessions every 6s per tab — without this cache, polls pile up and starve the event loop.
 const ROSTER_TTL_MS = envNumber('COSYNCING_ROSTER_TTL_MS', 4000);
+// Past the TTL the previous rows are served while a fresh sweep runs, but only this far past it.
+// The bound is what separates "revalidating" from "the sweep has been failing for an hour and every
+// caller is being handed rows from before it started failing, with nothing said". Set well clear of
+// a healthy sweep (seconds) so it can only trip when discovery is actually broken, at which point
+// callers wait on the real sweep and get its error instead of a comfortable lie.
+const ROSTER_STALE_SERVE_MAX_MS = envNumber('COSYNCING_ROSTER_STALE_SERVE_MAX_MS', 60_000);
+/**
+ * How long a caller with NO snapshot for its window waits for the whole sweep
+ * before being answered with the legs that have landed.
+ *
+ * Sized above a healthy full sweep and far below the measured bad ones, so an
+ * ordinary request still gets a complete roster and only a degraded one is
+ * answered early.
+ *
+ * The partial answer is NOT corrected by the sweep's own cache write, which was
+ * the original claim here and was wrong. A client polls `/api/sessions` with an
+ * ETag and is answered 304 for as long as the roster revision is unchanged, and
+ * filling the cache changes no revision. The correction is the explicit
+ * reconcile `discoverAllCached` attaches to a partial answer; see it for what
+ * kept a client partial for five minutes without it.
+ */
+const ROSTER_COLD_PARTIAL_MS = envNumber('COSYNCING_ROSTER_COLD_PARTIAL_MS', 2_500);
+// The client wait is bounded separately above. This is the lifetime of the
+// discovery work itself: one sweep may not keep consuming the broker after its
+// early answer, nor may unbudgeted local legs make it immortal. External hosts
+// retain their 15s per-leg ceiling, while a host reached late in the sweep gets
+// only the aggregate time still remaining.
+//
+// Twenty seconds was below healthy installed all-time work after production
+// discovery became serial: the measured twelve-adapter sweep needs roughly
+// 28-38s over 4,800 rows, so its trailing adapters were abandoned on every
+// pass. Forty-five seconds admits that measured workload with headroom without
+// weakening the 15s ceiling that identifies one wedged external host. Ordinary
+// callers still take the 2.5s cold partial or cached answer above; this longer
+// lifetime applies to the detached reconciliation work and explicit refreshes.
+const ROSTER_SWEEP_BUDGET_MS = Math.max(
+  1,
+  envNumber('COSYNCING_ROSTER_SWEEP_BUDGET_MS', 45_000),
+);
 const ROSTER_SAFETY_RECONCILE_MS = envNumber('COSYNCING_ROSTER_SAFETY_RECONCILE_MS', 5 * 60_000);
 const TRANSPORT_MAX_BYTES = Number(process.env.COSYNCING_TRANSPORT_MAX_BYTES ?? 1024 * 1024);
 const TRANSPORT_MAILBOX_MAX = Math.max(1, Number(process.env.COSYNCING_TRANSPORT_MAILBOX_MAX ?? 200) || 200);
@@ -726,6 +786,133 @@ registry.register(new PiAdapter({
 registry.register(new OmpAdapter({
   brokerUrl: BROKER_URL,
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.ompIntegrationSource === 'file',
+}));
+// Reasonix — file-backed Observe plus an explicit Resume that loads the same
+// native session through one broker-owned ACP stdio child. There is no daemon
+// or managed host. Registration is unconditional: `acp-stdio`, Observe, and
+// Resume predate the client decode tolerances, so this adapter needs no roster
+// revision floor and unavailable installations remain visible to doctor.
+registry.register(new ReasonixAdapter());
+// Grok Build — bounded local-store Observe plus floor-gated Create/Resume
+// through one authenticated broker-owned ACP stdio child. Durable app-created
+// provenance is the restart boundary; builds below the floor remain
+// Observe-only, while newer unmeasured ones drive.
+registry.register(new GrokAdapter({
+  resolveStoredDriveState: (info) => sessionMetadata.wasAppCreatedSession(info)
+    ? {
+        ...(sessionMetadata.currentModelHint(info)
+          ? { currentModel: sessionMetadata.currentModelHint(info) }
+          : {}),
+        ...(sessionMetadata.currentModeHint(info)
+          ? { currentMode: sessionMetadata.currentModeHint(info) }
+          : {}),
+        ...(sessionMetadata.appHistoryBoundary(info)
+          ? { historyBoundary: sessionMetadata.appHistoryBoundary(info) }
+          : {}),
+        ...(sessionMetadata.appTerminalSummaries(info).length > 0
+          ? { terminalSummaries: sessionMetadata.appTerminalSummaries(info) }
+          : {}),
+      }
+    : undefined,
+  revokeStoredDriveEligibility: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.revokeAppCreatedSession(info));
+  },
+  recordStoredDriveBoundary: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.recordAppHistoryBoundary(info));
+  },
+}));
+// Cline — default-profile parent/subagent Observe plus Create/Resume through
+// the isolated broker-owned Hub/profile. The fixture-only ACP writer is never
+// registered: it cannot causally bind a native prompt to durable message ids.
+registry.register(new ClineAdapter({
+  resolveStoredDriveState: (info) => sessionMetadata.wasAppCreatedSession(info)
+    ? {
+        ...(sessionMetadata.currentModelHint(info)
+          ? { currentModel: sessionMetadata.currentModelHint(info) }
+          : {}),
+        ...(sessionMetadata.currentModeHint(info)
+          ? { currentMode: sessionMetadata.currentModeHint(info) }
+          : {}),
+        ...(sessionMetadata.appHistoryBoundary(info)
+          ? { historyBoundary: sessionMetadata.appHistoryBoundary(info) }
+          : {}),
+        ...(sessionMetadata.appPromptCorrelations(info).length > 0
+          ? { promptCorrelations: sessionMetadata.appPromptCorrelations(info) }
+          : {}),
+        ...(sessionMetadata.appTerminalSummaries(info).length > 0
+          ? { terminalSummaries: sessionMetadata.appTerminalSummaries(info) }
+          : {}),
+      }
+    : undefined,
+  revokeStoredDriveEligibility: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.revokeAppCreatedSession(info));
+  },
+  recordStoredDriveBoundary: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.recordAppHistoryBoundary(info));
+  },
+  recordStoredPromptCorrelation: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.recordAppPromptCorrelation(info));
+  },
+  isManagedHostOwned: async (identityKey) => {
+    const port = clineManagedHubPort(process.env);
+    const record = managedHostOwners.read('cline');
+    if (record === null || record.evidence.port !== port) return false;
+    const listener = managedHostEffects.listenerAsync
+      ? await managedHostEffects.listenerAsync(port)
+      : managedHostEffects.listener(port);
+    return listener.state === 'identified'
+      && listener.pid === record.pid
+      && classifyManagedHost(
+        record,
+        managedHostEffects.liveProcess(listener.pid, { fresh: true }),
+        identityKey,
+      ) === 'owned';
+  },
+  onUnsafeManagedAuthority: async (reason) => {
+    const backend = registry.get('cline');
+    if (!backend) throw new Error('Cline adapter is no longer registered.');
+    const outcome = await releaseManagedHost(backend, managedHostEffects, managedHostOwners);
+    if (outcome.action !== 'stopped' && outcome.action !== 'already-gone') {
+      throw new Error(`managed Cline Hub was preserved (${outcome.action})`);
+    }
+    console.warn(`${LOG_PREFIX} stopped the managed Cline Hub after an unconfirmed native authority transition: ${reason}`);
+  },
+}));
+registry.register(new KiloAdapter({
+  resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
+  resolveStoredDriveState: (info) => sessionMetadata.wasAppCreatedSession(info)
+    ? {
+        ...(sessionMetadata.currentModelHint(info)
+          ? { currentModel: sessionMetadata.currentModelHint(info) }
+          : {}),
+        ...(sessionMetadata.appHistoryBoundary(info)
+          ? { historyBoundary: sessionMetadata.appHistoryBoundary(info) }
+          : {}),
+      }
+    : undefined,
+  revokeStoredDriveEligibility: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.revokeAppCreatedSession(info));
+  },
+  recordStoredDriveBoundary: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.recordAppHistoryBoundary(info));
+  },
+  isManagedHostOwned: async (identityKey) => {
+    const record = managedHostOwners.read('kilo');
+    if (record === null || record.evidence.port !== 4097) return false;
+    const listener = managedHostEffects.listenerAsync
+      ? await managedHostEffects.listenerAsync(4097)
+      : managedHostEffects.listener(4097);
+    return listener.state === 'identified'
+      && listener.pid === record.pid
+      && classifyManagedHost(
+        record,
+        managedHostEffects.liveProcess(listener.pid, { fresh: true }),
+        identityKey,
+      ) === 'owned';
+  },
+  recordNativeCurrentModel: (info) => {
+    safeRecordMetadata('mutate', () => sessionMetadata.recordCurrentModelHint(info));
+  },
 }));
 registry.register(new CodexAdapter({
   resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
@@ -1085,6 +1272,9 @@ async function deliverScheduledSend(schedule: ScheduleRecord): Promise<ScheduleD
     );
     safeRecordMetadata('create', () => {
       sessionMetadata.recordAppCreatedSession(info);
+      if (!backend.renameSession && schedule.title?.trim()) {
+        sessionMetadata.renameSession(schedule.tool, info.id, schedule.title);
+      }
       return true;
     });
     // Persist before prompt handoff. If the broker restarts or the prompt handoff fails, retry the
@@ -1405,7 +1595,7 @@ function claudeHooksInfo(b: any, id: string, transcriptPath?: string): SessionIn
       drive: { supported: false, state: 'unavailable', reason: `This Claude session is synced through ${PRODUCT_IDENTITY.productName} hooks — answer prompts and questions here.` },
       // answer-only: the hook can answer permission/question prompts but there is no live-prompt-inject path
       // (the channel was the only one, and it's archived) → the app keeps the composer read-only, cards active.
-      terminalSync: { supported: true, syncAvailable: true, active: true, input: 'answer-only', label: 'Synced via hooks', note: `Connected through the ${PRODUCT_IDENTITY.productName} PreToolUse hook; answer its permission prompts and questions here.` },
+      terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared', input: 'answer-only', label: 'Synced via hooks', note: `Connected through the ${PRODUCT_IDENTITY.productName} PreToolUse hook; answer its permission prompts and questions here.` },
     },
   };
 }
@@ -1567,9 +1757,42 @@ function normalizeModelSelection(value: unknown): ModelSelection | undefined {
 }
 
 const MAX_CREATION_MODEL_OPTIONS = 2048;
+const MAX_CREATION_MODE_OPTIONS = 128;
 
 class ModelCatalogUnavailableError extends Error {
   override readonly name = 'ModelCatalogUnavailableError';
+}
+
+class ModeCatalogUnavailableError extends Error {
+  override readonly name = 'ModeCatalogUnavailableError';
+}
+
+async function modeCatalogForCreation(backend: {
+  listModes?: () => Promise<ModeOption[]>;
+}): Promise<ModeOption[]> {
+  if (!backend.listModes) throw new ModeCatalogUnavailableError('this tool does not expose creation modes');
+  try {
+    const unique = new Map<string, ModeOption>();
+    for (const mode of (await backend.listModes()).slice(0, MAX_CREATION_MODE_OPTIONS)) {
+      if (!mode?.value || !mode?.label || !/^[A-Za-z0-9._:-]{1,120}$/u.test(mode.value)) continue;
+      if (!unique.has(mode.value)) unique.set(mode.value, mode);
+    }
+    return [...unique.values()];
+  } catch (error) {
+    throw new ModeCatalogUnavailableError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function requireSupportedCreationMode(
+  backend: { listModes?: () => Promise<ModeOption[]> },
+  mode: string | undefined,
+): Promise<void> {
+  if (!mode) return;
+  if (!(await modeCatalogForCreation(backend)).some((candidate) => candidate.value === mode)) {
+    const error = new Error(`selected permission mode '${mode}' is no longer available`);
+    error.name = 'PermissionModeUnsupportedError';
+    throw error;
+  }
 }
 
 function boundedModelCatalog(models: readonly ModelOption[]): ModelOption[] {
@@ -1657,13 +1880,16 @@ function normalizeCreateSessionOptions(body: any): {
   directory: string;
   title?: string;
   model?: ModelSelection;
+  permissionMode?: string;
 } {
   const title = typeof body?.title === 'string' ? body.title.trim() : '';
   const model = normalizeModelSelection(body?.model);
+  const permissionMode = typeof body?.permissionMode === 'string' ? body.permissionMode.trim() : '';
   return {
     directory: normalizeCreateDirectory(body?.directory),
     ...(title ? { title } : {}),
     ...(model ? { model } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
   };
 }
 
@@ -1731,12 +1957,16 @@ function recordAndBroadcastManagedAppMutation(mc: ManagedConn): void {
 // Roster discovery cache + single-flight: N concurrent /api/sessions polls (one per open tab, every
 // 6s) share ONE full-disk discovery instead of each starting their own. The cached array is never
 // mutated — /api/sessions copies each row before overlaying live state.
-type RosterDiscoveryCache = { at: number; sessions: SessionInfo[] };
-const rosterCaches = new Map<string, RosterDiscoveryCache>();
-const rosterInflight = new Map<string, Promise<SessionInfo[]>>();
+const rosterSweeps = new RosterSweepCache<SessionInfo>({
+  ttlMs: ROSTER_TTL_MS,
+  staleServeMaxMs: ROSTER_STALE_SERVE_MAX_MS,
+  coldPartialMs: ROSTER_COLD_PARTIAL_MS,
+});
 type RosterRepresentation = {
   revision: number;
   etag: string;
+  /** Whether the cached body is the whole roster; see the 304 guard. */
+  complete: boolean;
   expiresAt?: number;
   data: { machine: string; machineId: string; generatedAt: number; revision: number; sessions: SessionInfo[] };
 };
@@ -1759,25 +1989,221 @@ async function safetyReconcileRoster(windowMs: number | undefined, now: number):
   return true;
 }
 
-function discoverAllCached(force = false, windowMs?: number, now = Date.now()): Promise<SessionInfo[]> {
-  const key = windowMs === undefined ? 'all' : String(windowMs);
-  const cached = rosterCaches.get(key);
-  if (!force && cached && now - cached.at < ROSTER_TTL_MS) return Promise.resolve(cached.sessions);
-  const pending = rosterInflight.get(key);
-  if (pending) return pending;
-  const request = registry
-    .discoverAll(windowMs === undefined ? undefined : { updatedAfter: now - windowMs })
+/** A sweep slower than this logs which leg the time went to. Above a couple of
+ *  seconds the roster is visibly late and every other request is queued behind
+ *  it, so the breakdown is worth a line; below it the sweep is unremarkable and
+ *  logging each one would only train the reader to skip them. */
+const ROSTER_SLOW_SWEEP_LOG_MS = 2000;
+
+/** Start one whole-roster sweep and resolve with its rows and their coverage. */
+function startRosterSweep(
+  key: string,
+  windowMs: number | undefined,
+  now: number,
+): Promise<RosterSweepAnswer<SessionInfo>> {
+  // Per-leg WALL-CLOCK, with the overlap that produced it. Not the leg's own
+  // cost: six legs share this event loop, so a starved leg reports the sweep's
+  // duration. `x6` on a line means five other legs were running inside it, and
+  // the number says nothing about that adapter on its own; `x1` means the leg
+  // had the loop to itself and the number IS its cost. Without this the log
+  // blamed reasonix and cline for a sweep in which they were merely last, and
+  // showed `opencode=4525ms/2r` beside `omp=130ms/149r`.
+  const legs: {
+    id: string; ms: number; peak: number; rows: number; abandoned: boolean; failed: boolean;
+  }[] = [];
+  const sweepStartedAt = Date.now();
+  return registry
+    .discoverAll({
+      ...(windowMs === undefined ? {} : { updatedAfter: now - windowMs }),
+      sweepBudgetMs: ROSTER_SWEEP_BUDGET_MS,
+      // The same key `rosterSweeps` uses, so the registry's abandoned-leg
+      // memory is partitioned exactly like the cache it feeds. Without it one
+      // memory served every window and the last sweep to finish won, whatever
+      // question it had answered.
+      scopeKey: key,
+      onWork: (work) => {
+        if (work.kind === 'leg-elapsed') {
+          legs.push({
+            id: work.backendId,
+            ms: work.elapsedMs,
+            peak: work.concurrentPeak,
+            rows: work.rows,
+            abandoned: work.abandoned,
+            // A leg that THREW is not a leg that overran, and the breakdown is
+            // where a reader looks first. Without this the only trace of a
+            // failed leg was a separate `console.warn`, and the sweep line said
+            // it produced its carried rows normally.
+            failed: work.failed,
+          });
+        }
+      },
+      // Republish the served snapshot one LEG at a time, so a fast adapter is
+      // not held behind a slow one. The sweep answers only when its last leg
+      // finishes: `omp=153ms/209r` sat unpublished
+      // inside a 22641ms sweep because `reasonix=22631ms` was still running. A
+      // terminal-started session has no live owner to push it, so for those 22
+      // seconds it did not exist as far as the roster was concerned — long
+      // enough for a short OMP run to finish before a client could attach.
+      //
+      // Only ever a REPLACEMENT of the rows for the backend that just settled,
+      // and only when a snapshot already exists. `at` is deliberately NOT
+      // advanced: this makes the served rows fresher without making the cache
+      // look complete, so the TTL still expires on the last FULL sweep and the
+      // authoritative write below is unaffected.
+      //
+      // The registry publishes here only for a leg that COMPLETED, which is what
+      // makes replacing sound. An abandoned or failed leg reports carried rows,
+      // which restate what an earlier sweep of this same window already knew;
+      // merging those in could only reinstate rows a later sweep deleted. Those
+      // legs publish nothing and the rows already here stand, which is what the
+      // carry is trying to say anyway.
+      //
+      // Partitioned on `tool`, which `discoverAll` guarantees equals the
+      // backend id — a row filed under another tool is withheld there.
+      //
+      // A cold window SEEDS from the first leg to finish rather than skipping,
+      // which is what gives `ROSTER_COLD_PARTIAL_MS` something to answer with: a
+      // 60ms OMP leg is no longer held behind a 40s sweep on the one request
+      // that matters most -- a fresh client looking for a session that may
+      // already have ended. See `RosterSweepCache.seedLeg` for why the seeded
+      // snapshot keeps the SWEEP's start time rather than the leg's.
+      onLegRows: (backendId, rows) => {
+        rosterSweeps.seedLeg(key, sweepStartedAt, (existing) => mergeLegRows(existing, backendId, rows));
+      },
+    })
+    .then((sessions) => {
+      const sweepMs = Date.now() - sweepStartedAt;
+      if (sweepMs >= ROSTER_SLOW_SWEEP_LOG_MS && legs.length > 0) {
+        const breakdown = legs
+          .slice()
+          .sort((a, b) => b.ms - a.ms)
+          .map((leg) => `${leg.id}=${leg.ms}ms/${leg.rows}r/x${leg.peak}`
+            + (leg.abandoned ? '/ABANDONED' : '') + (leg.failed ? '/FAILED' : ''))
+          .join(' ');
+        console.warn(
+          `${LOG_PREFIX} roster sweep (window=${key}) took ${sweepMs}ms for ${sessions.length} session(s): ${breakdown}`,
+        );
+      }
+      return sessions;
+    })
     .then((sessions) => {
       rosterSafetyReconciledAt.set(key, Date.now());
       for (const session of sessions) rememberLatestSessionInfo(session);
-      rosterCaches.set(key, { at: Date.now(), sessions });
-      return sessions;
-    })
-    .finally(() => {
-      rosterInflight.delete(key);
+      // A finished sweep is not automatically a COMPLETE one. A leg that
+      // overran its budget or threw did not read its adapter, and what it
+      // returns is `carryLastGood` -- the rows of an EARLIER sweep of this same
+      // window, restated. The installed candidate showed the extreme of that:
+      // Cline abandoned at its 15s budget contributed zero rows to a sweep that
+      // otherwise looked entirely successful, so the roster was missing an agent
+      // it had registered and could create.
+      //
+      // Row count does not rescue such a leg, and treating it as authoritative
+      // because the carry was non-empty is worse than the empty case rather than
+      // better. The carry is a snapshot of the last sweep that DID read the
+      // adapter, so it cannot mention anything that appeared since -- a session
+      // the journal already knows about from a live owner, or from this same
+      // adapter's own earlier leg, is simply absent from it. Reconciling against
+      // that absence retires a row that exists, and the client is told a live
+      // session was deleted. Every abandoned or failed leg is therefore
+      // unconfirmed, whatever it returned.
+      const withheld = unconfirmedBackends(legs);
+      if (withheld.length > 0) {
+        console.warn(
+          `${LOG_PREFIX} roster sweep (window=${key}) cannot speak for ${withheld.join(', ')}: `
+          + 'abandoned or failed, so any rows they contributed are a carry rather than a reading.',
+        );
+      }
+      return {
+        rows: sessions,
+        coverage: withheld.length === 0
+          ? ROSTER_COVERAGE_COMPLETE
+          : { kind: 'incomplete' as const, withheld },
+      };
     });
-  rosterInflight.set(key, request);
-  return request;
+}
+
+/**
+ * Whole-roster discovery, cached and single-flighted.
+ *
+ * Stale-while-revalidate. A caller that already has rows takes them NOW and lets
+ * the sweep it just started land in the cache for the next read.
+ *
+ * Measured: ~5.4s on the window the client actually asks for (`7d`) and 7-17s on
+ * `window=all`, against a ROSTER_TTL_MS of 4000 -- the TTL is shorter than the
+ * time it takes to fill the thing it is caching, on every window. So every open
+ * more than 4s after the last sweep completed paid a full sweep.
+ *
+ * The cost is NOT codex and claude: both honour `updatedAfter` and skip before
+ * decoding, so on `7d` they are 86ms and 45ms. They dominate only `window=all`,
+ * which is a diagnostic path. Do not "optimise" them on this comment's account.
+ *
+ * Serving the previous rows is sound here rather than merely faster: the only
+ * consumer, `discoverLocalSessions`, overlays `hub.liveSnapshot()` on top of
+ * whatever this returns and PUSHES live sessions that are not on disk yet, so
+ * running/attached state is always fresh and a brand-new session cannot be
+ * hidden by a stale disk sweep. What can lag by one sweep is a session that
+ * changed on disk with no live owner, which is the case the roster revision and
+ * the delta long-poll already exist to settle.
+ *
+ * A caller with NO snapshot for its window used to await the entire sweep
+ * however long it ran. Measured on the installed candidate: 5.7-36.8s for seven
+ * days and 41.5s for all time, with Cline abandoned at its 15s budget while OMP
+ * had finished its own work in 60-304ms. Nothing bounded it: eight of twelve
+ * adapters declare no budget at all, so one wedged local adapter can hold the
+ * roster open indefinitely. Such a caller now waits a bounded time and is then
+ * answered with the legs that HAVE landed -- and `onPartialServed` below is what
+ * makes that safe.
+ *
+ * `force` (`?refresh=1`) still waits on THIS sweep and is never answered early.
+ * Note the join is weaker than it reads: a forced call arriving while an unforced
+ * sweep is already running joins it rather than starting its own, so it can
+ * observe a sweep that began before the caller asked. That predates all of this;
+ * it is called out so the guarantee is not read as stronger than it is.
+ */
+function discoverAllCached(
+  force = false,
+  windowMs?: number,
+  now = Date.now(),
+  allowSweeping = true,
+): Promise<RosterSweepAnswer<SessionInfo>> {
+  const key = windowMs === undefined ? 'all' : String(windowMs);
+  return rosterSweeps.read({
+    key,
+    force,
+    now,
+    allowSweeping,
+    startSweep: () => startRosterSweep(key, windowMs, now),
+    // An answer served ahead of a sweep is not self-correcting, and assuming it
+    // was is what made both early answers unsafe. The sweep's own cache write is
+    // invisible to a client: `/api/sessions` answers 304 while the roster
+    // REVISION is unchanged, and nothing advanced the revision, because the only
+    // thing that reconciles the journal is a caller passing through
+    // `discoverLocalSessions` -- which the 304 returns above without reaching.
+    // So the client held what it was given until an unrelated mutation moved the
+    // revision, or until the 5-minute safety reconcile -- which the completed
+    // sweep had itself just deferred by stamping `rosterSafetyReconciledAt`.
+    //
+    // This covers the ORDINARY stale-while-revalidate answer as well as the cold
+    // partial. A reconnect served stale rows is the common case, not the exotic
+    // one, and a session that appeared on disk with no live owner to announce it
+    // is exactly what a sweep is for.
+    //
+    // Put the sweep's rows through the same path a request takes. It hits the
+    // cache the sweep has just filled (no second sweep), reconciles the journal,
+    // and the revision moves -- so the next poll is a 200 carrying the rest.
+    onServedAheadOfSweep: (sweep) => {
+      void sweep
+        .then(() => discoverLocalSessions(false, windowMs))
+        .catch((error: unknown) => {
+          console.warn(
+            `${LOG_PREFIX} roster sweep (window=${key}) could not be reconciled after an early answer was served: ${String(error)}`,
+          );
+        });
+    },
+    onDetachedFailure: (error) => {
+      console.warn(`${LOG_PREFIX} roster sweep (window=${key}) failed while cached rows were served: ${String(error)}`);
+    },
+  });
 }
 
 async function discoverSession(tool: string, id: string): Promise<SessionInfo | undefined> {
@@ -1788,26 +2214,54 @@ async function discoverSession(tool: string, id: string): Promise<SessionInfo | 
   return (await backend.discoverSessions().catch(() => [])).find((s) => s.id === id);
 }
 
+/**
+ * The decorated local roster, WITHOUT its coverage.
+ *
+ * Almost every caller wants the rows and nothing else; only `/api/sessions` has
+ * to tell a client whether they are the whole roster, and it calls
+ * `discoverLocalRoster` for that.
+ */
 async function discoverLocalSessions(
   force = false,
   windowMs?: number,
   now = Date.now(),
 ): Promise<SessionInfo[]> {
+  return (await discoverLocalRoster(force, windowMs, now)).rows;
+}
+
+async function discoverLocalRoster(
+  force = false,
+  windowMs?: number,
+  now = Date.now(),
+  allowSweeping = true,
+): Promise<RosterSweepAnswer<SessionInfo>> {
   piBridgeIds.canonicalizeAll();
   ompBridgeIds.canonicalizeAll();
-  const sessions = (await discoverAllCached(force, windowMs, now)).map((s) => ({ ...s, machine: MACHINE }));
+  const swept = await discoverAllCached(force, windowMs, now, allowSweeping);
+  const sessions = swept.rows.map((s) => ({ ...s, machine: MACHINE }));
+  const withheldTools = withheldBackends(swept.coverage);
   // A native runtime may replace the adapter id while retaining one exact native identity (Claude
   // bridge continuation is the measured case). Retire every superseded Hub owner and remove its
   // journal row before the replacement can be owner-overlaid or published. This is capability-
   // generic and never consults title/cwd/content/time.
-  const canonicalReplacements = nativePublicationAuthority.reconcile(sessions);
-  const retiredOwners = await hub.retireSupersededOwners(canonicalReplacements);
-  for (const retired of retiredOwners) {
-    rosterRevision.remove(MACHINE, retired.tool, retired.id);
-    for (const store of rosterWindowRevisions.values()) {
-      store.remove(MACHINE, retired.tool, retired.id);
+  //
+  // Selection needs COMPLETE evidence, which is a stronger requirement than the journal's. The
+  // journal only removes rows; this terminates a live connection, so a wrong answer costs a session
+  // somebody is using. A mid-sweep snapshot is excluded outright -- an adapter nobody has reached
+  // yet contributes its previous rows or none, and either way the row that superseded them may not
+  // have landed. A settled sweep excludes just the legs it could not read: their carry predates the
+  // replacement by construction, so the old incarnation would stand alone in its group, read as
+  // unambiguous, and retire the newer owner that replaced it.
+  if (swept.coverage.kind !== 'sweeping') {
+    const canonicalReplacements = nativePublicationAuthority.reconcile(sessions, { withheldTools });
+    const retiredOwners = await hub.retireSupersededOwners(canonicalReplacements);
+    for (const retired of retiredOwners) {
+      rosterRevision.remove(MACHINE, retired.tool, retired.id);
+      for (const store of rosterWindowRevisions.values()) {
+        store.remove(MACHINE, retired.tool, retired.id);
+      }
+      latestSessionInfoByKey.delete(latestSessionKey(retired.tool, retired.id));
     }
-    latestSessionInfoByKey.delete(latestSessionKey(retired.tool, retired.id));
   }
   // Overlay the broker's LIVE view onto disk discovery: a session we currently own (a pinned Pi
   // bridge, or any attached session) reflects its true live attach mode and floats up as
@@ -1858,18 +2312,39 @@ async function discoverLocalSessions(
     .map((session) => hub.projectSessionInfo(session));
   for (const session of decorated) rememberLatestSessionInfo(session);
   decorated.sort((a, b) => statusRank(a) - statusRank(b) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
-  if (windowMs === undefined) {
-    rosterRevision.reconcile(decorated, MACHINE);
-  } else {
-    // Each bounded representation owns an independent journal. Absence here
-    // means deletion or age-out from THIS view only; it must never remove the
-    // row from the authoritative all-time journal.
-    rosterRevisionForWindow(windowMs).reconcile(decorated, MACHINE);
-    const expiresAt = sessionWindowRepresentationExpiry(decorated, windowMs);
-    if (expiresAt === undefined) rosterWindowExpiresAt.delete(windowMs);
-    else rosterWindowExpiresAt.set(windowMs, expiresAt);
+  // A sweep that is still RUNNING must not be journalled. `reconcile` treats its
+  // argument as the whole truth and removes everything absent from it, so
+  // journalling the legs that happen to have landed would publish a removal for
+  // every row a slower leg is still on its way to reporting -- and then publish
+  // it back moments later when the correction lands. Every connected client
+  // would watch those sessions disappear and return, and nothing on the wire
+  // would explain why.
+  //
+  // A sweep that SETTLED still reconciles even when an adapter contributed
+  // nothing: that state can persist, and skipping it would mean a machine with
+  // one permanently abandoned leg stopped removing deleted sessions altogether.
+  // The row's absence is then the honest answer, and `complete: false` on the
+  // wire is what tells the client not to read it as the whole roster.
+  if (swept.coverage.kind !== 'sweeping') {
+    // Removal authority is per ADAPTER. A settled sweep that lost one leg is
+    // still the whole truth about every other adapter, so it reconciles -- but
+    // it may not retire the rows of the backend it could not read. Those
+    // removals reach a connected client as deltas, which carry no completeness
+    // of their own and are applied the instant they arrive, so the snapshot's
+    // `complete: false` cannot protect them.
+    if (windowMs === undefined) {
+      rosterRevision.reconcile(decorated, MACHINE, { withheldTools });
+    } else {
+      // Each bounded representation owns an independent journal. Absence here
+      // means deletion or age-out from THIS view only; it must never remove the
+      // row from the authoritative all-time journal.
+      rosterRevisionForWindow(windowMs).reconcile(decorated, MACHINE, { withheldTools });
+      const expiresAt = sessionWindowRepresentationExpiry(decorated, windowMs);
+      if (expiresAt === undefined) rosterWindowExpiresAt.delete(windowMs);
+      else rosterWindowExpiresAt.set(windowMs, expiresAt);
+    }
   }
-  return decorated;
+  return { rows: decorated, coverage: swept.coverage };
 }
 
 async function discoverMachineRosters(
@@ -1881,8 +2356,18 @@ async function discoverMachineRosters(
   // must not receive its sessions from any of them. Peers are asked as a
   // current client (see `fetchPeerMachineRoster`), so what arrives is everything
   // this broker can decode, and this narrows it to what the CALLER can.
+  // `allowSweeping: false`. The aggregate is a routing table, and it says of each
+  // machine whether it can be trusted to deny a session. An early mid-sweep answer
+  // would make this machine degraded on every cold call for an ordinary reason,
+  // which is both noise and a lie about its health. Waiting for the sweep leaves
+  // `complete: false` meaning what it should: a leg was lost, not still running.
+  const localRoster = await discoverLocalRoster(false, undefined, generatedAt, false);
   const local = localMachineRoster(
-    MACHINE, visibleSessions(await discoverLocalSessions(), visibility), undefined, generatedAt,
+    MACHINE,
+    visibleSessions(localRoster.rows, visibility),
+    undefined,
+    generatedAt,
+    localRoster.coverage.kind === 'complete',
   );
   const peers = (await Promise.all(MACHINE_PEER_CONFIG.peers.map((peer) => fetchPeerMachineRoster(peer))))
     .map((peer) => ({
@@ -2042,12 +2527,17 @@ interface WsData {
   lastPromptAt?: number;
   /** Cancels the bounded attach-time picker refresh as soon as this socket closes. */
   sessionOptionsAbort?: AbortController;
+  /** Cancels and generations the per-socket history bootstrap. Late work from
+   *  a closed/replaced socket must not mutate shared history state. */
+  historyBootstrapAbort?: AbortController;
   /** Stable source revision that exceeded the bounded history cache. Repeated
    * pages fail closed until that source changes instead of reparsing it. */
   historyPagingUnavailableSource?: HistorySourceIdentity;
   /** True when a truncated source has no trustworthy revision probe. */
   historyPagingUnavailableWithoutIdentity?: boolean;
 }
+
+class HistoryBootstrapCancelled extends Error {}
 
 const activePeerSockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 
@@ -2140,11 +2630,22 @@ async function readNativeHistory(
   connection: SessionConnection,
   artifactMode: 'inline' | 'reference' | undefined,
   reason: 'attach' | 'page-cache-miss',
-): Promise<AgentMessage[]> {
+  signal?: AbortSignal,
+): Promise<
+  | { kind: 'history'; messages: AgentMessage[] }
+  | { kind: 'unavailable' }
+> {
   if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') {
     console.error(`[h1-history-read] ${reason} ${connection.info.tool}:${connection.info.id}`);
   }
-  return connection.getHistory({ artifactMode }).catch(() => []);
+  try {
+    return {
+      kind: 'history',
+      messages: await connection.getHistory({ artifactMode, signal }),
+    };
+  } catch {
+    return { kind: 'unavailable' };
+  }
 }
 
 function seedHistoryPageCache(options: {
@@ -2229,9 +2730,10 @@ async function readHistoryPagePrefix(options: {
     return cache ? { kind: 'cache', cache } : { kind: 'resource-limit' };
   }
   const history = await readNativeHistory(connection, artifactMode, 'page-cache-miss');
+  if (history.kind === 'unavailable') return { kind: 'source-changed' };
   const sourceAfter = await readHistorySourceIdentity(connection);
   if (!sameHistorySourceRevision(source, sourceAfter)) return { kind: 'source-changed' };
-  const cache = EncodedHistoryPageCache.create(source, history);
+  const cache = EncodedHistoryPageCache.create(source, history.messages);
   return cache ? { kind: 'cache', cache } : { kind: 'resource-limit' };
 }
 
@@ -3051,6 +3553,14 @@ async function handleManagedClientMessage(
         Object.prototype.hasOwnProperty.call(msg, 'permissionMode'),
         msg.permissionMode,
       );
+      const model = await validateRequestedModel(
+        mc.conn,
+        Object.prototype.hasOwnProperty.call(msg, 'model'),
+        msg.model,
+      );
+      const agent = Object.prototype.hasOwnProperty.call(msg, 'agent')
+        ? await validateRequestedAgent(mc.conn, msg.agent)
+        : undefined;
       if (msg.kind === 'prompt') {
       // space rapid prompts so opencode keeps their order (this runs inside the serialized chain)
       const gap = MIN_PROMPT_GAP_MS - (Date.now() - (promptTiming.lastPromptAt?.() ?? 0));
@@ -3112,8 +3622,8 @@ async function handleManagedClientMessage(
           text: String(msg.text ?? ''),
           images: msg.images,
           files: prepared?.files,
-          model: msg.model, // per-prompt model override {providerID, modelID}
-          agent: msg.agent, // per-prompt agent/mode (build/plan)
+          model, // exact adapter-advertised per-prompt model override
+          agent, // exact adapter-advertised per-prompt agent/mode (build/plan)
           permissionMode, // exact adapter-advertised per-prompt approval mode
           clientMessageId: clientMessageId || undefined, // echo correlation: adapters stamp it as clientKey on this send's user echo
         });
@@ -3152,12 +3662,16 @@ async function handleManagedClientMessage(
       // stored, the prompt still reached the agent — nacking it would be a lie — but the sender must
       // NOT delete its local draft, or a broker restart replays the sent text as an unsent draft on
       // every client. The outcome rides the prompt's own acknowledgement instead.
+      // The sent text is the third ownership proof, and the only one that does not depend on
+      // revision bookkeeping surviving the round trip. See `clearDraftAfterPrompt`.
       const clearResult = mc.clearDraftAfterPrompt(
         parseDraftBaseRevision(msg.draftRevision),
         parseClientMessageId(msg.draftUpdateId) || undefined,
+        String(msg.text ?? ''),
       );
-      // `undefined` means there was nothing of this sender's to clear, which is already the desired
-      // end state. Only a store that refused the write leaves the shared draft holding sent text.
+      // `undefined` now means the shared draft is not this prompt's text -- either there is none, or
+      // another device has typed something else since. Both are the desired end state for THIS
+      // sender. Only a store that refused the write leaves the shared draft holding sent text.
       draftClearFailed = clearResult?.unavailable === true;
       if (draftClearFailed) draftClearRevision = clearResult?.record.revision ?? 0;
     } else if (msg.kind === 'draft') {
@@ -3283,7 +3797,7 @@ async function handleManagedClientMessage(
     } else if (msg.kind === 'command') {
       const commandName = String(msg.name);
       const res = mc.conn.runCommand
-        ? await mc.conn.runCommand(commandName, msg.args, { model: msg.model, agent: msg.agent, permissionMode })
+        ? await mc.conn.runCommand(commandName, msg.args, { model, agent, permissionMode })
         : undefined;
       if (mc.conn.runCommand && isAcceptedMutationCommand(commandName, msg.args, res)) {
         recordAndBroadcastManagedAppMutation(mc);
@@ -5109,8 +5623,12 @@ server = Bun.serve<WsData>({
         try {
           nativeSession = await backend.renameSession(id, title);
           sessionMetadata.renameSession(tool, id, null);
-        } catch {
-          return json({ error: 'native session rename failed' }, 502);
+        } catch (error) {
+          if (isNativeSessionRenameUnsupportedError(error)) {
+            record = sessionMetadata.renameSession(tool, id, title);
+          } else {
+            return json({ error: 'native session rename failed' }, 502);
+          }
         }
       } else {
         record = sessionMetadata.renameSession(tool, id, title);
@@ -5130,7 +5648,7 @@ server = Bun.serve<WsData>({
       // cleared, so a stale `mc.conn.info.title` would flicker back on every later status broadcast
       // until the roster poll re-corrected it (issues-part2 item 15). The alias path needs no patch —
       // decorateSession applies the alias on every broadcast.
-      if (nativeSession?.title) {
+      if (nativeSession !== undefined) {
         hub.patchSessionInfoWhere((info) => info.tool === tool && info.id === id, { title: nativeSession.title });
       }
       hub.broadcastSessionWhere((info) => info.tool === tool && info.id === id, decorateSession);
@@ -5336,9 +5854,13 @@ server = Bun.serve<WsData>({
         const options = normalizeCreateSessionOptions(body ?? {});
         await prepareBackendSessionCreation(backend);
         await requireSupportedModelSelection(backend, options.model);
+        await requireSupportedCreationMode(backend, options.permissionMode);
         const info = await backend.createSession(options);
         safeRecordMetadata('create', () => {
           sessionMetadata.recordAppCreatedSession(info);
+          if (!backend.renameSession && options.title?.trim()) {
+            sessionMetadata.renameSession(tool, info.id, options.title);
+          }
           return true;
         });
         return json({ session: decorateSession(info), attachMode: createdSessionAttachMode(info) });
@@ -5349,9 +5871,18 @@ server = Bun.serve<WsData>({
             409,
           );
         }
+        if (err instanceof Error && err.name === 'PermissionModeUnsupportedError') {
+          return json({ error: err.message, code: 'PERMISSION_MODE_UNSUPPORTED' }, 409);
+        }
         if (err instanceof ModelCatalogUnavailableError) {
           return json(
             { error: 'model catalog refresh failed', code: 'MODEL_CATALOG_UNAVAILABLE' },
+            503,
+          );
+        }
+        if (err instanceof ModeCatalogUnavailableError) {
+          return json(
+            { error: 'mode catalog refresh failed', code: 'MODE_CATALOG_UNAVAILABLE' },
             503,
           );
         }
@@ -5565,15 +6096,27 @@ server = Bun.serve<WsData>({
         typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
           ? b.thinkingLevel
           : undefined;
-      const bridgeCurrentModel = b?.model?.modelID
+      // A provider is REQUIRED for a currentModel to exist at all
+      // (`validSessionCurrentModel` rejects an empty `providerID`), and the
+      // shipped bridge extension sends `String(model.provider ?? '')` precisely
+      // because a native model can have an id and no provider. Emitting `''`
+      // there made the whole hello fail its decode, and a failed hello is not a
+      // missing model — it is a session that never attaches at all.
+      // So: claim a model only when the claim is expressible.
+      const bridgeProviderID = String(b?.model?.providerID ?? '').trim();
+      const bridgeCurrentModel = b?.model?.modelID && bridgeProviderID.length > 0
         ? {
-            providerID: String(b.model.providerID ?? ''),
+            providerID: bridgeProviderID,
             modelID: String(b.model.modelID),
             ...(bridgeThinkingLevel ? { reasoningEffort: bridgeThinkingLevel } : {}),
           }
         : undefined;
+      const bridgeNativeId = typeof b?.nativeId === 'string' && b.nativeId.trim().length <= 512
+        ? b.nativeId.trim()
+        : '';
       const info: SessionInfo = {
         id, tool: 'pi', machine: MACHINE,
+        ...(bridgeNativeId ? { nativeId: bridgeNativeId } : {}),
         title: String(b?.title || sessionFile.split('/').pop() || 'Pi session'),
         cwd: b?.cwd ? String(b.cwd) : undefined,
         // A bridge hello is exact live-source activity. Publish that observation
@@ -5593,6 +6136,7 @@ server = Bun.serve<WsData>({
             supported: true,
             syncAvailable: true,
             active: true,
+            presence: 'shared',
             label: 'Synced with Pi terminal',
             note: `This Pi session is connected through the ${PRODUCT_IDENTITY.productName} bridge extension.`,
           },
@@ -5650,8 +6194,21 @@ server = Bun.serve<WsData>({
     // ── omp live bridge (Mode A): the in-session omp extension relays here ──
     // Same contract as the Pi family above, keyed by tool 'omp' with omp terminal-sync labels and
     // the omp bridge registry (OMP_DIALECT connections, omp:run: keys, omp-bridge sources).
+    if (path.startsWith('/omp/bridge/')) {
+      const readiness = currentOmpRuntimeReadiness();
+      if (!readiness.ready) {
+        return json({ ok: false, code: readiness.detailCode, error: readiness.message }, 409);
+      }
+    }
     if (path === '/omp/bridge/hello' && req.method === 'POST') {
       const b: any = await req.json().catch(() => ({}));
+      if (b?.nativeVersion !== OMP_VERIFIED_VERSION) {
+        return json({
+          ok: false,
+          code: 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED',
+          error: `OMP bridge registration requires native version ${OMP_VERIFIED_VERSION}.`,
+        }, 409);
+      }
       const sessionFile = String(b?.sessionFile ?? '');
       if (!sessionFile) return new Response('missing sessionFile', { status: 400 });
       if (ompPathCollision) {
@@ -5668,15 +6225,27 @@ server = Bun.serve<WsData>({
         typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
           ? b.thinkingLevel
           : undefined;
-      const bridgeCurrentModel = b?.model?.modelID
+      // A provider is REQUIRED for a currentModel to exist at all
+      // (`validSessionCurrentModel` rejects an empty `providerID`), and the
+      // shipped bridge extension sends `String(model.provider ?? '')` precisely
+      // because a native model can have an id and no provider. Emitting `''`
+      // there made the whole hello fail its decode, and a failed hello is not a
+      // missing model — it is a session that never attaches at all.
+      // So: claim a model only when the claim is expressible.
+      const bridgeProviderID = String(b?.model?.providerID ?? '').trim();
+      const bridgeCurrentModel = b?.model?.modelID && bridgeProviderID.length > 0
         ? {
-            providerID: String(b.model.providerID ?? ''),
+            providerID: bridgeProviderID,
             modelID: String(b.model.modelID),
             ...(bridgeThinkingLevel ? { reasoningEffort: bridgeThinkingLevel } : {}),
           }
         : undefined;
+      const bridgeNativeId = typeof b?.nativeId === 'string' && b.nativeId.trim().length <= 512
+        ? b.nativeId.trim()
+        : '';
       const info: SessionInfo = {
         id, tool: 'omp', machine: MACHINE,
+        ...(bridgeNativeId ? { nativeId: bridgeNativeId } : {}),
         title: String(b?.title || sessionFile.split('/').pop() || 'omp session'),
         cwd: b?.cwd ? String(b.cwd) : undefined,
         // Same rule as pi: a bridge hello is exact live-source activity, published so the default
@@ -5695,6 +6264,7 @@ server = Bun.serve<WsData>({
             supported: true,
             syncAvailable: true,
             active: true,
+            presence: 'shared',
             label: 'Synced with omp terminal',
             note: `This omp session is connected through the ${PRODUCT_IDENTITY.productName} bridge extension.`,
           },
@@ -6182,6 +6752,21 @@ server = Bun.serve<WsData>({
       }
     }
 
+    const agentModes = path.match(/^\/api\/agents\/([^/]+)\/modes$/);
+    if (agentModes && req.method === 'GET') {
+      const tool = decodeURIComponent(agentModes[1]!);
+      const backend = registry.get(tool);
+      if (!backend) return json({ error: `unknown tool: ${tool}` }, 404);
+      if (!backend.listModes) {
+        return json({ error: 'creation modes are unavailable for this agent', code: 'NOT_SUPPORTED' }, 501);
+      }
+      try {
+        return json({ tool, modes: await modeCatalogForCreation(backend), refreshedAt: Date.now() });
+      } catch {
+        return json({ error: 'mode catalog refresh failed', code: 'MODE_CATALOG_UNAVAILABLE' }, 503);
+      }
+    }
+
     if (path === '/api/agents' && req.method === 'GET') {
       // D16: /api/agents advertises ABILITY (capabilities); live per-session state rides `control`.
       // `syncEnabled` is the persisted per-agent enablement (AgentSyncEnablement) the Settings toggle
@@ -6200,11 +6785,21 @@ server = Bun.serve<WsData>({
           id: b.id,
           displayName: b.displayName,
           capabilities: b.capabilities,
+          // Static surface, separate from the live readiness probe below.  A
+          // false value means Observe-only by design; it must not be diagnosed
+          // as a failed creation runtime.
+          supportsCreateSession: typeof b.createSession === 'function',
           canCreateSession:
             typeof b.createSession === 'function' &&
             (typeof b.canCreateSession === 'function' ? await Promise.resolve(b.canCreateSession()).catch(() => false) : true),
           canSelectModelAtCreation: typeof b.listModels === 'function',
-          canRenameNative: typeof b.renameSession === 'function',
+          canSelectPermissionModeAtCreation: typeof b.listModes === 'function',
+          // Every session can be renamed in cosyncing. Adapters with renameSession additionally
+          // persist that title in the native tool; the generic fallback is a broker display alias.
+          canRenameDisplay: true,
+          canRenameNative:
+            typeof b.renameSession === 'function' &&
+            (typeof b.canRenameNative === 'function' ? await Promise.resolve(b.canRenameNative()).catch(() => false) : true),
           canFork: typeof b.forkSession === 'function',
           canClone: typeof b.cloneSession === 'function',
           // Command-surface export availability = adapter hook presence AND the reviewed R2 registry
@@ -6325,9 +6920,12 @@ server = Bun.serve<WsData>({
       const cutoffExpired =
         cached?.expiresAt !== undefined && requestNow >= cached.expiresAt;
       if (
-        !force &&
-        !cutoffExpired &&
-        cached?.revision === revisionStore.revision &&
+        cached !== undefined &&
+        rosterRepresentationIsReusable(cached, {
+          force,
+          revision: revisionStore.revision,
+          now: requestNow,
+        }) &&
         ifNoneMatchMatches(req.headers.get('if-none-match'), cached.etag)
       ) {
         return new Response(null, {
@@ -6339,12 +6937,23 @@ server = Bun.serve<WsData>({
           },
         });
       }
+      // Revision 23 introduced the completeness flag AND the early answer that
+      // makes it necessary. A caller that predates it reads every roster as an
+      // authoritative replacement, so serving it a mid-sweep partial would show
+      // the sessions a slow adapter has not reported yet as deleted ones. It
+      // waits for the sweep, which is what it did before any of this existed.
+      const roster = await discoverLocalRoster(
+        force || cutoffExpired,
+        windowMs,
+        requestNow,
+        parseAgentRosterClientRevision(url.searchParams) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
+      );
       const sessions = filterSessionsByWindow(
-        visibleSessions(await discoverLocalSessions(force || cutoffExpired, windowMs, requestNow), visibility),
+        visibleSessions(roster.rows, visibility),
         windowMs,
         requestNow,
       );
-      const data = {
+      const data: LocalRosterResponse = {
         machine: MACHINE,
         machineId: MACHINE,
         generatedAt:
@@ -6353,6 +6962,10 @@ server = Bun.serve<WsData>({
             : revisionStore.changedAt || cached?.data.generatedAt || requestNow,
         revision: revisionStore.revision,
         sessions,
+        // Coverage of the SWEEP, not of the window filter above. Rows dropped
+        // for being outside the requested window are exactly what the client
+        // asked for and say nothing about whether discovery finished.
+        complete: roster.coverage.kind === 'complete',
       };
       const response = jsonMaybe(req, data, { etag: true, cacheControl: 'no-cache' });
       const etag = response.headers.get('etag');
@@ -6360,6 +6973,7 @@ server = Bun.serve<WsData>({
         rosterRepresentations.set(windowKey, {
           revision: revisionStore.revision,
           etag,
+          complete: data.complete,
           expiresAt: sessionWindowRepresentationExpiry(sessions, windowMs),
           data,
         });
@@ -6440,11 +7054,21 @@ server = Bun.serve<WsData>({
       }
       registerPeerSocket(ws);
       const { tool, id, reason, expectedOwnerRevision, since, artifactMode } = ws.data;
+      const historyBootstrapAbort = new AbortController();
+      ws.data.historyBootstrapAbort = historyBootstrapAbort;
       const sessionOptionsAbort = new AbortController();
       ws.data.sessionOptionsAbort = sessionOptionsAbort;
+      const historyBootstrapActive = (): boolean =>
+        !historyBootstrapAbort.signal.aborted
+        && ws.readyState === 1
+        && ws.data.historyBootstrapAbort === historyBootstrapAbort;
+      const requireHistoryBootstrapActive = (): void => {
+        if (!historyBootstrapActive()) throw new HistoryBootstrapCancelled();
+      };
       let mode = ws.data.mode;
       const compatibility = ws.data.compatibility ?? evaluateBrokerClientCompatibility();
       const sendRaw: Client = (ev) => {
+        if (!historyBootstrapActive()) return;
         try {
           const prepared =
             ev.kind === 'message'
@@ -6559,6 +7183,7 @@ server = Bun.serve<WsData>({
           hub.releaseAttached(tool, id, mode, mc);
           return;
         }
+        requireHistoryBootstrapActive();
         ws.data.mc = mc;
         // Buffer live messages until history is delivered: guarantees history-then-live
         // order with no gap and no lost messages during the getHistory() round-trip (B2).
@@ -6571,6 +7196,15 @@ server = Bun.serve<WsData>({
           // wrapper is disposed.
           mc = next;
           ws.data.mc = next;
+          if (!historyDone) {
+            historyBootstrapAbort.abort();
+            try {
+              ws.close(1012, 'session ownership changed during attach');
+            } catch {
+              /* already closed */
+            }
+            return;
+          }
           ws.data.sessionOptionsAbort?.abort();
           ws.data.sessionOptionsAbort = undefined;
         };
@@ -6592,6 +7226,7 @@ server = Bun.serve<WsData>({
           artifactMode,
         );
         const historySourceBefore = await readHistorySourceIdentity(mc.conn);
+        requireHistoryBootstrapActive();
         const initialLimit = ws.data.historyLimit ?? HISTORY_MAX_MESSAGES;
         let durableHistory: AgentMessage[] = [];
         let derivedHistory: AgentMessage[] = [];
@@ -6616,6 +7251,7 @@ server = Bun.serve<WsData>({
         let hasEarlier = false;
         let compactDeliveredText: ReadonlyMap<string, number> | undefined;
         let usedCompactAttach = false;
+        let nativeHistoryAuthoritative = true;
 
         // A native random-access capture builds only compact cursor/location
         // metadata, then resolves the requested tail. In particular, the
@@ -6688,11 +7324,13 @@ server = Bun.serve<WsData>({
               connection: mc.conn,
               artifactMode,
             });
+            requireHistoryBootstrapActive();
             if (fallback) {
               const attached = fallback.replay.attach(since, initialLimit);
               const overlays = typeof mc.conn.getHistoryOverlays === 'function'
                 ? await mc.conn.getHistoryOverlays({ artifactMode }).catch(() => [])
                 : [];
+              requireHistoryBootstrapActive();
               derivedHistory = [...attached.derivedMessages, ...overlays];
               // No `olderCursor`: the window is real, but nothing behind it can
               // be paged, and offering a reload that can only fail is exactly
@@ -6740,17 +7378,20 @@ server = Bun.serve<WsData>({
             connection: mc.conn,
             artifactMode,
           });
+          requireHistoryBootstrapActive();
           if (built.kind === 'cache' && built.cache.kind === 'indexed') {
             const attached = await built.cache.loadAttach(
               since,
               initialLimit,
               { artifactMode },
             );
+            requireHistoryBootstrapActive();
             if (!('kind' in attached)) {
               usedCompactAttach = true;
               const overlays = typeof mc.conn.getHistoryOverlays === 'function'
                 ? await mc.conn.getHistoryOverlays({ artifactMode }).catch(() => [])
                 : [];
+              requireHistoryBootstrapActive();
               derivedHistory = [...attached.derivedMessages, ...overlays];
               acceptCompactAttach(attached, {
                 olderCursor: attached.olderCursor,
@@ -6766,61 +7407,87 @@ server = Bun.serve<WsData>({
         }
 
         if (!usedCompactAttach) {
-          const history = await readNativeHistory(
+          const historyResult = await readNativeHistory(
             mc.conn,
             artifactMode,
             'attach',
+            historyBootstrapAbort.signal,
           );
-          const historySourceAfter = await readHistorySourceIdentity(mc.conn);
-          mc.observeHistory(history);
-          // Cursor + capping run over the RAW history: oversized diffs are
-          // stashed on EGRESS only, so unsent diffs are never hashed-to-blob.
-          durableHistory = history.filter(isCursorDurableMessage);
-          derivedHistory = history.filter((m) => !isCursorDurableMessage(m));
-          delta = capHistoryDelta(
-            historyDelta(durableHistory, since),
-            initialLimit,
-            durableHistory.length,
-          );
-          if (delta.truncated) {
-            const seeded = seedHistoryPageCache({
-              scope: historyCacheScope,
-              sourceBefore: historySourceBefore,
-              sourceAfter: historySourceAfter,
-              history: durableHistory,
-            });
-            ws.data.historyPagingUnavailableSource = seeded
-              ? undefined
-              : sameHistorySourceRevision(
-                    historySourceBefore,
-                    historySourceAfter,
-                  )
-                ? historySourceAfter
-                : undefined;
-            ws.data.historyPagingUnavailableWithoutIdentity =
-              !seeded && (!historySourceBefore || !historySourceAfter);
-            olderCursor = backwardHistoryCursor(
-              durableHistory,
-              durableHistory.length - delta.truncated.shown,
-            );
+          requireHistoryBootstrapActive();
+          if (historyResult.kind === 'unavailable') {
+            // The source did not say it was empty. Preserve the client's
+            // accepted window and withhold both a replacement cursor and an
+            // attach ticket until a later attach can read native history.
+            delta = {
+              messages: [],
+              reset: false,
+              gap: {
+                code: 'HISTORY_PAGE_SOURCE_CHANGED',
+                reason: 'source-changed',
+                message: 'Native history is temporarily unavailable. Existing messages were preserved; reconnect to retry.',
+              },
+            };
+            nativeHistoryAuthoritative = false;
             hasEarlier = true;
           } else {
-            ws.data.historyPagingUnavailableSource = undefined;
-            ws.data.historyPagingUnavailableWithoutIdentity = false;
+            const historySourceAfter = await readHistorySourceIdentity(mc.conn);
+            requireHistoryBootstrapActive();
+            const history = historyResult.messages;
+            mc.observeHistory(history);
+            // Cursor + capping run over the RAW history: oversized diffs are
+            // stashed on EGRESS only, so unsent diffs are never hashed-to-blob.
+            durableHistory = history.filter(isCursorDurableMessage);
+            derivedHistory = history.filter((m) => !isCursorDurableMessage(m));
+            delta = capHistoryDelta(
+              historyDelta(durableHistory, since),
+              initialLimit,
+              durableHistory.length,
+            );
+            if (delta.truncated) {
+              requireHistoryBootstrapActive();
+              const seeded = seedHistoryPageCache({
+                scope: historyCacheScope,
+                sourceBefore: historySourceBefore,
+                sourceAfter: historySourceAfter,
+                history: durableHistory,
+              });
+              ws.data.historyPagingUnavailableSource = seeded
+                ? undefined
+                : sameHistorySourceRevision(
+                      historySourceBefore,
+                      historySourceAfter,
+                    )
+                  ? historySourceAfter
+                  : undefined;
+              ws.data.historyPagingUnavailableWithoutIdentity =
+                !seeded && (!historySourceBefore || !historySourceAfter);
+              olderCursor = backwardHistoryCursor(
+                durableHistory,
+                durableHistory.length - delta.truncated.shown,
+              );
+              hasEarlier = true;
+            } else {
+              ws.data.historyPagingUnavailableSource = undefined;
+              ws.data.historyPagingUnavailableWithoutIdentity = false;
+            }
           }
         } else {
+          requireHistoryBootstrapActive();
           mc.observeHistory(durableHistory);
         }
+        requireHistoryBootstrapActive();
         const artifactSnapshot = mc.artifactSnapshot();
         // A frame with no cursor delivered nothing and moved nothing, so there
         // is no delivery position to receipt (H1c).
-        if (delta.cursor !== undefined) {
+        if (nativeHistoryAuthoritative && delta.cursor !== undefined) {
+          requireHistoryBootstrapActive();
           protocolJournal.issueTicket({
             identity: ws.data.identity,
             tool,
             sessionId: id,
           }, delta.cursor);
         }
+        requireHistoryBootstrapActive();
         sendRaw({
           kind: 'history',
           messages: delta.messages,
@@ -6835,7 +7502,7 @@ server = Bun.serve<WsData>({
         });
         // Seed resync reconciliation from a cursor the client has actually accepted. Reads started
         // after replay recording begins cannot serve as a pre-race baseline.
-        mc.acceptResyncHistoryCursor(delta.cursor);
+        if (nativeHistoryAuthoritative) mc.acceptResyncHistoryCursor(delta.cursor);
         for (const m of derivedHistory) sendRaw({ kind: 'message', seq: 0, message: m });
         for (const m of artifactSnapshot) sendRaw({ kind: 'message', seq: 0, message: m });
         // One logical message can be BOTH persisted in history and still held in the live text
@@ -6872,6 +7539,7 @@ server = Bun.serve<WsData>({
         // this is idempotent across reattach/resync. Capability-driven (getPending is optional). (Issue G.)
         try {
           const pending = await Promise.resolve(mc.conn.getPending?.() ?? []);
+          requireHistoryBootstrapActive();
           for (const m of pending) {
             const key = pendingReplayKey(m);
             if (key && replayedPending.has(key)) continue;
@@ -6890,6 +7558,7 @@ server = Bun.serve<WsData>({
         const draft = mc.draftSnapshot({
           includeTombstone: (ws.data.compatibility?.client?.revision ?? 0) >= DURABLE_DRAFT_CONTRACT_REVISION,
         });
+        requireHistoryBootstrapActive();
         if (draft) sendRaw({ kind: 'draft', ...draft });
         historyDone = true;
         for (const ev of queue) {
@@ -6928,6 +7597,7 @@ server = Bun.serve<WsData>({
           }
         });
       } catch (err) {
+        if (err instanceof HistoryBootstrapCancelled) return;
         sendRaw({ kind: 'error', message: `attach failed: ${String(err)}` });
         if (ws.data.mc && ws.data.client) ws.data.mc.removeClient(ws.data.client);
         if (ws.data.mc) hub.releaseAttached(tool, id, mode, ws.data.mc);
@@ -6954,8 +7624,11 @@ server = Bun.serve<WsData>({
     },
     close(ws) {
       unregisterPeerSocket(ws);
+      ws.data.historyBootstrapAbort?.abort();
+      ws.data.historyBootstrapAbort = undefined;
       ws.data.sessionOptionsAbort?.abort();
       ws.data.sessionOptionsAbort = undefined;
+      ws.data.pendingInbound = undefined;
       const { mc, client, tool, id, mode } = ws.data;
       if (mc && client) mc.removeClient(client);
       if (mc) hub.releaseAttached(tool, id, mode, mc);

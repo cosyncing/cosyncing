@@ -484,6 +484,13 @@ void main() {
           find.byKey(const Key('session-agent-activity-agent:review')),
           findsNothing,
         );
+        expect(
+          find.byKey(
+            const ValueKey('session-live-strip-activity:agent:review'),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Done'), findsOneWidget);
       },
     );
   });

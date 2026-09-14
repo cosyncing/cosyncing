@@ -13,6 +13,28 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../../../support/session_detail_controller_test_harness.dart';
 
+// Every deadline in this file is a REAL clock. The bootstrap controller takes
+// no injectable one and nothing in this app's tests runs under FakeAsync, so a
+// check like "the session deadline has not fired but the history one would
+// have" is decided by `Future.delayed` against a wall-clock timer — and the
+// margins were narrower than ordinary scheduler jitter. A 50ms/120ms pair with
+// a 70ms sleep leaves 50ms of slack, which a loaded machine crosses: the gate
+// caught it reporting `failed` for "cold owner attach does not consume the
+// history-read deadline", because the 120ms SESSION deadline expired inside a
+// 70ms sleep. The budgets below keep the same ordering and the same claims,
+// with slack measured in hundreds of milliseconds instead of tens. Where a
+// deadline only has to stay unfired, it is set well clear rather than scaled,
+// since nothing waits on it.
+const _historyDeadline = Duration(milliseconds: 150);
+const _longHistoryDeadline = Duration(milliseconds: 600);
+const _shortHistoryDeadline = Duration(milliseconds: 120);
+const _phaseSplitHistoryDeadline = Duration(milliseconds: 300);
+const _unfiredSessionDeadline = Duration(seconds: 3);
+const _pastShortDeadline = Duration(milliseconds: 210);
+const _pastPhaseSplitDeadline = Duration(milliseconds: 420);
+const _pastPhaseSplitLongDeadline = Duration(milliseconds: 480);
+const _withinPhaseSplitDeadline = Duration(milliseconds: 120);
+
 class FailingLoadSessionTranscriptRepository
     implements SessionTranscriptRepository {
   FailingLoadSessionTranscriptRepository({this.failLoad = false});
@@ -121,7 +143,8 @@ ProviderContainer _buildBootstrapControllerContainer({
   Future<BrokerClient?>? brokerClientFuture,
   Future<BrokerClient?> Function()? brokerClientLoader,
   BrokerProfile? activeProfile,
-  Duration timeout = const Duration(milliseconds: 25),
+  Duration timeout = _historyDeadline,
+  Duration? sessionTimeout,
   SessionDetailConnection Function()? connectionFactory,
 }) {
   final profile = activeProfile ?? fakeControllerBrokerProfile();
@@ -181,6 +204,9 @@ ProviderContainer _buildBootstrapControllerContainer({
       sessionDetailInitialHistoryTimeoutProvider.overrideWith(
         (ref) => timeout,
       ),
+      sessionDetailInitialSessionTimeoutProvider.overrideWith(
+        (ref) => sessionTimeout ?? timeout,
+      ),
     ],
   );
 }
@@ -194,6 +220,138 @@ void main() {
     createdAt: DateTime(2026, 6, 26),
   );
 
+  SessionWireEvent sessionEvent() => SessionWireEvent(
+    info: SessionInfo.fromJson({
+      'id': key.sessionId,
+      'tool': key.tool,
+      'title': 'Bootstrap timing fixture',
+      'status': 'idle',
+      'attachMode': 'observe',
+    }),
+  );
+
+  test(
+    'session and history phases each have an independent bounded deadline',
+    () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      expect(
+        container.read(sessionDetailInitialSessionTimeoutProvider),
+        const Duration(seconds: 20),
+      );
+      expect(
+        container.read(sessionDetailInitialHistoryTimeoutProvider),
+        const Duration(seconds: 20),
+      );
+    },
+  );
+
+  test(
+    'cold owner attach does not consume the history-read deadline',
+    () async {
+      final connection = FakeSessionDetailConnection();
+      final container = _buildBootstrapControllerContainer(
+        connection: connection,
+        transcriptRepository: RecordingSessionTranscriptRepository(),
+        activeProfile: profile,
+        timeout: _phaseSplitHistoryDeadline,
+        sessionTimeout: _unfiredSessionDeadline,
+      );
+      addTearDown(container.dispose);
+      keepSessionDetailAlive(container, key);
+
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+      await Future<void>.delayed(_pastPhaseSplitDeadline);
+      expect(
+        container
+            .read(sessionDetailControllerProvider(key))
+            .bootstrapState
+            .readiness,
+        SessionDetailBootstrapReadiness.awaitingInitialHistory,
+      );
+
+      connection.emitEvent(sessionEvent());
+      await Future<void>.delayed(_withinPhaseSplitDeadline);
+      expect(
+        container
+            .read(sessionDetailControllerProvider(key))
+            .bootstrapState
+            .readiness,
+        SessionDetailBootstrapReadiness.awaitingInitialHistory,
+      );
+      connection.emitEvent(const HistoryWireEvent(messages: [], reset: true));
+      await drainSessionDetailMicrotasks();
+      expect(
+        container
+            .read(sessionDetailControllerProvider(key))
+            .bootstrapState
+            .readiness,
+        SessionDetailBootstrapReadiness.ready,
+      );
+    },
+  );
+
+  test('unavailable incremental history keeps cached Load Earlier', () async {
+    final connection = FakeSessionDetailConnection();
+    final transcriptRepository = RecordingSessionTranscriptRepository()
+      ..stored = SessionTranscriptSnapshot(
+        brokerProfileId: RosterSource.ofProfile(profile).storageKey,
+        sessionKey: key,
+        messages: const [
+          AgentMessage(
+            type: AgentMessageType.modelOutput,
+            raw: {'key': 'cached-tail', 'text': 'cached answer'},
+          ),
+        ],
+        cursor: 'cached-tail-cursor',
+        olderCursor: 'cached-older-cursor',
+        hasEarlier: true,
+        updatedAt: DateTime(2026, 6, 26),
+      );
+    final container = _buildBootstrapControllerContainer(
+      connection: connection,
+      transcriptRepository: transcriptRepository,
+      activeProfile: profile,
+      timeout: _longHistoryDeadline,
+    );
+    addTearDown(container.dispose);
+    keepSessionDetailAlive(container, key);
+
+    await container
+        .read(sessionDetailControllerProvider(key).notifier)
+        .attach();
+    expect(
+      container.read(sessionDetailControllerProvider(key)).olderHistoryCursor,
+      'cached-older-cursor',
+    );
+
+    connection
+      ..emitEvent(sessionEvent())
+      ..emitEvent(
+        const HistoryWireEvent(
+          messages: [],
+          hasEarlier: true,
+          gap: HistoryGap(
+            code: 'HISTORY_PAGE_SOURCE_CHANGED',
+            reason: 'source-changed',
+            message: 'Native history is temporarily unavailable.',
+          ),
+        ),
+      );
+    await drainSessionDetailMicrotasks();
+
+    final state = container.read(sessionDetailControllerProvider(key));
+    expect(
+      state.bootstrapState.readiness,
+      SessionDetailBootstrapReadiness.ready,
+    );
+    expect(state.olderHistoryCursor, 'cached-older-cursor');
+    expect(state.hasEarlierHistory, isTrue);
+  });
+
   test(
     'holds resolvingProfile until broker client resolution completes',
     () async {
@@ -204,7 +362,7 @@ void main() {
         transcriptRepository: RecordingSessionTranscriptRepository(),
         brokerClientFuture: clientResolution.future,
         activeProfile: profile,
-        timeout: const Duration(milliseconds: 100),
+        timeout: _longHistoryDeadline,
       );
       addTearDown(container.dispose);
       keepSessionDetailAlive(container, key);
@@ -242,7 +400,7 @@ void main() {
       connection: connection,
       transcriptRepository: transcriptRepository,
       activeProfile: profile,
-      timeout: const Duration(milliseconds: 100),
+      timeout: _longHistoryDeadline,
     );
     addTearDown(container.dispose);
     keepSessionDetailAlive(container, key);
@@ -295,7 +453,7 @@ void main() {
         connection: connection,
         transcriptRepository: transcriptRepository,
         activeProfile: profile,
-        timeout: const Duration(milliseconds: 100),
+        timeout: _longHistoryDeadline,
       );
       addTearDown(container.dispose);
       keepSessionDetailAlive(container, key);
@@ -335,7 +493,7 @@ void main() {
       connection: connection,
       transcriptRepository: RecordingSessionTranscriptRepository(),
       activeProfile: profile,
-      timeout: const Duration(milliseconds: 20),
+      timeout: _shortHistoryDeadline,
     );
     addTearDown(container.dispose);
     keepSessionDetailAlive(container, key);
@@ -364,7 +522,7 @@ void main() {
 
     connection.releaseConnect.complete();
     await attach;
-    await Future<void>.delayed(const Duration(milliseconds: 35));
+    await Future<void>.delayed(_pastShortDeadline);
     expect(
       container
           .read(sessionDetailControllerProvider(key))
@@ -386,7 +544,7 @@ void main() {
         transcriptRepository: RecordingSessionTranscriptRepository(),
         brokerClientFuture: Future<BrokerClient?>.value(brokerClient),
         activeProfile: profile,
-        timeout: const Duration(milliseconds: 50),
+        timeout: _phaseSplitHistoryDeadline,
         connectionFactory: () =>
             connectionCreationCount++ == 0 ? connection : retryConnection,
       );
@@ -427,7 +585,8 @@ void main() {
       expect(brokerClient.listAgentsResult.isCompleted, isFalse);
       expect(attachCompleted, isFalse);
 
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+      connection.emitEvent(sessionEvent());
+      await Future<void>.delayed(_pastPhaseSplitLongDeadline);
       await attach;
 
       final timedOut = container.read(sessionDetailControllerProvider(key));
@@ -478,7 +637,7 @@ void main() {
         connection: connection,
         transcriptRepository: RecordingSessionTranscriptRepository(),
         activeProfile: profile,
-        timeout: const Duration(milliseconds: 100),
+        timeout: _longHistoryDeadline,
       );
       addTearDown(container.dispose);
       keepSessionDetailAlive(container, key);
@@ -556,7 +715,7 @@ void main() {
       final container = _buildBootstrapControllerContainer(
         connection: connection,
         transcriptRepository: transcriptRepository,
-        timeout: const Duration(milliseconds: 100),
+        timeout: _longHistoryDeadline,
         activeProfile: profile,
       );
       addTearDown(container.dispose);
@@ -865,6 +1024,9 @@ void main() {
       connection: connection,
       transcriptRepository: transcriptRepository,
       activeProfile: profile,
+      // This test covers cache fallback, not either bootstrap deadline. Keep
+      // the real-time timer well outside the assertion window under load.
+      timeout: const Duration(seconds: 5),
     );
     addTearDown(container.dispose);
     keepSessionDetailAlive(container, key);
@@ -926,6 +1088,56 @@ void main() {
   });
 
   test(
+    'broker attach error fails bootstrap once and survives the history '
+    'deadline',
+    () async {
+      final connection = FakeSessionDetailConnection();
+      final container = _buildBootstrapControllerContainer(
+        connection: connection,
+        transcriptRepository: RecordingSessionTranscriptRepository(),
+        activeProfile: profile,
+        timeout: _shortHistoryDeadline,
+      );
+      addTearDown(container.dispose);
+      keepSessionDetailAlive(container, key);
+
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+      connection
+        ..connectionErrorMessage = 'attach failed: native session refused'
+        ..emitState(SessionDetailConnectionStatus.closed)
+        ..emitEvent(
+          const ErrorWireEvent(
+            message: 'attach failed: native session refused',
+          ),
+        );
+      await drainSessionDetailMicrotasks();
+
+      var failed = container.read(sessionDetailControllerProvider(key));
+      expect(
+        failed.bootstrapState.readiness,
+        SessionDetailBootstrapReadiness.failed,
+      );
+      expect(
+        failed.bootstrapState.failureSource,
+        SessionDetailBootstrapFailureSource.attach,
+      );
+      expect(failed.bootstrapState.failureKind, FailureKind.brokerFault);
+      expect(failed.error?.detail, contains('native session refused'));
+
+      await Future<void>.delayed(_pastShortDeadline);
+      failed = container.read(sessionDetailControllerProvider(key));
+      expect(
+        failed.bootstrapState.readiness,
+        SessionDetailBootstrapReadiness.failed,
+        reason: 'the cancelled history timer must not replace the broker error',
+      );
+      expect(failed.error?.detail, contains('native session refused'));
+    },
+  );
+
+  test(
     'times out waiting for initial history, then retries with fresh attempt',
     () async {
       final oldConnection = RetainingDisposedSessionDetailConnection();
@@ -935,7 +1147,7 @@ void main() {
         connection: oldConnection,
         transcriptRepository: RecordingSessionTranscriptRepository(),
         activeProfile: profile,
-        timeout: const Duration(milliseconds: 20),
+        timeout: _shortHistoryDeadline,
         connectionFactory: () =>
             connectionCreationCount++ == 0 ? oldConnection : retryConnection,
       );
@@ -946,7 +1158,9 @@ void main() {
         sessionDetailControllerProvider(key).notifier,
       );
       await controller.attach();
-      await Future<void>.delayed(const Duration(milliseconds: 35));
+      oldConnection.emitEvent(sessionEvent());
+      await drainSessionDetailMicrotasks();
+      await Future<void>.delayed(_pastShortDeadline);
 
       final timedOut = container.read(sessionDetailControllerProvider(key));
       expect(

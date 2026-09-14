@@ -1826,6 +1826,7 @@ final class _CreateSessionFakeBrokerClient extends BrokerClient {
     String? directory,
     String? title,
     SessionCurrentModel? model,
+    String? permissionMode,
   }) async {
     return CreateSessionResponse(
       session: SessionInfo(
@@ -1907,6 +1908,7 @@ class _NoopDriveIntentStore implements SessionDriveIntentStore {
     required String brokerProfileId,
     required String tool,
     required String sessionId,
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
   }) async {}
 
   @override

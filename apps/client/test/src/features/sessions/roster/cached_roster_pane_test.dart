@@ -276,6 +276,38 @@ void main() {
       expect(opened, ['codex/exact-id']);
     });
 
+    testWidgets('shows the localized Reasonix agent name', (tester) async {
+      await tester.pumpWidget(
+        host(
+          CachedRosterPane(
+            presentation: presentation(
+              rows: [identity(tool: 'reasonix')],
+            ),
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandGroup(tester, groupKey);
+
+      expect(find.text('Reasonix'), findsOneWidget);
+    });
+
+    testWidgets('shows the localized Grok Build agent name', (tester) async {
+      await tester.pumpWidget(
+        host(
+          CachedRosterPane(
+            presentation: presentation(rows: [identity(tool: 'grok')]),
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandGroup(tester, groupKey);
+
+      expect(find.text('Grok Build'), findsOneWidget);
+    });
+
     testWidgets('reads correctly in dark mode', (tester) async {
       await tester.pumpWidget(
         host(

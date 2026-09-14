@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -382,7 +383,22 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
         target: this.paths.activeManifestPath,
         ownership: { proof: 'receipt', marker: this.identity.installationId },
       },
-      ...windowsServiceVersionResources(this.options.stateHome, this.options.versionKey),
+      // The shared definition, plus the one thing only the PROVIDER can supply.
+      // `windowsServiceVersionResources` is also called by an upgrade activating
+      // a version root it holds no content for, so it cannot compute this; the
+      // provider is writing the file and knows exactly what went into it. The
+      // digest is what lets a later inspection tell "our environment file,
+      // unmodified" from "a file at the path we expected".
+      ...windowsServiceVersionResources(this.options.stateHome, this.options.versionKey)
+        .map((resource) => (resource.id === 'service-environment'
+          ? {
+            ...resource,
+            ownership: {
+              ...resource.ownership,
+              installedSha256: createHash('sha256').update(this.expectedEnvironment()).digest('hex'),
+            },
+          }
+          : resource)),
     ];
   }
 

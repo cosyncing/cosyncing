@@ -563,6 +563,14 @@ check('a status without a permission mode invents none',
   check('the k3-256k alias labels as K3-256k, not the client\'s "Kimi 3.256" guess',
     (k3.currentModel as { label?: string } | undefined)?.label === 'K3-256k', JSON.stringify(k3));
 
+  const thinking = infoOf({ model: 'kimi-code/k3-256k', thinking_level: 'high', plan_mode: true, swarm_mode: true }, catalog);
+  check('thinking level stays inside the declared currentModel selection',
+    (thinking.currentModel as { reasoningEffort?: string } | undefined)?.reasoningEffort === 'high',
+    JSON.stringify(thinking));
+  check('producer-only plan/swarm/thinking keys never poison the strict SessionInfo patch',
+    !('thinkingLevel' in thinking) && !('planMode' in thinking) && !('swarmMode' in thinking),
+    JSON.stringify(thinking));
+
   const unknown = infoOf({ model: 'kimi-code/k9-unreleased' }, catalog);
   check('a model the catalog does not know keeps the bare alias and invents no label',
     unknown.model === 'kimi-code/k9-unreleased' && unknown.currentModel === undefined,

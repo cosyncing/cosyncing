@@ -700,6 +700,7 @@ class FakeSessionDetailConnection
   String? lastQuestionRequestId;
   List<List<String>>? lastQuestionAnswers;
   String? lastRejectQuestionRequestId;
+  String? connectionErrorMessage;
   void Function()? onSendPrompt;
   Future<void> Function()? onSendCommand;
 
@@ -714,7 +715,7 @@ class FakeSessionDetailConnection
       _stateController.stream;
 
   @override
-  String? get lastConnectionErrorMessage => null;
+  String? get lastConnectionErrorMessage => connectionErrorMessage;
 
   @override
   Stream<WireEvent> get events => _eventController.stream;
@@ -1010,6 +1011,8 @@ class FakeSessionDetailConnection
 class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
   final Map<String, SessionDriveProvenanceKind> intents =
       <String, SessionDriveProvenanceKind>{};
+  final Map<String, SessionDriveRestoreMode> restoreModes =
+      <String, SessionDriveRestoreMode>{};
   int rememberCount = 0;
   int takeoverRefreshCount = 0;
   int clearCount = 0;
@@ -1026,12 +1029,19 @@ class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
   /// Legacy-shaped seeding helper: records a takeover lease, matching the
   /// pre-provenance store's single intent kind.
   void seedTakeover(String tool, String sessionId) {
-    intents[_key(tool, sessionId)] =
-        SessionDriveProvenanceKind.terminalTakeover;
+    final key = _key(tool, sessionId);
+    intents[key] = SessionDriveProvenanceKind.terminalTakeover;
+    restoreModes[key] = SessionDriveRestoreMode.resume;
   }
 
-  void seedAppCreated(String tool, String sessionId) {
-    intents[_key(tool, sessionId)] = SessionDriveProvenanceKind.appCreated;
+  void seedAppCreated(
+    String tool,
+    String sessionId, {
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
+  }) {
+    final key = _key(tool, sessionId);
+    intents[key] = SessionDriveProvenanceKind.appCreated;
+    restoreModes[key] = restoreMode;
   }
 
   @override
@@ -1048,9 +1058,14 @@ class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
     if (failRead) {
       throw StateError('Drive-intent storage unavailable');
     }
-    final kind = intents[_key(tool, sessionId)];
+    final key = _key(tool, sessionId);
+    final kind = intents[key];
     if (kind == null) return null;
-    return SessionDriveProvenance(kind: kind, recordedAt: DateTime.now());
+    return SessionDriveProvenance(
+      kind: kind,
+      recordedAt: DateTime.now(),
+      restoreMode: restoreModes[key] ?? SessionDriveRestoreMode.resume,
+    );
   }
 
   @override
@@ -1058,9 +1073,12 @@ class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
     required String brokerProfileId,
     required String tool,
     required String sessionId,
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
   }) async {
     rememberCount++;
-    intents[_key(tool, sessionId)] = SessionDriveProvenanceKind.appCreated;
+    final key = _key(tool, sessionId);
+    intents[key] = SessionDriveProvenanceKind.appCreated;
+    restoreModes[key] = restoreMode;
   }
 
   @override
@@ -1071,13 +1089,12 @@ class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
   }) async {
     rememberCount++;
     takeoverRefreshCount++;
-    final existing = intents[_key(tool, sessionId)];
-    intents[_key(
-      tool,
-      sessionId,
-    )] = existing == SessionDriveProvenanceKind.appCreated
+    final key = _key(tool, sessionId);
+    final existing = intents[key];
+    intents[key] = existing == SessionDriveProvenanceKind.appCreated
         ? SessionDriveProvenanceKind.appCreated
         : SessionDriveProvenanceKind.terminalTakeover;
+    restoreModes.putIfAbsent(key, () => SessionDriveRestoreMode.resume);
   }
 
   @override
@@ -1090,7 +1107,9 @@ class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
     if (failClear) {
       throw StateError('Drive-intent storage unavailable');
     }
-    intents.remove(_key(tool, sessionId));
+    final key = _key(tool, sessionId);
+    intents.remove(key);
+    restoreModes.remove(key);
   }
 }
 
@@ -1170,6 +1189,7 @@ class RecordingSessionOutboxRepository implements SessionOutboxRepository {
   Completer<void> holdNextRetryableLoad() => _retryableGate = Completer<void>();
 
   final messages = <SessionOutboxMessage>[];
+  final stillInFlightCalls = <String>[];
 
   /// Runs inside the durable insert, so a test can land a broker frame in the
   /// exact window between persisting a send and dispatching it.
@@ -1259,6 +1279,31 @@ class RecordingSessionOutboxRepository implements SessionOutboxRepository {
         lastError: error,
         updatedAt: DateTime.now(),
       ),
+    );
+  }
+
+  @override
+  Future<void> markResending(String clientMessageId) async {
+    final index = messages.indexWhere(
+      (message) => message.clientMessageId == clientMessageId,
+    );
+    if (index < 0) return;
+    messages[index] = messages[index].copyWith(
+      status: SessionOutboxMessageStatus.sending,
+    );
+  }
+
+  @override
+  Future<void> markStillInFlight(String clientMessageId) async {
+    stillInFlightCalls.add(clientMessageId);
+    final index = messages.indexWhere(
+      (m) => m.clientMessageId == clientMessageId,
+    );
+    if (index < 0) return;
+    final current = messages[index];
+    messages[index] = current.copyWith(
+      status: SessionOutboxMessageStatus.retryable,
+      attemptCount: current.attemptCount > 0 ? current.attemptCount - 1 : 0,
     );
   }
 

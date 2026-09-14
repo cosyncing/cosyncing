@@ -1,0 +1,11 @@
+{
+  "nativeEvidenceVersion": "7.4.23",
+  "database": "kilo.db",
+  "tables": ["migration", "session", "message", "part"],
+  "sessionColumns": ["id", "parent_id", "slug", "directory", "title", "model", "revert", "agent", "time_created", "time_updated", "time_archived"],
+  "messageData": {
+    "userKeys": ["agent", "model", "role", "summary", "time", "tools"],
+    "assistantKeys": ["agent", "cost", "finish", "mode", "modelID", "parentID", "path", "providerID", "role", "time", "tokens"]
+  },
+  "partTypes": ["text", "reasoning", "step-start", "step-finish"]
+}

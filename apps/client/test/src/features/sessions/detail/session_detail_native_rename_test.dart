@@ -2,8 +2,6 @@
 // ignore_for_file: unused_import, unnecessary_import
 
 import 'dart:async';
-import 'dart:ui' show PointerDeviceKind;
-
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
@@ -83,6 +81,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Before'), findsNWidgets(2));
+      final renameSemantics = tester.getSemantics(
+        find.byKey(const Key('session-detail-rename-button')),
+      );
+      expect(renameSemantics.label, 'Before');
       // The title is the affordance: tapping converts it in place, and Enter
       // commits. There is no dialog and no save button any more.
       await tester.tap(

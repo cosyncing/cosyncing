@@ -1503,4 +1503,57 @@ void main() {
       );
     });
   });
+
+  group('composer clear after an accepted send', () {
+    testWidgets('a no-op controller revision still clears the sent text', (
+      tester,
+    ) async {
+      // `_promptRevision` counts EVERY controller mutation -- the page says so
+      // itself: "including remote/programmatic changes and edits that return
+      // to the same empty value". The post-send clear required that counter to
+      // be unchanged AND the text to still equal what was sent. Any no-op
+      // mutation landing during the send await -- a composition drain, a draft
+      // hydration re-applying the same string, a shared-draft echo -- bumped
+      // the counter, so the clear was skipped and the SENT prompt stayed in
+      // the composer as unsent text. From there it publishes as the shared
+      // draft and becomes durable.
+      //
+      // Measured on installed v61: reasonix-permission-resolved.png shows the
+      // prompt still in the composer while the transcript shows that same
+      // prompt "Queued" -- before any reload. 28 sessions on that host held an
+      // already-executed `rm -f <path> && touch <path>` this way.
+      const prompt = 'rm -f /tmp/marker && touch /tmp/marker';
+      final input = find.byKey(const Key('session-detail-prompt-input'));
+      late final ScriptedSessionDetailConnection connection;
+      connection = ScriptedSessionDetailConnection(
+        events: const [],
+        onSendPrompt: () async {
+          // Text untouched; only the selection moves. This is the cheapest
+          // faithful stand-in for the mutations that actually occur here, and
+          // it is exactly the class the counter is documented to include.
+          final field = tester.widget<TextField>(input);
+          final controller = field.controller!;
+          controller.value = controller.value.copyWith(
+            selection: const TextSelection.collapsed(offset: 0),
+          );
+        },
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(input, prompt);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('session-detail-send-button')));
+      await tester.pumpAndSettle();
+
+      expect(connection.sendPromptCount, 1);
+      expect(
+        tester.widget<TextField>(input).controller!.text,
+        isEmpty,
+        reason: 'a sent prompt must not stay in the composer as unsent text',
+      );
+    });
+  });
 }

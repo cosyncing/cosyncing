@@ -1142,6 +1142,14 @@
   "@sessionsEmptyCreationCheckFailedBody": {
     "description": "Body of the sessions empty state when creation capability discovery failed."
   },
+  "sessionsIncompleteRosterTitle": "Still looking for sessions",
+  "@sessionsIncompleteRosterTitle": {
+    "description": "Title shown instead of the empty state when the broker says its roster is not the whole one."
+  },
+  "sessionsIncompleteRosterBody": "This server hasn't finished listing its sessions. An agent hasn't reported yet, so more may appear.",
+  "@sessionsIncompleteRosterBody": {
+    "description": "Body shown instead of the empty state when the broker says its roster is not the whole one."
+  },
   "sessionsWorkspaceSelectPrompt": "Select a session to open it here.",
   "sessionsWorkspaceEmpty": "No sessions on this server yet. Create one to get started.",
   "sessionsWorkspaceEmptyCreationChecking": "Checking whether a registered agent can create sessions…",
@@ -3141,6 +3149,10 @@
   "sessionRosterAgentOpenCode": "OpenCode",
   "sessionRosterAgentPi": "Pi",
   "sessionRosterAgentOmp": "omp",
+  "sessionRosterAgentReasonix": "Reasonix",
+  "sessionRosterAgentGrok": "Grok Build",
+  "sessionRosterAgentCline": "Cline",
+  "sessionRosterAgentKilo": "Kilo Code",
   "sessionRosterAgentAntigravity": "Antigravity",
   "sessionRosterOriginVscode": "VS Code",
   "sessionRosterOtherSessions": "Other sessions",
@@ -4591,13 +4603,15 @@
     "description": "Tooltip line on a composer picker that shows a current value but offers nothing to select — a terminal-synced session, or an adapter that advertises no options."
   },
   "sessionPermissionModeFallback": "Permission",
-  "sessionPermissionModeTooltip": "Permission mode for prompts and slash commands sent from this composer.",
+  "sessionPermissionModeTooltip": "Permission mode: {mode}. Applies to prompts and slash commands sent from this composer.",
+  "@sessionPermissionModeTooltip": {"placeholders": {"mode": {"type": "String"}}},
   "sessionPermissionModeSheetTitle": "Permission mode",
   "sessionPermissionModeSheetBody": "Applies to prompts and slash commands sent from this composer. If the Server publishes a different mode, that one takes over.",
   "sessionPermissionModeAsk": "Ask permission",
   "sessionPermissionModeApprove": "Approve for me",
   "sessionPermissionModeFullAccess": "Full access",
   "sessionPermissionModeCustom": "Custom",
+  "newSessionPermissionModeRetired": "That permission mode is no longer available. Refresh and choose again.",
   "sessionTerminalOutputCount": "Terminal output ({count})",
   "@sessionTerminalOutputCount": {
     "placeholders": {

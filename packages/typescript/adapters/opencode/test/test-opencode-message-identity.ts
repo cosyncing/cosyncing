@@ -165,6 +165,17 @@ try {
     JSON.stringify(liveThinking ?? null),
   );
 
+  // Assistant text and reasoning rows deliberately carry no turn anchor on EITHER surface: the
+  // durable projection keys them by part id too (`opencode-wire/src/mapping.ts:191-192`), and the
+  // user<->assistant linkage lives on the run-summary's userMessageKey/assistantMessageKey. Adding
+  // a live-only turnId would make the row's identity change across a reload, which is the very
+  // instability this file exists to prevent.
+  check(
+    'a live answer delta carries no turn anchor, matching its durable copy',
+    liveAnswer?.turnId === undefined,
+    JSON.stringify({ key: liveAnswer?.key, turnId: liveAnswer?.turnId ?? null }),
+  );
+
   unsubscribe();
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));

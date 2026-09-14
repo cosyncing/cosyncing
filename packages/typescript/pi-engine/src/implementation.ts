@@ -18,7 +18,7 @@
  * in the pi adapter package; only `PiEngineAdapter` and the dialect helpers live here.
  */
 import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
@@ -36,7 +36,7 @@ import {
   watch,
   type FSWatcher,
 } from 'node:fs';
-import { join, basename, dirname, extname, resolve } from 'node:path';
+import { join, basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 import {
   createJsonlSplitter,
   PRODUCT_IDENTITY,
@@ -274,6 +274,9 @@ export class PiEngineAdapter implements AgentBackend {
 
   private ensureBridgeExtension(): void {
     if (this.bridgeEnsured) return;
+    // Keep readable stores observable, but never install executable integration code into an
+    // unverified mutable runtime.
+    if (!this.rt.hooks.readiness().ready) return;
     this.bridgeEnsured = true;
     ensurePiBridgeExtension(this.rt);
   }
@@ -298,6 +301,10 @@ export class PiEngineAdapter implements AgentBackend {
   }
 
   canCreateSession(): boolean {
+    return this.rt.hooks.readiness().ready;
+  }
+
+  canRenameNative(): boolean {
     return this.rt.hooks.readiness().ready;
   }
 
@@ -337,7 +344,14 @@ export class PiEngineAdapter implements AgentBackend {
     });
     const file = typeof state.sessionFile === 'string' && state.sessionFile ? state.sessionFile : undefined;
     if (!file) throw new Error(`${this.rt.dialect.displayName} get_state did not return a durable session file after create.`);
-    materializePiSessionFile(this.rt, file, cwd, String(state.sessionId ?? ''), title);
+    materializePiSessionFile(
+      this.rt,
+      file,
+      cwd,
+      String(state.sessionId ?? ''),
+      title,
+      { model: state.model, thinkingLevel: state.thinkingLevel },
+    );
     const st = statSafe(file);
     const actualCwd = readSessionCwd(file) ?? cwd;
     const name = title ?? readSessionName(this.rt, file);
@@ -345,6 +359,7 @@ export class PiEngineAdapter implements AgentBackend {
     const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
     return {
       id: sessionIdForFile(file),
+      ...(sessionId ? { nativeId: sessionId } : {}),
       tool: this.id,
       title: name ?? `${baseName(actualCwd)} · ${(sessionId || baseName(file)).slice(0, 8)}`,
       cwd: actualCwd,
@@ -365,11 +380,19 @@ export class PiEngineAdapter implements AgentBackend {
   }
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
-    if (this.sessionAccessBlock()) return [];
+    const readiness = this.rt.hooks.readiness();
+    if (!readiness.ready && readiness.blocksSessionAccess) return [];
     if (!existsSync(this.rt.sessionsRoot)) return [];
     this.ensureBridgeExtension(); // sync-on-by-default: bundled bridge auto-installed/refreshed once
     const out: SessionInfo[] = [];
-    for (const full of piSessionFiles(this.rt.sessionsRoot)) {
+    let decodedFiles = 0;
+    for (const discovered of await piSessionFiles(this.rt.sessionsRoot, options?.signal)) {
+      // Each row performs several bounded synchronous head/tail reads and JSON
+      // parses. Pi and OMP share this engine, so hundreds of rows otherwise
+      // become one uninterrupted broker task. Yield on work count (not bytes):
+      // four small files can cost more CPU than one large bounded tail.
+      if (++decodedFiles % 8 === 0) await discoveryEventLoopTurn(options?.signal);
+      const full = discovered.file;
       const st = statSafe(full);
       if (!st) continue;
       if (
@@ -381,9 +404,16 @@ export class PiEngineAdapter implements AgentBackend {
       options?.onWork?.({ kind: 'decode-file', source: full });
       const cwd = readSessionCwd(full) ?? decodeCwdDir(baseDir(full)); // authoritative cwd from the file
       const surface = readSessionSurface(this.rt, full);
+      const nativeId = readSessionNativeId(full);
+      const isSubagent = discovered.parentFile !== undefined;
+      const parentThreadId = discovered.parentFile
+        ? readSessionNativeId(discovered.parentFile)
+        : undefined;
       const uuid = baseName(full).replace(/\.jsonl$/, '').split('_').pop() ?? baseName(full);
       out.push({
         id: sessionIdForFile(full),
+        ...(nativeId ? { nativeId } : {}),
+        ...(parentThreadId ? { origin: 'subagent' as const, parentThreadId } : {}),
         tool: this.id,
         title: readSessionName(this.rt, full) ?? `${cwd ? baseName(cwd) : baseDir(full)} · ${uuid.slice(0, 8)}`,
         cwd,
@@ -395,11 +425,14 @@ export class PiEngineAdapter implements AgentBackend {
         model: surface.model,
         currentModel: surface.currentModel,
         control: piControlState(this.rt.dialect, {
-          canDrive: resolveBin(this.rt) !== null,
+          canDrive: !isSubagent && resolveBin(this.rt) !== null,
           driveState: 'observing',
           terminalSyncActive: false,
           terminalSyncCommand: this.terminalSyncCommand(full),
           extensionInstalled: piBridgeExtensionInstalled(this.rt),
+          agentOwned: isSubagent,
+          mutableRuntimeReady: readiness.ready,
+          runtimeUnavailableReason: readiness.message,
         }),
         updatedAt: st.mtimeMs,
       });
@@ -409,15 +442,27 @@ export class PiEngineAdapter implements AgentBackend {
 
   async attach(sessionId: string, mode: AttachMode = 'observe'): Promise<SessionConnection> {
     this.assertSessionAccess();
+    const readiness = this.rt.hooks.readiness();
     const path = canonicalSessionFile(dec(sessionId));
+    const parentFile = piParentSessionFile(path);
+    const parentThreadId = parentFile
+      ? readSessionNativeId(parentFile)
+      : undefined;
+    const isSubagent = parentFile !== undefined;
+    if (isSubagent && mode !== 'observe') {
+      throw new Error(`${this.rt.dialect.displayName} subagent sessions are owned by their parent and can only be observed.`);
+    }
     const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path)); // authoritative cwd from the file
-    const canDrive = resolveBin(this.rt) !== null;
+    const canDrive = !isSubagent && resolveBin(this.rt) !== null;
     const surface = readSessionSurface(this.rt, path);
+    const nativeId = readSessionNativeId(path);
     if (mode === 'live') {
       throw new Error(`${this.rt.dialect.displayName} true sync is not active for this session. Start the ${this.rt.dialect.displayName} bridge extension in the terminal session, then refresh.`);
     }
     const info: SessionInfo = {
       id: sessionId,
+      ...(nativeId ? { nativeId } : {}),
+      ...(isSubagent ? { origin: 'subagent' as const, ...(parentThreadId ? { parentThreadId } : {}) } : {}),
       tool: this.id,
       title: readSessionName(this.rt, path) ?? baseName(path),
       cwd,
@@ -431,10 +476,17 @@ export class PiEngineAdapter implements AgentBackend {
         terminalSyncActive: false,
         terminalSyncCommand: this.terminalSyncCommand(path),
         extensionInstalled: piBridgeExtensionInstalled(this.rt),
+        agentOwned: isSubagent,
+        mutableRuntimeReady: readiness.ready,
+        runtimeUnavailableReason: readiness.message,
       }),
     };
     if (mode !== 'resume') return new PiObserveConnection(this.rt, path, cwd, info);
-    if (!canDrive) throw new Error(`${this.rt.dialect.displayName} CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`);
+    if (!canDrive) {
+      throw new Error(readiness.ready
+        ? `${this.rt.dialect.displayName} CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`
+        : readiness.message);
+    }
     const conn = new PiConnection(this.rt, path, cwd, info);
     await conn.start();
     return conn;
@@ -442,11 +494,17 @@ export class PiEngineAdapter implements AgentBackend {
 
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
     this.assertSessionAccess();
+    const readiness = this.rt.hooks.readiness();
+    if (!readiness.ready) throw new Error(readiness.message);
     const path = canonicalSessionFile(dec(sessionId));
+    if (piParentSessionFile(path)) {
+      throw new Error(`${this.rt.dialect.displayName} subagent sessions are owned by their parent and cannot be renamed independently.`);
+    }
     const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path));
     const requested = title == null ? '' : title.trim().slice(0, 160);
     const state = await renamePiSessionViaRpc(this.rt, path, requested);
     const st = statSafe(path);
+    const nativeId = readSessionNativeId(path);
     const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
     const nativeTitle =
       (typeof state.sessionName === 'string' && state.sessionName.trim()) ||
@@ -455,6 +513,7 @@ export class PiEngineAdapter implements AgentBackend {
       baseName(path);
     return {
       id: sessionIdForFile(path),
+      ...(nativeId ? { nativeId } : {}),
       tool: this.id,
       title: nativeTitle,
       cwd,
@@ -1037,6 +1096,9 @@ class PiConnection implements SessionConnection {
    *  {@link getPending} so a client joining a blocked Pi session sees the box, not just the badge.
    *  Tracked centrally in {@link emit} and cleared on the matching *-resolved frame. (Issue G.) */
   private readonly pendingFrames = new Map<string, AgentMessage>();
+  /** Reasons {@link sessionStatsMessages} has already reported, so a replay that
+   *  cannot reach a live agent logs once rather than once per history read. */
+  private readonly statsUnavailableReported = new Set<string>();
   private streaming = false;
   /** A partial model switch could not be rolled back or reconciled. No later prompt may reach Pi
    *  until get_state succeeds and republishes the actual native selection. */
@@ -1065,6 +1127,25 @@ class PiConnection implements SessionConnection {
    *  steer/follow-up is consumed in send order. The durable summary ordinal is allocated only when
    *  the turn actually starts, so a rejected/dropped prompt cannot leave a reload-visible gap. */
   private readonly pendingUserTurns: string[] = [];
+  /** Optimistic prompt payloads retained until Pi emits the native user message_start. Re-emitting
+   *  the same key with queued:false is the live delivery acknowledgement the original app socket
+   *  needs; a later filesystem replay cannot repair a socket that never reconnects. */
+  private readonly pendingUserEchoes = new Map<string, {
+    text: string;
+    sentAt: number;
+    clientKey?: string;
+    imageCount?: number;
+  }>();
+  /** OMP's RPC `prompt` ACK precedes the async extension send. A broker prompt is accepted only
+   *  after the exact collab-prompt reaches native message_start; an uncorrelated extension-send
+   *  failure is safe to attribute because prompt delivery is serialized and at most one waiter
+   *  exists. */
+  private readonly pendingNativePromptAcks = new Map<string, {
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer?: ReturnType<typeof setTimeout>;
+  }>();
+  private closed = false;
   /** When the current RUN began: stamped at agent_start. Only the FALLBACK turn anchor (a
    *  degraded stream that never forwards `message_start`) consumes it; the authoritative
    *  anchor is the opening user message itself, matching the JSONL mapper. */
@@ -1088,6 +1169,10 @@ class PiConnection implements SessionConnection {
         tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number };
       }
     | undefined;
+  /** A terminal-looking assistant error is provisional while Pi/OMP retries the
+   * same native user turn. The run remains keyed to that user until a later
+   * successful assistant or explicit retry exhaustion closes it. */
+  private retryActive = false;
 
   constructor(
     private readonly rt: PiDialectRuntime,
@@ -1124,8 +1209,18 @@ class PiConnection implements SessionConnection {
   async start(): Promise<void> {
     // Resolve the absolute binary path so Windows picks up `pi.cmd`/`pi.exe` (Bun.spawn won't append
     // those itself); fall back to the bare binary name for PATH lookup elsewhere.
-    const bin = resolveBin(this.rt) ?? this.rt.dialect.bin;
-    this.proc = spawnPi(this.rt.dialect, bin, ['--mode', 'rpc', '--session', this.sessionPath], {
+    const bin = resolveBin(this.rt);
+    if (!bin) {
+      throw new Error(`${this.rt.dialect.displayName} mutable runtime is not ready, so this session cannot be driven.`);
+    }
+    const args = ['--mode', 'rpc', '--session', this.sessionPath];
+    const selected = this.info.currentModel;
+    if (selected?.modelID) {
+      args.push('--model', selected.providerID ? `${selected.providerID}/${selected.modelID}` : selected.modelID);
+      const effort = normalizePiThinkingLevel(selected.reasoningEffort);
+      if (effort) args.push('--thinking', effort);
+    }
+    this.proc = spawnPi(this.rt.dialect, bin, args, {
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
@@ -1135,6 +1230,21 @@ class PiConnection implements SessionConnection {
       // to the broker (a loop / double-owner). The flag tells the extension to stay dormant here.
       env: piProcessEnv(this.rt, { COSYNCING_NO_BRIDGE: '1' }),
     });
+    // A child that dies on its own must reach the SAME settle path a deliberate
+    // teardown takes. `ompNativePromptAckDeadlineMs` leaves a steered prompt's
+    // ack deliberately unbounded — native OMP may not emit its correlated
+    // message_start until an arbitrarily long span reaches a turn boundary, so a
+    // wall-clock shortcut would reject prompts that were going to arrive — and
+    // names "connection close" as one of the three things that DO settle it.
+    // Nothing watched the child, so that path was unreachable on child death:
+    // the ack never settled, `sendPromptCritical` never returned, and
+    // `promptDeliveryTail` held every later prompt on this connection forever.
+    // This closes the connection instead of shortening the deadline, so the
+    // documented settle site fires without weakening the correlation rule.
+    void this.proc.exited.then(() => {
+      if (this.closed) return;
+      void this.close().catch(() => { /* teardown is best-effort */ });
+    }).catch(() => { /* exit already reported through the normal paths */ });
     // Seed the live key namespaces above every entry already in this session,
     // so a reconnect's fresh counters can never re-issue a key an earlier
     // connection's turns already own (see the field docs).
@@ -1207,6 +1317,17 @@ class PiConnection implements SessionConnection {
       this.pendingRpc.delete(obj.id);
       return;
     }
+    if (
+      this.rt.dialect.toolId === 'omp'
+      && obj.type === 'response'
+      && obj.command === 'extension_send'
+      && obj.success === false
+      && !obj.id
+    ) {
+      const pending = this.pendingNativePromptAcks.values().next().value;
+      pending?.reject(new Error('OMP rejected the broker prompt before native persistence.'));
+      return;
+    }
     this.handleEvent(obj);
   }
 
@@ -1219,6 +1340,7 @@ class PiConnection implements SessionConnection {
     const run = this.currentRun;
     if (!run) return;
     this.currentRun = undefined;
+    this.retryActive = false;
     let last = run.lastAssistant;
     // A degraded RPC stream may expose deltas but omit message_end. Keep the same fallback the
     // bridge applies: assistant activity is enough for a summary, but not enough to invent an end
@@ -1251,10 +1373,17 @@ class PiConnection implements SessionConnection {
   private ensureCurrentRun(): void {
     if (this.currentRun) return;
     const anchor = `u${this.nextUserTurnOrdinal++}`;
+    const ompCorrelationPending = this.rt.dialect.toolId === 'omp'
+      && this.pendingNativePromptAcks.size > 0;
     this.currentRun = {
       key: `${this.rt.dialect.eventKeyNamespace}${anchor}`,
       turnId: anchor,
-      userMessageKey: this.pendingUserTurns.shift() ?? this.lastUserMessageKey,
+      // A degraded OMP stream that omits its exact custom message_start has not proved which
+      // broker prompt entered the transcript. Leave the fallback unlinked and let the bounded
+      // persistence waiter close the child instead of assigning a FIFO key.
+      userMessageKey: ompCorrelationPending
+        ? undefined
+        : this.consumePendingUserTurn() ?? this.lastUserMessageKey,
       startedAt: this.runStartedAt ?? Date.now(),
     };
     this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: this.rt.dialect.eventSources.rpc });
@@ -1266,6 +1395,55 @@ class PiConnection implements SessionConnection {
   private removePendingUserTurn(userKey: string): void {
     const index = this.pendingUserTurns.indexOf(userKey);
     if (index !== -1) this.pendingUserTurns.splice(index, 1);
+    this.pendingUserEchoes.delete(userKey);
+  }
+
+  private consumePendingUserTurn(nativeSentAt?: number, expectedKey?: string): string | undefined {
+    const index = expectedKey === undefined ? 0 : this.pendingUserTurns.indexOf(expectedKey);
+    if (index < 0) return undefined;
+    const [userKey] = this.pendingUserTurns.splice(index, 1);
+    if (!userKey) return undefined;
+    const echo = this.pendingUserEchoes.get(userKey);
+    this.pendingUserEchoes.delete(userKey);
+    if (echo) {
+      this.emit({
+        type: 'user-message',
+        text: echo.text,
+        key: userKey,
+        turnId: userKey,
+        sentAt: nativeSentAt ?? echo.sentAt,
+        ...(echo.clientKey ? { clientKey: echo.clientKey } : {}),
+        ...(echo.imageCount ? { imageCount: echo.imageCount } : {}),
+        queued: false,
+      });
+    }
+    return userKey;
+  }
+
+  private awaitNativePromptAck(userKey: string, deadlineMs?: number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = deadlineMs === undefined ? undefined : setTimeout(() => {
+        if (!this.pendingNativePromptAcks.delete(userKey)) return;
+        reject(new Error('OMP did not persist the broker prompt before the delivery deadline.'));
+      }, deadlineMs);
+      this.pendingNativePromptAcks.set(userKey, {
+        timer,
+        resolve: () => {
+          if (timer !== undefined) clearTimeout(timer);
+          this.pendingNativePromptAcks.delete(userKey);
+          resolve();
+        },
+        reject: (error) => {
+          if (timer !== undefined) clearTimeout(timer);
+          this.pendingNativePromptAcks.delete(userKey);
+          reject(error);
+        },
+      });
+    });
+  }
+
+  private resolveNativePromptAck(userKey: string): void {
+    this.pendingNativePromptAcks.get(userKey)?.resolve();
   }
 
   private handleEvent(ev: any): void {
@@ -1284,17 +1462,66 @@ class PiConnection implements SessionConnection {
         // RUN instead left one summary spanning every queued turn, so count, keys, timing and
         // token grouping all changed on the first reload of the session file.
         const m = ev.message;
-        if (m?.role !== 'user') return;
+        const correlation = piCollabPromptCorrelation(m);
+        // A skill invocation is a user turn to EVERY reader of the durable file
+        // — `mapPiMessage`, `mapPiMessages`, `countPiJsonlUserMessages` and the
+        // bridge extension all treat it as one — and was not one here. So
+        // `/skill:foo` on a Drive session folded its output, clocks and tokens
+        // into the previous summary and did not advance the user ordinal, and a
+        // reload then split the turn and re-keyed every later run-summary.
+        const skill = piSkillPromptInvocation(m);
+        if (m?.role !== 'user' && !correlation && !skill) return;
         this.closeCurrentRun();
-        const userKey = this.pendingUserTurns.shift();
-        const anchor = `u${this.nextUserTurnOrdinal++}`;
+        // Hoisted above the emit below so a skill row can carry the SAME key the
+        // mapper will derive for it on reload (`skillUserKey ?? …`, which the
+        // caller passes as this ordinal anchor). Computed exactly once per
+        // boundary, as before.
+        const ordinalAnchor = `u${this.nextUserTurnOrdinal++}`;
+        const userStartedAt = correlation?.sentAt
+          ?? nativeTimeMs(m.timestamp)
+          ?? nativeTimeMs(ev.timestamp)
+          ?? Date.now();
+        const pendingUserKey = this.consumePendingUserTurn(userStartedAt, correlation?.messageKey);
+        const userKey = pendingUserKey ?? correlation?.messageKey
+          ?? (skill ? ordinalAnchor : undefined);
+        if (!pendingUserKey && !correlation && skill) {
+          // Same shape the mapper produces for this entry: text from the
+          // invocation, key AND turnId the ordinal anchor. A key that differed
+          // would show one bubble live and a second on reload.
+          const skillImages = contentImageCount(m.content);
+          if (skill.text || skillImages > 0) this.emit({
+            type: 'user-message',
+            text: skill.text,
+            key: ordinalAnchor,
+            turnId: ordinalAnchor,
+            sentAt: skill.sentAt ?? userStartedAt,
+            ...(skillImages ? { imageCount: skillImages } : {}),
+            queued: false,
+          });
+        }
+        if (!pendingUserKey && correlation) {
+          const text = contentToText(m.content);
+          const imageCount = contentImageCount(m.content);
+          if (text || imageCount > 0) this.emit({
+            type: 'user-message',
+            text,
+            key: correlation.messageKey,
+            turnId: correlation.messageKey,
+            sentAt: correlation.sentAt,
+            ...(correlation.clientKey ? { clientKey: correlation.clientKey } : {}),
+            ...(imageCount ? { imageCount } : {}),
+            queued: false,
+          });
+        }
+        if (correlation) this.resolveNativePromptAck(correlation.messageKey);
+        const anchor = correlation?.messageKey ?? ordinalAnchor;
         this.currentRun = {
           key: `${this.rt.dialect.eventKeyNamespace}${anchor}`,
           turnId: anchor,
           userMessageKey: userKey,
           // The message's own clock is the turn's start — the durable record of the same
           // instant the JSONL entry carries, so live and reload agree.
-          startedAt: nativeTimeMs(m.timestamp) ?? nativeTimeMs(ev.timestamp) ?? Date.now(),
+          startedAt: userStartedAt,
         };
         this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: this.rt.dialect.eventSources.rpc });
         return;
@@ -1324,14 +1551,28 @@ class PiConnection implements SessionConnection {
           completedAt: nativeTimeMs(ev.timestamp) ?? Date.now(),
         };
         accumulatePiUsage(currentRun, m.usage);
-        if (piTerminalStopReason(m.stopReason) !== undefined || m.error) this.closeCurrentRun();
+        // `error` is provisional: OMP emits message_end(error) before
+        // auto_retry_start. Closing here would mint a terminal footer for each
+        // superseded attempt. agent_end or auto_retry_end(false) closes a real
+        // final error; stop/aborted remain immediately terminal.
+        if (m.stopReason === 'stop' || m.stopReason === 'aborted') this.closeCurrentRun();
         return;
       }
       case 'agent_end':
         this.streaming = false;
         this.toolArgs.clear(); // turn boundary — drop args of any tool-call whose result never arrived (abort/block)
+        if (ev.isTerminal === false || this.retryActive) {
+          // Pi/OMP ends each failed attempt before maintenance schedules the
+          // automatic retry. This is not the user-turn boundary: preserve the
+          // summary key, queued correlation, usage, and run clock.
+          this.streaming = true;
+          this.emit({ type: 'status', status: 'running' });
+          return;
+        }
+        this.retryActive = false;
         this.runStartedAt = undefined;
         this.pendingUserTurns.length = 0; // unconsumed queue entries died with the run
+        this.pendingUserEchoes.clear();
         // Whatever is still open closes at the run's end clock. A degraded stream that
         // streamed assistant output but forwards no message_end still gets its summary; a
         // prompt the agent truly never answered is suppressed, exactly as the mapper does.
@@ -1396,15 +1637,46 @@ class PiConnection implements SessionConnection {
         // (otherwise a rate-limited Pi turn just looks frozen). See docs rpc.md auto_retry_start.
         const reason = String(ev.errorMessage ?? 'transient API error').replace(/\s+/g, ' ').slice(0, 80);
         const detail = `Retrying ${ev.attempt ?? '?'}/${ev.maxAttempts ?? '?'} — ${reason}`;
+        this.ensureCurrentRun();
+        this.retryActive = true;
+        const run = this.currentRun!;
+        this.emit({
+          type: 'run-summary',
+          key: run.key,
+          turnId: run.turnId,
+          userMessageKey: run.userMessageKey,
+          status: 'running',
+          ...(run.startedAt == null ? {} : { startedAt: run.startedAt }),
+          source: this.rt.dialect.eventSources.rpc,
+        });
         this.emit({ type: 'status', status: 'running', detail });
         return;
       }
-      case 'auto_retry_end':
+      case 'auto_retry_end': {
         // success → resume (clear the banner with a detail-less running status); exhausted → error.
-        if (ev.success === false)
+        const wasRetryActive = this.retryActive;
+        this.retryActive = false;
+        if (ev.success === false) {
+          this.ensureCurrentRun();
+          const completedAt = nativeTimeMs(ev.timestamp) ?? Date.now();
+          const last = this.currentRun!.lastAssistant;
+          if (last) {
+            last.stopReason = 'error';
+            last.errored = true;
+          } else {
+            this.currentRun!.lastAssistant = {
+              stopReason: 'error',
+              errored: true,
+              completedAt,
+            };
+          }
           this.emit({ type: 'error', message: `API retry gave up: ${String(ev.finalError ?? 'all attempts failed').split('\n')[0]?.slice(0, 180)}` });
-        else this.emit({ type: 'status', status: 'running' });
+          this.closeCurrentRun(completedAt);
+        } else if (wasRetryActive && this.currentRun) {
+          this.emit({ type: 'status', status: 'running' });
+        }
         return;
+      }
       case 'compaction_start':
         this.emit({ type: 'status', status: 'running', detail: 'Compacting conversation…' });
         return;
@@ -1513,13 +1785,48 @@ class PiConnection implements SessionConnection {
     return fileHistorySourceIdentity(this.sessionPath);
   }
 
+  /**
+   * The session's stats, which carry the ONLY source of this agent's
+   * `contextUsage` pair — there is no durable transcript record to re-derive it
+   * from, unlike Grok, which maps it from its own records.
+   *
+   * Three ways to answer `[]`, and until now no way to tell them apart from a
+   * session that genuinely has no stats. That silence is why one failing
+   * `contextUsageReDerived` claim sat unattributed: history appends whatever
+   * this returns, so a refused RPC and an empty result produce an identical
+   * transcript. Each path now says which one it was.
+   *
+   * Reported once per connection per reason. A read-only replay with no live
+   * agent to answer may legitimately fail on every history read, and a line per
+   * read would be noise — the failure mode that gets a diagnostic ignored
+   * exactly when it matters.
+   */
   private async sessionStatsMessages(): Promise<AgentMessage[]> {
+    const report = (reason: string): [] => {
+      if (!this.statsUnavailableReported.has(reason)) {
+        this.statsUnavailableReported.add(reason);
+        console.warn(
+          `[pi-engine] session stats unavailable (${reason}); this session's contextUsage pair is `
+            + 'absent from history and cannot be re-derived',
+        );
+      }
+      return [];
+    };
     try {
       const resp = await this.rpc({ type: 'get_session_stats' });
-      if (resp?.success !== true || !resp.data) return [];
-      return mapPiSessionStats(resp.data);
-    } catch {
-      return [];
+      if (resp?.success !== true) return report('rpc-unsuccessful');
+      if (!resp.data) return report('rpc-returned-no-data');
+      const messages = mapPiSessionStats(resp.data);
+      // Stats arrived but carried no usable used/max pair. A different fact from
+      // the RPC failing, and the one that would mean the gap is upstream in the
+      // agent rather than in reaching it.
+      if (!messages.some((message) =>
+        message.type === 'metadata-update' && message.key === 'contextUsage')) {
+        report('stats-carried-no-context-usage');
+      }
+      return messages;
+    } catch (error) {
+      return report(`rpc-threw:${error instanceof Error ? error.name : 'unknown'}`);
     }
   }
 
@@ -1637,10 +1944,15 @@ class PiConnection implements SessionConnection {
   }
 
   async sendPrompt(input: PromptInput): Promise<void> {
+    if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
     return this.serializePromptDelivery(() => this.sendPromptCritical(input));
   }
 
   private async sendPromptCritical(input: PromptInput): Promise<void> {
+    // A caller can enqueue behind another prompt before that first prompt fails closed. Admission
+    // must be checked again when this serialized critical section actually begins, or the queued
+    // caller can emit a phantom optimistic row against an already-ended child.
+    if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
     let text = input.text;
     // Attachments: write each to the workspace inbox and reference them by ABSOLUTE path in THIS
     // turn (multi-file + file+prompt) — the same universal path as OpenCode.
@@ -1657,6 +1969,7 @@ class PiConnection implements SessionConnection {
     // A previous partial model switch may have left native Pi on an unknown selection. Reconcile
     // before creating the optimistic bubble; if state is still unavailable, this prompt is refused.
     await this.ensureNativeModelStateKnown();
+    if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
     // Pi (unlike OpenCode) emits NO event echoing the user's own prompt, so the app would never
     // show the message you just sent until a reattach reloads history. Echo it optimistically so
     // it renders immediately (and so the queued-bubble reconcile in the app has something to adopt).
@@ -1666,12 +1979,34 @@ class PiConnection implements SessionConnection {
     // already used — the app then upserts the TUI-typed message INTO the old bubble and the user
     // message silently never appears (issues-part2 item 3 refinement: same-text "hi" repro).
     const sentAt = Date.now();
-    const userKey = `u:sent:${++this.userSeq}`;
+    // OMP's RPC runtime loads the broker-owned extension command below, allowing the native
+    // transcript to retain exact correlation. Keep upstream Pi on its measured plain-prompt RPC
+    // path until that runtime's command interception is separately proved.
+    const durableRpcCorrelation = this.rt.dialect.toolId === 'omp';
+    const images = (input.images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
+    const userKey = durableRpcCorrelation
+      ? `${PI_REMOTE_USER_KEY_PREFIX}${randomUUID()}`
+      : `u:sent:${++this.userSeq}`;
     this.lastUserMessageKey = userKey;
     // Consumed FIFO by the user message_start this prompt produces — queued steers are
     // delivered in send order, and each turn's summary must link to ITS echo bubble.
     this.pendingUserTurns.push(userKey);
-    this.emit({ type: 'user-message', text, key: userKey, turnId: userKey, sentAt, ...(input.clientMessageId ? { clientKey: input.clientMessageId } : {}) });
+    this.pendingUserEchoes.set(userKey, {
+      text,
+      sentAt,
+      ...(input.clientMessageId ? { clientKey: input.clientMessageId } : {}),
+      ...(images.length ? { imageCount: images.length } : {}),
+    });
+    this.emit({
+      type: 'user-message',
+      text,
+      key: userKey,
+      turnId: userKey,
+      sentAt,
+      ...(input.clientMessageId ? { clientKey: input.clientMessageId } : {}),
+      ...(images.length ? { imageCount: images.length } : {}),
+      queued: true,
+    });
     // Per-prompt model override happens before prompt delivery. If it fails, this optimistic key
     // has no future message_start and must leave the FIFO now or it will be assigned to the next
     // successful prompt's summary.
@@ -1681,16 +2016,61 @@ class PiConnection implements SessionConnection {
       this.removePendingUserTurn(userKey);
       throw error;
     }
-    const images = (input.images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
-    const cmd: Record<string, unknown> = { type: 'prompt', message: text };
-    if (images.length) cmd.images = images;
-    if (this.streaming) cmd.streamingBehavior = 'steer';
-    const resp = await this.rpc(cmd);
+    const cmd: Record<string, unknown> = durableRpcCorrelation
+      ? {
+          type: 'prompt',
+          message: `/${PI_RPC_COLLAB_PROMPT_COMMAND} ${Buffer.from(JSON.stringify({
+            text,
+            messageKey: userKey,
+            sentAt,
+            ...(input.clientMessageId ? { clientKey: input.clientMessageId } : {}),
+            ...(images.length ? { images } : {}),
+          }), 'utf8').toString('base64url')}`,
+        }
+      : { type: 'prompt', message: text, ...(images.length ? { images } : {}) };
+    const streamingAtDelivery = this.streaming;
+    if (streamingAtDelivery) cmd.streamingBehavior = 'steer';
+    const nativeAck = durableRpcCorrelation
+      ? this.awaitNativePromptAck(userKey, ompNativePromptAckDeadlineMs(streamingAtDelivery))
+      : undefined;
+    // Native OMP can reject extension delivery after its prompt RPC has already ACKed. Attach a
+    // handler immediately so an early rejection is retained while that RPC response is in flight.
+    if (nativeAck) void nativeAck.catch(() => {});
+    let resp: any;
+    try {
+      resp = await this.rpc(cmd);
+    } catch (error) {
+      this.removePendingUserTurn(userKey);
+      this.pendingNativePromptAcks.get(userKey)?.reject(
+        new Error('OMP prompt transport failed before native persistence.'),
+      );
+      if (durableRpcCorrelation) await this.close();
+      throw error;
+    }
     if (resp && resp.success === false && !resp.timeout) {
       // An explicit rejection proves Pi did not accept this prompt. A timeout is deliberately
       // different: delivery is ambiguous, so retain the key for a possible later message_start.
       this.removePendingUserTurn(userKey);
+      this.pendingNativePromptAcks.get(userKey)?.reject(
+        new Error('OMP rejected the broker prompt before native persistence.'),
+      );
       throw new Error(resp.error ?? `${this.rt.dialect.toolId} prompt rejected`);
+    }
+    if (durableRpcCorrelation && resp?.timeout) {
+      const failure = new Error('OMP prompt delivery became ambiguous; the Drive connection was closed.');
+      this.pendingNativePromptAcks.get(userKey)?.reject(failure);
+      this.removePendingUserTurn(userKey);
+      await this.close();
+      throw failure;
+    }
+    if (nativeAck) {
+      try {
+        await nativeAck;
+      } catch (error) {
+        this.removePendingUserTurn(userKey);
+        await this.close();
+        throw error;
+      }
     }
   }
 
@@ -1779,7 +2159,9 @@ class PiConnection implements SessionConnection {
       const resp = await this.rpc({ type: this.rt.dialect.rpcAliases.getCommands });
       const cmds: any[] = resp?.data?.commands ?? [];
       dynamic = cmds
-        .filter((c) => c?.name && /^[\w:-]+$/.test(c.name))
+        .filter((c) => c?.name
+          && c.name !== PI_RPC_COLLAB_PROMPT_COMMAND
+          && /^[\w:-]+$/.test(c.name))
         .map((c) => ({ name: c.name, description: c.description, kind: 'prompt' as const }));
     } catch {
       /* commands unavailable */
@@ -1824,6 +2206,12 @@ class PiConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.pendingNativePromptAcks.values()) {
+      pending.reject(new Error(`${this.rt.dialect.displayName} Drive connection closed before prompt persistence.`));
+    }
+    this.pendingNativePromptAcks.clear();
     try {
       this.write({ type: 'abort' });
     } catch {
@@ -1838,11 +2226,21 @@ class PiConnection implements SessionConnection {
 
 class PiObserveConnection implements SessionConnection {
   private readonly handlers = new Set<AgentMessageHandler>();
+  /** File watcher carries ordinary append events; directory watcher survives atomic replacement. */
   private watcher?: FSWatcher;
+  private directoryWatcher?: FSWatcher;
+  private closed = false;
+  /** Invalidates delayed tail reads when a watcher is re-armed or the connection closes. */
+  private watchGeneration = 0;
   private offset = 0;
   private lineIndex = 0;
   private tailBuffer = '';
   private primed = false;
+  private historySourceId?: string;
+  private rewriteToken?: string;
+  private lastEntryId?: string;
+  private readonly correlationMessageKeys = new Set<string>();
+  private readonly correlationClientKeys = new Set<string>();
   /** Open-turn evidence threaded across tail windows, so a turn whose prompt
    *  arrived in one read and whose final entry arrives in a later one closes
    *  with the SAME summary a whole-file reload computes. */
@@ -1871,14 +2269,56 @@ class PiObserveConnection implements SessionConnection {
     }
   }
 
-  async getHistory(): Promise<AgentMessage[]> {
-    const raw = readFileSync(this.sessionPath, 'utf8');
-    this.offset = Buffer.byteLength(raw);
+  /** Seed the ownership/correlation claims from the same active branch a full replay maps. */
+  private seedTranscriptState(raw: string, identity: HistorySourceIdentity): void {
+    this.historySourceId = identity.sourceId;
+    this.rewriteToken = identity.rewriteToken;
+    this.lastEntryId = undefined;
+    this.correlationMessageKeys.clear();
+    this.correlationClientKeys.clear();
+    const rows = activePiJsonlRows(parsePiJsonlRows(raw.split('\n')));
+    for (const row of rows) {
+      if (typeof row.obj?.id === 'string' && row.obj.id) this.lastEntryId = row.obj.id;
+      const correlation = piCollabPromptCorrelation(piJsonlRowMessage(row.obj));
+      if (!correlation) continue;
+      this.correlationMessageKeys.add(correlation.messageKey);
+      if (correlation.clientKey) this.correlationClientKeys.add(correlation.clientKey);
+    }
+  }
+
+  private resetToSnapshot(snapshot: PiHistoryFileSnapshot): void {
+    if (this.closed) return;
+    const raw = snapshot.buffer.toString('utf8');
+    this.offset = snapshot.buffer.length;
+    this.tailBuffer = '';
     this.lineIndex = countJsonlLines(raw);
+    // The reset itself does not replay rows through the incremental mapper. Seed its next ordinal
+    // from the replacement so an append that lands before the broker requests the full replay still
+    // receives the same turn identity that the later replay will assign.
+    this.turnCarry = { nextUserOrdinal: countPiJsonlUserMessages(raw) };
+    this.seedTranscriptState(raw, snapshot.identity);
+    // `fs.watch(file)` remains attached to the retired inode. Re-arm it on the newly installed
+    // path before publishing reset, then reread once to close the snapshot-to-watch race.
+    this.watchGeneration++;
+    this.watcher?.close();
+    this.watcher = undefined;
+    this.startFileWatch();
+    this.scheduleTailRead(0);
+    this.emit({ type: 'history-reset' });
+  }
+
+  async getHistory(): Promise<AgentMessage[]> {
     this.primed = true;
-    this.turnCarry = {};
+    // Establish the watch first: if an atomic replacement lands after the coherent snapshot's final
+    // path/inode check, its rename event schedules a reset instead of leaving the old snapshot stuck.
     this.startWatch();
-    return mapPiJsonlLines(raw.split('\n'), 0, true, this.turnCarry, this.rt.dialect);
+    const snapshot = readPiHistoryFileSnapshot(this.sessionPath);
+    const raw = snapshot.buffer.toString('utf8');
+    this.offset = snapshot.buffer.length;
+    this.lineIndex = countJsonlLines(raw);
+    this.turnCarry = {};
+    this.seedTranscriptState(raw, snapshot.identity);
+    return mapPiJsonlLines(raw.split('\n'), 0, true, this.turnCarry, this.rt.dialect, true);
   }
 
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {
@@ -1886,35 +2326,108 @@ class PiObserveConnection implements SessionConnection {
   }
 
   private startWatch(): void {
-    if (this.watcher) return;
+    if (this.closed) return;
+    if (!this.directoryWatcher) {
+      const watchedName = basename(this.sessionPath);
+      try {
+        // The directory watch is the replacement detector: unlike the file watch, it remains bound
+        // to the directory when a new inode is renamed onto the session path.
+        this.directoryWatcher = watch(dirname(this.sessionPath), (_event, filename) => {
+          if (filename != null && String(filename) !== watchedName) return;
+          this.scheduleTailRead(80);
+        });
+      } catch {
+        // The file watch below can still serve ordinary append-only transcripts.
+      }
+    }
+    this.startFileWatch();
+  }
+
+  private startFileWatch(): void {
+    if (this.closed || this.watcher) return;
     try {
-      this.watcher = watch(this.sessionPath, () => setTimeout(() => this.readTail(), 80));
+      this.watcher = watch(this.sessionPath, () => this.scheduleTailRead(80));
     } catch {
       return;
     }
-    this.readTail();
+  }
+
+  private scheduleTailRead(delayMs: number): void {
+    if (this.closed) return;
+    const generation = this.watchGeneration;
+    setTimeout(() => {
+      if (this.closed || generation !== this.watchGeneration) return;
+      this.readTail();
+    }, delayMs);
   }
 
   private readTail(): void {
-    let buf: Buffer;
+    if (this.closed) return;
+    let snapshot: PiHistoryFileSnapshot;
     try {
-      buf = readFileSync(this.sessionPath);
+      snapshot = readPiHistoryFileSnapshot(this.sessionPath);
     } catch {
       return;
     }
-    if (buf.length < this.offset) {
-      this.offset = 0;
-      this.tailBuffer = '';
-      this.lineIndex = 0;
-      this.turnCarry = {};
-      this.emit({ type: 'history-reset' });
+    const buf = snapshot.buffer;
+    const identity = snapshot.identity;
+    const prefixLength = Math.min(this.offset, HISTORY_SOURCE_REWRITE_PREFIX_BYTES);
+    const observedPrefixToken = createHash('sha256')
+      .update(buf.subarray(0, Math.min(prefixLength, buf.length)))
+      .digest('base64url');
+    const sourceReplaced = !!this.historySourceId
+      && !!identity.sourceId
+      && identity.sourceId !== this.historySourceId;
+    const prefixRewritten = !!this.rewriteToken
+      && observedPrefixToken !== this.rewriteToken;
+    if (buf.length < this.offset || sourceReplaced || prefixRewritten) {
+      this.resetToSnapshot(snapshot);
+      return;
     }
     if (buf.length <= this.offset) return;
     const chunk = buf.subarray(this.offset).toString('utf8');
+    const combined = this.tailBuffer + chunk;
+    const lines = combined.split('\n');
+    const nextTailBuffer = lines.pop() ?? '';
+    const rows = parsePiJsonlRows(lines, this.lineIndex);
+
+    let expectedParent = this.lastEntryId;
+    const newMessageKeys = new Set<string>();
+    const newClientKeys = new Set<string>();
+    for (const row of rows) {
+      const id = typeof row.obj?.id === 'string' && row.obj.id ? row.obj.id : undefined;
+      if (id && Object.prototype.hasOwnProperty.call(row.obj, 'parentId')) {
+        const parentId = row.obj.parentId == null ? undefined : String(row.obj.parentId);
+        if (expectedParent && parentId !== expectedParent) {
+          this.resetToSnapshot(snapshot);
+          return;
+        }
+        expectedParent = id;
+      } else if (id) {
+        expectedParent = id;
+      }
+      const correlation = piCollabPromptCorrelation(piJsonlRowMessage(row.obj));
+      if (!correlation) continue;
+      const repeatedMessageKey = this.correlationMessageKeys.has(correlation.messageKey)
+        || newMessageKeys.has(correlation.messageKey);
+      const repeatedClientKey = !!correlation.clientKey
+        && (this.correlationClientKeys.has(correlation.clientKey)
+          || newClientKeys.has(correlation.clientKey));
+      if (repeatedMessageKey || repeatedClientKey) {
+        this.resetToSnapshot(snapshot);
+        return;
+      }
+      newMessageKeys.add(correlation.messageKey);
+      if (correlation.clientKey) newClientKeys.add(correlation.clientKey);
+    }
+
     this.offset = buf.length;
-    this.tailBuffer += chunk;
-    const lines = this.tailBuffer.split('\n');
-    this.tailBuffer = lines.pop() ?? '';
+    this.tailBuffer = nextTailBuffer;
+    this.historySourceId = identity.sourceId;
+    this.rewriteToken = identity.rewriteToken;
+    this.lastEntryId = expectedParent;
+    for (const key of newMessageKeys) this.correlationMessageKeys.add(key);
+    for (const key of newClientKeys) this.correlationClientKeys.add(key);
     if (!lines.length) return;
     const messages = mapPiJsonlLines(lines, this.lineIndex, false, this.turnCarry, this.rt.dialect);
     this.lineIndex += lines.length;
@@ -1950,22 +2463,138 @@ class PiObserveConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.watchGeneration++;
     this.watcher?.close();
+    this.directoryWatcher?.close();
+    this.watcher = undefined;
+    this.directoryWatcher = undefined;
     this.handlers.clear();
   }
 }
 
 // ── mapping helpers ───────────────────────────────────────────────────────────
 
-function mapPiMessage(m: any, index = 0, argsByCallId?: Map<string, any>, keyBase?: string, entryTimestamp?: number): AgentMessage[] {
+const PI_COLLAB_PROMPT_TYPE = 'collab-prompt';
+const PI_SKILL_PROMPT_TYPE = 'skill-prompt';
+const PI_REMOTE_USER_KEY_PREFIX = 'u:remote:';
+const PI_RPC_COLLAB_PROMPT_COMMAND = '__cosyncing_rpc_prompt';
+
+/** Initial OMP delivery must persist promptly. A steer issued during an active run is different:
+ * native OMP queues it and may not emit its correlated message_start until an arbitrarily long
+ * model/tool span reaches the next turn boundary. OMP can also publish terminal agent_end before
+ * its post-settle stranded-queue drain starts that turn, so only exact correlation, explicit
+ * extension failure, or connection close settles it—not a wall-clock or agent_end shortcut. */
+export function ompNativePromptAckDeadlineMs(streaming: boolean): number | undefined {
+  return streaming ? undefined : 15_000;
+}
+
+function boundedPiCorrelationString(value: unknown, max = 256): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text && text.length <= max ? text : undefined;
+}
+
+/** Recognize only the bridge's exact persisted app-prompt envelope. Ordinary user messages and
+ *  unrelated custom messages remain unstamped; correlation is never guessed from text/order. */
+function piCollabPromptCorrelation(message: any): { messageKey: string; clientKey?: string; sentAt: number } | undefined {
+  if (
+    message?.role !== 'custom'
+    || message?.customType !== PI_COLLAB_PROMPT_TYPE
+    // Pi 0.78.1 drops attribution from custom messages; exact cosyncing details remain durable.
+    || (message?.attribution !== undefined && message.attribution !== 'user')
+  ) return undefined;
+  const details = message?.details;
+  if (!details || typeof details !== 'object' || details.from !== 'cosyncing') return undefined;
+  const messageKey = boundedPiCorrelationString(details.messageKey);
+  if (!messageKey?.startsWith(PI_REMOTE_USER_KEY_PREFIX)) return undefined;
+  const clientKey = details.clientKey == null ? undefined : boundedPiCorrelationString(details.clientKey);
+  if (details.clientKey != null && !clientKey) return undefined;
+  const sentAt = nativeTimeMs(details.sentAt);
+  if (sentAt === undefined) return undefined;
+  return { messageKey, ...(clientKey ? { clientKey } : {}), sentAt };
+}
+
+/** Recognize Pi/OMP's native expanded skill envelope without exposing the expanded instructions as
+ *  the user's transcript text. The absolute resource-loader path and line count distinguish the
+ *  native envelope from arbitrary display-only custom messages; explicit foreign attribution is
+ *  rejected while Pi 0.78.1's known attribution omission remains readable. */
+function piSkillPromptInvocation(message: any): { text: string; sentAt?: number } | undefined {
+  if (
+    message?.role !== 'custom'
+    || message?.customType !== PI_SKILL_PROMPT_TYPE
+    || message?.display !== true
+    || (message?.attribution !== undefined && message.attribution !== 'user')
+  ) return undefined;
+  const details = message?.details;
+  if (!details || typeof details !== 'object') return undefined;
+  const name = boundedPiCorrelationString(details.name, 128);
+  const path = boundedPiCorrelationString(details.path, 4096);
+  const args = details.args == null ? undefined : boundedPiCorrelationString(details.args, 4096);
+  // The bridge stamps a durable invocation clock. Native terminal /skill commands do not, so their
+  // persisted custom-message timestamp remains the best available clock.
+  const sentAt = nativeTimeMs(details.sentAt) ?? nativeTimeMs(message.timestamp);
+  if (
+    !name
+    || !/^[A-Za-z0-9._:-]+$/.test(name)
+    || !path
+    || !isAbsolute(path)
+    || (details.args != null && !args)
+    || !Number.isInteger(details.lineCount)
+    || details.lineCount < 0
+    || details.lineCount > 1_000_000
+  ) return undefined;
+  return {
+    text: `/skill:${name}${args ? ` ${args}` : ''}`,
+    ...(sentAt !== undefined ? { sentAt } : {}),
+  };
+}
+
+function mapPiMessage(
+  m: any,
+  index = 0,
+  argsByCallId?: Map<string, any>,
+  keyBase?: string,
+  entryTimestamp?: number,
+  allowCollabCorrelation = true,
+  skillUserKey?: string,
+): AgentMessage[] {
   const out: AgentMessage[] = [];
   if (m?.role === 'user') {
     const text = contentToText(m.content);
+    const imageCount = contentImageCount(m.content);
     // Key by Pi's message id when present, else deterministically by position — so the history copy
     // dedupes against any live echo and keys identically across reattaches (OpenCode keys its too).
     const key = keyBase ?? (m.id != null ? String(m.id) : `h${index}`);
     const sentAt = nativeTimeMs(m.timestamp) ?? entryTimestamp;
-    if (text) out.push({ type: 'user-message', text, key, turnId: key, sentAt });
+    if (text || imageCount > 0) out.push({
+      type: 'user-message',
+      text,
+      key,
+      turnId: key,
+      sentAt,
+      ...(imageCount ? { imageCount } : {}),
+    });
+  } else if (m?.role === 'custom') {
+    const correlation = piCollabPromptCorrelation(m);
+    const skill = piSkillPromptInvocation(m);
+    if (!correlation && !skill) return out;
+    const text = skill?.text ?? contentToText(m.content);
+    const imageCount = contentImageCount(m.content);
+    const key = correlation
+      ? (allowCollabCorrelation ? correlation.messageKey : (keyBase ?? `h${index}`))
+      : (skillUserKey ?? keyBase ?? `h${index}`);
+    const sentAt = correlation?.sentAt ?? skill?.sentAt ?? entryTimestamp;
+    if (text || imageCount > 0) out.push({
+      type: 'user-message',
+      text,
+      key,
+      turnId: key,
+      sentAt,
+      ...(correlation && allowCollabCorrelation && correlation.clientKey ? { clientKey: correlation.clientKey } : {}),
+      ...(imageCount ? { imageCount } : {}),
+    });
   } else if (m?.role === 'assistant') {
     const content = Array.isArray(m.content) ? m.content : [];
     let textSeq = 0;
@@ -1993,7 +2622,70 @@ function mapPiMessage(m: any, index = 0, argsByCallId?: Map<string, any>, keyBas
 }
 
 export function mapPiJsonlText(raw: string, firstIndex = 0, dialect: PiDialect = PI_DIALECT): AgentMessage[] {
-  return mapPiJsonlLines(raw.split('\n'), firstIndex, true, undefined, dialect);
+  return mapPiJsonlLines(raw.split('\n'), firstIndex, true, undefined, dialect, true);
+}
+
+interface ParsedPiJsonlRow {
+  obj: any;
+  index: number;
+}
+
+function piJsonlRowMessage(obj: any): any | undefined {
+  if (obj?.type === 'message') return obj.message;
+  if (obj?.type !== 'custom_message') return undefined;
+  return {
+    role: 'custom',
+    customType: obj.customType,
+    content: obj.content,
+    display: obj.display,
+    details: obj.details,
+    attribution: obj.attribution,
+    timestamp: obj.timestamp,
+  };
+}
+
+function parsePiJsonlRows(lines: string[], firstIndex = 0): ParsedPiJsonlRow[] {
+  const rows: ParsedPiJsonlRow[] = [];
+  lines.forEach((line, i) => {
+    if (!line.trim()) return;
+    try {
+      rows.push({ obj: JSON.parse(line), index: firstIndex + i });
+    } catch {
+      /* a torn/malformed line is not a native entry */
+    }
+  });
+  return rows;
+}
+
+/** Reconstruct SessionManager.getBranch() from an on-disk append-only tree. Current Pi/OMP rows
+ *  carry id/parentId; the last appended entry is the durable leaf. Legacy linear fixtures without
+ *  parentId fall back to their complete row order. Duplicate ids are structurally ambiguous and
+ *  likewise fall back, where correlation uniqueness still fails closed. */
+function activePiJsonlRows(rows: ParsedPiJsonlRow[]): ParsedPiJsonlRow[] {
+  const identified = rows.filter((row) => typeof row.obj?.id === 'string' && row.obj.id);
+  if (!identified.length || !identified.every((row) => Object.prototype.hasOwnProperty.call(row.obj, 'parentId'))) {
+    return rows;
+  }
+  const byId = new Map<string, ParsedPiJsonlRow>();
+  for (const row of identified) {
+    const id = String(row.obj.id);
+    if (byId.has(id)) return rows;
+    byId.set(id, row);
+  }
+  const activeIds = new Set<string>();
+  let cursor: ParsedPiJsonlRow | undefined = identified[identified.length - 1];
+  while (cursor) {
+    const id = String(cursor.obj.id);
+    if (activeIds.has(id)) break; // cycle: retain only the bounded leaf walk
+    activeIds.add(id);
+    const parentId = cursor.obj.parentId;
+    if (parentId == null) break;
+    cursor = byId.get(String(parentId));
+  }
+  return rows.filter((row) => {
+    const id = row.obj?.id;
+    return typeof id !== 'string' || !id ? true : activeIds.has(id);
+  });
 }
 
 /**
@@ -2040,19 +2732,14 @@ function mapPiJsonlLines(
   includeTotals = false,
   carry?: PiJsonlTurnCarry,
   dialect: PiDialect = PI_DIALECT,
+  activeBranchOnly = false,
 ): AgentMessage[] {
   const entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[] = [];
-  lines.forEach((line, i) => {
-    if (!line.trim()) return;
-    let obj: any;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      return;
-    }
-    const message = obj?.type === 'message' ? obj.message : undefined;
-    if (!message) return;
-    const index = firstIndex + i;
+  const parsedRows = parsePiJsonlRows(lines, firstIndex);
+  const rows = activeBranchOnly ? activePiJsonlRows(parsedRows) : parsedRows;
+  for (const { obj, index } of rows) {
+    const message = piJsonlRowMessage(obj);
+    if (!message) continue;
     const keyBase = obj.id != null ? String(obj.id) : message.id != null ? String(message.id) : `h${index}`;
     entries.push({
       message,
@@ -2061,7 +2748,7 @@ function mapPiJsonlLines(
       entryAt: nativeTimeMs(obj.timestamp),
       messageAt: nativeTimeMs(message.timestamp),
     });
-  });
+  }
   const argsByCallId = new Map<string, any>();
   for (const e of entries) {
     const m = e.message;
@@ -2078,6 +2765,12 @@ function piTerminalStopReason(stopReason: unknown): 'done' | 'cancelled' | 'erro
   if (stopReason === 'aborted') return 'cancelled';
   if (stopReason === 'error') return 'error';
   return undefined;
+}
+
+function piAssistantRetryIsSuperseded(message: any): boolean {
+  const recovery = message?.retryRecovery;
+  return recovery?.kind === 'auto-retry'
+    && (recovery.status === 'superseded' || recovery.status === 'recovered');
 }
 
 function accumulatePiUsage(
@@ -2131,6 +2824,17 @@ function mapPiMessages(
   const summaries: AgentMessage[] = [];
   let open: PiOpenTurn | undefined = carry?.open;
   let nextUserOrdinal = carry?.nextUserOrdinal ?? 0;
+  const correlationCounts = new Map<string, number>();
+  const clientKeyCounts = new Map<string, number>();
+  for (const e of entries) {
+    const correlation = piCollabPromptCorrelation(e.message);
+    if (!correlation) continue;
+    correlationCounts.set(correlation.messageKey, (correlationCounts.get(correlation.messageKey) ?? 0) + 1);
+    if (correlation.clientKey) clientKeyCounts.set(correlation.clientKey, (clientKeyCounts.get(correlation.clientKey) ?? 0) + 1);
+  }
+  const correlationIsUnique = (correlation: { messageKey: string; clientKey?: string }): boolean =>
+    correlationCounts.get(correlation.messageKey) === 1
+    && (!correlation.clientKey || clientKeyCounts.get(correlation.clientKey) === 1);
 
   const summarize = (turn: PiOpenTurn, closed: boolean): AgentMessage | undefined => {
     const last = turn.lastAssistant;
@@ -2179,30 +2883,52 @@ function mapPiMessages(
   };
 
   for (const e of entries) {
-    out.push(...mapPiMessage(e.message, e.index, argsByCallId, e.keyBase, e.entryAt ?? e.messageAt));
-    if (e.message?.role === 'user') {
+    const correlation = piCollabPromptCorrelation(e.message);
+    const skill = piSkillPromptInvocation(e.message);
+    const allowCorrelation = !correlation || correlationIsUnique(correlation);
+    const isUserBoundary = e.message?.role === 'user' || !!correlation || !!skill;
+    const ordinalAnchor = isUserBoundary ? `u${nextUserOrdinal++}` : undefined;
+    out.push(...mapPiMessage(
+      e.message,
+      e.index,
+      argsByCallId,
+      e.keyBase,
+      e.entryAt ?? e.messageAt,
+      allowCorrelation,
+      skill ? ordinalAnchor : undefined,
+    ));
+    if (isUserBoundary) {
       // A later prompt proves the previous run ended even without a terminal
       // stopReason (an abort can leave none behind).
       close(open, true);
+      const userKey = correlation && allowCorrelation
+        ? correlation.messageKey
+        : (skill ? ordinalAnchor! : e.keyBase);
       open = {
-        summaryAnchor: `u${nextUserOrdinal++}`,
-        userKey: e.keyBase,
-        startedAt: e.messageAt ?? e.entryAt,
+        summaryAnchor: correlation
+          ? (allowCorrelation ? correlation.messageKey : e.keyBase)
+          : ordinalAnchor!,
+        userKey,
+        startedAt: correlation?.sentAt ?? skill?.sentAt ?? e.messageAt ?? e.entryAt,
       };
     } else if (e.message?.role === 'assistant') {
       open ??= {};
-      open.lastAssistant = {
-        keyBase: e.keyBase,
-        stopReason: typeof e.message.stopReason === 'string' ? e.message.stopReason : undefined,
-        errored: !!e.message.error,
-        completedAt: e.entryAt,
-        textKey: firstPiAssistantTextKey(e.message, e.keyBase),
-      };
+      const supersededRetry = piAssistantRetryIsSuperseded(e.message);
+      if (!supersededRetry) {
+        open.lastAssistant = {
+          keyBase: e.keyBase,
+          stopReason: typeof e.message.stopReason === 'string' ? e.message.stopReason : undefined,
+          errored: !!e.message.error,
+          completedAt: e.entryAt,
+          textKey: firstPiAssistantTextKey(e.message, e.keyBase),
+        };
+      }
       accumulatePiUsage(open, e.message.usage);
       // Terminal evidence closes the turn immediately; the next user entry
       // opens its own.
-      const terminal = piTerminalStopReason(open.lastAssistant.stopReason) !== undefined
-        || open.lastAssistant.errored;
+      const terminal = !supersededRetry && open.lastAssistant !== undefined
+        && (piTerminalStopReason(open.lastAssistant.stopReason) !== undefined
+          || open.lastAssistant.errored);
       if (terminal) {
         close(open, true);
         open = undefined;
@@ -2233,14 +2959,10 @@ function countJsonlLines(raw: string): number {
  *  file, while summary identity advances only for user turns. */
 function countPiJsonlUserMessages(raw: string): number {
   let count = 0;
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      if (entry?.type === 'message' && entry.message?.role === 'user') count += 1;
-    } catch {
-      // A torn/malformed row is not a durable user turn; the next start/reload applies the same rule.
-    }
+  const rows = activePiJsonlRows(parsePiJsonlRows(raw.split('\n')));
+  for (const row of rows) {
+    const message = piJsonlRowMessage(row.obj);
+    if (message?.role === 'user' || piCollabPromptCorrelation(message) || piSkillPromptInvocation(message)) count += 1;
   }
   return count;
 }
@@ -2288,23 +3010,20 @@ function piUsageTokens(usage: any): { input?: number; output?: number; cacheRead
 function mapPiSessionStats(stats: any): AgentMessage[] {
   if (!stats || typeof stats !== 'object') return [];
   const out: AgentMessage[] = [{ type: 'metadata-update', key: 'sessionStats', value: stats }];
-  const tokens = stats.tokens && typeof stats.tokens === 'object' ? stats.tokens : stats;
-  const tokenCount = {
-    input: firstNumber(tokens.input, tokens.inputTokens, tokens.promptTokens, tokens.totalInputTokens),
-    output: firstNumber(tokens.output, tokens.outputTokens, tokens.completionTokens, tokens.totalOutputTokens),
-    cacheRead: firstNumber(tokens.cacheRead, tokens.cache_read, tokens.cacheReadTokens),
-    cacheWrite: firstNumber(tokens.cacheWrite, tokens.cache_write, tokens.cacheWriteTokens),
-    cost: firstNumber(tokens.cost, tokens.totalCost, tokens.costUsd),
-  };
-  if (Object.values(tokenCount).some((v) => v != null)) out.push({ type: 'token-count', ...tokenCount });
+  const contextUsage = piContextUsageMessage(stats.contextUsage);
+  if (contextUsage) out.push(contextUsage);
   return out;
 }
 
-function firstNumber(...values: unknown[]): number | undefined {
-  for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-  }
-  return undefined;
+/** Map Pi's exact native context-usage snapshot. Session totals are deliberately not accepted here:
+ *  they are cumulative and replay on every stats read, while canonical token-count frames are
+ *  deltas emitted from assistant messages. */
+export function piContextUsageMessage(value: unknown): AgentMessage | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { tokens, contextWindow } = value as { tokens?: unknown; contextWindow?: unknown };
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) return undefined;
+  if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+  return { type: 'metadata-update', key: 'contextUsage', value: { used: tokens, max: contextWindow } };
 }
 
 function runtimeTotalsFromRunSummaries(summaries: AgentMessage[], source: string): AgentMessage | undefined {
@@ -2332,17 +3051,34 @@ function piControlState(dialect: PiDialect, opts: {
    *  auto-connect the bridge → sync. Only then do we advertise `syncAvailable` on a not-yet-bridged
    *  disk row; without it, sync is not something the in-app flow can deliver (→ Take over / Observe). */
   extensionInstalled: boolean;
+  /** A persisted child remains owned by the parent agent run. It is roster-visible, never a second writer. */
+  agentOwned?: boolean;
+  /** False leaves the readable session visible but disables every native writer and bridge handoff. */
+  mutableRuntimeReady?: boolean;
+  runtimeUnavailableReason?: string;
 }): SessionControlState {
-  const drive = opts.driveState === 'driving'
+  const agentOwnedReason = `${dialect.displayName} subagent sessions are owned by their parent and can only be observed.`;
+  const runtimeUnavailableReason = opts.runtimeUnavailableReason
+    ?? `${dialect.displayName} mutable runtime is not ready.`;
+  const drive = opts.mutableRuntimeReady === false
+    ? { supported: false, state: 'unavailable' as const, reason: runtimeUnavailableReason }
+    : opts.agentOwned
+    ? { supported: false, state: 'unavailable' as const, reason: agentOwnedReason }
+    : opts.driveState === 'driving'
     ? { supported: true, state: 'driving' as const }
     : opts.canDrive
       ? { supported: true, state: 'observing' as const }
       : { supported: false, state: 'unavailable' as const, reason: `${dialect.displayName} CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.` };
-  const terminalSync = opts.terminalSyncActive
+  const terminalSync = opts.mutableRuntimeReady === false
+    ? { supported: false, syncAvailable: false, active: false, reason: runtimeUnavailableReason }
+    : opts.agentOwned
+    ? { supported: false, syncAvailable: false, active: false, reason: agentOwnedReason }
+    : opts.terminalSyncActive
     ? {
         supported: true,
         syncAvailable: true,
         active: true,
+        presence: 'shared' as const,
         label: `Synced with ${dialect.displayName} terminal`,
         note: `This ${dialect.displayName} session is connected through the ${PRODUCT_IDENTITY.productName} bridge extension.`,
       }
@@ -2371,6 +3107,7 @@ function piBridgeExtensionInstalled(rt: PiDialectRuntime): boolean {
 // Runs once per adapter instance (see PiEngineAdapter.bridgeEnsured); the dialect's autoinstall env
 // override opts out.
 function ensurePiBridgeExtension(rt: PiDialectRuntime): void {
+  if (!rt.hooks.readiness().ready) return;
   if (/^(0|false|no|off)$/i.test((process.env[rt.dialect.bridgeAutoinstallEnvOverride] ?? '').trim())) return;
   try {
     const inspection = inspectDialectBridgeAsset(rt);
@@ -2384,7 +3121,10 @@ function ensurePiBridgeExtension(rt: PiDialectRuntime): void {
 }
 
 function piTerminalSyncCommand(rt: PiDialectRuntime, file: string, brokerUrl: string, bridgeUsesIntegrationFile = false): string {
-  const resume = `${rt.dialect.bin} --session ${shellQuote(canonicalSessionFile(file))}`;
+  // Use the exact executable qualified by readiness. A dialect-specific override must not produce
+  // a handoff command that falls back to a different, unverified binary on the user's shell PATH.
+  const executable = resolveBin(rt) ?? rt.dialect.bin;
+  const resume = `${shellQuote(executable)} --session ${shellQuote(canonicalSessionFile(file))}`;
   return bridgeUsesIntegrationFile || isDefaultBrokerUrl(brokerUrl)
     ? resume
     : `COSYNCING_BROKER=${shellQuote(brokerUrl)} ${resume}`;
@@ -2606,9 +3346,14 @@ function contentToText(content: unknown): string {
   if (Array.isArray(content))
     return content
       .map((c: any) => (typeof c === 'string' ? c : c?.type === 'text' ? c.text : ''))
-      .join('')
-      .trim();
+      .join('');
   return '';
+}
+
+function contentImageCount(content: unknown): number {
+  return Array.isArray(content)
+    ? content.filter((block: any) => block?.type === 'image').length
+    : 0;
 }
 
 function normalizePiThinkingLevel(value: unknown): string | undefined {
@@ -2618,9 +3363,17 @@ function normalizePiThinkingLevel(value: unknown): string | undefined {
 
 function piThinkingEfforts(model: any): ModelOption['reasoningEfforts'] | undefined {
   if (model?.reasoning !== true) return undefined;
+  const nativeEfforts = Array.isArray(model?.thinking)
+    ? model.thinking
+    : Array.isArray(model?.thinking?.efforts)
+      ? model.thinking.efforts
+      : undefined;
+  const nativeThinking = nativeEfforts
+    ? new Set(nativeEfforts.map((value: unknown) => normalizePiThinkingLevel(value)).filter(Boolean))
+    : undefined;
   const map = model?.thinkingLevelMap && typeof model.thinkingLevelMap === 'object' ? model.thinkingLevelMap : undefined;
   const efforts = PI_THINKING_LEVELS
-    .filter(({ effort }) => map?.[effort] !== null)
+    .filter(({ effort }) => nativeThinking ? nativeThinking.has(effort) : map?.[effort] !== null)
     .map(({ effort, label }) => ({ effort, label }));
   return efforts.length ? efforts : undefined;
 }
@@ -2769,7 +3522,14 @@ function readSessionName(rt: PiDialectRuntime, file: string): string | undefined
   }
 }
 
-function materializePiSessionFile(rt: PiDialectRuntime, file: string, cwd: string, sessionId?: string, title?: string): void {
+function materializePiSessionFile(
+  rt: PiDialectRuntime,
+  file: string,
+  cwd: string,
+  sessionId?: string,
+  title?: string,
+  nativeState?: Pick<PiRpcSessionState, 'model' | 'thinkingLevel'>,
+): void {
   try {
     if (!existsSync(file)) {
       mkdirSync(dirname(file), { recursive: true });
@@ -2785,20 +3545,64 @@ function materializePiSessionFile(rt: PiDialectRuntime, file: string, cwd: strin
       );
     }
     const name = title?.trim();
-    // pi titles sessions through a session_info entry; omp owns its title natively (the durable
-    // `title` slot / set_session_name RPC), so the create-time append is pi-dialect-only.
-    if (rt.dialect.createTimeTitle === 'session_info' && name && readSessionName(rt, file) !== name) {
+    // A zero-turn native process can acknowledge set_session_name and still exit before persisting
+    // it. Materialize only that ACKNOWLEDGED title, using the dialect's own durable row shape.
+    if (name && readSessionName(rt, file) !== name) {
+      const isSessionInfo = rt.dialect.createTimeTitle === 'session_info';
       writeFileSync(
         file,
         JSON.stringify({
-          type: 'session_info',
+          type: isSessionInfo ? 'session_info' : 'title_change',
           id: `cosyncing-name-${Date.now()}`,
           parentId: null,
           timestamp: new Date().toISOString(),
-          name,
+          ...(isSessionInfo ? { name } : { title: name, source: 'user', trigger: 'manual' }),
         }) + '\n',
         { flag: 'a' },
       );
+    }
+    // The same zero-turn gap applies to set_model/set_thinking_level. Persist the native state
+    // returned by get_state so the immediately-following resume process cannot fall back to a
+    // different global default before the first prompt.
+    const selected = piCurrentModelFromNative(nativeState?.model, nativeState?.thinkingLevel);
+    const durable = readSessionSurface(rt, file).currentModel;
+    if (
+      selected?.modelID
+      && (
+        durable?.providerID !== selected.providerID
+        || durable?.modelID !== selected.modelID
+        || durable?.reasoningEffort !== selected.reasoningEffort
+      )
+    ) {
+      const modelEntryId = `cosyncing-model-${Date.now()}`;
+      writeFileSync(
+        file,
+        JSON.stringify({
+          type: 'model_change',
+          id: modelEntryId,
+          parentId: null,
+          timestamp: new Date().toISOString(),
+          provider: selected.providerID,
+          modelId: selected.modelID,
+          model: selected.providerID ? `${selected.providerID}/${selected.modelID}` : selected.modelID,
+          resolvedModelIsFallback: false,
+        }) + '\n',
+        { flag: 'a' },
+      );
+      if (selected.reasoningEffort) {
+        writeFileSync(
+          file,
+          JSON.stringify({
+            type: 'thinking_level_change',
+            id: `cosyncing-thinking-${Date.now()}`,
+            parentId: modelEntryId,
+            timestamp: new Date().toISOString(),
+            thinkingLevel: selected.reasoningEffort,
+            configured: null,
+          }) + '\n',
+          { flag: 'a' },
+        );
+      }
     }
   } catch {
     /* createSession will still return the native path; discovery may pick it up after the first turn */
@@ -2878,18 +3682,98 @@ function safeReaddir(p: string): string[] {
     return [];
   }
 }
-function piSessionFiles(root: string): string[] {
-  const out: string[] = [];
-  for (const entry of safeReaddir(root)) {
-    const full = join(root, entry);
-    const st = statSafe(full);
-    if (!st) continue;
-    if (st.isFile() && entry.endsWith('.jsonl')) out.push(full);
-    else if (st.isDirectory()) {
-      for (const file of safeReaddir(full)) if (file.endsWith('.jsonl')) out.push(join(full, file));
+interface PiSessionFile {
+  file: string;
+  parentFile?: string;
+}
+
+const MAX_PI_SUBAGENT_DEPTH = 16;
+const MAX_PI_SESSION_FILES = 4096;
+
+/**
+ * Discover ordinary Pi/OMP transcripts plus OMP's persisted subagent tree.
+ *
+ * A parent `<dir>/<name>.jsonl` owns children in `<dir>/<name>/<AgentId>.jsonl`;
+ * a child repeats the same layout for its descendants. Only that exact sibling
+ * relationship is traversed. `lstat` keeps symlinked files/directories out, and
+ * fixed depth/file ceilings keep an attacker-controlled session tree bounded.
+ */
+async function discoveryEventLoopTurn(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('Session discovery aborted.');
+  }
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('Session discovery aborted.');
+  }
+}
+
+async function piSessionFiles(root: string, signal?: AbortSignal): Promise<PiSessionFile[]> {
+  const out: PiSessionFile[] = [];
+  let examined = 0;
+  const cooperate = async (): Promise<void> => {
+    examined += 1;
+    if (examined % 32 === 0) await discoveryEventLoopTurn(signal);
+  };
+  const addTree = async (
+    file: string,
+    parentFile: string | undefined,
+    depth: number,
+  ): Promise<void> => {
+    await cooperate();
+    if (out.length >= MAX_PI_SESSION_FILES) return;
+    const st = lstatSafe(file);
+    if (!st?.isFile() || st.isSymbolicLink()) return;
+    out.push({ file, ...(parentFile ? { parentFile } : {}) });
+    if (depth >= MAX_PI_SUBAGENT_DEPTH || out.length >= MAX_PI_SESSION_FILES) return;
+    const childDir = file.slice(0, -'.jsonl'.length);
+    const childDirStat = lstatSafe(childDir);
+    if (!childDirStat?.isDirectory() || childDirStat.isSymbolicLink()) return;
+    for (const name of safeReaddir(childDir).sort()) {
+      if (!name.endsWith('.jsonl') || name.includes('.bak')) continue;
+      await addTree(join(childDir, name), file, depth + 1);
+      if (out.length >= MAX_PI_SESSION_FILES) return;
     }
+  };
+
+  for (const entry of safeReaddir(root)) {
+    await cooperate();
+    const full = join(root, entry);
+    const st = lstatSafe(full);
+    if (!st) continue;
+    if (st.isFile() && !st.isSymbolicLink() && entry.endsWith('.jsonl')) {
+      await addTree(full, undefined, 0);
+    }
+    else if (
+      st.isDirectory()
+      && !st.isSymbolicLink()
+      // A root-level transcript may own its subagent directory directly under the
+      // sessions root. `addTree` already traversed it from the sibling JSONL.
+      && !lstatSafe(`${full}.jsonl`)?.isFile()
+    ) {
+      for (const file of safeReaddir(full).sort()) {
+        if (!file.endsWith('.jsonl') || file.includes('.bak')) continue;
+        await addTree(join(full, file), undefined, 0);
+        if (out.length >= MAX_PI_SESSION_FILES) return out;
+      }
+    }
+    if (out.length >= MAX_PI_SESSION_FILES) return out;
   }
   return out;
+}
+
+/** Exact structural owner for `<parent-without-.jsonl>/<child>.jsonl`. */
+function piParentSessionFile(file: string): string | undefined {
+  const candidate = `${dirname(file)}.jsonl`;
+  const st = lstatSafe(candidate);
+  return st?.isFile() && !st.isSymbolicLink() ? candidate : undefined;
+}
+function lstatSafe(p: string) {
+  try {
+    return lstatSync(p);
+  } catch {
+    return undefined;
+  }
 }
 function statSafe(p: string) {
   try {
@@ -2898,33 +3782,142 @@ function statSafe(p: string) {
     return undefined;
   }
 }
-const HISTORY_SOURCE_REWRITE_PREFIX_BYTES = 1024;
 
-function fileHistorySourceIdentity(path: string): HistorySourceIdentity | undefined {
-  const stat = statSafe(path);
-  if (!stat) return undefined;
-  const prefix = Buffer.alloc(
-    Math.min(HISTORY_SOURCE_REWRITE_PREFIX_BYTES, stat.size),
-  );
-  let prefixBytes = 0;
+/** Native roster identity from the bounded session header prefix. */
+function readSessionNativeId(file: string): string | undefined {
   try {
-    const fd = openSync(path, 'r');
-    try {
-      prefixBytes = readSync(fd, prefix, 0, prefix.length, 0);
-    } finally {
-      closeSync(fd);
+    const st = statSafe(file);
+    if (!st?.isFile()) return undefined;
+    const head = readTextHead(file, Math.min(st.size, 64 * 1024));
+    for (const line of head.split('\n')) {
+      if (!line.trim()) continue;
+      let row: any;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (row?.type !== 'session') continue;
+      const id = typeof row.id === 'string' ? row.id.trim() : '';
+      return id && id.length <= 512 ? id : undefined;
     }
   } catch {
-    return undefined;
+    /* malformed or raced session headers do not earn a native identity */
   }
+  return undefined;
+}
+const HISTORY_SOURCE_REWRITE_PREFIX_BYTES = 1024;
+
+interface PiHistoryFileSnapshot {
+  buffer: Buffer;
+  identity: HistorySourceIdentity;
+}
+
+function piHistoryIdentity(
+  path: string,
+  stat: ReturnType<typeof fstatSync>,
+  prefix: Uint8Array,
+): HistorySourceIdentity {
   return {
     sourceId: `${path}:${stat.dev}:${stat.ino}`,
     revision: `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`,
-    appendPosition: stat.size,
+    appendPosition: Number(stat.size),
     rewriteToken: createHash('sha256')
-      .update(prefix.subarray(0, prefixBytes))
+      .update(prefix)
       .digest('base64url'),
   };
+}
+
+function samePiHistoryStat(
+  left: ReturnType<typeof fstatSync>,
+  right: ReturnType<typeof fstatSync>,
+): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+/** Read bytes, metadata, and rewrite prefix from one descriptor, then prove the path still names
+ *  that descriptor. An atomic rename between byte read and identity capture retries instead of
+ *  binding old correlation/offset state to a replacement inode. */
+function readPiHistoryFileSnapshot(
+  path: string,
+  afterReadForTest?: () => void,
+): PiHistoryFileSnapshot {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const before = fstatSync(fd);
+      if (!before.isFile()) throw new Error('Pi history source is not a regular file');
+      const buffer = Buffer.alloc(before.size);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const bytes = readSync(fd, buffer, offset, buffer.length - offset, offset);
+        if (bytes <= 0) break;
+        offset += bytes;
+      }
+      const after = fstatSync(fd);
+      afterReadForTest?.();
+      const pathStat = statSync(path);
+      if (offset !== buffer.length || !samePiHistoryStat(before, after) || !samePiHistoryStat(after, pathStat)) {
+        continue;
+      }
+      const prefix = buffer.subarray(0, Math.min(HISTORY_SOURCE_REWRITE_PREFIX_BYTES, buffer.length));
+      return { buffer, identity: piHistoryIdentity(path, after, prefix) };
+    } catch (error) {
+      lastError = error;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Pi history source changed while being read');
+}
+
+/** Deterministic seam for the atomic-replacement regression; not re-exported from the package. */
+export function readPiHistoryFileSnapshotForTest(
+  path: string,
+  afterFirstRead: () => void,
+): { raw: string; identity: HistorySourceIdentity } {
+  let invoked = false;
+  const snapshot = readPiHistoryFileSnapshot(path, () => {
+    if (invoked) return;
+    invoked = true;
+    afterFirstRead();
+  });
+  return { raw: snapshot.buffer.toString('utf8'), identity: snapshot.identity };
+}
+
+function fileHistorySourceIdentity(path: string): HistorySourceIdentity | undefined {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const before = fstatSync(fd);
+      if (!before.isFile()) return undefined;
+      const prefix = Buffer.alloc(Math.min(HISTORY_SOURCE_REWRITE_PREFIX_BYTES, before.size));
+      let offset = 0;
+      while (offset < prefix.length) {
+        const bytes = readSync(fd, prefix, offset, prefix.length - offset, offset);
+        if (bytes <= 0) break;
+        offset += bytes;
+      }
+      const after = fstatSync(fd);
+      const pathStat = statSync(path);
+      if (offset !== prefix.length || !samePiHistoryStat(before, after) || !samePiHistoryStat(after, pathStat)) {
+        continue;
+      }
+      return piHistoryIdentity(path, after, prefix);
+    } catch {
+      return undefined;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  return undefined;
 }
 // node:path basename/dirname handle BOTH `/` and `\` on Windows (and `/` on POSIX), so these work
 // for session paths (built with join → native sep) and for cwds reported by Pi on any platform.
@@ -2938,7 +3931,8 @@ function baseDir(p: string): string {
  *  env override, shebang interpreter) so the engine spawns exactly what the gate validated. */
 function resolveBin(rt: PiDialectRuntime): string | null {
   try {
-    return rt.hooks.readiness().executable ?? null;
+    const readiness = rt.hooks.readiness();
+    return readiness.ready ? readiness.executable ?? null : null;
   } catch {
     return null;
   }

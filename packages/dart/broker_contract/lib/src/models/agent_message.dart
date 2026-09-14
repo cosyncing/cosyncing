@@ -732,8 +732,11 @@ final class ArtifactInteractionPolicy {
 
 /// Resolution values carried by a broker `permission-resolved` message.
 ///
-/// `external` means another client of the shared owner settled the request;
-/// the broker deliberately does not reveal that client's approve/reject choice.
+/// `external` means the request was settled without a choice this client can
+/// attribute to a person: either another client of the shared owner answered it
+/// and the broker deliberately does not reveal that client's approve/reject
+/// choice, or it expired unanswered and was failed closed. Neither may be
+/// rendered as a rejection -- nobody rejected anything.
 enum PermissionResolutionDecision {
   approve('approve'),
   approveSession('approve-session'),

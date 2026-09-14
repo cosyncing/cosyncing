@@ -16,6 +16,7 @@ class ListSessionsResponse {
     this.machineId,
     this.generatedAt,
     this.revision,
+    this.complete = true,
   });
 
   /// Creates a [ListSessionsResponse] from a JSON map.
@@ -36,6 +37,22 @@ class ListSessionsResponse {
 
   /// List of sessions.
   final List<SessionInfo> sessions;
+
+  /// Whether [sessions] is the WHOLE roster the broker can see (revision 23).
+  ///
+  /// False while a discovery sweep is still running — the broker bounds how
+  /// long a caller waits for a slow adapter and answers with the legs that have
+  /// landed — and false when a settled sweep did not read every adapter. What
+  /// such a leg returns does not change that: an adapter abandoned at its
+  /// budget contributes the rows of the last sweep that DID read it, which
+  /// cannot mention anything that appeared since. Either way a missing session
+  /// is not an absent one, so an incomplete roster must never be treated as
+  /// authoritative for REMOVAL.
+  ///
+  /// Defaults to true, which is what a pre-revision-23 broker means by omitting
+  /// it: those brokers never answered ahead of a sweep.
+  @JsonKey(defaultValue: true)
+  final bool complete;
 
   /// Converts this [ListSessionsResponse] to a JSON map.
   Map<String, dynamic> toJson() => _$ListSessionsResponseToJson(this);
@@ -91,6 +108,33 @@ class ModelCatalogResponse {
 
   /// Encodes this response.
   Map<String, dynamic> toJson() => _$ModelCatalogResponseToJson(this);
+}
+
+/// Response from `GET /api/agents/:tool/modes`.
+@JsonSerializable()
+class ModeCatalogResponse {
+  /// Creates a pre-session permission-mode catalog response.
+  const ModeCatalogResponse({
+    required this.tool,
+    required this.modes,
+    required this.refreshedAt,
+  });
+
+  /// Decodes a permission-mode catalog response.
+  factory ModeCatalogResponse.fromJson(Map<String, dynamic> json) =>
+      _$ModeCatalogResponseFromJson(json);
+
+  /// Adapter id that owns every option.
+  final String tool;
+
+  /// Exact native approval-mode values.
+  final List<ModeOption> modes;
+
+  /// Broker observation time in epoch milliseconds.
+  final int refreshedAt;
+
+  /// Encodes this response.
+  Map<String, dynamic> toJson() => _$ModeCatalogResponseToJson(this);
 }
 
 /// Response from `POST /api/sessions/:tool/:id/fork`.

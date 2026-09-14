@@ -34,10 +34,13 @@ import {
   OMP_BRIDGE_EMBEDDED_SOURCE,
 } from '@cosyncing/adapter-omp/bridge-asset';
 import { inspectOmpBridgeAsset } from '@cosyncing/adapter-omp';
+import { shippedAdapters } from './shipped-adapters.ts';
+import { agentStateFromChecks } from './setup.ts';
 import { OMP_DIALECT } from '@cosyncing/adapter-omp';
 import {
   bunSpawnResolvedInvocation,
   resolveInvocation,
+  type AgentSetupDiagnosis,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { artifactCacheRoot, resolveArtifactCacheRoot } from '../artifacts/artifact-store.ts';
@@ -110,7 +113,9 @@ import { sanitizeManagedRuntimeOutput } from '../runtime/managed-runtime-state.t
 import {
   awaitServiceState,
   createServiceCommandRunner,
+  contextWithOwnedServiceAgentEnvironment,
   createDurableServiceProvider,
+  serviceAgentConfigurationOverrides,
   serviceAgentDataPathOverrides,
   serviceDefinitionResourceId,
   SERVICE_RESOURCE_IDS,
@@ -130,8 +135,11 @@ import {
   atomicWriteOwnerOnly,
 } from '../security/secure-files.ts';
 import {
+  inspectOmpBridgeReceiptTarget,
   inspectOmpBridgeOwnership,
+  inspectOmpBridgeTargetMigration,
   inspectPiBridgeOwnership,
+  ompBridgeReceiptTargetPrecondition,
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
 import { readSetupTransactionJournal } from './setup-transaction.ts';
@@ -196,6 +204,11 @@ export interface LifecycleBaseOptions {
    * describe a machine with a running host without one existing.
    */
   managedHostEffects?: ReturnType<typeof defaultManagedHostEffects>;
+  /**
+   * Injected omp setup diagnosis, so a suite can describe a machine with a
+   * supported omp without installing one. Default runs the adapter's own.
+   */
+  ompSetupDiagnosis?: (context: SetupDiagnosisContext) => Promise<AgentSetupDiagnosis>;
 }
 
 /** Best-effort, read-only view of the managed Codex app-server daemon used by uninstall planning. */
@@ -237,11 +250,15 @@ export interface LifecycleStatusReport {
     id: string;
     displayName?: string;
     registered: true;
+    /** Static adapter surface; false means Observe-only by design. */
+    supportsCreateSession: boolean | null;
     /** null means an older/unavailable broker did not report the live creation probe. */
     canCreateSession: boolean | null;
     /** Persisted/effective sync configuration where the adapter exposes it (currently Codex). */
     syncEnabled?: boolean;
   }>;
+  /** `null` means nothing answered; unreadable means a broker response could not be decoded. */
+  agentsRead: 'ok' | 'unreadable' | null;
   /**
    * Counts, or why there are none. `'unreadable'` means the broker answered and the answer could not be
    * used; `null` means nothing answered. A reader that treats both as "broker unavailable" reports the
@@ -308,6 +325,12 @@ interface LifecycleEnvironment {
   home: string;
   cacheRoot: string;
   context: SetupDiagnosisContext;
+  /**
+   * `context` with the receipt-owned agent overrides applied — the same view of
+   * the environment the installed service runs with, and the only one an agent
+   * probe may use. The bare `context` is the invoking shell.
+   */
+  agentContext: SetupDiagnosisContext;
   config?: BrokerConfig;
   setupState: ReturnType<typeof readSetupState>;
   install: ReturnType<typeof inspectInstallState>;
@@ -352,11 +375,36 @@ function cacheRoot(options: LifecycleBaseOptions, context: SetupDiagnosisContext
   return configured ? resolveArtifactCacheRoot(configured) : artifactCacheRoot();
 }
 
+/**
+ * The agent-executable overrides are receipt-owned service state, not shell state. Deriving the
+ * EXPECTED service environment from the caller's bare environment made every lifecycle verb read a
+ * healthy service as drifted whenever it ran without `COSYNCING_*_BIN` set — which is every
+ * ordinary shell. Measured: `cosy doctor` reported all service checks passing while `cosy stop`
+ * refused with "missing or drifted", and repair would have rewritten `broker.env` without the
+ * values setup deliberately persisted.
+ *
+ * This used to be a private near-copy of that inheritance and the two did not agree. It read
+ * `<home>/service/broker.env` with a bare `readFileSync` — following symlinks, ignoring mode,
+ * verifying nothing — while doctor and setup required a committed unique `service-environment`
+ * receipt, an owner-only mode and a content hash match. Two consequences, both now closed by
+ * calling the one verified reader instead:
+ *
+ * - a `broker.env` made group-readable or edited stopped being inherited by doctor and setup while
+ *   status, start, stop, repair and uninstall kept inheriting it, so setup planned an omp-bridge
+ *   MOVE out of the operator's directory that repair could not see;
+ * - on Windows the read could not succeed AT ALL. `service/broker.env` is the POSIX layout; a
+ *   Windows install writes `service/windows/versions/<versionKey>/environment.json` and receipts it
+ *   there. The read threw ENOENT, the catch returned the bare context, and no lifecycle verb on
+ *   Windows inherited anything — which means the deadlock the comment below documents, and which
+ *   this inheritance exists to prevent, was never actually fixed on that platform.
+ */
 export function createLifecycleDurableServiceProvider(options: LifecycleBaseOptions): DurableServiceProvider {
   const context = options.context ?? createSetupDiagnosisContext();
   const home = options.home ?? setupStateHome();
   const install = inspectInstallState(home);
-  const dialectEnv = { ...context.env, HOME: context.homeDir };
+  const agentContext = contextWithOwnedServiceAgentEnvironment(context, install, home);
+  const setupState = readSetupState(home);
+  const dialectEnv = { ...agentContext.env, HOME: context.homeDir };
   const piPaths = resolvePiDialectPaths(PI_DIALECT, dialectEnv);
   const ompPaths = resolvePiDialectPaths(OMP_DIALECT, dialectEnv);
   return (options.durableServiceProviderFactory ?? options.systemdProviderFactory ?? createDurableServiceProvider)({
@@ -382,8 +430,8 @@ export function createLifecycleDurableServiceProvider(options: LifecycleBaseOpti
     // setup therefore reads back as a drifted definition — which is the intended signal, and exactly what
     // repair converges by rewriting the unit with the runtime that is executing this command now.
     ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
-    agentExecutableDirectories: serviceAgentExecutableDirectories(context),
-    agentExecutableOverrides: serviceAgentExecutableOverrides(context),
+    agentExecutableDirectories: serviceAgentExecutableDirectories(agentContext),
+    agentExecutableOverrides: serviceAgentExecutableOverrides(agentContext),
     agentDataPathOverrides: serviceAgentDataPathOverrides({
       env: dialectEnv,
       piAgentDir: piPaths.agentDir,
@@ -391,6 +439,7 @@ export function createLifecycleDurableServiceProvider(options: LifecycleBaseOpti
       piSessionsRoot: piPaths.sessionsRoot,
       ompSessionsRoot: ompPaths.sessionsRoot,
     }),
+    agentConfigurationOverrides: serviceAgentConfigurationOverrides(agentContext.env, context.platform),
     // Same reason, same inputs: the service cannot resolve the sidecar from the binary it execs, so status
     // and repair must expect the identical explicit path setup wrote.
     webDir: serviceFlutterWebRoot({
@@ -498,11 +547,17 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
   const provider = isDurableServiceChoice(setupState.serviceChoice)
     ? createLifecycleDurableServiceProvider({ ...options, home, context })
     : undefined;
-  const dialectEnv = { ...context.env, HOME: context.homeDir };
+  // Same reason as the provider above: the omp/Pi agent directories are receipt-owned service
+  // state. Resolving them from the invoking shell made `repair` fire an omp-bridge-move blocker
+  // whose own remediation could not clear it — setup, re-run as instructed, inherits the override
+  // from broker.env, plans nothing, and leaves repair blocked forever.
+  const agentContext = contextWithOwnedServiceAgentEnvironment(context, install, home);
+  const dialectEnv = { ...agentContext.env, HOME: context.homeDir };
   return {
     home,
     cacheRoot: cacheRoot(options, context),
     context,
+    agentContext,
     config,
     setupState,
     install,
@@ -614,8 +669,20 @@ async function awaitEndpointIdentity(options: {
  */
 const SESSION_ROSTER_BODY_LIMIT = 16 * 1024 * 1024;
 
-/** The same roster took 2.8s of the shared 3s probe default, so it was marginal on time as well as size. */
-const SESSION_ROSTER_TIMEOUT_MS = 15_000;
+/**
+ * Adapter discovery is bounded per backend but the aggregate roster can still
+ * cross the shared 3s probe deadline on a real multi-agent installation. The
+ * 2026-09-01 installed pass measured 3.37s for a healthy 7 KiB response.
+ */
+const AGENT_ROSTER_TIMEOUT_MS = 15_000;
+
+/**
+ * Session roster decoding includes adapter refresh work as well as the 5 MiB
+ * response body. The same installed pass measured 19.27s, so 15s falsely
+ * rendered an answering broker as unavailable. Keep a finite command budget,
+ * but leave headroom above that measured valid case.
+ */
+const SESSION_ROSTER_TIMEOUT_MS = 30_000;
 
 /**
  * One authenticated status read.
@@ -676,7 +743,9 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
       env.config?.broker.machineLabel,
       healthHeaders,
     ),
-    authenticatedJson(env, INTERNAL_AGENT_ROSTER_PATH),
+    authenticatedJson(env, INTERNAL_AGENT_ROSTER_PATH, {
+      timeoutMs: AGENT_ROSTER_TIMEOUT_MS,
+    }),
     // The only endpoint here whose response size follows the operator's data rather than the
     // protocol, and so the only one that gets the larger allowance.
     authenticatedJson(env, '/api/sessions', {
@@ -697,11 +766,17 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
           id: row.id,
           ...(typeof row.displayName === 'string' ? { displayName: row.displayName } : {}),
           registered: true,
+          supportsCreateSession: typeof row.supportsCreateSession === 'boolean'
+            ? row.supportsCreateSession
+            : null,
           canCreateSession: typeof row.canCreateSession === 'boolean' ? row.canCreateSession : null,
           ...(typeof row.syncEnabled === 'boolean' ? { syncEnabled: row.syncEnabled } : {}),
         }];
       })
     : [];
+  const agentsRead: LifecycleStatusReport['agentsRead'] = Array.isArray(agentRows)
+    ? 'ok'
+    : agentsRaw.outcome === 'unavailable' ? null : 'unreadable';
   const sessionsBody = sessionsRaw.outcome === 'ok' ? sessionsRaw.json : undefined;
   const sessionsArray = Array.isArray(sessionsBody)
     ? sessionsBody
@@ -724,13 +799,15 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
       : undefined;
   const updates: LifecycleStatusReport['updates'] = updateRows
     ? { pending: updateRows.filter((candidate) => candidate && typeof candidate === 'object'
-      && (candidate as Record<string, unknown>).pending === true).length }
+      && ((candidate as Record<string, unknown>).updateAvailable === true
+        || (candidate as Record<string, unknown>).state === 'pending')).length }
     : updatesRaw.outcome === 'unavailable' ? null : 'unreadable';
   const detailCodes: string[] = [];
   if (!env.install.committed) detailCodes.push(`installation-${env.install.reason}`);
   if (!env.config) detailCodes.push('broker-config-invalid');
   if (isDurableServiceChoice(env.setupState.serviceChoice) && serviceStatus?.active !== 'active') detailCodes.push(`service-${serviceStatus?.active ?? 'unknown'}`);
   if (internal !== 'ready') detailCodes.push(`internal-endpoint-${internal}`);
+  if (agentsRead !== 'ok') detailCodes.push(`agent-roster-${agentsRead ?? 'unavailable'}`);
   return {
     schemaVersion: 2,
     product: PRODUCT_IDENTITY.productName,
@@ -757,6 +834,7 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
     },
     connectivity: { managedExternally: true },
     agents,
+    agentsRead,
     sessions,
     updates,
     detailCodes,
@@ -851,8 +929,26 @@ export async function runServiceCommand(
   }
   try {
     const before = await env.provider.inspect();
-    if (!before.supported || before.definition !== 'current' || before.environment !== 'current') {
-      return commandResult('blocked', 1, 'service-repair-required', 'The owned service is missing or drifted; run cosyncing repair.');
+    // Stopping must not depend on reconcilable drift. The unit is receipt-owned either way, and the
+    // expected agent PATH is derived from the CALLING shell — so a login shell that resolves an
+    // agent through a different-but-equivalent directory reads as 'drifted' while the service is
+    // healthy. Refusing there left the operator unable to stop their own broker, and pointed them
+    // at repair, which would rewrite production config to match whichever shell ran it. Starting is
+    // different: a drifted definition can exec the wrong thing, so start/restart keep the strict
+    // gate. Missing or unsafe still fails closed for every verb.
+    const unusable = (state: DurableServiceStatus['definition']): boolean =>
+      state === 'missing' || state === 'unsafe' || (action !== 'stop' && state !== 'current');
+    if (!before.supported) {
+      return commandResult('blocked', 1, 'service-repair-required',
+        'This platform has no supported durable user service; run cosyncing repair.');
+    }
+    const problems = [
+      ...(unusable(before.definition) ? [`its definition is ${before.definition}`] : []),
+      ...(unusable(before.environment) ? [`its environment is ${before.environment}`] : []),
+    ];
+    if (problems.length > 0) {
+      return commandResult('blocked', 1, 'service-repair-required',
+        `The owned service cannot be used because ${problems.join(' and ')}; run cosyncing repair.`);
     }
     await env.provider[action]();
     // launchd's verbs return before the transition completes (kickstart requests a spawn, kill delivers a
@@ -1053,6 +1149,32 @@ function verifiedPathBackup(home: string, item: InstalledResourceRecord): Uint8A
   return bytes;
 }
 
+/**
+ * Does setup consider omp supported? Asked through the adapter's own
+ * `diagnoseSetup` — the entry point doctor calls — and answered with
+ * `agentStateFromChecks`, the derivation setup applies to that same result.
+ *
+ * Repair cannot afford a full doctor report and does not need one: it wants the
+ * state of a single agent. What it must not do is invent a cheaper test that
+ * disagrees with setup, since disagreeing with setup is the whole defect.
+ * A probe that throws answers `false`, which preserves the repair rather than
+ * blocking it on a failure to ask.
+ */
+async function ompAgentSupported(
+  env: LifecycleEnvironment,
+  injected?: (context: SetupDiagnosisContext) => Promise<AgentSetupDiagnosis>,
+): Promise<boolean> {
+  const diagnose = injected
+    ?? shippedAdapters().find((candidate) => candidate.id === 'omp')?.diagnoseSetup;
+  if (!diagnose) return false;
+  try {
+    const diagnosis = await diagnose(env.agentContext);
+    return agentStateFromChecks('omp', diagnosis.checks) === 'supported';
+  } catch {
+    return false;
+  }
+}
+
 export async function inspectRepair(options: LifecycleBaseOptions): Promise<RepairPlan> {
   const env = await environment(options);
   const actions: RepairPlan['actions'] = [];
@@ -1118,7 +1240,30 @@ export async function inspectRepair(options: LifecycleBaseOptions): Promise<Repa
     });
   }
   const omp = inspectOmpBridgeOwnership(env.install, env.ompAgentDir);
-  if (omp.status === 'missing' && omp.receiptMatchesCurrentPackage) {
+  const ompMigration = inspectOmpBridgeTargetMigration(env.install, env.ompAgentDir);
+  if (ompMigration.status === 'eligible') {
+    // Blocking here tells the operator to run setup. That is only true advice if
+    // setup would actually MOVE the bridge, and setup additionally requires the
+    // omp agent to be `supported`. When it is not — omp uninstalled, below the
+    // minimum version, or without a usable Bun runtime — setup plans nothing,
+    // the migration stays eligible forever, and this blocker aborts every
+    // unrelated repair for good, because one blocker fails the whole command.
+    //
+    // The probe costs a process spawn, which is why it is behind this branch
+    // rather than in `environment()`: a changed agent directory is rare, and
+    // every ordinary repair still pays nothing.
+    if (await ompAgentSupported(env, options.ompSetupDiagnosis)) {
+      blockers.push({
+        detailCode: 'omp-bridge-move-requires-setup',
+        summary: 'The configured omp agent directory changed; run cosyncing setup so its durable transaction can move the receipt-owned bridge and reconcile the service together.',
+      });
+    } else {
+      warnings.push({
+        detailCode: 'omp-bridge-move-awaits-omp',
+        summary: 'The configured omp agent directory changed, but omp is not installed at a supported version with a usable runtime, so setup cannot move the receipt-owned bridge yet. The bridge is preserved and the rest of the repair proceeds.',
+      });
+    }
+  } else if (omp.status === 'missing' && omp.receiptMatchesCurrentPackage) {
     actions.push({
       id: 'omp-bridge.install',
       summary: 'Restore the receipt-owned packaged omp bridge.',
@@ -1131,6 +1276,12 @@ export async function inspectRepair(options: LifecycleBaseOptions): Promise<Repa
       summary: 'Refresh the receipt-owned omp bridge to this build\'s packaged version.',
       legacy: false,
       precondition: piBridgeOwnershipPrecondition(omp),
+    });
+  } else if (omp.receipt && typeof omp.receipt.target === 'string'
+      && resolve(omp.receipt.target) !== resolve(omp.bridge.path)) {
+    blockers.push({
+      detailCode: `omp-bridge-move-${ompMigration.status}`,
+      summary: 'The configured omp agent directory changed, but the old receipt or new target cannot be migrated safely.',
     });
   } else if (!['missing', 'owned-current'].includes(omp.status)) {
     warnings.push({
@@ -1599,12 +1750,17 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
   const env = await environment(options);
   const actions: UninstallPlan['actions'] = [];
   const warnings: UninstallPlan['warnings'] = [];
+  // Both service files absent is not the same as service files we declined to
+  // touch, and the omp-bridge warning below reports the difference.
+  let serviceFilesAbsent = false;
   if (env.provider) {
     const status = await env.provider.inspect();
     const exactPackageFiles = status.definition === 'current' && status.environment === 'current';
+    serviceFilesAbsent = status.definition === 'missing' && status.environment === 'missing';
     if (exactPackageFiles) actions.push({ id: 'service.remove', target: env.provider.definitionPath, legacy: false });
-    else if (status.definition !== 'missing' || status.environment !== 'missing') warnings.push({ detailCode: 'service-modified-preserved', summary: 'Modified or unreceipted service files will be preserved.' });
+    else if (!serviceFilesAbsent) warnings.push({ detailCode: 'service-modified-preserved', summary: 'Modified or unreceipted service files will be preserved.' });
   }
+  const serviceRemovalPlanned = !env.provider || actions.some((action) => action.id === 'service.remove');
   const legacyReceipt = env.install.committed
     ? resource(env.install.state, LEGACY_TAILSCALE_RESOURCE_ID)
     : undefined;
@@ -1637,16 +1793,30 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
     });
   }
   const omp = inspectOmpBridgeOwnership(env.install, env.ompAgentDir);
-  if (omp.status === 'owned-current' || omp.status === 'owned-stale') {
+  const ompReceiptTarget = inspectOmpBridgeReceiptTarget(env.install);
+  if (serviceRemovalPlanned
+      && (ompReceiptTarget.status === 'owned' || ompReceiptTarget.status === 'missing')) {
     actions.push({
       id: 'omp-bridge.remove',
-      target: omp.bridge.path,
+      target: ompReceiptTarget.target!,
       legacy: false,
-      precondition: piBridgeOwnershipPrecondition(omp),
+      precondition: ompBridgeReceiptTargetPrecondition(ompReceiptTarget),
     });
-  } else if (omp.status !== 'missing') {
+  } else if (!serviceRemovalPlanned
+      && (ompReceiptTarget.status === 'owned' || ompReceiptTarget.status === 'missing')) {
     warnings.push({
-      detailCode: `omp-bridge-${omp.status}-preserved`,
+      detailCode: 'omp-bridge-service-preserved',
+      // "Could not be removed safely" is true of a MODIFIED service and false of
+      // an absent one. `serviceRemovalPlanned` is false for both, so the single
+      // message claimed a durable service had resisted removal on hosts where
+      // the unit file and environment were simply not there.
+      summary: serviceFilesAbsent
+        ? 'The receipt-owned omp bridge is preserved because its durable service files are already absent, so uninstall has no service transaction to remove it alongside.'
+        : 'The receipt-owned omp bridge is preserved because the durable service could not be removed safely.',
+    });
+  } else if (ompReceiptTarget.status !== 'not-installed' || omp.status !== 'missing') {
+    warnings.push({
+      detailCode: `omp-bridge-${ompReceiptTarget.status === 'not-installed' ? omp.status : ompReceiptTarget.status}-preserved`,
       summary: 'The modified, unsafe, or incorrectly receipted omp bridge will be preserved.',
     });
   }
@@ -1998,14 +2168,19 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           if (!safeRemoveRegular(inspection.bridge.path, expectedSha256)) throw new Error('pi-bridge-drift');
           retainedResources = retainedResources.filter((item) => item.id !== 'pi-bridge');
         } else if (action.id === 'omp-bridge.remove') {
-          const inspection = inspectOmpBridgeOwnership(inspectInstallState(env.home), env.ompAgentDir);
-          const allowed = inspection.status === 'owned-current' || inspection.status === 'owned-stale';
+          if (env.provider && !completed.includes('service.remove')) {
+            throw new Error('omp-bridge-service-still-installed');
+          }
+          const inspection = inspectOmpBridgeReceiptTarget(inspectInstallState(env.home));
+          const allowed = inspection.status === 'owned' || inspection.status === 'missing';
           if (!allowed || !action.precondition
-              || piBridgeOwnershipPrecondition(inspection) !== action.precondition) {
+              || ompBridgeReceiptTargetPrecondition(inspection) !== action.precondition) {
             throw new Error('omp-bridge-drift');
           }
-          const expectedSha256 = inspection.bridge.actualSha256 ?? OMP_BRIDGE_EMBEDDED_SHA256;
-          if (!safeRemoveRegular(inspection.bridge.path, expectedSha256)) throw new Error('omp-bridge-drift');
+          const expectedSha256 = inspection.actualSha256
+            ?? inspection.receipt?.ownership.installedSha256
+            ?? OMP_BRIDGE_EMBEDDED_SHA256;
+          if (!safeRemoveRegular(inspection.target!, expectedSha256)) throw new Error('omp-bridge-drift');
           retainedResources = retainedResources.filter((item) => item.id !== 'omp-bridge');
         } else if (action.id.startsWith('agent-skill.remove.')) {
           const targetId = action.id.slice('agent-skill.remove.'.length);
@@ -2187,8 +2362,6 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
     if (env.install.committed) {
       const piAfter = inspectPiBridgeAsset(env.piAgentDir);
       if (piAfter.status === 'missing') retainedResources = retainedResources.filter((item) => item.id !== 'pi-bridge');
-      const ompAfter = inspectOmpBridgeAsset(env.ompAgentDir);
-      if (ompAfter.status === 'missing') retainedResources = retainedResources.filter((item) => item.id !== 'omp-bridge');
       for (const target of env.agentSkills) {
         if (inspectAgentSkill(target).status === 'missing') {
           retainedResources = retainedResources.filter((item) => item.id !== target.resourceId);

@@ -12,6 +12,19 @@ import 'package:broker_client/src/upload_offset_mismatch_exception.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:dio/dio.dart';
 
+/// How long a create may take before the client stops waiting for it.
+///
+/// The Dio client carries no default timeout, so without this a create that
+/// the broker or the native agent never answers left the launch page showing
+/// "This page will open the session when it is ready" forever: the page's
+/// failure and Retry UI exist, but nothing ever threw to reach them.
+///
+/// Sized above the server's own ceilings rather than picked for feel. The
+/// slowest bounded step is starting a managed host -- the Cline Hub allows
+/// itself 30s, Kilo 20s -- and a create may pay that plus the native create
+/// on top, so this leaves generous headroom while still ending the wait.
+const Duration createSessionReceiveTimeout = Duration(seconds: 90);
+
 /// Pure-Dart REST client for the cosyncing broker.
 ///
 /// Uses Dio for HTTP requests. No Flutter dependency.
@@ -577,6 +590,7 @@ class BrokerClient {
     String? directory,
     String? title,
     SessionCurrentModel? model,
+    String? permissionMode,
   }) async {
     final body = <String, dynamic>{};
     if (directory != null) body['directory'] = directory;
@@ -590,10 +604,14 @@ class BrokerClient {
           'reasoningEffort': model.reasoningEffort,
       };
     }
+    if (permissionMode != null && permissionMode.isNotEmpty) {
+      body['permissionMode'] = permissionMode;
+    }
 
     final response = await _post<Map<String, dynamic>>(
       _resolver.createSessionEndpoint(tool),
       data: body,
+      receiveTimeout: createSessionReceiveTimeout,
     );
     return CreateSessionResponse.fromJson(response);
   }
@@ -604,6 +622,14 @@ class BrokerClient {
       _resolver.agentModelsEndpoint(tool),
     );
     return ModelCatalogResponse.fromJson(response);
+  }
+
+  /// Loads the capability-driven pre-session permission modes for [tool].
+  Future<ModeCatalogResponse> listAgentModes(String tool) async {
+    final response = await _get<Map<String, dynamic>>(
+      _resolver.agentModesEndpoint(tool),
+    );
+    return ModeCatalogResponse.fromJson(response);
   }
 
   /// Renames a session.
@@ -1371,12 +1397,21 @@ class BrokerClient {
   }
 
   /// Wraps a Dio POST request, converting [DioException] to [BrokerException].
-  Future<T> _post<T>(String path, {Object? data}) async {
+  Future<T> _post<T>(
+    String path, {
+    Object? data,
+    Duration? receiveTimeout,
+  }) async {
     try {
       final response = await _dio.post<T>(
         path,
         data: data,
-        options: Options(headers: _resolver.jsonHeaders),
+        // A null `receiveTimeout` leaves Dio's own default in place, so every
+        // caller that does not ask for a bound is unchanged.
+        options: Options(
+          headers: _resolver.jsonHeaders,
+          receiveTimeout: receiveTimeout,
+        ),
       );
       return response.data as T;
     } on DioException catch (e) {

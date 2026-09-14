@@ -1027,6 +1027,7 @@ class InMemorySessionDriveIntentStore implements SessionDriveIntentStore {
     required String brokerProfileId,
     required String tool,
     required String sessionId,
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
   }) async {
     intents[_key(tool, sessionId)] = SessionDriveProvenanceKind.appCreated;
   }
@@ -1200,6 +1201,29 @@ class InMemorySessionOutboxRepository implements SessionOutboxRepository {
       (message) => message.copyWith(
         status: SessionOutboxMessageStatus.failed,
         lastError: error,
+        updatedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  @override
+  Future<void> markResending(String clientMessageId) {
+    return _update(
+      clientMessageId,
+      (message) => message.copyWith(
+        status: SessionOutboxMessageStatus.sending,
+        updatedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  @override
+  Future<void> markStillInFlight(String clientMessageId) {
+    return _update(
+      clientMessageId,
+      (message) => message.copyWith(
+        status: SessionOutboxMessageStatus.retryable,
+        attemptCount: message.attemptCount > 0 ? message.attemptCount - 1 : 0,
         updatedAt: DateTime.now(),
       ),
     );

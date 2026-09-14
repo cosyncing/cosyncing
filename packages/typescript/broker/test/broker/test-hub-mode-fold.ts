@@ -1099,6 +1099,10 @@ await parkedMutableCase('C22', 'resume', 'live');
   check('E1 patched title rides the rename broadcast', seen.at(-1) === 'new name', `seen=${seen.join(',')}`);
   mc.broadcastSession(mc.conn.info); // any later status-flip broadcast
   check('E2 later broadcasts can no longer resurrect the old title', seen.at(-1) === 'new name' && !seen.includes('old name'), `seen=${seen.join(',')}`);
+  hub.patchSessionInfoWhere((i) => i.tool === 'opencode' && i.id === 's6', { title: '' });
+  hub.broadcastSessionWhere((i) => i.tool === 'opencode' && i.id === 's6', (i) => i);
+  mc.broadcastSession(mc.conn.info);
+  check('E3 an accepted native title clear survives later broadcasts', seen.at(-1) === '', `seen=${seen.join(',')}`);
 }
 
 // ── F: refreshExternalSession folds a #resume rival when the terminal becomes the owner ──────────
@@ -1118,7 +1122,7 @@ await parkedMutableCase('C22', 'resume', 'live');
   const liveInfo: SessionInfo = {
     ...info('s8', 'live'),
     tool: 'codex',
-    control: { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true } },
+    control: { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' } },
   } as SessionInfo;
   const resumeConn = fakeConn(resumeInfo);
   const liveConn = fakeConn(liveInfo);
@@ -1170,7 +1174,7 @@ await parkedMutableCase('C22', 'resume', 'live');
   const liveInfo: SessionInfo = {
     ...info('s9', 'live'),
     tool: 'codex',
-    control: { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true } },
+    control: { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' } },
   } as SessionInfo;
   registry.register({
     id: 'codex', displayName: 'Codex', capabilities: {} as any,

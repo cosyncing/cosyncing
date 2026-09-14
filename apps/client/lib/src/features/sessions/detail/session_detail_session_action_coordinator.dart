@@ -35,7 +35,7 @@ extension _SessionDetailSessionActions on SessionDetailController {
         return false;
       }
 
-      if (state.agentActions?.canRenameNative != true) {
+      if (state.agentActions?.canRenameDisplay != true) {
         const lead = FailureLead.renameUnsupported;
         const refusal = SessionActionRefusal.renameUnsupported;
         state = state.copyWith(

@@ -153,11 +153,19 @@ class _ComposerBottomBar extends StatelessWidget {
     // composer read like a debug console. The advertised label is preferred but
     // NOT trusted: it comes straight from broker JSON and real brokers ship
     // labels that embed the id ("Opus · claude-opus-4-8"), so it is sanitized
-    // first, then derived from the id, then generic. The full id and the effort
-    // both live in the tooltip.
+    // before falling back to the generic label. The client never derives a
+    // product name from an id; the full id and effort live in the tooltip.
+    // Prefer the catalog entry, then the session's OWN reported label, before
+    // giving up. The catalog is fetched per session and is empty for a moment
+    // after a reload, so keying the bar solely off it made the composer forget
+    // the model it had just been showing: measured in the browser, the chip
+    // read
+    // "Qwen3 4B (local chat comp…" before a reload and the generic "Model"
+    // after, while the status page and the context pair both still knew the
+    // model. The session list already resolves its label the same way, in
+    // `session_list_presentation.dart`.
     final modelLabel =
-        _humanModelLabel(option?.label, rawModelID) ??
-        _shortModelLabel(rawModelID) ??
+        _humanModelLabel(option?.label ?? effectiveModel?.label, rawModelID) ??
         l10n.sessionComposerModelGenericLabel;
     final effortValue = effectiveModel?.reasoningEffort;
     final effortLabel = efforts
@@ -178,6 +186,22 @@ class _ComposerBottomBar extends StatelessWidget {
         break;
       }
     }
+    // Same rule the model chip above already follows, for the same measured
+    // reason. Keying the control solely off the advertised catalog made the
+    // composer forget the mode it had just been showing: an adapter that does
+    // not re-advertise its vocabulary after a reload leaves `modes` empty, and
+    // the whole control disappeared even though the session still knew which
+    // mode it was in -- browser-measured on Cline, whose composer showed
+    // `Ask permission` in one run and nothing at all in the next.
+    //
+    // The label falls back to the selected value itself, which is a native mode
+    // id and therefore true, rather than to the generic word. Picking still
+    // requires a catalog: there is nothing to choose from without one.
+    final showMode = modes.isNotEmpty || selectedPermissionMode != null;
+    final permissionModeLabel =
+        modeOption?.label ??
+        selectedPermissionMode ??
+        l10n.sessionPermissionModeFallback;
     final detached =
         connectionStatus == SessionDetailConnectionStatus.disconnected ||
         connectionStatus == SessionDetailConnectionStatus.closed;
@@ -196,8 +220,9 @@ class _ComposerBottomBar extends StatelessWidget {
               onPressed: enabled && models.isNotEmpty
                   ? () => unawaited(_pickModelAndEffort(context))
                   : null,
+              readOnly: !enabled,
             ),
-          if (showModel && (agents.isNotEmpty || modes.isNotEmpty))
+          if (showModel && (agents.isNotEmpty || showMode))
             const _ComposerPickerDot(),
           // Agent/mode control (e.g. opencode build/plan): advertised-data
           // only — absent when the adapter advertises no agents.
@@ -209,19 +234,20 @@ class _ComposerBottomBar extends StatelessWidget {
               compact: collapsed,
               onSelected: onAgentSelected,
             ),
-          if (agents.isNotEmpty && modes.isNotEmpty) const _ComposerPickerDot(),
-          if (modes.isNotEmpty)
+          if (agents.isNotEmpty && showMode) const _ComposerPickerDot(),
+          if (showMode)
             _ComposerPickerButton(
               key: const Key('session-detail-permission-selector'),
               icon: Icons.shield_outlined,
               // The bar shows the bare mode label (icon + status dot when
               // collapsed); the tooltip carries what the mode applies to.
-              label: modeOption?.label ?? l10n.sessionPermissionModeFallback,
-              tooltip: l10n.sessionPermissionModeTooltip,
+              label: permissionModeLabel,
+              tooltip: l10n.sessionPermissionModeTooltip(permissionModeLabel),
               compact: collapsed,
-              onPressed: enabled
+              onPressed: enabled && modes.isNotEmpty
                   ? () => unawaited(_pickPermissionMode(context))
                   : null,
+              readOnly: !enabled,
             ),
           // Information, not an action, so it stays left of the action
           // cluster. Renders nothing when the agent advertises no context
@@ -291,6 +317,7 @@ class _ComposerIconButton extends StatelessWidget {
   final Widget icon;
   final String tooltip;
   final VoidCallback? onPressed;
+
   final Key? buttonKey;
   final bool isSelected;
   final Color? selectedColor;
@@ -323,6 +350,7 @@ class _ComposerPickerButton extends StatelessWidget {
     required this.label,
     required this.tooltip,
     required this.onPressed,
+    required this.readOnly,
     this.compact = false,
     super.key,
   });
@@ -331,6 +359,17 @@ class _ComposerPickerButton extends StatelessWidget {
   final String label;
   final String tooltip;
   final VoidCallback? onPressed;
+
+  /// Whether the SESSION cannot be written to, as opposed to this control
+  /// merely having nothing to offer.
+  ///
+  /// `onPressed == null` conflates the two, and the tooltip used to read the
+  /// disabled state as read-only and say so. Measured on the installed
+  /// client: a reasonix session that had published no model catalog showed
+  /// "Read-only for this session." on a session that was accepting prompts
+  /// the whole time -- and B5/B6 make the control VISIBLE in exactly that
+  /// case, so the false sentence is what those fixes newly exposed.
+  final bool readOnly;
 
   /// Icon-only rendering with a status dot (permission at narrow width).
   final bool compact;
@@ -397,9 +436,12 @@ class _ComposerPickerButton extends StatelessWidget {
             ],
           );
     return Tooltip(
-      message: interactive
-          ? tooltip
-          : '$tooltip\n${l10n.sessionComposerPickerReadOnly}',
+      // Only a genuinely read-only session earns the read-only sentence. An
+      // empty catalog says nothing about whether the session can be written
+      // to, so it says nothing extra at all rather than something untrue.
+      message: !interactive && readOnly
+          ? '$tooltip\n${l10n.sessionComposerPickerReadOnly}'
+          : tooltip,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 220),
         child: TextButton(

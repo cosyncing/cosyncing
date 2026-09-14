@@ -3322,7 +3322,16 @@ async function exerciseTransactionalStartupFailure(
     const diagnostics: CodexAttachDiagnostic[] = [];
     const adapter = new CodexAdapter({
       reportAttachDiagnostic: (event) => diagnostics.push(event),
-      resumeStartupTimeoutMs: 80,
+      // Must exceed the fake child's INTERPRETER boot time, not just its reply
+      // latency. At 80ms a loaded machine timed out at the initialize stage
+      // before the child ran its first statement, which broke this family two
+      // ways: the timeout cases lost their markers (SIGTERM landed before the
+      // handler was installed, so the child died 143 instead of 0), and the
+      // three REJECTION cases silently stopped testing their subject -- an
+      // initialize timeout satisfies the looser assertions, so they reported
+      // "codex initialize timed out" and still passed. The timeout cases still
+      // time out here because the fake never answers them at all.
+      resumeStartupTimeoutMs: 2_000,
       resumeProcessStopTimeoutMs: 500,
       scanCodexTuiPresence: async () => fakeTuiScan(),
     });
@@ -3351,6 +3360,20 @@ async function exerciseTransactionalStartupFailure(
       fallback.conn.info.control?.drive.state === 'observing' &&
       joinCommand.includes('resume --remote');
     await hub.dispose();
+    // Every case must fail at the stage it names. Without this the family is
+    // vacuous under load: a slow child times out at INITIALIZE, and the looser
+    // assertions below accept that, so `resume-timeout` and
+    // `resume-internal-reject` would report a passing test of a stage they
+    // never reached.
+    const expectedMessage: Record<TransactionalStartupFailure, string> = {
+      'initialize-timeout': 'codex initialize timed out',
+      'resume-timeout': 'codex thread/resume timed out',
+      'resume-reject': 'native session is not resumable',
+      'resume-internal-reject': 'transient native internal error',
+      'resume-active-writer': 'active writer',
+    };
+    const stageOk = thrown instanceof Error &&
+      thrown.message.includes(expectedMessage[failure]);
     const rejectedTypeOk = failure === 'resume-reject'
       ? isNativeSessionUnresumableError(thrown)
       : failure === 'resume-active-writer'
@@ -3364,6 +3387,7 @@ async function exerciseTransactionalStartupFailure(
     return [
       rejectedTypeOk &&
         refusalCodeOk &&
+        stageOk &&
         ownersAfterFailure === 0 &&
         pendingAfterFailure === 0 &&
         markers.some((event) => event.kind === 'stdio-spawned') &&
@@ -3371,7 +3395,7 @@ async function exerciseTransactionalStartupFailure(
         exitEvent?.pendingRpcCount === 0 &&
         failedStage?.message != null &&
         fallbackUsable,
-      `failure=${failure} error=${thrown instanceof Error ? thrown.name + ':' + thrown.message : String(thrown)} owners=${ownersAfterFailure} pending=${pendingAfterFailure} markers=${JSON.stringify(markers)} exit=${JSON.stringify(exitEvent)} fallback=${fallback.conn.info.attachMode}/${fallback.conn.info.control?.drive.state} join=${joinCommand}`,
+      `failure=${failure} stageOk=${stageOk} error=${thrown instanceof Error ? thrown.name + ':' + thrown.message : String(thrown)} owners=${ownersAfterFailure} pending=${pendingAfterFailure} markers=${JSON.stringify(markers)} exit=${JSON.stringify(exitEvent)} fallback=${fallback.conn.info.attachMode}/${fallback.conn.info.control?.drive.state} join=${joinCommand}`,
     ];
   }));
 }

@@ -425,6 +425,10 @@ String _toolLabel(AppLocalizations l10n, String tool) =>
       'opencode' => l10n.sessionRosterAgentOpenCode,
       'pi' => l10n.sessionRosterAgentPi,
       'omp' => l10n.sessionRosterAgentOmp,
+      'reasonix' => l10n.sessionRosterAgentReasonix,
+      'grok' => l10n.sessionRosterAgentGrok,
+      'cline' => l10n.sessionRosterAgentCline,
+      'kilo' => l10n.sessionRosterAgentKilo,
       // The backend id and the product name differ here, so the fallback below
       // would render the command (`agy`) where every other row renders a name.
       'agy' => l10n.sessionRosterAgentAntigravity,

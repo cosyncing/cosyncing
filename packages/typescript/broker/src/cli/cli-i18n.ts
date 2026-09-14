@@ -93,6 +93,7 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'The durable service agent environment matches the bounded PATH, detected executable directories, and explicit overrides.': '持久服务智能体环境与受限 PATH、检测到的可执行文件目录及显式覆盖项一致。',
   'The durable service agent environment does not match the bounded PATH and overrides for the currently detected executables.': '持久服务智能体环境与当前检测到的可执行文件所需的受限 PATH 和覆盖项不一致。',
   'The running broker did not report agent creation readiness.': '正在运行的 broker 未报告智能体创建会话的就绪状态。',
+  'Back up or relocate the existing extension, then rerun `cosyncing setup`.': '请先备份或移走现有扩展，然后重新运行 `cosyncing setup`。',
   'Rebuild the durable service environment.': '重新生成持久服务环境。',
   'Reconcile the service PATH with the currently installed agent executables.': '根据当前安装的智能体可执行文件修复服务 PATH。',
   'Reconcile the durable service PATH and restart the broker.': '修复持久服务 PATH 并重启 broker。',
@@ -184,6 +185,7 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'One or more managed runtimes have a pending update.': '一个或多个托管运行时有待安装的更新。',
   'Managed runtime versions are current.': '托管运行时均为当前版本。',
   'Reconcile managed runtime versions when sessions are safe to restart.': '请在会话可安全重启时修复托管运行时版本。',
+  'Reconcile managed runtimes when their sessions are safe to restart; the evidence names each runtime, what changed, and how many threads block it.': '请在相关会话可安全重启时修复托管运行时；证据中已列出每个运行时、变更内容以及阻塞的线程数量。',
   'Managed runtime update status is unavailable.': '托管运行时更新状态不可用。',
   'Retry managed runtime diagnosis.': '请重试托管运行时诊断。',
   'No Tokdash is answering, so usage reporting is not configured.': '没有 Tokdash 在响应，用量报告尚未配置。',
@@ -324,6 +326,9 @@ export function translateDoctorTextToChinese(source: string): string | undefined
   if (exact) return exact;
   const dynamic =
     replaceMatch(source, /^(.*) is present and verified\.$/, (asset) => `${asset} 存在且已验证。`)
+    ?? replaceMatch(source, /^Installed (.*) bridge matches the packaged asset\.$/, (name) => `已安装的 ${name} bridge 与发行包资源一致。`)
+    ?? replaceMatch(source, /^The (.*) bridge extension is not installed\.$/, (name) => `未安装 ${name} bridge 扩展。`)
+    ?? replaceMatch(source, /^Install the packaged (.*) bridge through setup\.$/, (name) => `请通过 setup 安装发行包中的 ${name} bridge。`)
     ?? replaceMatch(
       source,
       /^([a-z0-9]+-[a-z0-9]+) is not a supported cosyncing broker host\.$/,
@@ -379,6 +384,7 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     ?? replaceMatch(source, /^(.*) does not provide setup diagnosis\.$/, (name) => `${name} 未提供 setup 诊断。`)
     ?? replaceMatch(source, /^(.*) diagnosis failed safely\.$/, (name) => `${name} 诊断已安全失败。`)
     ?? replaceMatch(source, /^(.*) is registered in the running broker and can create sessions\.$/, (name) => `${name} 已在运行中的 broker 注册，并且可以创建会话。`)
+    ?? replaceMatch(source, /^(.*) is registered without a session-creation surface\.$/, (name) => `${name} 已注册，但不提供会话创建接口。`)
     ?? replaceMatch(source, /^(.*) is registered in the running broker, but creation readiness was not reported\.$/, (name) => `${name} 已在运行中的 broker 注册，但未报告创建会话的就绪状态。`)
     ?? replaceMatch(source, /^(.*) is installed and registered, but the durable service PATH is stale\.$/, (name) => `${name} 已安装并注册，但持久服务 PATH 已过期。`)
     ?? replaceMatch(source, /^(.*) has a current durable service PATH, but its runtime or shared server is unavailable\.$/, (name) => `${name} 的持久服务 PATH 正确，但其运行时或共享服务器不可用。`)
@@ -424,13 +430,20 @@ const en: CliMessages = {
     service: (report) => `Service: ${report.service.mode} / ${report.service.active} / ${report.service.enabled}`,
     listener: (report) => `Broker listener: ${report.listener.url} / loopback only / ${report.listener.ready ? 'ready' : 'unreachable'}`,
     connectivity: () => 'Connectivity: managed externally by the operator',
-    agents: (report) => `Agents (registered): ${report.agents.length ? report.agents.map((agent) => {
-      const readiness = agent.canCreateSession === true
+    agents: (report) => `Agents (registered): ${report.agentsRead === null
+      ? 'broker unavailable'
+      : report.agentsRead === 'unreadable'
+        ? `broker answered but the agent roster could not be read; run ${PRODUCT_IDENTITY.primaryBinary} logs`
+        : report.agents.length ? report.agents.map((agent) => {
+      const readiness = agent.supportsCreateSession === false
+        ? 'observe only'
+        : agent.canCreateSession === true
         ? 'create ready'
         : agent.canCreateSession === false ? 'create unavailable' : 'create unknown';
       const sync = agent.syncEnabled === undefined ? '' : `; sync ${agent.syncEnabled ? 'enabled' : 'disabled'}`;
       return `${agent.displayName ?? agent.id} [${readiness}${sync}]`;
-    }).join(', ') : 'broker unavailable'}${report.agents.some((agent) => agent.canCreateSession === false)
+    }).join(', ') : 'none'}${report.agentsRead === 'ok' && report.agents.some((agent) =>
+      agent.supportsCreateSession !== false && agent.canCreateSession === false)
       ? `; run ${PRODUCT_IDENTITY.primaryBinary} doctor for creation setup guidance`
       : ''}`,
     // "unreadable" is never folded into "broker unavailable": the broker answered, and telling the
@@ -552,13 +565,20 @@ const zhHans: CliMessages = {
     service: (report) => `服务：${localizeCliStatusValue(report.service.mode, 'zh-Hans')} / ${localizeCliStatusValue(report.service.active, 'zh-Hans')} / ${localizeCliStatusValue(report.service.enabled, 'zh-Hans')}`,
     listener: (report) => `Broker 监听：${report.listener.url} / 仅限回环 / ${report.listener.ready ? '就绪' : '无法连接'}`,
     connectivity: () => '连接：由操作者在 cosyncing 外部管理',
-    agents: (report) => `已注册智能体：${report.agents.length ? report.agents.map((agent) => {
-      const readiness = agent.canCreateSession === true
+    agents: (report) => `已注册智能体：${report.agentsRead === null
+      ? 'broker 不可用'
+      : report.agentsRead === 'unreadable'
+        ? `broker 有响应，但智能体列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} logs`
+        : report.agents.length ? report.agents.map((agent) => {
+      const readiness = agent.supportsCreateSession === false
+        ? '仅观察'
+        : agent.canCreateSession === true
         ? '可创建会话'
         : agent.canCreateSession === false ? '无法创建会话' : '创建状态未知';
       const sync = agent.syncEnabled === undefined ? '' : `；同步${agent.syncEnabled ? '已启用' : '已禁用'}`;
       return `${agent.displayName ?? agent.id} [${readiness}${sync}]`;
-    }).join(', ') : 'broker 不可用'}${report.agents.some((agent) => agent.canCreateSession === false)
+    }).join(', ') : '无'}${report.agentsRead === 'ok' && report.agents.some((agent) =>
+      agent.supportsCreateSession !== false && agent.canCreateSession === false)
       ? `；会话创建配置请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor 检查`
       : ''}`,
     sessions: (report) => `会话：${report.sessions === null

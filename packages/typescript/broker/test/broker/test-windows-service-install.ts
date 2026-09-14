@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
@@ -42,10 +43,13 @@ import {
   windowsPriorVersionReceiptTarget,
   windowsServiceVersionResources,
 } from '../../src/installation/windows-task-scheduler-provider.ts';
-import type { InstalledResourceRecord } from '../../src/installation/install-state.ts';
+import { committedInstallState, type InstalledResourceRecord } from '../../src/installation/install-state.ts';
+import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
 import {
   brokerServiceEnvironmentEntries,
   createDurableServiceProvider,
+  parseReceiptOwnedServiceAgentEnvironment,
+  serviceAgentConfigurationOverrides,
   durableServiceProviderId,
   SERVICE_RESOURCE_IDS,
 } from '../../src/installation/service-manager.ts';
@@ -75,6 +79,93 @@ function check(name: string, ok: boolean, detail?: string): void {
       && paths.activeManifestPath === 'C:\\Users\\Fixture\\.cosyncing\\service\\windows\\active-install.json'
       && paths.applicationPath === 'C:\\Users\\Fixture\\.cosyncing\\service\\windows\\versions\\0.5.0-build_7\\cosyncing'
       && paths.environmentPath.endsWith('\\0.5.0-build_7\\environment.json'));
+}
+
+{
+  const stateHome = 'C:\\Users\\Fixture\\.cosyncing';
+  const versionKey = 'version-preserved';
+  const paths = windowsServiceInstallPaths(stateHome, versionKey);
+  const environment = `${JSON.stringify(windowsServiceEnvironment([
+    ['COSYNCING_CLINE_BIN', 'C:\\Tools\\cline-3.0.60\\cline.exe'],
+    ['COSYNCING_CLINE_PROVIDER', 'openai-compatible'],
+    ['COSYNCING_CLINE_MODEL', 'fixture-model'],
+  ]), null, 2)}\n`;
+  const state = committedInstallState();
+  state.resources.push({
+    id: 'service-windows-version', kind: 'other', target: paths.versionRoot,
+    ownership: { proof: 'receipt', marker: versionKey },
+  }, {
+    id: 'service-environment', kind: 'environment-file', target: paths.environmentPath,
+    ownership: {
+      proof: 'receipt', marker: versionKey,
+      installedSha256: createHash('sha256').update(environment).digest('hex'),
+    },
+  });
+  const base = createSetupDiagnosisContext({
+    platform: 'win32', homeDir: 'C:\\Users\\Fixture', env: { HOME: 'C:\\Users\\Fixture', PATH: '' },
+  });
+  const parsed = parseReceiptOwnedServiceAgentEnvironment(
+    base, { committed: true, path: `${stateHome}\\install-state.json`, state }, stateHome, Buffer.from(environment),
+  );
+  const explicitLowercase = serviceAgentConfigurationOverrides({
+    cosyncing_cline_provider: 'openrouter',
+    cosyncing_cline_model: 'replacement-model',
+  }, 'win32');
+  check('Windows receipt parsing accepts canonical hash-bound input and configuration keys case-insensitively',
+    parsed?.COSYNCING_CLINE_BIN === 'C:\\Tools\\cline-3.0.60\\cline.exe'
+      && explicitLowercase.COSYNCING_CLINE_PROVIDER === 'openrouter'
+      && explicitLowercase.COSYNCING_CLINE_MODEL === 'replacement-model');
+
+  const edited = parseReceiptOwnedServiceAgentEnvironment(
+    base, { committed: true, path: `${stateHome}\\install-state.json`, state }, stateHome,
+    Buffer.from(environment.replace('fixture-model', 'edited-model')),
+  );
+  check('same-target same-marker edited Windows environment cannot supply authority', edited === undefined);
+
+  const duplicate = structuredClone(state);
+  duplicate.resources.push(structuredClone(duplicate.resources.find((resource) => resource.id === 'service-environment')!));
+  const duplicated = parseReceiptOwnedServiceAgentEnvironment(
+    base, { committed: true, path: `${stateHome}\\install-state.json`, state: duplicate }, stateHome,
+    Buffer.from(environment),
+  );
+  check('duplicate Windows environment receipts fail closed', duplicated === undefined);
+}
+
+{
+  // The shape of the defect the lifecycle verbs used to have: they read
+  // `<stateHome>/service/broker.env` on EVERY platform and parsed it as JSON
+  // when the platform was win32. A Windows install never writes that path, so
+  // the read threw ENOENT and no verb inherited anything. Pinned here at the
+  // pure boundary, which is the part that can run on a POSIX host: a receipt
+  // naming the POSIX layout carries no Windows authority even when its bytes
+  // and hash are otherwise perfect.
+  const stateHome = 'C:\\Users\\Fixture\\.cosyncing';
+  const versionKey = 'posix-shaped-target';
+  const paths = windowsServiceInstallPaths(stateHome, versionKey);
+  const environment = `${JSON.stringify(windowsServiceEnvironment([
+    ['COSYNCING_CLINE_BIN', 'C:\\Tools\\cline-3.0.60\\cline.exe'],
+  ]), null, 2)}\n`;
+  const digest = createHash('sha256').update(environment).digest('hex');
+  const base = createSetupDiagnosisContext({
+    platform: 'win32', homeDir: 'C:\\Users\\Fixture', env: { HOME: 'C:\\Users\\Fixture', PATH: '' },
+  });
+  const withTarget = (target: string): Record<string, string> | undefined => {
+    const state = committedInstallState();
+    state.resources.push({
+      id: 'service-windows-version', kind: 'other', target: paths.versionRoot,
+      ownership: { proof: 'receipt', marker: versionKey },
+    }, {
+      id: 'service-environment', kind: 'environment-file', target,
+      ownership: { proof: 'receipt', marker: versionKey, installedSha256: digest },
+    });
+    return parseReceiptOwnedServiceAgentEnvironment(
+      base, { committed: true, path: `${stateHome}\\install-state.json`, state }, stateHome,
+      Buffer.from(environment),
+    );
+  };
+  check('a Windows service-environment receipt naming the POSIX broker.env supplies no authority',
+    withTarget(`${stateHome}\\service\\broker.env`) === undefined
+      && withTarget(paths.environmentPath)?.COSYNCING_CLINE_BIN === 'C:\\Tools\\cline-3.0.60\\cline.exe');
 }
 
 {
@@ -662,6 +753,7 @@ function check(name: string, ok: boolean, detail?: string): void {
   await provider.setEnabled(true);
   const reenabled = await provider.inspect();
   const resources = provider.installedResources();
+  const environmentReceipt = resources.find((resource) => resource.id === 'service-environment');
   const captured = await provider.captureTransactionState();
   await provider.start();
   const running = await provider.inspect();
@@ -679,7 +771,9 @@ function check(name: string, ok: boolean, detail?: string): void {
       && restored.definition === 'current' && restored.active === 'inactive'
       && resources.map((resource) => resource.id).join(',')
         === 'service-task-scheduler,service-task-scheduler-sid-folder,service-task-scheduler-shared-folder,'
-          + 'service-windows-bootstrap,service-windows-active-install,service-windows-version,service-environment',
+          + 'service-windows-bootstrap,service-windows-active-install,service-windows-version,service-environment'
+      && environmentReceipt?.ownership.installedSha256
+        === createHash('sha256').update(provider.expectedEnvironment()).digest('hex'),
     operations.join(','));
   const command = provider.logsCommand({ follow: true, lines: 42 });
   check('Task Scheduler provider keeps a stable bootstrap action and delegates bounded log following to it',

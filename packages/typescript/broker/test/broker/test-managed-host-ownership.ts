@@ -116,6 +116,8 @@ function fakeEffects(options: {
   childDiesOn?: 'SIGTERM' | 'SIGKILL';
   selfPid?: number;
   listeners?: Map<number, ManagedHostLocation>;
+  ancestry?: 'yes' | 'no' | 'unknown';
+  ancestryScript?: Array<'yes' | 'no' | 'unknown'>;
   /**
    * What a pid NOT in the table reads as. Defaults to 'unknown' — the answer
    * that authorizes nothing — so a suite has to say so explicitly when it means
@@ -138,6 +140,7 @@ function fakeEffects(options: {
   const signals: Array<{ pid: number; signal: string }> = [];
   const spawns: ManagedHostLaunch[] = [];
   const script = options.identityScript ? [...options.identityScript] : undefined;
+  const ancestryScript = options.ancestryScript ? [...options.ancestryScript] : undefined;
   let clock = 1_000;
   let child: { exitCode: number | null } | null = null;
   let sleeps = 0;
@@ -151,6 +154,15 @@ function fakeEffects(options: {
       if (script) return script.length > 1 ? script.shift()! : script[0]!;
       const identity = table.get(pid);
       return identity ? running(identity) : (options.missingProcess ?? PROCESS_UNKNOWN);
+    },
+    descendsFrom: (pid, ancestorPid) => {
+      if (ancestryScript) {
+        return ancestryScript.length > 1 ? ancestryScript.shift()! : ancestryScript[0]!;
+      }
+      if (pid === ancestorPid) return 'yes';
+      const parent = options.descendants?.get(pid);
+      if (parent !== undefined) return parent === ancestorPid ? 'yes' : 'no';
+      return options.ancestry ?? 'unknown';
     },
     spawn: (launch) => {
       spawns.push(launch);
@@ -189,12 +201,6 @@ function fakeEffects(options: {
       return { expired, cancel: () => clearTimeout(timer) };
     },
     selfPid: () => options.selfPid ?? 111_111,
-    descendsFrom: (pid, ancestorPid) => {
-      if (pid === ancestorPid) return 'yes';
-      const parent = options.descendants?.get(pid);
-      if (parent === undefined) return 'unknown';
-      return parent === ancestorPid ? 'yes' : 'no';
-    },
   };
   return { effects, signals, spawns, table };
 }
@@ -380,12 +386,259 @@ try {
         && signals.some((s) => s.signal === 'SIGTERM') && signals.some((s) => s.signal === 'SIGKILL'),
       JSON.stringify({ outcome, signals }));
   }
+  {
+    // The unready child is a LAUNCHER and its server holds the address. Stopping
+    // only the launcher and then clearing the record is how a merely slow start
+    // becomes a permanent one: the server keeps the port and nothing is left
+    // that could ever reap it. Measured on Linux against `cline/bin/cline`, a
+    // Node resolver that `spawnSync`s the platform binary — 25464 held forever
+    // and cline stuck at `canCreateSession: false`.
+    const launcherPid = 5154;
+    const serverPid = 5164;
+    const launcher = { pid: launcherPid, start: '2', boot: BOOT, comm: 'node' };
+    const server = { pid: serverPid, start: '3', boot: BOOT, comm: 'cline' };
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[launcherPid, launcher], [serverPid, server]]),
+      spawnPid: launcherPid,
+      ancestry: 'yes',
+      childDiesOn: 'SIGTERM',
+      missingProcess: PROCESS_ABSENT,
+      onSignal: (pid, signal, live) => { if (signal === 'SIGTERM') live.delete(pid); },
+    });
+    const { store, records } = memoryStore();
+    // Absent for the pre-flight probe — otherwise the address reads as occupied
+    // and nothing is ever spawned — then the server, which is what the abandon
+    // path has to find.
+    let locates = 0;
+    const outcome = await startManagedHost(
+      plan({
+        ready: async () => false,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(serverPid)),
+        readyTimeoutMs: 300,
+        readyPollMs: 100,
+      }),
+      effects,
+      store,
+    );
+    check('an unready launcher takes its proven server down with it, leaving no orphan holding the address',
+      outcome.action === 'start-failed' && outcome.detailCode === 'host-not-ready-in-time'
+        && signals.some((s) => s.pid === launcherPid)
+        && signals.some((s) => s.pid === serverPid)
+        && records.size === 0,
+      JSON.stringify({ outcome, signals, records: [...records.values()] }));
+  }
+  {
+    // Same shape, but the server will not die. The record must SURVIVE and must
+    // name the server rather than the launcher: it is the only thing that
+    // authorizes a later stop, and pointing it at the launcher would aim that
+    // stop at a process that is already gone.
+    const launcherPid = 5155;
+    const serverPid = 5165;
+    const launcher = { pid: launcherPid, start: '4', boot: BOOT, comm: 'node' };
+    const server = { pid: serverPid, start: '5', boot: BOOT, comm: 'cline' };
+    const { effects } = fakeEffects({
+      identities: new Map([[launcherPid, launcher], [serverPid, server]]),
+      spawnPid: launcherPid,
+      ancestry: 'yes',
+      // The launcher dies on the first signal; the server refuses every one, so
+      // the surviving record below can only be the server's doing.
+      childDiesOn: 'SIGTERM',
+      missingProcess: PROCESS_ABSENT,
+      onSignal: (pid, signal, live) => { if (pid === launcherPid && signal === 'SIGTERM') live.delete(pid); },
+    });
+    const { store, records } = memoryStore();
+    // Absent for the pre-flight probe — otherwise the address reads as occupied
+    // and nothing is ever spawned — then the server, which is what the abandon
+    // path has to find.
+    let locates = 0;
+    const outcome = await startManagedHost(
+      plan({
+        ready: async () => false,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(serverPid)),
+        readyTimeoutMs: 300,
+        readyPollMs: 100,
+      }),
+      effects,
+      store,
+    );
+    const record = records.get(AGENT);
+    check('a surviving server keeps its ownership record, repointed off the launcher onto itself',
+      outcome.action === 'start-failed' && outcome.detailCode === 'host-not-ready-in-time'
+        && record?.pid === serverPid && record.start === server.start,
+      JSON.stringify({ outcome, record }));
+  }
+  {
+    // The mirror case: the SERVER dies and the launcher refuses. The record was
+    // repointed onto the server before either signal, so leaving it there would
+    // name a dead pid and strand the live launcher — the same leak from the
+    // other side.
+    const launcherPid = 5156;
+    const serverPid = 5166;
+    const launcher = { pid: launcherPid, start: '6', boot: BOOT, comm: 'node' };
+    const server = { pid: serverPid, start: '7', boot: BOOT, comm: 'cline' };
+    const { effects } = fakeEffects({
+      identities: new Map([[launcherPid, launcher], [serverPid, server]]),
+      spawnPid: launcherPid,
+      ancestry: 'yes',
+      missingProcess: PROCESS_ABSENT,
+      onSignal: (pid, signal, live) => { if (pid === serverPid && signal === 'SIGTERM') live.delete(pid); },
+    });
+    const { store, records } = memoryStore();
+    let locates = 0;
+    const outcome = await startManagedHost(
+      plan({
+        ready: async () => false,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(serverPid)),
+        readyTimeoutMs: 300,
+        readyPollMs: 100,
+      }),
+      effects,
+      store,
+    );
+    const record = records.get(AGENT);
+    check('a surviving launcher takes the record back when its server is the one that died',
+      outcome.action === 'start-failed'
+        && record?.pid === launcherPid && record.start === launcher.start,
+      JSON.stringify({ outcome, record }));
+  }
+  {
+    // `terminate` re-proves between SIGTERM and SIGKILL, and that proof has to be
+    // IDENTITY, not liveness. The server dies on our SIGTERM and the OS hands its
+    // pid straight to somebody else; a bare "is something at this pid" would
+    // escalate onto the stranger. Nothing may be signalled at that pid twice.
+    const launcherPid = 5157;
+    const serverPid = 5167;
+    const launcher = { pid: launcherPid, start: '8', boot: BOOT, comm: 'node' };
+    const server = { pid: serverPid, start: '9', boot: BOOT, comm: 'cline' };
+    const stranger = { pid: serverPid, start: '999999', boot: BOOT, comm: 'someone-elses-work' };
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[launcherPid, launcher], [serverPid, server]]),
+      spawnPid: launcherPid,
+      ancestry: 'yes',
+      missingProcess: PROCESS_ABSENT,
+      onSignal: (pid, signal, live) => {
+        // Our server dies and the number is immediately reused.
+        if (pid === serverPid && signal === 'SIGTERM') live.set(serverPid, stranger);
+      },
+    });
+    const { store } = memoryStore();
+    let locates = 0;
+    await startManagedHost(
+      plan({
+        ready: async () => false,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(serverPid)),
+        readyTimeoutMs: 300,
+        readyPollMs: 100,
+      }),
+      effects,
+      store,
+    );
+    check('a server pid recycled between SIGTERM and SIGKILL never receives the SIGKILL',
+      signals.filter((s) => s.pid === serverPid).length === 1
+        && !signals.some((s) => s.pid === serverPid && s.signal === 'SIGKILL'),
+      JSON.stringify({ signals }));
+  }
+  {
+    // A launcher that DAEMONISES — spawn and exit, rather than `spawnSync` and
+    // block — trips `childGone()` before readiness. Ancestry dies with it, so the
+    // proof has to have been taken during the wait; without that the server keeps
+    // the address and the record is dropped, which is the orphan again.
+    const launcherPid = 5158;
+    const serverPid = 5168;
+    const launcher = { pid: launcherPid, start: '10', boot: BOOT, comm: 'node' };
+    const server = { pid: serverPid, start: '11', boot: BOOT, comm: 'cline' };
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[launcherPid, launcher], [serverPid, server]]),
+      spawnPid: launcherPid,
+      ancestry: 'yes',
+      // Alive for the first polls so the adoption probe can prove descent, then
+      // gone — the daemonising hand-off.
+      childExitsAfter: 12,
+      missingProcess: PROCESS_ABSENT,
+      onSignal: (pid, signal, live) => { if (signal === 'SIGTERM') live.delete(pid); },
+    });
+    const { store, records } = memoryStore();
+    let locates = 0;
+    const outcome = await startManagedHost(
+      plan({
+        ready: async () => false,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(serverPid)),
+        readyTimeoutMs: 5_000,
+        readyPollMs: 10,
+      }),
+      effects,
+      store,
+    );
+    check('a daemonising launcher does not strand the server it handed the address to',
+      outcome.action === 'start-failed' && outcome.detailCode === 'host-exited-during-start'
+        && signals.some((s) => s.pid === serverPid)
+        && records.size === 0,
+      JSON.stringify({ outcome, signals, records: [...records.values()] }));
+  }
 
 
   // ── start: what the readiness barrier is allowed to conclude ───────────────
   //
   // `ready()` asks about an ADDRESS. Treating that as an answer about OUR CHILD
   // is the mistake these four cases exist to make impossible.
+  {
+    // npm launchers keep running while a native child owns the socket. A
+    // complete ancestry proof promotes the durable record to the listener.
+    const wrapperPid = 5159;
+    const listenerPid = 5169;
+    const wrapper = { pid: wrapperPid, start: '8', boot: BOOT, comm: 'node' };
+    const listener = { pid: listenerPid, start: '9', boot: BOOT, comm: 'kilo' };
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[wrapperPid, wrapper], [listenerPid, listener]]),
+      spawnPid: wrapperPid,
+      ancestry: 'yes',
+    });
+    const { store, records } = memoryStore();
+    let locates = 0;
+    const outcome = await startManagedHost(
+      plan({
+        ready: async () => locates > 0,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(listenerPid)),
+        observe: async () => ({ port: 59999, version: '7.4.23' }),
+      }),
+      effects,
+      store,
+    );
+    const record = records.get(AGENT);
+    check('a proven native listener descendant replaces its npm launcher ownership record',
+      outcome.action === 'started' && outcome.pid === listenerPid && outcome.servingProven === true
+        && record?.pid === listenerPid && record.start === listener.start
+        && record.evidence.port === 59999 && record.evidence.version === '7.4.23'
+        && signals.length === 0,
+      JSON.stringify({ outcome, record, signals }));
+  }
+  {
+    const wrapperPid = 5179;
+    const listenerPid = 5189;
+    const wrapper = { pid: wrapperPid, start: '18', boot: BOOT, comm: 'node' };
+    const listener = { pid: listenerPid, start: '19', boot: BOOT, comm: 'kilo' };
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[wrapperPid, wrapper], [listenerPid, listener]]),
+      spawnPid: wrapperPid,
+      ancestryScript: ['yes', 'unknown'],
+      childDiesOn: 'SIGTERM',
+      missingProcess: PROCESS_ABSENT,
+      onSignal: (pid, signal, live) => { if (pid === wrapperPid && signal === 'SIGTERM') live.delete(pid); },
+    });
+    const { store, records } = memoryStore();
+    let locates = 0;
+    const outcome = await startManagedHost(
+      plan({ ready: async () => locates > 0, locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(listenerPid)) }),
+      effects,
+      store,
+    );
+    check('a descendant relation that changes during adoption never claims or signals the listener',
+      outcome.action === 'already-serving'
+        && records.size === 0
+        && signals.length > 0
+        && signals.every((entry) => entry.pid === wrapperPid),
+      JSON.stringify({ outcome, records: records.size, signals }));
+  }
   {
     // A stranger's host wins the address during our launch window. Ours must not
     // be claimed on its readiness, and the stranger must not be touched.
@@ -1023,36 +1276,52 @@ try {
       attempts.join(','));
   }
   {
-    // An agent that is not INSTALLED describes a host with nothing to launch, and that reaches the
-    // supervisor on every tick. Counting those as restart attempts spent the budget on a host that never
-    // existed and then warned, once a minute, that a `kimi web` host "keeps failing to stay up" on a
-    // machine where setup's own preflight had already reported Kimi as missing. Absence is not failure:
-    // it declines, spawns nothing, journals nothing, and -- the property that matters -- never runs out
-    // of budget, because a budget spent here is a budget denied to a host that could really be restarted.
+    // An agent that is not INSTALLED describes a host with nothing to launch, and
+    // that reaches the supervisor on every tick. Counting those as restart
+    // attempts spent the budget on a host that never existed and then warned,
+    // once a minute, that a `kimi web` host "keeps failing to stay up" on a
+    // machine where setup's own preflight had already reported the agent as
+    // missing. Absence is not failure: it declines, spawns nothing, and never
+    // runs out of budget, because a budget spent here is a budget denied to a
+    // host that could really be restarted. The tick AFTER installation is what
+    // proves the budget survived rather than merely going unread.
     const ledger = managedHostRestartLedger();
+    const listeners = new Map([[59999, HOST_ABSENT]]);
+    const identities = new Map<number, HostProcessIdentity>([[
+      6010,
+      { pid: 6010, start: '6010', boot: BOOT, comm: 'host' },
+    ]]);
     const { effects, spawns } = fakeEffects({
-      identities: new Map(), missingProcess: PROCESS_ABSENT,
-      listeners: new Map([[59999, HOST_ABSENT]]),
+      identities, listeners, spawnPid: 6010, missingProcess: PROCESS_ABSENT,
     });
     const { store } = memoryStore();
-    const seen: string[] = [];
-    for (let round = 0; round < 8; round += 1) {
-      const outcome = await recoverManagedHost(
-        backend({
-          isAvailable: async () => false,
-          describeManagedHost: async () => ({
-            identityKey: KEY,
-            locator: { kind: 'tcp-port' as const, port: 59999 },
-            readyTimeoutMs: 300,
-            stopGraceMs: 100,
-          }),
-        }) as never,
-        effects, store, ledger, AUTHORIZED);
-      seen.push(outcome.action === 'declined' ? (outcome as { reason: string }).reason : outcome.action);
+    let launchable = false;
+    const optional = backend({
+      isAvailable: async () => {
+        if (spawns.length === 0) return false;
+        listeners.set(59999, hostAt(6010));
+        return true;
+      },
+      describeManagedHost: async () => ({
+        identityKey: KEY,
+        locator: { kind: 'tcp-port' as const, port: 59999 },
+        launch: launchable ? { command: '/fixture/bin/host', args: ['web'] } : null,
+        readyTimeoutMs: 300,
+        stopGraceMs: 100,
+      }),
+    });
+    const inactive: string[] = [];
+    for (let round = 0; round < 6; round += 1) {
+      const outcome = await recoverManagedHost(optional as never, effects, store, ledger, AUTHORIZED);
+      inactive.push(outcome.action === 'declined' ? outcome.reason : outcome.action);
     }
-    check('an agent with nothing to launch is declined as an absence, and never exhausts its budget',
-      seen.every((entry) => entry === 'not-launchable') && spawns.length === 0,
-      seen.join(','));
+    launchable = true;
+    const started = await recoverManagedHost(optional as never, effects, store, ledger, AUTHORIZED);
+    check('an absent optional managed CLI consumes no recovery budget and can start on the next tick after installation',
+      inactive.every((entry) => entry === 'not-launchable')
+        && started.action === 'recovered'
+        && spawns.length === 1,
+      JSON.stringify({ inactive, started, spawns: spawns.length }));
   }
   {
     // The supervisor is behind the same gate as the start: an unauthorized agent
@@ -1720,12 +1989,37 @@ try {
     records.set(AGENT, ownership());
     const outcome = await startManagedHost(
       plan({ ready: async () => true, locate: async () => hostAt(HOST_PID) }), effects, store);
-    check('our own serving host is never reaped as its own predecessor',
+  check('our own serving host is never reaped as its own predecessor',
       outcome.action === 'already-serving'
         && (outcome as { verdict: string }).verdict === 'owned'
         && signals.length === 0 && spawns.length === 0
         && records.get(AGENT)?.pid === HOST_PID,
       JSON.stringify({ outcome, signals, record: records.get(AGENT)?.pid }));
+  }
+  {
+    // Crash window: the broker wrote the wrapper record, then died before it
+    // could replace it with the native listener identity. A later broker may
+    // adopt only the still-proven descendant; it must not reap the wrapper.
+    const wrapperPid = 8858;
+    const listenerPid = 8859;
+    const wrapper = { pid: wrapperPid, start: '80', boot: BOOT, comm: 'node' };
+    const listener = { pid: listenerPid, start: '81', boot: BOOT, comm: 'kilo' };
+    const { effects, signals, spawns } = fakeEffects({
+      identities: new Map([[wrapperPid, wrapper], [listenerPid, listener]]),
+      ancestry: 'yes',
+    });
+    const { store, records } = memoryStore();
+    store.write(ownership({ ...wrapper }));
+    const outcome = await startManagedHost(
+      plan({ ready: async () => true, locate: async () => hostAt(listenerPid) }),
+      effects,
+      store,
+    );
+    check('a serving native descendant closes the durable launcher-record crash window',
+      outcome.action === 'already-serving' && outcome.verdict === 'owned'
+        && records.get(AGENT)?.pid === listenerPid
+        && signals.length === 0 && spawns.length === 0,
+      JSON.stringify({ outcome, signals, spawns: spawns.length, record: records.get(AGENT) }));
   }
   {
     // A predecessor that refuses to die on a path where something else is already
@@ -2066,7 +2360,13 @@ try {
       // host resolves somewhere else, which is the operator-shell case the whole
       // identity scoping exists for.
       const shellIdentities = managedShipped.map((a) => a.managedHostIdentity!({
-        env: { KIMI_CODE_HOME: '/elsewhere/.kimi-code', COSYNCING_DSH_BASE_URL: 'http://dsh-host.example:9999' },
+        env: {
+          KILO_URL: 'http://127.0.0.1:5097',
+          KILO_DATA_DIR: '/elsewhere/kilo',
+          KIMI_CODE_HOME: '/elsewhere/.kimi-code',
+          COSYNCING_DSH_BASE_URL: 'http://dsh-host.example:9999',
+          COSYNCING_CLINE_PROFILE_DIR: '/elsewhere/cline-managed',
+        },
         homeDir: '/fixture/home',
       }));
       check('an operator shell that names a host resolves a different identity',

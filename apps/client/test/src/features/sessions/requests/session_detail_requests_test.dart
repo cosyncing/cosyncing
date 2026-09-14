@@ -1444,6 +1444,15 @@ void main() {
           findsOneWidget,
         );
         expect(find.text('Approved'), findsOneWidget);
+        // And nothing beside it says the opposite. The outcome badge reports
+        // THIS client's own submission, whose initial state is `pending`, so a
+        // request answered anywhere else used to render "Approved" above the
+        // buttons and "Pending" below them. Measured on the installed client.
+        expect(
+          find.text('Pending'),
+          findsNothing,
+          reason: 'a resolved request is not also pending',
+        );
       },
     );
 

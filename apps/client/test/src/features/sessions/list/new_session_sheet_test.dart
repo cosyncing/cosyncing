@@ -120,6 +120,160 @@ void main() {
     expect(fake.createCalls, 0);
   });
 
+  testWidgets('immediate New propagates an exact advertised permission mode', (
+    tester,
+  ) async {
+    final fake = _FakeBrokerClient(
+      agents: const [
+        _AgentFixture(
+          'codex',
+          'Codex',
+          canSelectPermissionModeAtCreation: true,
+        ),
+      ],
+      modes: const {
+        'codex': [
+          ModeOption(value: 'ask', label: 'Ask permission'),
+          ModeOption(value: 'full-access', label: 'Full access'),
+        ],
+      },
+    );
+    await tester.pumpWidget(_host(fake));
+    await tester.tap(find.byKey(const Key('open-project-new')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const Key('new-session-permission-codex-ready-default')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Full access').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-session-submit')));
+    await tester.pumpAndSettle();
+
+    expect(fake.createdPermissionMode, 'full-access');
+  });
+
+  testWidgets('permission modes survive a populated model catalog', (
+    tester,
+  ) async {
+    // Measured in the browser on v38: Reasonix, which has NO model selector,
+    // renders a permission-mode row; Cline and Grok, which do have one, render
+    // none — Cline advertising ask/auto/plan and getting no control at all. The
+    // only structural difference from the passing case above is that this agent
+    // has a non-empty model catalog, so that is what this pins down.
+    final fake = _FakeBrokerClient(
+      agents: const [
+        _AgentFixture(
+          'cline',
+          'Cline',
+          canSelectPermissionModeAtCreation: true,
+        ),
+      ],
+      catalogs: {
+        'cline': [
+          _model('qwen3:4b', 'qwen3:4b', provider: 'openai-compatible'),
+        ],
+      },
+      modes: const {
+        'cline': [
+          ModeOption(value: 'ask', label: 'Ask permission'),
+          ModeOption(value: 'auto', label: 'Approve for me'),
+          ModeOption(value: 'plan', label: 'Plan'),
+        ],
+      },
+    );
+    await tester.pumpWidget(_host(fake));
+    await tester.tap(find.byKey(const Key('open-project-new')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('new-session-permission-cline-ready-default')),
+      findsOneWidget,
+      reason: 'an agent advertising modes must offer them alongside a model',
+    );
+
+    // The browser sequence is agent -> MODEL -> look for the mode row, and
+    // it is after picking a model that the row goes missing there. Reproduce
+    // that order.
+    await tester.tap(_modelDropdown());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('qwen3:4b').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('new-session-permission-cline-ready-default')),
+      findsOneWidget,
+      reason: 'choosing a model must not remove the permission-mode control',
+    );
+  });
+
+  testWidgets('a failing model catalog does not take the modes with it', (
+    tester,
+  ) async {
+    // B4 candidate: `_selectTool` awaits loadModels(tool) and only then
+    // loadModes(tool), with nothing between them. If the model catalog throws,
+    // does the mode catalog still load? The two are independent server reads
+    // and a mode vocabulary the broker will happily serve should not be lost
+    // because a different endpoint failed.
+    final fake = _FakeBrokerClient(
+      agents: const [
+        _AgentFixture(
+          'cline',
+          'Cline',
+          canSelectPermissionModeAtCreation: true,
+        ),
+      ],
+      failCatalogsRemaining: 1,
+      modes: const {
+        'cline': [
+          ModeOption(value: 'ask', label: 'Ask permission'),
+          ModeOption(value: 'auto', label: 'Approve for me'),
+        ],
+      },
+    );
+    await tester.pumpWidget(_host(fake));
+    await tester.tap(find.byKey(const Key('open-project-new')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('new-session-permission-cline-ready-default')),
+      findsOneWidget,
+      reason: 'a model-catalog failure must not suppress the mode control',
+    );
+  });
+
+  testWidgets('scheduled New hides permission modes it cannot preserve', (
+    tester,
+  ) async {
+    final fake = _FakeBrokerClient(
+      agents: const [
+        _AgentFixture(
+          'codex',
+          'Codex',
+          canSelectPermissionModeAtCreation: true,
+        ),
+      ],
+      modes: const {
+        'codex': [ModeOption(value: 'ask', label: 'Ask permission')],
+      },
+    );
+    await tester.pumpWidget(_host(fake));
+    await tester.tap(find.byKey(const Key('open-project-new')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('new-session-permission-codex-ready-default')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('new-session-start')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Repeat daily').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text(en.sessionPermissionModeSheetTitle), findsNothing);
+  });
+
   testWidgets('immediate submit hands off once to page-level creation', (
     tester,
   ) async {
@@ -817,6 +971,48 @@ void main() {
     },
   );
 
+  testWidgets(
+    'observe-only Cline is absent from the create sheet without crashing',
+    (
+      tester,
+    ) async {
+      final fake = _FakeBrokerClient(
+        agents: const [
+          _AgentFixture('codex', 'Codex'),
+          _AgentFixture('cline', 'Cline', canCreateSession: false),
+        ],
+      );
+      await tester.pumpWidget(_host(fake));
+      await tester.tap(find.byKey(const Key('open-project-new')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Codex'), findsWidgets);
+      expect(find.text('Cline'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'observe-only Kilo Code is absent from the create sheet without crashing',
+    (
+      tester,
+    ) async {
+      final fake = _FakeBrokerClient(
+        agents: const [
+          _AgentFixture('codex', 'Codex'),
+          _AgentFixture('kilo', 'Kilo Code', canCreateSession: false),
+        ],
+      );
+      await tester.pumpWidget(_host(fake));
+      await tester.tap(find.byKey(const Key('open-project-new')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Codex'), findsWidgets);
+      expect(find.text('Kilo Code'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('retired explicit selection is shown and rejected', (
     tester,
   ) async {
@@ -856,6 +1052,8 @@ void main() {
         _AgentFixture('opencode', 'OpenCode'),
         _AgentFixture('pi', 'Pi'),
         _AgentFixture('omp', 'omp'),
+        _AgentFixture('reasonix', 'Reasonix'),
+        _AgentFixture('grok', 'Grok Build'),
       ],
       catalogs: {
         'codex': [_model('codex-model', 'Codex model')],
@@ -865,6 +1063,16 @@ void main() {
         ],
         'pi': [_model('pi-model', 'Pi model', provider: 'pi-provider')],
         'omp': [_model('omp-model', 'omp model', provider: 'omp-provider')],
+        'reasonix': [
+          _model(
+            'reasonix-model',
+            'Reasonix model',
+            provider: 'reasonix-provider',
+          ),
+        ],
+        'grok': [
+          _model('grok-4.6', 'Grok 4.6', provider: 'xai'),
+        ],
       },
     );
     await tester.pumpWidget(_host(fake));
@@ -877,6 +1085,8 @@ void main() {
       'OpenCode': 'MiniMax',
       'Pi': 'Pi model',
       'omp': 'omp model',
+      'Reasonix': 'Reasonix model',
+      'Grok Build': 'Grok 4.6',
       'Codex': 'Codex model',
     }.entries) {
       await tester.tap(find.text(currentTool).first);
@@ -1216,6 +1426,8 @@ AgentInfo _agent([
   String id = 'codex',
   String displayName = 'Codex',
   bool canSelectModelAtCreation = true,
+  bool canCreateSession = true,
+  bool canSelectPermissionModeAtCreation = false,
 ]) => AgentInfo(
   id: id,
   displayName: displayName,
@@ -1230,8 +1442,9 @@ AgentInfo _agent([
     supportsModelSwitch: true,
     permissionGranularity: PermissionGranularity.perSession,
   ),
-  canCreateSession: true,
+  canCreateSession: canCreateSession,
   canSelectModelAtCreation: canSelectModelAtCreation,
+  canSelectPermissionModeAtCreation: canSelectPermissionModeAtCreation,
   canRenameNative: false,
   canFork: false,
   canClone: false,
@@ -1243,11 +1456,15 @@ class _AgentFixture {
     this.id,
     this.displayName, {
     this.canSelectModelAtCreation = true,
+    this.canCreateSession = true,
+    this.canSelectPermissionModeAtCreation = false,
   });
 
   final String id;
   final String displayName;
   final bool canSelectModelAtCreation;
+  final bool canCreateSession;
+  final bool canSelectPermissionModeAtCreation;
 }
 
 ModelOption _model(
@@ -1284,6 +1501,7 @@ final class _FakeBrokerClient extends BrokerClient {
     this.failAgentList = false,
     this.agents = const [_AgentFixture('codex', 'Codex')],
     Map<String, List<ModelOption>>? catalogs,
+    this.modes = const {},
   }) : catalogs =
            catalogs ??
            {
@@ -1310,9 +1528,11 @@ final class _FakeBrokerClient extends BrokerClient {
   final bool failAgentList;
   final List<_AgentFixture> agents;
   final Map<String, List<ModelOption>> catalogs;
+  final Map<String, List<ModeOption>> modes;
 
   String? createdDirectory;
   SessionCurrentModel? createdModel;
+  String? createdPermissionMode;
   final List<ScheduleCreate> createdSchedules = [];
   int createCalls = 0;
   int modelCatalogCalls = 0;
@@ -1326,6 +1546,8 @@ final class _FakeBrokerClient extends BrokerClient {
             fixture.id,
             fixture.displayName,
             fixture.canSelectModelAtCreation,
+            fixture.canCreateSession,
+            fixture.canSelectPermissionModeAtCreation,
           ),
         )
         .toList();
@@ -1350,11 +1572,20 @@ final class _FakeBrokerClient extends BrokerClient {
   }
 
   @override
+  Future<ModeCatalogResponse> listAgentModes(String tool) async =>
+      ModeCatalogResponse(
+        tool: tool,
+        modes: modes[tool] ?? const [],
+        refreshedAt: 1,
+      );
+
+  @override
   Future<CreateSessionResponse> createSession(
     String tool, {
     String? directory,
     String? title,
     SessionCurrentModel? model,
+    String? permissionMode,
   }) async {
     createCalls += 1;
     if (createGate != null) await createGate!.future;
@@ -1364,6 +1595,7 @@ final class _FakeBrokerClient extends BrokerClient {
     }
     createdDirectory = directory;
     createdModel = model;
+    createdPermissionMode = permissionMode;
     return CreateSessionResponse(
       session: SessionInfo(
         id: 'created',
@@ -1396,6 +1628,7 @@ class _NoopDriveIntentStore implements SessionDriveIntentStore {
     required String brokerProfileId,
     required String tool,
     required String sessionId,
+    SessionDriveRestoreMode restoreMode = SessionDriveRestoreMode.resume,
   }) async {}
 
   @override

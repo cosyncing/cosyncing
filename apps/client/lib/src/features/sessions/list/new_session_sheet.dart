@@ -20,6 +20,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 enum _NewSessionIssue {
   noAgents,
   modelRetired,
+  permissionModeRetired,
   firstMessageRequired,
   firstMessageTooLong,
   timeInPast,
@@ -98,6 +99,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   String? _selectedTool;
   SessionCurrentModel? _selectedModel;
   String? _selectedModelLabel;
+  String? _selectedPermissionMode;
   _NewSessionIssue? _localIssue;
   bool _submittingImmediate = false;
   bool _submittingSchedule = false;
@@ -141,6 +143,16 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       await ref
           .read(newSessionControllerProvider.notifier)
           .loadModels(first.id);
+      // The model catalog is a real network read and the user can pick a
+      // different agent while it is in flight. Continuing to configure the
+      // auto-selected agent afterwards overwrites the choice they just made:
+      // the first agent in the roster is opencode, which reports
+      // canSelectPermissionModeAtCreation:false, so a late loadModes for it
+      // sets the catalog unavailable and the sheet stops rendering the
+      // permission row for the agent actually selected.
+      if (!mounted || _selectedTool != first.id) return;
+      await ref.read(newSessionControllerProvider.notifier).loadModes(first.id);
+      if (!mounted || _selectedTool != first.id) return;
       await _applyToolModelDefault(first.id);
     }
   }
@@ -150,9 +162,19 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       _selectedTool = tool;
       _selectedModel = null;
       _selectedModelLabel = null;
+      _selectedPermissionMode = null;
       _localIssue = null;
     });
     await ref.read(newSessionControllerProvider.notifier).loadModels(tool);
+    // Same race `_loadInitial` guards, reachable the same way: the agent
+    // dropdown stays enabled during a catalog fetch, so a second pick can
+    // land while the first is still in flight. `loadModes` writes its
+    // "unavailable" branch unconditionally, so the superseded tool would
+    // clear the permission row for the agent now selected — and Create
+    // would then send no permissionMode at all.
+    if (!mounted || _selectedTool != tool) return;
+    await ref.read(newSessionControllerProvider.notifier).loadModes(tool);
+    if (!mounted || _selectedTool != tool) return;
     await _applyToolModelDefault(tool);
   }
 
@@ -315,6 +337,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       ref.read(activeBrokerProfileProvider),
     );
     var selectedModel = _selectedModel;
+    final selectedPermissionMode = _selectedPermissionMode;
     if (selectedModel != null) {
       ModelOption? selectedOption;
       for (final option in modelState.models) {
@@ -337,6 +360,19 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         preferredEffort: selectedModel.reasoningEffort,
       );
     }
+    if (!_start.isScheduled && selectedPermissionMode != null) {
+      final modeIsFresh =
+          modelState.modeCatalogPhase == NewSessionModeCatalogPhase.ready &&
+          modelState.modeTool == tool &&
+          modelState.modeCatalogSource == currentSource &&
+          modelState.modes.any(
+            (candidate) => candidate.value == selectedPermissionMode,
+          );
+      if (!modeIsFresh) {
+        setState(() => _localIssue = _NewSessionIssue.permissionModeRetired);
+        return;
+      }
+    }
     setState(() => _localIssue = null);
     if (!_start.isScheduled) {
       if (_submittingImmediate) return;
@@ -348,6 +384,10 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         modelSource: selectedModel == null
             ? null
             : modelState.modelCatalogSource,
+        permissionMode: selectedPermissionMode,
+        permissionModeSource: selectedPermissionMode == null
+            ? null
+            : modelState.modeCatalogSource,
       );
       setState(() => _submittingImmediate = true);
       widget.onImmediateLaunch(request);
@@ -442,6 +482,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           _selectedTool = null;
           _selectedModel = null;
           _selectedModelLabel = null;
+          _selectedPermissionMode = null;
           _declinedDefaultTools.clear();
           _localIssue = null;
         });
@@ -476,6 +517,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final modelOptions = state.modelTool == effectiveTool
         ? state.models
         : const <ModelOption>[];
+    final modeOptions = state.modeTool == effectiveTool
+        ? state.modes
+        : const <ModeOption>[];
     final selectedModelKey = _selectedModel == null
         ? ''
         : _modelKey(_selectedModel!);
@@ -767,6 +811,108 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                 padding: const EdgeInsets.only(top: 8),
                 child: SelectableText(l10n.newSessionModelRetired),
               ),
+            if (!_start.isScheduled &&
+                (state.modeCatalogPhase == NewSessionModeCatalogPhase.loading ||
+                    state.modeCatalogPhase ==
+                        NewSessionModeCatalogPhase.ready)) ...[
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                key: ValueKey(
+                  'new-session-permission-${effectiveTool ?? 'none'}-'
+                  '${state.modeCatalogPhase.name}-'
+                  '${_selectedPermissionMode ?? 'default'}',
+                ),
+                initialValue: _selectedPermissionMode ?? '',
+                decoration: InputDecoration(
+                  labelText: l10n.sessionPermissionModeSheetTitle,
+                ),
+                items: [
+                  DropdownMenuItem(
+                    value: '',
+                    child: Text(l10n.newSessionModelDefault),
+                  ),
+                  for (final mode in modeOptions)
+                    DropdownMenuItem(
+                      value: mode.value,
+                      child: mode.description == null
+                          ? Text(mode.label)
+                          : Tooltip(
+                              message: mode.description,
+                              child: Text(
+                                mode.label,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                    ),
+                ],
+                onChanged: busy
+                    ? null
+                    : (value) {
+                        if (value == null) return;
+                        final source = RosterSource.of(
+                          ref.read(activeBrokerProfileProvider),
+                        );
+                        final catalog = ref.read(
+                          newSessionControllerProvider,
+                        );
+                        if (source == null ||
+                            catalog.modeTool != effectiveTool ||
+                            catalog.modeCatalogSource != source) {
+                          return;
+                        }
+                        if (value.isNotEmpty &&
+                            !catalog.modes.any(
+                              (candidate) => candidate.value == value,
+                            )) {
+                          return;
+                        }
+                        setState(() {
+                          _selectedPermissionMode = value.isEmpty
+                              ? null
+                              : value;
+                          _localIssue = null;
+                        });
+                      },
+              ),
+              if (state.modeCatalogPhase == NewSessionModeCatalogPhase.loading)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: LinearProgressIndicator(
+                    key: Key('new-session-permission-loading'),
+                  ),
+                ),
+            ],
+            if (!_start.isScheduled &&
+                state.modeCatalogPhase ==
+                    NewSessionModeCatalogPhase.failed) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: SelectableText(
+                      _modelFailureText(
+                        l10n,
+                        state.modeError,
+                        retainedOptions: false,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    key: const Key('new-session-permission-refresh'),
+                    onPressed: effectiveTool == null || busy
+                        ? null
+                        : () => unawaited(
+                            ref
+                                .read(
+                                  newSessionControllerProvider.notifier,
+                                )
+                                .loadModes(effectiveTool),
+                          ),
+                    child: Text(l10n.newSessionModelRefresh),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 12),
             TextField(
               key: const Key('new-session-directory'),
@@ -937,6 +1083,8 @@ String _newSessionIssueMessage(
 ) => switch (issue) {
   _NewSessionIssue.noAgents => l10n.newSessionNoAgents,
   _NewSessionIssue.modelRetired => l10n.newSessionModelRetired,
+  _NewSessionIssue.permissionModeRetired =>
+    l10n.newSessionPermissionModeRetired,
   _NewSessionIssue.firstMessageRequired => l10n.newSessionFirstMessageRequired,
   _NewSessionIssue.firstMessageTooLong => l10n.newSessionFirstMessageTooLong(
     schedulePromptMaxCharacters,

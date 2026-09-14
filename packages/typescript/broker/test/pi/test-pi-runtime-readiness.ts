@@ -137,6 +137,22 @@ try {
   assert.match(nodeCheck?.summary ?? '', /Node 22\.14\.0/);
   assert.match(nodeCheck?.remediation?.message ?? '', /22\.19\.0/);
 
+  const largePi = makePiPackage('large-doctor-pi');
+  writeFileSync(largePi.executable, `#!/usr/bin/env node\n// fixture\n${'x'.repeat(9 * 1024 * 1024)}`);
+  chmodSync(largePi.executable, 0o755);
+  const largeDoctorContext = createSetupDiagnosisContext({
+    homeDir: root,
+    platform: 'linux',
+    arch: 'x64',
+    env: { HOME: root, PATH: `${dirname(goodNode)}:${largePi.binDir}` },
+  });
+  const largeNodeCheck = await diagnosePiNodeRuntime(
+    largeDoctorContext,
+    join(largePi.binDir, 'pi'),
+  );
+  assert.equal(largeNodeCheck.status, 'pass', 'doctor reads a bounded prefix from a large symlinked Pi bundle');
+  assert.equal(largeNodeCheck.detailCode, 'node-runtime-supported');
+
   const doctor = {
     minimumVersions: [{ agent: 'pi', displayName: 'Pi', version: '0.78.1' }],
     sections: [{ id: 'agents', title: 'Agents', checks: diagnosis.checks }],

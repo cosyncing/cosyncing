@@ -155,22 +155,43 @@ function routeSessions(
   }));
 }
 
-export function localMachineRoster(machine: string, sessions: SessionInfo[], baseUrl?: string, now = Date.now()): MachineRoster {
+export function localMachineRoster(
+  machine: string,
+  sessions: SessionInfo[],
+  baseUrl?: string,
+  now = Date.now(),
+  // Whether `sessions` is the whole local roster. An incomplete one must not be
+  // reported `ok`: a caller resolving a session that belongs to the adapter the
+  // sweep could not read would be told it does not exist, when what happened is
+  // that nobody could look. `degraded` is the existing word for that, and
+  // MACHINE_PEER_PARTIAL the existing code.
+  complete = true,
+): MachineRoster {
   const routed = routeSessions(sessions, { machineId: machine, machine, role: 'local', ...(baseUrl ? { baseUrl } : {}), route: 'local' });
   const duplicates = duplicateSessionKeys(routed);
   if (duplicates.size) markAmbiguous(routed, duplicates);
+  // Duplicates first: an ambiguous identity is a stronger claim about the rows
+  // present than partial coverage is about rows absent, and only one code fits.
+  const code = duplicates.size
+    ? 'MACHINE_PEER_DUPLICATE_SESSION' as const
+    : complete ? undefined : 'MACHINE_PEER_PARTIAL' as const;
   return {
     machineId: machine,
     machine,
     role: 'local',
-    status: duplicates.size ? 'degraded' : 'ok',
+    status: code ? 'degraded' : 'ok',
     sessions: routed,
     sessionCount: routed.length,
     ...(baseUrl ? { baseUrl } : {}),
     checkedAt: now,
     generatedAt: now,
     freshness: 'fresh',
-    ...(duplicates.size ? { code: 'MACHINE_PEER_DUPLICATE_SESSION' as const, error: 'duplicate session identity on local owner' } : {}),
+    ...(code ? {
+      code,
+      error: duplicates.size
+        ? 'duplicate session identity on local owner'
+        : 'local roster is missing an adapter this sweep could not read',
+    } : {}),
   };
 }
 
@@ -196,7 +217,9 @@ export async function fetchPeerMachineRoster(peer: MachinePeerConfig, opts: { ti
     if (!res.ok) {
       return degraded(peer, 'MACHINE_PEER_BAD_RESPONSE', `peer roster returned HTTP ${res.status}`);
     }
-    const body = await res.json().catch(() => undefined) as { machine?: unknown; sessions?: unknown; generatedAt?: unknown } | undefined;
+    const body = await res.json().catch(() => undefined) as {
+      machine?: unknown; sessions?: unknown; generatedAt?: unknown; complete?: unknown;
+    } | undefined;
     if (!body || typeof body.machine !== 'string' || !Array.isArray(body.sessions)) {
       return degraded(peer, 'MACHINE_PEER_BAD_RESPONSE', 'peer roster response is malformed');
     }
@@ -213,11 +236,23 @@ export async function fetchPeerMachineRoster(peer: MachinePeerConfig, opts: { ti
     });
     const duplicateKeys = duplicateSessionKeys(sessions);
     if (duplicateKeys.size) markAmbiguous(sessions, duplicateKeys);
+    // Contract revision 23. A peer that says its own roster is not the whole one
+    // is exactly as partial as one whose rows we had to discard, and it already
+    // has a code that says so.
+    //
+    // Three cases, not two. Omission is valid and means complete: a peer that
+    // predates the flag never answered ahead of a sweep. `true` is complete. But
+    // a field that is PRESENT and not a boolean is a peer we cannot read, and
+    // reading it as complete is the one interpretation with a cost -- it is what
+    // lets a garbled roster answer `ok` and then deny a session that exists.
+    // Unreadable is treated as unconfirmed.
+    const peerIncomplete = body.complete !== undefined && body.complete !== true;
+    const peerCompletenessUnreadable = body.complete !== undefined && typeof body.complete !== 'boolean';
     const code: MachinePeerErrorCode | undefined = stale
       ? 'MACHINE_PEER_STALE'
       : duplicateKeys.size
         ? 'MACHINE_PEER_DUPLICATE_SESSION'
-        : invalidSessionCount
+        : invalidSessionCount || peerIncomplete
           ? 'MACHINE_PEER_PARTIAL'
           : undefined;
     return {
@@ -238,7 +273,11 @@ export async function fetchPeerMachineRoster(peer: MachinePeerConfig, opts: { ti
           ? 'peer roster is stale'
           : duplicateKeys.size
             ? 'peer roster contains duplicate composite session identities'
-            : 'peer roster was partially accepted after malformed sessions were discarded',
+            : invalidSessionCount
+            ? 'peer roster was partially accepted after malformed sessions were discarded'
+            : peerCompletenessUnreadable
+              ? 'peer roster completeness is malformed and cannot be read as whole'
+              : 'peer reported its own roster as incomplete',
       } : {}),
     };
   } catch (err) {
@@ -340,6 +379,13 @@ export function resolveMachineSession(
     return { ok: false, identity, status: 'stale', code: 'MACHINE_ROUTE_STALE', message: 'owning roster is stale', ...(session ? { session, owner: session.owner } : {}) };
   }
   if (!session) {
+    // A partial roster is truthful about the rows it carries and silent about the
+    // rest, so it can confirm a session but never deny one. Absence here means the
+    // owner did not finish looking -- the same thing staleness means, and it gets
+    // the same answer rather than a fabricated not-found.
+    if (machine.code === 'MACHINE_PEER_PARTIAL') {
+      return { ok: false, identity, status: 'stale', code: 'MACHINE_ROUTE_STALE', message: 'owning roster is incomplete' };
+    }
     return { ok: false, identity, status: 'not-found', code: 'MACHINE_ROUTE_NOT_FOUND', message: 'session is not present on the owning machine' };
   }
   return { ok: true, identity, status: 'resolved', session, owner: session.owner };

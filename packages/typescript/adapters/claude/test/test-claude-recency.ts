@@ -141,7 +141,7 @@ process.env.CLAUDE_CONFIG_DIR = configDir;
 process.env.COSYNCING_CLAUDE_BIN = fakeClaude;
 process.env.COSYNCING_CLAUDE_WRAPPER_DIR = wrapperBinDir;
 
-const { ClaudeAdapter } = await import('../src/index.ts');
+const { ClaudeAdapter, drainClaudeLiveStatusProbes } = await import('../src/index.ts');
 const adapter = new ClaudeAdapter();
 const rows = await adapter.discoverSessions();
 const id = Buffer.from(transcript).toString('base64url');
@@ -171,4 +171,9 @@ await fableConn.close();
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
+// Every suite that calls `discoverSessions()` and then `process.exit()` opens the
+// same window: a background `agents --json` refresh still running when the
+// process dies leaves an orphaned child behind. `14645766` closed it in one
+// suite of four; these are the other three.
+await drainClaudeLiveStatusProbes();
 process.exit(failed ? 1 : 0);

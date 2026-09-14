@@ -129,6 +129,7 @@ class SessionConnection {
   int _generation = 0;
   bool _disposed = false;
   bool _reconnectEnabled = true;
+  bool _bootstrapProjectionSeen = false;
 
   // --- Backoff config ---
   static const _initialBackoff = Duration(seconds: 1);
@@ -240,26 +241,60 @@ class SessionConnection {
 
     final gen = ++_generation;
     _reconnectEnabled = true;
+    _bootstrapProjectionSeen = false;
     _backoffMultiplier = 1;
     _setState(SessionConnectionState.connecting);
 
+    WebSocketAdapter? attemptAdapter;
+    StreamSubscription<Object?>? attemptSub;
+    var attemptEstablished = false;
+    var endedBeforeEstablished = false;
     try {
       final url = await _streamUrl();
-      _adapter = _adapterFactory(url);
-      await _adapter!.connect();
+      final adapter = _adapterFactory(url);
+      attemptAdapter = adapter;
+      _adapter = adapter;
+      final messageSub = adapter.messages.listen(
+        (data) => _onMessage(data, gen),
+        onError: (_) {
+          if (attemptEstablished) {
+            _onDisconnect(gen);
+          } else {
+            endedBeforeEstablished = true;
+          }
+        },
+        onDone: () {
+          if (attemptEstablished) {
+            _onDisconnect(gen);
+          } else {
+            endedBeforeEstablished = true;
+          }
+        },
+      );
+      attemptSub = messageSub;
+      _messageSub = messageSub;
+      await adapter.connect();
 
-      if (gen != _generation) return;
+      if (endedBeforeEstablished) {
+        throw StateError('WebSocket closed while connecting.');
+      }
+      if (gen != _generation || !identical(_adapter, adapter)) {
+        await _retireAdapterAttempt(adapter, messageSub);
+        return;
+      }
+      if (!_reconnectEnabled || _state == SessionConnectionState.closed) {
+        await _retireAdapterAttempt(adapter, messageSub);
+        return;
+      }
+      attemptEstablished = true;
       _lastConnectionError = null;
       _setState(SessionConnectionState.connected);
-
-      _messageSub = _adapter!.messages.listen(
-        (data) => _onMessage(data, gen),
-        onError: (_) => _onDisconnect(gen),
-        onDone: () => _onDisconnect(gen),
-      );
       // Catching all exceptions during connect to trigger reconnect.
       // ignore: avoid_catches_without_on_clauses
     } catch (e) {
+      if (attemptAdapter != null && attemptSub != null) {
+        await _retireAdapterAttempt(attemptAdapter, attemptSub);
+      }
       if (gen != _generation) return;
       _lastConnectionError = e;
       _invalidateWebSocketAuthCapabilityAfterConnectFailure();
@@ -510,6 +545,15 @@ class SessionConnection {
     _reason = reason;
     _readOnly = _readOnly || readOnly;
     _ownerRevision = reason == 'join-existing' ? ownerRevision : null;
+    // A fresh attach must not inherit the previous attempt's failure. `close()`
+    // below emits `closed` synchronously-ish, and `connect()` does not clear
+    // this until after it has awaited the auth ticket — so a listener
+    // reading
+    // "closed + an error is present" saw the OLD error and declared the new
+    // attach terminally failed before it had even started. Not cleared in
+    // `close()` itself: a broker `STREAM_ATTACH_FAILED` sets this and then the
+    // socket closes, and that pairing is exactly what the listener is for.
+    _lastConnectionError = null;
     await close();
     await connect();
   }
@@ -712,6 +756,7 @@ class SessionConnection {
       case HelloWireEvent():
         _hello = event;
       case SessionWireEvent(:final info):
+        _bootstrapProjectionSeen = true;
         _sessionInfo = info;
         final drive = info.control?.drive;
         final isDriving =
@@ -728,6 +773,7 @@ class SessionConnection {
         :final reset,
         :final cursor,
       ):
+        _bootstrapProjectionSeen = true;
         if (reset) {
           _messages.clear();
         }
@@ -736,8 +782,14 @@ class SessionConnection {
           _cursor = cursor;
         }
         _attachTicket = event.attachTicket ?? cursor ?? _attachTicket;
-        _olderCursor = event.olderCursor;
-        _hasEarlier = event.hasEarlier && event.olderCursor != null;
+        // An incremental unavailable-history gap deliberately omits paging
+        // metadata because it has nothing authoritative to replace it with.
+        // Keep the last accepted backward cursor; only a reset or a newly
+        // supplied cursor can replace that paging position.
+        if (reset || event.olderCursor != null) {
+          _olderCursor = event.olderCursor;
+          _hasEarlier = event.hasEarlier && event.olderCursor != null;
+        }
         _lastHistoryGap = event.gap;
       case HistoryPageWireEvent(
         :final messages,
@@ -770,6 +822,24 @@ class SessionConnection {
         _mode = null;
         _reason = null;
         _ownerRevision = null;
+      case ErrorWireEvent(:final message) when !_bootstrapProjectionSeen:
+        // A broker-declared error before either session identity or history
+        // is an attach refusal, not a transient network drop. Retrying the
+        // identical ticket/mode can only loop and hides the real cause behind
+        // a later client-side timeout.
+        final detail = message.trim().isEmpty
+            ? 'The broker could not attach this session.'
+            : message.trim();
+        _lastConnectionError = BrokerException(
+          statusCode: 500,
+          message: detail,
+          error: BrokerError(error: detail, code: 'STREAM_ATTACH_FAILED'),
+        );
+        _reconnectEnabled = false;
+        _reconnectTimer?.cancel();
+        _reconnectTimer = null;
+        unawaited(_closeAdapter());
+        _setState(SessionConnectionState.closed);
       case ErrorWireEvent():
       case NoticeWireEvent():
       case UnknownWireEvent():
@@ -799,6 +869,24 @@ class SessionConnection {
     _scheduleReconnect(gen);
   }
 
+  Future<void> _retireAdapterAttempt(
+    WebSocketAdapter adapter,
+    StreamSubscription<Object?> messageSub,
+  ) async {
+    if (identical(_messageSub, messageSub)) _messageSub = null;
+    if (identical(_adapter, adapter)) _adapter = null;
+    try {
+      await messageSub.cancel();
+    } on Object {
+      // Retirement still closes the underlying adapter below.
+    }
+    try {
+      await adapter.close();
+    } on Object {
+      // A failed close cannot reactivate a generation-fenced attempt.
+    }
+  }
+
   void _scheduleReconnect(int gen) {
     final delay = _initialBackoff * _backoffMultiplier;
     _reconnectTimer = Timer(delay, () async {
@@ -810,25 +898,59 @@ class SessionConnection {
       // Bump generation so events from any prior adapter
       // are suppressed by the gen check in _onMessage.
       final reconnectGen = ++_generation;
+      _bootstrapProjectionSeen = false;
 
+      WebSocketAdapter? attemptAdapter;
+      StreamSubscription<Object?>? attemptSub;
+      var attemptEstablished = false;
+      var endedBeforeEstablished = false;
       try {
         final url = await _streamUrl();
-        _adapter = _adapterFactory(url);
-        await _adapter!.connect();
+        final adapter = _adapterFactory(url);
+        attemptAdapter = adapter;
+        _adapter = adapter;
+        final messageSub = adapter.messages.listen(
+          (data) => _onMessage(data, reconnectGen),
+          onError: (_) {
+            if (attemptEstablished) {
+              _onDisconnect(reconnectGen);
+            } else {
+              endedBeforeEstablished = true;
+            }
+          },
+          onDone: () {
+            if (attemptEstablished) {
+              _onDisconnect(reconnectGen);
+            } else {
+              endedBeforeEstablished = true;
+            }
+          },
+        );
+        attemptSub = messageSub;
+        _messageSub = messageSub;
+        await adapter.connect();
 
-        if (reconnectGen != _generation) return;
+        if (endedBeforeEstablished) {
+          throw StateError('WebSocket closed while reconnecting.');
+        }
+        if (reconnectGen != _generation || !identical(_adapter, adapter)) {
+          await _retireAdapterAttempt(adapter, messageSub);
+          return;
+        }
+        if (!_reconnectEnabled || _state == SessionConnectionState.closed) {
+          await _retireAdapterAttempt(adapter, messageSub);
+          return;
+        }
+        attemptEstablished = true;
         _lastConnectionError = null;
         _setState(SessionConnectionState.connected);
         _backoffMultiplier = 1;
-
-        _messageSub = _adapter!.messages.listen(
-          (data) => _onMessage(data, reconnectGen),
-          onError: (_) => _onDisconnect(reconnectGen),
-          onDone: () => _onDisconnect(reconnectGen),
-        );
         // Catching all exceptions during reconnect to retry.
         // ignore: avoid_catches_without_on_clauses
       } catch (e) {
+        if (attemptAdapter != null && attemptSub != null) {
+          await _retireAdapterAttempt(attemptAdapter, attemptSub);
+        }
         if (reconnectGen != _generation) return;
         _lastConnectionError = e;
         _invalidateWebSocketAuthCapabilityAfterConnectFailure();

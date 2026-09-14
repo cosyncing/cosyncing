@@ -16,6 +16,7 @@ ListSessionsResponse _$ListSessionsResponseFromJson(
   machineId: json['machineId'] as String?,
   generatedAt: (json['generatedAt'] as num?)?.toInt(),
   revision: (json['revision'] as num?)?.toInt(),
+  complete: json['complete'] as bool? ?? true,
 );
 
 Map<String, dynamic> _$ListSessionsResponseToJson(
@@ -26,6 +27,7 @@ Map<String, dynamic> _$ListSessionsResponseToJson(
   'generatedAt': instance.generatedAt,
   'revision': instance.revision,
   'sessions': instance.sessions,
+  'complete': instance.complete,
 };
 
 CreateSessionResponse _$CreateSessionResponseFromJson(
@@ -57,6 +59,23 @@ Map<String, dynamic> _$ModelCatalogResponseToJson(
 ) => <String, dynamic>{
   'tool': instance.tool,
   'models': instance.models,
+  'refreshedAt': instance.refreshedAt,
+};
+
+ModeCatalogResponse _$ModeCatalogResponseFromJson(Map<String, dynamic> json) =>
+    ModeCatalogResponse(
+      tool: json['tool'] as String,
+      modes: (json['modes'] as List<dynamic>)
+          .map((e) => ModeOption.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      refreshedAt: (json['refreshedAt'] as num).toInt(),
+    );
+
+Map<String, dynamic> _$ModeCatalogResponseToJson(
+  ModeCatalogResponse instance,
+) => <String, dynamic>{
+  'tool': instance.tool,
+  'modes': instance.modes,
   'refreshedAt': instance.refreshedAt,
 };
 

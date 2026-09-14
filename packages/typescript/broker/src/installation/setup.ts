@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, win32 } from 'node:path';
 import {
   inspectPiBridgeAsset,
   PI_DIALECT,
@@ -86,7 +86,9 @@ import {
   decideBridgeOwnership,
   decidePiBridgeOwnership,
   inspectOmpBridgeOwnership,
+  inspectOmpBridgeTargetMigration,
   OMP_BRIDGE_OWNERSHIP_SPEC,
+  ompBridgeTargetMigrationPrecondition,
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
 import {
@@ -108,13 +110,17 @@ import {
   serviceDefinitionResourceId,
   startAndVerifyDurableService,
   SERVICE_RESOURCE_IDS,
+  serviceAgentConfigurationOverrides,
   serviceAgentDataPathOverrides,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
+  contextWithOwnedServiceAgentEnvironment,
   type DurableServiceProvider,
   type DurableServiceProviderId,
   type DurableServiceOwnership,
   type DurableServiceStatus,
+  type ServiceAgentConfigurationOverrides,
+  type ServiceAgentDataPathOverrides,
   type ServiceAgentExecutableOverrides,
   type DurableServiceProviderOptions,
 } from './service-manager.ts';
@@ -165,6 +171,19 @@ function piFamilyServiceDataPathOverrides(context: SetupDiagnosisContext) {
     piSessionsRoot: pi.sessionsRoot,
     ompSessionsRoot: omp.sessionsRoot,
   });
+}
+
+/**
+ * Reuse only whitelisted, non-secret agent inputs from the exact environment file the prior committed
+ * receipt still owns. An explicit value in the invoking environment wins, including an explicit empty
+ * value used to clear an old override. Missing, moved, edited, or malformed state contributes nothing.
+ */
+export function setupContextWithOwnedServiceOverrides(
+  context: SetupDiagnosisContext,
+  installState: InstallStateInspection,
+  stateHome: string,
+): SetupDiagnosisContext {
+  return contextWithOwnedServiceAgentEnvironment(context, installState, stateHome);
 }
 
 /**
@@ -224,7 +243,7 @@ export interface OpencodeShimInspection {
 }
 
 export interface SetupAgentSummary {
-  id: 'codex' | 'opencode' | 'pi' | 'omp' | 'claude' | 'agy' | 'kimi' | 'dsh';
+  id: 'codex' | 'opencode' | 'pi' | 'omp' | 'reasonix' | 'grok' | 'cline' | 'kilo' | 'claude' | 'agy' | 'kimi' | 'dsh';
   displayName: string;
   state: 'missing' | 'supported' | 'unsupported' | 'runtime-unavailable';
   installedVersion?: string;
@@ -287,6 +306,10 @@ export interface SetupInspection {
   agentExecutableDirectories?: string[];
   /** Validated nonstandard executable names that the durable adapters must receive explicitly. */
   agentExecutableOverrides?: ServiceAgentExecutableOverrides;
+  /** Validated agent data roots retained from an owned service environment or selected explicitly now. */
+  agentDataPathOverrides?: ServiceAgentDataPathOverrides;
+  /** Bounded non-secret adapter configuration retained from an owned service environment or selected now. */
+  agentConfigurationOverrides?: ServiceAgentConfigurationOverrides;
 
   /**
    * The single durable manager this host could use. Availability, inspection, and owned targets describe
@@ -473,8 +496,8 @@ function installedVersion(report: DoctorReport, id: string): string | undefined 
   return typeof value === 'string' ? value : undefined;
 }
 
-/** Agents the installed service delivers itself, with no external host involved. */
-const SETUP_DELIVERED_AGENTS = ['codex', 'opencode', 'pi', 'omp', 'claude', 'agy'] as const;
+/** Agents whose integrations setup always delivers or configures directly. */
+const SETUP_DELIVERED_AGENTS = ['codex', 'opencode', 'pi', 'omp', 'reasonix', 'grok', 'cline', 'claude', 'agy'] as const;
 
 /**
  * Setup advertises what the SERVICE IT INSTALLS can actually deliver.
@@ -496,7 +519,59 @@ function setupPreflightAgents(): readonly SetupAgentSummary['id'][] {
   const managedHosts = shippedAdapters()
     .filter((adapter) => adapter.integration?.externalHost?.managed === true)
     .map((adapter) => adapter.id as SetupAgentSummary['id']);
-  return [...SETUP_DELIVERED_AGENTS, ...managedHosts];
+  return [...new Set([...SETUP_DELIVERED_AGENTS, ...managedHosts])];
+}
+
+/**
+ * The managed-runtime readiness check for the two agents that have one, looked
+ * up in one place so the per-agent branch exists once in this file.
+ */
+function agentRuntimeCheck(
+  id: SetupAgentSummary['id'],
+  checks: readonly SetupCheck[],
+): SetupCheck | undefined {
+  const runtimeCheckId = id === 'pi' ? 'pi.node-runtime' : id === 'omp' ? 'omp.bun-runtime' : undefined;
+  return runtimeCheckId === undefined
+    ? undefined
+    : checks.find((candidate) => candidate.id === runtimeCheckId);
+}
+
+/**
+ * The ONE derivation of an agent's setup state from its own checks.
+ *
+ * Setup reads it from a full doctor report. Repair runs a single adapter's
+ * diagnosis and reads it from that, because it needs the same answer for one
+ * agent without paying for eleven others. Both must agree: a private second
+ * copy of this is exactly the shape of the divergence that made status, start,
+ * stop and repair disagree with doctor about installed health.
+ */
+export function agentStateFromChecks(
+  id: SetupAgentSummary['id'],
+  checks: readonly SetupCheck[],
+): SetupAgentSummary['state'] {
+  const find = (checkId: string): SetupCheck | undefined =>
+    checks.find((candidate) => candidate.id === checkId);
+  const binary = find(`${id}.binary`);
+  const version = find(`${id}.version`);
+  const runtime = agentRuntimeCheck(id, checks);
+  // A readable `kilo.db` short-circuits BOTH the binary and the version checks,
+  // and that is deliberate rather than an oversight: Kilo Observe reads that
+  // database directly, so a store with no binary beside it is a genuinely
+  // usable Observe install and `test-kilocode-diagnostics` pins it
+  // ("setup treats a readable DB-only Kilo installation as supported
+  // Observe-only"). The cost is that Kilo can never report `missing`; the
+  // binary and version checks themselves stay visible in the doctor report,
+  // which is where an operator sees what is actually wrong.
+  const kiloStoreAvailable = id === 'kilo' && find('kilo.storage')?.status === 'pass';
+  const observeOnlyVersionAccepted = (id === 'grok' || id === 'kilo')
+    && version?.status === 'warn'
+    && version.detailCode === 'version-unverified-observe-only';
+  return kiloStoreAvailable
+    ? 'supported'
+    : binary?.status !== 'pass' ? 'missing'
+    : version?.status !== 'pass' && !observeOnlyVersionAccepted
+      ? 'unsupported'
+      : runtime?.status === 'fail' ? 'runtime-unavailable' : 'supported';
 }
 
 export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
@@ -505,6 +580,10 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
     omp: 'Packaged in-session bridge when omp is installed.',
+    reasonix: 'Observe + Resume only; Reasonix has no daemon to manage, and setup never touches Reasonix state.',
+    grok: 'Create/Resume is enabled for authenticated Grok Build 1.0.13 or newer; setup preserves Grok state and records its executable for the service.',
+    cline: 'Default-profile Observe plus Create/Resume for app-created sessions through an isolated managed Cline Hub, on 3.0.61 or newer; setup persists explicit non-secret provider/model selection and paths, never credentials.',
+    kilo: 'Observe plus authenticated Create/Drive on Kilo Code 7.4.23 or newer; the broker manages only its dedicated loopback port 4097 host and leaves foreign servers untouched.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
     agy: 'Observe + Resume only; agy has no daemon to manage, and setup never touches Antigravity state.',
     kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
@@ -512,18 +591,9 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
   };
   return setupPreflightAgents().map((id) => {
     const matrix = report.minimumVersions.find((entry) => entry.agent === id);
-    const binary = check(report, `${id}.binary`);
     const version = check(report, `${id}.version`);
-    const runtime = id === 'pi'
-      ? check(report, 'pi.node-runtime')
-      : id === 'omp'
-        ? check(report, 'omp.bun-runtime')
-        : undefined;
-    const state: SetupAgentSummary['state'] = binary?.status !== 'pass'
-      ? 'missing'
-      : version?.status !== 'pass'
-        ? 'unsupported'
-        : runtime?.status === 'fail' ? 'runtime-unavailable' : 'supported';
+    const runtime = agentRuntimeCheck(id, allChecks(report));
+    const state = agentStateFromChecks(id, allChecks(report));
     // The adapter that owns the floor also owns the command that clears it. Carrying it through instead of
     // hardcoding one per agent here is what lets the preflight say `claude update` without this file
     // inventing an upgrade path any adapter could rename.
@@ -661,15 +731,31 @@ async function portStatus(options: {
   const probe = await options.context.probeTcp('127.0.0.1', options.config.broker.port);
   if (probe === 'closed') return 'free';
   if (probe !== 'open') return 'unknown';
-  const health = await options.context.fetchJson(
-    new URL('/api/health', options.config.broker.internalUrl).toString(),
-    options.healthHeaders,
-  );
-  return options.installed && health.status === 'ok'
-      && (health.json as any)?.ok === true
-      && (health.json as any)?.product === PRODUCT_IDENTITY.productName
-    ? 'owned-running'
-    : 'conflict';
+  const url = new URL('/api/health', options.config.broker.internalUrl).toString();
+  // A probe that did not COMPLETE is not evidence about who owns the port, and
+  // this verdict is the one that tells the operator to stop the process. The
+  // default probe ceiling is 3s; measured on a busy host, this broker's own
+  // /api/health answered correctly in 2.98s, so one timeout was enough to
+  // report a healthy managed broker as "an unrecognized process" and recommend
+  // killing it. Retry the incomplete case with a ceiling that is not a
+  // stopwatch on a loaded machine.
+  //
+  // Only `unreachable` is retried. Anything that answers -- including a wrong
+  // product, an HTTP error, or an unparseable body -- has settled the question
+  // and a genuine foreign listener is still refused on the first attempt.
+  for (const timeoutMs of [3_000, 10_000, 10_000]) {
+    const health = await options.context.fetchJson(url, options.healthHeaders, timeoutMs);
+    if (health.status === 'ok'
+        && (health.json as any)?.ok === true
+        && (health.json as any)?.product === PRODUCT_IDENTITY.productName) {
+      // A cosyncing broker on the port with no committed receipt of our own is
+      // a contributor build, which is still a conflict: setup owns no receipt
+      // that would let it stop or replace that process.
+      return options.installed ? 'owned-running' : 'conflict';
+    }
+    if (health.status !== 'unreachable') break;
+  }
+  return 'conflict';
 }
 
 /**
@@ -732,6 +818,8 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
     legacyCodexDaemon: input.legacyCodexDaemon,
     agentExecutableDirectories: input.agentExecutableDirectories,
     agentExecutableOverrides: input.agentExecutableOverrides,
+    agentDataPathOverrides: input.agentDataPathOverrides,
+    agentConfigurationOverrides: input.agentConfigurationOverrides,
     durableServiceProvider: input.durableServiceProvider,
     durableServiceAvailable: input.durableServiceAvailable,
     durableServiceStatus: input.durableServiceStatus,
@@ -761,6 +849,14 @@ export async function inspectSetupEnvironment(options: {
   const config = inspectBrokerConfig(options.home);
   const targetConfig = config.status === 'ok' ? config.config : defaultBrokerConfig();
   const installState = inspectInstallState(options.home);
+  const invokingHasClineExecutable = Object.keys(options.context.env).some((name) =>
+    options.context.platform === 'win32'
+      ? name.toLowerCase() === 'cosyncing_cline_bin'
+      : name === 'COSYNCING_CLINE_BIN');
+  const context = setupContextWithOwnedServiceOverrides(options.context, installState, options.home);
+  const retainedClineExecutable = !invokingHasClineExecutable
+    && typeof context.env.COSYNCING_CLINE_BIN === 'string'
+    && context.env.COSYNCING_CLINE_BIN.length > 0;
   const installedBinary = inspectInstalledBinary({
     home: options.home,
     packaged: options.buildInfo.packaged,
@@ -774,33 +870,33 @@ export async function inspectSetupEnvironment(options: {
   const ompCredentialUrlMatches = ompCredential.status === 'ok'
     && readOmpIntegration(ompCredential.path).internalUrl === targetConfig.broker.internalUrl;
   const setupState = readSetupState(options.home);
-  const dialectEnv = { ...options.context.env, HOME: options.context.homeDir };
+  const dialectEnv = { ...context.env, HOME: context.homeDir };
   const piPaths = resolvePiDialectPaths(PI_DIALECT, dialectEnv);
   const ompPaths = resolvePiDialectPaths(OMP_DIALECT, dialectEnv);
   const piAgentDir = piPaths.agentDir;
   const piBridge = inspectPiBridgeAsset(piAgentDir);
   const ompAgentDir = ompPaths.agentDir;
   const ompBridge = inspectOmpBridgeAsset(ompAgentDir);
-  const agentSkills = inspectAgentSkills(options.context);
+  const agentSkills = inspectAgentSkills(context);
   const opencodeShimPath = opencodeShimShellPath(options.home);
-  const shimPort = opencodeShimPort(options.context.env.OPENCODE_URL);
-  const shimHost = opencodeShimHost(options.context.env.OPENCODE_URL);
+  const shimPort = opencodeShimPort(context.env.OPENCODE_URL);
+  const shimHost = opencodeShimHost(context.env.OPENCODE_URL);
   // One proof, not two: on Windows each costs a PowerShell process to establish ownership.
   const opencodeShimProof = proveOpencodeShim(opencodeShimPath);
   const opencodeShim: OpencodeShimInspection = {
     shimPath: opencodeShimPath,
     shimStatus: opencodeShimProof.status,
     actualSha256: opencodeShimProof.actualSha256,
-    routingSupported: options.context.platform !== 'win32',
-    rc: opencodeShimRcCandidates(options.context).map(({ id, resourceId, path }): OpencodeShimRcSummary => {
+    routingSupported: context.platform !== 'win32',
+    rc: opencodeShimRcCandidates(context).map(({ id, resourceId, path }): OpencodeShimRcSummary => {
       const rc = inspectRcFile(path, opencodeShimPath, shimPort, shimHost);
       const state = rc.status === 'absent' ? 'no-file' : rc.status === 'unsafe' ? 'unsafe' : rc.blockState;
       return { id, resourceId, path, state };
     }),
   };
   const cacheRoot = resolveArtifactCacheRoot(
-    options.context.env.COSYNCING_CACHE_DIR?.trim()
-      || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
+    context.env.COSYNCING_CACHE_DIR?.trim()
+      || join(context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
   );
   const durableAssessment = assessDurableStateForSetup(durableStateLayout({
     stateRoot: options.home,
@@ -808,7 +904,7 @@ export async function inspectSetupEnvironment(options: {
   }));
   const doctor = await collectDoctorReport({
     buildInfo: options.buildInfo,
-    context: options.context,
+    context,
     assetReport: inspectRuntimeAssets(),
     stateHome: options.home,
     // Setup reads this report for its agent summaries alone, and its own Tokdash step promises that a
@@ -819,7 +915,7 @@ export async function inspectSetupEnvironment(options: {
   });
   const agents = agentSummaries(doctor);
   let legacyCodexDaemon: LegacyCodexDaemonInspection | undefined;
-  const codexBin = options.context.resolveExecutable('codex');
+  const codexBin = context.resolveExecutable('codex');
   if (codexBin && existsSync(codexBin)
       && agents.some((agent) => agent.id === 'codex' && agent.state === 'supported')) {
     try {
@@ -830,10 +926,12 @@ export async function inspectSetupEnvironment(options: {
       legacyCodexDaemon = { state: 'unproven', detail: 'The running Codex daemon could not be inspected safely.' };
     }
   }
-  const agentExecutableDirectories = serviceAgentExecutableDirectories(options.context);
-  const agentExecutableOverrides = serviceAgentExecutableOverrides(options.context);
+  const agentExecutableDirectories = serviceAgentExecutableDirectories(context);
+  const agentExecutableOverrides = serviceAgentExecutableOverrides(context);
+  const agentDataPathOverrides = piFamilyServiceDataPathOverrides(context);
+  const agentConfigurationOverrides = serviceAgentConfigurationOverrides(context.env, context.platform);
   const currentPort = await portStatus({
-    context: options.context,
+    context,
     config: targetConfig,
     installed: installState.committed,
     ...(brokerCredential.status === 'ok'
@@ -848,7 +946,21 @@ export async function inspectSetupEnvironment(options: {
     doctor,
     new Set(durableAssessment.permissionRepairs.map((repair) => repair.id)),
   ), ...durableStateBlockers(durableAssessment.blockers)];
-  const ompPathCollision = inspectOmpPathCollision(dialectEnv, options.context.platform);
+  const cline = agents.find((agent) => agent.id === 'cline');
+  if (retainedClineExecutable && cline?.state !== 'supported') {
+    issues.push({
+      code: 'cline-retained-executable-unavailable',
+      summary: 'The receipt-owned Cline executable is missing or no longer meets the 3.0.61 Cline floor.',
+      // The third option is the only one always available, and omitting it left
+      // setup permanently blocked after an ordinary Cline upgrade — including
+      // the setup run needed after a broker update. An explicitly EMPTY value
+      // counts as invoking with the variable set (the check above tests the
+      // NAME, not the value), which drops the retained executable instead of
+      // requiring the old build back.
+      remediation: 'Restore a Cline 3.0.61 or newer executable, explicitly select a verified replacement, or drop the retained executable by rerunning setup with an empty override (COSYNCING_CLINE_BIN= cosyncing setup).',
+    });
+  }
+  const ompPathCollision = inspectOmpPathCollision(dialectEnv, context.platform);
   if (ompPathCollision) {
     issues.push({
       code: ompPathCollision.code,
@@ -916,16 +1028,31 @@ export async function inspectSetupEnvironment(options: {
   }
   const omp = agents.find((agent) => agent.id === 'omp');
   const ompBridgeOwnership = inspectOmpBridgeOwnership(installState, ompAgentDir);
+  const ompBridgeMigration = inspectOmpBridgeTargetMigration(installState, ompAgentDir);
+  const ompBridgeBlockingStatus = ompBridgeMigration.status === 'unsafe'
+      || ompBridgeMigration.status === 'unreadable'
+    ? ompBridgeMigration.status
+    : ompBridgeOwnership.status;
   if (omp?.state === 'supported'
-      && ['unowned', 'receipt-invalid', 'unsafe', 'unreadable', 'legacy-unreceipted'].includes(ompBridgeOwnership.status)) {
+      && ompBridgeMigration.status !== 'eligible'
+      && ['unowned', 'receipt-invalid', 'unsafe', 'unreadable', 'legacy-unreceipted'].includes(ompBridgeBlockingStatus)) {
+    // Name the file the status is ABOUT. `unsafe`/`unreadable` reach this issue
+    // from two different files: the OLD receipt target (pi-bridge-ownership.ts
+    // :282-283, which is why those branches carry `previousTarget`) or the NEW
+    // destination (:285-289, which do not). Reporting both against
+    // `ompBridge.path` told an operator blocked by a bad file in the directory
+    // they moved away FROM to reconcile a file in the directory they moved TO.
+    // `previousTarget` is present exactly when the old file is the one at fault,
+    // so this needs no status test of its own.
+    const blockingPath = ompBridgeMigration.previousTarget ?? ompBridge.path;
     issues.push({
-      code: `omp-bridge-${ompBridgeOwnership.status}`,
+      code: `omp-bridge-${ompBridgeBlockingStatus}`,
       summary: 'The omp bridge target cannot be replaced safely.',
-      remediation: `Reconcile or back up ${ompBridge.path}, then rerun setup; setup replaces only a missing target or a receipt-proven packaged omp bridge.`,
+      remediation: `Reconcile or back up ${blockingPath}, then rerun setup; setup replaces only a missing target or a receipt-proven packaged omp bridge.`,
       localized: {
         'zh-Hans': {
           summary: '现有 omp bridge 无法安全替换，安装不会覆盖。',
-          remediation: `请先明确处理或备份 ${ompBridge.path}，再重新运行安装。安装只会写入缺失目标，或更新由收据证明归属的 omp bridge。`,
+          remediation: `请先明确处理或备份 ${blockingPath}，再重新运行安装。安装只会写入缺失目标，或更新由收据证明归属的 omp bridge。`,
         },
       },
     });
@@ -937,7 +1064,7 @@ export async function inspectSetupEnvironment(options: {
       remediation: `Run \`${PRODUCT_IDENTITY.primaryBinary} repair\` before attempting setup again.`,
     });
   }
-  const durableServiceProvider = durableServiceProviderId(options.context.platform);
+  const durableServiceProvider = durableServiceProviderId(context.platform);
   const durableServiceCheck = check(doctor, DURABLE_SERVICE_CHECK_ID[durableServiceProvider]);
   // A source entry point is not a stable executable for a boot service. Durable installation is exposed only
   // by the packaged binary; contributor source runs retain foreground setup for local development.
@@ -945,8 +1072,8 @@ export async function inspectSetupEnvironment(options: {
     && (durableServiceCheck?.status === 'pass' || durableServiceCheck?.detailCode === 'systemd-user-degraded');
   const durableService = durableServiceAvailable
     ? (options.durableServiceProviderFactory ?? options.systemdProviderFactory ?? createDurableServiceProvider)({
-        context: options.context,
-        homeDir: options.context.homeDir,
+        context,
+        homeDir: context.homeDir,
         stateHome: options.home,
         ...(options.installationId ? { installationId: options.installationId } : {}),
         versionKey: windowsServiceVersionKey(options.buildInfo),
@@ -962,9 +1089,10 @@ export async function inspectSetupEnvironment(options: {
         ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
         agentExecutableDirectories,
         agentExecutableOverrides,
-        agentDataPathOverrides: piFamilyServiceDataPathOverrides(options.context),
+        agentDataPathOverrides,
+        agentConfigurationOverrides,
         webDir: serviceFlutterWebRoot({
-          override: options.context.env.COSYNCING_WEB_DIR,
+          override: context.env.COSYNCING_WEB_DIR,
           packaged: options.buildInfo.packaged,
           executablePath: options.executablePath,
           version: options.buildInfo.version,
@@ -1001,10 +1129,12 @@ export async function inspectSetupEnvironment(options: {
     // entirely when the tokdash command is already there — a host with the CLI installed and the instance
     // stopped was being told cosyncing could not set it up. No probe of the endpoint here: consent comes
     // before any network call.
-    pipxAvailable: !!options.context.resolveExecutable('pipx'),
-    tokdashAvailable: !!options.context.resolveExecutable(TOKDASH_PACKAGE),
+    pipxAvailable: !!context.resolveExecutable('pipx'),
+    tokdashAvailable: !!context.resolveExecutable(TOKDASH_PACKAGE),
     agentExecutableDirectories,
     agentExecutableOverrides,
+    agentDataPathOverrides,
+    agentConfigurationOverrides,
     durableServiceProvider,
     durableServiceAvailable,
     ...(durableServiceStatus ? { durableServiceStatus } : {}),
@@ -1015,7 +1145,7 @@ export async function inspectSetupEnvironment(options: {
       ...(durableService.ownership ? { durableServiceOwnershipVerdict: durableService.ownership() } : {}),
     } : {}),
     webAppAvailable: existsSync(join(resolveFlutterWebRoot({
-      override: options.context.env.COSYNCING_WEB_DIR,
+      override: context.env.COSYNCING_WEB_DIR,
       packaged: options.buildInfo.packaged,
       executablePath: options.executablePath,
       version: options.buildInfo.version,
@@ -1341,19 +1471,28 @@ export function buildSetupPlan(options: {
     options.inspection.installState,
     options.inspection.ompBridge,
   );
+  const ompBridgeMigration = inspectOmpBridgeTargetMigration(
+    options.inspection.installState,
+    options.inspection.ompAgentDir,
+  );
   const installOmpBridge = options.inspection.agents.some((agent) => agent.id === 'omp' && agent.state === 'supported')
-    && (ompBridgeOwnership.status === 'missing'
+    && (ompBridgeMigration.status === 'eligible'
+      || ompBridgeOwnership.status === 'missing'
       || ompBridgeOwnership.status === 'owned-stale'
       || (ompBridgeOwnership.status === 'owned-current'
         && !ompBridgeOwnership.receiptMatchesCurrentPackage));
   if (installOmpBridge) {
+    const migratingTarget = ompBridgeMigration.status === 'eligible';
     const refreshingStale = ompBridgeOwnership.status === 'owned-stale';
     actions.push(planned({
       kind: 'omp-bridge',
       path: options.inspection.ompBridge.path,
+      ...(migratingTarget ? { previousPath: ompBridgeMigration.previousTarget } : {}),
     }, {
       id: 'omp-bridge.install',
-      title: refreshingStale ? 'Refresh the packaged omp bridge' : 'Install packaged omp bridge',
+      title: migratingTarget
+        ? 'Move the packaged omp bridge'
+        : refreshingStale ? 'Refresh the packaged omp bridge' : 'Install packaged omp bridge',
       reversible: true,
     }));
   }
@@ -1733,6 +1872,19 @@ function actionInputs(options: {
           options.inspection.ompBridge,
         ))
       : undefined,
+    ...(() => {
+      if (!options.plan.installOmpBridge) return {};
+      const migration = inspectOmpBridgeTargetMigration(
+        options.inspection.installState,
+        options.inspection.ompAgentDir,
+      );
+      return migration.status === 'eligible'
+        ? {
+            ompBridgePreviousTarget: migration.previousTarget,
+            ompBridgeMigrationPrecondition: ompBridgeTargetMigrationPrecondition(migration),
+          }
+        : {};
+    })(),
     durableStatePermissionRepairs: options.inspection.durableStatePermissionRepairs ?? [],
     agentSkillTargets: options.inspection.agentSkills,
     installAgentSkill: options.plan.choices.installAgentSkill,
@@ -2074,6 +2226,8 @@ function createDurableProviderForSetup(options: {
   taskSchedulerReceiptResources?: readonly InstalledResourceRecord[];
   agentExecutableDirectories?: readonly string[];
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
+  agentDataPathOverrides?: Readonly<ServiceAgentDataPathOverrides>;
+  agentConfigurationOverrides?: Readonly<ServiceAgentConfigurationOverrides>;
   factory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
 }): DurableServiceProvider {
   const cacheRoot = resolveArtifactCacheRoot(
@@ -2097,7 +2251,10 @@ function createDurableProviderForSetup(options: {
       ?? serviceAgentExecutableDirectories(options.context),
     agentExecutableOverrides: options.agentExecutableOverrides
       ?? serviceAgentExecutableOverrides(options.context),
-    agentDataPathOverrides: piFamilyServiceDataPathOverrides(options.context),
+    agentDataPathOverrides: options.agentDataPathOverrides
+      ?? piFamilyServiceDataPathOverrides(options.context),
+    agentConfigurationOverrides: options.agentConfigurationOverrides
+      ?? serviceAgentConfigurationOverrides(options.context.env, options.context.platform),
     webDir: serviceFlutterWebRoot({
       override: options.context.env.COSYNCING_WEB_DIR,
       packaged: options.packaged,
@@ -2109,7 +2266,7 @@ function createDurableProviderForSetup(options: {
 
 export async function runSetup(dependencies: SetupDependencies): Promise<SetupCommandResult> {
   const home = dependencies.home ?? setupStateHome();
-  const context = dependencies.context ?? createSetupDiagnosisContext();
+  const baseContext = dependencies.context ?? createSetupDiagnosisContext();
   const inspect = dependencies.inspectEnvironment ?? inspectSetupEnvironment;
   const acquireLock = dependencies.acquireLock ?? ((options) => acquireInstallationLock(options));
   const catalogFactory = dependencies.actionCatalogFactory ?? createSetupActionCatalog;
@@ -2118,6 +2275,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   // its journal is the only durable source for the marker already written into provider-owned objects.
   const pendingJournal = readSetupTransactionJournal(home);
   const existingInstall = inspectInstallState(home);
+  const context = setupContextWithOwnedServiceOverrides(baseContext, existingInstall, home);
   const installationId = pendingJournal?.plan.installationId
     ?? (existingInstall.committed && existingInstall.state.installationId
     ? existingInstall.state.installationId
@@ -2203,7 +2361,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     executablePath: dependencies.executablePath,
     ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
     home,
-    context,
+    context: baseContext,
     installationId,
     durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
     inspectLegacyCodexDaemon: dependencies.inspectLegacyCodexDaemon,
@@ -2431,7 +2589,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       executablePath: dependencies.executablePath,
       ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
       home,
-      context,
+      context: baseContext,
       installationId,
       durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
       inspectLegacyCodexDaemon: dependencies.inspectLegacyCodexDaemon,
@@ -2487,6 +2645,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
             : [],
           agentExecutableDirectories: inspection.agentExecutableDirectories,
           agentExecutableOverrides: inspection.agentExecutableOverrides,
+          agentDataPathOverrides: inspection.agentDataPathOverrides,
+          agentConfigurationOverrides: inspection.agentConfigurationOverrides,
           factory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
         })
       : undefined;

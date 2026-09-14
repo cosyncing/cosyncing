@@ -1,0 +1,9 @@
+{
+  "name": "@cosyncing/acp-client",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Provider-neutral Agent Client Protocol (ACP) JSON-RPC 2.0 stdio client.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

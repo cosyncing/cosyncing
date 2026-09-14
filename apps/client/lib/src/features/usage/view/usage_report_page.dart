@@ -377,7 +377,7 @@ class _UsageReportBody extends StatelessWidget {
 }
 
 /// The heatmap, its legend, and the one line of streak evidence beneath it.
-class _ActiveDays extends StatelessWidget {
+class _ActiveDays extends ConsumerWidget {
   const _ActiveDays({
     required this.period,
     required this.report,
@@ -389,7 +389,7 @@ class _ActiveDays extends StatelessWidget {
   final String locale;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final daily = report.daily;
     if (daily == null || daily.isEmpty) return const SizedBox.shrink();
@@ -434,8 +434,14 @@ class _ActiveDays extends StatelessWidget {
     final wide = to.difference(from).inDays > 120;
 
     // "Still running" is decided against the served window's own end, not the
-    // client clock's idea of the period.
-    final today = DateTime.now();
+    // client clock's idea of the period -- so read the injected clock, not
+    // `DateTime.now()`. Reading the device clock here made this widget's
+    // rendering depend on the real date: it flips `windowIsOpen` the moment the
+    // real day passes the served window's end, which silently broke every
+    // report-page golden at midnight while the card goldens, which already went
+    // through the provider, kept passing. The user-facing form of the same bug
+    // is a skewed or differently-zoned device calling a finished period live.
+    final today = ref.watch(usageNowProvider)();
     final windowIsOpen = !servedTo.isBefore(
       DateTime(today.year, today.month, today.day),
     );
@@ -555,7 +561,7 @@ class _ActiveDays extends StatelessWidget {
   }
 }
 
-class _Header extends StatelessWidget {
+class _Header extends ConsumerWidget {
   const _Header({
     required this.period,
     required this.offset,
@@ -574,7 +580,7 @@ class _Header extends StatelessWidget {
   final DateTime now;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final tokens = context.tokens;

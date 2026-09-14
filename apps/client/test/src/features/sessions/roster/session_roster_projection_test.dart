@@ -1004,6 +1004,53 @@ void main() {
       expect(searching.visibleRows.map((row) => row.depth), [0, 1, 2]);
     });
 
+    test('a chip that counts a child can reveal it past the filter', () {
+      // Measured on the installed client: narrowing to the parent's own title
+      // left "Show 1 linked session" on screen, and pressing it did nothing
+      // through four different activation routes. There was nothing to reveal.
+      // `kept` propagates upward only, so a parent matching on its own title
+      // keeps none of its children, while `childCount` counts them unfiltered.
+      final parent = root('p1');
+      final sessions = [parent, child('c1', 'p1')];
+      final parentKey = sessionCompositeRosterKey(parent);
+      const hidden = SessionVisibilityPreferences();
+      // Matches the parent only: the child is 'Child c1'.
+      const query = SessionRosterFilters(query: 'Root p1');
+
+      final searching = project(sessions, preferences: hidden, filters: query);
+      expect(searching.visibleSessions.map((s) => s.id), ['p1']);
+      expect(
+        searching.visibleRows.single.childCount,
+        1,
+        reason: 'the affordance counts this child, so it must be reachable',
+      );
+      expect(searching.visibleRows.single.childrenRevealed, isFalse);
+
+      final revealed = project(
+        sessions,
+        preferences: hidden,
+        revealChildExpansion: {parentKey: SessionChildExpansion.expanded},
+        filters: query,
+      );
+      expect(revealed.visibleSessions.map((s) => s.id), ['p1', 'c1']);
+      expect(revealed.visibleRows.map((row) => row.depth), [0, 1]);
+      expect(revealed.visibleRows.first.childrenRevealed, isTrue);
+
+      // Explicit only, and only downward one level: with no override the
+      // default still surfaces the match path and nothing else.
+      final collapsed = project(
+        sessions,
+        preferences: hidden,
+        revealChildExpansion: {parentKey: SessionChildExpansion.collapsed},
+        filters: query,
+      );
+      expect(collapsed.visibleSessions.map((s) => s.id), ['p1']);
+
+      // And it writes nothing lasting: clearing the search restores the view.
+      final cleared = project(sessions, preferences: hidden);
+      expect(cleared.visibleSessions.map((s) => s.id), ['p1']);
+    });
+
     test('a saved collapse never blocks a search reveal', () {
       // Narrowing ignores the saved map entirely, so a subtree the user closed
       // earlier still surfaces its matching descendant — and clearing the

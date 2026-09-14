@@ -77,6 +77,42 @@
         }
       }
     },
+    "ReasonixAdapter": {
+      "coverage": {
+        "native-identity": ["reasonix-identity"],
+        "terminal-authority": ["reasonix-drive", "reasonix-observe"],
+        "history-live-chronology": ["reasonix-identity", "reasonix-observe"],
+        "replacement": ["reasonix-identity"],
+        "hub-authority": ["reasonix-cross-client-join", "reasonix-registration-gate"]
+      }
+    },
+    "GrokAdapter": {
+      "coverage": {
+        "native-identity": ["grok-identity"],
+        "terminal-authority": ["grok-drive", "grok-observe"],
+        "history-live-chronology": ["grok-identity", "grok-observe"],
+        "replacement": ["grok-drive", "grok-observe"],
+        "hub-authority": ["grok-cross-client-join", "grok-registration-gate"]
+      }
+    },
+    "ClineAdapter": {
+      "coverage": {
+        "native-identity": ["cline-store", "cline-registration-gate"],
+        "terminal-authority": ["cline-observe", "cline-registration-gate"],
+        "history-live-chronology": ["cline-observe"],
+        "replacement": ["cline-observe"],
+        "hub-authority": ["cline-registration-gate"]
+      }
+    },
+    "KiloAdapter": {
+      "coverage": {
+        "native-identity": ["kilocode-store", "kilocode-registration-gate"],
+        "terminal-authority": ["kilocode-observe", "kilocode-registration-gate"],
+        "history-live-chronology": ["kilocode-observe"],
+        "replacement": ["kilocode-observe"],
+        "hub-authority": ["kilocode-registration-gate"]
+      }
+    },
     "KimiAdapter": {
       "coverage": {
         "native-identity": ["kimi-mapping"],

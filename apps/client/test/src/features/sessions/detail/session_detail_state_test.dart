@@ -617,7 +617,7 @@ void main() {
     });
 
     test(
-      'running activity upserts by key and terminal activity removes it',
+      'running activity upserts and terminal activity remains reviewable',
       () {
         SessionDetailState stateWithStatus(
           String status, {
@@ -660,8 +660,20 @@ void main() {
         expect(running.transcriptMessageEvents, isEmpty);
 
         final done = stateWithStatus('done');
-        expect(done.liveState.activities, isEmpty);
+        expect(done.liveState.activities, hasLength(1));
+        expect(
+          done.liveState.activities.single.status,
+          AgentActivityStatus.done,
+        );
+        expect(done.liveState.activities.single.title, 'Current title');
         expect(done.transcriptMessageEvents, isEmpty);
+
+        final failed = stateWithStatus('error');
+        expect(failed.liveState.activities, hasLength(1));
+        expect(
+          failed.liveState.activities.single.status,
+          AgentActivityStatus.error,
+        );
       },
     );
 
@@ -1193,6 +1205,32 @@ void main() {
           // Equal visible text is deliberate: identity must never come from it.
           'text': 'same '.padRight(textBytes, 'x'),
         });
+
+    test('unavailable incremental history retains the load-earlier cursor', () {
+      final primed = TranscriptHistoryWindow.fromHistory(
+        HistoryWireEvent(
+          messages: [message(99)],
+          reset: true,
+          cursor: 'tail-cursor',
+          olderCursor: 'older-cursor',
+          hasEarlier: true,
+        ),
+      );
+      final preserved = primed.applyHistory(
+        const HistoryWireEvent(
+          messages: [],
+          hasEarlier: true,
+          gap: HistoryGap(
+            code: 'HISTORY_PAGE_SOURCE_CHANGED',
+            reason: 'source-changed',
+            message: 'Native history is temporarily unavailable.',
+          ),
+        ),
+      );
+
+      expect(preserved.olderHistoryCursor, 'older-cursor');
+      expect(preserved.hasEarlierHistory, isTrue);
+    });
 
     test('tail byte eviction is explicit and remains within the named cap', () {
       final window = TranscriptHistoryWindow.fromHistory(

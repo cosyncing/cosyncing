@@ -67,3 +67,22 @@ export function visibleSessions<T extends { tool: string }>(
 export function rosterRepresentationKey(windowKey: string, visibility: RosterVisibility): string {
   return `${windowKey}|${visibility.projectionKey}`;
 }
+
+/**
+ * Replace ONE backend's slice of a served roster snapshot with the rows its
+ * discovery leg just finished, leaving every other backend's rows untouched.
+ *
+ * Wholesale replacement rather than a union, because a completed leg is
+ * authoritative for its own tool: a session it no longer reports is gone, and
+ * merging by id would resurrect it. That is only sound because the caller
+ * publishes a leg exclusively when it COMPLETED, and because every row is
+ * guaranteed to be filed under the backend that produced it -- with a misfiled
+ * row this would delete another backend's sessions and adopt rows it never had.
+ */
+export function mergeLegRows<T extends { tool: string }>(
+  sessions: readonly T[],
+  backendId: string,
+  rows: readonly T[],
+): T[] {
+  return [...sessions.filter((session) => session.tool !== backendId), ...rows];
+}

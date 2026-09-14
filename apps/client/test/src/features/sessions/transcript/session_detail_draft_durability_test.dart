@@ -1894,6 +1894,62 @@ void main() {
       expect(detailState().draftSurface?.text, 'prompt that will fail');
     });
 
+    test('a duplicate-id nack keeps the prompt but never re-arms it', () async {
+      // `CLIENT_MESSAGE_ID_CONFLICT` answers an id already used for a different
+      // mutation, so the original may already have run. Restoring that text to
+      // the composer is one Enter from running it twice; dropping it loses the
+      // user's typing. It has to be preserved and OFFERED, never re-armed.
+      await attachConnected();
+      await emitDrivingControl();
+      await controller().recordLocalDraft('rm -f /tmp/x && touch /tmp/x');
+      await drainSessionDetailMicrotasks();
+      await controller().sendPrompt('rm -f /tmp/x && touch /tmp/x');
+      await drainSessionDetailMicrotasks();
+      final clientMessageId =
+          (await container
+                  .read(sessionOutboxRepositoryProvider)
+                  .loadForSession(
+                    key,
+                    brokerProfileId: fakeControllerBrokerScope(),
+                  ))
+              .single
+              .clientMessageId;
+
+      connection.emitEvent(
+        NackWireEvent(
+          code: 'CLIENT_MESSAGE_ID_CONFLICT',
+          message: 'clientMessageId was already used',
+          clientMessageId: clientMessageId,
+        ),
+      );
+      await drainSessionDetailMicrotasks();
+
+      final row = await drafts.load(
+        brokerProfileId: fakeControllerBrokerScope(),
+        sessionKey: key,
+      );
+      // Re-arming is `dirty` + the submitted binding cleared + a restore
+      // surface: that trio is what puts text back under the cursor and
+      // republishes it. None of it may happen here.
+      expect(
+        row!.submittedClientMessageId,
+        isNotNull,
+        reason: 'the row stays bound, so it is never re-armed as live text',
+      );
+      expect(row.dirty, isFalse);
+      expect(
+        row.conflictText,
+        'rm -f /tmp/x && touch /tmp/x',
+        reason: 'and it is never silently dropped either',
+      );
+      expect(detailState().draftConflict, isNotNull);
+      expect(
+        detailState().draftSurface?.kind,
+        isNot(SessionDraftSurfaceKind.restoreIfEmpty),
+        reason: 'the composer is not handed a command that may have executed',
+      );
+    });
+
     test('an oversized prompt that nacks is offered back', () async {
       await attachConnected();
       await emitDrivingControl();
@@ -2006,6 +2062,83 @@ void main() {
         sessionKey: key,
       );
       expect(row!.text, 'short draft');
+    });
+
+    // The installed v81 shape: a prompt that was answered before a reload came
+    // back offering itself as "Recover kept version" over an EMPTY composer.
+    // Its outbox row read `failed` -- `markDelivered` is skipped when the
+    // shared-draft clear is not also confirmed, and a reattach then retires the
+    // still-retryable row across the ownership change -- while the broker's own
+    // echo of it sat in the transcript above the banner.
+    test(
+      'a prompt the transcript already holds is never offered back',
+      () async {
+        final outbox = container.read(sessionOutboxRepositoryProvider);
+        await outbox.upsert(
+          SessionOutboxMessage.create(
+            sessionKey: key,
+            brokerProfileId: fakeControllerBrokerScope(),
+            clientMessageId: 'cm-already-landed',
+            kind: SessionOutboxMessageKind.prompt,
+            payload: const {'text': 'rm -f /tmp/marker && touch /tmp/marker'},
+          ),
+        );
+        await outbox.markSending('cm-already-landed'); // dispatched
+        await outbox.markFailed(
+          'cm-already-landed',
+          'Not replayed across a session ownership change.',
+        );
+
+        await attachConnected();
+        connection.emitEvent(
+          MessageWireEvent(
+            seq: 0,
+            message: AgentMessage.fromJson(const {
+              'type': 'user-message',
+              'key': 'native-landed',
+              'clientKey': 'cm-already-landed',
+              'text': 'rm -f /tmp/marker && touch /tmp/marker',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        connection.emitState(SessionDetailConnectionStatus.reconnecting);
+        await drainSessionDetailMicrotasks();
+        connection.emitState(SessionDetailConnectionStatus.connected);
+        await emitHello();
+        await drainSessionDetailMicrotasks();
+
+        expect(
+          detailState().draftConflict,
+          isNull,
+          reason:
+              'the prompt is visible in the transcript; offering it back '
+              'is one Enter from running it twice',
+        );
+      },
+    );
+
+    test('a dispatched prompt with no echo is still offered back', () async {
+      final outbox = container.read(sessionOutboxRepositoryProvider);
+      await outbox.upsert(
+        SessionOutboxMessage.create(
+          sessionKey: key,
+          brokerProfileId: fakeControllerBrokerScope(),
+          clientMessageId: 'cm-no-echo',
+          kind: SessionOutboxMessageKind.prompt,
+          payload: const {'text': 'typed but never seen again'},
+        ),
+      );
+      await outbox.markSending('cm-no-echo');
+      await outbox.markFailed('cm-no-echo', 'expired');
+
+      await attachConnected();
+
+      expect(
+        detailState().draftConflict?.recoveredPromptId,
+        'cm-no-echo',
+        reason: 'nothing else holds this text, so the choice must stay visible',
+      );
     });
 
     test('an expired oversized prompt is offered back on reopen', () async {

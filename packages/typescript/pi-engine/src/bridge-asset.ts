@@ -19,8 +19,11 @@ function decodeFrozenTextAsset(asset: unknown): string {
 // TypeScript resolves a `.ts` import as a module even when Bun's text loader is selected. At runtime and in
 // a compiled executable, the import attribute yields source bytes. Core identity substitution keeps the
 // installed state path aligned with the parameterized product name without importing broker runtime code.
-export const PI_BRIDGE_EMBEDDED_SOURCE = (piBridgeEmbeddedSource as unknown as string)
+const PI_BRIDGE_SOURCE_TEMPLATE = (piBridgeEmbeddedSource as unknown as string)
   .replaceAll('__COSYNCING_STATE_DIRECTORY__', PRODUCT_IDENTITY.stateDirectoryName);
+export const PI_BRIDGE_EMBEDDED_SOURCE = PI_BRIDGE_SOURCE_TEMPLATE
+  .replace('/*__COSYNCING_NATIVE_VERSION_IMPORT__*/', '')
+  .replace('/*__COSYNCING_NATIVE_VERSION_PAYLOAD__*/', '');
 export const PI_BRIDGE_LEGACY_MARKER = 'cosyncing — Pi live bridge extension';
 /**
  * Exact bytes shipped by the immediately preceding v0.1.0 bridge. This asset must never be derived from
@@ -40,9 +43,21 @@ export const PI_BRIDGE_EMBEDDED_SHA256 = createHash('sha256').update(PI_BRIDGE_E
  * `COSYNCING_PI_INTEGRATION_FILE`, `pi-integration.json`, `pi:run:`, and `pi-bridge` — the last
  * also rewrites `pi-bridge-history`) — the bridge-asset test pins them.
  */
-export function piBridgeEmbeddedSourceForDialect(target: { routePrefix: string; toolId: string }): string {
+export function piBridgeEmbeddedSourceForDialect(target: {
+  routePrefix: string;
+  toolId: string;
+  nativeVersionModule?: string;
+}): string {
   const envSlug = target.toolId.toUpperCase();
-  return PI_BRIDGE_EMBEDDED_SOURCE
+  const nativeVersionImport = target.nativeVersionModule
+    ? `import { VERSION as COSYNCING_NATIVE_VERSION } from '${target.nativeVersionModule}';`
+    : '';
+  const nativeVersionPayload = target.nativeVersionModule
+    ? 'nativeVersion: COSYNCING_NATIVE_VERSION,'
+    : '';
+  return PI_BRIDGE_SOURCE_TEMPLATE
+    .replace('/*__COSYNCING_NATIVE_VERSION_IMPORT__*/', nativeVersionImport)
+    .replace('/*__COSYNCING_NATIVE_VERSION_PAYLOAD__*/', nativeVersionPayload)
     .replaceAll('/pi/bridge', target.routePrefix)
     .replaceAll('COSYNCING_PI_INTEGRATION_TOKEN', `COSYNCING_${envSlug}_INTEGRATION_TOKEN`)
     .replaceAll('COSYNCING_PI_INTEGRATION_FILE', `COSYNCING_${envSlug}_INTEGRATION_FILE`)

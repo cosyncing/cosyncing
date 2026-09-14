@@ -38,6 +38,7 @@ class SessionsEmptyState extends StatelessWidget {
   const SessionsEmptyState({
     required this.hasActiveBrokerClient,
     required this.creationAvailability,
+    this.rosterComplete = true,
     this.queryWindow = SessionRosterQueryWindow.any,
     this.onShowAllSessions,
     super.key,
@@ -48,6 +49,14 @@ class SessionsEmptyState extends StatelessWidget {
 
   /// Source-qualified creation capability for the selected server.
   final SessionCreationAvailability creationAvailability;
+
+  /// Whether the server said this roster is the whole one.
+  ///
+  /// When it is not, no empty state is honest: "no active sessions" is a claim
+  /// the server did not make. It said it had not finished looking, or that an
+  /// agent had not answered — and the sessions it could not see are exactly the
+  /// ones someone staring at this screen is waiting for.
+  final bool rosterComplete;
 
   /// The window the empty roster was fetched under, or null while the stored
   /// preference is still rehydrating.
@@ -60,16 +69,26 @@ class SessionsEmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
-    final windowBody = hasActiveBrokerClient
+    // Two different reasons a list can be empty, and they do not commute. An
+    // incomplete roster means the server did not finish looking, so it cannot
+    // support ANY claim about what the window contains -- "nothing in the last
+    // 7 days" included. Incompleteness is therefore read first; the window
+    // message is only honest once the roster behind it is whole.
+    final incomplete = hasActiveBrokerClient && !rosterComplete;
+    final windowBody = hasActiveBrokerClient && !incomplete
         ? sessionsEmptyWindowBody(l10n, queryWindow)
         : null;
     final title = !hasActiveBrokerClient
         ? l10n.sessionsEmptyTitle
+        : incomplete
+        ? l10n.sessionsIncompleteRosterTitle
         : windowBody != null
         ? l10n.sessionsEmptyWindowTitle
         : l10n.sessionsEmptyActiveTitle;
     final body = !hasActiveBrokerClient
         ? l10n.sessionsEmptyBody
+        : incomplete
+        ? l10n.sessionsIncompleteRosterBody
         : windowBody ??
               switch (creationAvailability) {
                 SessionCreationAvailability.checking =>
@@ -86,7 +105,11 @@ class SessionsEmptyState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.inbox_outlined, size: 64, color: tokens.textTertiary),
+          Icon(
+            incomplete ? Icons.travel_explore_outlined : Icons.inbox_outlined,
+            size: 64,
+            color: tokens.textTertiary,
+          ),
           const SizedBox(height: 16),
           SelectableText(
             key: const Key('sessions-empty-title'),

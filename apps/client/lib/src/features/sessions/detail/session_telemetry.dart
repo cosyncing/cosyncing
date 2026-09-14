@@ -25,6 +25,7 @@ final class SessionTelemetry {
     this.agentRuntimeMs,
     this.executionRuntimeMs,
     this.turnCount,
+    this.inputIncludesCacheSubsets = false,
   });
 
   /// Folds telemetry frames from [messages] into one latest-value snapshot.
@@ -75,14 +76,19 @@ final class SessionTelemetry {
   /// Completed turns, when reported.
   final int? turnCount;
 
+  /// Whether input already includes cache-read/write subsets.
+  final bool inputIncludesCacheSubsets;
+
   /// Sum of every token bucket in the latest reading.
   int? get totalTokens {
-    final parts = [
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheWriteTokens,
-    ].whereType<int>();
+    final parts = inputIncludesCacheSubsets
+        ? [inputTokens, outputTokens].whereType<int>()
+        : [
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+          ].whereType<int>();
     if (parts.isEmpty) return null;
     return parts.fold<int>(0, (sum, value) => sum + value);
   }
@@ -135,20 +141,35 @@ final class SessionTelemetry {
     final output = _intOf(raw['output']);
     final cacheRead = _intOf(raw['cacheRead']);
     final cacheWrite = _intOf(raw['cacheWrite']);
+    final cacheReadSubset = _intOf(raw['cacheReadSubset']);
+    final cacheWriteSubset = _intOf(raw['cacheWriteSubset']);
     final cost = _doubleOf(raw['cost']);
     if (input == null &&
         output == null &&
         cacheRead == null &&
+        cacheReadSubset == null &&
         cacheWrite == null &&
+        cacheWriteSubset == null &&
         cost == null) {
       return this;
     }
-    return _copyWith(
+    // Token frames are snapshots, not sparse deltas. Missing buckets explicitly
+    // clear the preceding reading so a later ordinary frame cannot retain and
+    // double-count cache subsets from a cumulative Cline aggregate.
+    return SessionTelemetry(
       inputTokens: input,
       outputTokens: output,
-      cacheReadTokens: cacheRead,
-      cacheWriteTokens: cacheWrite,
+      cacheReadTokens: cacheRead ?? cacheReadSubset,
+      cacheWriteTokens: cacheWrite ?? cacheWriteSubset,
       cost: cost,
+      inputIncludesCacheSubsets: raw['inputIncludesCacheSubsets'] == true,
+      contextPercent: contextPercent,
+      contextUsedTokens: contextUsedTokens,
+      contextMaxTokens: contextMaxTokens,
+      totalRuntimeMs: totalRuntimeMs,
+      agentRuntimeMs: agentRuntimeMs,
+      executionRuntimeMs: executionRuntimeMs,
+      turnCount: turnCount,
     );
   }
 
@@ -169,6 +190,9 @@ final class SessionTelemetry {
       'contextUsage' || 'context-usage' || 'context' => _applyContext(value),
       'runtimeTotals' ||
       'runtime-totals' => value is Map ? _applyRuntime(_asMap(value)) : this,
+      'sessionUsage' ||
+      'session-usage' ||
+      'clineSessionUsage' => value is Map ? _applyTokens(_asMap(value)) : this,
       _ => this,
     };
   }
@@ -229,6 +253,7 @@ final class SessionTelemetry {
     int? agentRuntimeMs,
     int? executionRuntimeMs,
     int? turnCount,
+    bool? inputIncludesCacheSubsets,
   }) {
     return SessionTelemetry(
       inputTokens: inputTokens ?? this.inputTokens,
@@ -243,6 +268,8 @@ final class SessionTelemetry {
       agentRuntimeMs: agentRuntimeMs ?? this.agentRuntimeMs,
       executionRuntimeMs: executionRuntimeMs ?? this.executionRuntimeMs,
       turnCount: turnCount ?? this.turnCount,
+      inputIncludesCacheSubsets:
+          inputIncludesCacheSubsets ?? this.inputIncludesCacheSubsets,
     );
   }
 
@@ -260,7 +287,8 @@ final class SessionTelemetry {
       other.totalRuntimeMs == totalRuntimeMs &&
       other.agentRuntimeMs == agentRuntimeMs &&
       other.executionRuntimeMs == executionRuntimeMs &&
-      other.turnCount == turnCount;
+      other.turnCount == turnCount &&
+      other.inputIncludesCacheSubsets == inputIncludesCacheSubsets;
 
   @override
   int get hashCode => Object.hash(
@@ -276,6 +304,7 @@ final class SessionTelemetry {
     agentRuntimeMs,
     executionRuntimeMs,
     turnCount,
+    inputIncludesCacheSubsets,
   );
 }
 
@@ -296,6 +325,9 @@ bool isSessionTelemetryMessage(AgentMessage message) {
         'runtimeTotals',
         'runtime-totals',
         'sessionStats',
+        'sessionUsage',
+        'session-usage',
+        'clineSessionUsage',
       }.contains(key);
 }
 

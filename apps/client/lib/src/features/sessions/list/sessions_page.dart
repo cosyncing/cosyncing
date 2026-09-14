@@ -214,6 +214,7 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                         ? SessionsEmptyState(
                             hasActiveBrokerClient: hasActiveBrokerClient,
                             creationAvailability: creationAvailability,
+                            rosterComplete: state.rosterComplete,
                             queryWindow: ref
                                 .watch(sessionRosterWindowProvider)
                                 .valueOrNull,

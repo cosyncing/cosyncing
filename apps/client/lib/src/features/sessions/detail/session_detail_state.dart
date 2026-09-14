@@ -1527,14 +1527,20 @@ final class TranscriptHistoryWindow {
       next = next._applyHistoryDelta(event.messages);
     }
     var nextPages = next.pages;
-    if (event.olderCursor != null && nextPages.isNotEmpty) {
+    final preservesUnavailablePaging =
+        isHistoryUnavailableGapCode(event.gap?.code) && !event.reset;
+    if ((event.olderCursor != null || preservesUnavailablePaging) &&
+        nextPages.isNotEmpty) {
       final tailIndex = nextPages.lastIndexWhere((page) => page.isTail);
       final tail = nextPages[tailIndex];
       nextPages = List.unmodifiable([
         ...nextPages.take(tailIndex),
         TranscriptHistoryPage(
           messages: tail.messages,
-          olderCursor: event.olderCursor,
+          // An unavailable non-reset frame has no authoritative replacement
+          // paging position. Keep the last accepted cursor so Load Earlier
+          // remains usable while the visible cached rows are preserved.
+          olderCursor: event.olderCursor ?? tail.olderCursor,
           newerCursor: null,
           isTail: true,
           estimatedBytes: tail.estimatedBytes,
@@ -3298,6 +3304,7 @@ class SessionAgentActions {
     required this.canClone,
     required this.canTranscriptExport,
     required this.canAttachFiles,
+    this.canRenameDisplay = false,
     this.loaded = true,
   });
 
@@ -3305,6 +3312,7 @@ class SessionAgentActions {
   factory SessionAgentActions.fromAgentInfo(AgentInfo agent) {
     return SessionAgentActions(
       canRenameNative: agent.canRenameNative,
+      canRenameDisplay: agent.canRenameDisplay || agent.canRenameNative,
       canFork: agent.canFork,
       canClone: agent.canClone,
       canTranscriptExport: agent.canTranscriptExport,
@@ -3314,6 +3322,9 @@ class SessionAgentActions {
 
   /// Whether native rename is available.
   final bool canRenameNative;
+
+  /// Whether the broker can rename the displayed title, natively or via alias.
+  final bool canRenameDisplay;
 
   /// Whether native fork is available.
   final bool canFork;

@@ -5,48 +5,17 @@ part of 'session_detail_page.dart';
 /// The bar must never render a raw model id (`claude-opus-4-8`) — that is what
 /// makes the composer read like a debug console.
 ///
-/// The advertised [ModelOption.label] is the preferred source but is *not*
-/// trusted: it is broker JSON (`label: json['label'] as String`), and real
-/// brokers ship labels that already embed the id, e.g.
-/// `Opus · claude-opus-4-8`. The pipeline is therefore sanitize the advertised
-/// label ([_humanModelLabel]) → derive from the id ([_shortModelLabel]) →
-/// generic.
-
-/// Short, human family names keyed by a token found in a raw model id.
-///
-/// Insertion order is the match order, so the most specific token wins.
-const _modelFamilyLabels = <String, String>{
-  'opus': 'Opus',
-  'sonnet': 'Sonnet',
-  'haiku': 'Haiku',
-  'gpt': 'GPT',
-  'gemini': 'Gemini',
-  'grok': 'Grok',
-  'llama': 'Llama',
-  'mistral': 'Mistral',
-  'deepseek': 'DeepSeek',
-  'qwen': 'Qwen',
-  'kimi': 'Kimi',
-  'glm': 'GLM',
-};
-
-/// Vendor/prefix tokens that never make a useful button label on their own.
-const _modelVendorTokens = <String>{
-  'anthropic',
-  'openai',
-  'google',
-  'models',
-  'claude',
-  'chat',
-};
+/// The advertised [ModelOption.label] is the only human-name source. Native
+/// model ids remain exact technical identity in the tooltip; the client never
+/// derives a product/family name from them.
 
 /// Separator glyphs a broker may use to join a label to an embedded id.
 const _labelSeparators = r'·•\-–—/|,:';
 
 /// Sanitizes a broker-advertised model label into something human.
 ///
-/// Returns null when nothing legible survives, so the caller can fall through
-/// to [_shortModelLabel] and then to a generic label.
+/// Returns null when nothing legible survives, so the caller uses the generic
+/// localized model label.
 ///
 /// Genuinely human labels are returned untouched — the id is only excised when
 /// it is actually present, so `Opus 4.8` and `GPT-5.4` survive intact while
@@ -117,34 +86,6 @@ bool _looksLikeModelId(String value) {
       .where((segment) => segment.isNotEmpty)
       .length;
   return segments >= 3;
-}
-
-/// Derives a short, human model name from a raw model id.
-///
-/// Used only when the session's model is absent from the broker's advertised
-/// options, where there is no `label` to read. `claude-opus-4-8` becomes
-/// `Opus`; an unrecognised id falls back to its first meaningful token so the
-/// bar still never renders the dashed id verbatim. Returns null when nothing
-/// legible can be derived, letting the caller show a generic `Model`.
-String? _shortModelLabel(String? rawModelID) {
-  final raw = rawModelID?.trim().toLowerCase() ?? '';
-  if (raw.isEmpty) {
-    return null;
-  }
-  for (final entry in _modelFamilyLabels.entries) {
-    if (raw.contains(entry.key)) {
-      return entry.value;
-    }
-  }
-  for (final token in raw.split(RegExp('[^a-z0-9]+'))) {
-    if (token.isEmpty ||
-        _modelVendorTokens.contains(token) ||
-        !RegExp('[a-z]').hasMatch(token)) {
-      continue;
-    }
-    return token[0].toUpperCase() + token.substring(1);
-  }
-  return null;
 }
 
 /// Tooltip carrying everything the bar deliberately does not show: the full

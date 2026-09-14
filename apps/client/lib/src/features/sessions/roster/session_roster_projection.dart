@@ -651,11 +651,45 @@ final class SessionRosterProjection {
       };
     }
 
+    // An explicit reveal beats the filter, for that parent's children only.
+    //
+    // `kept` propagates upward: a subtree survives narrowing when it or a
+    // descendant matches. Nothing propagates DOWN, so a parent that matches on
+    // its own title keeps none of its children. The child-count affordance
+    // counts `childKeysOf` unfiltered, so it went on advertising "Show 1 linked
+    // session" for a row the walk below could never emit — measured on the
+    // installed client, where pressing that chip did nothing four different
+    // ways because there was nothing for it to reveal.
+    //
+    // Pressing it is an explicit statement that these children are wanted, so
+    // it admits them past the filter -- the direct children of that one parent
+    // only. The default is untouched: `auto` still reveals only the match path.
+    //
+    // The two stores have DIFFERENT lifetimes, and only one is bounded by the
+    // narrowing that prompted it. `revealChildExpansion` is discarded when the
+    // search clears. `childExpansion` is not: it lives as long as the pane, so
+    // a parent expanded once keeps drawing children that fail the always-on
+    // activity window (`last7Days`, which `isSearching` deliberately excludes)
+    // while a top-level session of the same age stays hidden. That asymmetry is
+    // deliberate -- an expand is a request for those specific rows, and the
+    // alternative is the dead chip this whole block exists to remove -- but it
+    // is a PERSISTENT override, and an earlier version of this comment claimed
+    // transience for both branches when it is true of only one.
+    bool explicitlyExpanded(String key) =>
+        (filters.isSearching
+            ? revealChildExpansion[key]
+            : childExpansion[key]) ==
+        SessionChildExpansion.expanded;
+
+    bool drawable(String childKey, String parentKey) =>
+        ((kept[childKey] ?? false) || explicitlyExpanded(parentKey)) &&
+        shown(childKey);
+
     // What the roster is actually about to draw, so the row affordance states
     // the truth in every mode instead of echoing the override alone.
     bool childrenRevealed(String key) {
       for (final childKey in tree.childKeysOf(key)) {
-        if ((kept[childKey] ?? false) && shown(childKey)) return true;
+        if (drawable(childKey, key)) return true;
       }
       return false;
     }
@@ -682,7 +716,7 @@ final class SessionRosterProjection {
         final children = tree.childKeysOf(key);
         for (var index = children.length - 1; index >= 0; index -= 1) {
           final childKey = children[index];
-          if ((kept[childKey] ?? false) && shown(childKey)) {
+          if (drawable(childKey, key)) {
             stack.add(childKey);
           }
         }

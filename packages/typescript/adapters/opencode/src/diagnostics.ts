@@ -90,6 +90,10 @@ export async function diagnoseOpenCodeSetup(
     displayName: 'OpenCode',
     command: 'opencode',
     versionArgs: ['--version'],
+    // Doctor and setup spawn this probe too, and an unguarded `--version`
+    // here is the same class of gap as an unguarded runtime child --
+    // `diagnoseBinaryVersion` runs it on every doctor and every setup.
+    versionProbeEnv: { OPENCODE_DISABLE_AUTOUPDATE: '1' },
     minimum: OPENCODE_MINIMUM_VERSION,
     installMessage: 'Install the official OpenCode CLI, then rerun doctor.',
     upgradeCommand: 'opencode upgrade',

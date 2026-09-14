@@ -25,7 +25,7 @@ import { writeFileSync, appendFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CANONICAL_MESSAGE_TYPES, summarizeDiff } from '../../../adapter-api/src/index.ts';
-import { ClaudeAdapter, ClaudeObserveConnection, ClaudeResumeConnection, mapTranscript, enrichClaudeToolResult, structuredPatchToDiff } from '../src/index.ts';
+import { ClaudeAdapter, ClaudeObserveConnection, ClaudeResumeConnection, drainClaudeLiveStatusProbes, mapTranscript, enrichClaudeToolResult, structuredPatchToDiff } from '../src/index.ts';
 import type { ClaudeStore } from '../src/index.ts';
 import type { AgentMessage, SessionInfo } from '../../../adapter-api/src/index.ts';
 
@@ -600,6 +600,12 @@ await (async () => {
   check('getHistory() on a real transcript parses without throwing', threw === '', threw);
   check('real history yields only canonical message types', bad.length === 0, `types=[${types.join(',')}] msgs=${history.length}`);
 })();
+
+// The real-data half discovers live sessions, which refreshes the adapter's
+// `agents --json` status cache in the background. `process.exit` below would
+// abandon that child mid-flight, and a process outliving this one is exactly
+// what the verification lane reports as a stray.
+await drainClaudeLiveStatusProbes();
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

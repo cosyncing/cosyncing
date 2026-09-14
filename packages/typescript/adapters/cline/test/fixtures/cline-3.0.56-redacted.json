@@ -1,0 +1,35 @@
+{
+  "nativeVersion": "3.0.56",
+  "messagesDocumentVersion": 1,
+  "parent": {
+    "agent": "lead",
+    "sessionId": "1787424308272_2eapl",
+    "origin": {
+      "source": "cli",
+      "mode": "user",
+      "sessionId": "1787424308272_2eapl",
+      "version": "3.0.56"
+    },
+    "assistantModelInfo": {
+      "id": "qwen3.8-27B-FP8",
+      "provider": "openai-compatible"
+    }
+  },
+  "subagent": {
+    "agent": "subagent",
+    "taskType": "subagent_task",
+    "sessionId": "1787424308272_2eapl__agent_1787424313729_lbwhkj",
+    "origin": {
+      "source": "cli",
+      "mode": "subagent",
+      "sessionId": "1787424308272_2eapl__agent_1787424313729_lbwhkj",
+      "parentThreadId": "1787424308272_2eapl",
+      "subagent": "agent_1787424313729_lbwhkj",
+      "version": "3.0.56"
+    },
+    "assistantModelInfo": {
+      "id": "qwen3.8-27B-FP8",
+      "provider": "openai-compatible"
+    }
+  }
+}

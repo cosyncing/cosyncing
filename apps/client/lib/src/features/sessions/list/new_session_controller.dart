@@ -35,6 +35,21 @@ enum NewSessionModelCatalogPhase {
   failed,
 }
 
+/// Pre-session permission-mode catalog state for the selected tool.
+enum NewSessionModeCatalogPhase {
+  /// The selected adapter exposes no pre-session mode catalog.
+  unavailable,
+
+  /// A mode catalog request is active.
+  loading,
+
+  /// A fresh mode catalog was loaded.
+  ready,
+
+  /// Refresh failed; retained options, if any, are stale.
+  failed,
+}
+
 /// Defense-in-depth bound matching the broker's pre-session catalog ceiling.
 const newSessionModelCatalogMaxOptions = 2048;
 
@@ -69,6 +84,12 @@ final class NewSessionState {
     this.modelCatalogSource,
     this.modelRefreshedAt,
     this.modelError,
+    this.modeCatalogPhase = NewSessionModeCatalogPhase.unavailable,
+    this.modeTool,
+    this.modes = const [],
+    this.modeCatalogSource,
+    this.modeRefreshedAt,
+    this.modeError,
     this.error,
   });
 
@@ -96,6 +117,24 @@ final class NewSessionState {
   /// Honest refresh error. Retained [models] are stale when this is non-null.
   final LocalizedFailure? modelError;
 
+  /// Freshness of [modes].
+  final NewSessionModeCatalogPhase modeCatalogPhase;
+
+  /// Tool that owns [modes].
+  final String? modeTool;
+
+  /// Exact adapter-owned approval modes for [modeTool].
+  final List<ModeOption> modes;
+
+  /// Exact profile/endpoint/incarnation that supplied [modes].
+  final RosterSource? modeCatalogSource;
+
+  /// Broker observation time for [modes].
+  final int? modeRefreshedAt;
+
+  /// Honest permission-mode refresh error.
+  final LocalizedFailure? modeError;
+
   /// Last honest load/create error.
   final LocalizedFailure? error;
 
@@ -112,9 +151,16 @@ final class NewSessionState {
     RosterSource? modelCatalogSource,
     int? modelRefreshedAt,
     LocalizedFailure? modelError,
+    NewSessionModeCatalogPhase? modeCatalogPhase,
+    String? modeTool,
+    List<ModeOption>? modes,
+    RosterSource? modeCatalogSource,
+    int? modeRefreshedAt,
+    LocalizedFailure? modeError,
     LocalizedFailure? error,
     bool clearError = false,
     bool clearModelError = false,
+    bool clearModeError = false,
   }) => NewSessionState(
     phase: phase ?? this.phase,
     agents: agents ?? this.agents,
@@ -124,6 +170,12 @@ final class NewSessionState {
     modelCatalogSource: modelCatalogSource ?? this.modelCatalogSource,
     modelRefreshedAt: modelRefreshedAt ?? this.modelRefreshedAt,
     modelError: clearModelError ? null : modelError ?? this.modelError,
+    modeCatalogPhase: modeCatalogPhase ?? this.modeCatalogPhase,
+    modeTool: modeTool ?? this.modeTool,
+    modes: modes ?? this.modes,
+    modeCatalogSource: modeCatalogSource ?? this.modeCatalogSource,
+    modeRefreshedAt: modeRefreshedAt ?? this.modeRefreshedAt,
+    modeError: clearModeError ? null : modeError ?? this.modeError,
     error: clearError ? null : error ?? this.error,
   );
 }
@@ -285,7 +337,13 @@ final class SessionCreationReadinessController
       final agents = await agentsFuture;
       if (!_canPublish(admission)) return;
       if (agents == null) {
-        state = SessionCreationReadinessState(source: source);
+        // No client is not an answer about the server. `unavailable` means "a
+        // successful read confirmed that no registered agent can create
+        // sessions", and every surface that renders a reason reads it that
+        // way, so producing it here states something never established. It is
+        // the same shape as a thrown read and is reported the same: a failure,
+        // which stays retryable instead of settling into a false negative.
+        state = SessionCreationReadinessState(source: source, failed: true);
         return;
       }
       state = SessionCreationReadinessState(
@@ -311,6 +369,7 @@ final class SessionCreationReadinessController
 final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
   int _agentGeneration = 0;
   int _modelGeneration = 0;
+  int _modeGeneration = 0;
   RosterSource? _activeSource;
 
   @override
@@ -323,6 +382,7 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
     // freshly rebuilt state.
     _agentGeneration += 1;
     _modelGeneration += 1;
+    _modeGeneration += 1;
     return const NewSessionState();
   }
 
@@ -347,7 +407,41 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
           .where((agent) => agent.canCreateSession)
           .toList(growable: false);
       if (!_canAdmitAgents(admission)) return;
-      state = NewSessionState(agents: agents);
+      // A roster refresh must not destroy work already in progress. Replacing
+      // the whole state here dropped the loaded model and mode catalogs — and
+      // with them the user's in-progress selection — every time the roster
+      // refreshed while the New Session sheet was open. The permission-mode
+      // field then vanished and Create refused with "That permission mode is
+      // no longer available. Refresh and choose again.", naming a control the
+      // sheet had stopped showing. Measured in the browser against Reasonix,
+      // whose /modes endpoint kept advertising the chosen mode throughout.
+      // A catalog whose tool is still offered survives; one whose tool is gone
+      // is dropped, because that tool really did stop being creatable.
+      final keepsModel =
+          state.modelTool != null &&
+          agents.any((agent) => agent.id == state.modelTool);
+      final keepsMode =
+          state.modeTool != null &&
+          agents.any((agent) => agent.id == state.modeTool);
+      state = NewSessionState(
+        agents: agents,
+        modelCatalogPhase: keepsModel
+            ? state.modelCatalogPhase
+            : NewSessionModelCatalogPhase.unavailable,
+        modelTool: keepsModel ? state.modelTool : null,
+        models: keepsModel ? state.models : const [],
+        modelCatalogSource: keepsModel ? state.modelCatalogSource : null,
+        modelRefreshedAt: keepsModel ? state.modelRefreshedAt : null,
+        modelError: keepsModel ? state.modelError : null,
+        modeCatalogPhase: keepsMode
+            ? state.modeCatalogPhase
+            : NewSessionModeCatalogPhase.unavailable,
+        modeTool: keepsMode ? state.modeTool : null,
+        modes: keepsMode ? state.modes : const [],
+        modeCatalogSource: keepsMode ? state.modeCatalogSource : null,
+        modeRefreshedAt: keepsMode ? state.modeRefreshedAt : null,
+        modeError: keepsMode ? state.modeError : null,
+      );
     } on Object catch (error) {
       if (!_canAdmitAgents(admission)) return;
       state = NewSessionState(
@@ -365,6 +459,89 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
       await _loadModels(tool);
     } finally {
       keepAlive.close();
+    }
+  }
+
+  /// Loads the selected adapter's pre-session permission-mode catalog.
+  Future<void> loadModes(String tool) async {
+    final keepAlive = ref.keepAlive();
+    try {
+      await _loadModes(tool);
+    } finally {
+      keepAlive.close();
+    }
+  }
+
+  Future<void> _loadModes(String tool) async {
+    final profile = ref.read(activeBrokerProfileProvider);
+    final admission = _NewSessionAdmission(
+      source: RosterSource.of(profile),
+      tool: tool,
+      generation: ++_modeGeneration,
+    );
+    if (profile == null) {
+      state = state.copyWith(
+        modeCatalogPhase: NewSessionModeCatalogPhase.failed,
+        modeTool: tool,
+      );
+      return;
+    }
+    final source = RosterSource.ofProfile(profile);
+    final agent = state.agents
+        .where((candidate) => candidate.id == tool)
+        .firstOrNull;
+    if (agent == null || !agent.canSelectPermissionModeAtCreation) {
+      state = state.copyWith(
+        modeCatalogPhase: NewSessionModeCatalogPhase.unavailable,
+        modeTool: tool,
+        modes: const [],
+        modeCatalogSource: source,
+        clearModeError: true,
+      );
+      return;
+    }
+    final retained = state.modeTool == tool && state.modeCatalogSource == source
+        ? state.modes
+        : const <ModeOption>[];
+    state = state.copyWith(
+      modeCatalogPhase: NewSessionModeCatalogPhase.loading,
+      modeTool: tool,
+      modes: retained,
+      modeCatalogSource: source,
+      clearModeError: true,
+    );
+    try {
+      final response = await (() async {
+        final client = await ref.read(brokerClientFactoryProvider)(profile);
+        try {
+          return await client.listAgentModes(tool);
+        } finally {
+          client.close();
+        }
+      })();
+      if (!_canAdmitModes(admission)) return;
+      state = state.copyWith(
+        modeCatalogPhase: NewSessionModeCatalogPhase.ready,
+        modeTool: tool,
+        modes: response.modes
+            .take(newSessionModelCatalogMaxOptions)
+            .toList(growable: false),
+        modeCatalogSource: source,
+        modeRefreshedAt: response.refreshedAt,
+        clearModeError: true,
+      );
+    } on Object catch (error) {
+      if (!_canAdmitModes(admission)) return;
+      state = state.copyWith(
+        modeCatalogPhase: NewSessionModeCatalogPhase.failed,
+        modeTool: tool,
+        modes: const [],
+        modeCatalogSource: source,
+        modeError: LocalizedFailure.from(
+          error,
+          lead: FailureLead.refreshModelCatalog,
+        ),
+      );
     }
   }
 
@@ -456,6 +633,12 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
       admission.tool == state.modelTool &&
       admission.source == _activeSource;
 
+  bool _canAdmitModes(_NewSessionAdmission admission) =>
+      admission.generation == _modeGeneration &&
+      admission.tool != null &&
+      admission.tool == state.modeTool &&
+      admission.source == _activeSource;
+
   /// Creates and returns one session, omitting blank optional fields.
   Future<SessionInfo?> create({
     required String tool,
@@ -463,6 +646,8 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
     required String title,
     SessionCurrentModel? model,
     RosterSource? modelSource,
+    String? permissionMode,
+    RosterSource? permissionModeSource,
   }) async {
     if (!state.agents.any((agent) => agent.id == tool)) {
       state = state.copyWith(
@@ -481,6 +666,8 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
               title: title,
               model: model,
               modelSource: modelSource,
+              permissionMode: permissionMode,
+              permissionModeSource: permissionModeSource,
             ),
           );
       state = state.copyWith(phase: NewSessionPhase.idle, clearError: true);

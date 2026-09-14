@@ -442,6 +442,7 @@ void main() {
                 currentModel: const SessionCurrentModel(
                   providerID: 'openai',
                   modelID: 'gpt-5.4-codex',
+                  label: 'GPT-5.4',
                   variant: 'fast',
                   reasoningEffort: 'high',
                 ),
@@ -469,6 +470,38 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+
+    testWidgets('shows the localized Reasonix agent name', (tester) async {
+      await tester.pumpWidget(
+        host(
+          SessionListPane(
+            sessions: [_session('reasonix', 'reasonix-label')],
+            activeKey: null,
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandProject(tester, ungrouped);
+
+      expect(find.text('Reasonix'), findsOneWidget);
+    });
+
+    testWidgets('shows the localized Grok Build agent name', (tester) async {
+      await tester.pumpWidget(
+        host(
+          SessionListPane(
+            sessions: [_session('grok', 'grok-label')],
+            activeKey: null,
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandProject(tester, ungrouped);
+
+      expect(find.text('Grok Build'), findsOneWidget);
     });
 
     testWidgets('search filters the live roster without another fetch', (
@@ -895,6 +928,7 @@ void main() {
                 currentModel: const SessionCurrentModel(
                   providerID: 'anthropic',
                   modelID: 'claude-opus-4-8',
+                  label: 'Opus 4.8',
                 ),
               ),
             ],
@@ -1665,13 +1699,15 @@ void main() {
       );
       // The affordance keeps a localized, counted label that states what it
       // will do next — here the subtree was just opened, so it offers to
-      // hide it again.
+      // hide it again. Read off the SEMANTICS, not `ActionChip.tooltip`: the
+      // widget field stays true whatever reaches the accessibility tree, and
+      // the chip no longer carries a tooltip at all.
       expect(
         tester
-            .widget<ActionChip>(
+            .getSemantics(
               find.byKey(const ValueKey('session-children-opencode/p1')),
             )
-            .tooltip,
+            .label,
         'Hide 1 linked session',
       );
       // The redundant parent chip is gone; adjacency carries the relation.
@@ -1682,9 +1718,101 @@ void main() {
       semantics.dispose();
     });
 
+    testWidgets(
+      'the expand affordance is operable through its accessible name',
+      (
+        tester,
+      ) async {
+        // The accessible NAME used to be the bare count ("1"), with the
+        // sentence that says what activation does hidden in `tooltip`. The
+        // older test next door cannot see that: it reads `ActionChip.tooltip`
+        // off the WIDGET, which stays true whatever the rendered semantics do.
+        //
+        // Scope, stated because it is easy to overclaim here: this test says
+        // NOTHING about the web role. On web `RawChip` emits
+        // `checked: widget.selected` and leaves `selected` null
+        // (`material/chip.dart:1511`, `kIsWeb`-guarded), so the checkable state
+        // that makes this control `role="checkbox"` in a browser exists only
+        // there. A widget test runs the non-web branch, where `selected` is set
+        // instead, so it can neither reproduce nor lock that. Asserting
+        // `isSelected` here and calling it the web fix would be a test that
+        // passes for the wrong reason.
+        //
+        // What it does lock: the name, the actions the control must keep, and
+        // that dispatching the semantics action really operates it.
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(
+          roster([node('p1'), node('c1', parentId: 'p1')]),
+        );
+        await tester.pumpAndSettle();
+        await openProject(tester);
+
+        final chip = find.byKey(
+          const ValueKey('session-children-opencode/p1'),
+        );
+        final data = tester.getSemantics(chip).getSemanticsData();
+
+        // 1. The accessible NAME states what activating it does. It used to be
+        //    the bare count, with the sentence hidden in `tooltip`.
+        expect(
+          data.label,
+          'Show 1 linked session',
+          reason: 'the name assistive technology reads must be the action',
+        );
+        // 1b. And it must be said ONCE. Flutter web folds label and tooltip
+        //     into a single accessible name, so a tooltip repeating the label
+        //     ships as `aria-label="Show 1 linked session\nShow 1 linked
+        //     session"` — measured on the installed client, read twice.
+        expect(
+          data.tooltip,
+          isEmpty,
+          reason: 'a tooltip repeating the label is read out twice on web',
+        );
+        // 2. The chip keeps the semantics it supplies itself. Naming this
+        //    control by WRAPPING it and setting `excludeSemantics: true` on the
+        //    wrapper passes assertion 1 and silently costs both of these:
+        //    `visitChildrenForSemantics` drops the entire subtree, taking
+        //    `Focus`'s contribution with it, and Flutter web only puts a node
+        //    in the browser tab order when it is focusable. That trade — a
+        //    better name for a control keyboard users can no longer reach — is
+        //    what these two lines exist to prevent.
+        expect(
+          data.hasAction(SemanticsAction.focus),
+          isTrue,
+          reason: 'a control keyboard users cannot focus is not an improvement',
+        );
+        expect(
+          data.flagsCollection.isEnabled,
+          Tristate.isTrue,
+          reason: 'the chip reports its own enabled state; do not drop it',
+        );
+        expect(data.flagsCollection.isButton, isTrue);
+        expect(data.hasAction(SemanticsAction.tap), isTrue);
+
+        // 3. Dispatching the semantics action -- the path assistive technology
+        //    and anything driving the page by name take -- must actually
+        //    reveal the subtree, not merely describe it. Located BY LABEL, the
+        //    way the browser locates it, so the name and the action have to
+        //    belong to one node; `performAction` throws if it lacks the action.
+        expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
+        tester.semantics.performAction(
+          find.semantics.byLabel('Show 1 linked session'),
+          SemanticsAction.tap,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('session-row-opencode/c1')),
+          findsOneWidget,
+          reason: 'the semantics action must operate the control',
+        );
+        semantics.dispose();
+      },
+    );
+
     testWidgets('the expand affordance is localized in Chinese', (
       tester,
     ) async {
+      final semantics = tester.ensureSemantics();
       await tester.pumpWidget(
         roster(
           [node('p1'), node('c1', parentId: 'p1'), node('c2', parentId: 'p1')],
@@ -1695,14 +1823,18 @@ void main() {
       await tester.pumpAndSettle();
       await openProject(tester);
 
+      // The localized string has to reach the accessible NAME. Reading
+      // `ActionChip.tooltip` proved only that a translation was passed to a
+      // widget field, which the chip no longer has.
       expect(
         tester
-            .widget<ActionChip>(
+            .getSemantics(
               find.byKey(const ValueKey('session-children-opencode/p1')),
             )
-            .tooltip,
+            .label,
         '显示 2 个关联会话',
       );
+      semantics.dispose();
     });
 
     testWidgets('the child chip hides and reshows with background enabled', (
@@ -1711,33 +1843,33 @@ void main() {
       // A subagent subtree defaults closed even with showBackgroundSessions
       // on, so the chip starts by offering to show — and it must keep telling
       // the truth through a full open/close round trip.
+      final semantics = tester.ensureSemantics();
       await tester.pumpWidget(
         roster([node('p1'), node('c1', parentId: 'p1')]),
       );
       await tester.pumpAndSettle();
       await openProject(tester);
 
-      String chipTooltip() => tester
-          .widget<ActionChip>(
-            find.byKey(const ValueKey('session-children-opencode/p1')),
-          )
-          .tooltip!;
       Finder chip() =>
           find.byKey(const ValueKey('session-children-opencode/p1'));
+      // The NAME, not `ActionChip.tooltip`. The round trip is only worth
+      // asserting on the string that actually reaches a reader.
+      String chipName() => tester.getSemantics(chip()).label;
 
       // Children start hidden, so the affordance must offer to show them.
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
-      expect(chipTooltip(), 'Show 1 linked session');
+      expect(chipName(), 'Show 1 linked session');
 
       await tester.tap(chip());
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
-      expect(chipTooltip(), 'Hide 1 linked session');
+      expect(chipName(), 'Hide 1 linked session');
 
       await tester.tap(chip());
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
-      expect(chipTooltip(), 'Show 1 linked session');
+      expect(chipName(), 'Show 1 linked session');
+      semantics.dispose();
     });
 
     testWidgets('searching a hidden child reveals it under its parent', (

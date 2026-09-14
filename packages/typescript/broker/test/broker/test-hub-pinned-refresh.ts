@@ -43,7 +43,7 @@ const syncedInfo = (id: string): SessionInfo => ({
   attachMode: 'live',
   control: {
     drive: { supported: false, state: 'unavailable', reason: 'Synced through hooks.' },
-    terminalSync: { supported: true, syncAvailable: true, active: true, input: 'answer-only', label: 'Synced via hooks' },
+    terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared', input: 'answer-only', label: 'Synced via hooks' },
   },
 });
 
@@ -110,7 +110,7 @@ const observeInfo = (id: string): SessionInfo => ({
       // First attach (ensure) → a bare Observe conn; the second (the refresh upgrade) → live + synced.
       if (attachCalls === 1) return fakeConn({ ...observeInfo('s-b'), tool: 'opencode' });
       const info: SessionInfo = { ...observeInfo('s-b'), tool: 'opencode', attachMode: 'live' };
-      info.control = { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true } };
+      info.control = { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' } };
       return fakeConn(info);
     },
   } as any);
@@ -122,7 +122,7 @@ const observeInfo = (id: string): SessionInfo => ({
 
   // The adapter now reports the same session as synced (a terminal bridge appeared) → upgrade expected.
   const synced: SessionInfo = { ...observeInfo('s-b'), tool: 'opencode', attachMode: 'observe' };
-  synced.control = { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true } };
+  synced.control = { drive: { supported: false, state: 'unavailable' }, terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' } };
   await hub.refreshExternalSession(synced);
 
   check('B1 non-pinned observe→sync upgrade still re-attaches (guard did not over-correct)', attachCalls === 2, `attachCalls=${attachCalls}`);

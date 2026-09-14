@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(57));
+      expect(brokerRoutes, hasLength(58));
     });
 
     test('contains the aggregated usage-report route', () {
@@ -59,9 +59,13 @@ void main() {
   });
 
   group('brokerErrorCodes', () {
-    test('has 103 entries', () {
-      expect(brokerErrorCodes, hasLength(103));
+    test('has 106 entries', () {
+      expect(brokerErrorCodes, hasLength(106));
       expect(brokerErrorCodes, contains('AUTH_REQUIRED'));
+      expect(
+        brokerErrorCodes,
+        contains('OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED'),
+      );
     });
 
     test('includes temporary session creation unavailability', () {

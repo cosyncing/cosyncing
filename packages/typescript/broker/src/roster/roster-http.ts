@@ -137,6 +137,38 @@ export function ifNoneMatchMatches(header: string | null, tag: string): boolean 
   return false;
 }
 
+/** What `/api/sessions` remembers about the last body it built for one window. */
+export interface CachedRosterRepresentation {
+  /** Roster revision the body was built at. */
+  revision: number;
+  /** Whether that body was the whole roster; see {@link rosterRepresentationIsReusable}. */
+  complete: boolean;
+  /** When the window's oldest in-range row ages out, if it has one. */
+  expiresAt?: number;
+}
+
+/**
+ * Whether the remembered body may still answer, subject to the ETag matching.
+ *
+ * The revision is what normally releases a client from a cached answer, and that
+ * is exactly what an INCOMPLETE body cannot rely on. A roster served ahead of
+ * its sweep may reconcile to the very same rows -- no change, no revision -- and
+ * the client would hold `complete: false` forever on a roster that had been
+ * complete all along, with no poll ever reaching discovery again to find out.
+ *
+ * So an incomplete representation is never reusable. It costs one full answer on
+ * the next poll, which is self-limiting: the first complete one restores 304s.
+ */
+export function rosterRepresentationIsReusable(
+  cached: CachedRosterRepresentation | undefined,
+  options: { force: boolean; revision: number; now: number },
+): boolean {
+  if (options.force || !cached) return false;
+  if (cached.expiresAt !== undefined && options.now >= cached.expiresAt) return false;
+  if (!cached.complete) return false;
+  return cached.revision === options.revision;
+}
+
 /** JSON response that gzips when the client accepts it and the body is worth it, with an optional weak
  *  ETag → 304 on a matching If-None-Match. Built for the roster: its ~2 MB payload is re-polled every
  *  few seconds, and a phone over the tailnet was starving on it (gzip ~10×; 304 skips it entirely when

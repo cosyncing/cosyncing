@@ -6,7 +6,7 @@
  * calls a model.
  */
 export {};
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { AgentMessage } from '../../../adapter-api/src/index.ts';
 
@@ -267,6 +267,7 @@ try {
   process.env.COSYNCING_PI_BIN = join(binDir, 'pi');
   process.env.PATH = `${binDir}:${process.env.PATH ?? ''}`;
   const { PiAdapter } = await import('../src/index.ts');
+  const { mapPiJsonlText, readPiHistoryFileSnapshotForTest } = await import('../../../pi-engine/src/implementation.ts');
   const adapter = new PiAdapter({ brokerUrl: 'http://127.0.0.1:19999' });
   check('Pi reports createSession available when CLI exists', adapter.canCreateSession() === true);
   const creationCatalog = await adapter.listModels();
@@ -282,6 +283,286 @@ try {
       ),
     JSON.stringify(creationCatalog),
   );
+
+  // Fresh Observe reconstruction: an app-authored custom row carries its exact durable key/client
+  // identity, while identical terminal text has only its native key. No in-memory drive connection
+  // participates in this read, so this also covers broker/browser restart replay.
+  const correlatedFile = join(sessionDir, '2026-06-16T00-00-00-000Z_correlated.jsonl');
+  const remoteOneSentAt = Date.parse('2026-06-16T00:00:00.500Z');
+  const remoteTwoSentAt = Date.parse('2026-06-16T00:00:02.500Z');
+  writeFileSync(correlatedFile, [
+    jsonl({ type: 'session', version: 3, id: 'correlated', timestamp: '2026-06-16T00:00:00.000Z', cwd }),
+    jsonl({
+      type: 'custom_message',
+      id: 'remote-native-1',
+      timestamp: '2026-06-16T00:00:01.000Z',
+      customType: 'collab-prompt',
+      content: 'IDENTICAL PROMPT',
+      display: true,
+      // Pi 0.78.1 drops attribution while retaining the exact extension details.
+      details: { from: 'cosyncing', messageKey: 'u:remote:one', clientKey: 'ca.omp.one', sentAt: remoteOneSentAt },
+    }),
+    jsonl({ type: 'message', id: 'remote-answer-1', timestamp: '2026-06-16T00:00:01.500Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'REMOTE ANSWER' }], usage: { input: 3, output: 4 } } }),
+    jsonl({ type: 'message', id: 'terminal-native', timestamp: '2026-06-16T00:00:02.000Z', message: { role: 'user', content: [{ type: 'text', text: 'IDENTICAL PROMPT' }] } }),
+    jsonl({
+      type: 'custom_message',
+      id: 'remote-native-2',
+      timestamp: '2026-06-16T00:00:03.000Z',
+      customType: 'collab-prompt',
+      content: 'IDENTICAL PROMPT',
+      display: true,
+      attribution: 'user',
+      details: { from: 'cosyncing', messageKey: 'u:remote:two', clientKey: 'ca.omp.two', sentAt: remoteTwoSentAt },
+    }),
+  ].join(''));
+  const correlatedId = Buffer.from(realpathSync(correlatedFile), 'utf8').toString('base64url');
+  const correlatedObserve = await adapter.attach(correlatedId);
+  const correlatedUsers = (await correlatedObserve.getHistory()).filter(
+    (m): m is Extract<AgentMessage, { type: 'user-message' }> => m.type === 'user-message',
+  );
+  check(
+    'fresh Observe preserves two identical app correlations and leaves identical terminal input unstamped',
+    correlatedUsers.length === 3
+      && correlatedUsers[0]?.key === 'u:remote:one'
+      && correlatedUsers[0]?.clientKey === 'ca.omp.one'
+      && correlatedUsers[1]?.key === 'terminal-native'
+      && correlatedUsers[1]?.clientKey === undefined
+      && correlatedUsers[2]?.key === 'u:remote:two'
+      && correlatedUsers[2]?.clientKey === 'ca.omp.two',
+    JSON.stringify(correlatedUsers),
+  );
+  const correlatedHistory = await correlatedObserve.getHistory();
+  const correlatedSummary = correlatedHistory.find(
+    (m) => m.type === 'run-summary' && m.turnId === 'u:remote:one',
+  );
+  check(
+    'correlated reload summary keeps the exact remote anchor and original app-send clock',
+    correlatedSummary?.type === 'run-summary'
+      && correlatedSummary.key === 'pi:run:u:remote:one'
+      && correlatedSummary.userMessageKey === 'u:remote:one'
+      && correlatedSummary.startedAt === remoteOneSentAt
+      && correlatedSummary.completedAt === Date.parse('2026-06-16T00:00:01.500Z')
+      && correlatedSummary.totalRuntimeMs === 1000,
+    JSON.stringify(correlatedSummary),
+  );
+
+  const correlatedLive: AgentMessage[] = [];
+  correlatedObserve.subscribe((m) => correlatedLive.push(m));
+  appendFileSync(correlatedFile, jsonl({
+    type: 'custom_message',
+    id: 'remote-native-duplicate',
+    timestamp: '2026-06-16T00:00:04.000Z',
+    customType: 'collab-prompt',
+    content: 'IDENTICAL PROMPT',
+    display: true,
+    attribution: 'user',
+    details: { from: 'cosyncing', messageKey: 'u:remote:one', clientKey: 'ca.omp.one', sentAt: remoteOneSentAt },
+  }));
+  for (let i = 0; i < 30 && !correlatedLive.some((m) => m.type === 'history-reset'); i++) await sleep(100);
+  const duplicateReplayUsers = (await correlatedObserve.getHistory()).filter(
+    (m): m is Extract<AgentMessage, { type: 'user-message' }> => m.type === 'user-message',
+  );
+  check(
+    'an appended duplicate correlation resets the tail and full replay fails both claims closed',
+    correlatedLive.some((m) => m.type === 'history-reset')
+      && duplicateReplayUsers.some((m) => m.key === 'remote-native-1' && m.clientKey === undefined)
+      && duplicateReplayUsers.some((m) => m.key === 'remote-native-duplicate' && m.clientKey === undefined)
+      && !duplicateReplayUsers.some((m) => m.key === 'u:remote:one'),
+    JSON.stringify({ correlatedLive, duplicateReplayUsers }),
+  );
+  await correlatedObserve.close();
+
+  const duplicateRows = mapPiJsonlText([
+    jsonl({ type: 'custom_message', id: 'dup-native-1', timestamp: '2026-06-16T00:01:00.000Z', customType: 'collab-prompt', content: 'DUP', display: true, attribution: 'user', details: { from: 'cosyncing', messageKey: 'u:remote:dup', clientKey: 'ca.omp.dup', sentAt: 1781568060000 } }),
+    jsonl({ type: 'custom_message', id: 'dup-native-2', timestamp: '2026-06-16T00:01:01.000Z', customType: 'collab-prompt', content: 'DUP', display: true, attribution: 'user', details: { from: 'cosyncing', messageKey: 'u:remote:dup', clientKey: 'ca.omp.dup', sentAt: 1781568061000 } }),
+    jsonl({ type: 'custom_message', id: 'wrong-attribution', timestamp: '2026-06-16T00:01:02.000Z', customType: 'collab-prompt', content: 'FORGED', display: true, attribution: 'assistant', details: { from: 'cosyncing', messageKey: 'u:remote:forged', clientKey: 'ca.omp.forged', sentAt: 1781568062000 } }),
+    jsonl({ type: 'custom_message', id: 'bad-details', timestamp: '2026-06-16T00:01:03.000Z', customType: 'collab-prompt', content: 'FORGED', display: true, attribution: 'user', details: { from: 'someone-else', messageKey: 'u:remote:forged-2', clientKey: 'ca.omp.forged-2', sentAt: 1781568063000 } }),
+  ].join('')).filter((m): m is Extract<AgentMessage, { type: 'user-message' }> => m.type === 'user-message');
+  check(
+    'duplicate identities fall back to distinct native keys; malformed/foreign envelopes are ignored',
+    duplicateRows.length === 2
+      && duplicateRows[0]?.key === 'dup-native-1'
+      && duplicateRows[1]?.key === 'dup-native-2'
+      && duplicateRows.every((m) => m.clientKey === undefined),
+    JSON.stringify(duplicateRows),
+  );
+
+  const branchRows = mapPiJsonlText([
+    jsonl({ type: 'message', id: 'branch-root', parentId: null, timestamp: '2026-06-16T00:02:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'ROOT' }] } }),
+    jsonl({ type: 'custom_message', id: 'branch-abandoned', parentId: 'branch-root', timestamp: '2026-06-16T00:02:01.000Z', customType: 'collab-prompt', content: 'ABANDONED', display: true, attribution: 'user', details: { from: 'cosyncing', messageKey: 'u:remote:branch', clientKey: 'ca.omp.branch', sentAt: 1781568120500 } }),
+    jsonl({ type: 'custom_message', id: 'branch-active', parentId: 'branch-root', timestamp: '2026-06-16T00:02:02.000Z', customType: 'collab-prompt', content: 'ACTIVE', display: true, details: { from: 'cosyncing', messageKey: 'u:remote:branch', clientKey: 'ca.omp.branch', sentAt: 1781568121500 } }),
+    jsonl({ type: 'message', id: 'branch-leaf', parentId: 'branch-active', timestamp: '2026-06-16T00:02:04.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'ACTIVE ANSWER' }] } }),
+  ].join(''));
+  check(
+    'fresh JSONL replay follows only the active parent chain before validating correlations',
+    branchRows.some((m) => m.type === 'user-message' && m.key === 'u:remote:branch' && m.clientKey === 'ca.omp.branch' && m.text === 'ACTIVE')
+      && !branchRows.some((m) => m.type === 'user-message' && m.text === 'ABANDONED')
+      && branchRows.some((m) => m.type === 'run-summary' && m.key === 'pi:run:u:remote:branch'),
+    JSON.stringify(branchRows),
+  );
+
+  const skillStartedAt = Date.parse('2026-06-16T00:02:10.000Z');
+  const skillEntryAt = skillStartedAt + 500;
+  const skillCompletedAt = Date.parse('2026-06-16T00:02:12.000Z');
+  const skillRows = mapPiJsonlText([
+    jsonl({
+      type: 'custom_message',
+      id: 'skill-native',
+      timestamp: new Date(skillEntryAt).toISOString(),
+      customType: 'skill-prompt',
+      content: 'PRIVATE EXPANDED BODY THAT MUST NOT BECOME THE USER BUBBLE',
+      display: true,
+      // Pi 0.78.1 can omit attribution on persisted custom rows.
+      details: { name: 'review', path: join(root, 'skills', 'review', 'SKILL.md'), args: 'now', lineCount: 2, sentAt: skillStartedAt },
+    }),
+    jsonl({
+      type: 'message',
+      id: 'skill-answer',
+      timestamp: new Date(skillCompletedAt).toISOString(),
+      message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'SKILL DONE' }] },
+    }),
+  ].join(''));
+  const skillUser = skillRows.find((m) => m.type === 'user-message');
+  const skillSummary = skillRows.find((m) => m.type === 'run-summary');
+  check(
+    'fresh JSONL replay maps a native skill prompt to its compact invocation and turn boundary',
+    skillUser?.type === 'user-message'
+      && skillUser.key === 'u0'
+      && skillUser.text === '/skill:review now'
+      && !skillRows.some((m) => m.type === 'user-message' && m.text.includes('PRIVATE EXPANDED BODY'))
+      && skillSummary?.type === 'run-summary'
+      && skillSummary.key === 'pi:run:u0'
+      && skillSummary.userMessageKey === 'u0'
+      && skillSummary.startedAt === skillStartedAt
+      && skillSummary.completedAt === skillCompletedAt,
+    JSON.stringify(skillRows),
+  );
+
+  const nativeSkillEntryAt = Date.parse('2026-06-16T00:02:20.000Z');
+  const nativeSkillCompletedAt = nativeSkillEntryAt + 3000;
+  const nativeSkillRows = mapPiJsonlText([
+    jsonl({
+      type: 'custom_message',
+      id: 'terminal-skill-native',
+      timestamp: new Date(nativeSkillEntryAt).toISOString(),
+      customType: 'skill-prompt',
+      content: 'NATIVE TERMINAL EXPANDED BODY',
+      display: true,
+      attribution: 'user',
+      // OMP 17.4.2's native SkillPromptDetails has no sentAt field.
+      details: { name: 'review', path: join(root, 'skills', 'review', 'SKILL.md'), args: 'terminal', lineCount: 2 },
+    }),
+    jsonl({
+      type: 'message',
+      id: 'terminal-skill-answer',
+      timestamp: new Date(nativeSkillCompletedAt).toISOString(),
+      message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'NATIVE SKILL DONE' }] },
+    }),
+  ].join(''));
+  check(
+    'fresh JSONL replay retains a terminal-native skill prompt without bridge sentAt details',
+    nativeSkillRows.some((m) => m.type === 'user-message' && m.key === 'u0' && m.text === '/skill:review terminal' && m.sentAt === nativeSkillEntryAt)
+      && nativeSkillRows.some((m) => m.type === 'run-summary' && m.key === 'pi:run:u0' && m.startedAt === nativeSkillEntryAt && m.completedAt === nativeSkillCompletedAt)
+      && !nativeSkillRows.some((m) => m.type === 'user-message' && m.text.includes('NATIVE TERMINAL EXPANDED BODY')),
+    JSON.stringify(nativeSkillRows),
+  );
+
+  // Deterministically replace the path after the first descriptor read. The coherent reader must
+  // reject the old descriptor/path pairing and retry the replacement for equal and larger files.
+  for (const kind of ['equal', 'larger'] as const) {
+    const raceFile = join(sessionDir, `2026-06-16T00-03-00-000Z_snapshot-${kind}.jsonl`);
+    const staging = `${raceFile}.next`;
+    const oldRaw = [
+      jsonl({ type: 'session', version: 3, id: `snapshot-${kind}`, timestamp: '2026-06-16T00:03:00.000Z', cwd }),
+      jsonl({ type: 'message', id: 'snapshot-old', message: { role: 'user', content: [{ type: 'text', text: 'OLD_EQUAL' }] } }),
+    ].join('');
+    const replacementRaw = kind === 'equal'
+      ? oldRaw.replace('OLD_EQUAL', 'NEW_EQUAL')
+      : oldRaw.replace('OLD_EQUAL', 'NEW_LARGER')
+        + jsonl({ type: 'message', id: 'snapshot-extra', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'EXTRA' }] } });
+    writeFileSync(raceFile, oldRaw);
+    writeFileSync(staging, replacementRaw);
+    const snapshot = readPiHistoryFileSnapshotForTest(raceFile, () => renameSync(staging, raceFile));
+    const installedStat = statSync(raceFile);
+    check(
+      `coherent snapshot retries a ${kind}-size atomic replacement instead of binding old bytes to it`,
+      snapshot.raw === replacementRaw
+        && snapshot.identity.sourceId.endsWith(`:${installedStat.dev}:${installedStat.ino}`),
+      JSON.stringify({ raw: snapshot.raw, identity: snapshot.identity }),
+    );
+    rmSync(raceFile, { force: true });
+  }
+
+  // Connection-level proof: both equal and larger inode replacements invalidate the live Observe
+  // state and force a whole replay from the replacement, never an append from the old offset.
+  for (const kind of ['equal', 'larger'] as const) {
+    const observedFile = join(sessionDir, `2026-06-16T00-04-00-000Z_observed-${kind}.jsonl`);
+    const staging = `${observedFile}.next`;
+    const oldRaw = [
+      jsonl({ type: 'session', version: 3, id: `observed-${kind}`, timestamp: '2026-06-16T00:04:00.000Z', cwd }),
+      jsonl({ type: 'message', id: 'observed-old', message: { role: 'user', content: [{ type: 'text', text: 'OLD_BRANCH' }] } }),
+    ].join('');
+    const replacementRaw = kind === 'equal'
+      ? oldRaw.replace('OLD_BRANCH', 'NEW_BRANCH')
+      : oldRaw.replace('OLD_BRANCH', 'NEW_BRANCH')
+        + jsonl({ type: 'message', id: 'observed-extra', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'LARGER_REPLACEMENT' }] } });
+    writeFileSync(observedFile, oldRaw);
+    const observedId = Buffer.from(realpathSync(observedFile), 'utf8').toString('base64url');
+    const observed = await adapter.attach(observedId);
+    const replacementEvents: AgentMessage[] = [];
+    observed.subscribe((message) => replacementEvents.push(message));
+    await observed.getHistory();
+    writeFileSync(staging, replacementRaw);
+    renameSync(staging, observedFile);
+    for (let i = 0; i < 40 && !replacementEvents.some((m) => m.type === 'history-reset'); i++) await sleep(100);
+    const afterReplacement = `AFTER_REPLACEMENT_${kind.toUpperCase()}`;
+    appendFileSync(observedFile, jsonl({
+      type: 'message',
+      id: `observed-after-${kind}`,
+      message: { role: 'user', content: [{ type: 'text', text: afterReplacement }] },
+    }));
+    for (let i = 0; i < 40 && !replacementEvents.some((m) => m.type === 'user-message' && m.text === afterReplacement); i++) await sleep(100);
+    const replacementHistory = await observed.getHistory();
+    check(
+      `Observe resets, tails, and replays a ${kind}-size atomic transcript replacement`,
+      replacementEvents.some((m) => m.type === 'history-reset')
+        && replacementEvents.some((m) => m.type === 'user-message' && m.text === afterReplacement)
+        && replacementHistory.some((m) => m.type === 'user-message' && m.text === 'NEW_BRANCH')
+        && replacementHistory.some((m) => m.type === 'user-message' && m.text === afterReplacement)
+        && !replacementHistory.some((m) => m.type === 'user-message' && m.text === 'OLD_BRANCH')
+        && (kind === 'equal' || replacementHistory.some((m) => m.type === 'model-output' && m.text === 'LARGER_REPLACEMENT')),
+      JSON.stringify({ replacementEvents, replacementHistory }),
+    );
+    await observed.close();
+    rmSync(observedFile, { force: true });
+  }
+
+  // A replacement event can already have queued its delayed read when the socket detaches. Closing
+  // must invalidate that callback so resetToSnapshot cannot resurrect a file watcher afterward.
+  const closeRaceFile = join(sessionDir, '2026-06-16T00-05-00-000Z_close-race.jsonl');
+  const closeRaceStaging = `${closeRaceFile}.next`;
+  writeFileSync(closeRaceFile, jsonl({ type: 'message', id: 'close-old', message: { role: 'user', content: [{ type: 'text', text: 'CLOSE OLD' }] } }));
+  const closeRaceId = Buffer.from(realpathSync(closeRaceFile), 'utf8').toString('base64url');
+  const closeRace = await adapter.attach(closeRaceId);
+  const closeRaceEvents: AgentMessage[] = [];
+  closeRace.subscribe((message) => closeRaceEvents.push(message));
+  await closeRace.getHistory();
+  writeFileSync(closeRaceStaging, jsonl({ type: 'message', id: 'close-new', message: { role: 'user', content: [{ type: 'text', text: 'CLOSE NEW' }] } }));
+  renameSync(closeRaceStaging, closeRaceFile);
+  await sleep(10); // directory callback is queued for 80 ms, but reset has not run yet
+  await closeRace.close();
+  await sleep(200);
+  const closedInternals = closeRace as any;
+  check(
+    'close during atomic replacement fences queued reads and cannot resurrect watchers',
+    closeRaceEvents.length === 0
+      && closedInternals.closed === true
+      && closedInternals.watcher === undefined
+      && closedInternals.directoryWatcher === undefined,
+    JSON.stringify({ events: closeRaceEvents, watcher: closedInternals.watcher, directoryWatcher: closedInternals.directoryWatcher }),
+  );
+  rmSync(closeRaceFile, { force: true });
+
   const created = await adapter.createSession({
     directory: cwd,
     title: 'Created From Test',
@@ -316,7 +597,7 @@ try {
   check('terminal sync is supported but inactive before bridge', session?.control?.terminalSync.supported === true && session?.control?.terminalSync.active === false);
   check(
     'terminal sync setup is a short Pi session resume command',
-    session?.control?.terminalSync.command === `COSYNCING_BROKER='http://127.0.0.1:19999' pi --session '${resolve(sessionFile)}'` &&
+    session?.control?.terminalSync.command === `COSYNCING_BROKER='http://127.0.0.1:19999' '${join(binDir, 'pi')}' --session '${resolve(sessionFile)}'` &&
       !/config\.json|mkdir|cp /.test(session?.control?.terminalSync.command ?? ''),
     session?.control?.terminalSync.command ?? '',
   );
@@ -458,8 +739,21 @@ try {
   );
   check(
     'reconnected drive keys its optimistic prompt echo above the file entries',
-    driveLive.some((m) => m.type === 'user-message' && (m as any).key === `u:sent:${seededLines + 1}`),
-    JSON.stringify(driveLive.filter((m) => m.type === 'user-message').map((m) => (m as any).key)),
+    driveLive.some((m) =>
+      m.type === 'user-message'
+      && (m as any).key === `u:sent:${seededLines + 1}`
+      && m.queued === true
+    ),
+    JSON.stringify(driveLive.filter((m) => m.type === 'user-message')),
+  );
+  check(
+    'native user start reconciles the original prompt echo on the same key',
+    driveLive.some((m) =>
+      m.type === 'user-message'
+      && (m as any).key === `u:sent:${seededLines + 1}`
+      && m.queued === false
+    ),
+    JSON.stringify(driveLive.filter((m) => m.type === 'user-message')),
   );
   for (let i = 0; i < 30 && !driveLive.some((m) => m.type === 'run-summary' && m.status === 'done'); i++) await sleep(100);
   const driveDone: any = driveLive.find((m) => m.type === 'run-summary' && m.status === 'done');

@@ -1,9 +1,12 @@
 # Adapter support and evidence
 
-The broker presents one protocol across Claude Code, Codex, OpenCode, Pi, Kimi
-Code, DeepSeek Harness, and Antigravity. The generated matrix below covers the
-four whose claims carry the required evidence; Kimi Code, DeepSeek Harness, and
-Antigravity are provisional and are described under
+The broker presents one protocol across Claude Code, Codex, OpenCode, Pi, omp,
+Kimi Code, DeepSeek Harness, Antigravity, Reasonix, Grok Build, Cline, and Kilo
+Code. The generated matrix below covers the nine whose claims carry the
+required evidence. omp, Reasonix, Grok Build, Cline, and Kilo Code remain
+experimental because their upstream contracts are version-sensitive, but their
+measured shipped postures have completed installed physical acceptance. Kimi
+Code, DeepSeek Harness, and Antigravity are also described under
 [experimental adapters](#experimental-adapters).
 Support claims are generated from `support-matrix-claims.ts` and must have the
 evidence level required by `trace-manifest.ts`.
@@ -26,24 +29,24 @@ bun run scripts/broker/tests_traces/render-support-matrix.ts --write
 
 <!-- BEGIN GENERATED SUPPORT MATRIX -->
 
-| Function | Claude Code | Codex | OpenCode | Pi | omp |
-|---|---|---|---|---|---|
-| F01 discover/history/reattach | full: JSONL observe plus Drive/resume | full: rollout observe plus app-server resume/live | full: shared-server plus private observe | full: JSONL/RPC observe plus bridge | full: JSONL/RPC observe plus bridge |
-| F02 true sync | partial: hooks are answer-only; Drive is app-owned continuation | full: managed app-server live thread | full: shared opencode serve plus attach TUI | full: bridge extension | partial: bridge extension is wired; real OMP TUI true-sync pass remains |
-| F03 prompt/queue/stop | full: Drive prompt/stop; hooks sync cannot inject prompts | full: Drive/live; queued steer guarded | full: shared server; private Drive partial but prompt path covered | full: resume/bridge; queue semantics partial but prompt/stop path covered | full: resume/bridge; queue semantics partial but prompt/stop path covered |
-| F04 answer/thinking streaming | partial: externally launched hooks are block-level; Drive is fuller | full: app-server streaming; observe rollout limited | full: answer/thinking lanes | partial: live tool-output streaming thinner than RPC history | partial: live tool-output streaming thinner than RPC history |
-| F05 tool display | full: common Claude tools, TodoWrite, diffs | full: exec/patch/read/search plus subagent control suppression | full: bash/edit/read/search summaries | full: common built-ins after enrichment | full: common built-ins after shared-engine enrichment |
-| F06 permissions | full: PreToolUse hooks and Drive; L3 app-answer exists | full: app-server permission path | full: SSE/REST permission path | full: bridge permission and RPC confirm | full: bridge permission and RPC confirm |
-| F07 questions | full: AskUserQuestion and Drive | full: app-server tool/MCP questions | full: SSE/REST question channel | partial: resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only | partial: resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only |
-| F08 model/effort/mode display/override | full: display plus Drive overrides; hooks locked when not injectable | full: display and Drive overrides | full: model/agent display and override | full: model/thinking display and override | full: model/thinking display and override |
-| F09 slash commands/skills/templates | partial: native command discovery; hooks cannot inject prompt commands | partial: native slash/skills where app-server exposes them | full: server command registry; documented TUI built-ins tracked separately | full: get_commands registry; TUI/RPC-only gaps tracked separately | full: get_available_commands registry; pinned native drift gate remains follow-up work |
-| F10 todo/task list | full: TodoWrite to task-list-state | full: update_plan to task-list-state | full: todowrite to task-list-state | n/a: no native todo tool | n/a: no mapped native todo tool |
-| F11 subagents/workflows/activity | full: Task plus UltraCode/workflow activity | full: spawn/wait-derived subagents | full: OpenCode task/subagent progress | n/a: no native subagent/workflow concept | n/a: native subagent events are deliberately outside the v1 adapter |
-| F12 user-to-agent files | full: native file/image input through Drive | full: inbox path read by Codex | full: single and multi-file input | full: byte-exact inbox upload | full: byte-exact inbox upload |
-| F13 agent-to-user artifacts | partial: maps native SendUserFile records and auto-surfaces its native Write of a deliverable file inside cwd; still partial because local CLI/Drive exposes no callable delivery tool | n/a: no exact session-qualified delivery route; shared cwd outbox fails closed | full: session-qualified send_file plus exact native write events | full: session-qualified bridge send-file route | full: session-qualified bridge send-file route |
-| F14 lifecycle/history mutation | partial: resume/Drive/stop; fork/rename/export gaps | partial: observe/resume/live; archive/delete/fork UI gaps | partial: rename/fork plus stop/compact/undo/redo; export mapped (needs L2); timeline gap remains | partial: create/reload/quit/fork/clone/name covered; switch excluded by review; export mapped (needs L2) | partial: create/reload/quit/name/export covered; fork and clone are unavailable through RPC |
-| F15 runtime/tokens/context/status | full: runtime/status/token display with hooks caveat | full: runtime/status; no fabricated token split | full: runtime/status/tokens; context meter follow-up | full: runtime/status/tokens; context stats follow-up | full: runtime/status/tokens; context stats follow-up |
-| F16 security/auth/boundaries | full: hook path auth/data-loss hardening; broader read auth follow-up | partial: path/id guards; app-server auth follows native daemon | partial: path/artifact guards; shared-server auth is native deployment concern | partial: bridge token/auth plus path guards; broader read auth follow-up | partial: separately scoped bridge token/auth plus path guards; broader read auth follow-up |
+| Function | Claude Code | Codex | OpenCode | Pi | omp | Reasonix | Grok Build | Cline | Kilo Code |
+|---|---|---|---|---|---|---|---|---|---|
+| F01 discover/history/reattach | full: JSONL observe plus Drive/resume | full: rollout observe plus app-server resume/live | full: shared-server plus private observe | full: JSONL/RPC observe plus bridge | full: JSONL/RPC observe plus bridge | full: bounded file-store observe plus ACP create/load and cross-client reattach | full: bounded local-store Observe plus authenticated ACP create/load, Drive, and cross-client reattach on 1.0.13 or newer | partial: bounded parent/subagent Observe plus isolated managed-Hub Create/Drive and cross-client reattach on 3.0.61 or newer; a replacement Hub epoch revokes Drive | full: bounded SQLite Observe plus authenticated managed-server create, live attach, and restart reattach on 7.4.23 or newer |
+| F02 true sync | partial: hooks are answer-only; Drive is app-owned continuation | full: managed app-server live thread | full: shared opencode serve plus attach TUI | full: bridge extension | partial: bridge true-sync is physically proved for the measured version; reusable L3 TUI drift coverage remains outside the tracked matrix | n/a: broker-owned ACP has no terminal join; exact --resume session targeting is unpinned | n/a: exact-id terminal resume is a separate handoff process; Grok exposes no measured live terminal-join channel | n/a: cline --id starts a separate handoff process; no measured channel joins that process to the broker-owned Hub Drive | n/a: the broker manages a dedicated authenticated loopback host on port 4097, but no exact-session terminal join has been captured |
+| F03 prompt/queue/stop | full: Drive prompt/stop; hooks sync cannot inject prompts | full: Drive/live; queued steer guarded | full: shared server; private Drive partial but prompt path covered | full: resume/bridge; queue semantics partial but prompt/stop path covered | full: resume/bridge; queue semantics partial but prompt/stop path covered | full: ACP prompt FIFO, pending replay, cancel, and detected ownership-loss stop | full: authenticated ACP Drive serializes prompts, reconciles durable echoes, cancels turns, and revokes on ownership loss | full: isolated Hub Drive serializes run.start, reconciles queued echoes after terminal reply plus durable reread, aborts turns, and revokes on ownership loss | full: authenticated prompt_async, abort, echo correlation, and broker-owned single-writer boundaries ship on the managed host |
+| F04 answer/thinking streaming | partial: externally launched hooks are block-level; Drive is fuller | full: app-server streaming; observe rollout limited | full: answer/thinking lanes | partial: live tool-output streaming thinner than RPC history | partial: live tool-output streaming thinner than RPC history | partial: ACP answer/thinking lanes converge with flat replay; tool progress is terminal-only | partial: ACP answer/thinking chunks share one live/replay fold; installed streaming/final convergence is proved, while upstream chunk cadence remains undocumented | partial: live Hub answer/reasoning events and stored blocks converge through canonical presentation; native flush granularity remains unverified | partial: live SSE and SQLite replay share answer/reasoning semantics and stable part identity; installed streaming/final convergence is proved, while upstream chunk cadence remains undocumented |
+| F05 tool display | full: common Claude tools, TodoWrite, diffs | full: exec/patch/read/search plus subagent control suppression | full: bash/edit/read/search summaries | full: common built-ins after enrichment | full: common built-ins after shared-engine enrichment | partial: ACP tool titles and bounded raw results are preserved without path/diff enrichment | partial: ACP tool metadata, arguments, and bounded results are preserved without unmeasured path/diff promotion | partial: live Hub and stored tool identities, names, bounded payloads, and subagent activity render without guessed path/diff promotion | n/a: a synthetic shared-lineage mapper candidate exists, but no native Kilo tool part has been captured; tool identity, display, paths, and diffs remain unsupported |
+| F06 permissions | full: PreToolUse hooks and Drive; L3 app-answer exists | full: app-server permission path | full: SSE/REST permission path | full: bridge permission and RPC confirm | full: bridge permission and RPC confirm | full: per-tool ACP permission cards round-trip canonical allow/reject decisions | partial: the adapter maps allow-once and reject option ids and settles cards, but shipped Grok issues no permission request through this client: cosyncing delegates no fs/terminal execution, so tools run in-process | full: managed-Hub per-tool approval cards round-trip approve/reject and are cancelled on stop, close, or ownership loss | full: authenticated per-tool HTTP/SSE permission requests and replies preserve actionable ownership |
+| F07 questions | full: AskUserQuestion and Drive | full: app-server tool/MCP questions | full: SSE/REST question channel | partial: resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only | partial: resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only | n/a: no measured ACP question request route; unknown requests fail closed | n/a: no measured Grok ACP question request route; unknown requests fail closed | n/a: no measured Cline snapshot block or hub route represents an actionable question request | n/a: no measured Kilo SQLite part or SDK route represents an actionable question request |
+| F08 model/effort/mode display/override | full: display plus Drive overrides; hooks locked when not injectable | full: display and Drive overrides | full: model/agent display and override | full: model/thinking display and override | full: model/thinking display and override | partial: durable provider/model identity is displayed; existing-session model switch is unsupported | full: durable labels plus ACP model, effort, and mode selection survive create, relaunch, replay, and restart | partial: durable labels plus configured provider/model and ask/auto/plan mode propagate at managed creation; per-turn switching remains disabled | partial: provider model labels and model selection propagate through create, live SSE, replay, and restart; no measured permission-mode vocabulary exists |
+| F09 slash commands/skills/templates | partial: native command discovery; hooks cannot inject prompt commands | partial: native slash/skills where app-server exposes them | full: server command registry; documented TUI built-ins tracked separately | full: get_commands registry; TUI/RPC-only gaps tracked separately | full: get_available_commands registry; pinned native drift gate remains follow-up work | partial: protocol-shaped ACP command snapshots and prompt invocation; native payload/invocation capture remains a gap | partial: ACP command catalogs and invocation ship on 1.0.13 or newer; native command breadth remains narrower than terminal documentation | n/a: rewritten snapshots and the measured Hub expose no slash-command registry; Drive advertises only its lifecycle Stop action | n/a: the measured store exposes no command registry and Observe has no prompt-command path |
+| F10 todo/task list | full: TodoWrite to task-list-state | full: update_plan to task-list-state | full: todowrite to task-list-state | n/a: no native todo tool | n/a: no mapped native todo tool | n/a: no native task-list record or mapped todo tool | partial: measured task_completed snapshots map to native task-list state; mutation controls are not exposed | n/a: no measured Cline snapshot block carries a native todo or task-list state | n/a: the shared mapper recognizes OpenCode-lineage todos, but no Kilo todo capture exists to advertise the feature |
+| F11 subagents/workflows/activity | full: Task plus UltraCode/workflow activity | full: spawn/wait-derived subagents | full: OpenCode task/subagent progress | n/a: no native subagent/workflow concept | n/a: native subagent events are deliberately outside the v1 adapter | n/a: subagent command exists, but no child-session store shape has been measured | partial: measured background-task activity renders and exact native parent/child metadata publishes a linked child roster row; child sessions remain Observe-only | partial: spawn_agent activity and measured parent/subagent document identities render; team/workflow controls remain unsupported | partial: a live-qualified native parent_id capture publishes linked child rows as Observe-only with no child writer controls |
+| F12 user-to-agent files | full: native file/image input through Drive | full: inbox path read by Codex | full: single and multi-file input | full: byte-exact inbox upload | full: byte-exact inbox upload | n/a: native file and image input are disabled until an attachment echo is measured | n/a: native file and image input are disabled until an ACP/store echo capture proves identity and replay | n/a: native file and image input remain disabled until their exact durable attachment echo is captured | n/a: native file and image input remain disabled until an attachment echo and ownership route are captured |
+| F13 agent-to-user artifacts | partial: maps native SendUserFile records and auto-surfaces its native Write of a deliverable file inside cwd; still partial because local CLI/Drive exposes no callable delivery tool | n/a: no exact session-qualified delivery route; shared cwd outbox fails closed | full: session-qualified send_file plus exact native write events | full: session-qualified bridge send-file route | full: session-qualified bridge send-file route | n/a: no measured session-qualified artifact delivery route | n/a: no measured session-qualified artifact delivery route | n/a: no measured session-qualified artifact delivery block or callable route | n/a: no measured session-qualified artifact delivery part or callable route |
+| F14 lifecycle/history mutation | partial: resume/Drive/stop; fork/rename/export gaps | partial: observe/resume/live; archive/delete/fork UI gaps | partial: rename/fork plus stop/compact/undo/redo; export mapped (needs L2); timeline gap remains | partial: create/reload/quit/fork/clone/name covered; switch excluded by review; export mapped (needs L2) | partial: create/reload/quit/name/export covered; fork and clone are unavailable through RPC | partial: durable create/load/cancel and rewrite reset; rename, fork, and export are unsupported | partial: create, durable load, cancel, history reset, and exact-id terminal handoff ship; rename, fork, clone, and export are unsupported | partial: managed create/resume/stop, Observe rewrite reset, native rename, and exact-id terminal handoff ship; replacement-Hub resume, fork, clone, and export are unsupported | partial: create, live attach, cancel, native rename, and retained-history reset ship; terminal handoff, fork, clone, and export are unsupported |
+| F15 runtime/tokens/context/status | full: runtime/status/token display with hooks caveat | full: runtime/status; no fabricated token split | full: runtime/status/tokens; context meter follow-up | full: runtime/status/tokens plus exact native used/max context stats | full: runtime/status/tokens plus exact native used/max context stats | partial: assistant runtime, status, cumulative tokens, and cost map with monotonic partial-update merging; no measured context maximum exists | partial: turn completion, status, per-turn tokens, run summaries, and aggregate context usage map without fabricated cumulative totals | partial: live Hub status/tokens plus durable run summaries, cache-inclusive token metrics, and cost render without double-counting; no trustworthy context maximum exists | partial: live status, run summaries, model identity, cache-aware tokens, and cost render; no measured context used/max pair exists |
+| F16 security/auth/boundaries | full: hook path auth/data-loss hardening; broader read auth follow-up | partial: path/id guards; app-server auth follows native daemon | partial: path/artifact guards; shared-server auth is native deployment concern | partial: bridge token/auth plus path guards; broader read auth follow-up | partial: separately scoped bridge token/auth plus path guards; broader read auth follow-up | partial: local stdio, component-checked store reads, schema/path/frame bounds, and ownership fences; native per-write identity is unmeasured | partial: no-follow bounded store reads, authenticated floored-version ACP, path/frame limits, provenance, and foreign-writer demotion ship | partial: no-follow bounded snapshots plus owner-only Hub discovery, isolated profile/port, floored-version gate, frame bounds, epoch fencing, and foreign-run demotion ship | partial: no-follow bounded SQLite, floored-version Basic-auth host, dedicated-port ownership proof, origin-bound credentials, and writer demotion ship |
 
 <!-- END GENERATED SUPPORT MATRIX -->
 
@@ -89,21 +92,61 @@ session creation, and model selection with reasoning efforts read from the
 CLI's live catalog. Image and file input remain follow-up work. See
 [Antigravity setup](../supported_agents/antigravity.md).
 
+omp has evidence-backed rows in the generated matrix and completed terminal,
+wire, and installed-client physical acceptance. It reuses the shared Pi engine
+through an omp-specific dialect, store, credentials, and packaged bridge; it
+does not alias Pi state. See [omp setup](../supported_agents/omp.md).
+
+Reasonix has evidence-backed rows in the generated matrix and completed its
+installed wire/client physical acceptance. Observe reads its bounded local store;
+Resume and create use one broker-owned ACP child per driven session. Joined
+clients share that writer, and a detectable foreign durable write demotes it.
+Native per-write identity remains unmeasured, so an exact same-text collision
+remains an explicit coexistence limitation. Reasonix has no verified terminal
+join, file input, durable-store usage totals, or context-window maximum; live
+ACP usage updates can supply attributable cumulative tokens and cost.
+See [Reasonix setup](../supported_agents/reasonix.md).
+
+Grok Build has evidence-backed rows in the generated matrix and completed its
+installed wire/client physical acceptance. Observe reads its
+bounded local store and starts no process. Version 1.0.13 or newer with
+reusable cached authentication adds broker-owned ACP Create/Resume, prompt/cancel, approvals,
+commands, model/effort/mode controls, and cross-client Drive. Older versions
+stay Observe-only. See
+[Grok Build setup](../supported_agents/grok-build.md).
+
+Cline has evidence-backed rows in the generated matrix. Default-profile Observe
+reads bounded rewritten parent and subagent snapshots, across every schema
+version listed in `CLINE_OBSERVE_VERSIONS`, and starts no
+process. App-created sessions use an isolated broker-owned Hub on dedicated
+port 25464 for Create/Resume, prompt/Stop, approvals, create-time model/mode,
+and shared cross-client Drive. A terminal native reply plus an exact durable
+reread replaces the queued echo. A replacement Hub epoch revokes Drive rather
+than attempting Cline's unsafe stale-pid same-id reactivation. Setup never
+reads Cline provider settings from disk. See
+[Cline setup](../supported_agents/cline.md).
+
+Kilo Code has evidence-backed rows in the generated matrix and completed its
+managed-host, wire, and installed-client physical acceptance. SQLite Observe starts
+no process. Version 7.4.23 or newer adds authenticated Create/Drive, prompt/cancel,
+permission replies, model selection, and native rename through a broker-owned
+loopback host on dedicated port 4097. A user server on port 4096 remains
+unmanaged. Native tool display and terminal handoff remain unsupported. See
+[Kilo Code setup](../supported_agents/kilocode.md).
+
 ## Context window reporting
 
-Only Codex currently advertises a context window. Its native `token_count` event
-carries `model_context_window` alongside a per-turn `last_token_usage`, so the
-adapter emits a reconciled `metadata-update` with key `contextUsage` and value
-`{used, max}`. The window is adapter-advertised per event; the client holds no
-model-to-window table and must not acquire one.
+Codex, Grok Build 1.0.13, Pi, and omp can supply an attributable
+`contextUsage` value with `{used, max}`. Codex derives it from native
+token-count events, Grok from its durable signals file, and the Pi-family
+adapters from the native `getContextUsage()` result exposed by RPC or bridge.
+The client renders the meter only when the adapter supplies a valid pair. It
+holds no model-to-window table and must not acquire one.
 
-The client's context meter therefore renders for Codex sessions and renders
-**nothing** elsewhere. That absence is deliberate. Claude Code and OpenCode
-expose no window size at all, and `ModelOption` carries no field for one. Pi does
-report a `contextWindow`, but under a key no consumer matches, and whether its
-token figures are resident or cumulative is unverified — wiring it on assumption
-is precisely how a cumulative total gets measured against a window and renders a
-five-digit percentage. A missing meter beats a confident wrong one.
+The client renders **nothing** when the native contract lacks a trustworthy
+denominator. That currently includes Claude Code, OpenCode, Reasonix, Cline,
+and Kilo. Invalid or incomplete Pi-family context readings are also discarded;
+a model catalog's context-window number alone never creates a meter.
 
 Making the meter universal is a protocol change, not a client change: the
 denominator should travel with the model as a `contextWindow` on `ModelOption`.

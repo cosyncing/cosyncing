@@ -72,6 +72,42 @@ void main() {
 
       final provenance = await read(tool: 'codex');
       expect(provenance?.kind, SessionDriveProvenanceKind.appCreated);
+      expect(provenance?.restoreMode, SessionDriveRestoreMode.resume);
+    });
+
+    test(
+      'app-created live provenance preserves its native restore mode',
+      () async {
+        await store.rememberAppCreated(
+          brokerProfileId: 'local',
+          tool: 'kilo',
+          sessionId: 'session-live',
+          restoreMode: SessionDriveRestoreMode.live,
+        );
+        now = now.add(const Duration(days: 3));
+
+        final provenance = await read(tool: 'kilo', sessionId: 'session-live');
+        expect(provenance?.kind, SessionDriveProvenanceKind.appCreated);
+        expect(provenance?.restoreMode, SessionDriveRestoreMode.live);
+      },
+    );
+
+    test('takeover refresh preserves app-created live restore mode', () async {
+      await store.rememberAppCreated(
+        brokerProfileId: 'local',
+        tool: 'kilo',
+        sessionId: 'session-live',
+        restoreMode: SessionDriveRestoreMode.live,
+      );
+      await store.rememberTakeover(
+        brokerProfileId: 'local',
+        tool: 'kilo',
+        sessionId: 'session-live',
+      );
+
+      final provenance = await read(tool: 'kilo', sessionId: 'session-live');
+      expect(provenance?.kind, SessionDriveProvenanceKind.appCreated);
+      expect(provenance?.restoreMode, SessionDriveRestoreMode.live);
     });
 
     test('takeover refresh never downgrades app-created provenance', () async {

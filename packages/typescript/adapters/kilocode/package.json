@@ -1,0 +1,12 @@
+{
+  "name": "@cosyncing/adapter-kilocode",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cosyncing/adapter-api": "workspace:*",
+    "@cosyncing/opencode-wire": "workspace:*"
+  }
+}

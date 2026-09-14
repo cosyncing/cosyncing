@@ -36,9 +36,13 @@ import type {
   SetupRollbackRecord,
   SetupTransactionAction,
 } from './setup-transaction.ts';
-import type { InstalledResourceRecord } from './install-state.ts';
+import type { InstalledResourceRecord, InstallStateInspection } from './install-state.ts';
+import {
+  parseWindowsServiceEnvironment,
+  windowsServiceInstallPaths,
+  WINDOWS_VERSION_RESOURCE_ID,
+} from './windows-service-install.ts';
 import { managedHostServiceEnvironmentEntries } from './shipped-adapters.ts';
-import { windowsServiceInstallPaths } from './windows-service-install.ts';
 import { WindowsTaskSchedulerServiceProvider } from './windows-task-scheduler-provider.ts';
 
 export const SYSTEMD_SERVICE_NAME = `${PRODUCT_IDENTITY.serviceName}.service`;
@@ -264,6 +268,8 @@ export interface DurableServiceProviderOptions {
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
   /** Explicit Pi/omp data-path overrides translated into disjoint durable variables. */
   agentDataPathOverrides?: Readonly<ServiceAgentDataPathOverrides>;
+  /** Non-secret native-agent selections required by managed writer hosts. */
+  agentConfigurationOverrides?: Readonly<ServiceAgentConfigurationOverrides>;
   /**
    * Flutter web root, resolved from the ACQUISITION executable. The unit execs the bootstrap copy, which has
    * no sidecar beside it, so the service can only find the web app if it is handed the path.
@@ -459,7 +465,7 @@ function servicePathDirectory(value: string, platform: string = process.platform
 }
 
 export interface ServiceAgentExecutable {
-  id: 'codex' | 'opencode' | 'pi' | 'claude';
+  id: 'codex' | 'opencode' | 'pi' | 'grok' | 'cline' | 'kilo' | 'claude';
   executablePath: string;
   directory: string;
   overrideVariable?: ServiceAgentExecutableOverrideName;
@@ -468,6 +474,9 @@ export interface ServiceAgentExecutable {
 export const SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES = [
   'COSYNCING_CODEX_BIN',
   'COSYNCING_CLAUDE_BIN',
+  'COSYNCING_GROK_BIN',
+  'COSYNCING_CLINE_BIN',
+  'COSYNCING_KILO_BIN',
   'COSYNCING_PI_BIN',
 ] as const;
 
@@ -476,6 +485,11 @@ export type ServiceAgentExecutableOverrideName = typeof SERVICE_AGENT_EXECUTABLE
 export type ServiceAgentExecutableOverrides = Partial<Record<ServiceAgentExecutableOverrideName, string>>;
 
 export const SERVICE_AGENT_DATA_PATH_OVERRIDE_NAMES = [
+  'GROK_HOME',
+  'CLINE_DIR',
+  'CLINE_DATA_DIR',
+  'COSYNCING_CLINE_PROFILE_DIR',
+  'KILO_DATA_DIR',
   'COSYNCING_PI_AGENT_DIR',
   'COSYNCING_OMP_AGENT_DIR',
   'COSYNCING_PI_SESSIONS_ROOT',
@@ -484,6 +498,48 @@ export const SERVICE_AGENT_DATA_PATH_OVERRIDE_NAMES = [
 
 export type ServiceAgentDataPathOverrideName = typeof SERVICE_AGENT_DATA_PATH_OVERRIDE_NAMES[number];
 export type ServiceAgentDataPathOverrides = Partial<Record<ServiceAgentDataPathOverrideName, string>>;
+
+export const SERVICE_AGENT_CONFIGURATION_OVERRIDE_NAMES = [
+  'COSYNCING_CLINE_PROVIDER',
+  'COSYNCING_CLINE_MODEL',
+  'COSYNCING_CLINE_HUB_PORT',
+] as const;
+
+export type ServiceAgentConfigurationOverrideName = typeof SERVICE_AGENT_CONFIGURATION_OVERRIDE_NAMES[number];
+export type ServiceAgentConfigurationOverrides = Partial<Record<ServiceAgentConfigurationOverrideName, string>>;
+
+export function serviceAgentConfigurationOverrides(
+  env: Readonly<Record<string, string | undefined>>,
+  platform: string = process.platform,
+): ServiceAgentConfigurationOverrides {
+  const bounded = (name: string): string | undefined => {
+    const direct = env[name];
+    const raw = direct ?? (platform === 'win32'
+      ? env[Object.keys(env).find((key) => key.toLowerCase() === name.toLowerCase()) ?? '']
+      : undefined);
+    const value = raw?.trim();
+    return value && value.length <= 512 && !/[\0\r\n]/u.test(value) ? value : undefined;
+  };
+  const rawPort = bounded('COSYNCING_CLINE_HUB_PORT');
+  // Cline's own default Hub port is refused, not persisted. The adapter also
+  // refuses it when resolving, but dropping it here means a typo never reaches
+  // the service environment file in the first place, where it would read as a
+  // deliberate, reviewed choice to put the managed Hub on the owner's port.
+  //
+  // Duplicated rather than imported: `broker/src` deliberately imports nothing
+  // from `adapters/`. `test-service-environment-cline-port.ts` asserts this
+  // equals the adapter's `CLINE_OWNER_DEFAULT_HUB_PORT`, so the copy cannot
+  // drift silently.
+  const CLINE_OWNER_DEFAULT_HUB_PORT = 25_463;
+  const port = rawPort && Number.isSafeInteger(Number(rawPort))
+    && Number(rawPort) > 0 && Number(rawPort) <= 65_535
+    && Number(rawPort) !== CLINE_OWNER_DEFAULT_HUB_PORT ? String(Number(rawPort)) : undefined;
+  return {
+    ...(bounded('COSYNCING_CLINE_PROVIDER') ? { COSYNCING_CLINE_PROVIDER: bounded('COSYNCING_CLINE_PROVIDER')! } : {}),
+    ...(bounded('COSYNCING_CLINE_MODEL') ? { COSYNCING_CLINE_MODEL: bounded('COSYNCING_CLINE_MODEL')! } : {}),
+    ...(port ? { COSYNCING_CLINE_HUB_PORT: port } : {}),
+  };
+}
 
 /**
  * Translate explicit/shared Pi-family path inputs into durable dialect-specific variables. Omp's
@@ -501,6 +557,12 @@ export function serviceAgentDataPathOverrides(options: {
   const ompUsesNativeDerivedPath = set('PI_CONFIG_DIR')
     || resolve(options.ompSessionsRoot) !== resolve(join(options.ompAgentDir, 'sessions'));
   return {
+    ...(set('GROK_HOME') ? { GROK_HOME: resolve(options.env.GROK_HOME!.trim()) } : {}),
+    ...(set('CLINE_DIR') ? { CLINE_DIR: resolve(options.env.CLINE_DIR!.trim()) } : {}),
+    ...(set('CLINE_DATA_DIR') ? { CLINE_DATA_DIR: resolve(options.env.CLINE_DATA_DIR!.trim()) } : {}),
+    ...(set('COSYNCING_CLINE_PROFILE_DIR')
+      ? { COSYNCING_CLINE_PROFILE_DIR: resolve(options.env.COSYNCING_CLINE_PROFILE_DIR!.trim()) } : {}),
+    ...(set('KILO_DATA_DIR') ? { KILO_DATA_DIR: resolve(options.env.KILO_DATA_DIR!.trim()) } : {}),
     ...(set('COSYNCING_PI_AGENT_DIR') || set('PI_CODING_AGENT_DIR')
       ? { COSYNCING_PI_AGENT_DIR: options.piAgentDir } : {}),
     ...(set('COSYNCING_OMP_AGENT_DIR') || set('PI_CODING_AGENT_DIR') || ompUsesNativeDerivedPath
@@ -578,6 +640,9 @@ export function resolveServiceAgentExecutables(
     ['codex', serviceEnvValue(context.env, 'COSYNCING_CODEX_BIN', platform)?.trim() || 'codex', 'COSYNCING_CODEX_BIN'],
     ['opencode', 'opencode', undefined],
     ['pi', serviceEnvValue(context.env, 'COSYNCING_PI_BIN', platform)?.trim() || 'pi', 'COSYNCING_PI_BIN'],
+    ['grok', serviceEnvValue(context.env, 'COSYNCING_GROK_BIN', platform)?.trim() || 'grok', 'COSYNCING_GROK_BIN'],
+    ['cline', serviceEnvValue(context.env, 'COSYNCING_CLINE_BIN', platform)?.trim() || 'cline', 'COSYNCING_CLINE_BIN'],
+    ['kilo', serviceEnvValue(context.env, 'COSYNCING_KILO_BIN', platform)?.trim() || 'kilo', 'COSYNCING_KILO_BIN'],
     ['claude', serviceEnvValue(context.env, 'COSYNCING_CLAUDE_BIN', platform)?.trim() || 'claude', 'COSYNCING_CLAUDE_BIN'],
   ] as const;
   return commands.flatMap(([id, command, overrideVariable]): ServiceAgentExecutable[] => {
@@ -725,6 +790,15 @@ function serviceAgentDataPathOverrideEntries(
   });
 }
 
+function serviceAgentConfigurationOverrideEntries(
+  overrides: Readonly<ServiceAgentConfigurationOverrides>,
+): Array<readonly [ServiceAgentConfigurationOverrideName, string]> {
+  return SERVICE_AGENT_CONFIGURATION_OVERRIDE_NAMES.flatMap((name) => {
+    const value = overrides[name];
+    return value ? [[name, value] as const] : [];
+  });
+}
+
 /**
  * The exact, minimal environment a managed broker runs with. Both providers derive from this single list, so
  * the owner-only `service/broker.env` file and its `service-environment` receipt are byte-identical whichever
@@ -742,6 +816,7 @@ export function brokerServiceEnvironmentEntries(options: {
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
   /** Explicit Pi/omp data-path overrides translated into disjoint durable variables. */
   agentDataPathOverrides?: Readonly<ServiceAgentDataPathOverrides>;
+  agentConfigurationOverrides?: Readonly<ServiceAgentConfigurationOverrides>;
   webDir: string;
   platform?: string;
 }): Array<readonly [string, string]> {
@@ -759,6 +834,7 @@ export function brokerServiceEnvironmentEntries(options: {
     )],
     ...serviceAgentOverrideEntries(options.agentExecutableOverrides ?? {}, platform),
     ...serviceAgentDataPathOverrideEntries(options.agentDataPathOverrides ?? {}, platform),
+    ...serviceAgentConfigurationOverrideEntries(options.agentConfigurationOverrides ?? {}),
     ['COSYNCING_HOME', stateHome],
     ['COSYNCING_CACHE_DIR', cleanHostPath(options.cacheRoot, 'cache', platform)],
     ['COSYNCING_TOKEN_FILE', pathApi.join(stateHome, 'secrets', 'broker-token')],
@@ -782,6 +858,155 @@ export function brokerServiceEnvironmentEntries(options: {
 
 function renderEnvironmentFile(entries: ReadonlyArray<readonly [string, string]>): string {
   return `${entries.map(([name, value]) => environmentLine(name, value)).join('\n')}\n`;
+}
+
+function parseServiceEnvironmentValue(quoted: string): string | undefined {
+  if (quoted.length < 2 || quoted[0] !== '"' || quoted.at(-1) !== '"') return undefined;
+  let value = '';
+  for (let index = 1; index < quoted.length - 1; index += 1) {
+    const char = quoted[index]!;
+    if (char === '\\') {
+      index += 1;
+      if (index >= quoted.length - 1) return undefined;
+      value += quoted[index]!;
+    } else {
+      value += char;
+    }
+  }
+  return value;
+}
+
+/** Parse only the exact owner-only `broker.env` grammar emitted above. */
+export function parseBrokerServiceEnvironment(environment: string): Record<string, string> | undefined {
+  const values: Record<string, string> = {};
+  for (const line of environment.split('\n').filter(Boolean)) {
+    const separator = line.indexOf('=');
+    if (separator < 1) return undefined;
+    const name = line.slice(0, separator);
+    if (!/^[A-Z][A-Z0-9_]*$/.test(name) || name in values) return undefined;
+    const value = parseServiceEnvironmentValue(line.slice(separator + 1));
+    if (value === undefined) return undefined;
+    values[name] = value;
+  }
+  return values;
+}
+
+const PRESERVED_SERVICE_AGENT_ENVIRONMENT_NAMES = [
+  ...SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES,
+  ...SERVICE_AGENT_DATA_PATH_OVERRIDE_NAMES,
+  ...SERVICE_AGENT_CONFIGURATION_OVERRIDE_NAMES,
+] as const;
+
+function ownedServiceEnvironmentResource(
+  context: SetupDiagnosisContext,
+  installState: InstallStateInspection,
+  stateHome: string,
+): InstalledResourceRecord | undefined {
+  if (!installState.committed) return undefined;
+  const environmentResources = installState.state.resources.filter((entry) => entry.id === 'service-environment');
+  if (environmentResources.length !== 1) return undefined;
+  const resource = environmentResources[0]!;
+  if (resource.kind !== 'environment-file') return undefined;
+
+  if (context.platform === 'win32') {
+    if (resource.ownership.proof !== 'receipt'
+        || typeof resource.ownership.marker !== 'string'
+        || typeof resource.ownership.installedSha256 !== 'string') {
+      return undefined;
+    }
+    let expected;
+    try { expected = windowsServiceInstallPaths(stateHome, resource.ownership.marker); } catch { return undefined; }
+    const sameWindowsPath = (left: string, right: string): boolean =>
+      win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase();
+    if (!sameWindowsPath(resource.target, expected.environmentPath)) return undefined;
+    const versions = installState.state.resources.filter((entry) => entry.id === WINDOWS_VERSION_RESOURCE_ID);
+    if (versions.length !== 1) return undefined;
+    const version = versions[0]!;
+    if (!version || version.kind !== 'other'
+        || version.ownership.proof !== 'receipt'
+        || version.ownership.marker !== resource.ownership.marker
+        || !sameWindowsPath(version.target, expected.versionRoot)) return undefined;
+  } else {
+    const expectedTarget = resolve(stateHome, 'service', 'broker.env');
+    if (resolve(resource.target) !== expectedTarget
+        || resource.ownership.proof !== 'package-hash'
+        || typeof resource.ownership.installedSha256 !== 'string') return undefined;
+  }
+
+  return resource;
+}
+
+/** Pure receipt/path/hash/parser boundary, exported so Windows behavior is testable on non-Windows CI. */
+export function parseReceiptOwnedServiceAgentEnvironment(
+  context: SetupDiagnosisContext,
+  installState: InstallStateInspection,
+  stateHome: string,
+  bytes: Uint8Array,
+): Record<string, string> | undefined {
+  const resource = ownedServiceEnvironmentResource(context, installState, stateHome);
+  if (!resource) return undefined;
+  if (createHash('sha256').update(bytes).digest('hex') !== resource.ownership.installedSha256) {
+    return undefined;
+  }
+  try {
+    return context.platform === 'win32'
+      ? parseWindowsServiceEnvironment(JSON.parse(Buffer.from(bytes).toString('utf8')))?.variables
+      : parseBrokerServiceEnvironment(Buffer.from(bytes).toString('utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function ownedServiceEnvironment(
+  context: SetupDiagnosisContext,
+  installState: InstallStateInspection,
+  stateHome: string,
+): Record<string, string> | undefined {
+  const resource = ownedServiceEnvironmentResource(context, installState, stateHome);
+  if (!resource || inspectOwnerOnlyFile(resource.target).status !== 'ok') return undefined;
+  let bytes: Buffer;
+  try { bytes = readFileSync(resource.target); } catch { return undefined; }
+  return parseReceiptOwnedServiceAgentEnvironment(context, installState, stateHome, bytes);
+}
+
+/**
+ * Restore only receipt-owned, non-secret agent inputs that an unattended repeat setup or standalone doctor
+ * would otherwise lose. Cline's provider/model is one selection: explicitly changing or clearing either
+ * half suppresses inheritance of both halves, so an old model is never paired with a new provider.
+ */
+export function contextWithOwnedServiceAgentEnvironment(
+  context: SetupDiagnosisContext,
+  installState: InstallStateInspection,
+  stateHome: string,
+): SetupDiagnosisContext {
+  const prior = ownedServiceEnvironment(context, installState, stateHome);
+  if (!prior) return context;
+  const currentKeys = Object.keys(context.env);
+  const currentHas = (name: string): boolean => context.platform === 'win32'
+    ? currentKeys.some((key) => key.toLowerCase() === name.toLowerCase())
+    : Object.prototype.hasOwnProperty.call(context.env, name);
+  const priorValue = (name: string): string | undefined => {
+    if (context.platform !== 'win32') return prior[name];
+    const key = Object.keys(prior).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+    return key === undefined ? undefined : prior[key];
+  };
+  const clineSelectionExplicit = currentHas('COSYNCING_CLINE_PROVIDER') || currentHas('COSYNCING_CLINE_MODEL');
+  const inherited = Object.fromEntries(PRESERVED_SERVICE_AGENT_ENVIRONMENT_NAMES.flatMap((name) => {
+    if (currentHas(name)
+        || (clineSelectionExplicit && (name === 'COSYNCING_CLINE_PROVIDER' || name === 'COSYNCING_CLINE_MODEL'))) {
+      return [];
+    }
+    const value = priorValue(name);
+    return value === undefined ? [] : [[name, value]];
+  }));
+  const explicitCanonical = context.platform === 'win32'
+    ? Object.fromEntries(PRESERVED_SERVICE_AGENT_ENVIRONMENT_NAMES.flatMap((name) => {
+        const key = currentKeys.find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+        return key === undefined ? [] : [[name, context.env[key]]];
+      }))
+    : {};
+  if (Object.keys(inherited).length === 0 && Object.keys(explicitCanonical).length === 0) return context;
+  return { ...context, env: { ...inherited, ...context.env, ...explicitCanonical } };
 }
 
 /**
@@ -966,6 +1191,7 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
       agentDataPathOverrides: options.agentDataPathOverrides,
+      agentConfigurationOverrides: options.agentConfigurationOverrides,
       webDir: options.webDir,
     }));
     const template = embeddedRuntimeAsset('service/systemd/cosyncing.service').content;
@@ -1080,10 +1306,16 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
   }
 
   async uninstall(): Promise<void> {
-    await this.systemctl(
+    const disabled = await this.systemctl(
       ['disable', '--now', SYSTEMD_SERVICE_NAME],
       SYSTEMD_MUTATION_TIMEOUT_MS,
     );
+    const settled = await awaitServiceState({ provider: this, expected: 'inactive' });
+    if (settled.active !== 'inactive' || settled.enabled !== 'disabled') {
+      throw new Error(disabled.status === 'ok'
+        ? 'systemd-uninstall-did-not-settle'
+        : 'systemd-uninstall-stop-failed');
+    }
     for (const path of [this.definitionPath, this.environmentPath]) {
       if (!existsSync(path)) continue;
       assertNoSymlinkComponents(path, false);
@@ -1161,6 +1393,7 @@ export class LaunchdUserServiceProvider implements DurableServiceProvider {
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
       agentDataPathOverrides: options.agentDataPathOverrides,
+      agentConfigurationOverrides: options.agentConfigurationOverrides,
       webDir: options.webDir,
     });
     // The env file is the receipt-owned source of truth for what the service environment IS; launchd has no
@@ -1275,7 +1508,15 @@ export class LaunchdUserServiceProvider implements DurableServiceProvider {
     if (!enabled) {
       // Boot out before disabling so the reported status actually follows: `launchctl print` reports a loaded
       // job whether or not the domain's disable override is set.
-      await this.launchctl(['bootout', this.serviceTarget]);
+      const bootout = await this.launchctl(['bootout', this.serviceTarget]);
+      if (bootout.status === 'ok') {
+        await this.awaitUnloaded();
+      } else {
+        const settled = await this.inspect();
+        if (settled.enabled !== 'disabled' || settled.active !== 'inactive') {
+          throw new Error('launchd-bootout-failed');
+        }
+      }
       requireCommand(await this.launchctl(['disable', this.serviceTarget]), 'launchd-disable-failed');
       return;
     }
@@ -1312,7 +1553,15 @@ export class LaunchdUserServiceProvider implements DurableServiceProvider {
   }
 
   async uninstall(): Promise<void> {
-    await this.launchctl(['bootout', this.serviceTarget]);
+    const bootout = await this.launchctl(['bootout', this.serviceTarget]);
+    if (bootout.status === 'ok') {
+      await this.awaitUnloaded();
+    } else {
+      const settled = await this.inspect();
+      if (settled.enabled !== 'disabled' || settled.active !== 'inactive') {
+        throw new Error('launchd-uninstall-stop-failed');
+      }
+    }
     for (const path of [this.definitionPath, this.environmentPath]) {
       if (!existsSync(path)) continue;
       assertNoSymlinkComponents(path, false);
@@ -1397,6 +1646,7 @@ export function createDurableServiceProvider(options: DurableServiceProviderOpti
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
       agentDataPathOverrides: options.agentDataPathOverrides,
+      agentConfigurationOverrides: options.agentConfigurationOverrides,
       webDir: paths.webRoot,
       platform: 'win32',
     }),

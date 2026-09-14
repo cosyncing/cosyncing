@@ -42,7 +42,11 @@ import {
   type OpencodeServeOwnership,
   type ProcessIdentity,
 } from '../../../adapters/opencode/src/managed-server.ts';
-import { HostProcessProvider, type WindowsProcessSnapshot } from '../../../adapter-api/src/host-process.ts';
+import {
+  HostProcessProvider,
+  parseLinuxProcessStat,
+  type WindowsProcessSnapshot,
+} from '../../../adapter-api/src/host-process.ts';
 import '../../src/runtime/managed-runtime-state.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
@@ -440,10 +444,144 @@ try {
   check('ancestry: a cycle terminates rather than spinning',
     windows([proc(300, 301, '2026-08-25T10:00:00.0000000Z', 'a.exe'), proc(301, 300, '2026-08-25T10:00:00.0000000Z', 'b.exe')])
       .descendsFrom(300, 100) === 'unknown');
-  // POSIX needs no ancestry: the process the broker spawns IS the serve. Saying so is honest;
-  // guessing 'no' would silently stop recording ownership if that ever stopped being true.
-  check('ancestry: off Windows the question is not answered rather than guessed',
-    new HostProcessProvider({ platform: 'linux', runWindowsSnapshot: () => null }).descendsFrom(300, 100) === 'unknown');
+  const linuxStat = (pid: number, parentPid: number, start: number, name = 'host') => {
+    const fields = ['S', String(parentPid), ...Array.from({ length: 17 }, () => '0'), String(start)];
+    return `${pid} (${name}) ${fields.join(' ')}`;
+  };
+  const linux = (entries: Array<[number, string | null | undefined]>) => {
+    const stats = new Map(entries);
+    return new HostProcessProvider({
+      platform: 'linux',
+      readLinuxStat: (pid) => stats.has(pid) ? stats.get(pid) : null,
+    });
+  };
+  check('ancestry: Linux proc stat parser survives spaces and parentheses in comm',
+    parseLinuxProcessStat(linuxStat(300, 200, 30, 'kilo (native) host'))?.parentPid === 200
+      && parseLinuxProcessStat(linuxStat(300, 200, 30, 'kilo (native) host'))?.start === '30');
+  const linuxChain: Array<[number, string]> = [
+    [100, linuxStat(100, 1, 10, 'node')],
+    [200, linuxStat(200, 100, 20, 'shim')],
+    [300, linuxStat(300, 200, 30, 'kilo')],
+    [1, linuxStat(1, 0, 1, 'init')],
+  ];
+  check('ancestry: Linux native listener under an npm wrapper is proven ours',
+    linux(linuxChain).descendsFrom(300, 100) === 'yes');
+  check('ancestry: Linux direct child and self ancestry are proven',
+    linux(linuxChain).descendsFrom(200, 100) === 'yes'
+      && linux(linuxChain).descendsFrom(100, 100) === 'yes');
+  check('ancestry: a complete Linux stranger chain is proven not ours',
+    linux([...linuxChain, [400, linuxStat(400, 1, 40, 'stranger')]]).descendsFrom(400, 100) === 'no');
+  check('ancestry: missing or unreadable Linux proc hops stay unknown',
+    linux([[300, linuxStat(300, 200, 30, 'kilo')]]).descendsFrom(300, 100) === 'unknown'
+      && linux([[300, linuxStat(300, 200, 30, 'kilo')], [200, undefined]])
+        .descendsFrom(300, 100) === 'unknown');
+  check('ancestry: Linux parent pid reuse is rejected by start order',
+    linux([
+      [100, linuxStat(100, 1, 10, 'node')],
+      [200, linuxStat(200, 100, 40, 'reused')],
+      [300, linuxStat(300, 200, 30, 'kilo')],
+    ]).descendsFrom(300, 100) === 'no');
+  {
+    let parentReads = 0;
+    const provider = new HostProcessProvider({
+      platform: 'linux',
+      readLinuxStat: (pid) => {
+        if (pid === 300) return linuxStat(300, 200, 30, 'kilo');
+        if (pid === 200) {
+          parentReads += 1;
+          return parentReads === 1
+            ? linuxStat(200, 400, 20, 'old-parent')
+            : linuxStat(200, 100, 25, 'recycled-parent');
+        }
+        if (pid === 400) return linuxStat(400, 1, 10, 'old-root');
+        if (pid === 100) return linuxStat(100, 1, 5, 'launcher');
+        return null;
+      },
+    });
+    check('ancestry: Linux cannot splice a proof through a parent pid recycled between hops',
+      provider.descendsFrom(300, 100) === 'unknown', `parentReads=${parentReads}`);
+  }
+  check('ancestry: malformed Linux proc and cycles never become ownership',
+    linux([[300, 'malformed']]).descendsFrom(300, 100) === 'unknown'
+      && linux([
+        [300, linuxStat(300, 301, 30, 'a')],
+        [301, linuxStat(301, 300, 30, 'b')],
+      ]).descendsFrom(300, 100) === 'unknown');
+  const macEntries = new Map<number, { parentPid: number; start: string }>([
+    [100, { parentPid: 1, start: 'Mon Aug 31 10:00:00 2026' }],
+    [200, { parentPid: 100, start: 'Mon Aug 31 10:00:01 2026' }],
+    [300, { parentPid: 200, start: 'Mon Aug 31 10:00:02 2026' }],
+    [1, { parentPid: 0, start: 'Mon Aug 31 09:00:00 2026' }],
+  ]);
+  const mac = (entries = macEntries) => new HostProcessProvider({
+    platform: 'darwin',
+    readPosixProcess: (pid) => entries.get(pid) ?? null,
+  });
+  check('ancestry: macOS native listener under an npm wrapper is proven ours',
+    mac().descendsFrom(300, 100) === 'yes');
+  check('ancestry: macOS missing ancestry and parent pid reuse fail closed',
+    mac(new Map([[300, macEntries.get(300)!]])).descendsFrom(300, 100) === 'unknown'
+      && mac(new Map([
+        ...macEntries,
+        [200, { parentPid: 100, start: 'Mon Aug 31 11:00:00 2026' }],
+      ])).descendsFrom(300, 100) === 'no');
+  {
+    let parentReads = 0;
+    const provider = new HostProcessProvider({
+      platform: 'darwin',
+      readPosixProcess: (pid) => {
+        if (pid === 300) return { parentPid: 200, start: 'Mon Aug 31 10:00:05 2026' };
+        if (pid === 200) {
+          parentReads += 1;
+          return parentReads === 1
+            ? { parentPid: 400, start: 'Mon Aug 31 10:00:02 2026' }
+            : { parentPid: 100, start: 'Mon Aug 31 10:00:03 2026' };
+        }
+        if (pid === 400) return { parentPid: 1, start: 'Mon Aug 31 10:00:01 2026' };
+        if (pid === 100) return { parentPid: 1, start: 'Mon Aug 31 10:00:00 2026' };
+        return null;
+      },
+    });
+    check('ancestry: macOS cannot splice a proof through a parent pid recycled between hops',
+      provider.descendsFrom(300, 100) === 'unknown', `parentReads=${parentReads}`);
+  }
+  check('ancestry: unsupported POSIX stays unknown rather than guessed',
+    new HostProcessProvider({ platform: 'freebsd' }).descendsFrom(300, 100) === 'unknown');
+}
+
+// A listener probe runs from roster discovery. A slow `lsof` must consume its
+// own deadline without preventing the broker event loop from serving health or
+// socket traffic in the meantime.
+{
+  const listenerDir = mkdtempSync(join(tmpdir(), 'cosyncing-listener-probe-'));
+  const fakeLsof = join(listenerDir, 'lsof');
+  writeFileSync(fakeLsof, '#!/usr/bin/env bun\nawait Bun.sleep(80);\nconsole.log("4321");\n');
+  chmodSync(fakeLsof, 0o700);
+  try {
+    let eventLoopAdvanced = false;
+    const tick = setTimeout(() => { eventLoopAdvanced = true; }, 10);
+    const startedAt = performance.now();
+    const read = await new HostProcessProvider({
+      platform: 'linux',
+      resolveExecutable: (name) => name === 'lsof' ? fakeLsof : null,
+    }).listenerAsync(4097);
+    clearTimeout(tick);
+    check('listener proof yields the event loop while a slow lsof is running',
+      eventLoopAdvanced && read.state === 'identified' && read.pid === 4321,
+      `advanced=${eventLoopAdvanced} state=${read.state} elapsed=${(performance.now() - startedAt).toFixed(1)}ms`);
+
+    const boundedAt = performance.now();
+    const bounded = await new HostProcessProvider({
+      platform: 'linux',
+      resolveExecutable: (name) => name === 'lsof' ? fakeLsof : null,
+      posixListenerTimeoutMs: 20,
+    }).listenerAsync(4097);
+    check('listener proof times out fail-closed',
+      bounded.state === 'unknown' && performance.now() - boundedAt < 250,
+      `state=${bounded.state} elapsed=${(performance.now() - boundedAt).toFixed(1)}ms`);
+  } finally {
+    rmSync(listenerDir, { recursive: true, force: true });
+  }
 }
 
 const failed = results.filter((r) => !r.ok);

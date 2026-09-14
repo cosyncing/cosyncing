@@ -9,7 +9,7 @@ const info = (id: string): SessionInfo => ({
   id, tool: 'pi', machine: 'test', title: id, status: 'idle', attachMode: 'live',
   control: {
     drive: { supported: false, state: 'unavailable' },
-    terminalSync: { supported: true, syncAvailable: true, active: true },
+    terminalSync: { supported: true, syncAvailable: true, active: true, presence: 'shared' },
   },
 });
 

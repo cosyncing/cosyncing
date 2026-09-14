@@ -131,6 +131,61 @@ void main() {
       );
     });
 
+    test('a row bound to a live send is never PUBLISHED on attach', () async {
+      // The surface immediately above this publish is guarded by
+      // `submittedClientMessageId == null`, with a comment saying exactly why:
+      // "A row still bound to a live send holds text this device ALREADY
+      // sent." The publish carried no such guard, so the same row this device
+      // refuses to show itself was relayed to every OTHER client as an unsent
+      // shared draft -- and, being durable, outlived the session.
+      //
+      // Measured on installed v63, reasonix session 45119131: prompt acked at
+      // 19:09:21, approval at 19:09:26, then a draft holding that same
+      // already-executed `rm -f <path> && touch <path>` written at 19:09:36 by
+      // a connection whose update counter had just restarted -- the reattach.
+      // 29 sessions on that host were in this state.
+      // The REAL repository over the in-memory database. The container's
+      // double implements the same interface, so a test against it would
+      // pass whatever the production SQL does.
+      final outbox = DriftSessionOutboxRepository(database);
+      await outbox.upsert(
+        SessionOutboxMessage(
+          sessionKey: key,
+          clientMessageId: 'send-1',
+          kind: SessionOutboxMessageKind.prompt,
+          payload: const {'text': 'already sent'},
+          // Still in flight, so reconciliation keeps the binding rather than
+          // deleting the row: exactly the window this reattach lands in.
+          status: SessionOutboxMessageStatus.sending,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          brokerProfileId: fakeControllerBrokerScope(),
+        ),
+      );
+      await drafts.save(
+        SessionLocalDraft(
+          brokerProfileId: fakeControllerBrokerScope(),
+          sessionKey: key,
+          text: 'already sent',
+          localRevision: 1,
+          baseBrokerRevision: 0,
+          dirty: true,
+          submittedClientMessageId: 'send-1',
+          updatedAt: DateTime.now(),
+        ),
+      );
+      final before = connection.sendDraftCount;
+
+      await attachConnected();
+      await drainSessionDetailMicrotasks();
+
+      expect(
+        connection.sendDraftCount,
+        before,
+        reason: 'a sent prompt must not become every client shared draft',
+      );
+    });
+
     test('is not offered a row still bound to a live send', () async {
       await drafts.save(
         SessionLocalDraft(
@@ -559,6 +614,178 @@ void main() {
         reason:
             'a failed offer load left hydration free to replace newer '
             'typed text',
+      );
+    });
+  });
+
+  group('a prompt whose replay collides with its own original', () {
+    test('does not spend an attempt on a pending answer', () async {
+      // The broker answers a duplicate claim it is STILL EXECUTING with
+      // `pending: true` (`runtime.ts:3184`). That is not a receipt and not a
+      // failure. Counting it against `sessionOutboxMaxAttempts` spent the
+      // replay budget on answers that were never attempts, so a prompt held
+      // behind a permission gate ran out after three of them; maintenance then
+      // expired the row and RESTORED its prompt into the durable draft.
+      //
+      // Measured on the installed client with instrumentation:
+      //   markSending ca.hlzk4ysfmo.3   (x3, and the cap is 3)
+      //   -- the delivered handler never ran for it --
+      //   expire {"rows":1}
+      // and the already-executed `rm -f <path> && touch <path>` came back as
+      // the shared draft. The first prompt of the same session, sent while
+      // idle, went terminal at once and was never at risk.
+      // The REAL repository over the in-memory database. The container's
+      // double implements the same interface, so a test against it would
+      // pass whatever the production SQL does.
+      final outbox = DriftSessionOutboxRepository(database);
+      await outbox.upsert(
+        SessionOutboxMessage(
+          sessionKey: key,
+          clientMessageId: 'send-pending',
+          kind: SessionOutboxMessageKind.prompt,
+          payload: const {'text': 'held behind a permission gate'},
+          status: SessionOutboxMessageStatus.sending,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          brokerProfileId: fakeControllerBrokerScope(),
+          attemptCount: 3,
+        ),
+      );
+
+      await outbox.markStillInFlight('send-pending');
+
+      final rows = await outbox.loadForSession(
+        key,
+        brokerProfileId: fakeControllerBrokerScope(),
+      );
+      final row = rows.firstWhere(
+        (message) => message.clientMessageId == 'send-pending',
+      );
+      expect(
+        row.attemptCount,
+        2,
+        reason: 'the collided replay bought nothing; give the attempt back',
+      );
+      expect(row.status, SessionOutboxMessageStatus.retryable);
+    });
+
+    test('re-asking a dispatched row does not spend an attempt', () async {
+      // Measured on the installed broker: a prompt held behind a permission
+      // gate is not acked until the whole turn resolves --
+      //   sendPrompt-begin    21:55:32
+      //   sendPrompt-resolved 21:55:44
+      //   ack-send            21:55:44
+      // -- so two ordinary reattaches inside that 12s window exhausted
+      // `sessionOutboxMaxAttempts`, the row stopped replaying before the ack
+      // existed, and expiry claimed it. A `sending` row is already dispatched
+      // and merely waiting; replaying it is reconciliation, not a retry. The
+      // two-minute window still bounds this path.
+      final outbox = DriftSessionOutboxRepository(database);
+      await outbox.upsert(
+        SessionOutboxMessage(
+          sessionKey: key,
+          clientMessageId: 'send-awaiting',
+          kind: SessionOutboxMessageKind.prompt,
+          payload: const {'text': 'waiting on a permission decision'},
+          status: SessionOutboxMessageStatus.sending,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          brokerProfileId: fakeControllerBrokerScope(),
+          attemptCount: 1,
+        ),
+      );
+
+      await outbox.markResending('send-awaiting');
+      await outbox.markResending('send-awaiting');
+
+      final rows = await outbox.loadForSession(
+        key,
+        brokerProfileId: fakeControllerBrokerScope(),
+      );
+      final row = rows.firstWhere(
+        (message) => message.clientMessageId == 'send-awaiting',
+      );
+      expect(
+        row.attemptCount,
+        1,
+        reason: 'nothing failed, so nothing was spent',
+      );
+      expect(
+        row.isRetryableAt(DateTime.now()),
+        isTrue,
+        reason: 'it must still be replaying when the deferred ack arrives',
+      );
+    });
+
+    test('a refund can never hand out an unbounded replay budget', () async {
+      // The REAL repository over the in-memory database. The container's
+      // double implements the same interface, so a test against it would
+      // pass whatever the production SQL does.
+      final outbox = DriftSessionOutboxRepository(database);
+      await outbox.upsert(
+        SessionOutboxMessage(
+          sessionKey: key,
+          clientMessageId: 'send-floor',
+          kind: SessionOutboxMessageKind.prompt,
+          payload: const {'text': 'never dispatched'},
+          status: SessionOutboxMessageStatus.queued,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          brokerProfileId: fakeControllerBrokerScope(),
+        ),
+      );
+
+      await outbox.markStillInFlight('send-floor');
+      await outbox.markStillInFlight('send-floor');
+
+      final rows = await outbox.loadForSession(
+        key,
+        brokerProfileId: fakeControllerBrokerScope(),
+      );
+      final row = rows.firstWhere(
+        (message) => message.clientMessageId == 'send-floor',
+      );
+      expect(row.attemptCount, 0, reason: 'floored at zero, never negative');
+    });
+
+    test('a refund never reports a dispatched row as unsent', () async {
+      // `attempt_count` answers two questions, and the expiry pass reads the
+      // second: `> 0` means the prompt left this device, so its text is not
+      // handed back to the composer. A refund to zero said "never dispatched"
+      // about a row the broker had just acknowledged as in flight, and expiry
+      // then restored an already-executed command into every client.
+      final outbox = DriftSessionOutboxRepository(database);
+      await outbox.upsert(
+        SessionOutboxMessage(
+          sessionKey: key,
+          clientMessageId: 'send-dispatched',
+          kind: SessionOutboxMessageKind.prompt,
+          payload: const {'text': 'rm -f /tmp/x && touch /tmp/x'},
+          status: SessionOutboxMessageStatus.queued,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          brokerProfileId: fakeControllerBrokerScope(),
+        ),
+      );
+
+      // The measured ordering: dispatch, reattach (which does not increment),
+      // then a `pending: true` duplicate ack, twice.
+      await outbox.markSending('send-dispatched');
+      await outbox.markResending('send-dispatched');
+      await outbox.markStillInFlight('send-dispatched');
+      await outbox.markStillInFlight('send-dispatched');
+
+      final rows = await outbox.loadForSession(
+        key,
+        brokerProfileId: fakeControllerBrokerScope(),
+      );
+      final row = rows.firstWhere(
+        (message) => message.clientMessageId == 'send-dispatched',
+      );
+      expect(
+        row.attemptCount,
+        1,
+        reason: 'refunded down to one, never below what proves it was sent',
       );
     });
   });

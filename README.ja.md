@@ -64,19 +64,24 @@ Broker の間に当方が運用するサービスは一切入りません。
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
   <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
+  <a href="https://github.com/can1357/oh-my-pi" title="omp (oh-my-pi)"><img src="docs/assets/agents/pills/omp.svg" alt="omp (oh-my-pi)" height="34"></a>
+  <a href="https://reasonix.io/" title="Reasonix"><img src="docs/assets/agents/pills/reasonix.svg" alt="Reasonix" height="34"></a>
+  <a href="https://grok.com/" title="Grok Build"><img src="docs/assets/agents/pills/grok.svg" alt="Grok Build" height="34"></a>
+  <a href="https://cline.bot/" title="Cline"><img src="docs/assets/agents/pills/cline.svg" alt="Cline" height="34"></a>
+  <a href="https://kilocode.ai/" title="Kilo Code"><img src="docs/assets/agents/pills/kilocode.svg" alt="Kilo Code" height="34"></a>
 </p>
 
-7 つすべてを 1 つのプロトコルでカバーします。操作できる範囲はエージェントごとに異なり、
+12 種すべてを 1 つのプロトコルでカバーします。操作できる範囲はエージェントごとに異なり、
 Claude Code のセッションは引き継ぐまで読み取り専用で開きます。バージョンとインストール方法は
 [対応エージェントのセットアップ](docs/supported_agents/README.md)、機能の対応表は
 [アダプターの対応状況](docs/protocol/adapter-support.md) を参照してください。
 
 フォアグラウンドのクライアントは、ネイティブの Resume をもう 1 つ起動することなく、Broker が
-所有する同じ Codex / Pi の操作セッションに参加できます。Claude Code は別クライアントでの
+所有する同じ Codex / Pi / omp / Reasonix の操作セッションに参加できます。Claude Code は別クライアントでの
 「閲覧・引き継ぎ」の流れを維持し、OpenCode は共有ライブの挙動を維持します。バックグラウンドの
 閲覧接続は読み取り専用のままです。
 
-**実験的:** ソースからのコントリビューター向けに、暫定のアダプターが 3 つあります。
+**実験的:** ソースからのコントリビューター向けに、暫定のアダプターが 8 つあります。
 [Kimi Code](docs/supported_agents/kimi.md) は
 `kimi web` サーバー上のすべてのセッションを読み取り専用で監視し、cosyncing が作成した
 セッションは操作でき（プロンプト、承認、モデル選択）、そうでないものは明示的に引き継ぎます。
@@ -88,6 +93,19 @@ Claude Code のセッションは引き継ぐまで読み取り専用で開き�
 会話ストアを読み取り（サーバーは介在しません）、すべての会話を読み取り専用で再生し、Broker が
 所有する `agy` 子プロセスを通じて操作します。2 つのクライアントが 1 つの Drive を共有でき、
 ターミナルからの書き込みがあればセッションを返します。
+[omp](docs/supported_agents/omp.md) は専用の同梱ブリッジと RPC 方言を使い、セッション検出、
+ライブ同期、プロンプト、承認、コマンド、モデル、ファイル入力、セッション作成に対応します。
+[Reasonix](docs/supported_agents/reasonix.md) はサイズ制限付きのローカルストアを監視し、必要時に
+Broker 所有の ACP 子プロセスで再開します。複数クライアントは 1 つの writer を共有しますが、
+ターミナルとの true sync とファイル入力には対応しません。[Grok Build](docs/supported_agents/grok-build.md)
+はサイズ制限付きのローカルストアを読み取り専用で監視します。ネイティブ ACP の受け入れ確認が
+完了するまで新規作成と Resume は無効で、ターミナル true sync とファイル入力にも対応しません。
+[Cline](docs/supported_agents/cline.md) は、親セッションとサブエージェントのサイズ制限付き
+スナップショットを読み取り専用で監視します。ネイティブの hub または ACP 契約を測定するまで、
+新規作成、Drive、ネイティブ承認、モデル／モード変更は無効です。
+[Kilo Code](docs/supported_agents/kilocode.md) は、サイズ制限付きのローカル SQLite
+スナップショットを読み取り専用で監視します。CLI とライブ通信契約を測定するまで、新規作成、
+Drive、マネージド serve、ターミナルへの引き継ぎ、モデル／エージェント変更は無効です。
 
 いずれもロールアウトフラグは不要です。サーバーを使う 2 つのアダプターは、ターミナルを開いた
 ままにしておく必要もありません。

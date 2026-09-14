@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join, resolve, win32 } from 'node:path';
+import { dirname, join, resolve, win32 } from 'node:path';
 import type {
   AgentBackend,
   AgentSetupDiagnosis,
@@ -49,8 +49,11 @@ import {
 import {
   durableServiceProviderId,
   createDurableServiceProvider,
+  contextWithOwnedServiceAgentEnvironment,
+  parseBrokerServiceEnvironment,
   parseLaunchdPrintState,
   resolveServiceAgentExecutables,
+  serviceAgentConfigurationOverrides,
   serviceAgentDataPathOverrides,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
@@ -78,7 +81,11 @@ import {
   listManagedHostOwnerships,
   locateRecordedManagedHost,
 } from '../runtime/managed-host.ts';
-import { inspectOmpBridgeOwnership, inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
+import {
+  inspectOmpBridgeOwnership,
+  inspectOmpBridgeReceiptTarget,
+  inspectPiBridgeOwnership,
+} from './pi-bridge-ownership.ts';
 import { parseMachinePeers } from '../roster/machine-aggregation.ts';
 import { WindowsTaskSchedulerPowerShellBackend } from './windows-task-scheduler-powershell.ts';
 import { parseWindowsServiceEnvironment, windowsServiceVersionKey } from './windows-service-install.ts';
@@ -765,36 +772,6 @@ function resourceIntegrity(resource: InstalledResourceRecord | undefined): 'ok' 
   }
 }
 
-function parseServiceEnvironmentValue(quoted: string): string | undefined {
-  if (quoted.length < 2 || quoted[0] !== '"' || quoted.at(-1) !== '"') return undefined;
-  let value = '';
-  for (let index = 1; index < quoted.length - 1; index += 1) {
-    const char = quoted[index]!;
-    if (char === '\\') {
-      index += 1;
-      if (index >= quoted.length - 1) return undefined;
-      value += quoted[index]!;
-    } else {
-      value += char;
-    }
-  }
-  return value;
-}
-
-function parseServiceEnvironment(environment: string): Record<string, string> | undefined {
-  const values: Record<string, string> = {};
-  for (const line of environment.split('\n').filter(Boolean)) {
-    const separator = line.indexOf('=');
-    if (separator < 1) return undefined;
-    const name = line.slice(0, separator);
-    if (!/^[A-Z][A-Z0-9_]*$/.test(name) || name in values) return undefined;
-    const value = parseServiceEnvironmentValue(line.slice(separator + 1));
-    if (value === undefined) return undefined;
-    values[name] = value;
-  }
-  return values;
-}
-
 /**
  * Compare the interactive detection result with the receipt-owned PATH the durable service actually uses.
  *
@@ -810,7 +787,6 @@ function serviceAgentPathCheck(
   integrity: ReturnType<typeof resourceIntegrity>,
   runtimePath: string | undefined,
 ): SetupCheck {
-  const executables = resolveServiceAgentExecutables(context);
   if (!environment || integrity !== 'ok') {
     return {
       id: 'service.agent-executable-path',
@@ -824,7 +800,7 @@ function serviceAgentPathCheck(
     if (context.platform === 'win32') {
       durableEnvironment = parseWindowsServiceEnvironment(JSON.parse(readFileSync(environment.target, 'utf8')))?.variables;
     } else {
-      durableEnvironment = parseServiceEnvironment(readFileSync(environment.target, 'utf8'));
+      durableEnvironment = parseBrokerServiceEnvironment(readFileSync(environment.target, 'utf8'));
     }
   } catch { /* integrity check owns the error */ }
   const entries = durableEnvironment?.PATH?.split(context.platform === 'win32' ? ';' : ':').filter(Boolean);
@@ -837,7 +813,15 @@ function serviceAgentPathCheck(
       remediation: remediation('cosyncing repair', 'Rebuild the durable service environment.'),
     };
   }
-  const requiredDirectories = serviceAgentExecutableDirectories(context);
+  const inheritedExecutableOverrides = Object.fromEntries(SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES.flatMap((name) =>
+    !Object.prototype.hasOwnProperty.call(context.env, name) && durableEnvironment![name] !== undefined
+      ? [[name, durableEnvironment![name]]]
+      : []));
+  const effectiveContext: SetupDiagnosisContext = Object.keys(inheritedExecutableOverrides).length === 0
+    ? context
+    : { ...context, env: { ...inheritedExecutableOverrides, ...context.env } };
+  const executables = resolveServiceAgentExecutables(effectiveContext);
+  const requiredDirectories = serviceAgentExecutableDirectories(effectiveContext);
   const serviceExecutable = context.platform === 'win32'
     ? win32.join(win32.dirname(environment.target), PRODUCT_IDENTITY.primaryBinary)
     : resources.find((resource) => resource.id === 'broker-binary')?.target ?? installedBinaryPath(home);
@@ -863,7 +847,7 @@ function serviceAgentPathCheck(
   const orderingMismatch = missing.length === 0
     && obsolete.length === 0
     && !servicePathMatchesExpected(normalizedEntries, normalizedExpected);
-  const expectedOverrides = serviceAgentExecutableOverrides(context);
+  const expectedOverrides = serviceAgentExecutableOverrides(effectiveContext);
   const overrideMismatches = SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES.filter(
     (name) => durableEnvironment[name] !== expectedOverrides[name],
   );
@@ -1155,6 +1139,7 @@ async function installedBrokerServiceChecks(
           piSessionsRoot: piPaths.sessionsRoot,
           ompSessionsRoot: ompPaths.sessionsRoot,
         }),
+        agentConfigurationOverrides: serviceAgentConfigurationOverrides(context.env, context.platform),
         webDir: serviceFlutterWebRoot({
           override: context.env.COSYNCING_WEB_DIR,
           packaged: buildInfo.packaged,
@@ -1358,16 +1343,47 @@ async function endpointAndRuntimeChecks(options: {
       const items = (updates.json as any).updates as any[];
       const errors = items.filter((item) => item?.state === 'error');
       const pending = items.filter((item) => item?.updateAvailable === true || item?.state === 'pending');
+      // Name the runtimes and say WHAT changed. Three bare counts told the
+      // operator that "one or more managed runtimes have a pending update" and
+      // to reconcile "when sessions are safe to restart" -- without saying
+      // which runtime, that the pending change is often CONFIGURATION rather
+      // than a version (installed and running versions equal), or how many
+      // threads block the restart. All of it is already in the response and was
+      // discarded, so the one judgement the remediation asks for -- is it safe
+      // to restart -- could not be made from the check.
+      const name = (item: any): string => String(item?.agent ?? 'unknown');
+      const describe = (item: any): Record<string, unknown> => ({
+        agent: name(item),
+        state: String(item?.state ?? 'unknown'),
+        ...(Array.isArray(item?.pendingChanges) && item.pendingChanges.length > 0
+          ? { pendingChanges: item.pendingChanges.map(String).join(', ') } : {}),
+        ...(typeof item?.installedVersion === 'string' ? { installedVersion: item.installedVersion } : {}),
+        ...(typeof item?.runningVersion === 'string' ? { runningVersion: item.runningVersion } : {}),
+        ...(typeof item?.blockers === 'number' ? { blockers: item.blockers } : {}),
+      });
+      const affected = [...errors, ...pending.filter((item) => !errors.includes(item))];
+      const versionMoved = pending.some((item) =>
+        typeof item?.installedVersion === 'string'
+        && typeof item?.runningVersion === 'string'
+        && item.installedVersion !== item.runningVersion);
       runtime.push({
         id: 'runtime.managed-updates',
         status: errors.length > 0 ? 'fail' : pending.length > 0 ? 'warn' : 'pass',
         detailCode: errors.length > 0 ? 'runtime-update-error' : pending.length > 0 ? 'runtime-update-pending' : 'runtime-updates-current',
         summary: errors.length > 0
-          ? 'One or more managed runtimes could not report update state.'
-          : pending.length > 0 ? 'One or more managed runtimes have a pending update.' : 'Managed runtime versions are current.',
-        evidence: { checked: items.length, pending: pending.length, errors: errors.length },
+          ? `Managed runtimes that could not report update state: ${errors.map(name).join(', ')}.`
+          : pending.length > 0
+            ? `${pending.map(name).join(', ')} ${pending.length === 1 ? 'has' : 'have'} a pending `
+              + `${versionMoved ? 'version update' : 'configuration reload'}.`
+            : 'Managed runtime versions are current.',
+        evidence: {
+          checked: items.length,
+          pending: pending.length,
+          errors: errors.length,
+          ...(affected.length > 0 ? { runtimes: JSON.stringify(affected.map(describe)) } : {}),
+        },
         ...(errors.length > 0 || pending.length > 0
-          ? { remediation: remediation('cosyncing repair', 'Reconcile managed runtime versions when sessions are safe to restart.') }
+          ? { remediation: remediation('cosyncing repair', 'Reconcile managed runtimes when their sessions are safe to restart; the evidence names each runtime, what changed, and how many threads block it.') }
           : {}),
       });
     } else {
@@ -1390,21 +1406,28 @@ async function endpointAndRuntimeChecks(options: {
         const displayName = typeof row.displayName === 'string' ? row.displayName : row.id;
         const reported = typeof row.canCreateSession === 'boolean';
         const ready = row.canCreateSession === true;
+        // New brokers distinguish a static Observe-only registration from a
+        // create-capable adapter whose live prerequisite is unavailable.  When
+        // the field is absent, preserve the legacy interpretation.
+        const creationUnsupported = row.supportsCreateSession === false;
         const installedInShell = installed.has(row.id as 'codex' | 'opencode' | 'pi' | 'claude');
-        const pathStale = installedInShell && options.agentPathCheck?.status === 'fail';
-        const pathCurrent = installedInShell && options.agentPathCheck?.status === 'pass';
-        const runtimeUnavailable = !ready && reported && pathCurrent;
+        const pathStale = !creationUnsupported && installedInShell && options.agentPathCheck?.status === 'fail';
+        const pathCurrent = !creationUnsupported && installedInShell && options.agentPathCheck?.status === 'pass';
+        const runtimeUnavailable = !ready && reported && !creationUnsupported && pathCurrent;
         agents.push({
           id: `${row.id}.broker-create-readiness`,
-          status: ready ? 'pass' : !reported ? 'warn' : installedInShell ? 'fail' : 'skip',
+          status: ready ? 'pass' : creationUnsupported ? 'skip' : !reported ? 'warn' : installedInShell ? 'fail' : 'skip',
           detailCode: ready
             ? 'broker-session-creation-ready'
+            : creationUnsupported ? 'broker-session-creation-unsupported'
             : !reported ? 'broker-session-creation-unreported'
               : pathStale ? 'broker-session-creation-path-stale'
                 : runtimeUnavailable ? 'broker-agent-runtime-unavailable'
                   : installedInShell ? 'broker-session-creation-unavailable' : 'broker-agent-executable-unavailable',
           summary: ready
             ? `${displayName} is registered in the running broker and can create sessions.`
+            : creationUnsupported
+              ? `${displayName} is registered without a session-creation surface.`
             : !reported
               ? `${displayName} is registered in the running broker, but creation readiness was not reported.`
               : pathStale
@@ -1417,6 +1440,9 @@ async function endpointAndRuntimeChecks(options: {
           evidence: {
             registered: true,
             creationReady: ready,
+            ...(typeof row.supportsCreateSession === 'boolean'
+              ? { creationSupported: row.supportsCreateSession }
+              : {}),
             installedInInteractiveShell: installedInShell,
             ...(typeof row.syncEnabled === 'boolean' ? { syncEnabled: row.syncEnabled } : {}),
           },
@@ -1427,7 +1453,7 @@ async function endpointAndRuntimeChecks(options: {
               'cosyncing restart',
               `Restart the broker-managed ${displayName} runtime or shared server; inspect \`cosyncing logs\` if it remains unavailable.`,
             ),
-          } : !ready && installedInShell ? {
+          } : !creationUnsupported && !ready && installedInShell ? {
             remediation: remediation('cosyncing doctor', 'Verify the durable service and agent runtime state, then rerun doctor.'),
           } : {}),
         });
@@ -1588,6 +1614,7 @@ function reconcileBridgeDoctorDiagnosis(
   context: SetupDiagnosisContext,
   install: InstallStateInspection,
   diagnoses: readonly AgentSetupDiagnosis[],
+  forceDecision = false,
 ): AgentSetupDiagnosis[] {
   const target = diagnoses.find((diagnosis) => diagnosis.agent === family.agent);
   if (!target || !target.checks.some((check) => check.id === family.checkId)) return [...diagnoses];
@@ -1596,7 +1623,24 @@ function reconcileBridgeDoctorDiagnosis(
     : inspectOmpBridgeOwnership(install, family.agentDir);
   const evidence = { path: context.displayPath(decision.bridge.path) };
   let replacement: SetupCheck | undefined;
-  if (decision.status === 'owned-stale') {
+  if (decision.status === 'owned-current' && forceDecision) {
+    replacement = {
+      id: family.checkId,
+      status: 'pass',
+      detailCode: 'bridge-owned-current',
+      summary: `Installed ${family.displayName} bridge matches the packaged asset.`,
+      evidence,
+    };
+  } else if (decision.status === 'missing' && forceDecision) {
+    replacement = {
+      id: family.checkId,
+      status: 'warn',
+      detailCode: 'bridge-missing',
+      summary: `The ${family.displayName} bridge extension is not installed.`,
+      evidence,
+      remediation: remediation('cosyncing setup', `Install the packaged ${family.displayName} bridge through setup.`),
+    };
+  } else if (decision.status === 'owned-stale') {
     replacement = {
       id: family.checkId,
       status: 'warn',
@@ -1651,11 +1695,20 @@ function reconcilePiBridgeDoctorDiagnosis(
     diagnoses,
   );
   const ompAgentDir = resolvePiDialectPaths(OMP_DIALECT, env).agentDir;
+  const ompReceiptTarget = inspectOmpBridgeReceiptTarget(install);
+  // Setup persists an explicit OMP profile in the durable service environment and moves the receipt with
+  // the bridge. A later `cosyncing doctor` process does not inherit that service-only override. Inspect the
+  // committed receipt target first so doctor reports the installed product, not the invoking shell's default
+  // profile. Environment/service drift is diagnosed separately by the service checks.
+  const installedOmpAgentDir = ompReceiptTarget.target
+    ? dirname(dirname(dirname(ompReceiptTarget.target)))
+    : ompAgentDir;
   return reconcileBridgeDoctorDiagnosis(
-    { agent: 'omp', checkId: 'omp.bridge-asset', displayName: 'omp', agentDir: ompAgentDir },
+    { agent: 'omp', checkId: 'omp.bridge-asset', displayName: 'omp', agentDir: installedOmpAgentDir },
     context,
     install,
     pi,
+    ompReceiptTarget.status !== 'not-installed',
   );
 }
 
@@ -1690,33 +1743,34 @@ export function defaultDoctorAdapters(
 export async function collectDoctorReport(dependencies: DoctorDependencies): Promise<DoctorReport> {
   if (dependencies.context.effects !== 'forbidden') throw new Error('doctor requires a no-effects context');
   const home = dependencies.stateHome ?? setupStateHome();
+  const installedResources = inspectInstallState(home);
+  const context = contextWithOwnedServiceAgentEnvironment(dependencies.context, installedResources, home);
   const config = inspectBrokerConfig(home);
   const brokerToken = inspectBrokerToken(join(home, 'secrets', 'broker-token'));
   const piIntegration = inspectPiIntegration(join(home, 'secrets', 'pi-integration.json'));
   const ompIntegration = inspectOmpIntegration(join(home, 'secrets', 'omp-integration.json'));
-  const host = hostChecks(dependencies.context, dependencies.context.arch);
-  const adapters = dependencies.adapters ?? defaultDoctorAdapters(dependencies.context.env);
-  const installedResources = inspectInstallState(home);
+  const host = hostChecks(context, context.arch);
+  const adapters = dependencies.adapters ?? defaultDoctorAdapters(context.env);
   // Resolved before the service checks because the durable service PATH is derived from it: setup records
   // the validated runtime's directory there, and the check below must reconstruct the same expectation.
   const identity = dependencies.applicationIdentity
     ?? currentApplicationIdentity(dependencies.buildInfo.distribution, `${import.meta.dir}/cli.ts`);
   const [adapterDiagnoses, service, installedService] = await Promise.all([
-    diagnoseAgents(dependencies.context, adapters, brokerManagedHostIdentities(
+    diagnoseAgents(context, adapters, brokerManagedHostIdentities(
       // `home` is the STATE home — receipts and ownership records. The identity
       // an adapter resolves belongs to the USER home, which is the same one the
       // diagnosis below resolves against; handing it the state home would name
       // `~/.cosyncing/.kimi-code`, match nothing, and quietly restore the manual
       // start command the posture exists to withhold.
       home,
-      dependencies.context.homeDir,
+      context.homeDir,
       adapters,
     )),
-    serviceChecks(dependencies.context, host.wsl),
-    installedBrokerServiceChecks(dependencies.context, home, identity, dependencies.buildInfo),
+    serviceChecks(context, host.wsl),
+    installedBrokerServiceChecks(context, home, identity, dependencies.buildInfo),
   ]);
   const agents = reconcilePiBridgeDoctorDiagnosis(
-    dependencies.context,
+    context,
     installedResources,
     adapterDiagnoses,
   );
@@ -1733,11 +1787,11 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
       : tokdashVersionCheck(dependencies.context),
   ]);
   const codexReadiness = codexTuiReadinessCheck(
-    dependencies.codexTuiReadiness ?? safeCodexTuiReadiness(dependencies.context),
+    dependencies.codexTuiReadiness ?? safeCodexTuiReadiness(context),
   );
   // Read from the receipt's own target, so this inspects the file the installer actually wrote rather than
   // a path recomputed here — the same rule every other receipt-owned resource check follows.
-  const serviceProvider = durableServiceProviderId(dependencies.context.platform);
+  const serviceProvider = durableServiceProviderId(context.platform);
   const serviceDefinitionReceipt = (installedResources.committed ? installedResources.state.resources : [])
     .find((resource: InstalledResourceRecord) => resource.id === serviceDefinitionResourceId({ id: serviceProvider }));
   const serviceRuntimePath = serviceDefinitionReceipt
@@ -1759,17 +1813,17 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
       id: 'state',
       title: 'Configuration and state',
       checks: [
-        configCheck(config, dependencies.context),
-        credentialCheck({ id: 'state.broker-token', label: 'Broker credential', inspection: brokerToken, context: dependencies.context }),
-        credentialCheck({ id: 'state.pi-integration', label: 'Pi integration credential', inspection: piIntegration, context: dependencies.context }),
-        credentialCheck({ id: 'state.omp-integration', label: 'omp integration credential', inspection: ompIntegration, context: dependencies.context }),
-        environmentPrecedenceCheck({ packaged: dependencies.buildInfo.packaged, home, context: dependencies.context }),
-        machinePeerCredentialCheck(dependencies.context),
-        ...agentSkillChecks(home, dependencies.context),
-        ...setupFailureChecks(home, dependencies.context),
+        configCheck(config, context),
+        credentialCheck({ id: 'state.broker-token', label: 'Broker credential', inspection: brokerToken, context }),
+        credentialCheck({ id: 'state.pi-integration', label: 'Pi integration credential', inspection: piIntegration, context }),
+        credentialCheck({ id: 'state.omp-integration', label: 'omp integration credential', inspection: ompIntegration, context }),
+        environmentPrecedenceCheck({ packaged: dependencies.buildInfo.packaged, home, context }),
+        machinePeerCredentialCheck(context),
+        ...agentSkillChecks(home, context),
+        ...setupFailureChecks(home, context),
         ...managedHostChecks(home),
-        ...durableDirectoryChecks(home, dependencies.context),
-        ...durableChecks(home, dependencies.context),
+        ...durableDirectoryChecks(home, context),
+        ...durableChecks(home, context),
       ],
     },
     { id: 'agents', title: 'Coding agents', checks: [...agents.flatMap((agent) => agent.checks), ...endpoints.agents, codexReadiness] },

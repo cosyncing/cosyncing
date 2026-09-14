@@ -1279,7 +1279,7 @@ void main() {
       expect(connection.lastPromptPermissionMode, 'auto');
     });
 
-    testWidgets('a picker with nothing to pick reads as read-only', (
+    testWidgets('a picker with nothing to pick promises nothing false', (
       tester,
     ) async {
       // A session that must show its model but offers no catalog to choose
@@ -1329,7 +1329,20 @@ void main() {
       final tooltip = tester.widget<Tooltip>(
         find.descendant(of: selector, matching: find.byType(Tooltip)),
       );
-      expect(tooltip.message, contains('Read-only'));
+      // ...and what must NOT appear is a claim about the SESSION. This
+      // fixture is `drive: driving` -- it accepts prompts -- and only its
+      // catalog is empty, so "Read-only for this session." is false. This
+      // assertion previously required that sentence, which is how the false
+      // claim reached the installed client: `onPressed == null` was read as
+      // read-only, and B5/B6 then made the control visible in exactly this
+      // case. Saying nothing extra is not ideal -- a disabled control with no
+      // explanation -- but "No options available" would be new copy and that
+      // is an owner's choice, whereas removing a false statement is not.
+      expect(
+        tooltip.message,
+        isNot(contains('Read-only')),
+        reason: 'this session is writable; only the picker is empty',
+      );
     });
 
     testWidgets('the compact selection pip is the shared component', (

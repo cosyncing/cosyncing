@@ -79,7 +79,7 @@ chmodSync(fakeBin, 0o755);
 const enc = (p: string): string => Buffer.from(p, 'utf8').toString('base64url');
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-const { ClaudeAdapter, CLAUDE_TERMINAL_BUSY_CONFLICT } = await import('../src/index.ts');
+const { ClaudeAdapter, CLAUDE_TERMINAL_BUSY_CONFLICT, drainClaudeLiveStatusProbes } = await import('../src/index.ts');
 
 // ── 15a: mid-turn terminal owner refuses takeover ────────────────────────────
 const adapter = new ClaudeAdapter();
@@ -149,4 +149,9 @@ check(
 rmSync(ROOT, { recursive: true, force: true });
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
+// Every suite that calls `discoverSessions()` and then `process.exit()` opens the
+// same window: a background `agents --json` refresh still running when the
+// process dies leaves an orphaned child behind. `14645766` closed it in one
+// suite of four; these are the other three.
+await drainClaudeLiveStatusProbes();
 process.exit(failed ? 1 : 0);

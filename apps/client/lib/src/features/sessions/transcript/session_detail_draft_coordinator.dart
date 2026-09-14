@@ -1115,8 +1115,26 @@ extension SessionDetailDrafts on SessionDetailController {
           );
         }
         if (row != null) _restorePreservedDraftConflict(row);
+        // The same guard the surface above carries, for the same reason. A row
+        // still bound to a live send holds text this device ALREADY sent;
+        // refusing to show it here while RELAYING it to every other client
+        // published the sent prompt as their unsent shared draft, and the
+        // shared record is durable, so it outlived the session that sent it.
+        //
+        // Measured on installed v63, reasonix session 45119131: prompt acked
+        // at 19:09:21, approval at 19:09:26, then a draft holding that same
+        // already-executed `rm -f <path> && touch <path>` written at 19:09:36
+        // by a connection whose update counter had just restarted -- this
+        // reattach. 29 sessions on that host were in that state, each one
+        // Enter away from running the command again.
+        //
+        // Nothing is lost by waiting: the send's own receipt settles the row,
+        // deleting it on delivery or restoring it (dirty, unbound) on terminal
+        // failure, and the restored row publishes through this path on the
+        // next connection.
         if (row != null &&
             row.dirty &&
+            row.submittedClientMessageId == null &&
             state.draftConflict == null &&
             state.connectionStatus == SessionDetailConnectionStatus.connected) {
           await _publishLocalDraft(row);
@@ -1140,6 +1158,45 @@ extension SessionDetailDrafts on SessionDetailController {
   /// other UI reads — and a row nothing reads is not a recovery. The offer
   /// exposes it through the ordinary conflict choice; resolving the offer
   /// removes the row (DR1 retention: resolved failed rows are deleted).
+  /// Client message ids this session's transcript already carries a canonical
+  /// echo for.
+  ///
+  /// Such a send LANDED, whatever its outbox row says. A row can end `failed`
+  /// after the broker acked it: `markDelivered` is skipped when the
+  /// shared-draft clear is not also confirmed, and a reattach then retires the
+  /// still-retryable row across the ownership change.
+  Set<String> _deliveredClientMessageIds() {
+    final delivered = <String>{};
+    for (final message in state.messageEvents) {
+      final clientKey = message.userMessageClientKey;
+      if (clientKey != null && !message.userMessageQueued) {
+        delivered.add(clientKey);
+      }
+    }
+    // A legacy unstamped echo correlates only through the state-layer map.
+    delivered.addAll(state.transcriptClientKeys.values);
+    return delivered;
+  }
+
+  /// Withdraws a recovery offer once the prompt it names turns up in the
+  /// transcript.
+  ///
+  /// The offer is computed when the connection restores, which is BEFORE
+  /// history replays — so on a reload it is decided against an empty transcript
+  /// and cannot yet see that its prompt landed. Measured on installed v81: one
+  /// browser run of three came back from its reload showing "Recover kept
+  /// version" over an EMPTY composer, for a prompt that had been answered
+  /// before the reload. Offering that back asks the user whether to recover a
+  /// message they can read in the transcript above the banner, and it is one
+  /// Enter from running it twice — the exact hazard the dispatched guards
+  /// elsewhere in this file exist to prevent.
+  void retractRecoveredPromptOfferInTranscript() {
+    final recovered = state.draftConflict?.recoveredPromptId;
+    if (recovered == null) return;
+    if (!_deliveredClientMessageIds().contains(recovered)) return;
+    state = state.copyWith(clearDraftConflict: true);
+  }
+
   Future<void> _offerFailedOversizedPrompt(
     String profileId,
     _DraftScope scope,
@@ -1149,13 +1206,30 @@ extension SessionDetailDrafts on SessionDetailController {
     final messages = await scope.guard(
       repository.loadForSession(arg, brokerProfileId: profileId),
     );
+    final delivered = _deliveredClientMessageIds();
     SessionOutboxMessage? newest;
     String? newestText;
     for (final message in messages) {
       if (message.kind != SessionOutboxMessageKind.prompt) continue;
       if (message.status != SessionOutboxMessageStatus.failed) continue;
+      if (delivered.contains(message.clientMessageId)) continue;
       final text = message.payload['text'];
-      if (text is! String || text.length <= maxLocalDraftTextChars) continue;
+      if (text is! String || text.isEmpty) continue;
+      // Two prompts end up with their text held only in a failed outbox row
+      // that no other UI reads, and the comment above is right that such a row
+      // is not a recovery:
+      //
+      //  - OVERSIZED: the durable draft row refuses to hold it.
+      //  - DISPATCHED: the restore paths now refuse to hand it back, because a
+      //    prompt that left this device may already have run and putting it in
+      //    the composer is one Enter from running it twice.
+      //
+      // The second is not a reason to delete someone's typing. Offering it
+      // through the ordinary conflict choice keeps both properties at once:
+      // nothing lands in the composer on its own, and nothing is lost silently
+      // -- the user decides, having seen the text.
+      final dispatched = message.attemptCount > 0;
+      if (!dispatched && text.length <= maxLocalDraftTextChars) continue;
       newest = message; // loadForSession answers oldest first
       newestText = text;
     }
@@ -1212,6 +1286,29 @@ extension SessionDetailDrafts on SessionDetailController {
         return null;
       }
       if (outbox.status == SessionOutboxMessageStatus.failed) {
+        // The SAME test the expiry pass applies to the outbox payload, because
+        // this draft row holds a second copy of the identical text. Without it
+        // that payload guard is decorative: expiry refuses to restore a
+        // dispatched prompt and then marks the row `failed`, the next attach
+        // arrives here, and the draft copy is restored anyway -- dirty and
+        // unbound, so straight through the publish guard to every client. One
+        // attach later the executed `rm -f <path> && touch <path>` is back in
+        // the composer, which is the outcome refusing the payload existed to
+        // prevent.
+        //
+        // A dispatched prompt is not unsent text. Its association is still
+        // dropped, so a settled send never holds the composer hostage, but its
+        // text is not offered back as something merely forgotten.
+        if (outbox.attemptCount > 0) {
+          return _saveLocalDraft(
+            row.copyWith(
+              localRevision: row.localRevision + 1,
+              clearSubmitted: true,
+              updatedAt: DateTime.now(),
+            ),
+            scope,
+          );
+        }
         final restored = await _saveLocalDraft(
           row.copyWith(
             dirty: true,
@@ -2029,16 +2126,25 @@ extension SessionDetailDrafts on SessionDetailController {
 
   /// Terminal delivery failure: restore the exact prompt text into the draft
   /// and offer it back to the composer (never loses the unsent text).
-  Future<void> _restoreDraftForFailedSend(String clientMessageId) =>
-      _serializeDraftMutation(
-        (scope) => _restoreDraftForFailedSendLocked(clientMessageId, scope),
-        whenStale: null,
-      );
+  /// [outcomeAmbiguous] marks a failure that does NOT prove the prompt went
+  /// unexecuted — see the guard below.
+  Future<void> _restoreDraftForFailedSend(
+    String clientMessageId, {
+    required bool outcomeAmbiguous,
+  }) => _serializeDraftMutation(
+    (scope) => _restoreDraftForFailedSendLocked(
+      clientMessageId,
+      scope,
+      outcomeAmbiguous: outcomeAmbiguous,
+    ),
+    whenStale: null,
+  );
 
   Future<void> _restoreDraftForFailedSendLocked(
     String clientMessageId,
-    _DraftScope scope,
-  ) async {
+    _DraftScope scope, {
+    required bool outcomeAmbiguous,
+  }) async {
     final profileId = _brokerScopeKey;
     if (profileId == null) return;
     try {
@@ -2059,9 +2165,27 @@ extension SessionDetailDrafts on SessionDetailController {
       if (outbox == null || outbox.kind != SessionOutboxMessageKind.prompt) {
         return;
       }
+      // Most terminal failures PROVE the prompt did not run --
+      // `PROMPT_REJECTED` is the agent declining it -- and restoring that text
+      // is this path's whole purpose. Two do not:
+      // `CLIENT_MESSAGE_ID_CONFLICT` (the id was already used for a different
+      // mutation, so the original may well have executed) and
+      // `CLIENT_MESSAGE_OUTCOME_UNKNOWN`, which says so outright. The
+      // fingerprint note in `session_detail_messaging_coordinator.dart:149`
+      // documents how a replay reaches the first of those on a prompt that
+      // already executed.
+      //
+      // Only for those two is handing the text straight back the destructive
+      // direction. Returning early there would be the OTHER mistake: it drops
+      // the text into a failed row no UI reads. The conflict branch below
+      // already resolves both at once -- preserve it as the second version and
+      // offer the choice -- so ambiguity routes THERE rather than to the
+      // composer. Keying this on `attemptCount` alone would have refused every
+      // nack, including a prompt the agent had merely declined.
+      final unproven = outcomeAmbiguous && outbox.attemptCount > 0;
       final text = outbox.payload['text'];
       if (text is! String || text.isEmpty) return;
-      if (text.length > maxLocalDraftTextChars) {
+      if (text.length > maxLocalDraftTextChars && !unproven) {
         // The durable row refuses oversized text, so the failed outbox row
         // stays the durable copy — but a terminal nack must still RESTORE the
         // text, not merely retain it in a table no UI reads. The composer gets
@@ -2078,10 +2202,16 @@ extension SessionDetailDrafts on SessionDetailController {
       await _withDraftRowRetry<void>(() async {
         final row = _localDraft;
         if (row != null &&
-            row.submittedClientMessageId != clientMessageId &&
-            row.text.isNotEmpty &&
-            row.text != text) {
-          // Other text owns the row. It does not have to be a newer local
+            (unproven ||
+                (row.submittedClientMessageId != clientMessageId &&
+                    row.text.isNotEmpty &&
+                    row.text != text))) {
+          // Either other text owns the row, or the prompt's outcome is
+          // unproven and must not be handed back as if it were merely unsent.
+          // Both want the same answer: keep it as the second version and offer
+          // the choice.
+          //
+          // Other text owning the row does not have to be a newer local
           // edit: a CLEAN row holding another device's adopted shared draft is
           // the more dangerous case, because overwriting it keeps the current
           // shared revision, so the next publish replaces that device's unsent

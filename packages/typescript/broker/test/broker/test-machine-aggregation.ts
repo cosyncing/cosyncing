@@ -17,6 +17,7 @@ import {
   parseMachinePeers,
   resolveMachineSession,
 } from '../../src/roster/machine-aggregation.ts';
+import { isolatedBrokerFixtureEnvironment } from '../helpers/isolated-broker-fixture.ts';
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
   try {
@@ -96,6 +97,83 @@ await test('composite identity makes cross-machine duplicates valid and same-own
   assert.equal(resolveMachineSession(aggregatedMachines('machine-a', [stale]), {
     machineId: 'machine-stale', tool: 'opencode', sessionId: 'same',
   }).code, 'MACHINE_ROUTE_STALE');
+});
+
+await test('an incomplete roster is degraded, and it can confirm a session but never deny one', () => {
+  // Broker contract 23. A roster can now be answered before every discovery leg
+  // has landed. The rows it carries are true; its silence is not. A machine that
+  // reported `ok` on that basis would let a caller conclude that a session on the
+  // unread adapter had been deleted.
+  const session = { id: 'live', tool: 'opencode', title: 'live', status: 'idle', attachMode: 'observe' } as const;
+  const partial = localMachineRoster('machine-partial', [session], 'http://partial.test', 1000, false);
+  assert.equal(partial.status, 'degraded');
+  assert.equal(partial.code, 'MACHINE_PEER_PARTIAL');
+  assert.equal(localMachineRoster('machine-whole', [session], 'http://whole.test', 1000).status, 'ok');
+
+  const aggregate = aggregatedMachines('machine-a', [partial], 1000);
+  assert.equal(resolveMachineSession(aggregate, {
+    machineId: 'machine-partial', tool: 'opencode', sessionId: 'live',
+  }).status, 'resolved', 'a row the partial roster DOES carry still routes');
+
+  const absent = resolveMachineSession(aggregate, {
+    machineId: 'machine-partial', tool: 'codex', sessionId: 'unread-leg',
+  });
+  assert.equal(absent.code, 'MACHINE_ROUTE_STALE');
+  assert.notEqual(absent.code, 'MACHINE_ROUTE_NOT_FOUND');
+
+  // ...and the same question against a machine that DID finish looking is still
+  // answered `not found`, so this is not a blanket softening of absence.
+  assert.equal(resolveMachineSession(aggregatedMachines('machine-a', [
+    localMachineRoster('machine-whole', [session], 'http://whole.test', 1000),
+  ], 1000), { machineId: 'machine-whole', tool: 'codex', sessionId: 'unread-leg' }).code, 'MACHINE_ROUTE_NOT_FOUND');
+});
+
+await test('a peer that reports its own roster incomplete is not counted healthy', async () => {
+  const port = await freePort();
+  let complete: boolean | undefined = false;
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port,
+    fetch(req) {
+      if (new URL(req.url).pathname !== '/api/sessions') return new Response('not found', { status: 404 });
+      return Response.json({
+        machine: 'peer-partial',
+        generatedAt: Date.now(),
+        complete,
+        sessions: [{ id: 'p1', tool: 'opencode', title: 'p1', status: 'idle', attachMode: 'observe' }],
+      });
+    },
+  });
+  try {
+    const peer = parseMachinePeers(JSON.stringify([{ id: 'peer-partial', url: `http://127.0.0.1:${port}` }]))[0]!;
+    const partial = await fetchPeerMachineRoster(peer);
+    assert.equal(partial.status, 'degraded');
+    assert.equal(partial.code, 'MACHINE_PEER_PARTIAL');
+    assert.match(partial.error ?? '', /incomplete/);
+    assert.equal(partial.sessions.length, 1, 'the rows it did send are still usable');
+
+    // The flag is the only difference. A peer too old to send it never served a
+    // partial roster in the first place, so its silence is not punished.
+    complete = undefined;
+    assert.equal((await fetchPeerMachineRoster(peer)).status, 'ok');
+    complete = true;
+    assert.equal((await fetchPeerMachineRoster(peer)).status, 'ok');
+
+    // A field that is present and not a boolean is a peer we cannot read. That
+    // is not the same as a peer that did not speak, and reading it as complete
+    // is the interpretation with a cost: it is what lets a garbled roster answer
+    // `ok` and then deny a session that exists.
+    for (const malformed of ['true', 1, null, {}, []]) {
+      complete = malformed as unknown as boolean;
+      const unreadable = await fetchPeerMachineRoster(peer);
+      assert.equal(unreadable.status, 'degraded', `complete=${JSON.stringify(malformed)}`);
+      assert.equal(unreadable.code, 'MACHINE_PEER_PARTIAL', `complete=${JSON.stringify(malformed)}`);
+    }
+    complete = 'true' as unknown as boolean;
+    assert.match((await fetchPeerMachineRoster(peer)).error ?? '', /malformed/);
+  } finally {
+    server.stop(true);
+  }
 });
 
 async function freePort(): Promise<number> {
@@ -207,20 +285,26 @@ await test('multi-machine roster is token-gated, merged, timeout-bounded, and to
     { id: 'stale-peer-config', url: `http://127.0.0.1:${stalePeerPort}` },
     { id: 'legacy-peer-config', url: `http://127.0.0.1:${legacyPeerPort}` },
   ];
+  // Isolated from the host's agent state. This suite is about aggregation, not
+  // about what happens to be on this machine, and inheriting the operator's home
+  // made the local leg both slow and nondeterministic: a real sweep of thousands
+  // of sessions can abandon a leg at its budget, which contract 23 now (rightly)
+  // reports as an incomplete local roster.
   const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
-    env: {
-      ...process.env,
-      PORT: String(brokerPort),
-      HOST: '127.0.0.1',
-      COSYNCING_TOKEN: token,
-      COSYNCING_TOKEN_FILE: '',
-      COSYNCING_PI_INTEGRATION_FILE: '',
-      COSYNCING_HOME: home,
-      COSYNCING_MACHINE: 'local-machine',
-      COSYNCING_MACHINE_PEERS: JSON.stringify(peers),
-      COSYNCING_MACHINE_PEER_TIMEOUT_MS: '150',
-      COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
-    },
+    env: isolatedBrokerFixtureEnvironment(home, {
+      overrides: {
+        PORT: String(brokerPort),
+        HOST: '127.0.0.1',
+        COSYNCING_TOKEN: token,
+        COSYNCING_TOKEN_FILE: '',
+        COSYNCING_PI_INTEGRATION_FILE: '',
+        COSYNCING_HOME: home,
+        COSYNCING_MACHINE: 'local-machine',
+        COSYNCING_MACHINE_PEERS: JSON.stringify(peers),
+        COSYNCING_MACHINE_PEER_TIMEOUT_MS: '150',
+        COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+      },
+    }),
     stdout: 'ignore',
     stderr: 'pipe',
   });

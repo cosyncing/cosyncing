@@ -10,8 +10,8 @@
  *  - Claude observe tail (the True-Sync echo surface): Claude Code writes the
  *    JSONL itself with no id handle, so NO echo is ever stamped — a terminal
  *    prompt landing before the app echo cannot steal its identity.
- *  - Pi bridge: Pi user messages have no native id, so the relayed echo stays
- *    unstamped; the prompt itself is still queued for the extension.
+ *  - Pi bridge: app prompts use one exact durable collab-prompt identity; equal
+ *    terminal text remains unstamped and cannot steal it.
  * (Codex's exact clientId round-trip is covered in codex/resume-fake.ts; the
  * OpenCode Run and direct Pi paths stamp their own synchronously-emitted echo.)
  *
@@ -263,7 +263,7 @@ const userEchoes = (messages: AgentMessage[]): UserEcho[] =>
   }
 }
 
-// ── Pi bridge: relayed echoes stay unstamped (no native id exists) ──────────
+// ── Pi bridge: durable custom prompt correlation, native terminal isolation ─
 {
   const info = {
     id: 'pi-bridge-c1r',
@@ -277,25 +277,51 @@ const userEchoes = (messages: AgentMessage[]): UserEcho[] =>
   conn.subscribe((m) => messages.push(m));
   await conn.sendPrompt({ text: 'ping from app', clientMessageId: 'ca.pi.1' });
   const commands = await conn.takeCommands();
+  const prompt = commands.find((c) => c.kind === 'prompt' && c.text === 'ping from app');
   check(
-    'pi-bridge: the app send is queued for the extension',
-    commands.some((c) => c.kind === 'prompt' && c.text === 'ping from app'),
+    'pi-bridge: command carries broker-minted messageKey plus app clientKey',
+    prompt?.messageKey?.startsWith('u:remote:') === true && prompt?.clientKey === 'ca.pi.1',
     JSON.stringify(commands),
   );
-  conn.ingest({ t: 'user', key: 'pik1', text: 'ping from app', sentAt: 1000 });
-  conn.ingest({ t: 'user', key: 'pik2', text: 'ping from app', sentAt: 2000 });
+  // Same text typed in the terminal lands first: it has only a native ordinal and must stay
+  // unstamped. The later collab-prompt carries its exact persisted identity.
+  conn.ingest({ t: 'user', key: 'u0', text: 'ping from app', sentAt: 1000 });
+  conn.ingest({ t: 'user', key: prompt?.messageKey, clientKey: prompt?.clientKey, text: 'ping from app', sentAt: 2000 });
   const echoes = userEchoes(messages);
   check(
-    'pi-bridge: relayed user echoes are never stamped (terminal is indistinguishable)',
-    echoes.length === 2 && echoes.every((m) => m.clientKey === undefined),
+    'pi-bridge: identical terminal input stays unstamped while app row keeps exact correlation',
+    echoes.length === 2
+      && echoes[0]?.key === 'u0'
+      && echoes[0]?.clientKey === undefined
+      && echoes[1]?.key === prompt?.messageKey
+      && echoes[1]?.clientKey === 'ca.pi.1',
     JSON.stringify(echoes),
   );
   const history = userEchoes(await conn.getHistory());
   check(
-    'pi-bridge: history carries both unstamped echoes with their relay keys',
-    history.length === 2 && history[0]?.key === 'pik1' && history[1]?.key === 'pik2' &&
-      history.every((m) => m.clientKey === undefined),
+    'pi-bridge: cached history preserves both distinct rows and the app stamp',
+    history.length === 2
+      && history[0]?.key === 'u0'
+      && history[0]?.clientKey === undefined
+      && history[1]?.key === prompt?.messageKey
+      && history[1]?.clientKey === 'ca.pi.1',
     JSON.stringify(history),
+  );
+
+  // Re-hello backfill is authoritative. Recover a second native-persisted app prompt whose live
+  // event POST was lost, and remove the terminal row absent from the rewritten snapshot.
+  conn.ingestHistory([
+    { t: 'user', key: prompt?.messageKey, clientKey: 'ca.pi.1', text: 'ping from app', sentAt: 2000 },
+    { t: 'user', key: 'u:remote:recovered', clientKey: 'ca.pi.2', text: 'persisted before crash', sentAt: 3000 },
+  ]);
+  const recovered = userEchoes(await conn.getHistory());
+  check(
+    'pi-bridge: re-hello replaces stale cache and recovers a missed persisted row once',
+    recovered.length === 2
+      && recovered.every((m, index) => m.key === (index ? 'u:remote:recovered' : prompt?.messageKey))
+      && recovered[1]?.clientKey === 'ca.pi.2'
+      && recovered.every((m) => m.key !== 'u0'),
+    JSON.stringify(recovered),
   );
   await conn.close();
 }

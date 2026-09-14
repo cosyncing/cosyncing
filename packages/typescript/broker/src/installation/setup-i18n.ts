@@ -37,7 +37,7 @@ export type SetupMutationStep =
   | { kind: 'credentials' }
   | { kind: 'setup-state'; service: SetupServiceChoice }
   | { kind: 'pi-bridge'; path: string; replaceLegacy?: boolean }
-  | { kind: 'omp-bridge'; path: string }
+  | { kind: 'omp-bridge'; path: string; previousPath?: string }
   | { kind: 'durable-state-permissions'; paths: readonly string[] }
   | { kind: 'agent-skill-install' }
   | { kind: 'agent-skill-refresh' }
@@ -199,6 +199,10 @@ const en: SetupMessages = {
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
     omp: 'Packaged in-session bridge when omp is installed.',
+    reasonix: 'Observe + Resume only; Reasonix has no daemon to manage, and setup never touches Reasonix state.',
+    grok: 'Create/Resume is enabled for authenticated Grok Build 1.0.13 or newer; setup preserves Grok state and records its executable for the service.',
+    cline: 'Default-profile Observe plus Create/Resume for app-created sessions through an isolated managed Cline Hub, on 3.0.61 or newer; setup persists explicit non-secret provider/model selection and paths, never credentials.',
+    kilo: 'Observe plus authenticated Create/Drive on Kilo Code 7.4.23 or newer; the broker manages only its dedicated loopback port 4097 host and leaves foreign servers untouched.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
     agy: 'Observe + Resume only; agy has no daemon to manage, and setup never touches Antigravity state.',
     kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
@@ -229,7 +233,7 @@ const en: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\nFix: ${remediation}`,
   managedRuntimeTitle: 'Required managed-runtime acknowledgement',
   managedRuntimeBody: (product) =>
-    `${product} will manage supported shared Codex/OpenCode runtimes, the packaged Pi and omp bridges, and the \`kimi web\` and \`dsh web\` hosts — starting one when none is running, restarting it if it crashes, and stopping only the one it started. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
+    `${product} will manage supported shared Codex/OpenCode runtimes, the packaged Pi and omp bridges, and the Kilo, \`kimi web\`, and \`dsh web\` hosts — starting one when none is running, restarting it if it crashes, and stopping only the one it started. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
   managedRuntimeConfirm: (product) =>
     `I understand and want ${product} to manage the supported shared runtimes.`,
   legacyPiBridgeConfirm: (path) =>
@@ -320,7 +324,9 @@ const en: SetupMessages = {
           ? `Transactionally replace the exact known legacy bridge at ${step.path}; rollback restores the previous bytes.`
           : `Write the exact packaged bridge to ${step.path}; unrelated content is never overwritten.`;
       case 'omp-bridge':
-        return `Write the exact packaged omp bridge to ${step.path}; unrelated content is never overwritten.`;
+        return step.previousPath
+          ? `Transactionally move the receipt-owned packaged omp bridge from ${step.previousPath} to ${step.path}; rollback restores both paths.`
+          : `Write the exact packaged omp bridge to ${step.path}; unrelated content is never overwritten.`;
       case 'durable-state-permissions':
         return `Tighten owner-only permissions on current-schema durable state: ${step.paths.join(', ')}; `
           + 'content is unchanged. This one is not undone if a later step fails: setup never widens access '
@@ -428,6 +434,10 @@ const zhHans: SetupMessages = {
     opencode: '由 cosyncing 托管共享 serve；你自己启动的 server 不受影响。',
     pi: '装有 Pi 时，随包提供会话内 bridge。',
     omp: '装有 omp 时，随包提供会话内 bridge。',
+    reasonix: '只有「观察 + 继续」两种模式；Reasonix 没有常驻进程，安装过程不会改动 Reasonix 的数据。',
+    grok: '已认证的 Grok Build 1.0.13 及更高版本支持创建和恢复；安装过程保留 Grok 数据，并为服务记录可执行文件。',
+    cline: '默认配置仅观察；在 3.0.61 及更高版本上，应用创建的会话通过隔离、受管的 Cline Hub 支持创建/恢复。安装仅持久化显式的非密钥提供商、模型和路径，不读取凭据。',
+    kilo: '从本地 SQLite 观察，并在 Kilo Code 7.4.23 及更高版本上提供经认证的创建和控制；代理仅管理专用的本机回环 4097 端口，绝不接管外部服务器。',
     claude: '只有「观察 + 接管」两种模式；安装过程不会改动 Claude 的配置。',
     agy: '只有「观察 + 继续」两种模式；agy 没有常驻进程，安装过程不会改动 Antigravity 的数据。',
     kimi: '由 cosyncing 托管 `kimi web` host；你自己启动的 server 不受影响。',
@@ -455,7 +465,7 @@ const zhHans: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\n解决办法：${remediation}`,
   managedRuntimeTitle: '需要确认：由 cosyncing 托管运行时',
   managedRuntimeBody: (product) =>
-    `${product} 会接管支持的 Codex/OpenCode 共享运行时、随包提供的 Pi 与 omp bridge，以及 \`kimi web\` 和 \`dsh web\` host：没有运行时会启动，崩溃后会重启，并且只停止它自己启动的那个。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
+    `${product} 会接管支持的 Codex/OpenCode 共享运行时、随包提供的 Pi 与 omp bridge，以及 Kilo、\`kimi web\` 和 \`dsh web\` host：没有运行时会启动，崩溃后会重启，并且只停止它自己启动的那个。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
   managedRuntimeConfirm: (product) => `我已了解，同意由 ${product} 托管这些共享运行时。`,
   legacyPiBridgeConfirm: (path) =>
     `用当前随包版本替换 ${path} 中内容完全匹配的已知旧版 Pi bridge？如果回滚，会逐字节恢复旧文件。`,
@@ -533,7 +543,9 @@ const zhHans: SetupMessages = {
           ? `以事务方式替换 ${step.path} 中内容完全匹配的已知旧版 bridge；回滚时会恢复原始字节。`
           : `把随包提供的 bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
       case 'omp-bridge':
-        return `把随包提供的 omp bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
+        return step.previousPath
+          ? `以事务方式把凭证证明归属的 omp bridge 从 ${step.previousPath} 移到 ${step.path}；回滚时会恢复两个路径。`
+          : `把随包提供的 omp bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
       case 'durable-state-permissions':
         return `收紧当前架构持久状态的仅本人访问权限：${step.paths.join('、')}；不修改文件内容。`
           + '此项在后续步骤失败时不会回滚：安装程序不会为了撤销自身而重新放宽访问权限。';

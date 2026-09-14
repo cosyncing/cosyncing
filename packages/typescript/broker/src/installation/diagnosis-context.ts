@@ -1,9 +1,13 @@
 import {
   accessSync,
+  closeSync,
   constants,
+  fstatSync,
   lstatSync,
+  openSync,
   opendirSync,
   readFileSync,
+  readSync,
   realpathSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -18,6 +22,7 @@ import type {
 } from '@cosyncing/adapter-api';
 
 const COMMAND_OUTPUT_LIMIT = 64 * 1024;
+const FILE_PREFIX_HARD_LIMIT = 64 * 1024;
 const HTTP_BODY_LIMIT = 256 * 1024;
 /**
  * The most this context will ever hold in memory for one response, whatever a caller asks for.
@@ -78,6 +83,29 @@ function readText(path: string, maxBytes = 256 * 1024): ReturnType<SetupDiagnosi
       ok: false,
       reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable',
     };
+  }
+}
+
+function readTextPrefix(
+  path: string,
+  maxBytes: number,
+): NonNullable<ReturnType<Required<Pick<SetupDiagnosisContext, 'readTextPrefix'>>['readTextPrefix']>> {
+  let fd: number | undefined;
+  try {
+    const requested = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : 1;
+    const ceiling = Math.min(requested, FILE_PREFIX_HARD_LIMIT);
+    if (!lstatSync(path).isFile()) return { ok: false, reason: 'unreadable' };
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return { ok: false, reason: 'unreadable' };
+    const buffer = Buffer.allocUnsafe(Math.min(stat.size, ceiling));
+    const bytes = buffer.length === 0 ? 0 : readSync(fd, buffer, 0, buffer.length, 0);
+    return { ok: true, text: buffer.subarray(0, bytes).toString('utf8') };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { ok: false, reason: code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unreadable' };
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* read-only diagnosis */ }
   }
 }
 
@@ -329,8 +357,15 @@ export function createSetupDiagnosisContext(options: SetupDiagnosisContextOption
     resolveExecutable: (command) => resolveInvocation(command, { env, platform })?.originalPath,
     inspectPath: (path) => inspectPath(path, displayPath),
     readText,
+    readTextPrefix,
     readPackageVersion,
-    runReadOnly: (path, args, timeoutMs) => runReadOnly(path, args, env, platform, timeoutMs),
+    runReadOnly: (path, args, timeoutMs, envOverrides) => runReadOnly(
+      path,
+      args,
+      { ...env, ...envOverrides },
+      platform,
+      timeoutMs,
+    ),
     fetchJson,
     probeTcp,
     listDirectory,

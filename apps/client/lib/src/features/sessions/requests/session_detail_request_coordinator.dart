@@ -334,7 +334,13 @@ extension _SessionDetailRequestActions on SessionDetailController {
         if (payloadError != null) {
           await repository.markFailed(message.clientMessageId, payloadError);
           if (message.kind == SessionOutboxMessageKind.prompt) {
-            await _restoreDraftForFailedSend(message.clientMessageId);
+            // A local payload refusal says nothing about a PREVIOUS attempt: a
+            // row that already went out once may have run, and this replay
+            // never reached the broker to find out.
+            await _restoreDraftForFailedSend(
+              message.clientMessageId,
+              outcomeAmbiguous: message.attemptCount > 0,
+            );
           }
           continue;
         }
@@ -362,7 +368,15 @@ extension _SessionDetailRequestActions on SessionDetailController {
               continue;
             }
           }
-          await repository.markSending(message.clientMessageId);
+          // A row already `sending` was dispatched and is waiting for its ack;
+          // replaying it on reattach is a re-ask, not another attempt. Only a
+          // `queued` row (never dispatched) or a `retryable` one (a previous
+          // attempt failed) spends the failure budget. See `markResending`.
+          if (message.status == SessionOutboxMessageStatus.sending) {
+            await repository.markResending(message.clientMessageId);
+          } else {
+            await repository.markSending(message.clientMessageId);
+          }
           if (_brokerScopeKey != brokerProfileId ||
               !identical(_connection, connection) ||
               state.connectionStatus !=

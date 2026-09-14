@@ -13,10 +13,11 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import {
   createWindowsOwnerOnlyDirectory,
   enforceWindowsOwnerOnlyDacl,
@@ -331,41 +332,100 @@ export function createOwnerOnlyFileExclusive(
   target: string,
   content: string | Uint8Array,
   mode = 0o600,
+  options: { afterOpen?: () => void; beforePublish?: () => void; stagePath?: string } = {},
 ): 'created' | 'exists' {
   assertNoSymlinkComponents(target, false);
   const parent = dirname(target);
   ensureOwnerOnlyDirectory(parent);
+  // Windows reached the same stage-then-hard-link shape by its own route, for its own reason (inherited
+  // ACEs, not crash exposure), so it keeps its own implementation and none of the options below: the
+  // recovery hooks exist for the POSIX journal tests, which skip on Windows. Folding the two into one
+  // primitive is the right end state and belongs to the Windows lane work, not to a merge resolution.
   if (process.platform === 'win32') return createOwnerOnlyFileExclusiveWindows(target, content, mode);
+  sweepStaleStageFiles(parent, basename(target));
+  const stage = options.stagePath ?? `${target}.stage-${process.pid}-${randomBytes(12).toString('hex')}`;
+  if (dirname(resolve(stage)) !== dirname(resolve(target))) {
+    throw new Error('exclusive file staging path must share the destination directory');
+  }
   let fd: number | undefined;
-  let created = false;
   try {
-    try {
-      fd = openSync(target, 'wx', mode);
-      created = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
-      throw error;
-    }
+    fd = openSync(stage, 'wx', mode);
+    options.afterOpen?.();
     writeFileSync(fd, content);
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
+    options.beforePublish?.();
+    // A hard-link publish is the portable no-replace primitive available through node:fs: the complete,
+    // fsynced inode becomes visible at `target` atomically, and EEXIST leaves the winner untouched. Writing
+    // directly through open('wx') made a crash expose a truncated final file that durable recovery could
+    // neither prove nor remove.
+    assertNoSymlinkComponents(target, false);
+    try {
+      linkSync(stage, target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
+      throw error;
+    }
+    enforceOwnerOnlyFile(target, mode);
     try {
       const dirFd = openSync(parent, 'r');
       try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
     } catch {
       // Directory fsync is not portable. The exclusively created file itself is still durable.
     }
+    unlinkSync(stage);
     return 'created';
   } catch (error) {
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* preserve the original failure */ }
       fd = undefined;
     }
-    if (created) {
-      try { rmSync(target, { force: true }); } catch { /* best-effort cleanup of our incomplete file */ }
-    }
     throw error;
+  } finally {
+    try { rmSync(stage, { force: true }); } catch { /* best-effort cleanup of the complete staging inode */ }
+  }
+}
+
+/** A staging inode this old cannot belong to a live write: staging is a handful
+ *  of syscalls. Generous by a wide margin so a concurrent writer is never
+ *  disturbed, and still finite so orphans do not accumulate for the life of the
+ *  installation. */
+const STAGE_SWEEP_MIN_AGE_MS = 60 * 60_000;
+
+/**
+ * Remove staging inodes left by a writer that DIED mid-write.
+ *
+ * The `finally` in the exclusive write already removes this call's stage file,
+ * including when the write throws. What it cannot cover is the process being
+ * killed between the exclusive create and that finally — and because the name
+ * carries a fresh random suffix per call, nothing later ever matches it. Nothing
+ * else sweeps them, so a host that crashes during first-run instance creation
+ * deposits one more beside `broker-instance.json` on every attempt, forever.
+ *
+ * Best-effort throughout: a failure to tidy must never fail the write it
+ * precedes, and an age bound is what keeps a CONCURRENT writer's stage file safe.
+ */
+function sweepStaleStageFiles(parent: string, base: string): void {
+  const prefix = `${base}.stage-`;
+  const now = Date.now();
+  let names: string[];
+  try {
+    names = readdirSync(parent);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    try {
+      const path = join(parent, name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      if (now - stat.mtimeMs < STAGE_SWEEP_MIN_AGE_MS) continue;
+      unlinkSync(path);
+    } catch {
+      /* another writer may have removed it first; nothing to repair */
+    }
   }
 }
 

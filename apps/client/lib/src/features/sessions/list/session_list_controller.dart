@@ -414,12 +414,21 @@ class SessionListController extends Notifier<SessionListState> {
         // ones are ONE assignment, so no frame can show both or neither.
         state = SessionListState(
           status: SessionListStatus.loaded,
-          sessions: response.sessions,
+          sessions: _rowsFrom(
+            response,
+            keepKnown: !revisionNamespaceChanged && !repositoryChanged,
+          ),
           machine: response.machine,
           revision: snapshotRevision,
           source: source,
+          rosterComplete: response.complete,
         );
-        replacedRoster = true;
+        // An incomplete roster is not something to persist. The durable
+        // snapshot is what the next cold start shows before any broker answers,
+        // and writing a roster the broker itself called partial would hand that
+        // start a shorter list than the one it already had. The complete answer
+        // is one sweep away and writes itself.
+        replacedRoster = response.complete;
         _revisionWindow = requestWindow;
       } else {
         state = state.copyWith(
@@ -494,6 +503,45 @@ class SessionListController extends Notifier<SessionListState> {
         error: e,
       );
     }
+  }
+
+  /// The rows to publish from an authoritative response.
+  ///
+  /// A COMPLETE roster replaces outright: absence is deletion, and that is the
+  /// only reading that lets a removed session leave the list.
+  ///
+  /// An INCOMPLETE one (broker contract 23) is a roster the broker has told us
+  /// is not the whole one — it answered ahead of a still-running sweep, or a
+  /// sweep settled without reading every adapter. Treating that as a
+  /// replacement is what makes sessions blink out and return a moment later,
+  /// with nothing on screen to explain it. So its rows are merged over the ones
+  /// already held rather than substituted for them: everything it mentions is
+  /// updated, and everything it does not is left alone until a roster that
+  /// claims to be complete says otherwise.
+  ///
+  /// [keepKnown] is false whenever the previous rows answered a DIFFERENT
+  /// question — another broker, or another time window. Merging across that
+  /// boundary would not preserve knowledge, it would import rows the new
+  /// question excludes: a `7d` roster would inherit the year-old sessions an
+  /// `all` roster had. Those rows are dropped and the partial stands alone,
+  /// marked incomplete so the list can say it is still arriving.
+  List<SessionInfo> _rowsFrom(
+    ListSessionsResponse response, {
+    required bool keepKnown,
+  }) {
+    if (response.complete || !keepKnown || state.sessions.isEmpty) {
+      return response.sessions;
+    }
+    // The same key and the same order the delta feed uses. A merge that kept
+    // insertion order would leave the retained rows sorted by whatever an
+    // earlier response said and the new ones appended after them, so a session
+    // that started working would sit below idle ones until the next complete
+    // roster re-sorted the list.
+    final merged = <String, SessionInfo>{
+      for (final session in state.sessions) _sessionKey(session): session,
+      for (final session in response.sessions) _sessionKey(session): session,
+    };
+    return merged.values.toList(growable: false)..sort(_compareSessions);
   }
 
   /// Starts the local snapshot read as soon as the active profile is hydrated.

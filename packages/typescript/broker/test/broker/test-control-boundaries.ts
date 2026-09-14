@@ -38,6 +38,7 @@ import {
 } from '../../src/sessions/client-message-policy.ts';
 import {
   ClientMessagePolicyError,
+  validateRequestedModel,
   validateRequestedPermissionMode,
 } from '../../src/sessions/client-message-policy.ts';
 import {
@@ -147,6 +148,44 @@ await run('permissionMode accepts only exact adapter-advertised values', async (
       && error.code === 'PERMISSION_MODE_UNSUPPORTED',
   );
   assert(BROKER_ERROR_CODES.includes('PERMISSION_MODE_UNSUPPORTED'));
+});
+
+await run('model selections preserve opaque host ids and still require an exact catalog row', async () => {
+  const selection = {
+    providerID: 'managed:kimi-code',
+    modelID: 'kimi-code/k3-256k',
+    reasoningEffort: 'high',
+  };
+  const connection = {
+    async listModels() {
+      return [{
+        providerID: 'managed:kimi-code',
+        modelID: 'kimi-code/k3-256k',
+        label: 'K3-256k',
+        reasoningEfforts: [{ effort: 'high', label: 'High' }],
+      }];
+    },
+  };
+  assert.deepEqual(
+    await validateRequestedModel(connection as SessionConnection, true, selection),
+    selection,
+  );
+  await assert.rejects(
+    validateRequestedModel(connection as SessionConnection, true, {
+      ...selection,
+      modelID: 'kimi-code/k3-unadvertised',
+    }),
+    (error: unknown) => error instanceof ClientMessagePolicyError
+      && error.code === 'MODEL_UNSUPPORTED',
+  );
+  await assert.rejects(
+    validateRequestedModel(connection as SessionConnection, true, {
+      ...selection,
+      modelID: 'kimi-code/k3-256k\n',
+    }),
+    (error: unknown) => error instanceof ClientMessagePolicyError
+      && error.code === 'MODEL_UNSUPPORTED',
+  );
 });
 
 await run('remote filesystem trust remains independent of successful authentication', () => {

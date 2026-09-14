@@ -1,0 +1,71 @@
+{
+  "agent": "fake-acp",
+  "version": "0.0.0-fake",
+  "captured": "2026-08-27",
+  "note": "Synthetic envelopes the in-process fake ACP child speaks, named by agent+version per the plan. The real reasonix step-0 smoke capture (probe R1) files beside this as reasonix-v<probe-version>.json.",
+  "initializeExtra": {
+    "vendorField": { "nested": "preserved verbatim" },
+    "_meta": { "vendor.example/flag": true, "experimental": [1, 2, 3] }
+  },
+  "updates": [
+    {
+      "sessionId": "fake-session-1",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": { "type": "text", "text": "hello from the fake agent" }
+      }
+    },
+    {
+      "sessionId": "fake-session-1",
+      "update": {
+        "sessionUpdate": "mystery_update",
+        "vendorPayload": { "anything": "goes" }
+      }
+    }
+  ],
+  "frames": [
+    {
+      "jsonrpc": "1.0",
+      "method": "session/update",
+      "params": { "update": { "sessionUpdate": "must_not_dispatch" } }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "_reasonix.io/session/status_update",
+      "params": { "sessionId": "fake-session-1", "status": "idle" }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "x.ai/usage",
+      "params": { "tokens": 42 }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "_x.ai/session/update",
+      "params": { "sessionId": "fake-session-1", "update": { "sessionUpdate": "turn_completed" } }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "_other.io/ping",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "reasonix-unknown-1",
+      "method": "_reasonix.io/session/question",
+      "params": { "prompt": "must fail closed" }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": null,
+      "method": "unknown/null-id",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "term-1",
+      "method": "terminal/create",
+      "params": { "sessionId": "fake-session-1", "command": "ls" }
+    }
+  ]
+}

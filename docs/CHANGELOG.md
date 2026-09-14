@@ -13,6 +13,54 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Added provisional Kilo Code 7.4.23 full-sync support. SQLite Observe remains
+  process-free; an authenticated broker-owned host on dedicated port 4097 adds
+  Create/Drive, prompt/cancel, per-tool approvals, model selection, native
+  rename, live status, run summaries, tokens, and cost. Native tool display,
+  child-lineage capture, and installed-client acceptance remain pending.
+
+- Added provisional Cline 3.0.56 snapshot support: bounded Observe for parent
+  and subagent sessions, rewrite-safe history reset, model/token/status display,
+  process-free registration, and no access to Cline provider settings. Native
+  Create and Drive remain disabled pending physical wire acceptance.
+
+- Added provisional Grok Build local-store support: bounded Observe, history
+  replay/tail, answer/reasoning/tool/task display, model and effort display, and
+  terminal handoff. Create, Resume, permissions, commands, model/mode controls,
+  and cross-client Drive remain unadvertised until native ACP acceptance.
+
+- Added provisional Cline 3.0.61 managed-Hub full sync for app-created
+  sessions: isolated-profile Create/Resume, queued prompt reconciliation,
+  Stop, per-tool approvals, create-time model/mode, shared cross-client Drive,
+  live output/usage, and native rename. Default-profile and subagent snapshots
+  remain Observe-only; a replacement Hub epoch revokes Drive because native
+  same-id reactivation retains unsafe stale pid/status metadata.
+
+- Added provisional Grok Build 1.0.13 full-sync support: bounded Observe plus
+  authenticated ACP Create/Resume, queued prompts, permissions, commands,
+  model/effort/mode controls, cancel, context display, and shared cross-client
+  Drive. Builds below the 1.0.13 floor remain Observe-only; newer ones drive.
+
+- Added provisional Reasonix 1.25.2 support: bounded local-store discovery and
+  Observe, durable create/load through a lazy broker-owned ACP child, queued
+  prompt reconciliation, answer/reasoning streaming, per-tool approvals, and a
+  single cross-client Drive that fails read-only on detectable foreign
+  transcript writes. Native per-write identity remains unmeasured.
+
+- Artifact downloads are served in byte ranges. The broker answers `Range` on
+  artifact downloads, so any client that speaks it — `curl -C -`, a download
+  manager — can resume one. The app now pulls an artifact in 512 KiB chunks
+  instead of buffering the whole file, retries a failed chunk from where it
+  stopped, and resumes at the same offset when its download ticket has to be
+  refreshed mid-transfer. Each chunk is validated against the representation the
+  download started on, so a file that changed underneath restarts cleanly rather
+  than splicing two versions. Resuming *across* attempts — after you cancel, or
+  after the app is killed — is not in this release; the next attempt starts over.
+
+- Keep signed broker promotion policy bound to the trusted workflow revision when
+  verifying older candidates. Print shell setup commands with the resolved Bun
+  runtime, including when Bun was downloaded outside `PATH`.
+
 - Short installer URLs at `cosyncing.com/install.sh` and
   `cosyncing.com/install.ps1`, plus their `install-server` variants. The website
   mirrors the accepted stable release's scripts; install instructions now use
@@ -45,6 +93,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 - Shell setup commands print the Bun runtime that will actually run them,
   including when the installer downloaded Bun outside `PATH`.
+
+### Fixed
+
+- Session-roster discovery yields between adapters and stops at a whole-sweep
+  deadline. Large local stores no longer make broker health, paired clients, or
+  live sessions wait behind a multi-adapter discovery cohort; an unfinished
+  adapter remains explicitly unconfirmed and uses the existing bounded carry.
 
 ## 0.5.2 — 2026-09-12
 

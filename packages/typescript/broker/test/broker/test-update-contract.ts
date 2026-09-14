@@ -139,6 +139,13 @@ check('a client below the revision-17 security floor still fails closed',
 // one-version overlap window fails closed` below is what enforces that; the
 // release consequence is that a revision-19-or-later client ships first.
 //
+// Revision 21 is additive on the same terms: an optional creation permission
+// mode, one pre-session mode catalog route, an optional roster rename
+// distinction, stricter decoding of adapter-authored session snapshots, and one
+// new error code. Nothing an older client sends becomes invalid and no
+// credential boundary moves, so the floor stays 17 and the overlap window just
+// shifts by one -- a revision-20-or-later client ships first.
+//
 // The assertion tracks the constants rather than a literal revision. An
 // additive bump should not need this line edited — but raising the floor, or
 // making a previous-revision client read-only, must still fail here.

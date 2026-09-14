@@ -34,6 +34,7 @@ import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-conn
 import { acquireInstallationLock } from '../../src/installation/installation-lock.ts';
 import {
   atomicWriteOwnerOnly,
+  createOwnerOnlyFileExclusive,
   ensureOwnerOnlyDirectory,
 } from '../../src/security/secure-files.ts';
 import { isLooseFile, isOwnerOnlyFile } from '../helpers/isolated-broker-fixture.ts';
@@ -47,6 +48,7 @@ import {
 } from '../../src/installation/service-manager.ts';
 import {
   createSetupActionCatalog,
+  rollbackSetupFiles,
   type SetupActionInputs,
 } from '../../src/installation/setup-actions.ts';
 import {
@@ -131,6 +133,7 @@ import {
   type SetupTransactionAction,
   type SetupTransactionPlan,
 } from '../../src/installation/setup-transaction.ts';
+import { sameCanonicalPath } from '../../src/installation/pi-bridge-ownership.ts';
 
 function readFrozenTextFixture(path: string): string {
   const asset = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
@@ -180,6 +183,7 @@ class ScriptedPresenter implements SetupPresenter {
   readonly calls: string[] = [];
   lastResult?: SetupCommandResult;
   lastBlockers?: SetupBlockingIssue[];
+  lastPlan?: SetupPlan;
 
   constructor(readonly options: {
     cancelAt?: 'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'service' | 'quota' | 'confirm';
@@ -233,7 +237,7 @@ class ScriptedPresenter implements SetupPresenter {
     this.calls.push('quota');
     return this.options.cancelAt === 'quota' ? SETUP_PROMPT_CANCELLED : this.options.quota ?? false;
   }
-  showPlan(): void { this.calls.push('plan'); }
+  showPlan(plan: Readonly<SetupPlan>): void { this.calls.push('plan'); this.lastPlan = plan as SetupPlan; }
   async confirmApply(): Promise<SetupPromptResult<boolean>> {
     this.calls.push('confirm');
     return this.options.cancelAt === 'confirm' ? SETUP_PROMPT_CANCELLED : this.options.apply ?? true;
@@ -553,11 +557,71 @@ async function schedulerIdentityCrashChild(
   throw new Error('scheduler identity crash child unexpectedly completed');
 }
 
+function exclusivePublishCrashChild(
+  target: string,
+  stagePath: string,
+  marker: string,
+  phase: 'after-open' | 'before-publish',
+): never {
+  const hang = () => {
+    writeFileSync(marker, 'ready\n', { mode: 0o600 });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+  };
+  createOwnerOnlyFileExclusive(target, OMP_BRIDGE_EMBEDDED_SOURCE, 0o600, {
+    stagePath,
+    ...(phase === 'after-open' ? { afterOpen: hang } : { beforePublish: hang }),
+  });
+  throw new Error('exclusive publish crash child unexpectedly completed');
+}
+
+function rollbackRestoreCrashChild(
+  target: string,
+  backupPath: string,
+  retiredPath: string,
+  restoreStagePath: string,
+  marker: string,
+): never {
+  rollbackSetupFiles({
+    kind: 'files-v1',
+    data: { files: [{
+      target,
+      existed: true,
+      backupPath,
+      mode: 0o600,
+      retiredPath,
+      restoreStagePath,
+    }] },
+  }, {
+    restoreAfterOpen: () => {
+      writeFileSync(marker, 'ready\n', { mode: 0o600 });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+    },
+  });
+  throw new Error('rollback restore crash child unexpectedly completed');
+}
+
 if (process.argv[2] === '--crash-child') {
   await crashChild(process.argv[3]!, process.argv[4]!);
 }
 if (process.argv[2] === '--scheduler-identity-crash-child') {
   await schedulerIdentityCrashChild(process.argv[3]!, process.argv[4]!, process.argv[5]!, process.argv[6]!);
+}
+if (process.argv[2] === '--exclusive-publish-crash-child') {
+  exclusivePublishCrashChild(
+    process.argv[3]!,
+    process.argv[4]!,
+    process.argv[5]!,
+    process.argv[6] as 'after-open' | 'before-publish',
+  );
+}
+if (process.argv[2] === '--rollback-restore-crash-child') {
+  rollbackRestoreCrashChild(
+    process.argv[3]!,
+    process.argv[4]!,
+    process.argv[5]!,
+    process.argv[6]!,
+    process.argv[7]!,
+  );
 }
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-transactional-setup-'));
@@ -2384,16 +2448,59 @@ try {
   {
     const machine = join(root, 'port-conflict');
     const base = contextFor(machine);
+    // Count the HEALTH probe only. `fetchJson` serves several consumers in one
+    // setup run, so a bare call counter answers a different question than the
+    // one asked here.
+    let healthProbes = 0;
     const conflictContext = {
       ...base,
       probeTcp: async () => 'open' as const,
-      fetchJson: async () => ({ status: 'ok' as const, statusCode: 200, json: { service: 'contributor' } }),
+      fetchJson: async (url: string) => {
+        if (url.endsWith('/api/health')) healthProbes += 1;
+        return { status: 'ok' as const, statusCode: 200, json: { service: 'contributor' } };
+      },
     };
     const presenter = new ScriptedPresenter();
     const blocked = await runSetup(setupOptions(machine, presenter, { context: conflictContext }));
     check('unowned port 7734 blocks safely with actionable remediation and no mutation',
       blocked.status === 'blocked' && blocked.issueCodes?.includes('broker-port-conflict') === true
         && !existsSync(join(machine, '.cosyncing')) && presenter.calls.includes('blockers'));
+    // The retry below must not put a delay in front of a genuine conflict: a
+    // listener that ANSWERS has settled the question on the first probe.
+    check('a listener that answers is refused without a second probe',
+      healthProbes === 1, `healthProbes=${healthProbes}`);
+  }
+
+  // A health probe that did not COMPLETE is not evidence about who owns the
+  // port, and this is the verdict that tells the operator to stop the process.
+  // Measured on a loaded host: this broker's own /api/health answered correctly
+  // in 2.98s against the 3s probe ceiling, so a single timeout reported a
+  // healthy managed broker as "an unrecognized process" and recommended
+  // killing it.
+  {
+    const machine = join(root, 'port-slow-own-broker');
+    const committed = await zeroAgentSetup(machine);
+    let healthProbes = 0;
+    const slowContext = {
+      ...contextFor(machine),
+      probeTcp: async () => 'open' as const,
+      fetchJson: async (url: string) => {
+        if (!url.endsWith('/api/health')) return { status: 'unreachable' as const };
+        healthProbes += 1;
+        // Times out at the default ceiling twice, then answers as itself.
+        return healthProbes <= 2
+          ? { status: 'unreachable' as const }
+          : { status: 'ok' as const, statusCode: 200, json: { ok: true, product: 'cosyncing' } };
+      },
+    };
+    const rerun = await runSetup(
+      setupOptions(machine, new ScriptedPresenter(), { context: slowContext }),
+    );
+    check('a slow but healthy own broker is never called an unrecognized process',
+      committed.status === 'complete'
+        && rerun.issueCodes?.includes('broker-port-conflict') !== true
+        && healthProbes >= 3,
+      `${committed.status}:${rerun.status}:${rerun.issueCodes?.join(',')}:probes=${healthProbes}`);
   }
 
   // A current-schema legacy state file whose only defect is its mode is safe to tighten inside setup's
@@ -2553,6 +2660,106 @@ try {
       JSON.stringify(repair));
   }
 
+  check('bridge receipt path equality follows Windows case-insensitive semantics',
+    sameCanonicalPath(
+      'C:\\Users\\Howard\\.omp\\agent\\extensions\\cosyncing-bridge\\index.ts',
+      'c:\\users\\howard\\.OMP\\AGENT\\EXTENSIONS\\COSYNCING-BRIDGE\\INDEX.TS',
+      'win32',
+    ));
+
+  // Skipped on Windows because the publication primitive differs there, not because recovery is
+  // untested: createOwnerOnlyFileExclusiveWindows publishes under its own staging name and takes none
+  // of the crash hooks these lanes drive, so there is nothing here to interrupt. Crash coverage for the
+  // Windows publisher needs its own fixture against that function.
+  if (process.platform === 'win32') {
+    skip('the exclusive-publish and rollback-restore crash lanes',
+      'Windows publishes through createOwnerOnlyFileExclusiveWindows, which takes none of these staging hooks');
+  } else {
+    {
+      const machine = join(root, 'omp-exclusive-publish-crash');
+      const facts: string[] = [];
+      let allRecovered = true;
+      for (const phase of ['after-open', 'before-publish'] as const) {
+        const target = join(machine, phase, 'extensions', 'cosyncing-bridge', 'index.ts');
+        const stagePath = join(dirname(target), `.index.ts.omp-bridge.install.${phase}.stage`);
+        const marker = join(machine, `${phase}-ready`);
+        const child = Bun.spawn([
+          'bun', import.meta.path, '--exclusive-publish-crash-child', target, stagePath, marker, phase,
+        ], {
+          cwd: join(import.meta.dir, '../../../../..'),
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        for (let index = 0; index < 200 && !existsSync(marker); index += 1) await Bun.sleep(10);
+        child.kill('SIGKILL');
+        await child.exited;
+        const absentAfterKill = !existsSync(target);
+        const stagedAfterKill = existsSync(stagePath);
+        rollbackSetupFiles({
+          kind: 'files-v1',
+          data: { files: [{
+            target: stagePath,
+            existed: false,
+            expectedCreatedSha256: OMP_BRIDGE_EMBEDDED_SHA256,
+            transactionPrivate: true,
+          }] },
+        });
+        const stageRemovedByRecovery = !existsSync(stagePath);
+        const retry = createOwnerOnlyFileExclusive(target, OMP_BRIDGE_EMBEDDED_SOURCE, 0o600, { stagePath });
+        const passed = existsSync(marker)
+          && absentAfterKill
+          && stagedAfterKill
+          && stageRemovedByRecovery
+          && retry === 'created'
+          && readFileSync(target, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE;
+        allRecovered &&= passed;
+        facts.push(`${phase}:absent=${absentAfterKill},staged=${stagedAfterKill},recovered=${stageRemovedByRecovery},retry=${retry}`);
+      }
+      check('journal recovery removes partial and complete staging leaves after killed exclusive publishes',
+        allRecovered,
+        facts.join(' | '));
+    }
+    {
+      const machine = join(root, 'omp-rollback-restore-crash');
+      const target = join(machine, 'agent', 'extensions', 'cosyncing-bridge', 'index.ts');
+      const backupPath = join(machine, 'transaction', 'index.ts.backup');
+      const retiredPath = join(dirname(target), '.index.ts.fixture.retired');
+      const restoreStagePath = join(dirname(target), '.index.ts.fixture.restore-stage');
+      const marker = join(machine, 'restore-opened');
+      atomicWriteOwnerOnly(backupPath, OMP_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+      const child = Bun.spawn([
+        'bun', import.meta.path, '--rollback-restore-crash-child',
+        target, backupPath, retiredPath, restoreStagePath, marker,
+      ], {
+        cwd: join(import.meta.dir, '../../../../..'),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      for (let index = 0; index < 200 && !existsSync(marker); index += 1) await Bun.sleep(10);
+      child.kill('SIGKILL');
+      await child.exited;
+      const partialStage = existsSync(restoreStagePath);
+      const record = {
+        kind: 'files-v1',
+        data: { files: [{
+          target,
+          existed: true,
+          backupPath,
+          mode: 0o600,
+          retiredPath,
+          restoreStagePath,
+        }] },
+      } as const;
+      rollbackSetupFiles(record);
+      check('a second crash during backup restoration is cleaned and converges on the next recovery',
+        existsSync(marker)
+          && partialStage
+          && readFileSync(target, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
+          && !existsSync(restoreStagePath),
+        `partialStage=${partialStage}`);
+    }
+  }
+
   // omp setup owns bridge installation independently of session discovery. A first run must install and
   // receipt the extension even though omp has never created its sessions directory yet.
   //
@@ -2582,6 +2789,257 @@ try {
           && item.target === bridge
           && item.ownership.installedSha256 === OMP_BRIDGE_EMBEDDED_SHA256),
       `${complete.status}:${complete.actions.join(',')}`);
+  }
+  {
+    const machine = join(root, 'omp-agent-dir-relocation');
+    const { context, bridge: previousBridge } = supportedOmpFixture(machine);
+    const home = join(machine, '.cosyncing');
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const unrelatedSession = join(machine, '.omp', 'agent', 'sessions', 'preserved.jsonl');
+    mkdirSync(dirname(unrelatedSession), { recursive: true });
+    writeFileSync(unrelatedSession, '{"preserve":true}\n', { mode: 0o600 });
+    const nextAgentDir = join(machine, 'isolated-omp-agent');
+    const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const nextContext = contextFor(machine, {
+      PATH: context.env.PATH ?? '',
+      PI_CODING_AGENT_DIR: '',
+      COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+    });
+    const presenter = new ScriptedPresenter();
+    const moved = await runSetup(setupOptions(machine, presenter, { context: nextContext }));
+    const install = inspectInstallState(home);
+    const rerun = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context: nextContext }));
+    check('setup transactionally moves a receipt-owned omp bridge when the configured agent directory changes',
+      moved.status === 'complete'
+        && moved.actions.includes('omp-bridge.install')
+        && presenter.lastPlan?.mutationSummary.some((row) => row.includes(previousBridge) && row.includes(nextBridge)) === true
+        && !existsSync(previousBridge)
+        && readFileSync(nextBridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
+        && (statSync(nextBridge).mode & 0o777) === 0o600
+        && readFileSync(unrelatedSession, 'utf8') === '{"preserve":true}\n'
+        && install.committed
+        && install.state.resources.some((item) => item.id === 'omp-bridge'
+          && item.target === nextBridge
+          && item.ownership.installedSha256 === OMP_BRIDGE_EMBEDDED_SHA256)
+        && rerun.status === 'already-configured',
+      `${moved.status}:${moved.actions.join(',')}:${rerun.status}`);
+  }
+  {
+    const sharedMemoryRoot = '/dev/shm';
+    if (!existsSync(sharedMemoryRoot) || statSync(sharedMemoryRoot).dev === statSync(root).dev) {
+      check('omp bridge relocation works when its profile and transaction home are on different filesystems',
+        true,
+        'skipped: no distinct temporary filesystem is available');
+    } else {
+      const machine = join(root, 'omp-agent-dir-cross-device-relocation');
+      const fixture = supportedOmpFixture(machine);
+      const externalRoot = mkdtempSync(join(sharedMemoryRoot, 'cosyncing-omp-cross-device-'));
+      try {
+        const previousAgentDir = join(externalRoot, 'agent');
+        const previousBridge = join(previousAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+        const initialContext = contextFor(machine, {
+          PATH: fixture.context.env.PATH ?? '',
+          PI_CODING_AGENT_DIR: '',
+          COSYNCING_OMP_AGENT_DIR: previousAgentDir,
+        });
+        const initial = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context: initialContext }));
+        const nextAgentDir = join(machine, 'isolated-omp-agent');
+        const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+        const nextContext = contextFor(machine, {
+          PATH: fixture.context.env.PATH ?? '',
+          PI_CODING_AGENT_DIR: '',
+          COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+        });
+        const moved = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context: nextContext }));
+        check('omp bridge relocation works when its profile and transaction home are on different filesystems',
+          initial.status === 'complete'
+            && moved.status === 'complete'
+            && !existsSync(previousBridge)
+            && readFileSync(nextBridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE,
+          `${initial.status}:${moved.status}`);
+      } finally {
+        rmSync(externalRoot, { recursive: true, force: true });
+      }
+    }
+  }
+  {
+    const machine = join(root, 'omp-agent-dir-relocation-drift');
+    const { context, bridge: previousBridge } = supportedOmpFixture(machine);
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    atomicWriteOwnerOnly(previousBridge, `${OMP_BRIDGE_EMBEDDED_SOURCE}\n// operator edit\n`, { mode: 0o600 });
+    const nextAgentDir = join(machine, 'isolated-omp-agent');
+    const nextContext = contextFor(machine, {
+      PATH: context.env.PATH ?? '',
+      PI_CODING_AGENT_DIR: '',
+      COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+    });
+    const blocked = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context: nextContext }));
+    check('setup blocks omp agent-directory migration when the receipt-owned source bytes drifted',
+      blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('omp-bridge-receipt-invalid') === true
+        && readFileSync(previousBridge, 'utf8').endsWith('// operator edit\n')
+        && !existsSync(join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts')),
+      `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
+  {
+    const machine = join(root, 'omp-agent-dir-relocation-occupied');
+    const { context, bridge: previousBridge } = supportedOmpFixture(machine);
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const nextAgentDir = join(machine, 'isolated-omp-agent');
+    const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    atomicWriteOwnerOnly(nextBridge, OMP_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+    const nextContext = contextFor(machine, {
+      PATH: context.env.PATH ?? '',
+      PI_CODING_AGENT_DIR: '',
+      COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+    });
+    const blocked = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context: nextContext }));
+    check('setup never treats an occupied omp migration destination as replaceable',
+      blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('omp-bridge-receipt-invalid') === true
+        && readFileSync(previousBridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
+        && readFileSync(nextBridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE,
+      `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
+  {
+    const machine = join(root, 'omp-agent-dir-relocation-rollback');
+    const { context, bridge: previousBridge } = supportedOmpFixture(machine);
+    const home = join(machine, '.cosyncing');
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const beforeInstall = readFileSync(join(home, 'install-state.json'), 'utf8');
+    const nextAgentDir = join(machine, 'isolated-omp-agent');
+    const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const nextContext = contextFor(machine, {
+      PATH: context.env.PATH ?? '',
+      PI_CODING_AGENT_DIR: '',
+      COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+    });
+    const factory = (inputs: SetupActionInputs) => {
+      const catalog = createSetupActionCatalog(inputs);
+      return {
+        ...catalog,
+        actions: catalog.actions.map((action): SetupTransactionAction => action.id !== 'omp-bridge.install'
+          ? action
+          : {
+              ...action,
+              async apply(actionContext) {
+                await action.apply(actionContext);
+                throw new Error('fixture failure after omp bridge move');
+              },
+            }),
+      };
+    };
+    const failed = await runSetup(setupOptions(
+      machine,
+      new ScriptedPresenter(),
+      { context: nextContext, actionCatalogFactory: factory },
+    ));
+    check('a failed omp bridge move restores the old leaf, removes the new leaf, and preserves the old receipt',
+      failed.status === 'failed'
+        && readFileSync(previousBridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
+        && !existsSync(nextBridge)
+        && readFileSync(join(home, 'install-state.json'), 'utf8') === beforeInstall,
+      failed.status);
+  }
+  {
+    const machine = join(root, 'omp-agent-dir-relocation-concurrent-rollback');
+    const { context, bridge: previousBridge } = supportedOmpFixture(machine);
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const nextAgentDir = join(machine, 'isolated-omp-agent');
+    const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const nextContext = contextFor(machine, {
+      PATH: context.env.PATH ?? '',
+      PI_CODING_AGENT_DIR: '',
+      COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+    });
+    const factory = (inputs: SetupActionInputs) => {
+      const catalog = createSetupActionCatalog(inputs);
+      return {
+        ...catalog,
+        actions: catalog.actions.map((action): SetupTransactionAction => action.id !== 'omp-bridge.install'
+          ? action
+          : {
+              ...action,
+              async apply(actionContext) {
+                await action.apply(actionContext);
+                atomicWriteOwnerOnly(nextBridge, '// concurrent owner bytes\n', { mode: 0o600 });
+                throw new Error('fixture failure after concurrent destination replacement');
+              },
+            }),
+      };
+    };
+    const failed = await runSetup(setupOptions(
+      machine,
+      new ScriptedPresenter(),
+      { context: nextContext, actionCatalogFactory: factory },
+    ));
+    check('rollback preserves a concurrently replaced destination while still restoring the old omp bridge',
+      failed.status === 'failed'
+        && failed.failure?.rollback === 'incomplete'
+        && readFileSync(previousBridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
+        && readFileSync(nextBridge, 'utf8') === '// concurrent owner bytes\n',
+      `${failed.status}:${failed.failure?.rollback}`);
+  }
+  {
+    const machine = join(root, 'omp-agent-dir-relocation-source-replaced-before-retire');
+    const { context, bridge: previousBridge } = supportedOmpFixture(machine);
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const nextAgentDir = join(machine, 'isolated-omp-agent');
+    const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const nextContext = contextFor(machine, {
+      PATH: context.env.PATH ?? '',
+      PI_CODING_AGENT_DIR: '',
+      COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+    });
+    const concurrent = '// replacement that arrived before source retirement\n';
+    const factory = (inputs: SetupActionInputs) => createSetupActionCatalog({
+      ...inputs,
+      ompBridgeMigrationBeforeRetire: () => {
+        atomicWriteOwnerOnly(previousBridge, concurrent, { mode: 0o600 });
+      },
+    });
+    const failed = await runSetup(setupOptions(
+      machine,
+      new ScriptedPresenter(),
+      { context: nextContext, actionCatalogFactory: factory },
+    ));
+    check('a source replacement before retirement is restored exactly and never overwritten by rollback',
+      failed.status === 'failed'
+        && failed.failure?.rollback === 'complete'
+        && readFileSync(previousBridge, 'utf8') === concurrent
+        && !existsSync(nextBridge),
+      `${failed.status}:${failed.failure?.rollback}`);
+  }
+  {
+    const machine = join(root, 'omp-agent-dir-relocation-source-replaced-after-retire');
+    const { context, bridge: previousBridge } = supportedOmpFixture(machine);
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const nextAgentDir = join(machine, 'isolated-omp-agent');
+    const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const nextContext = contextFor(machine, {
+      PATH: context.env.PATH ?? '',
+      PI_CODING_AGENT_DIR: '',
+      COSYNCING_OMP_AGENT_DIR: nextAgentDir,
+    });
+    const concurrent = '// replacement that arrived after atomic source retirement\n';
+    const factory = (inputs: SetupActionInputs) => createSetupActionCatalog({
+      ...inputs,
+      ompBridgeMigrationAfterRetire: () => {
+        atomicWriteOwnerOnly(previousBridge, concurrent, { mode: 0o600 });
+      },
+    });
+    const failed = await runSetup(setupOptions(
+      machine,
+      new ScriptedPresenter(),
+      { context: nextContext, actionCatalogFactory: factory },
+    ));
+    check('a replacement after atomic source retirement is preserved and leaves recoverable journal evidence',
+      failed.status === 'failed'
+        && failed.failure?.rollback === 'incomplete'
+        && readFileSync(previousBridge, 'utf8') === concurrent
+        && !existsSync(nextBridge)
+        && !!readSetupTransactionJournal(join(machine, '.cosyncing')),
+      `${failed.status}:${failed.failure?.rollback}`);
   }
 
   // First-install migration owns its own confirmation path. Only the full preceding packaged source is
