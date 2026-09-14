@@ -25,6 +25,9 @@ generated output belongs in Git. The public-tree CI policy rejects these paths
 and file types.
 
 Future migrations must be forward-only, tested from the previously supported
-release, and documented before a tag is created. Broker binary upgrades use the
-signed manifest, isolated installer, health check, and rollback process in the
-[release documentation](../release/broker-release-signing.md).
+release, and documented before a tag is created. Installer-owned JavaScript
+brokers (`bootstrap-js`) use the signed manifest, isolated installer, health
+check, and rollback process in the
+[release documentation](../release/broker-release-signing.md). npm-owned
+installations (`bun-js`) update through the global npm package, followed by
+`cosyncing setup`; they do not switch ownership to the signed installer channel.

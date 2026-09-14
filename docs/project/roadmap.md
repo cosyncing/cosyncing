@@ -77,10 +77,11 @@ full support claim:
 
 ### Compiled native broker distribution
 
-The npm package remains the supported broker distribution. Compiled native
-broker releases stay blocked until legal review, signing, protected release
-infrastructure, rollback testing, and clean-host platform acceptance are all in
-place.
+The npm package and signed JavaScript
+[one-liner installers](../installation/script-install.md) are supported broker
+distributions. Compiled native broker releases stay blocked until legal review,
+signing, protected release infrastructure, rollback testing, and clean-host
+platform acceptance are all in place.
 
 ## How roadmap work is accepted
 
