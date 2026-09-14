@@ -2833,7 +2833,7 @@ try {
         && presenter.lastPlan?.mutationSummary.some((row) => row.includes(previousBridge) && row.includes(nextBridge)) === true
         && !existsSync(previousBridge)
         && readFileSync(nextBridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
-        && (statSync(nextBridge).mode & 0o777) === 0o600
+        && isOwnerOnlyFile(nextBridge)
         && readFileSync(unrelatedSession, 'utf8') === '{"preserve":true}\n'
         && install.committed
         && install.state.resources.some((item) => item.id === 'omp-bridge'

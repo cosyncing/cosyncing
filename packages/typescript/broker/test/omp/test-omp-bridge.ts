@@ -64,23 +64,27 @@ function encodeCwdDir(path: string): string {
   return `--${path.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
 }
 
+function writeSupportedOmpBinary(ompBin: string, bunBin: string): void {
+  mkdirSync(dirname(bunBin), { recursive: true });
+  writeFileSync(bunBin, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '1.3.14\\n'; exit 0; fi
+if [ "$2" = "--version" ]; then printf '17.4.2\\n'; exit 0; fi
+exit 73
+`);
+  chmodSync(bunBin, 0o755);
+  writeFileSync(ompBin, `#!${bunBin}
+// fixture
+`);
+  chmodSync(ompBin, 0o755);
+}
+
 // A killed prior run may leave this port-keyed fixture behind. Port reuse must
 // not turn that interrupted run into an EEXIST failure in a later clean run.
 rmSync(ROOT, { recursive: true, force: true });
 mkdirSync(DISCOVERY_CWD, { recursive: true });
 mkdirSync(DISCOVERY_SESSION_DIR, { recursive: true });
 mkdirSync(PI_EMPTY_SESSIONS, { recursive: true });
-mkdirSync(dirname(OMP_BUN_BIN), { recursive: true });
-writeFileSync(OMP_BUN_BIN, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '1.3.14\\n'; exit 0; fi
-if [ "$2" = "--version" ]; then printf '17.4.2\\n'; exit 0; fi
-exit 73
-`);
-chmodSync(OMP_BUN_BIN, 0o755);
-writeFileSync(OMP_BIN, `#!${OMP_BUN_BIN}
-// fixture
-`);
-chmodSync(OMP_BIN, 0o755);
+writeSupportedOmpBinary(OMP_BIN, OMP_BUN_BIN);
 writeFileSync(
   DISCOVERY_SESSION_FILE,
   JSON.stringify({ type: 'session', version: 3, id: 'omp-sync', timestamp: new Date().toISOString(), cwd: DISCOVERY_CWD }) + '\n',
@@ -409,9 +413,12 @@ try {
   const sharedAgent = join(collisionRoot, 'shared-agent');
   const sharedSessions = join(collisionRoot, 'shared-sessions');
   const sharedSessionFile = join(sharedSessions, '2026-08-25_shared.jsonl');
+  const collisionOmpBin = join(collisionRoot, 'omp');
+  const collisionBunBin = join(collisionRoot, 'runtime', 'bun');
   rmSync(collisionRoot, { recursive: true, force: true });
   mkdirSync(sharedAgent, { recursive: true });
   mkdirSync(sharedSessions, { recursive: true });
+  writeSupportedOmpBinary(collisionOmpBin, collisionBunBin);
   writeFileSync(sharedSessionFile, [
     JSON.stringify({
       type: 'session',
@@ -435,6 +442,7 @@ try {
       overrides: {
         PORT: String(collisionPort),
         HOST: '127.0.0.1',
+        COSYNCING_OMP_BIN: collisionOmpBin,
         PI_CODING_AGENT_DIR: sharedAgent,
         PI_CODING_AGENT_SESSION_DIR: sharedSessions,
         COSYNCING_OMP_AGENT_DIR: '',
