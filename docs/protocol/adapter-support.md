@@ -179,6 +179,10 @@ Unknown state fails closed.
 The default Codex policy requires no attached threads. The optional idle policy
 requires explicit informed confirmation and still blocks working, needs-input,
 or unknown threads. OpenCode uses its own managed-session activity evidence.
-There is no force-after-timeout path. A manual per-runtime restart or global
-restart requires explicit confirmation, rechecks lifecycle permission at the
-mutation boundary, and re-inspects the runtime afterward.
+Automatic updates have no force-after-timeout path. A manual per-runtime restart
+or global restart requires explicit confirmation, rechecks lifecycle permission
+at the mutation boundary, and re-inspects the runtime afterward. Confirmed Codex
+recovery may terminate a stalled daemon only after independently verifying its
+process identity. A missing control socket never proves that the old process
+exited or released its thread writer locks. Concurrent restart requests share
+one operation, and failed replacement verification remains an error.

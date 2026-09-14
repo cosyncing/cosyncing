@@ -17,6 +17,7 @@ import {
 } from '../../release/candidate-browser-startup.ts';
 import {
   CANDIDATE_CREDENTIAL_FIELD_LABEL,
+  enterCandidateCredential,
   candidateBrokerEnvironment,
   candidateBrokerCommand,
   brokerIdentityMatchesCandidate,
@@ -29,6 +30,7 @@ import {
   ticketRequestPostData,
   webIdentityMatchesCandidate,
   type CandidateBrokerProcess,
+  type CandidateCredentialInputWitness,
 } from '../../release/verify-candidate-pair.ts';
 
 const bundleFixture = mkdtempSync(join(tmpdir(), 'cosyncing-js-candidate-verifier-'));
@@ -60,6 +62,63 @@ try {
 
 assert.equal(CANDIDATE_CREDENTIAL_FIELD_LABEL, 'Server token');
 console.log('PASS  publication verifier targets the current server token field');
+
+{
+  const empty: CandidateCredentialInputWitness = {
+    focusedEditable: false, matchesField: false, matchesValue: false, valueLength: 0, activeTag: 'other',
+  };
+  let focused = false;
+  let inserted = false;
+  let probes = 0;
+  await enterCandidateCredential({
+    clickField: async () => {},
+    inspect: async () => {
+      focused = ++probes >= 3;
+      return { ...empty, focusedEditable: focused, matchesField: focused, matchesValue: inserted };
+    },
+    replaceText: async () => { assert.equal(focused, true, 'must not type before the delayed Flutter editor has focus'); inserted = true; },
+    waitFor: async (predicate) => { for (let i = 0; i < 4; i++) if (await predicate()) return true; return false; },
+  });
+  assert.equal(inserted, true);
+  console.log('PASS  credential input waits for delayed editable focus before typing');
+
+  let attempts = 0;
+  let replacements = 0;
+  await enterCandidateCredential({
+    clickField: async () => { attempts++; },
+    inspect: async () => ({ ...empty, focusedEditable: true, matchesField: true, matchesValue: replacements === 2, valueLength: replacements === 2 ? 43 : 0, activeTag: 'input' }),
+    replaceText: async () => { replacements++; },
+    waitFor: async (predicate) => predicate(),
+  });
+  assert.equal(attempts, 2);
+  assert.equal(replacements, 2);
+  console.log('PASS  dropped credential insertion retries until the intended value is witnessed');
+
+  let wrongFieldWrites = 0;
+  await assert.rejects(enterCandidateCredential({
+    clickField: async () => {},
+    inspect: async () => ({ ...empty, focusedEditable: true, valueLength: 4, activeTag: 'input' }),
+    replaceText: async () => { wrongFieldWrites++; },
+    waitFor: async (predicate) => predicate(),
+  }), /did not accept its credential input/);
+  assert.equal(wrongFieldWrites, 0);
+  console.log('PASS  an unrelated focused editor never receives the credential');
+
+  let inputAttempts = 0;
+  await assert.rejects(enterCandidateCredential({
+    clickField: async () => {},
+    inspect: async () => ({ ...empty, focusedEditable: true, matchesField: true, valueLength: 43, activeTag: 'input' }),
+    replaceText: async () => { inputAttempts++; },
+    waitFor: async (predicate) => predicate(),
+  }), (error: Error) => {
+    assert.match(error.message, /"matchesValue":false/);
+    assert.match(error.message, /"valueLength":43/);
+    assert.doesNotMatch(error.message, /"value":/);
+    return true;
+  });
+  assert.equal(inputAttempts, 3);
+  console.log('PASS  a nonempty wrong value fails before Save with safe witness diagnostics');
+}
 
 const candidateStreamPath = '/api/sessions/pi/session-1/stream';
 assert.equal(

@@ -39,6 +39,38 @@ export interface CandidatePairArgs {
 
 export const CANDIDATE_CREDENTIAL_FIELD_LABEL = 'Server token';
 
+export interface CandidateCredentialInputWitness {
+  focusedEditable: boolean;
+  matchesField: boolean;
+  matchesValue: boolean;
+  valueLength: number;
+  activeTag: string;
+}
+
+/** Wait for Flutter's editable, which can attach after its semantics field receives the click. */
+export async function enterCandidateCredential(options: {
+  clickField(): Promise<void>;
+  replaceText(): Promise<void>;
+  inspect(): Promise<CandidateCredentialInputWitness>;
+  waitFor(predicate: () => Promise<boolean>, timeoutMs: number): Promise<boolean>;
+}): Promise<void> {
+  let witness: CandidateCredentialInputWitness | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await options.clickField();
+    if (!await options.waitFor(async () => {
+      witness = await options.inspect();
+      return witness.focusedEditable && witness.matchesField;
+    }, 5_000)) continue;
+    await options.replaceText();
+    if (await options.waitFor(async () => {
+      witness = await options.inspect();
+      return witness.focusedEditable && witness.matchesField && witness.matchesValue;
+    }, 5_000)) return;
+  }
+  // Witnesses contain only booleans, lengths and tag names; never return or log the credential value.
+  throw new Error(`built app did not accept its credential input: ${JSON.stringify(witness)}`);
+}
+
 function usage(): never {
   console.error(
     'Usage: bun run scripts/broker/release/verify-candidate-pair.ts '
@@ -646,8 +678,50 @@ async function probeBuiltClient(options: {
         }`,
       );
     }
-    await clickLabel(CANDIDATE_CREDENTIAL_FIELD_LABEL);
-    await send('Input.insertText', { text: options.token });
+    const credentialInput = async (): Promise<CandidateCredentialInputWitness> => evaluate(`(() => {
+      const expectedLabel = ${JSON.stringify(CANDIDATE_CREDENTIAL_FIELD_LABEL.toLowerCase())};
+      let active = document.activeElement;
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+      const editable = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
+      const focusedEditable = editable && active.isConnected && !active.disabled && !active.readOnly;
+      const label = (element) => (element.getAttribute('aria-label')
+        || element.getAttribute('placeholder') || element.textContent || '').trim().toLowerCase();
+      const rect = active?.getBoundingClientRect();
+      const fields = Array.from(document.querySelectorAll(
+        'flt-semantics, flt-semantics *, input, textarea'
+      )).filter((element) => label(element) === expectedLabel);
+      const matchesField = focusedEditable && fields.some((element) => {
+        if (element === active || element.contains(active)) return true;
+        // Flutter can keep the editing input outside the semantics tree. Its painted rectangle must
+        // still contain the labelled field's centre; a focused editor elsewhere is not this field.
+        const field = element.getBoundingClientRect();
+        const x = field.x + field.width / 2, y = field.y + field.height / 2;
+        return field.width > 0 && field.height > 0 && rect.width > 0 && rect.height > 0
+          && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      });
+      return {
+        focusedEditable, matchesField,
+        matchesValue: matchesField && active.value === ${JSON.stringify(options.token)},
+        valueLength: editable ? active.value.length : 0,
+        activeTag: editable ? active.tagName.toLowerCase() : 'other',
+      };
+    })()`);
+    await enterCandidateCredential({
+      clickField: () => clickLabel(CANDIDATE_CREDENTIAL_FIELD_LABEL),
+      inspect: credentialInput,
+      waitFor,
+      replaceText: async () => {
+        // A dropped first insertion can be retried without appending the token twice. Selection uses
+        // the focused editor; the value still enters through Chromium's normal text-input event.
+        await send('Input.dispatchKeyEvent', {
+          type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+        });
+        await send('Input.dispatchKeyEvent', {
+          type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+        });
+        await send('Input.insertText', { text: options.token });
+      },
+    });
     await clickLabel('Save token');
     // The save button starts an async secure-store/profile mutation followed by a gate refresh. A fixed
     // post-click delay let a slower hosted runner navigate away while that transaction was still in flight,

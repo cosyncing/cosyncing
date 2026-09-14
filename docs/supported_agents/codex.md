@@ -54,8 +54,37 @@ join or start model work.
 
 Live two-way terminal sync is available for Codex CLI sessions joined to the
 managed daemon with the **Sync with a terminal** command shown by cosyncing
-(`codex resume --remote ...`). A plain Codex Desktop session and a plain
-`codex resume` process do not share that synchronized owner.
+(`codex resume --remote ...`). Codex Desktop and CLI sessions running their own
+app-server do not share that synchronized owner. A plain `codex resume` can
+auto-connect to a reachable default daemon when its launch settings allow
+reuse; use the generated `--remote` command to select cosyncing's daemon
+explicitly.
+
+For a session currently driven by cosyncing's private Codex process, use
+**Resume in terminal** and wait for handoff confirmation before running the
+copied command. This closes the app's writer and leaves the app in Observe so
+the terminal can resume through the shared daemon. A session already on that
+daemon can be joined directly. If another foreground app client still drives
+the session, close that client before handing off.
+
+## Recovering a stalled daemon
+
+If terminal resumes report **This conversation is open in another app** and
+the managed Codex runtime is unavailable, a daemon may still hold writer locks
+after losing its control socket. The Agents and usage panel keeps independently
+verified version information and offers **Restart** when that daemon's process
+identity can be verified.
+
+A confirmed restart first requests graceful shutdown. If it stalls, cosyncing
+rechecks the old daemon's identity, terminates only that process, and verifies
+its exit before starting a replacement. This can interrupt unfinished turns;
+saved conversation history remains available. Resume your terminal explicitly
+with **Sync with a terminal** after recovery. Do not delete writer-lock files.
+
+Automatic runtime updates continue to wait for their configured safety gate
+and never escalate a stalled shutdown to forced termination. An unreadable or
+changed process identity also prevents forced recovery. Restart failures appear
+in the runtime status and broker logs.
 
 Direct agent-to-user file delivery is not currently available in Codex. The
 installed skill leaves generated files in the workspace because Codex has no

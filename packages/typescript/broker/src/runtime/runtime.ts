@@ -65,6 +65,7 @@ import {
   queryCodexLoadedThreadActivitiesStrict,
   readCodexDaemonVersion,
   restartCodexDaemon,
+  inspectCodexDaemonHealth,
   stopCodexDaemonEnsureProcess,
 } from '@cosyncing/adapter-codex';
 import { ClaudeAdapter, claudeSessionId, installClaudeHooks, uninstallClaudeHooks, claudeHooksInstalled, claudeHooksSettingsPath, isClaudeTranscriptPathAllowed, readLatestModel, readLatestPermissionMode, modelAlias } from '@cosyncing/adapter-claude';
@@ -1060,6 +1061,7 @@ const codexConfigFreshness = createCodexConfigFreshnessProbe();
 const runtimeUpdates = new RuntimeUpdateCoordinator([
   createCodexRuntimeUpdateProvider({
     readVersion: readCodexDaemonVersion,
+    readDaemonHealth: inspectCodexDaemonHealth,
     readConfigFreshness: (version) => codexConfigFreshness.inspect(version),
     loadedThreads: queryCodexLoadedThreadActivitiesStrict,
     policy: getCodexUpdatePolicy,
@@ -6483,10 +6485,12 @@ server = Bun.serve<WsData>({
       let codex: { ok: boolean; skipped?: boolean; reason?: string; error?: string };
       try {
         const version = await readCodexDaemonVersion();
-        if (!version || version.status !== 'running') {
+        const health = !version ? inspectCodexDaemonHealth() : undefined;
+        if (health?.state === 'unknown') throw new Error(health.detail);
+        if ((!version || version.status !== 'running') && health?.state !== 'running') {
           codex = { ok: true, skipped: true, reason: 'Managed Codex daemon is not running; it was left stopped.' };
         } else {
-          await restartCodexDaemon();
+          await runtimeUpdates.restartNow('codex');
           codex = { ok: true };
         }
       } catch (error) {

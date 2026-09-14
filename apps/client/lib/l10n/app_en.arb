@@ -1709,7 +1709,7 @@
       }
     }
   },
-  "settingsRestartRuntimeConfirmBody": "Attached clients can disconnect. Active work should be allowed to finish first; idle Codex terminals are resume-safe but do not reattach automatically.",
+  "settingsRestartRuntimeConfirmBody": "Connected clients can disconnect. Let active work finish first. If Codex shutdown stalls, this restart can forcibly stop it and interrupt unfinished turns. Resume Codex terminals manually afterward.",
   "@settingsRestartRuntimeConfirmBody": {
     "description": "Body of the confirm dialog before restarting one managed agent runtime."
   },
@@ -1721,7 +1721,7 @@
   "@settingsRestartEverythingConfirmTitle": {
     "description": "Title of the confirm dialog before restarting every managed runtime and the broker."
   },
-  "settingsRestartEverythingConfirmBody": "This restarts Codex, OpenCode, and the server. All connected app clients can briefly disconnect, and idle Codex terminals may need a manual resume.",
+  "settingsRestartEverythingConfirmBody": "This restarts Codex, OpenCode, and the server. Clients can disconnect. If Codex shutdown stalls, this restart can forcibly stop it and interrupt unfinished turns. Resume Codex terminals manually afterward.",
   "@settingsRestartEverythingConfirmBody": {
     "description": "Body of the confirm dialog before restarting every managed runtime and the broker."
   },

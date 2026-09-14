@@ -15,6 +15,10 @@ import {
   qualifyCodexRolloutStatus,
 } from '../src/index.ts';
 
+// Writer ownership also depends on daemon lifetime when its control socket disappears.
+await import('./test-codex-daemon-restart.ts');
+await import('../../../broker/test/broker/test-runtime-restart-recovery.ts');
+
 type PresenceFixture = {
   attributed: Set<string>;
   unattributed: Array<{ cwd?: string; startedAtMs?: number }>;
