@@ -218,7 +218,7 @@ resume la instalación, el servicio, los agentes y las sesiones.
 Tu propio broker sirve la aplicación web de Flutter incluida en `/cosy/`; no descarga código de
 aplicación de un tercero en tiempo de ejecución. La configuración imprime la URL: ábrela en cualquier
 navegador que pueda llegar al broker. Los clientes de Android y de escritorio están en
-[GitHub Releases](https://github.com/cosyncing/cosyncing/releases/latest). El cliente de iOS llegará
+[GitHub Releases](https://github.com/cosyncing/cosyncing/releases?q=%22cosyncing%20client%22). El cliente de iOS llegará
 más adelante por TestFlight.
 
 <p align="center">

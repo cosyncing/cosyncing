@@ -216,7 +216,7 @@ install, service, agents, and sessions.
 The packaged Flutter web app is served by your own broker at `/cosy/`; it does not fetch application
 code from a third-party host at runtime. Setup prints the URL; open it in any browser that can reach
 the broker. Android and desktop clients are available from
-[GitHub Releases](https://github.com/cosyncing/cosyncing/releases/latest).
+[GitHub Releases](https://github.com/cosyncing/cosyncing/releases?q=%22cosyncing%20client%22).
 The iOS client will follow later through TestFlight.
 
 <p align="center">

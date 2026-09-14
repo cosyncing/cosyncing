@@ -193,7 +193,7 @@ setup 完成后，`cosy doctor` 只诊断、不改动机器；`cosy status` 汇�
 
 发行包内的 Flutter 网页应用由你自己的 Broker 在 `/cosy/` 提供；运行时不会从第三方主机
 拉取应用代码。setup 会打印访问地址；任何能连到 Broker 的浏览器都可以打开。Android 与桌面
-客户端可从 [GitHub Releases](https://github.com/cosyncing/cosyncing/releases/latest) 下载。
+客户端可从 [GitHub Releases](https://github.com/cosyncing/cosyncing/releases?q=%22cosyncing%20client%22) 下载。
 iOS 客户端将在后续通过 TestFlight 发布。
 
 <p align="center">

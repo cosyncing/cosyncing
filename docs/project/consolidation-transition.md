@@ -27,14 +27,16 @@ The non-embedded npm package and signed GitHub JavaScript release do not
 distribute the Bun runtime or a compiled broker. Their release controls remain
 separate from the compiled-broker legal gate.
 
-## D. Post-public validation — complete for source, npm, and client releases
+## D. Post-public validation — complete for source, npm, client, and JavaScript broker releases
 
 The contributor fork path and maintainer hosted checks are proven. The npm
 JavaScript package and advertised Android, Linux, macOS, and Windows clients use
 protected release workflows and physically accepted candidates. iOS remains a
 CI-built source target rather than a distributed client. The native-free signed
-GitHub broker path is published from 0.5.3, on a physically accepted candidate. Any future compiled broker additionally requires legal
-approval and a reviewed native asset policy. Release validation must complete
+GitHub broker path is published from 0.5.3, on a physically accepted candidate.
+The website serves its version-pinned shell and PowerShell installers. Any
+future compiled broker additionally requires legal approval and a reviewed
+native asset policy. Release validation must complete
 without relying on a maintainer workstation as CI infrastructure.
 
 ## Traceability
@@ -50,5 +52,5 @@ without relying on a maintainer workstation as CI infrastructure.
 | Source publication | C | public repository, website, branch rules, and fork PR proof |
 | npm JavaScript release | C → D | protected trusted publishing, staged approval, and package-manager-owned updates |
 | Flutter client release | C → D | protected candidate staging, physical acceptance, and exact-asset stable promotion |
-| Signed JavaScript broker release | C → D | source prepared; protected signing and candidate acceptance remain before publication |
+| Signed JavaScript broker release | C → D | protected signing, accepted candidate, stable promotion, and website installer mirror published from 0.5.3 |
 | Compiled release acceptance | C → D | legal approval, protected signing, candidate upgrade/rollback, stable promotion |
