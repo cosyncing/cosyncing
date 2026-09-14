@@ -26,6 +26,7 @@ import {
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
   PI_BRIDGE_LEGACY_MARKER,
+  PI_MINIMUM_SUPPORTED_VERSION,
 } from '../../../adapters/pi/src/index.ts';
 import { BUILD_INFO, type BuildInfo } from '../../src/runtime/build-info.ts';
 import { runCli } from '../../src/cli/cli.ts';
@@ -92,6 +93,15 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) return false;
+    await delay(10);
+  }
+  return true;
+}
+
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
 
 async function runProcess(
@@ -120,6 +130,7 @@ interface PackageFixture {
   claudeConfig: string;
   piAgent: string;
   piBridge: string;
+  piBin: string;
 }
 
 function packageFixture(root: string, bridgeContent?: string): PackageFixture {
@@ -128,11 +139,20 @@ function packageFixture(root: string, bridgeContent?: string): PackageFixture {
   const cache = join(home, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
   const claudeConfig = join(home, '.claude');
   const piAgent = join(home, '.pi', 'agent');
+  const piBin = join(root, 'bin', 'pi');
   const sessionDirectory = join(piAgent, 'sessions', '--tmp--');
   const piBridge = join(piAgent, 'extensions', 'cosyncing-bridge', 'index.ts');
   mkdirSync(stateHome, { recursive: true });
   mkdirSync(sessionDirectory, { recursive: true });
   mkdirSync(claudeConfig, { recursive: true });
+  mkdirSync(join(root, 'bin'), { recursive: true });
+  writeFileSync(piBin, `#!/usr/bin/env bun
+if (process.argv.includes('--version')) {
+  console.log('pi-coding-agent ${PI_MINIMUM_SUPPORTED_VERSION}');
+  process.exit(0);
+}
+process.exit(73);
+`, { mode: 0o700 });
   writeFileSync(
     join(stateHome, 'install-state.json'),
     `${JSON.stringify(committedInstallState('2026-07-17T00:00:00.000Z'), null, 2)}\n`,
@@ -146,7 +166,7 @@ function packageFixture(root: string, bridgeContent?: string): PackageFixture {
     mkdirSync(join(piAgent, 'extensions', 'cosyncing-bridge'), { recursive: true });
     writeFileSync(piBridge, bridgeContent, { mode: 0o600 });
   }
-  return { home, stateHome, cache, claudeConfig, piAgent, piBridge };
+  return { home, stateHome, cache, claudeConfig, piAgent, piBridge, piBin };
 }
 
 function packagedEnvironment(fixture: PackageFixture, port: number): Record<string, string | undefined> {
@@ -157,6 +177,7 @@ function packagedEnvironment(fixture: PackageFixture, port: number): Record<stri
     COSYNCING_CACHE_DIR: fixture.cache,
     CLAUDE_CONFIG_DIR: fixture.claudeConfig,
     PI_CODING_AGENT_DIR: fixture.piAgent,
+    COSYNCING_PI_BIN: fixture.piBin,
     HOST: '127.0.0.1',
     PORT: String(port),
     COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
@@ -665,9 +686,9 @@ try {
     const roster = await fetch(`${base}/api/sessions`, { headers: authHeaders });
     check('packaged broker discovers the isolated Pi fixture',
       roster.ok && (await roster.text()).includes('pi'));
-    await delay(100);
+    const bridgeInstalled = await waitUntil(() => existsSync(installFixture.piBridge));
     check('packaged Pi bridge installs from embedded bytes with owner-only permissions',
-      existsSync(installFixture.piBridge) &&
+      bridgeInstalled &&
         sha256(readFileSync(installFixture.piBridge, 'utf8')) === PI_BRIDGE_EMBEDDED_SHA256 &&
         (statSync(installFixture.piBridge).mode & 0o777) === 0o600);
 

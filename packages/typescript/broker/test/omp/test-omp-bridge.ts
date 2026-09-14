@@ -54,6 +54,7 @@ const ROOT = join('/tmp', `cosyncing-omp-bridge-${PORT}`);
 const DISCOVERY_CWD = join(ROOT, 'work');
 const DISCOVERY_AGENT = join(ROOT, 'agent');
 const DISCOVERY_AGENT_LINK = join(ROOT, 'agent-link');
+const OMP_BIN = join(ROOT, 'omp');
 const PI_EMPTY_SESSIONS = join(ROOT, 'pi-empty-sessions');
 const DISCOVERY_SESSION_DIR = join(DISCOVERY_AGENT, 'sessions', encodeCwdDir(DISCOVERY_CWD));
 const DISCOVERY_SESSION_FILE = join(DISCOVERY_SESSION_DIR, '2026-08-25T00-00-00-000Z_omp-sync.jsonl');
@@ -68,6 +69,11 @@ rmSync(ROOT, { recursive: true, force: true });
 mkdirSync(DISCOVERY_CWD, { recursive: true });
 mkdirSync(DISCOVERY_SESSION_DIR, { recursive: true });
 mkdirSync(PI_EMPTY_SESSIONS, { recursive: true });
+writeFileSync(OMP_BIN, `#!/usr/bin/env bun
+if (process.argv.includes('--version')) { console.log('17.4.2'); process.exit(0); }
+process.exit(73);
+`);
+chmodSync(OMP_BIN, 0o755);
 writeFileSync(
   DISCOVERY_SESSION_FILE,
   JSON.stringify({ type: 'session', version: 3, id: 'omp-sync', timestamp: new Date().toISOString(), cwd: DISCOVERY_CWD }) + '\n',
@@ -82,6 +88,7 @@ const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'
     PORT: String(PORT),
     HOST: '127.0.0.1',
     COSYNCING_BRIDGE_GRACE_MS: String(GRACE_MS),
+    COSYNCING_OMP_BIN: OMP_BIN,
     // Pin omp through its dialect-specific override. Pi stays on its own agent directory and an
     // empty sessions root, proving the broker does not need shared Pi-family variables here.
     COSYNCING_OMP_SESSIONS_ROOT: '',

@@ -1113,7 +1113,13 @@ export class AgentRegistry {
           : sweepExpiry?.aborted === true ? 'sweep' : undefined;
         if (!legSettled && budgetKind !== undefined) {
           const budgetMs = budgetKind === 'leg' ? legBudgetMs! : sweepBudgetMs!;
-          const elapsedMs = Date.now() - startedAt;
+          const measuredElapsedMs = Date.now() - startedAt;
+          // A leg timer can fire between wall-clock ticks, but an expiry event must never
+          // claim that its own budget elapsed in less time than the configured budget.
+          // Sweep expiry is different: a trailing adapter may not have started any work.
+          const elapsedMs = budgetKind === 'leg'
+            ? Math.max(budgetMs, measuredElapsedMs)
+            : measuredElapsedMs;
           options?.onWork?.({
             kind: 'leg-abandoned',
             backendId: backend.id,
