@@ -109,6 +109,9 @@ import {
   resolveCodexMacConfiguredExecutable,
 } from './tui-presence.ts';
 import { diagnoseCodexSetup } from './diagnostics.ts';
+import { readCodexDaemonProcess, codexDaemonProcessState, forceStopCodexDaemonProcess } from './daemon-process.ts';
+import { restartCodexDaemonVerified, type CodexRestartOptions, type CodexDaemonCommandResult } from './daemon-restart.ts';
+export type { CodexRestartOptions } from './daemon-restart.ts';
 import {
   codexBaseHasCustomModelCatalog,
   codexModelCatalogSources,
@@ -1238,10 +1241,11 @@ let _codexDaemonEnsureCancelled: Bun.Subprocess | null = null;
 function boundedStreamCapture(stream: ReadableStream<Uint8Array>, limit = 8 * 1024): {
   read: () => string;
   done: Promise<void>;
+  cancel: () => void;
 } {
   let value = '';
+  const reader = stream.getReader();
   const done = (async () => {
-    const reader = stream.getReader();
     const decoder = new TextDecoder();
     try {
       for (;;) {
@@ -1254,7 +1258,7 @@ function boundedStreamCapture(stream: ReadableStream<Uint8Array>, limit = 8 * 10
       /* process ended while the bounded diagnostic stream was draining */
     }
   })();
-  return { read: () => value, done };
+  return { read: () => value, done, cancel: () => { void reader.cancel().catch(() => {}); } };
 }
 
 function notifyManagedStart(
@@ -2348,7 +2352,7 @@ async function runCodexDaemonCommand(
   command: 'version' | 'restart' | 'stop' | 'start',
   timeoutMs: number,
   binOverride?: string,
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<CodexDaemonCommandResult> {
   const bin = binOverride?.trim() || resolveBin('codex');
   if (!bin) throw new Error('Codex CLI is not available on PATH.');
   const proc = spawnCodex(bin, ['app-server', 'daemon', command], {
@@ -2357,17 +2361,24 @@ async function runCodexDaemonCommand(
     stderr: 'pipe',
     env: { ...process.env },
   });
-  const stdoutPromise = new Response(proc.stdout).text();
-  const stderrPromise = new Response(proc.stderr).text();
+  const stdout = boundedStreamCapture(proc.stdout);
+  const stderr = boundedStreamCapture(proc.stderr);
+  let timedOut = false;
   const timer = setTimeout(() => {
-    try { proc.kill(); } catch { /* already exited */ }
+    timedOut = true;
+    // This is the short-lived lifecycle CLI, never the independently running daemon. SIGTERM can
+    // itself enter Codex's graceful drain and leave this supposedly bounded command hung forever.
+    try { proc.kill('SIGKILL'); } catch { /* already exited */ }
   }, timeoutMs);
   try {
     const code = await proc.exited;
-    const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
-    return { code, stdout, stderr };
+    // A detached child can inherit a pipe. Reading until EOF must not defeat the command deadline.
+    await Promise.race([Promise.all([stdout.done, stderr.done]), new Promise((resolve) => setTimeout(resolve, 100))]);
+    return { code: timedOut ? -1 : code, stdout: stdout.read(), stderr: stderr.read(), timedOut };
   } finally {
     clearTimeout(timer);
+    stdout.cancel();
+    stderr.cancel();
   }
 }
 
@@ -2377,6 +2388,35 @@ export async function readCodexDaemonVersion(binOverride?: string): Promise<Code
   if (!bin) return undefined;
   const result = await runCodexDaemonCommand('version', 5000, bin);
   return result.code === 0 ? parseCodexDaemonVersionOutput(result.stdout.trim()) : undefined;
+}
+
+export interface CodexDaemonHealth {
+  state: 'absent' | 'running' | 'unknown';
+  installedVersion?: string;
+  runningVersion?: string;
+  detail: string;
+}
+
+/** Retain independently observed versions and orphan ownership when the control RPC stops answering. */
+export function inspectCodexDaemonHealth(): CodexDaemonHealth {
+  const bin = resolveBin('codex');
+  if (!bin) return { state: 'absent', detail: 'Codex CLI is not installed.' };
+  const versionFromPath = (path: string) => path.match(/[/\\]releases[/\\](\d+\.\d+\.\d+)(?:-[^/\\]+)?[/\\]bin[/\\]codex(?:\.exe)?$/)?.[1];
+  let installedVersion: string | undefined;
+  try { installedVersion = versionFromPath(realpathSync(bin)); } catch { /* process inspection reports the failure */ }
+  const external = process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim();
+  if (external && resolve(external) !== resolve(DEFAULT_APP_SERVER_CONTROL_SOCK)) {
+    return { state: 'unknown', installedVersion, detail: 'An external Codex app server is configured; cosyncing cannot recover its daemon.' };
+  }
+  const daemon = readCodexDaemonProcess(CODEX_HOME, bin);
+  return {
+    state: daemon.state,
+    installedVersion,
+    ...(daemon.state === 'running' ? { runningVersion: versionFromPath(daemon.process.executable) } : {}),
+    detail: daemon.state === 'running'
+      ? `Codex daemon pid=${daemon.process.pid} is still running but its control endpoint is unavailable. Use Restart to recover the daemon and release its session locks.`
+      : daemon.state === 'unknown' ? daemon.detail : 'Codex managed daemon is not running.',
+  };
 }
 
 function daemonGeneration(version: CodexDaemonVersion | undefined): string | undefined {
@@ -2412,30 +2452,28 @@ async function waitForCodexDaemon(
   return version;
 }
 
-function daemonRunsInstalledVersion(version: CodexDaemonVersion | undefined): boolean {
-  return version?.status === 'running' && version.cliVersion === version.appServerVersion;
-}
-
-function daemonRestartApplied(
-  before: CodexDaemonVersion | undefined,
-  beforeGeneration: string | undefined,
-  after: CodexDaemonVersion | undefined,
-): boolean {
-  if (!daemonRunsInstalledVersion(after)) return false;
-  // A binary-version mismatch resolving proves that a new app-server process took over. When the
-  // restart is configuration-only, require a changed control-socket generation instead; otherwise
-  // `daemon restart` returning zero while leaving the old process alive would be a false success.
-  if (before?.cliVersion !== before?.appServerVersion) return true;
-  const afterGeneration = daemonGeneration(after);
-  return beforeGeneration != null && afterGeneration != null && afterGeneration !== beforeGeneration;
-}
-
 function daemonCommandFailure(command: string, result: { code: number; stdout: string; stderr: string }): string {
   return result.stderr.trim() || result.stdout.trim() || `codex daemon ${command} exited ${result.code}`;
 }
 
 /** Explicit lifecycle mutation used only after the idle-only gate or a confirmed manual action. */
-export async function restartCodexDaemon(): Promise<void> {
+let codexRestartInFlight: Promise<void> | undefined;
+
+export function restartCodexDaemon(options: CodexRestartOptions = {}): Promise<void> {
+  if (codexRestartInFlight) return codexRestartInFlight;
+  const operation = restartCodexDaemonOnce(options);
+  codexRestartInFlight = operation;
+  void operation.finally(() => { if (codexRestartInFlight === operation) codexRestartInFlight = undefined; }).catch(() => {});
+  return operation;
+}
+
+async function restartCodexDaemonOnce(options: CodexRestartOptions): Promise<void> {
+  const bin = resolveBin('codex');
+  if (!bin) throw new Error('Codex CLI is not available on PATH.');
+  const external = process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim();
+  if (external && resolve(external) !== resolve(DEFAULT_APP_SERVER_CONTROL_SOCK)) {
+    throw new Error('An external Codex app server is configured; its lifecycle is not managed by cosyncing.');
+  }
   const before = await readCodexDaemonVersion();
   // An older directly-launched app server answers the daemon status probe but rejects every managed
   // lifecycle command. Do not disguise that state as a failed stop/start fallback: setup owns the one-time,
@@ -2443,39 +2481,16 @@ export async function restartCodexDaemon(): Promise<void> {
   if (before?.status === 'running' && !codexDaemonIsManaged(before)) {
     throw new CodexUnmanagedDaemonError();
   }
-  const beforeGeneration = daemonGeneration(before);
-  const nativeRestart = await runCodexDaemonCommand('restart', 30_000);
-  if (nativeRestart.code === 0) {
-    const restarted = await waitForCodexDaemon(
-      (version) => daemonRestartApplied(before, beforeGeneration, version),
-      codexRestartVerifyMs(),
-    );
-    if (daemonRestartApplied(before, beforeGeneration, restarted)) return;
-  }
-
-  // Some Codex versions acknowledge `daemon restart` without replacing an older daemon. A restart
-  // request has already passed the idle gate or explicit confirmation, so fall back to an observable
-  // stop/start cycle. Never start until the old daemon is proven down.
-  const stopped = await runCodexDaemonCommand('stop', 15_000);
-  const afterStop = await waitForCodexDaemon((version) => version == null, 10_000);
-  if (afterStop) {
-    const nativeDetail = nativeRestart.code === 0
-      ? 'codex daemon restart returned success but the old daemon stayed active'
-      : daemonCommandFailure('restart', nativeRestart);
-    const stopDetail = stopped.code === 0
-      ? 'codex daemon stop returned success but the daemon stayed active'
-      : daemonCommandFailure('stop', stopped);
-    throw new Error(`${nativeDetail}; ${stopDetail}`);
-  }
-
-  const started = await runCodexDaemonCommand('start', 30_000);
-  const afterStart = await waitForCodexDaemon(daemonRunsInstalledVersion, 15_000);
-  if (!daemonRunsInstalledVersion(afterStart)) {
-    const detail = started.code === 0
-      ? 'Codex daemon did not report the installed version after stop/start.'
-      : daemonCommandFailure('start', started);
-    throw new Error(detail);
-  }
+  await restartCodexDaemonVerified({
+    readVersion: () => readCodexDaemonVersion(bin),
+    captureProcess: () => readCodexDaemonProcess(CODEX_HOME, bin),
+    processState: codexDaemonProcessState,
+    forceStop: forceStopCodexDaemonProcess,
+    generation: daemonGeneration,
+    run: (command, timeoutMs) => runCodexDaemonCommand(command, timeoutMs, bin),
+    verifyMs: codexRestartVerifyMs(),
+    log: (message) => console.log(`[${PRODUCT_IDENTITY.productName}] Codex daemon restart: ${message}`),
+  }, options);
 }
 
 /**

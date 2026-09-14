@@ -43,6 +43,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Codex restart verifies that the previous daemon actually exits before
+  accepting a replacement. A confirmed restart can recover a stalled daemon
+  that lost its control socket while retaining session locks. Concurrent
+  restart requests share one operation, and unreachable daemons retain their
+  known versions and show a recovery action. Automatic updates never force-stop
+  a daemon that fails graceful shutdown.
+
 - Shell setup commands print the Bun runtime that will actually run them,
   including when the installer downloaded Bun outside `PATH`.
 

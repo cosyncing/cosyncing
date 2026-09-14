@@ -57,6 +57,25 @@ managed daemon with the **Sync with a terminal** command shown by cosyncing
 (`codex resume --remote ...`). A plain Codex Desktop session and a plain
 `codex resume` process do not share that synchronized owner.
 
+## Recovering a stalled daemon
+
+If terminal resumes report **This conversation is open in another app** and
+the managed Codex runtime is unavailable, a daemon may still hold writer locks
+after losing its control socket. The Agents and usage panel keeps independently
+verified version information and offers **Restart** when that daemon's process
+identity can be verified.
+
+A confirmed restart first requests graceful shutdown. If it stalls, cosyncing
+rechecks the old daemon's identity, terminates only that process, and verifies
+its exit before starting a replacement. This can interrupt unfinished turns;
+saved conversation history remains available. Resume your terminal explicitly
+with **Sync with a terminal** after recovery. Do not delete writer-lock files.
+
+Automatic runtime updates continue to wait for their configured safety gate
+and never escalate a stalled shutdown to forced termination. An unreadable or
+changed process identity also prevents forced recovery. Restart failures appear
+in the runtime status and broker logs.
+
 Direct agent-to-user file delivery is not currently available in Codex. The
 installed skill leaves generated files in the workspace because Codex has no
 safe exact-session delivery tool. Do not use a shared `.cosyncing/outbox`

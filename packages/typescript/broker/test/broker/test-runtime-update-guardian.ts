@@ -36,6 +36,9 @@ import {
   setCodexUpdatePolicy,
 } from '../../src/installation/setup-state.ts';
 
+await import('../../../adapters/codex/test/test-codex-daemon-restart.ts');
+await import('./test-runtime-restart-recovery.ts');
+
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = '') => {
   results.push({ name, ok, detail });
@@ -288,7 +291,12 @@ function fakeProvider(agent: string, safe: boolean): RuntimeUpdateProvider & { r
   process.env.COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS = '0';
   try {
     const version = await readCodexDaemonVersion();
-    await restartCodexDaemon();
+    // The native PID receipt is host-global unless CODEX_HOME is set before the adapter loads.
+    const restart = Bun.spawn([process.execPath, '-e', `import { restartCodexDaemon } from './packages/typescript/adapters/codex/src/index.ts'; await restartCodexDaemon();`], {
+      env: { ...process.env, CODEX_HOME: temp }, stdout: 'pipe', stderr: 'pipe',
+    });
+    const [code, stdout, stderr] = await Promise.all([restart.exited, new Response(restart.stdout).text(), new Response(restart.stderr).text()]);
+    check('native restart fixture is isolated and completes', code === 0, stdout + stderr);
     const restartedVersion = await readCodexDaemonVersion();
     check('Codex native version probe parses the managed-daemon command', version?.cliVersion === '0.144.1' && version.appServerVersion === '0.142.5', JSON.stringify(version));
     check('Codex restart attempts the native daemon restart first', readFileSync(restartAttempt, 'utf8') === 'attempted');

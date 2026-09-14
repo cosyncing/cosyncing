@@ -25,7 +25,7 @@ export type RuntimeUpdateInspection = AgentRuntimeUpdateStatus & {
 export interface RuntimeUpdateProvider {
   readonly agent: string;
   inspect(): Promise<RuntimeUpdateInspection>;
-  restart(): Promise<void>;
+  restart(options?: { confirmed?: boolean }): Promise<void>;
 }
 
 export interface RuntimeUpdateCoordinatorOptions {
@@ -41,6 +41,7 @@ export class RuntimeUpdateCoordinator {
   private readonly providers = new Map<string, RuntimeUpdateProvider>();
   private readonly statuses = new Map<string, RuntimeUpdateInspection>();
   private readonly inFlight = new Map<string, Promise<RuntimeUpdateInspection>>();
+  private readonly manualRestarts = new Map<string, Promise<RuntimeUpdateInspection | undefined>>();
 
   constructor(
     providers: RuntimeUpdateProvider[],
@@ -69,6 +70,8 @@ export class RuntimeUpdateCoordinator {
   async refresh(agent: string, opts: { autoRestart?: boolean } = {}): Promise<RuntimeUpdateInspection | undefined> {
     const provider = this.providers.get(agent);
     if (!provider) return undefined;
+    const manual = this.manualRestarts.get(agent);
+    if (manual) return manual;
     const existing = this.inFlight.get(agent);
     if (existing) return existing;
     const operation = (async () => {
@@ -84,9 +87,15 @@ export class RuntimeUpdateCoordinator {
           ? status.pendingChanges.join(' + ')
           : `${status.runningVersion ?? 'unknown'} → ${status.installedVersion ?? 'newer'}`;
         console.log(`${LOG_PREFIX} ${status.displayName} ${status.runtimeKind || 'runtime'} change (${changes}); restarting at idle`);
-        await provider.restart();
-        status = await provider.inspect();
-        await this.storeStatus(status);
+        try {
+          await provider.restart();
+          status = await provider.inspect();
+          this.assertRestartApplied(status);
+          await this.storeStatus(status);
+        } catch (error) {
+          await this.storeRestartFailure(status, error);
+          throw error;
+        }
       }
       return status;
     })();
@@ -106,17 +115,43 @@ export class RuntimeUpdateCoordinator {
   async restartNow(agent: string): Promise<RuntimeUpdateInspection | undefined> {
     const provider = this.providers.get(agent);
     if (!provider) return undefined;
+    const manual = this.manualRestarts.get(agent);
+    if (manual) return manual;
     const existing = this.inFlight.get(agent);
-    if (existing) await existing;
-    const current = this.statuses.get(agent);
-    if (current && !current.updateAvailable) return current;
-    if (!(this.options.restartAllowed?.() ?? true)) return current;
-    await provider.restart();
-    const refreshed = await this.refresh(agent, { autoRestart: false });
-    if (refreshed?.updateAvailable) {
-      throw new Error(`${refreshed.displayName} restart completed but the pending runtime change was not applied.`);
+    const operation = (async () => {
+      // A failed automatic attempt must not block the explicitly confirmed recovery that follows it.
+      if (existing) await existing.catch(() => undefined);
+      let status = await provider.inspect();
+      await this.storeStatus(status);
+      if (!(this.options.restartAllowed?.() ?? true)) return status;
+      try {
+        await provider.restart({ confirmed: true });
+        status = await provider.inspect();
+        this.assertRestartApplied(status);
+        await this.storeStatus(status);
+        return status;
+      } catch (error) {
+        await this.storeRestartFailure(status, error);
+        throw error;
+      }
+    })();
+    this.manualRestarts.set(agent, operation);
+    try { return await operation; } finally {
+      if (this.manualRestarts.get(agent) === operation) this.manualRestarts.delete(agent);
     }
-    return refreshed;
+  }
+
+  private assertRestartApplied(status: RuntimeUpdateInspection): void {
+    if (status.updateAvailable) throw new Error(`${status.displayName} restart completed but the pending runtime change was not applied.`);
+    if (status.state !== 'current' || !status.managed) {
+      throw new Error(`${status.displayName} restart failed verification: ${status.detail || status.state}.`);
+    }
+  }
+
+  private async storeRestartFailure(status: RuntimeUpdateInspection, error: unknown): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`${LOG_PREFIX} ${status.displayName} runtime restart failed: ${detail}`);
+    await this.storeStatus({ ...status, state: 'error', autoRestartReady: false, detail, checkedAt: Date.now() });
   }
 
   private async storeStatus(status: RuntimeUpdateInspection): Promise<void> {
