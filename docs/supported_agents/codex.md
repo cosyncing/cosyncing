@@ -54,8 +54,11 @@ join or start model work.
 
 Live two-way terminal sync is available for Codex CLI sessions joined to the
 managed daemon with the **Sync with a terminal** command shown by cosyncing
-(`codex resume --remote ...`). A plain Codex Desktop session and a plain
-`codex resume` process do not share that synchronized owner.
+(`codex resume --remote ...`). Codex Desktop and CLI sessions running their own
+app-server do not share that synchronized owner. A plain `codex resume` can
+auto-connect to a reachable default daemon when its launch settings allow
+reuse; use the generated `--remote` command to select cosyncing's daemon
+explicitly.
 
 For a session currently driven by cosyncing's private Codex process, use
 **Resume in terminal** and wait for handoff confirmation before running the
