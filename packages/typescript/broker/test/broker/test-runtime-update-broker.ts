@@ -1,5 +1,5 @@
 /**
- * Broker contract for managed runtime freshness status + confirmed manual restart.
+ * Broker contract for managed runtime freshness status + confirmed restart refusal without ownership.
  * Uses a fake Codex CLI and isolated CODEX_HOME; no real daemon, server, session, or model is touched.
  *
  *   bun run packages/typescript/broker/test/broker/test-runtime-update-broker.ts
@@ -128,9 +128,15 @@ try {
     body: JSON.stringify({ confirmRestart: true }),
   });
   const body: any = await confirmed.json();
-  if (!confirmed.ok || !existsSync(marker) || body.update?.state !== 'current') {
-    throw new Error(`confirmed runtime restart did not re-probe current: ${confirmed.status} ${JSON.stringify(body)}`);
+  if (confirmed.status !== 502 || existsSync(marker) || !String(body.error).includes('without a verified daemon PID receipt')) {
+    throw new Error(`unverified runtime restart must fail without mutation: ${confirmed.status} ${JSON.stringify(body)}`);
   }
+
+  // Simulate an independently replaced daemon to exercise subsequent freshness reporting. A fake
+  // CLI without a real process identity must not make the restart implementation claim success.
+  writeFileSync(marker, 'external replacement');
+  writeFileSync(socketPath, 'daemon-generation-2');
+  await fetch(`${base}/api/agent-runtime-updates?fresh=1`);
 
   const configPath = join(temp, 'config.toml');
   writeFileSync(configPath, 'model = "config-only-drift"\n');
@@ -169,8 +175,10 @@ try {
   const restartAllBody: any = await restartAll.json();
   if (
     !restartAll.ok ||
-    !existsSync(marker) ||
-    restartAllBody.components?.codex?.ok !== true ||
+    existsSync(marker) ||
+    restartAllBody.partialFailure !== true ||
+    restartAllBody.components?.codex?.ok !== false ||
+    !String(restartAllBody.components?.codex?.error).includes('without a verified daemon PID receipt') ||
     restartAllBody.components?.opencode?.strategy !== 'broker-relaunch' ||
     restartAllBody.components?.opencode?.restartsWithBroker !== false ||
     String(restartAllBody.message || '').includes('Managed OpenCode will be replaced') ||
@@ -197,7 +205,7 @@ try {
   ) {
     throw new Error(`stopped Codex daemon should be skipped without starting it: ${restartStopped.status} ${JSON.stringify(stoppedBody)}`);
   }
-  console.log('PASS runtime-update policy + status + manual runtime restart + Restart everything broker contracts');
+  console.log('PASS runtime-update policy + status + unverified restart refusal + Restart everything partial-failure contracts');
 } finally {
   broker.kill();
   await broker.exited.catch(() => undefined);

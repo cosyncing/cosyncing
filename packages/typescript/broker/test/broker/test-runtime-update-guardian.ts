@@ -296,11 +296,11 @@ function fakeProvider(agent: string, safe: boolean): RuntimeUpdateProvider & { r
       env: { ...process.env, CODEX_HOME: temp }, stdout: 'pipe', stderr: 'pipe',
     });
     const [code, stdout, stderr] = await Promise.all([restart.exited, new Response(restart.stdout).text(), new Response(restart.stderr).text()]);
-    check('native restart fixture is isolated and completes', code === 0, stdout + stderr);
+    check('answering native fixture without a PID receipt refuses restart', code !== 0 && stderr.includes('without a verified daemon PID receipt'), stdout + stderr);
     const restartedVersion = await readCodexDaemonVersion();
     check('Codex native version probe parses the managed-daemon command', version?.cliVersion === '0.144.1' && version.appServerVersion === '0.142.5', JSON.stringify(version));
-    check('Codex restart attempts the native daemon restart first', readFileSync(restartAttempt, 'utf8') === 'attempted');
-    check('Codex restart replaces a daemon when native restart falsely succeeds', readFileSync(started, 'utf8') === 'started' && restartedVersion?.appServerVersion === '0.144.1', JSON.stringify(restartedVersion));
+    check('Codex restart never delegates shutdown to a mutable native PID receipt', !existsSync(restartAttempt) && !existsSync(stopped));
+    check('Codex restart preserves an unverified answering daemon', !existsSync(started) && restartedVersion?.appServerVersion === '0.142.5', JSON.stringify(restartedVersion));
   } finally {
     if (previous == null) delete process.env.COSYNCING_CODEX_BIN;
     else process.env.COSYNCING_CODEX_BIN = previous;

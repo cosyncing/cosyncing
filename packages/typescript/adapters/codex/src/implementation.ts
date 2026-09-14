@@ -109,7 +109,7 @@ import {
   resolveCodexMacConfiguredExecutable,
 } from './tui-presence.ts';
 import { diagnoseCodexSetup } from './diagnostics.ts';
-import { readCodexDaemonProcess, codexDaemonProcessState, forceStopCodexDaemonProcess } from './daemon-process.ts';
+import { readCodexDaemonProcess, codexDaemonProcessState, gracefullyStopCodexDaemonProcess, forceStopCodexDaemonProcess } from './daemon-process.ts';
 import { restartCodexDaemonVerified, type CodexRestartOptions, type CodexDaemonCommandResult } from './daemon-restart.ts';
 export type { CodexRestartOptions } from './daemon-restart.ts';
 import {
@@ -2419,18 +2419,6 @@ export function inspectCodexDaemonHealth(): CodexDaemonHealth {
   };
 }
 
-function daemonGeneration(version: CodexDaemonVersion | undefined): string | undefined {
-  const path = version?.socketPath?.trim()
-    || process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim()
-    || DEFAULT_APP_SERVER_CONTROL_SOCK;
-  try {
-    const stat = lstatSync(path);
-    return `${stat.dev}:${stat.ino}:${stat.mtimeMs}`;
-  } catch {
-    return undefined;
-  }
-}
-
 function codexRestartVerifyMs(): number {
   const configured = Number(process.env.COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS);
   return Number.isFinite(configured) && configured >= 0 ? configured : 2_000;
@@ -2485,8 +2473,8 @@ async function restartCodexDaemonOnce(options: CodexRestartOptions): Promise<voi
     readVersion: () => readCodexDaemonVersion(bin),
     captureProcess: () => readCodexDaemonProcess(CODEX_HOME, bin),
     processState: codexDaemonProcessState,
+    gracefulStop: gracefullyStopCodexDaemonProcess,
     forceStop: forceStopCodexDaemonProcess,
-    generation: daemonGeneration,
     run: (command, timeoutMs) => runCodexDaemonCommand(command, timeoutMs, bin),
     verifyMs: codexRestartVerifyMs(),
     log: (message) => console.log(`[${PRODUCT_IDENTITY.productName}] Codex daemon restart: ${message}`),

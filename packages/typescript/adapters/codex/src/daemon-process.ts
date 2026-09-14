@@ -121,10 +121,76 @@ export function codexDaemonProcessState(expected: CodexDaemonProcess): 'running'
     && JSON.stringify(current.process.argv) === JSON.stringify(expected.argv) ? 'running' : 'unknown';
 }
 
-/** Only a confirmed restart may call this, after native graceful shutdown has failed. */
+interface ProcessSignalHandle { send(signal: 'SIGTERM' | 'SIGKILL'): void; close(): void }
+interface ProcessSignalDependencies {
+  bind(pid: number): ProcessSignalHandle;
+  state(expected: CodexDaemonProcess): 'running' | 'exited' | 'unknown';
+}
+
+let linuxSignals: { open(pid: number): number; send(fd: number, signal: number): number; close(fd: number): void } | undefined;
+function bindProcessSignal(pid: number): ProcessSignalHandle {
+  if (process.platform === 'linux') {
+    if (!linuxSignals) {
+      if (process.arch !== 'x64' && process.arch !== 'arm64') throw new Error('Codex process-bound signals are unavailable on this architecture.');
+      const { dlopen, FFIType } = require('bun:ffi') as typeof import('bun:ffi');
+      const symbols = {
+        // pidfd_open (434) and pidfd_send_signal (424) have the same numbers on supported Linux hosts.
+        syscall: { args: [FFIType.i64, FFIType.i64, FFIType.i64, FFIType.i64, FFIType.i64], returns: FFIType.i64 },
+        close: { args: [FFIType.i32], returns: FFIType.i32 },
+      } as const;
+      let libc;
+      try { libc = dlopen('libc.so.6', symbols); } catch {
+        libc = dlopen(`/lib/ld-musl-${process.arch === 'x64' ? 'x86_64' : 'aarch64'}.so.1`, symbols);
+      }
+      linuxSignals = {
+        open: (processId) => Number(libc.symbols.syscall(434, processId, 0, 0, 0)),
+        send: (fd, signal) => Number(libc.symbols.syscall(424, fd, signal, 0, 0)),
+        close: (fd) => { libc.symbols.close(fd); },
+      };
+    }
+    const api = linuxSignals;
+    const fd = api.open(pid);
+    if (fd < 0) throw new Error('Codex daemon pidfd could not be opened; process-bound shutdown was refused.');
+    return {
+      send: (signal) => {
+        if (api.send(fd, signal === 'SIGTERM' ? 15 : 9) !== 0) throw new Error('Codex daemon process-bound signal failed.');
+      },
+      close: () => api.close(fd),
+    };
+  }
+  if (process.platform !== 'darwin') throw new Error('Codex daemon signals are unavailable on this platform.');
+  // macOS has no pidfd. Keep its synchronous identity check adjacent to signalling the captured PID;
+  // never delegate target selection to the mutable native daemon receipt.
+  return { send: (signal) => { process.kill(pid, signal); }, close: () => {} };
+}
+
+/** Bind before rechecking identity, so a Linux PID reused during inspection can never be signalled. */
+export function signalCodexDaemonProcess(
+  expected: CodexDaemonProcess, signal: 'SIGTERM' | 'SIGKILL',
+  deps: Partial<ProcessSignalDependencies> = {},
+): void {
+  const bind = deps.bind ?? bindProcessSignal;
+  const stateOf = deps.state ?? codexDaemonProcessState;
+  let handle: ProcessSignalHandle;
+  try { handle = bind(expected.pid); } catch (error) {
+    if (stateOf(expected) === 'exited') return;
+    throw error;
+  }
+  try {
+    const state = stateOf(expected);
+    if (state === 'exited') return;
+    if (state !== 'running') throw new Error('Codex daemon identity changed; shutdown was refused.');
+    try { handle.send(signal); } catch (error) {
+      if (stateOf(expected) !== 'exited') throw error;
+    }
+  } finally { handle.close(); }
+}
+
+export function gracefullyStopCodexDaemonProcess(expected: CodexDaemonProcess): void {
+  signalCodexDaemonProcess(expected, 'SIGTERM');
+}
+
+/** Only a confirmed restart may call this, after graceful shutdown has failed. */
 export function forceStopCodexDaemonProcess(expected: CodexDaemonProcess): void {
-  const state = codexDaemonProcessState(expected);
-  if (state === 'exited') return;
-  if (state !== 'running') throw new Error('Codex daemon identity changed; forced shutdown was refused.');
-  process.kill(expected.pid, 'SIGKILL');
+  signalCodexDaemonProcess(expected, 'SIGKILL');
 }
