@@ -57,6 +57,13 @@ managed daemon with the **Sync with a terminal** command shown by cosyncing
 (`codex resume --remote ...`). A plain Codex Desktop session and a plain
 `codex resume` process do not share that synchronized owner.
 
+For a session currently driven by cosyncing's private Codex process, use
+**Resume in terminal** and wait for handoff confirmation before running the
+copied command. This closes the app's writer and leaves the app in Observe so
+the terminal can resume through the shared daemon. A session already on that
+daemon can be joined directly. If another foreground app client still drives
+the session, close that client before handing off.
+
 ## Recovering a stalled daemon
 
 If terminal resumes report **This conversation is open in another app** and

@@ -36,6 +36,7 @@ import {
   resolveCodexModelProvider,
 } from '../../../adapters/codex/src/provider-resolver.ts';
 import { AttentionService } from '../../src/attention/attention-service.ts';
+import { authoritativeLiveOwners, overlayAuthoritativeOwner } from '../../src/roster/roster-overlay.ts';
 import { driveAttachRefusalCode } from '../../src/sessions/client-message-policy.ts';
 import { Hub, ManagedConn } from '../../src/sessions/hub.ts';
 
@@ -3601,6 +3602,57 @@ async function withLoadedDaemon<T>(
   }
 }
 
+await test('CR6 private Codex Drive preserves terminal handoff through refresh and closes before confirmation', async () => {
+  return withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => withLoadedDaemon(dir, [], async () => {
+    const diagnostics: CodexAttachDiagnostic[] = [];
+    const adapter = new CodexAdapter({
+      queryLoadedThreadIds: async () => new Set(),
+      scanCodexTuiPresence: async () => fakeTuiScan(),
+      reportAttachDiagnostic: (event) => diagnostics.push(event),
+    });
+    const registry = new AgentRegistry();
+    registry.register(adapter);
+    const hub = new Hub(registry, 20);
+    const id = Buffer.from(rollout, 'utf8').toString('base64url');
+    try {
+      const observer = await hub.ensure('codex', id, 'observe');
+      const discovered = structuredClone(observer.conn.info);
+      const observingJoin = discovered.attachMode === 'observe' &&
+        discovered.control?.terminalSync.action === 'join';
+      const driver = await hub.ensure('codex', id, 'resume', 'takeover');
+      const privateHandoff = driver.conn.info.attachMode === 'resume' &&
+        driver.conn.info.control?.drive.state === 'driving' &&
+        driver.conn.info.control?.terminalSync.action === 'handoff' &&
+        driver.conn.info.control.terminalSync.command?.includes('-m fake-model') === true &&
+        diagnostics.some((event) => event.event === 'transport-selected' && event.transport === 'stdio');
+
+      // The watcher still reports an unowned, joinable disk session. Its bare
+      // Observe refresh and the roster overlay must retain the live driver's
+      // handoff, including when Observe was inserted before Drive.
+      await hub.refreshExternalSession(discovered);
+      const owners = authoritativeLiveOwners(hub.liveSnapshot());
+      const owner = owners.get(`codex:${id}`);
+      const roster = structuredClone(discovered);
+      if (owner) overlayAuthoritativeOwner(roster, owner);
+      const retainedHandoff = driver.conn.info.control?.terminalSync.action === 'handoff' &&
+        roster.attachMode === 'resume' && roster.control?.terminalSync.action === 'handoff';
+
+      const handedOff = await hub.handoffToTerminal('codex', id, driver);
+      const closedBeforeConfirmation = diagnostics.some((event) =>
+        event.event === 'child-lifecycle' && event.outcome?.startsWith('exited:'));
+      const observingAfterHandoff = handedOff.conn.info.attachMode === 'observe' &&
+        handedOff.conn.info.control?.drive.state === 'observing' &&
+        handedOff.conn.info.control?.terminalSync.action === 'join';
+      return [
+        observingJoin && privateHandoff && retainedHandoff && closedBeforeConfirmation && observingAfterHandoff,
+        `observeJoin=${observingJoin} privateHandoff=${privateHandoff} refreshRetained=${retainedHandoff} childExited=${closedBeforeConfirmation} handoffObserved=${observingAfterHandoff}`,
+      ];
+    } finally {
+      await hub.dispose();
+    }
+  }));
+});
+
 const CR4_CHILD_THREAD = '00000000-0000-4000-8000-0000000000c4';
 
 /** Writes a subagent (agent-owned) child rollout next to the harness's normal one. */
@@ -3631,6 +3683,7 @@ await test('CR4 a mode-less attach on a daemon-loaded NORMAL thread still comes 
             conn.info.control?.drive.supported === true &&
             conn.info.control?.drive.state === 'driving' &&
             sync?.supported === true &&
+            sync.action === 'join' &&
             sync.syncAvailable === true,
           `attachMode=${conn.info.attachMode} drive=${JSON.stringify(conn.info.control?.drive)} sync=${JSON.stringify(sync)}`,
         ];

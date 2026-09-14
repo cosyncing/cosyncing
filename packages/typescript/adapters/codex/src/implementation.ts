@@ -943,7 +943,10 @@ export class CodexAdapter implements AgentBackend {
         agentOwned,
         terminalSyncActive: liveEligible && terminalPresence === 'shared',
         terminalSyncPresence: terminalPresence,
-        terminalSyncAction: 'join',
+        // A private stdio writer must close before the terminal can load this
+        // thread in the shared daemon. The client's handoff action awaits that
+        // close; a direct join would conflict with the still-open writer.
+        terminalSyncAction: !observe && !liveEligible ? 'handoff' : 'join',
         terminalSyncHint,
         syncEnabled: this.capabilities.supportsLiveAttach,
       }),

@@ -43,6 +43,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Codex sessions driven through a private app-server now hand control back
+  before terminal sync, preventing an active-writer conflict when the terminal
+  resumes through the shared daemon.
+
 - Codex restart verifies that the previous daemon actually exits before
   accepting a replacement. A confirmed restart can recover a stalled daemon
   that lost its control socket while retaining session locks. Concurrent
