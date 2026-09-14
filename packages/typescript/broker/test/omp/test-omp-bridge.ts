@@ -30,7 +30,7 @@
  */
 export {};
 import { chmodSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   BROKER_CONTRACT_REVISION,
   CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY,
@@ -55,6 +55,7 @@ const DISCOVERY_CWD = join(ROOT, 'work');
 const DISCOVERY_AGENT = join(ROOT, 'agent');
 const DISCOVERY_AGENT_LINK = join(ROOT, 'agent-link');
 const OMP_BIN = join(ROOT, 'omp');
+const OMP_BUN_BIN = join(ROOT, 'runtime', 'bun');
 const PI_EMPTY_SESSIONS = join(ROOT, 'pi-empty-sessions');
 const DISCOVERY_SESSION_DIR = join(DISCOVERY_AGENT, 'sessions', encodeCwdDir(DISCOVERY_CWD));
 const DISCOVERY_SESSION_FILE = join(DISCOVERY_SESSION_DIR, '2026-08-25T00-00-00-000Z_omp-sync.jsonl');
@@ -69,9 +70,15 @@ rmSync(ROOT, { recursive: true, force: true });
 mkdirSync(DISCOVERY_CWD, { recursive: true });
 mkdirSync(DISCOVERY_SESSION_DIR, { recursive: true });
 mkdirSync(PI_EMPTY_SESSIONS, { recursive: true });
-writeFileSync(OMP_BIN, `#!/usr/bin/env bun
-if (process.argv.includes('--version')) { console.log('17.4.2'); process.exit(0); }
-process.exit(73);
+mkdirSync(dirname(OMP_BUN_BIN), { recursive: true });
+writeFileSync(OMP_BUN_BIN, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '1.3.14\\n'; exit 0; fi
+if [ "$2" = "--version" ]; then printf '17.4.2\\n'; exit 0; fi
+exit 73
+`);
+chmodSync(OMP_BUN_BIN, 0o755);
+writeFileSync(OMP_BIN, `#!${OMP_BUN_BIN}
+// fixture
 `);
 chmodSync(OMP_BIN, 0o755);
 writeFileSync(

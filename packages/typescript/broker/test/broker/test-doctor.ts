@@ -158,7 +158,13 @@ function literalDoctorCopy(): Array<{ file: string; text: string }> {
 }
 
 function displayed(path: string, home: string): string {
-  return path === home ? '~' : path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+  const normalizedPath = path.replaceAll('\\', '/');
+  const normalizedHome = home.replaceAll('\\', '/');
+  return normalizedPath === normalizedHome
+    ? '~'
+    : normalizedPath.startsWith(`${normalizedHome}/`)
+      ? `~/${normalizedPath.slice(normalizedHome.length + 1)}`
+      : path;
 }
 
 interface FakeContextOptions {

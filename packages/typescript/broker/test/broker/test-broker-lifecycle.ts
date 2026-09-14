@@ -1034,7 +1034,7 @@ try {
     const priorPackaged = `${OMP_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged omp bridge comment\n`;
     atomicWriteOwnerOnly(bridge, priorPackaged, { mode: 0o600 });
     const environmentPath = join(m.home, 'service', 'broker.env');
-    const environment = `COSYNCING_OMP_AGENT_DIR="${inheritedAgentDir}"\n`;
+    const environment = `COSYNCING_OMP_AGENT_DIR="${inheritedAgentDir.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"\n`;
     atomicWriteOwnerOnly(environmentPath, environment, { mode: 0o600 });
     const install = inspectInstallState(m.home);
     if (!install.committed) throw new Error('fixture install missing');

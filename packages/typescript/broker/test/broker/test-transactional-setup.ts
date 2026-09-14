@@ -354,13 +354,40 @@ function supportedOmpFixture(machine: string): { context: ReturnType<typeof cont
   }));
   writeFileSync(bunBin, '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "1.3.14\\n"; else printf "17.4.2\\n"; fi\n');
   chmodSync(bunBin, 0o755);
-  writeFileSync(ompBin, `#!${bunBin}\n// fixture\n`);
+  const bunShebang = bunBin.replaceAll('\\', '/');
+  writeFileSync(ompBin, `#!${bunShebang}\n// fixture\n`);
   chmodSync(ompBin, 0o755);
-  symlinkSync(ompBin, join(binDir, 'omp'));
+  const context = contextFor(machine, { PATH: binDir, PI_CODING_AGENT_DIR: '' });
   return {
-    context: contextFor(machine, { PATH: binDir, PI_CODING_AGENT_DIR: '' }),
+    // The fixture describes supported OMP independently of the OS running the suite. Windows
+    // does not execute POSIX shebang launchers, so inject the same resolution and bounded version
+    // answers the setup diagnosis would obtain from a real platform-specific launcher.
+    context: {
+      ...context,
+      resolveExecutable: (command: string) => {
+        if (command === 'omp' || command === ompBin) return ompBin;
+        if (command === 'bun' || command === bunBin || command === bunShebang) return bunBin;
+        return undefined;
+      },
+      runReadOnly: async (executable: string) => {
+        if (executable === ompBin) {
+          return { status: 'ok' as const, exitCode: 0, stdout: '17.4.2\n', stderr: '' };
+        }
+        if (executable === bunBin) {
+          return { status: 'ok' as const, exitCode: 0, stdout: '1.3.14\n', stderr: '' };
+        }
+        return { status: 'unavailable' as const, stdout: '', stderr: 'not a fixture executable' };
+      },
+    },
     bridge: join(machine, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts'),
   };
+}
+
+function contextWithEnvironment(
+  context: ReturnType<typeof contextFor>,
+  overrides: Record<string, string>,
+): ReturnType<typeof contextFor> {
+  return { ...context, env: { ...context.env, ...overrides } };
 }
 
 function treeSnapshot(root: string): string {
@@ -2763,17 +2790,9 @@ try {
   // omp setup owns bridge installation independently of session discovery. A first run must install and
   // receipt the extension even though omp has never created its sessions directory yet.
   //
-  // Skipped on Windows, and NOT because the product cannot do this there. The fixture describes an omp
-  // install in POSIX terms -- a `#!/bin/sh` launcher, an executable bit, and a symlink onto PATH --
-  // and Windows expresses none of the three, so `resolveInvocation` finds nothing and the run reports
-  // "omp is not installed" rather than exercising the bridge install. The Windows shape of this is a
-  // `.cmd` shim resolved through PATHEXT, which the readiness code already has a branch for
-  // (`invocation.kind === 'batch'`) and which no fixture builds yet. Writing that fixture is the work;
-  // pretending this check ran is not.
-  if (process.platform === 'win32') {
-    skip('the omp bridge install lane',
-      'the fixture describes a POSIX omp install; the Windows shape is a .cmd shim and has no fixture yet');
-  } else {
+  // The fixture injects executable resolution and bounded version answers, so this setup contract runs
+  // identically on POSIX and Windows without relying on either host's launcher conventions.
+  {
     const machine = join(root, 'omp-fresh-install-no-sessions');
     const { context, bridge } = supportedOmpFixture(machine);
     const sessions = join(machine, '.omp', 'agent', 'sessions');
@@ -2800,8 +2819,7 @@ try {
     writeFileSync(unrelatedSession, '{"preserve":true}\n', { mode: 0o600 });
     const nextAgentDir = join(machine, 'isolated-omp-agent');
     const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-    const nextContext = contextFor(machine, {
-      PATH: context.env.PATH ?? '',
+    const nextContext = contextWithEnvironment(context, {
       PI_CODING_AGENT_DIR: '',
       COSYNCING_OMP_AGENT_DIR: nextAgentDir,
     });
@@ -2837,16 +2855,14 @@ try {
       try {
         const previousAgentDir = join(externalRoot, 'agent');
         const previousBridge = join(previousAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-        const initialContext = contextFor(machine, {
-          PATH: fixture.context.env.PATH ?? '',
+        const initialContext = contextWithEnvironment(fixture.context, {
           PI_CODING_AGENT_DIR: '',
           COSYNCING_OMP_AGENT_DIR: previousAgentDir,
         });
         const initial = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context: initialContext }));
         const nextAgentDir = join(machine, 'isolated-omp-agent');
         const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-        const nextContext = contextFor(machine, {
-          PATH: fixture.context.env.PATH ?? '',
+        const nextContext = contextWithEnvironment(fixture.context, {
           PI_CODING_AGENT_DIR: '',
           COSYNCING_OMP_AGENT_DIR: nextAgentDir,
         });
@@ -2868,8 +2884,7 @@ try {
     await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
     atomicWriteOwnerOnly(previousBridge, `${OMP_BRIDGE_EMBEDDED_SOURCE}\n// operator edit\n`, { mode: 0o600 });
     const nextAgentDir = join(machine, 'isolated-omp-agent');
-    const nextContext = contextFor(machine, {
-      PATH: context.env.PATH ?? '',
+    const nextContext = contextWithEnvironment(context, {
       PI_CODING_AGENT_DIR: '',
       COSYNCING_OMP_AGENT_DIR: nextAgentDir,
     });
@@ -2888,8 +2903,7 @@ try {
     const nextAgentDir = join(machine, 'isolated-omp-agent');
     const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
     atomicWriteOwnerOnly(nextBridge, OMP_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
-    const nextContext = contextFor(machine, {
-      PATH: context.env.PATH ?? '',
+    const nextContext = contextWithEnvironment(context, {
       PI_CODING_AGENT_DIR: '',
       COSYNCING_OMP_AGENT_DIR: nextAgentDir,
     });
@@ -2909,8 +2923,7 @@ try {
     const beforeInstall = readFileSync(join(home, 'install-state.json'), 'utf8');
     const nextAgentDir = join(machine, 'isolated-omp-agent');
     const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-    const nextContext = contextFor(machine, {
-      PATH: context.env.PATH ?? '',
+    const nextContext = contextWithEnvironment(context, {
       PI_CODING_AGENT_DIR: '',
       COSYNCING_OMP_AGENT_DIR: nextAgentDir,
     });
@@ -2947,8 +2960,7 @@ try {
     await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
     const nextAgentDir = join(machine, 'isolated-omp-agent');
     const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-    const nextContext = contextFor(machine, {
-      PATH: context.env.PATH ?? '',
+    const nextContext = contextWithEnvironment(context, {
       PI_CODING_AGENT_DIR: '',
       COSYNCING_OMP_AGENT_DIR: nextAgentDir,
     });
@@ -2986,8 +2998,7 @@ try {
     await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
     const nextAgentDir = join(machine, 'isolated-omp-agent');
     const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-    const nextContext = contextFor(machine, {
-      PATH: context.env.PATH ?? '',
+    const nextContext = contextWithEnvironment(context, {
       PI_CODING_AGENT_DIR: '',
       COSYNCING_OMP_AGENT_DIR: nextAgentDir,
     });
@@ -3016,8 +3027,7 @@ try {
     await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
     const nextAgentDir = join(machine, 'isolated-omp-agent');
     const nextBridge = join(nextAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-    const nextContext = contextFor(machine, {
-      PATH: context.env.PATH ?? '',
+    const nextContext = contextWithEnvironment(context, {
       PI_CODING_AGENT_DIR: '',
       COSYNCING_OMP_AGENT_DIR: nextAgentDir,
     });
