@@ -195,7 +195,7 @@ cosy setup
 함께 제공되는 Flutter 웹 앱은 여러분의 Broker가 `/cosy/`에서 직접 제공합니다. 실행 중에 제3자
 호스트에서 애플리케이션 코드를 가져오지 않습니다. 설정 과정에서 URL이 출력되니, Broker에 접근할 수
 있는 브라우저에서 여세요. Android와 데스크톱 클라이언트는
-[GitHub Releases](https://github.com/cosyncing/cosyncing/releases/latest)에서 받을 수 있습니다.
+[GitHub Releases](https://github.com/cosyncing/cosyncing/releases?q=%22cosyncing%20client%22)에서 받을 수 있습니다.
 iOS 클라이언트는 이후 TestFlight로 제공할 예정입니다.
 
 <p align="center">

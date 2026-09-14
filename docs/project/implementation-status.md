@@ -1,14 +1,14 @@
 # Implementation status
 
-Last updated: 2026-09-02.
+Last updated: 2026-09-14.
 
 ## Publication state
 
 The source repository is public at
 [`cosyncing/cosyncing`](https://github.com/cosyncing/cosyncing), with the
-project site at [cosyncing.github.io](https://cosyncing.github.io/). English
-and Simplified Chinese README layers describe the same supported product and
-link to the matching website locale.
+project site at [cosyncing.com](https://cosyncing.com/). English, Simplified
+Chinese, Japanese, Korean, and Spanish READMEs describe the same supported
+product and link to the matching website locale.
 
 Internal plans, physical-host evidence, and maintainer logs live in a separate
 private repository checked out locally as the ignored `docs-internal/` tree.
@@ -76,12 +76,19 @@ through npm's protected staging and 2FA approval flow. Flutter-only Android,
 Linux, Apple Silicon macOS, and Windows client downloads are published in the client
 release; iOS/TestFlight remains deferred.
 
-The signed GitHub workflow now assembles a JavaScript broker, web sidecar,
-installers and same-commit desktop clients with signed metadata. Its asset policy
-rejects embedded-runtime brokers and bundled Bun archives; protected candidate
-and promotion environments still apply. This source change does not publish the
-new installer. Older installer-owned builds need to rerun that installer after
-publication because their manifest parser requires a native artifact.
+The signed JavaScript broker channel is live as of 0.5.3. It publishes a broker
+bundle, web sidecar, installers and same-commit desktop clients with signed
+metadata. The one-liners use `https://cosyncing.com/install.sh` and
+`https://cosyncing.com/install.ps1`; broker-only variants use `install-server.sh`
+and `install-server.ps1`. These website copies are version-pinned and must be
+refreshed after each stable broker promotion. The release asset policy rejects
+embedded-runtime brokers and bundled Bun archives; protected candidate and
+promotion environments still apply.
+
+Older `bootstrap-js` 0.5.2 builds must rerun the new installer because their
+manifest parser requires a native artifact. Compiled native installations with
+schema-1 receipts cannot migrate this way; follow the
+[installer migration guidance](../installation/script-install.md#migrating-older-installer-owned-brokers).
 
 Keep `COSYNCING_BINARY_RELEASE_LEGAL_APPROVED` unset. Any future compiled broker
 distribution still requires the documented dated approval. Local native builds
