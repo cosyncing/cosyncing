@@ -3,6 +3,7 @@ import {
   parseCodexDaemonVersionOutput,
   type CodexLoadedThreadActivity,
   type CodexDaemonVersion,
+  type CodexDaemonHealth,
 } from '@cosyncing/adapter-codex';
 import type { CodexUpdatePolicy } from '../installation/setup-state.ts';
 import {
@@ -16,7 +17,7 @@ export { codexThreadActivityFromNative };
 export type { CodexDaemonVersion, CodexLoadedThreadActivity };
 
 const CODEX_RESTART_WARNING =
-  'Remote terminals attached to the daemon will disconnect and must be resumed explicitly.';
+  'Remote terminals will disconnect and must be resumed explicitly. If graceful shutdown stalls, this confirmed restart terminates the verified daemon and interrupts its unfinished turns.';
 
 export function inspectionFromVersions(input: {
   agent: string;
@@ -63,6 +64,7 @@ export function inspectionFromVersions(input: {
 
 export interface CodexRuntimeDependencies {
   readVersion(): Promise<CodexDaemonVersion | undefined>;
+  readDaemonHealth?(): CodexDaemonHealth;
   readConfigFreshness?(version: CodexDaemonVersion): Promise<{
     changed: boolean;
     detail: string;
@@ -70,7 +72,7 @@ export interface CodexRuntimeDependencies {
   }>;
   loadedThreads(): Promise<CodexLoadedThreadActivity[]>;
   policy(): CodexUpdatePolicy;
-  restart(): Promise<void>;
+  restart(options?: { confirmed?: boolean }): Promise<void>;
 }
 
 export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies): RuntimeUpdateProvider {
@@ -94,15 +96,20 @@ export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies)
         };
       }
       if (!version || version.status !== 'running') {
+        const health = deps.readDaemonHealth?.();
+        const recoverable = health?.state === 'running';
         return {
           agent: 'codex',
           displayName: 'Codex',
           runtimeKind: 'daemon',
-          managed: false,
-          state: 'unavailable',
-          updateAvailable: false,
+          managed: recoverable,
+          state: health && health.state !== 'absent' ? 'error' : 'unavailable',
+          updateAvailable: recoverable,
           autoRestartReady: false,
-          detail: 'Codex managed daemon is not running.',
+          installedVersion: health?.installedVersion,
+          runningVersion: health?.runningVersion,
+          restartWarning: CODEX_RESTART_WARNING,
+          detail: health?.detail ?? 'Codex managed daemon is not running.',
           checkedAt: Date.now(),
         };
       }
@@ -121,6 +128,8 @@ export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies)
             runtimeKind: 'daemon',
             managed: true,
             state: 'error',
+            installedVersion: version.cliVersion,
+            runningVersion: version.appServerVersion,
             updateAvailable: false,
             autoRestartReady: false,
             detail: `Codex user-config freshness probe failed: ${error instanceof Error ? error.message : String(error)}`,
