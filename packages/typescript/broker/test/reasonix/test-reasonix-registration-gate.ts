@@ -148,8 +148,11 @@ try {
 
   const enBehavior = setupMessages('en').agentBehavior('reasonix');
   const zhBehavior = setupMessages('zh-Hans').agentBehavior('reasonix');
-  check('setup explains Reasonix Observe/Resume and no-daemon behavior in both presenters',
-    /Observe \+ Resume/.test(enBehavior) && /没有常驻进程/.test(zhBehavior), `${enBehavior} | ${zhBehavior}`);
+  check('setup explains Reasonix Observe/Create/Resume and no-daemon behavior in both presenters',
+    /Observe plus Create\/Resume/.test(enBehavior)
+      && /观察、创建和继续/.test(zhBehavior)
+      && /没有常驻进程/.test(zhBehavior),
+    `${enBehavior} | ${zhBehavior}`);
   const serviceEntries = brokerServiceEnvironmentEntries({
     homeDir: '/fixture/home',
     stateHome: '/fixture/state',
