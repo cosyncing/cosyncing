@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+- Codex completion notices retain their opening event when the start response
+  arrives before the start notification.
 - Desktop installers complete automatic pairing when the local broker is ready
   but an agent-list or service-status check fails. Client handoff results now
   distinguish failed pairing from a saved credential.

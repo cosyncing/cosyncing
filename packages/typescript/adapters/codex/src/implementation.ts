@@ -4782,8 +4782,12 @@ class CodexResumeConnection implements SessionConnection {
         return;
       }
       if (this.turnRunStateMatches(expectedTurnRunVersion, expectedTurnRunState)) {
-        if (startedTurnId) this.markRunning(startedTurnId);
-        else this.markUnknown();
+        if (startedTurnId) {
+          // The response can precede turn/started; whichever admits the turn emits its opening.
+          this.markRunning(startedTurnId);
+          this.emit({ type: 'status', status: 'running' });
+          this.emitNativeRunSummary(started, 'running');
+        } else this.markUnknown();
       }
     } catch (err) {
       if (captureFirstTurnStart) {
