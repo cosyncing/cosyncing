@@ -69,7 +69,7 @@ export function installerPairingRegressions(check: Check, powerShell?: string): 
     } else {
       const executable = powerShell ?? join(process.env.SystemRoot ?? 'C:\\Windows',
         'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-      const source = readFileSync(join(import.meta.dir, '../../release/bootstrap-template.ps1'), 'utf8');
+      const source = readFileSync(join(import.meta.dir, '../../release/bootstrap-template.ps1'), 'utf8').replaceAll('\r\n', '\n');
       const prefix = section(source, 'function Get-JsonProperty {', '\n<#');
       const statusStep = section(source,
         '  $status = Invoke-Native -FilePath $bunBin -ArgumentList @($application, \'status\', \'--json\')',

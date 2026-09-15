@@ -5,7 +5,8 @@ import { join } from 'node:path';
 
 type Check = (name: string, ok: boolean, detail?: string) => void;
 const shellTemplate = readFileSync(join(import.meta.dir, '../../release/bootstrap-template.sh'), 'utf8');
-const psTemplate = readFileSync(join(import.meta.dir, '../../release/bootstrap-template.ps1'), 'utf8');
+// Git's Windows checkout can use CRLF; fixture boundaries describe logical lines.
+const psTemplate = readFileSync(join(import.meta.dir, '../../release/bootstrap-template.ps1'), 'utf8').replaceAll('\r\n', '\n');
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 export async function installerOnboardingRegressions(check: Check, powerShell?: string): Promise<void> {
