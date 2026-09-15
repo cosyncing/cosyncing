@@ -436,6 +436,7 @@ try {
   const boundedReattach = await attach(clientAOrigin, restartedIdA);
   phones.add(boundedReattach);
   await boundedReattach.waitFrame((frame) => frame?.kind === 'history');
+  await boundedReattach.waitFrame(artifactNamed(overflowNames.at(-1)!));
   const boundedNames = artifactFrames(boundedReattach).map((message) => String(message.name));
   check('8b live reattach emits at most the configured replay-frame bound', boundedNames.length === 3, `count=${boundedNames.length}`);
   check('8c replay contains only the newest owner versions',
@@ -456,6 +457,7 @@ try {
     boundedRestartOwner.waitFrame((frame) => frame?.kind === 'history'),
     boundedRestartPeer.waitFrame((frame) => frame?.kind === 'history'),
   ]);
+  await boundedRestartOwner.waitFrame(artifactNamed(overflowNames.at(-1)!));
   const restartNames = artifactFrames(boundedRestartOwner).map((message) => String(message.name));
   check('8d bounded hydration survives a real broker restart',
     JSON.stringify(restartNames) === JSON.stringify(overflowNames.slice(-3)), restartNames.join(','));
