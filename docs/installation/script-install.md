@@ -65,6 +65,20 @@ their package manager.
 
 ## What the all-in-one does
 
+With a terminal attached, the installer first asks for English or Simplified Chinese.
+It passes the selection to `setup`, which continues in that language without asking again.
+Set `COSYNCING_SETUP_LANG=en` or `COSYNCING_SETUP_LANG=zh-Hans` to skip the language prompt;
+this does not accept any installation or setup confirmation. Without a terminal, the
+installer keeps its existing behavior of printing the command to finish setup later.
+
+If another process occupies the configured broker port, interactive setup suggests the
+next available port, such as 7735 when 7734 is busy. Press Enter to accept it or enter
+another port from 1024 to 65535. Setup checks it again before applying the plan, then
+saves it for the broker, integrations, and pairing URLs. An identified second cosyncing
+broker must be stopped explicitly because its managed agent runtimes can also conflict.
+An unanswered health check also stays blocked until setup can identify the listener.
+Non-interactive `setup --yes` keeps reporting the conflict without changing the port.
+
 After the broker's files are in place — the same work `install-server.*` does, verified the same way —
 it continues:
 
@@ -80,11 +94,25 @@ it continues:
    `pair --json`, and writes it to `$COSYNCING_HOME/client-pairing.json`, owner-only. The client reads
    that file once on its next launch, imports it, and deletes it. The offer is one-use and expires in
    five minutes, so a file left behind by a client that never started is a dead offer.
+   Pairing uses the local listener's readiness even if `status` reports an unrelated
+   agent-list or service-status failure; `pair` still verifies the broker and owner credential.
 4. **Launches the client.**
 
 Two hosts get no client and are told so, and the install still succeeds as a server install: Linux
 arm64, for which no client is built, and a Linux machine with neither `DISPLAY` nor `WAYLAND_DISPLAY`
 set, where a GUI is a package nothing can start.
+
+### If the Linux desktop client opens without authentication
+
+Read the installer's `Pairing handoff:` line. A running desktop app skips the startup
+handoff; quit it before rerunning the installer. Foreground setup does not start a
+broker, so start it before pairing. A fresh handoff expires after five minutes.
+
+The desktop client also needs an unlocked Secret Service keyring, such as GNOME
+Keyring, to save credentials. WSLg provides a display but may lack a desktop login
+session that starts and unlocks a keyring. After resolving the reported issue, run
+`cosy pair` and paste the new link in the client's pairing form. Keep the pairing
+link and credentials out of support logs.
 
 ## Linux and macOS
 

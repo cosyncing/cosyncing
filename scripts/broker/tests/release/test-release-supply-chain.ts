@@ -68,6 +68,9 @@ import { forbiddenArtifactContent } from '../../release/package-evidence.ts';
 import { javaScriptReleaseRegressions } from './javascript-release-regressions.ts';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
+import { installerOnboardingRegressions } from './installer-onboarding-regressions.ts';
+import { installerPairingRegressions } from './installer-pairing-regressions.ts';
+
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
 function check(name: string, ok: boolean, detail?: string): void {
@@ -158,7 +161,7 @@ const identity = ${JSON.stringify({
 })};
 if (command === 'version' && args[0] === '--json') console.log(JSON.stringify(identity, null, 2));
 else if (command === 'setup') console.log('fixture setup completed');
-else if (command === 'status') console.log(JSON.stringify({schemaVersion: 2,
+else if (command === 'status') console.log(JSON.stringify({schemaVersion: 2, product: 'cosyncing',
   listener: {host: '127.0.0.1', port: 7734, url: 'http://127.0.0.1:7734', ready: true}}));
 else if (command === 'pair' && args[0] === '--json' && args[1] === '--broker-url') {
   console.log(JSON.stringify({schemaVersion: 1, pairingId: 'fixture-pairing',
@@ -302,6 +305,8 @@ cp "$FAKE_RELEASE_ROOT/\${URL##*/}" "$OUT"
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-release-supply-chain-'));
 try {
+  await installerOnboardingRegressions(check);
+  installerPairingRegressions(check);
   const timeoutRetryMarker = join(root, 'timeout-retry-marker');
   let timeoutRetryCleanupCalls = 0;
   const timeoutRetryControl = await run([
@@ -758,7 +763,7 @@ try {
   // per-user unpackaged application, and it is Windows' own variable rather than a cosyncing knob.
   check('install.ps1 reads exactly the documented environment, and no refusal override',
     environmentReads.join(',')
-        === 'APPDATA,BUN_INSTALL,COSYNCING_BUN_BIN,COSYNCING_HOME,COSYNCING_SKIP_BUN_INSTALL,LOCALAPPDATA,USERPROFILE'
+        === 'APPDATA,BUN_INSTALL,COSYNCING_BUN_BIN,COSYNCING_HOME,COSYNCING_SETUP_LANG,COSYNCING_SKIP_BUN_INSTALL,LOCALAPPDATA,USERPROFILE'
       && providerReads.join(',') === 'SystemRoot'
       && powerShellInstaller.includes('refusing an elevated install'),
     `${environmentReads.join(',')} | $env:${providerReads.join(',$env:')}`);
@@ -852,7 +857,8 @@ try {
     const rule = powerShellInstaller.indexOf('function Assert-ClientNotRunning');
     const preflight = powerShellInstaller.indexOf('Assert-ClientNotRunning -ClientRoot $preflightRoot');
     const placement = powerShellInstaller.indexOf('Assert-ClientNotRunning -ClientRoot $CLIENT_ROOT');
-    const installed = powerShellInstaller.indexOf('Write-Output "Installed cosyncing');
+    check('PowerShell installers are ASCII-safe for irm and saved-file execution', !/[^\x00-\x7f]/.test(powerShellInstaller));
+    const installed = powerShellInstaller.indexOf('Write-InstallerMessage "Installed cosyncing');
     check('install.ps1 refuses a running desktop client in preflight, before it installs anything',
       rule >= 0 && preflight >= 0 && placement >= 0 && installed >= 0
         && preflight < installed && installed < placement,
@@ -1375,6 +1381,7 @@ try {
       HOME: handoffHome,
       DISPLAY: ':0',
       FAKE_RELEASE_ROOT: handoffRelease,
+      COSYNCING_SETUP_LANG: 'en',
       LANG: 'C.UTF-8',
     },
   });
@@ -1400,6 +1407,7 @@ try {
       PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: headlessHandoffHome,
       FAKE_RELEASE_ROOT: handoffRelease,
+      COSYNCING_SETUP_LANG: 'en',
       LANG: 'C.UTF-8',
     },
   });
@@ -1435,6 +1443,7 @@ try {
         PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
         HOME: supersededHome,
         FAKE_RELEASE_ROOT: handoffRelease,
+        COSYNCING_SETUP_LANG: 'en',
         LANG: 'C.UTF-8',
       },
     });
@@ -1473,6 +1482,7 @@ try {
       PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: supersededHome,
       FAKE_RELEASE_ROOT: handoffRelease,
+      COSYNCING_SETUP_LANG: 'en',
       LANG: 'C.UTF-8',
     },
   });
@@ -1505,6 +1515,7 @@ exit 1
       HOME: runningClientHome,
       DISPLAY: ':0',
       FAKE_RELEASE_ROOT: handoffRelease,
+      COSYNCING_SETUP_LANG: 'en',
       LANG: 'C.UTF-8',
     },
   });

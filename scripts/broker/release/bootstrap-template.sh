@@ -38,6 +38,50 @@ fail() {
   exit 1
 }
 
+# Select before downloading or placing anything. Under `curl ... | sh`, stdin is the script,
+# so answers must come from the terminal. Never consume the installer pipe as prompt input.
+select_setup_language() {
+  printf '选择语言 / Language\n  1) English\n  2) 简体中文\n' >&2
+  while :; do
+    printf '[1/2, Enter = English, q = cancel] ' >&2
+    IFS= read -r language_answer || fail 'language selection cancelled'
+    case "$language_answer" in
+      ''|1) COSYNCING_SETUP_LANG='en'; return ;;
+      2) COSYNCING_SETUP_LANG='zh-Hans'; return ;;
+      q|Q) exit 0 ;;
+      *) printf 'Please enter 1 or 2 / 请输入 1 或 2。\n' >&2 ;;
+    esac
+  done
+}
+
+# Server-only installs have no wizard. Explicit environment choices also work for unattended runs.
+if [ "$INSTALL_MODE" = 'all' ]; then
+  case "${COSYNCING_SETUP_LANG:-}" in
+    en|zh-Hans) ;;
+    *)
+      if [ -t 0 ]; then
+        select_setup_language
+      elif [ -t 1 ]; then
+        select_setup_language 0<&1
+      elif [ -t 2 ]; then
+        select_setup_language 0<&2
+      elif ( : < /dev/tty ) 2>/dev/null; then
+        select_setup_language < /dev/tty
+      fi
+      ;;
+  esac
+fi
+COSYNCING_SETUP_LANG="${COSYNCING_SETUP_LANG:-en}"
+export COSYNCING_SETUP_LANG
+
+installer_message() {
+  if [ "$COSYNCING_SETUP_LANG" = 'zh-Hans' ]; then
+    printf '%s\n' "$2"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 # A copied command must survive spaces and apostrophes and must not depend on Bun being on PATH.
 shell_quote() {
   printf "'"
@@ -583,8 +627,8 @@ if [ -n "$RETIRED_WEB" ]; then
 fi
 [ -L "$ALIAS" ] || ln -s 'cosyncing' "$ALIAS"
 
-printf 'Installed cosyncing %s at %s\n' "$VERSION" "$APPLICATION"
-printf 'Web client: %s\n' "$WEB_ROOT"
+installer_message "Installed cosyncing $VERSION at $APPLICATION" "已安装 cosyncing $VERSION：$APPLICATION"
+installer_message "Web client: $WEB_ROOT" "网页客户端：$WEB_ROOT"
 printf 'Bun runtime: %s\n' "$BUN_STATE"
 printf 'Artifact digests: matched the sha256 values embedded in this installer.\n'
 printf 'Release signature: %s\n' "$SIGNATURE_STATE"
@@ -822,7 +866,9 @@ if [ ! -t 1 ] && [ ! -t 2 ] && { [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/
   exit 0
 fi
 
-printf '\nRunning setup. It shows its plan and asks before changing anything.\n'
+printf '\n'
+installer_message 'Running setup. It shows its plan and asks before changing anything.' \
+  '正在运行安装配置。它会显示计划，并在做出更改前征求确认。'
 SETUP_STATUS=0
 if [ -t 1 ]; then
   setup_with_terminal 0<&1 || SETUP_STATUS=$?
@@ -913,11 +959,15 @@ elif [ -n "$CLIENT_RUNNING" ]; then
     "$APPLICATION"
 elif ! ensure_handoff_home; then
   handoff_failed "the client's own home could not be created at $HANDOFF_HOME"
-elif "$BUN_BIN" "$APPLICATION" status --json > "$WORK/status.json" 2>/dev/null \
+# status also checks agents and the service manager. Its exit code can be nonzero
+# while the listener is ready; pair independently verifies identity and owner auth.
+elif ( "$BUN_BIN" "$APPLICATION" status --json > "$WORK/status.json" 2>/dev/null || true ) \
   && LISTENER_URL="$("$BUN_BIN" -e '
     const status = JSON.parse(await Bun.file(process.argv[1]).text());
     const url = status?.listener?.url;
-    if (typeof url !== "string" || !/^https?:\/\//.test(url)) process.exit(1);
+    if (status?.product !== "cosyncing" || status?.listener?.ready !== true || typeof url !== "string") process.exit(1);
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" || parsed.username || parsed.password) process.exit(1);
     console.log(url);
   ' "$WORK/status.json" 2>/dev/null)" \
   && [ -n "$LISTENER_URL" ]
@@ -947,7 +997,7 @@ then
     handoff_failed 'the broker did not issue a pairing offer'
   fi
 else
-  handoff_failed 'the broker did not report a listener URL'
+  handoff_failed 'the broker did not report a ready local listener; check cosy status'
 fi
 
 if [ -z "$CLIENT_SKIP" ]; then

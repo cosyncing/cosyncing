@@ -7,6 +7,7 @@ import {
   note,
   outro,
   select,
+  text as promptText,
 } from '@clack/prompts';
 import {
   SETUP_PROMPT_CANCELLED,
@@ -32,6 +33,7 @@ import {
   type SetupMessages,
 } from './setup-i18n.ts';
 import { resolveTokdashEndpoint, tokdashRejectionReason } from './tokdash-quota.ts';
+import { validSetupPort } from './setup-ports.ts';
 import { APP_PATH, browserClientUrl } from '../transport/http-contracts.ts';
 
 export interface SetupOutputWriter {
@@ -183,6 +185,8 @@ export function createClackSetupPresenter(): SetupPresenter {
   const text = (): SetupMessages => setupMessages(language);
   return {
     async chooseLanguage(inspection): Promise<SetupPromptResult<SetupLanguage>> {
+      const inherited = setupLanguageFromEnv(process.env);
+      if (inherited) { language = inherited; return language; }
       const stored = normalizeSetupLanguage(inspection.setupState.language) ?? DEFAULT_SETUP_LANGUAGE;
       const value = await select<SetupLanguage>({
         // Bilingual on purpose: this one prompt is read by someone who has not chosen a language yet.
@@ -192,6 +196,20 @@ export function createClackSetupPresenter(): SetupPresenter {
       });
       if (!isCancel(value)) language = value;
       return cancelled(value);
+    },
+    async chooseBrokerPort(current, suggested): Promise<SetupPromptResult<number>> {
+      log.warn(text().brokerPortOccupied(current));
+      const value = await promptText({
+        message: text().brokerPortPrompt,
+        ...(suggested === undefined ? {} : { placeholder: String(suggested), defaultValue: String(suggested) }),
+        validate: (input) => {
+          // clack validates an empty submission before substituting defaultValue.
+          const candidate = input || (suggested === undefined ? '' : String(suggested));
+          return /^\d+$/.test(candidate) && validSetupPort(Number(candidate))
+            ? undefined : text().brokerPortInvalid;
+        },
+      });
+      return isCancel(value) ? SETUP_PROMPT_CANCELLED : Number(value);
     },
     intro(inspection): void {
       intro(text().introTitle(PRODUCT_IDENTITY.productName));

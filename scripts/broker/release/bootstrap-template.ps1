@@ -8,8 +8,8 @@
 # (that is .NET Core 3+), so the P-256 key is decoded by hand into a CNG blob; and `Invoke-WebRequest`
 # needs `-UseBasicParsing` and an explicit TLS 1.2 selection.
 #
-# It installs the JavaScript distribution — one universal bundle plus the web client sidecar, executed by a
-# separately installed Bun — and it stops after placing files. Registering the service is `setup`'s job and
+# It installs the JavaScript distribution -- one universal bundle plus the web client sidecar, executed by a
+# separately installed Bun -- and it stops after placing files. Registering the service is `setup`'s job and
 # is already qualified; nothing here touches Task Scheduler.
 #
 # No `param()` block, deliberately: the documented invocation is
@@ -92,6 +92,37 @@ function Get-EnvironmentValue {
   return $value.Trim()
 }
 
+# Keep executable text ASCII: irm in Windows PowerShell 5.1 may decode a download
+# without a charset as Latin-1, and a UTF-8 BOM does not repair that decoding.
+function Get-InstallerText {
+  param([string] $Utf8Base64)
+  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Utf8Base64))
+}
+
+# Read-Host uses the console even when the script itself arrives through `irm ... | iex`.
+# Write-Host keeps the menu out of the function's return value. No downloads or writes precede it.
+function Select-SetupLanguage {
+  $selected = Get-EnvironmentValue 'COSYNCING_SETUP_LANG'
+  if ($selected -ceq 'en' -or $selected -ceq 'zh-Hans') { return $selected }
+  if ($INSTALL_MODE -ne 'all' -or [Console]::IsInputRedirected) { return 'en' }
+  Write-Host (Get-InstallerText '6YCJ5oup6K+t6KiAIC8gTGFuZ3VhZ2UKICAxKSBFbmdsaXNoCiAgMikg566A5L2T5Lit5paH')
+  while ($true) {
+    $answer = Read-Host '[1/2, Enter = English, q = cancel]'
+    switch -Exact ($answer) {
+      '' { return 'en' }
+      '1' { return 'en' }
+      '2' { return 'zh-Hans' }
+      'q' { exit 0 }
+      default { Write-Host (Get-InstallerText 'UGxlYXNlIGVudGVyIDEgb3IgMiAvIOivt+i+k+WFpSAxIOaIliAy44CC') }
+    }
+  }
+}
+
+function Write-InstallerMessage {
+  param([string] $English, [string] $Chinese)
+  if ($SETUP_LANGUAGE -ceq 'zh-Hans') { Write-Output $Chinese } else { Write-Output $English }
+}
+
 # Read one JSON field without StrictMode turning an absent property into a stack trace. A missing field
 # reads as $null and every caller compares against what it requires, so a manifest whose shape changed
 # fails closed with the message for that field.
@@ -107,7 +138,7 @@ function Get-JsonProperty {
 Run a native executable and hand back its output and exit code.
 
 Windows PowerShell 5.1 turns a native child's stderr into ErrorRecords, and under
-`$ErrorActionPreference = 'Stop'` the first one is a TERMINATING error — so a plain `& $bun --revision`
+`$ErrorActionPreference = 'Stop'` the first one is a TERMINATING error -- so a plain `& $bun --revision`
 whose output is captured kills the installer on any Bun that prints a warning. The preference is lowered
 for exactly the duration of the call and restored in a `finally`, and both streams are captured to files.
 Captured stderr is carried for diagnosis only and is never parsed for a decision.
@@ -157,7 +188,7 @@ FILE_ALL_ACCESS, `P` protects the DACL from inheritance, and `OICI` carries the 
 contents and is absent on a file. The three principals are the user, SYSTEM and Administrators, closed.
 
 A directory with inherited access is reported `unsafe-dacl` by `doctor` and refused by `setup`, so each
-level is created WITH this descriptor rather than tightened afterwards — a post-mkdir change leaves a
+level is created WITH this descriptor rather than tightened afterwards -- a post-mkdir change leaves a
 window in which a principal admitted by a shared parent could keep an open handle. Measured on Windows
 PowerShell 5.1: a child created inside one of these directories comes back `OICIID` and unprotected, so
 every level genuinely needs its own.
@@ -237,7 +268,7 @@ Create or converge one application-owned directory, mirroring `ensureOwnerOnlyDi
 An existing directory is refused unless the current user owns it, and is then tightened rather than
 recreated: an operator's own `%USERPROFILE%\.cosyncing` from an earlier install is legitimate and may
 predate this policy, while a directory somebody else owns must never be laundered by tightening it. A
-reparse point is refused outright — the shell refuses a symlinked state home for the same reason.
+reparse point is refused outright -- the shell refuses a symlinked state home for the same reason.
 #>
 function Initialize-OwnerOnlyDirectory {
   param([Parameter(Mandatory = $true)][string] $Path)
@@ -323,8 +354,8 @@ function Get-EmbeddedArtifact {
 <#
 The desktop client row for one host, or $null when this release publishes none for it.
 
-$null rather than a refusal: a host with no client is a supported outcome of an all-in-one install — it
-finishes as a server install and says so — where a missing BROKER artifact is a broken release.
+$null rather than a refusal: a host with no client is a supported outcome of an all-in-one install -- it
+finishes as a server install and says so -- where a missing BROKER artifact is a broken release.
 #>
 function Get-EmbeddedClient {
   param([Parameter(Mandatory = $true)][string] $Host_)
@@ -349,8 +380,8 @@ $P256_CURVE_OID = [byte[]] @(0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x0
 <#
 Build an ECDSA verifier from the embedded SPKI PEM, by hand.
 
-Windows PowerShell 5.1 runs on .NET Framework, which has no `ImportSubjectPublicKeyInfo` — that is
-.NET Core 3+ — and Windows ships no system OpenSSL to shell out to. So the SPKI is decoded here: assert it
+Windows PowerShell 5.1 runs on .NET Framework, which has no `ImportSubjectPublicKeyInfo` -- that is
+.NET Core 3+ -- and Windows ships no system OpenSSL to shell out to. So the SPKI is decoded here: assert it
 names the P-256 curve, take the trailing uncompressed point, and hand CNG a `BCRYPT_ECCKEY_BLOB` (`ECS1`
 magic, cbKey 32, X, Y). CNG can always do this, which is why this script has no "cannot verify" state and
 no degraded branch: signature FAILURE is fatal, and the genuine inability to verify that a stock-LibreSSL
@@ -396,7 +427,7 @@ function New-P256Verifier {
 <#
 Verify one detached signature over one downloaded payload.
 
-The `.p256.sig` files are IEEE P1363 — the raw 64-byte `r || s` — which is exactly the layout
+The `.p256.sig` files are IEEE P1363 -- the raw 64-byte `r || s` -- which is exactly the layout
 `ECDsa.VerifyData(byte[], byte[], HashAlgorithmName)` reads, and the only layout .NET Framework offers.
 The `.p256.der.sig` siblings exist for `openssl dgst -verify` on the shell path and are not used here.
 #>
@@ -424,7 +455,7 @@ function Assert-P256Signature {
 Every digest the signed manifest states FOR THIS ASSET, by walking the document.
 
 Reading `artifacts[0].sha256` and friends by position would bind this check to today's manifest shape, and
-scanning for the digest anywhere would be weaker than it looks — it would pass for a manifest that named
+scanning for the digest anywhere would be weaker than it looks -- it would pass for a manifest that named
 the asset in one object and carried the digest in another. So the walk collects the `sha256` of every
 object whose `name` is this asset, and the caller refuses anything but exactly one, the same rule the
 checksum list applies to a repeated row. Neither is reachable without the signing key; a rule that
@@ -557,12 +588,12 @@ Windows exposes no AVX2 bit through CIM. Worth asking because Bun's plain build 
 rather than exiting cleanly, and a Windows Error Reporting dialog during a headless install is worse
 than a wasted download.
 
-Both are wrapped so a host that cannot compile at all — Constrained Language Mode, a locked-down
-compiler — degrades instead of failing. See each caller for what degraded means there.
+Both are wrapped so a host that cannot compile at all -- Constrained Language Mode, a locked-down
+compiler -- degrades instead of failing. See each caller for what degraded means there.
 #>
 # TRUE when this process holds an elevated token. Its own function for the same reason
 # `Get-NativeMachineValue` is: a host property a test cannot change about itself has to be replaceable in
-# a copy of the rendered script, since the alternative is an environment override — and a refusal that an
+# a copy of the rendered script, since the alternative is an environment override -- and a refusal that an
 # environment variable can switch off is not a refusal.
 # Put the install directory on the user's PATH.
 #
@@ -683,7 +714,7 @@ The machine's architecture as `Kind` (`x64`, `arm64`, `other` or `unknown`) plus
 `RuntimeInformation.OSArchitecture` is NOT a substitute for the kernel call and is only the fallback
 here: on .NET Framework it is `GetNativeSystemInfo`, documented to report the EMULATED architecture to
 an x86 or x64 process on an ARM64 machine, and before 4.8.1 it does not consult the machine at all. So
-an installer keyed on it would admit an emulated ARM64 host silently — which is the case this refusal
+an installer keyed on it would admit an emulated ARM64 host silently -- which is the case this refusal
 exists for.
 
 `unknown` means no probe answered, and it PROCEEDS. That is a deliberate difference from
@@ -725,7 +756,7 @@ function Get-MachineArchitecture {
   return [pscustomobject] @{ Kind = $kind; Reported = "$reported" }
 }
 
-# Only REORDERS the pinned rows — the `--revision` probe still decides which build runs — so a probe that
+# Only REORDERS the pinned rows -- the `--revision` probe still decides which build runs -- so a probe that
 # cannot run costs the default order and nothing else.
 function Test-Avx2Present {
   if (-not (Initialize-NativeProbe)) { return $true }
@@ -754,7 +785,7 @@ function Get-BunCandidates {
 
 <#
 Bun is DOWNLOADED, never bundled. A Bun inside this release would put a JavaScriptCore build back into the
-artifact set — the one thing this distribution exists to avoid — and would make every cosyncing release
+artifact set -- the one thing this distribution exists to avoid -- and would make every cosyncing release
 responsible for shipping a runtime it does not build.
 
 Downloaded is not the same as unverified. Every cosyncing artifact above is checked against a digest baked
@@ -785,7 +816,7 @@ function Install-PinnedBun {
     # `tar.exe` (bsdtar), not `Expand-Archive`. The cmdlet lives in Microsoft.PowerShell.Archive, which is
     # the same class of dependency this script refuses to take on Get-Acl: a 5.1 session that inherited a
     # PowerShell 7 PSModulePath cannot auto-load it, and this is the ONE path that only runs on a host
-    # without a usable Bun — so the failure would land exactly where nothing else has been proven. bsdtar
+    # without a usable Bun -- so the failure would land exactly where nothing else has been proven. bsdtar
     # reads zip, it is already a hard requirement for the web sidecar, and it is refused for once above.
     $extract = Invoke-Native -FilePath $TAR_EXE -ArgumentList @('-xf', $archive, '-C', $unpack)
     if ($extract.ExitCode -ne 0) {
@@ -819,7 +850,7 @@ function Invoke-InstallCleanup {
     }
   }
   # A retired web root is the operator's previous client, held only for the instant between two renames. On
-  # any failure it is put BACK, never discarded — losing it would leave a host with no web client at all.
+  # any failure it is put BACK, never discarded -- losing it would leave a host with no web client at all.
   if ($RetiredWeb -and (Test-Path -LiteralPath $RetiredWeb -PathType Container)) {
     if (Test-Path -LiteralPath $WEB_ROOT) {
       Remove-Item -LiteralPath $RetiredWeb -Recurse -Force -ErrorAction SilentlyContinue
@@ -923,6 +954,7 @@ function Approve-NpmApplicationTakeover {
 }
 
 try {
+  $SETUP_LANGUAGE = Select-SetupLanguage
   if ($PSVersionTable.PSVersion -lt [Version] '5.1') {
     Fail ("Windows PowerShell 5.1 or newer is required; this host reports " +
       "$($PSVersionTable.PSVersion). Update Windows Management Framework, or run this installer from a " +
@@ -931,7 +963,7 @@ try {
 
   # The Windows mirror of the shell installer's root refusal. The qualified service lifecycle is a
   # per-user Scheduled Task registered by the user who owns it, and an elevated install would stamp
-  # BUILTIN\Administrators as the owner of every file it creates — which the product's own owner-only
+  # BUILTIN\Administrators as the owner of every file it creates -- which the product's own owner-only
   # inspection then reads as somebody else's state.
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
   if (Test-ElevatedProcess -Identity $identity) {
@@ -941,7 +973,7 @@ try {
   $CURRENT_USER_SID = $identity.User.Value
 
   # The MACHINE architecture, not the process's. `brokerHostVerdict` refuses for both reasons this does:
-  # Windows ARM64 is not qualified, and neither is an x64 process emulated on an ARM64 machine — which
+  # Windows ARM64 is not qualified, and neither is an x64 process emulated on an ARM64 machine -- which
   # reports x64 for itself, so a check written against the process would admit it silently. The two now
   # ask the same kernel export; see `Get-MachineArchitecture` for why the framework's own answer cannot
   # be the one that decides, and for why an unanswerable probe proceeds here but not there.
@@ -1049,7 +1081,7 @@ try {
   }
   # One key id covers both signatures, because the Ed25519 and P-256 keys are one release identity rather
   # than two independent trust anchors: a release is signed by the pair. This installer carries only the
-  # P-256 half and still asserts the manifest's single identity — the two cannot be rotated apart without
+  # P-256 half and still asserts the manifest's single identity -- the two cannot be rotated apart without
   # also changing this id. See docs/release/broker-release-signing.md.
   $manifestKeyId = Get-JsonProperty -Name 'keyId' `
     -Object (Get-JsonProperty -Object $manifest -Name 'signature')
@@ -1263,15 +1295,15 @@ try {
   }
 
   # The shell places a `cosy -> cosyncing` symlink. Windows offers a JavaScript bundle no equivalent, so
-  # `cosy` is a batch shim with the resolved Bun baked in — a convenience for humans typing commands.
+  # `cosy` is a batch shim with the resolved Bun baked in -- a convenience for humans typing commands.
   # `setup` writes the service's own action with bun.exe named directly and never reads this file. Written
   # without a byte-order mark, because cmd.exe would try to execute the mark as part of the first command.
   [IO.File]::WriteAllText($aliasPath, "@`"$bunBin`" `"%~dp0cosyncing`" %*`r`n",
     (New-Object Text.UTF8Encoding $false))
   Set-OwnerOnlySecurity -Path $aliasPath -Kind 'file'
 
-  Write-Output "Installed cosyncing $VERSION at $application"
-  Write-Output "Web client: $WEB_ROOT"
+  Write-InstallerMessage "Installed cosyncing $VERSION at $application" ((Get-InstallerText '5bey5a6J6KOFIGNvc3luY2luZyB7MH3vvJp7MX0=') -f $VERSION, $application)
+  Write-InstallerMessage "Web client: $WEB_ROOT" ((Get-InstallerText '572R6aG15a6i5oi356uv77yaezB9') -f $WEB_ROOT)
   Write-Output "Bun runtime: $bunState"
   Write-Output 'Artifact digests: matched the sha256 values embedded in this installer.'
   Write-Output ('Release signature: verified (ECDSA P-256 over the signed release manifest and ' +
@@ -1472,19 +1504,23 @@ try {
   }
 
   Write-Output ''
-  Write-Output 'Running setup. It shows its plan and asks before changing anything.'
+  Write-InstallerMessage 'Running setup. It shows its plan and asks before changing anything.' `
+    (Get-InstallerText '5q2j5Zyo6L+Q6KGM5a6J6KOF6YWN572u44CC5a6D5Lya5pi+56S66K6h5YiS77yM5bm25Zyo5YGa5Ye65pu05pS55YmN5b6B5rGC56Gu6K6k44CC')
   # Run with the console attached rather than through `Invoke-Native`, which captures both streams to
   # files: setup is a conversation, and a captured conversation is a hang. The preference is lowered for
   # the duration so a native child's stderr is not turned into a terminating error, exactly as
   # `Invoke-Native` does it.
   $setupExit = -1
+  $previousSetupLanguage = [Environment]::GetEnvironmentVariable('COSYNCING_SETUP_LANG')
   $previousPreference = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
     $global:LASTEXITCODE = 0
+    [Environment]::SetEnvironmentVariable('COSYNCING_SETUP_LANG', $SETUP_LANGUAGE)
     & $bunBin $application setup
     $setupExit = $LASTEXITCODE
   } finally {
+    [Environment]::SetEnvironmentVariable('COSYNCING_SETUP_LANG', $previousSetupLanguage)
     $ErrorActionPreference = $previousPreference
   }
   if ($setupExit -ne 0) {
@@ -1526,19 +1562,25 @@ try {
     exit 0
   }
   $status = Invoke-Native -FilePath $bunBin -ArgumentList @($application, 'status', '--json')
-  if ($status.ExitCode -ne 0) {
-    $handoffSkip = 'the broker did not report a listener URL'
-  } else {
-    try {
-      $listenerUrl = [string] (Get-JsonProperty -Name 'url' `
-        -Object (Get-JsonProperty -Object ($status.StdOut | ConvertFrom-Json) -Name 'listener'))
-    } catch {
+  # The overall status includes agent and service checks; pairing needs a ready
+  # local listener. The pair command independently verifies identity and owner auth.
+  try {
+    $statusDocument = $status.StdOut | ConvertFrom-Json
+    $listener = Get-JsonProperty -Object $statusDocument -Name 'listener'
+    $listenerUrl = [string] (Get-JsonProperty -Object $listener -Name 'url')
+    $listenerUri = [uri] $listenerUrl
+    $listenerReady = Get-JsonProperty -Object $listener -Name 'ready'
+    if ((Get-JsonProperty -Object $statusDocument -Name 'product') -cne 'cosyncing' -or
+        $listenerReady -isnot [bool] -or -not $listenerReady -or
+        $listenerUri.Scheme -cne 'http' -or $listenerUri.Host -cne '127.0.0.1' -or
+        $listenerUri.UserInfo) {
       $listenerUrl = ''
     }
-    if ($listenerUrl -notmatch '^https?://') {
-      $handoffSkip = 'the broker did not report a listener URL'
-      $listenerUrl = ''
-    }
+  } catch {
+    $listenerUrl = ''
+  }
+  if (-not $listenerUrl) {
+    $handoffSkip = 'the broker did not report a ready local listener; check cosy status'
   }
   if (-not $handoffSkip) {
     $offer = Invoke-Native -FilePath $bunBin `

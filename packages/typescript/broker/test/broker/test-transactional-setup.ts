@@ -16,6 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+import { setupPortPromptRegressions } from './setup-port-prompt-regressions.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
 import { BUILD_INFO, buildFingerprint, type BuildInfo } from '../../src/runtime/build-info.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
@@ -24,6 +25,10 @@ import {
   inspectBrokerToken,
   inspectPiIntegration,
   readBrokerToken,
+  readPiIntegration,
+  readOmpIntegration,
+  piIntegrationPath,
+  ompIntegrationPath,
 } from '../../src/security/credentials.ts';
 import {
   durableStateLayout,
@@ -38,6 +43,7 @@ import {
   ensureOwnerOnlyDirectory,
 } from '../../src/security/secure-files.ts';
 import { isLooseFile, isOwnerOnlyFile } from '../helpers/isolated-broker-fixture.ts';
+import { validSetupPort, nextAvailableSetupPort } from '../../src/installation/setup-ports.ts';
 import { PRODUCT_IDENTITY } from '../../../protocol/src/product.ts';
 import {
   createDurableServiceSetupAction,
@@ -653,6 +659,7 @@ if (process.argv[2] === '--rollback-restore-crash-child') {
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-transactional-setup-'));
 try {
+  await setupPortPromptRegressions(check);
   // A darwin host completes foreground setup end-to-end. No launchd provider is supplied, so this is the
   // "durable service unavailable" path: it must commit foreground rather than block, and must never explain
   // itself with systemd wording that has no meaning on macOS.
@@ -2503,6 +2510,141 @@ try {
       healthProbes === 1, `healthProbes=${healthProbes}`);
   }
 
+  {
+    const machine = join(root, 'port-unidentified-listener');
+    let healthProbes = 0;
+    let prompts = 0;
+    const presenter = Object.assign(new ScriptedPresenter(), {
+      async chooseBrokerPort() { prompts += 1; return 7735; },
+    });
+    const context = {
+      ...contextFor(machine),
+      probeTcp: async (_host: string, port: number) => port === 7734 ? 'open' as const : 'closed' as const,
+      fetchJson: async (url: string) => {
+        if (url.endsWith('/api/health')) healthProbes += 1;
+        return { status: 'unreachable' as const };
+      },
+    };
+    const result = await runSetup(setupOptions(machine, presenter, { context }));
+    check('an unidentified listener remains blocked after health timeouts without offering another port',
+      result.status === 'blocked' && result.issueCodes?.includes('broker-port-unverified') === true
+        && prompts === 0 && healthProbes === 3 && !existsSync(join(machine, '.cosyncing')));
+  }
+
+  check('port input accepts only non-privileged whole TCP ports',
+    [1024, 7735, 65535].every(validSetupPort)
+      && [0, -1, 1023, 65536, 7734.5, NaN, Infinity].every((port) => !validSetupPort(port)));
+  check('port suggestion respects the upper bound and never treats an unknown probe as free',
+    await nextAvailableSetupPort({ ...contextFor(root), probeTcp: async () => 'unknown' as const }, 65534) === undefined);
+
+  // Port selection is part of the plan: no config is written until approval, and the locked
+  // inspection must probe the selected port again before any transaction action can run.
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    const machine = join(root, `port-selection-${platform}`);
+    const home = join(machine, '.cosyncing');
+    const suggestions: Array<number | undefined> = [];
+    const presenter = Object.assign(new ScriptedPresenter({ opencodeShim: platform !== 'win32' }), {
+      async chooseBrokerPort(current: number, suggested?: number) {
+        suggestions.push(suggested);
+        check(`${platform}: port choice precedes filesystem mutation`, !existsSync(home));
+        return suggested!;
+      },
+    });
+    const context = {
+      ...contextFor(machine, {}, platform),
+      probeTcp: async (_host: string, port: number) => port === 7734 ? 'open' as const : 'closed' as const,
+      fetchJson: async () => ({ status: 'ok' as const, statusCode: 200, json: { product: 'other-service' } }),
+    };
+    const completed = await runSetup(setupOptions(machine, presenter, { context }));
+    const stored = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'));
+    check(`${platform}: occupied 7734 offers 7735 and persists the selected endpoint`,
+      completed.status === 'complete' && suggestions.join(',') === '7735'
+        && stored.broker.port === 7735
+        && presenter.lastPlan?.targetConfig.broker.internalUrl === 'http://127.0.0.1:7735'
+        && completed.access?.loopbackUrl === 'http://127.0.0.1:7735'
+        && readPiIntegration(piIntegrationPath(home)).internalUrl === 'http://127.0.0.1:7735'
+        && readOmpIntegration(ompIntegrationPath(home)).internalUrl === 'http://127.0.0.1:7735',
+      `${completed.status}:${JSON.stringify(completed.failure ?? completed.issueCodes)}`);
+    const rerun = await runSetup(setupOptions(machine, presenter, { context }));
+    check(`${platform}: rerun retains the selected port without another port prompt`,
+      rerun.status === 'already-configured' && suggestions.length === 1);
+  }
+  {
+    const machine = join(root, 'port-selection-busy-suggestion');
+    const suggestions: Array<number | undefined> = [];
+    const context = {
+      ...contextFor(machine),
+      probeTcp: async (_host: string, port: number) => [7734, 7735, 8800].includes(port)
+        ? 'open' as const : 'closed' as const,
+      fetchJson: async () => ({ status: 'ok' as const, statusCode: 200, json: {} }),
+    };
+    const presenter = Object.assign(new ScriptedPresenter(), {
+      async chooseBrokerPort(_current: number, suggested?: number) {
+        suggestions.push(suggested);
+        return suggestions.length === 1 ? 8800 : 8801;
+      },
+    });
+    const completed = await runSetup(setupOptions(machine, presenter, { context }));
+    check('port selection skips busy suggestions and asks again for an occupied custom port',
+      completed.status === 'complete' && suggestions.join(',') === '7736,8801'
+        && completed.access?.loopbackUrl === 'http://127.0.0.1:8801');
+  }
+  for (const scenario of ['cancel', 'decline', 'race', 'unknown', 'unknown-after-apply', 'other-broker']) {
+    const machine = join(root, `port-selection-${scenario}`);
+    let selectedProbes = 0;
+    let prompts = 0;
+    const context = {
+      ...contextFor(machine),
+      probeTcp: async (_host: string, port: number) => {
+        if (port === 7734) return 'open' as const;
+        if (port !== 7735) return 'closed' as const;
+        selectedProbes += 1;
+        if ((scenario === 'unknown' && selectedProbes >= 3)
+            || (scenario === 'unknown-after-apply' && selectedProbes >= 4)) return 'unknown' as const;
+        return scenario === 'race' && selectedProbes >= 3 ? 'open' as const : 'closed' as const;
+      },
+      fetchJson: async () => ({ status: 'ok' as const, statusCode: 200,
+        json: scenario === 'other-broker' ? { ok: true, product: 'cosyncing' } : {} }),
+    };
+    const presenter = Object.assign(new ScriptedPresenter({ apply: scenario !== 'decline' }), {
+      async chooseBrokerPort(): Promise<SetupPromptResult<number>> {
+        prompts += 1;
+        if (prompts > 1) throw new Error(`Unexpected repeated port choice in ${scenario} fixture`);
+        return scenario === 'cancel' ? SETUP_PROMPT_CANCELLED : 7735;
+      },
+    });
+    const completed = await runSetup(setupOptions(machine, presenter, { context }));
+    check(`${scenario}: port selection preserves refusal/cancellation without config mutation`,
+      completed.status !== 'complete' && !existsSync(join(machine, '.cosyncing', 'config.json'))
+        && (scenario !== 'other-broker' || prompts === 0)
+        && (scenario !== 'unknown' || completed.issueCodes?.includes('broker-port-unverified') === true)
+        && (scenario !== 'race' || completed.issueCodes?.includes('broker-port-conflict') === true),
+      `${completed.status}:${JSON.stringify(completed.issueCodes)}:${prompts}`);
+  }
+
+  {
+    const machine = join(root, 'port-selection-credential-scope');
+    await zeroAgentSetup(machine);
+    const home = join(machine, '.cosyncing');
+    const healthRequests: Array<{ url: string; headers?: Readonly<Record<string, string>> }> = [];
+    const context = {
+      ...contextFor(machine),
+      probeTcp: async () => 'open' as const,
+      fetchJson: async (url: string, headers?: Readonly<Record<string, string>>) => {
+        if (url.endsWith('/api/health')) healthRequests.push({ url, headers });
+        return { status: 'ok' as const, statusCode: 200, json: { ok: true, product: 'cosyncing' } };
+      },
+    };
+    const alternate = await inspectSetupEnvironment({
+      buildInfo: BUILD_INFO, executablePath: join(machine, 'bin', 'cosyncing'), home, context, brokerPort: 7735,
+    });
+    const requests = healthRequests.filter(({ url }) => url === 'http://127.0.0.1:7735/api/health');
+    check('an alternate port receives no saved credential and cannot inherit the original broker ownership',
+      requests.length > 0 && requests.every(({ headers }) => headers === undefined)
+        && alternate.portStatus === 'unowned-broker'
+        && JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')).broker.port === 7734);
+  }
+
   // A health probe that did not COMPLETE is not evidence about who owns the
   // port, and this is the verdict that tells the operator to stop the process.
   // Measured on a loaded host: this broker's own /api/health answered correctly
@@ -3727,6 +3869,20 @@ try {
         && await resolveNonInteractive({}, 'zh-Hans') === 'zh-Hans'
         && await resolveNonInteractive({}, 'klingon') === 'en'
         && await resolveNonInteractive({ language: 'en' }, 'zh-Hans') === 'en');
+  }
+
+  {
+    const previous = process.env.COSYNCING_SETUP_LANG;
+    process.env.COSYNCING_SETUP_LANG = 'zh-Hans';
+    try {
+      const presenter = createClackSetupPresenter();
+      const language = await presenter.chooseLanguage({ setupState: { language: 'en' } } as SetupInspection);
+      check('interactive setup reuses the installer language without prompting, overriding stored language',
+        language === 'zh-Hans');
+    } finally {
+      if (previous === undefined) delete process.env.COSYNCING_SETUP_LANG;
+      else process.env.COSYNCING_SETUP_LANG = previous;
+    }
   }
 
   // Tri-state opencode-shim consent in the NON-interactive (`--yes`) presenter: it must never default-true.
