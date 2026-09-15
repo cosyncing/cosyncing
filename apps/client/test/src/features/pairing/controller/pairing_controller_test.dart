@@ -10,7 +10,9 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/pairing_controller.dart';
+import 'package:cosyncing_client/src/features/pairing/data/installer_pairing_handoff.dart';
 import 'package:cosyncing_client/src/features/pairing/data/transport_pairing_accept_service.dart';
 import 'package:cosyncing_client/src/features/pairing/data/transport_pairing_store.dart';
 import 'package:cosyncing_client/src/features/pairing/model/transport_qr_payload.dart';
@@ -24,8 +26,10 @@ void main() {
   late _FakeTransportPairingAcceptService transportAcceptService;
   late _InMemoryTransportPairingStore transportStore;
   late ProviderContainer container;
+  late _InstallerInbox installerInbox;
 
   setUp(() async {
+    installerInbox = _InstallerInbox();
     credentialStore = _SpyCredentialStore();
     repository = _InMemoryBrokerProfileRepository();
     activeStore = _InMemoryActiveBrokerProfileStore();
@@ -36,6 +40,7 @@ void main() {
 
     container = ProviderContainer(
       overrides: [
+        installerPairingInboxProvider.overrideWithValue(installerInbox),
         credentialStoreProvider.overrideWithValue(credentialStore),
         brokerProfileRepositoryProvider.overrideWithValue(repository),
         activeBrokerProfileStoreProvider.overrideWithValue(activeStore),
@@ -65,6 +70,68 @@ void main() {
       credentialKey: credentialKey,
     );
   }
+
+  group('installer handoff with the real pairing controller', () {
+    for (final port in [7734, 7735]) {
+      test(
+        'persists a revocable credential and active profile on $port',
+        () async {
+          final brokerUrl = 'http://127.0.0.1:$port';
+          installerInbox.raw = jsonEncode({
+            'schemaVersion': 1,
+            'qr': _transportQr(
+              version: 3,
+              pairingId: 'installer-pairing',
+              transportKind: 'broker-url',
+              transportUrl: brokerUrl,
+              publicKey: transportAcceptService.brokerIdentity.publicKey,
+            ),
+            'brokerUrl': brokerUrl,
+            'expiresAt': DateTime.now()
+                .add(const Duration(minutes: 5))
+                .toUtc()
+                .toIso8601String(),
+          });
+          expect(
+            await container.read(installerPairingHandoffProvider.future),
+            InstallerPairingHandoffOutcome.imported,
+          );
+          final profile = container.read(activeBrokerProfileProvider);
+          expect(profile?.id, brokerUrl);
+          expect(profile?.credentialKey, 'broker-peer-token:$brokerUrl');
+          expect(
+            await credentialStore.readBrokerToken(profile!.credentialKey!),
+            isNotEmpty,
+          );
+          expect(activeStore.activeProfileId, brokerUrl);
+          expect(transportStore.last?.brokerUrl, Uri.parse(brokerUrl));
+          expect(installerInbox.raw, isNull);
+        },
+      );
+    }
+
+    test('a rejected offer is not reported as successfully imported', () async {
+      transportAcceptService.failure = const BrokerException(
+        message: 'pairing expired',
+        statusCode: 410,
+        error: BrokerError(error: 'expired', code: 'PAIRING_EXPIRED'),
+      );
+      installerInbox.raw = jsonEncode({
+        'qr': _transportQr(version: 2, pairingId: 'installer-expired'),
+      });
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.failed,
+      );
+      expect(
+        container.read(pairingControllerProvider).notice,
+        PairingNotice.expired,
+      );
+      expect(container.read(activeBrokerProfileProvider), isNull);
+      expect(credentialStore.writeCount, 0);
+      expect(installerInbox.raw, isNull);
+    });
+  });
 
   group('PairingController', () {
     test(
@@ -878,5 +945,17 @@ class _FailingActiveBrokerProfileStore
   @override
   Future<void> setActiveProfileId(String? profileId) async {
     throw StateError('active save failed');
+  }
+}
+
+class _InstallerInbox implements InstallerPairingInbox {
+  String? raw;
+
+  @override
+  Future<String?> read() async => raw;
+
+  @override
+  Future<void> discard() async {
+    raw = null;
   }
 }

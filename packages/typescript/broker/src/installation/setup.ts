@@ -27,6 +27,7 @@ import { resolveArtifactCacheRoot } from '../artifacts/artifact-store.ts';
 import {
   defaultBrokerConfig,
   inspectBrokerConfig,
+  validateBrokerConfig,
   type BrokerConfig,
 } from '../runtime/configuration.ts';
 import {
@@ -40,6 +41,7 @@ import {
   readOmpIntegration,
   readPiIntegration,
 } from '../security/credentials.ts';
+import { nextAvailableSetupPort, setupPortStatus, validSetupPort } from './setup-ports.ts';
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
 import { collectDoctorReport, DURABLE_SERVICE_CHECK_ID, type DoctorReport } from './doctor.ts';
 import { shippedAdapters } from './shipped-adapters.ts';
@@ -297,7 +299,7 @@ export interface SetupInspection {
   durableStatePermissionRepairs: DurableStatePermissionRepair[];
   agentSkills: AgentSkillInspection[];
   opencodeShim: OpencodeShimInspection;
-  portStatus: 'free' | 'owned-running' | 'conflict' | 'unknown';
+  portStatus: 'free' | 'owned-running' | 'unowned-broker' | 'conflict' | 'unknown';
   /** Whether `pipx` is on PATH, i.e. whether the quota prompt may promise an auto-install at all. */
   pipxAvailable: boolean;
   /** Whether the `tokdash` command is on PATH, i.e. whether there is anything left to install. */
@@ -369,6 +371,7 @@ export interface SetupPresenter {
    * in some language. The non-interactive presenter answers from flag, stored state, or env without asking.
    */
   chooseLanguage(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<SetupLanguage>>;
+  chooseBrokerPort?(current: number, suggested?: number): Promise<SetupPromptResult<number>>;
   intro(inspection: Readonly<SetupInspection>): Promise<void> | void;
   showBlockers(issues: readonly SetupBlockingIssue[]): Promise<void> | void;
   /**
@@ -466,6 +469,7 @@ export interface SetupDependencies {
     home: string;
     context: SetupDiagnosisContext;
     installationId?: string;
+    brokerPort?: number;
     durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
     inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
   }) => Promise<SetupInspection>;
@@ -722,42 +726,6 @@ function uniqueIssues(issues: readonly SetupBlockingIssue[]): SetupBlockingIssue
   return [...byCode.values()];
 }
 
-async function portStatus(options: {
-  context: SetupDiagnosisContext;
-  config: BrokerConfig;
-  installed: boolean;
-  healthHeaders?: Readonly<Record<string, string>>;
-}): Promise<SetupInspection['portStatus']> {
-  const probe = await options.context.probeTcp('127.0.0.1', options.config.broker.port);
-  if (probe === 'closed') return 'free';
-  if (probe !== 'open') return 'unknown';
-  const url = new URL('/api/health', options.config.broker.internalUrl).toString();
-  // A probe that did not COMPLETE is not evidence about who owns the port, and
-  // this verdict is the one that tells the operator to stop the process. The
-  // default probe ceiling is 3s; measured on a busy host, this broker's own
-  // /api/health answered correctly in 2.98s, so one timeout was enough to
-  // report a healthy managed broker as "an unrecognized process" and recommend
-  // killing it. Retry the incomplete case with a ceiling that is not a
-  // stopwatch on a loaded machine.
-  //
-  // Only `unreachable` is retried. Anything that answers -- including a wrong
-  // product, an HTTP error, or an unparseable body -- has settled the question
-  // and a genuine foreign listener is still refused on the first attempt.
-  for (const timeoutMs of [3_000, 10_000, 10_000]) {
-    const health = await options.context.fetchJson(url, options.healthHeaders, timeoutMs);
-    if (health.status === 'ok'
-        && (health.json as any)?.ok === true
-        && (health.json as any)?.product === PRODUCT_IDENTITY.productName) {
-      // A cosyncing broker on the port with no committed receipt of our own is
-      // a contributor build, which is still a conflict: setup owns no receipt
-      // that would let it stop or replace that process.
-      return options.installed ? 'owned-running' : 'conflict';
-    }
-    if (health.status !== 'unreachable') break;
-  }
-  return 'conflict';
-}
-
 /**
  * The precondition fingerprint: everything a plan's validity depends on. Exported so a test can prove a
  * field is actually IN it -- the hash is computed only during inspection, so a fixture that overrides an
@@ -782,6 +750,7 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
     config: input.config.status === 'ok'
       ? { status: 'ok', config: input.config.config }
       : { status: input.config.status, problem: input.config.status === 'error' ? input.config.detailCode : 'missing' },
+    targetConfig: input.targetConfig,
     brokerCredential: input.brokerCredential.status,
     piCredential: input.piCredential.status,
     piCredentialUrlMatches: input.piCredentialUrlMatches,
@@ -841,13 +810,17 @@ export async function inspectSetupEnvironment(options: {
   home: string;
   context: SetupDiagnosisContext;
   installationId?: string;
+  brokerPort?: number;
   durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   /** @deprecated Use durableServiceProviderFactory. */
   systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
 }): Promise<SetupInspection> {
   const config = inspectBrokerConfig(options.home);
-  const targetConfig = config.status === 'ok' ? config.config : defaultBrokerConfig();
+  const storedConfig = config.status === 'ok' ? config.config : defaultBrokerConfig();
+  const targetConfig = options.brokerPort === undefined ? storedConfig : validateBrokerConfig({
+    ...storedConfig, broker: { ...storedConfig.broker, port: options.brokerPort },
+  });
   const installState = inspectInstallState(options.home);
   const invokingHasClineExecutable = Object.keys(options.context.env).some((name) =>
     options.context.platform === 'win32'
@@ -930,11 +903,11 @@ export async function inspectSetupEnvironment(options: {
   const agentExecutableOverrides = serviceAgentExecutableOverrides(context);
   const agentDataPathOverrides = piFamilyServiceDataPathOverrides(context);
   const agentConfigurationOverrides = serviceAgentConfigurationOverrides(context.env, context.platform);
-  const currentPort = await portStatus({
+  const currentPort = await setupPortStatus({
     context,
     config: targetConfig,
-    installed: installState.committed,
-    ...(brokerCredential.status === 'ok'
+    installed: installState.committed && targetConfig.broker.port === storedConfig.broker.port,
+    ...(brokerCredential.status === 'ok' && targetConfig.broker.port === storedConfig.broker.port
       ? {
           healthHeaders: {
             [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerCredential.path),
@@ -1003,11 +976,32 @@ export async function inspectSetupEnvironment(options: {
       remediation: `Run \`${PRODUCT_IDENTITY.primaryBinary} repair\` to reconcile the scoped credential.`,
     });
   }
-  if (currentPort === 'conflict') {
+  if (currentPort === 'unknown') {
+    issues.push({
+      code: 'broker-port-unverified',
+      summary: `Could not determine whether port ${targetConfig.broker.port} is available.`,
+      remediation: 'Check the local listener and rerun setup; an incomplete probe is not evidence of a free port.',
+      localized: { 'zh-Hans': {
+        summary: `无法确认端口 ${targetConfig.broker.port} 是否可用。`,
+        remediation: '请检查本机监听进程后重新运行 setup；未完成的检查不代表端口可用。',
+      } },
+    });
+  }
+  if (currentPort === 'conflict' || currentPort === 'unowned-broker') {
     issues.push({
       code: 'broker-port-conflict',
       summary: `Port ${targetConfig.broker.port} is already owned by an unrecognized process or contributor broker.`,
-      remediation: 'Stop that process explicitly or choose a different broker port; setup never kills an unowned listener.',
+      remediation: currentPort === 'unowned-broker'
+        ? 'Stop the other cosyncing broker explicitly before setup; a different port does not isolate managed agent runtimes.'
+        : 'Rerun interactive setup to choose a different broker port, or stop that process explicitly; setup never kills an unowned listener.',
+      localized: {
+        'zh-Hans': {
+          summary: `端口 ${targetConfig.broker.port} 已被其他进程占用。`,
+          remediation: currentPort === 'unowned-broker'
+            ? '请先明确停止另一个 cosyncing broker；更换端口不能隔离托管的编程助手运行时。'
+            : '请重新运行交互式 setup 选择其他端口，或明确停止占用进程；安装不会终止不属于它的进程。',
+        },
+      },
     });
   }
   const pi = agents.find((agent) => agent.id === 'pi');
@@ -1984,7 +1978,8 @@ async function verifySetup(options: {
     return false;
   }
   const port = await options.context.probeTcp('127.0.0.1', options.plan.targetConfig.broker.port);
-  if (port !== 'open') return true;
+  if (port === 'closed') return true;
+  if (port !== 'open') return false;
   // `launchctl bootstrap` loads AND starts the agent inside apply, so by the time this runs the listener on
   // the broker port is our own just-started service. systemd defers its start to the post-commit health
   // check, so an open port there still means a foreign listener and must fail. A genuinely foreign listener
@@ -2356,7 +2351,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     }
   }
 
-  let inspection = await inspect({
+  let brokerPort: number | undefined;
+  const inspectCandidate = () => inspect({
     buildInfo: dependencies.buildInfo,
     executablePath: dependencies.executablePath,
     ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
@@ -2365,11 +2361,24 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     installationId,
     durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
     inspectLegacyCodexDaemon: dependencies.inspectLegacyCodexDaemon,
+    brokerPort,
   });
+  let inspection = await inspectCandidate();
   // FIRST prompt, ahead of the intro panels: every panel below is copy, and copy needs a language before it
   // can be rendered. Cancelling here is a cancel like any other — nothing has been mutated yet.
   const language = await dependencies.presenter.chooseLanguage(inspection);
   if (language === SETUP_PROMPT_CANCELLED) return cancelled(dependencies, inspection, recovered, 'language choice');
+  while (inspection.portStatus === 'conflict' && inspection.config.status !== 'error'
+      && dependencies.presenter.chooseBrokerPort) {
+    const selected = await dependencies.presenter.chooseBrokerPort(
+      inspection.targetConfig.broker.port,
+      await nextAvailableSetupPort(context, inspection.targetConfig.broker.port),
+    );
+    if (selected === SETUP_PROMPT_CANCELLED) return cancelled(dependencies, inspection, recovered, 'broker port');
+    if (!validSetupPort(selected)) throw new Error('Broker port must be an integer from 1024 to 65535.');
+    brokerPort = selected;
+    inspection = await inspectCandidate();
+  }
   await dependencies.presenter.intro(inspection);
   if (inspection.blockingIssues.length > 0) {
     await dependencies.presenter.showBlockers(inspection.blockingIssues);
@@ -2584,16 +2593,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   let migratedCodexEvidence: CodexDaemonOwnershipEvidence | undefined;
   let codexOwnershipRecorded = false;
   try {
-    inspection = await inspect({
-      buildInfo: dependencies.buildInfo,
-      executablePath: dependencies.executablePath,
-      ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
-      home,
-      context: baseContext,
-      installationId,
-      durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
-      inspectLegacyCodexDaemon: dependencies.inspectLegacyCodexDaemon,
-    });
+    inspection = await inspectCandidate();
     const lockedPlan = buildSetupPlan({
       inspection,
       choices,

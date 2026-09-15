@@ -301,6 +301,7 @@ class _RecordingController extends PairingController {
   @override
   Future<void> importPayload(String rawPayload, {String? brokerUrl}) async {
     imported.add(rawPayload);
+    state = PairingControllerState(notice: PairingNotice.devicePaired);
   }
 }
 

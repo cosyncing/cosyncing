@@ -68,6 +68,9 @@ import {
   runSupervised,
 } from '../../../verification/supervised-process.ts';
 
+import { installerOnboardingRegressions } from './installer-onboarding-regressions.ts';
+import { installerPairingRegressions } from './installer-pairing-regressions.ts';
+
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
 function check(name: string, ok: boolean, detail?: string): void {
@@ -157,6 +160,8 @@ function isolateRenderedRegistry(directory: string): void {
   }
 }
 try {
+  await installerOnboardingRegressions(check);
+  installerPairingRegressions(check);
   // ---- Fixtures -----------------------------------------------------------------------------------
   const fixtures = join(root, 'fixtures');
   mkdirSync(fixtures, { recursive: true });

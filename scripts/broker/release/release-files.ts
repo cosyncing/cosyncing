@@ -586,6 +586,10 @@ function renderBootstraps(options: {
     // `@SOMETHING@` where a digest or a URL belongs, and would fail at the operator rather than here.
     const unresolved = /@[A-Z0-9_]+@/.exec(script);
     if (unresolved) throw new Error(`${name} still carries the unrendered token ${unresolved[0]}`);
+    // The documented irm | iex path must work even without an HTTP charset.
+    if (name.endsWith('.ps1') && /[^\x00-\x7f]/.test(script)) {
+      throw new Error(`${name} must be ASCII-safe for Windows PowerShell 5.1`);
+    }
     rendered[name] = script;
   }
   // Stated as an assertion, not as a comment: no Windows installer may carry the Ed25519 key. Written

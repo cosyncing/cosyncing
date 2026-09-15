@@ -8,8 +8,11 @@ enum InstallerPairingHandoffOutcome {
   /// There was no handoff file to read.
   absent,
 
-  /// A handoff was read and its payload was handed to the pairing controller.
+  /// The handoff was redeemed and its credential and active profile were saved.
   imported,
+
+  /// The pairing controller could not redeem, save, or activate the handoff.
+  failed,
 
   /// A handoff was read and had already expired, so it was discarded unused.
   expired,
@@ -69,7 +72,11 @@ final installerPairingHandoffProvider =
         await ref
             .read(pairingControllerProvider.notifier)
             .importPayload(handoff.qr, brokerUrl: handoff.brokerUrl);
-        return InstallerPairingHandoffOutcome.imported;
+        final notice = ref.read(pairingControllerProvider).notice;
+        return notice == PairingNotice.paired ||
+                notice == PairingNotice.devicePaired
+            ? InstallerPairingHandoffOutcome.imported
+            : InstallerPairingHandoffOutcome.failed;
       } on Object {
         return InstallerPairingHandoffOutcome.unreadable;
       }

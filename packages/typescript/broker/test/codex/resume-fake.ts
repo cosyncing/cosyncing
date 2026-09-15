@@ -1561,7 +1561,8 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 });
 
-await test('native no-timestamp completion reaches the durable attention feed', async () => {
+for (const ordering of ['response-first', 'notification-first']) {
+await test(`native no-timestamp completion reaches the durable attention feed (${ordering})`, async () => {
   return await withFakeCodex(`#!/usr/bin/env bun
 const enc = new TextDecoder();
 let buf = '';
@@ -1579,14 +1580,16 @@ for await (const chunk of Bun.stdin.stream()) {
     else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
     else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
     else if (msg.method === 'turn/start') {
-      send({ id: msg.id, result: { turn: { id: 'native-completion' } } });
-      send({ method: 'turn/started', params: {
+      const started = { method: 'turn/started', params: {
         threadId: 'fake-thread',
         turn: { id: 'native-completion' },
-      } });
+      } };
+      if ('${ordering}' === 'notification-first') send(started);
+      send({ id: msg.id, result: { turn: { id: 'native-completion' } } });
       while (!require('node:fs').existsSync('__MARKER__.release')) {
         await Bun.sleep(10);
       }
+      if ('${ordering}' === 'response-first') send(started);
       send({ method: 'turn/completed', params: {
         threadId: 'fake-thread',
         turn: { id: 'native-completion', status: 'completed' },
@@ -1613,10 +1616,12 @@ for await (const chunk of Bun.stdin.stream()) {
     });
     try {
       await conn.sendPrompt({ text: 'finish natively' });
-      const running = await waitFor(() => messages.some((m) =>
+      // The marker holds later notifications until the RPC continuation has finished.
+      // Both native arrival orders must already have published the opening evidence.
+      const running = messages.some((m) =>
         m.type === 'run-summary'
         && m.status === 'running'
-        && m.turnId === 'native-completion'), 15000);
+        && m.turnId === 'native-completion');
       writeFileSync(`${marker}.release`, 'release\n');
       await waitFor(() => messages.some((m) =>
         m.type === 'run-summary'
@@ -1635,6 +1640,10 @@ for await (const chunk of Bun.stdin.stream()) {
       });
       return [
         running
+          && messages.filter((m) => m.type === 'run-summary' && m.status === 'running'
+            && m.turnId === 'native-completion').length === 1
+          && messages.filter((m) => m.type === 'run-summary' && m.status === 'done'
+            && m.turnId === 'native-completion').length === 1
           && event?.state === 'resolved'
           && event?.presentationRevision === 1
           && event?.turnId === 'native-completion'
@@ -1644,11 +1653,13 @@ for await (const chunk of Bun.stdin.stream()) {
         `summaries=${JSON.stringify(messages.filter((m) => m.type === 'run-summary'))} event=${JSON.stringify(event)}`,
       ];
     } finally {
+      writeFileSync(`${marker}.release`, 'release\n');
       attention.dispose();
       await conn.close().catch(() => {});
     }
   });
 });
+}
 
 await test('thread waiting flags surface read-only pending cards when request is not replayed', async () => {
   return await withFakeCodex(`#!/usr/bin/env bun

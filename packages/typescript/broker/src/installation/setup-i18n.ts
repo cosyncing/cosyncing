@@ -82,8 +82,8 @@ export function normalizeSetupLanguage(value: unknown): SetupLanguage | undefine
 }
 
 /**
- * `COSYNCING_SETUP_LANG` lets the non-interactive path pick a language without a prompt — the only way
- * `setup --yes` can run in anything but the persisted choice or English.
+ * `COSYNCING_SETUP_LANG` carries the installer choice into interactive setup without another prompt.
+ * It also supplies a default for non-interactive setup when no stored choice exists.
  */
 export function setupLanguageFromEnv(env: Readonly<Record<string, string | undefined>>): SetupLanguage | undefined {
   return normalizeSetupLanguage(env.COSYNCING_SETUP_LANG?.trim());
@@ -91,6 +91,9 @@ export function setupLanguageFromEnv(env: Readonly<Record<string, string | undef
 
 export interface SetupMessages {
   languagePrompt: string;
+  brokerPortOccupied: (port: number) => string;
+  brokerPortPrompt: string;
+  brokerPortInvalid: string;
   introTitle: (product: string) => string;
   installationTitle: string;
   installationBody: (fields: { version: string; install: string; state: string; broker: string }) => string;
@@ -188,6 +191,9 @@ export interface SetupMessages {
 
 const en: SetupMessages = {
   languagePrompt: 'Language',
+  brokerPortOccupied: (port) => `Port ${port} is in use. Choose another port; the existing process will keep running.`,
+  brokerPortPrompt: 'Broker port',
+  brokerPortInvalid: 'Enter a whole number from 1024 to 65535.',
   introTitle: (product) => `${product} setup`,
   installationTitle: 'Installation',
   installationBody: ({ version, install, state, broker }) =>
@@ -418,6 +424,9 @@ const en: SetupMessages = {
 
 const zhHans: SetupMessages = {
   languagePrompt: '选择语言 / Language',
+  brokerPortOccupied: (port) => `端口 ${port} 已被占用。请选择其他端口；现有进程会继续运行。`,
+  brokerPortPrompt: 'Broker 端口',
+  brokerPortInvalid: '请输入 1024 到 65535 之间的整数。',
   introTitle: (product) => `${product} 安装配置`,
   installationTitle: '安装信息',
   installationBody: ({ version, install, state, broker }) =>
