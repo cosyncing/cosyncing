@@ -106,6 +106,96 @@ check('F4 resolving the real request restores working', mc.status === 'working',
 replacement.emit({ type: 'status', status: 'idle' } as AgentMessage);
 check('F5 authoritative idle retires the replacement turn', mc.status === 'idle', `status=${mc.status}`);
 
+// ── G: a nonblocking question (contract revision 24) never forces needs-input ─────────────────
+// A `question-request` with `blocking: false` (Codex `request_user_input_async`) stays pending —
+// visible, retained, replayed to late joiners — but the agent kept working, so the session status
+// follows only BLOCKING pending input. A blocking sibling still wins, resolving it returns to the
+// underlying run state, and the nonblocking card survives all of it.
+const asyncOwner = fakeConn({ ...info('s1'), status: 'idle' });
+mc.replaceConnection(asyncOwner);
+check('G1 the async-question owner starts idle', mc.status === 'idle', `status=${mc.status}`);
+const question = (requestId: string) => ({
+  type: 'question-request',
+  requestId,
+  blocking: false,
+  questions: [{ question: 'Which color first?', options: [{ label: 'Crimson' }, { label: 'Teal' }] }],
+} as unknown as AgentMessage);
+const pendingCards = () => mc.liveSnapshot().filter((m: any) => m.type === 'question-request' || m.type === 'permission-request');
+
+let framesBefore = sessionFrames.length;
+asyncOwner.emit(question('aq1'));
+check('G2 a nonblocking question moves an idle session nowhere', mc.status === 'idle', `status=${mc.status}`);
+check('G3 ...and broadcasts no needs-input frame', sessionFrames.length === framesBefore, `frames=${sessionFrames.length}`);
+check('G4 the card stays pending for late-joiner replay', pendingCards().some((m: any) => m.requestId === 'aq1'), JSON.stringify(pendingCards().map((m: any) => m.requestId)));
+
+asyncOwner.emit({ type: 'status', status: 'running' } as AgentMessage);
+check('G5 a running report with a pending nonblocking question shows working', mc.status === 'working', `status=${mc.status}`);
+framesBefore = sessionFrames.length;
+asyncOwner.emit(question('aq2'));
+check('G6 a second nonblocking question leaves a working session working', mc.status === 'working' && sessionFrames.length === framesBefore,
+  `status=${mc.status} frames=${sessionFrames.length}`);
+
+asyncOwner.emit({ type: 'permission-request', requestId: 'r3', title: 'may i' } as AgentMessage);
+check('G7 a permission-request still wins over pending nonblocking questions', mc.status === 'needs-input' && sessionFrames.at(-1)?.status === 'needs-input',
+  `status=${mc.status}`);
+asyncOwner.emit({ type: 'permission-resolved', requestId: 'r3', decision: 'approve' } as AgentMessage);
+check('G8 resolving the permission returns to working while both questions stay pending',
+  mc.status === 'working'
+    && pendingCards().some((m: any) => m.requestId === 'aq1')
+    && pendingCards().some((m: any) => m.requestId === 'aq2'),
+  `status=${mc.status} pending=${JSON.stringify(pendingCards().map((m: any) => m.requestId))}`);
+
+asyncOwner.emit({ type: 'status', status: 'idle' } as AgentMessage);
+check('G9 idle with a nonblocking question still pending stays idle (the card is not a blocker)',
+  mc.status === 'idle' && pendingCards().some((m: any) => m.requestId === 'aq1'),
+  `status=${mc.status}`);
+framesBefore = sessionFrames.length;
+asyncOwner.emit({ type: 'question-resolved', requestId: 'aq1' } as AgentMessage);
+check('G10 resolving one nonblocking question leaves status and its sibling alone',
+  mc.status === 'idle'
+    && sessionFrames.length === framesBefore
+    && !pendingCards().some((m: any) => m.requestId === 'aq1')
+    && pendingCards().some((m: any) => m.requestId === 'aq2'),
+  `status=${mc.status} pending=${JSON.stringify(pendingCards().map((m: any) => m.requestId))}`);
+asyncOwner.emit({ type: 'question-resolved', requestId: 'aq2' } as AgentMessage);
+check('G11 resolving the last nonblocking question empties the replay set without a status flap',
+  mc.status === 'idle' && sessionFrames.length === framesBefore && pendingCards().length === 0,
+  `status=${mc.status} frames=${sessionFrames.length}`);
+
+// The omitted-flag default is the pre-24 behavior: a bare question-request still blocks.
+asyncOwner.emit({ type: 'question-request', requestId: 'q-block', questions: [] } as unknown as AgentMessage);
+check('G12 a question-request WITHOUT the flag still forces needs-input', mc.status === 'needs-input', `status=${mc.status}`);
+asyncOwner.emit({ type: 'question-resolved', requestId: 'q-block' } as AgentMessage);
+check('G13 ...and resolving it returns to idle', mc.status === 'idle' && pendingCards().length === 0, `status=${mc.status}`);
+
+// A replacement's native waiting state is independent of its nonblocking cards.
+const waitingOwner = fakeConn({ ...info('s1'), status: 'needs-input' });
+mc.replaceConnection(waitingOwner);
+waitingOwner.emit(question('waiting-async'));
+check('G14 a nonblocking card cannot clear native needs-input evidence', mc.status === 'needs-input');
+waitingOwner.emit({ type: 'status', status: 'running' } as AgentMessage);
+check('G15 authoritative running clears native waiting while keeping the async card',
+  mc.status === 'working' && pendingCards().some((m: any) => m.requestId === 'waiting-async'));
+waitingOwner.info.status = 'idle';
+check('G16 silent native idle is not masked by a nonblocking pending card', mc.status === 'idle');
+waitingOwner.emit({ type: 'question-request', requestId: 'real-blocker', questions: [] } as AgentMessage);
+waitingOwner.emit(question('another-async'));
+check('G17 a later nonblocking question cannot mask a blocking question', mc.status === 'needs-input');
+
+const replayOwner = fakeConn({ ...info('s1'), status: 'idle' });
+let replayQuestion: AgentMessage = question('same-id');
+replayOwner.getPending = async () => [replayQuestion];
+mc.replaceConnection(replayOwner);
+await (mc as any).refreshPendingQueuedUsers();
+replayQuestion = { ...question('same-id'), blocking: true } as AgentMessage;
+await (mc as any).refreshPendingQueuedUsers();
+check('G18 a same-id pending refresh that becomes blocking updates SessionInfo',
+  replayOwner.info.status === 'needs-input' && mc.status === 'needs-input');
+replayQuestion = question('same-id');
+await (mc as any).refreshPendingQueuedUsers();
+check('G19 a same-id pending refresh that stops blocking restores native idle',
+  replayOwner.info.status === 'idle' && mc.status === 'idle');
+
 // ── E: one session, several live owners — the roster overlay must pick exactly one ──────────────
 // A read-only Observe tail and an explicit Drive attach are DISTINCT Hub owners of the same session
 // id, and their run states legitimately disagree mid-turn. Applying each in turn let Map iteration

@@ -3792,7 +3792,7 @@ async function handleManagedClientMessage(
     } else if (msg.kind === 'approve') {
       await mc.conn.respondPermission(String(msg.requestId), msg.decision);
     } else if (msg.kind === 'answer') {
-      // Answer a question via its dedicated channel — NOT as a new prompt.
+      // The adapter selects the native answer transport for this request.
       await mc.conn.answerQuestion?.(String(msg.requestId), msg.answers ?? []);
     } else if (msg.kind === 'reject-question') {
       await mc.conn.rejectQuestion?.(String(msg.requestId));

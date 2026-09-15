@@ -136,6 +136,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "The /api/sessions roster carries `complete`. The broker now bounds how long a caller waits for a slow discovery leg and answers with the legs that have landed, so for the first time a roster can be served that is not the whole roster; a client that reads every roster as an authoritative replacement would render the shortfall as sessions that do not exist. `complete` is false for a sweep still running and for a settled sweep that did not read every adapter -- a leg abandoned at its budget, or one that threw. Row count does not enter into it: such a leg returns the carry of the last sweep that DID read the adapter, which cannot mention anything that appeared since. Measured on a real installation as an agent absent from its own roster while registered and creatable. The field adds no route, frame kind, message type or error code, so the surface hash is unchanged from revision 22; the number moves because the DTO did. The minimum client revision stays at 17, and the broker enforces what that claim requires: the EARLY answer -- short because the sweep is still running -- is served only to a caller declaring revision 23 or later, so an older client waits for the sweep exactly as it did against a revision-22 broker. A settled sweep that lost a leg is still served to everyone, because that condition predates this revision and persists while the adapter is down; removal deltas are withheld for the lost adapter for every client alike, since deltas carry no completeness of their own."
+    },
+    {
+      "revision": 24,
+      "surfaceHash": "fnv1a32:caf34ce7",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "question-request carries an optional `blocking` flag so an adapter can surface an asynchronous question (Codex delivery:\"async\" agent items) that stays visible and answerable without forcing the session into needs-input; omission reproduces the pre-24 blocking behavior. The answer transport stays adapter-owned: a native RPC request is answered with its RPC response, an async question is steered in as user input. The flag adds no route, frame kind, message type or error code, so the surface hash is unchanged from revision 22; the number moves because the DTO did. The minimum client revision stays at 17: an older client ignores the field and renders the same card, and only the broker reads the flag."
     }
   ]
 }

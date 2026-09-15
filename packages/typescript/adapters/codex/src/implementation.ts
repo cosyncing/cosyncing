@@ -126,6 +126,14 @@ import {
   decideCodexRunStateRepair,
   readCodexNativeRunEvidence,
 } from './run-state-repair.ts';
+import {
+  asyncQuestionCard,
+  asyncQuestionRequestId,
+  asyncQuestionsFromAgentItem,
+  CodexAsyncQuestionTracker,
+  isAsyncQuestionToolCall,
+  isAsyncQuestionRequestId,
+} from './async-user-input.ts';
 
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
 const SESSIONS_ROOT = join(CODEX_HOME, 'sessions');
@@ -3766,6 +3774,9 @@ class CodexResumeConnection implements SessionConnection {
   private readonly pendingRpc = new Map<string, PendingRpc>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
+  /** Async `request_user_input_async` questions. Deliberately NOT in pendingQuestions: those settle
+   *  when their turn ends, while an async question outlives it (a late answer opens a new turn). */
+  private readonly asyncQuestions = new CodexAsyncQuestionTracker();
   /** Which synthetic waiting placeholders are ACTIVE (emitted and not yet resolved). A
    *  resolution frame may only be emitted for a placeholder that was actually emitted —
    *  turn completion/idle/system-error settling paths fire after every ordinary turn, and
@@ -4708,7 +4719,9 @@ class CodexResumeConnection implements SessionConnection {
     content: any[],
     model?: PromptInput['model'],
     permissionMode?: string,
+    canSend?: () => boolean,
   ): Promise<void> {
+    if (canSend?.() === false) return;
     try {
       await this.rpc('turn/steer', {
         threadId: this.threadId,
@@ -4723,6 +4736,7 @@ class CodexResumeConnection implements SessionConnection {
       // notification already moved our local state to idle; that is the race this recovery covers.
       if (this.turnRunState.kind !== 'unknown' && this.turnRunState.kind !== 'hydrating') this.markUnknown();
       await this.reconcileActiveTurnFromNative(this.turnRunStateVersion);
+      if (canSend?.() === false) return;
       const resolvedTurnId = this.activeTurnId();
       if (resolvedTurnId) {
         await this.rpc('turn/steer', {
@@ -4734,7 +4748,7 @@ class CodexResumeConnection implements SessionConnection {
         return;
       }
       if (this.turnRunState.kind === 'idle') {
-        await this.submitTurnStart(content, clientUserMessageId, model, permissionMode);
+        await this.submitTurnStart(content, clientUserMessageId, model, permissionMode, canSend);
         return;
       }
       throw error;
@@ -4746,7 +4760,9 @@ class CodexResumeConnection implements SessionConnection {
     clientUserMessageId: string,
     model?: PromptInput['model'],
     permissionMode?: string,
+    canSend?: () => boolean,
   ): Promise<void> {
+    if (canSend?.() === false) return;
     // Only an EXPLICIT app pick overrides the permission tuple. Codex persists turn/start's
     // approval/reviewer settings "for this turn and subsequent turns", so unconditionally re-asserting a
     // fallback here is what used to clobber a synced terminal's approve-for-me back to "ask"
@@ -4862,7 +4878,8 @@ class CodexResumeConnection implements SessionConnection {
         // or a terminal turn state.
         this.clearWaitingPlaceholders('approval');
       }
-      if (flags.includes('waitingOnUserInput') && this.pendingQuestions.size === 0
+      if (flags.includes('waitingOnUserInput')
+        && ![...this.pendingQuestions.values()].some((q) => q.params?.isBlocking !== false)
         && !this.activeWaitingPlaceholders.has('question')) {
         const requestId = this.nextWaitingRequestId('question');
         this.activeWaitingPlaceholders.set('question', requestId);
@@ -5185,8 +5202,19 @@ class CodexResumeConnection implements SessionConnection {
         sentAt: timestampToMs(item.createdAt ?? item.created_at ?? item.timestamp ?? item.startedAt ?? item.started_at),
         ...(clientKey ? { clientKey } : {}),
       });
+      // Native answers have no request id. Match only a unique quoted question title and a
+      // fresh user item; replaying an old answer cannot settle a later question with the same title.
+      if (text && item.id) {
+        for (const requestId of this.asyncQuestions.resolveFromUserText(text, `${turnId}:${item.id}`)) {
+          this.emit({ type: 'question-resolved', requestId });
+        }
+      }
       return;
     }
+    // An async question item carries its full questions from item/started on; the card goes up
+    // immediately and item/completed merges into it (same native item id, same requestId).
+    const asyncCard = this.asyncQuestions.observe(item, turnId);
+    if (asyncCard) this.emit(asyncCard);
     const call = codexToolCallFromItem(item, turnId);
     if (call) this.emit(call);
   }
@@ -5269,6 +5297,19 @@ class CodexResumeConnection implements SessionConnection {
   private handleItemCompleted(item: any, turnId: string): void {
     if (!item?.type) return;
     if (item.type === 'agentMessage') {
+      if (asyncQuestionsFromAgentItem(item)) {
+        const itemId = typeof item.id === 'string' && item.id ? item.id : undefined;
+        if (itemId) {
+          // The question card carries this item's content. Its `text` repeats the same question as
+          // markdown and no deltas ever stream for it, so emitting model-output here would render
+          // the question twice (measured on 0.154.0: started and completed carry identical payloads).
+          const card = this.asyncQuestions.observe(item, turnId);
+          if (card) this.emit(card);
+          return;
+        }
+        // No native identity: the question cannot be tracked or answered — fall through so its
+        // text still renders as an ordinary assistant message.
+      }
       if (item.text) {
         const key = codexItemTextKey(turnId, String(item.id ?? 'unknown'), 't');
         this.noteLiveAssistantKey(turnId, key);
@@ -5359,6 +5400,7 @@ class CodexResumeConnection implements SessionConnection {
     return [
       ...[...this.pendingApprovals].map(([requestId, pending]) => approvalMessage(pending.method, requestId, pending.params)),
       ...[...this.pendingQuestions].map(([requestId, pending]) => codexQuestionMessage(pending.method, requestId, pending.params)),
+      ...this.asyncQuestions.cards(),
       ...(this.activeWaitingPlaceholders.has('approval') ? [{
         type: 'permission-request' as const,
         requestId: this.activeWaitingPlaceholders.get('approval')!,
@@ -5397,11 +5439,11 @@ class CodexResumeConnection implements SessionConnection {
     await this.enqueueContent(content, input.model, input.permissionMode, input.clientMessageId);
   }
 
-  private enqueueContent(content: any[], model?: PromptInput['model'], permissionMode?: string, clientMessageId?: string): Promise<void> {
+  private enqueueContent(content: any[], model?: PromptInput['model'], permissionMode?: string, clientMessageId?: string, canSend?: () => boolean): Promise<void> {
     this.pendingPromptStarts += 1;
     const run = this.promptChain
       .catch(() => undefined)
-      .then(() => this.submitContent(content, model, permissionMode, clientMessageId))
+      .then(() => this.submitContent(content, model, permissionMode, clientMessageId, canSend))
       .finally(() => {
         this.pendingPromptStarts = Math.max(0, this.pendingPromptStarts - 1);
       });
@@ -5409,8 +5451,8 @@ class CodexResumeConnection implements SessionConnection {
     return run;
   }
 
-  private async submitContent(content: any[], model?: PromptInput['model'], permissionMode?: string, clientMessageId?: string): Promise<void> {
-    if (!content.length) return;
+  private async submitContent(content: any[], model?: PromptInput['model'], permissionMode?: string, clientMessageId?: string, canSend?: () => boolean): Promise<void> {
+    if (canSend?.() === false || !content.length) return;
     const clientUserMessageId = `cosyncing-${Date.now()}-${++this.userSeq}`;
     if (clientMessageId) {
       this.appSendClientKeys.set(clientUserMessageId, clientMessageId);
@@ -5434,13 +5476,14 @@ class CodexResumeConnection implements SessionConnection {
       await this.waitForActiveTurnId(5000, true);
       activeTurnId = this.activeTurnId();
     }
+    if (canSend?.() === false) return;
     if (this.isHydratingOrUnknown() && !activeTurnId) {
       throw new Error('Codex is recovering thread state; retry this prompt after a moment.');
     }
     if (activeTurnId) {
-      await this.submitTurnSteerWithRecovery(activeTurnId, clientUserMessageId, content, model, permissionMode);
+      await this.submitTurnSteerWithRecovery(activeTurnId, clientUserMessageId, content, model, permissionMode, canSend);
     } else {
-      await this.submitTurnStart(content, clientUserMessageId, model, permissionMode);
+      await this.submitTurnStart(content, clientUserMessageId, model, permissionMode, canSend);
     }
   }
 
@@ -5490,6 +5533,12 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
+    if (isAsyncQuestionRequestId(requestId)) {
+      const resolved = await this.asyncQuestions.answer(requestId, answers, (text, isPending) =>
+        this.enqueueContent([{ type: 'text', text, text_elements: [] }], undefined, undefined, undefined, isPending));
+      if (resolved) this.emit({ type: 'question-resolved', requestId });
+      return;
+    }
     const pending = this.pendingQuestions.get(requestId);
     this.pendingQuestions.delete(requestId);
     if (!pending) return;
@@ -5509,6 +5558,12 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   async rejectQuestion(requestId: string): Promise<void> {
+    // Native async-question skip records nothing on any channel (measured: no wire event, no
+    // rollout line), so dismissing the card locally IS the complete and correct operation.
+    if (isAsyncQuestionRequestId(requestId)) {
+      if (await this.asyncQuestions.dismiss(requestId)) this.emit({ type: 'question-resolved', requestId });
+      return;
+    }
     const pending = this.pendingQuestions.get(requestId);
     this.pendingQuestions.delete(requestId);
     if (!pending) return;
@@ -5684,6 +5739,7 @@ class CodexResumeConnection implements SessionConnection {
     this.handlers.clear();
     this.pendingApprovals.clear();
     this.pendingQuestions.clear();
+    this.asyncQuestions.clear();
     this.activeWaitingPlaceholders.clear();
     this.skills.clear();
     this.published.clear(); // line indices only mean anything to the connection that published them
@@ -6737,6 +6793,18 @@ export function mapLine(
         // ignored here exactly as before — assistant text, reasoning and tools keep arriving via
         // their paired `response_item` records, so mapping them too would double each one.
         const item = p.item;
+        // One exception to that rule: an async user-input question has NO paired response_item
+        // message (measured on 0.154.0 — its text exists only here and in the tool-call
+        // arguments), so mapping this item is the only way the question appears in history at
+        // all. readOnly because durable history is the past: actionability comes from the live
+        // pending replay, which reuses this same requestId and wins the client's keyed upsert.
+        if (item?.type === 'AgentMessage') {
+          const questions = asyncQuestionsFromAgentItem(item);
+          if (questions && typeof item.id === 'string' && item.id) {
+            return [asyncQuestionCard(asyncQuestionRequestId(item.id), questions, true)];
+          }
+          return [];
+        }
         if (item?.type !== 'UserMessage') return [];
         const text = userInputText(item.content);
         if (!text) return [];
@@ -6888,6 +6956,9 @@ export function mapLine(
         // spawn_agent/wait_agent are subagent control-plane, not user tool cards — their matching
         // function_call_output produces the agent-activity bar (running on spawn, done on wait).
         if (p.name === 'spawn_agent' || p.name === 'wait_agent') return [];
+        // The async-question tool call renders as the question card from its paired
+        // item_completed event — never as a raw-JSON tool card.
+        if (isAsyncQuestionToolCall(p.name)) return [];
         const callId = String(p.call_id ?? '');
         const semantic = codexCallSemantic(String(p.name ?? 'tool'), enrich.get(callId), parseArgs(p.arguments));
         return [{
@@ -6914,6 +6985,8 @@ export function mapLine(
         const e = enrich.get(callId) ?? {};
         runtime.recordAutomaticApprovalDenial(e.name, p.output);
         if (e.name === 'update_plan') return [];
+        // The async question's tool output is always {"accepted":true} — delivery receipt, not content.
+        if (isAsyncQuestionToolCall(e.name)) return [];
         // Subagent lifecycle → activity bars (see spawn_agent/wait_agent suppression above).
         if (e.name === 'spawn_agent') return spawnAgentActivity(p.output, e, ts, runtime);
         if (e.name === 'wait_agent') return waitAgentActivity(p.output, ts, runtime);
@@ -7746,6 +7819,11 @@ function codexQuestionMessage(method: string, requestId: string, params: any): E
   return {
     type: 'question-request',
     requestId,
+    // Codex 0.154 marks every native request with isBlocking. Only a present-false is meaningful
+    // here (a question the agent is NOT waiting on); absent/true keeps the default blocking card.
+    // The answer still goes back as THIS request's RPC response — isBlocking:false alone never
+    // turns an RPC-backed question into a steered prompt.
+    ...(params?.isBlocking === false ? { blocking: false as const } : {}),
     questions: (params?.questions ?? []).map((q: any) => ({
       question: String(q?.question ?? ''),
       header: q?.header ? String(q.header) : undefined,

@@ -171,6 +171,26 @@ function utf8Prefix(value: string, maxBytes: number): string {
   return '';
 }
 
+/**
+ * Whether one pending-input card BLOCKS the agent on the user. A permission request always does.
+ * A `question-request` with `blocking: false` (contract revision 24 — e.g. a Codex
+ * `delivery: "async"` question) is different: the agent kept working and merely consumes the answer
+ * at a later input boundary. Such a card stays pending — visible, retained, replayed to late
+ * joiners — but it never forces `needs-input`, and it never masks a genuinely blocking entry.
+ */
+function isBlockingPendingInput(message: AgentMessage): boolean {
+  if (message.type === 'permission-request') return true;
+  if (message.type === 'question-request') return message.blocking !== false;
+  return false;
+}
+
+function anyBlockingPendingInput(pendingInput: ReadonlyMap<string, AgentMessage>): boolean {
+  for (const message of pendingInput.values()) {
+    if (isBlockingPendingInput(message)) return true;
+  }
+  return false;
+}
+
 const MIME: Record<string, string> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
   '.webp': 'image/webp', '.svg': 'image/svg+xml', '.html': 'text/html', '.htm': 'text/html',
@@ -1072,9 +1092,9 @@ export class ManagedConn {
     this.liveRunning = current !== 'idle';
     // One run-state representation: write the managed projection back, so `conn.info.status` and the
     // published owner status cannot disagree even for one frame. Only pendingInput can differ from
-    // the adopted value — a real permission/question outranks a bare `working`, exactly as in
-    // {@link status}.
-    const projected = this.liveNeedsInput || this.pendingInput.size > 0
+    // the adopted value — a real BLOCKING permission/question outranks a bare `working`, exactly as
+    // in {@link status}.
+    const projected = this.liveNeedsInput || anyBlockingPendingInput(this.pendingInput)
       ? 'needs-input'
       : this.liveRunning ? 'working' : 'idle';
     if (projected !== current) {
@@ -1121,9 +1141,11 @@ export class ManagedConn {
       }
     } else if (message.type === 'permission-request' || message.type === 'question-request') {
       this.pendingQueuedRevision += 1;
-      this.liveNeedsInput = false;
+      if (isBlockingPendingInput(message)) this.liveNeedsInput = false;
       this.pendingInput.set(message.requestId, message);
-      this.applyManagedStatus('needs-input');
+      // A nonblocking question never forces needs-input — but a blocking sibling already in the
+      // map still does, which `this.status` recomputes correctly.
+      this.applyManagedStatus(isBlockingPendingInput(message) ? 'needs-input' : this.status);
     } else if (message.type === 'permission-resolved' || message.type === 'question-resolved') {
       this.pendingQueuedRevision += 1;
       // A duplicate or orphan resolution is not a state transition. In
@@ -1219,7 +1241,7 @@ export class ManagedConn {
     // left `needs-input` standing: the card disappears and the badge does not,
     // with no later transition able to repair it because the folded status and
     // the observed status already agree.
-    const blockingBefore = [...this.pendingInput.keys()].sort().join('\u0000');
+    const blockingBefore = anyBlockingPendingInput(this.pendingInput);
     this.pendingInput.clear();
     for (const message of pending) {
       if (message.type === 'user-message' && message.queued === true && message.key) {
@@ -1229,9 +1251,9 @@ export class ManagedConn {
       }
     }
     this.pendingQueuedRevision += 1;
-    // Only when it actually changed: an unchanged set must not broadcast, or every
-    // history-reset would republish a status nothing has moved.
-    if ([...this.pendingInput.keys()].sort().join('\u0000') !== blockingBefore) {
+    // Request ids can stay the same while blocking changes. Only a changed blocking
+    // projection needs a status write; pending retention is reconciled separately below.
+    if (anyBlockingPendingInput(this.pendingInput) !== blockingBefore) {
       this.applyManagedStatus(this.status);
     }
     const retainedAfter = this.requiresAttentionRetention;
@@ -1583,7 +1605,7 @@ export class ManagedConn {
   /** Roster-facing live state for this owned connection. */
   get status(): SessionInfo['status'] {
     this.foldAdapterStatusTransition();
-    if (this.liveNeedsInput || this.pendingInput.size > 0) return 'needs-input';
+    if (this.liveNeedsInput || anyBlockingPendingInput(this.pendingInput)) return 'needs-input';
     return this.liveRunning ? 'working' : 'idle';
   }
 

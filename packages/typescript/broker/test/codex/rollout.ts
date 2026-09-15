@@ -966,6 +966,104 @@ function check(name: string, ok: boolean, detail = ''): void {
   check('Codex update_plan suppresses raw tool-result card', !out.some((m) => m.type === 'tool-result' && (m as any).toolName === 'update_plan'), JSON.stringify(out));
 }
 {
+  // Codex 0.154.0 `request_user_input_async` (contract revision 24): the durable triple — the
+  // function_call, the item_completed AgentMessage carrying `delivery: "async"` + `questions`, and
+  // the always-`{"accepted":true}` receipt — surfaces as ONE question-request card keyed by the
+  // native item id, read-only and nonblocking. The raw tool records never render, the question text
+  // never doubles as model-output, and an ordinary assistant item beside them maps exactly as before.
+  const lines = [
+    { type: 'session_meta', payload: { cwd: '/tmp/x', id: 'async-question' } },
+    { type: 'turn_context', payload: { turn_id: 'tq1' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tq1' } },
+    { type: 'response_item', payload: { type: 'function_call', id: 'fc_1', name: 'request_user_input_async', arguments: '{"questions":[{"title":"Which color first?","options":["Crimson","Teal"]}]}', call_id: 'call_q1' } },
+    { type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'tq1', item: { type: 'AgentMessage', id: 'call_q1', content: [{ type: 'Text', text: 'Which color first?\n- Crimson\n- Teal' }], phase: 'final_answer', delivery: 'async', questions: [{ title: 'Which color first?', options: ['Crimson', 'Teal'] }] } } },
+    { type: 'response_item', payload: { type: 'function_call_output', id: 'fco_1', call_id: 'call_q1', output: '{"accepted":true}' } },
+    { type: 'event_msg', payload: { type: 'agent_message', message: 'Continuing with Crimson.', phase: 'commentary' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_ok', phase: 'commentary', content: [{ type: 'output_text', text: 'Continuing with Crimson.' }] } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tq1' } },
+  ];
+  const out = mapRollout(lines);
+  const cards = out.filter((m) => m.type === 'question-request') as any[];
+  check('request_user_input_async maps to exactly one question-request card', cards.length === 1, JSON.stringify(out.map((m) => m.type)));
+  const card = cards[0];
+  check(
+    'the async question card is read-only, nonblocking, and keyed by the native item id',
+    card?.requestId === 'codex:aq:call_q1' && card?.blocking === false && card?.readOnly === true,
+    JSON.stringify(card),
+  );
+  check(
+    'the card maps the native title and options to canonical question shape',
+    card?.questions?.length === 1
+      && card.questions[0].question === 'Which color first?'
+      && JSON.stringify(card.questions[0].options) === JSON.stringify([{ label: 'Crimson' }, { label: 'Teal' }]),
+    JSON.stringify(card?.questions),
+  );
+  check(
+    'request_user_input_async never leaks as a raw tool-call card',
+    !out.some((m) => m.type === 'tool-call' && (m as any).toolName === 'request_user_input_async'),
+    JSON.stringify(out.filter((m) => m.type === 'tool-call')),
+  );
+  check(
+    'its {"accepted":true} receipt never leaks as a raw tool-result card',
+    !out.some((m) => m.type === 'tool-result' && ((m as any).toolName === 'request_user_input_async' || (m as any).callId === 'call_q1')),
+    JSON.stringify(out.filter((m) => m.type === 'tool-result')),
+  );
+  check(
+    'the item text (which repeats the question as markdown) never doubles as model-output',
+    !out.some((m) => m.type === 'model-output' && String((m as any).text ?? '').includes('Which color first?')),
+    JSON.stringify(out.filter((m) => m.type === 'model-output')),
+  );
+  const answers = out.filter((m) => m.type === 'model-output') as any[];
+  check(
+    'an ordinary assistant item beside the async question still maps normally (no suppression bleed)',
+    answers.length === 1 && answers[0].text === 'Continuing with Crimson.' && answers[0].key === 'codex:tq1:msg_ok:t',
+    JSON.stringify(answers),
+  );
+}
+await (async () => {
+  // The same records through the Observe live tail (mapLine over appended lines): the card must
+  // arrive under the same requestId and the tool records must stay suppressed there too.
+  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-codex-async-question-tail-'));
+  const path = join(dir, 'rollout-2026-09-14T00-00-00-00000000-0000-4000-8000-000000000154.jsonl');
+  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+  writeFileSync(
+    path,
+    line({ type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000154', cwd: dir } }) +
+      line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'tq-live' } }),
+  );
+  const messages: any[] = [];
+  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
+  const unsubscribe = conn.subscribe((m: any) => messages.push(m));
+  try {
+    appendFileSync(
+      path,
+      [
+        { type: 'response_item', payload: { type: 'function_call', id: 'fc_1', name: 'request_user_input_async', arguments: '{"questions":[{"title":"Which color first?","options":["Crimson","Teal"]}]}', call_id: 'call_q1' } },
+        { type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'tq-live', item: { type: 'AgentMessage', id: 'call_q1', content: [{ type: 'Text', text: 'Which color first?\n- Crimson\n- Teal' }], phase: 'final_answer', delivery: 'async', questions: [{ title: 'Which color first?', options: ['Crimson', 'Teal'] }] } } },
+        { type: 'response_item', payload: { type: 'function_call_output', id: 'fco_1', call_id: 'call_q1', output: '{"accepted":true}' } },
+        { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tq-live' } },
+      ].map(line).join(''),
+    );
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !messages.some((m: any) => m.type === 'question-request')) await new Promise((r) => setTimeout(r, 25));
+    const cards = messages.filter((m: any) => m.type === 'question-request');
+    check(
+      'the Observe live tail surfaces the same nonblocking card under the same requestId',
+      cards.length === 1 && cards[0].requestId === 'codex:aq:call_q1' && cards[0].blocking === false,
+      JSON.stringify(cards.map((m: any) => m.requestId)),
+    );
+    check(
+      'the live tail never renders the async tool call or its receipt as tool cards',
+      !messages.some((m: any) => (m.type === 'tool-call' || m.type === 'tool-result') && (m.toolName === 'request_user_input_async' || m.callId === 'call_q1')),
+      JSON.stringify(messages.filter((m: any) => m.type === 'tool-call' || m.type === 'tool-result')),
+    );
+  } finally {
+    unsubscribe();
+    await conn.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+{
   const out = mapRollout([
     { timestamp: '2026-06-18T10:20:00.000Z', type: 'event_msg', payload: { type: 'task_started' } },
     { timestamp: '2026-06-18T10:20:02.000Z', type: 'event_msg', payload: { type: 'task_complete' } },
