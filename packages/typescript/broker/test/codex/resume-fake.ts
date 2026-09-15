@@ -5,6 +5,8 @@
  */
 export {};
 import { createHash } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { CodexAsyncQuestionTracker } from '../../../adapters/codex/src/async-user-input.ts';
 import {
   appendFileSync,
   chmodSync,
@@ -854,7 +856,7 @@ for await (const chunk of Bun.stdin.stream()) {
       await conn.sendPrompt({ text: 'trigger approval', permissionMode: 'full-access' });
       await waitFor(() => messages.some((m) => m.type === 'permission-request'), 5000);
       const perm = messages.find((m) => m.type === 'permission-request');
-      const pending = await Promise.resolve(conn.getPending?.() ?? []);
+      const pending: any[] = await Promise.resolve(conn.getPending?.() ?? []);
       const pendingPerm = pending.find((m) => m.type === 'permission-request');
       await conn.respondPermission(perm.requestId, 'approve-session');
       await waitFor(() => messages.some((m) => m.type === 'status' && m.status === 'idle'), 5000);
@@ -2715,7 +2717,7 @@ for await (const chunk of Bun.stdin.stream()) {
     const messages: any[] = [];
     conn.subscribe((m: any) => messages.push(m));
     try {
-      const pending = await Promise.resolve(conn.getPending?.() ?? []);
+      const pending: any[] = await Promise.resolve(conn.getPending?.() ?? []);
       const placeholder = pending.find((m: any) => m.type === 'permission-request') as any;
       await waitFor(() => messages.some((m) => m.type === 'permission-resolved'), 5000);
       await sleep(100);
@@ -2946,7 +2948,7 @@ for await (const chunk of Bun.stdin.stream()) {
       await waitFor(() => messages.some((m) => m.type === 'permission-request') && messages.some((m) => m.type === 'question-request'), 5000);
       await waitFor(() => messages.some((m) => m.type === 'model-output' && m.text === 'CLEANED'), 5000);
       const counts = requestCounts(messages);
-      const pending = await Promise.resolve(conn.getPending?.() ?? []);
+      const pending: any[] = await Promise.resolve(conn.getPending?.() ?? []);
       return [
         counts.permReq === 1 && counts.qReq === 1 &&
           counts.permRes === 1 && counts.qRes === 1 &&
@@ -3003,6 +3005,576 @@ for await (const chunk of Bun.stdin.stream()) {
       ];
     } finally {
       await second.close().catch(() => {});
+    }
+  });
+});
+
+// ── Async user-input questions (`request_user_input_async`, Codex ≥ 0.154) ─────────────────────
+// Wire facts measured on installed Codex 0.154.0: the full questions ride item/started AND
+// item/completed on an agentMessage item whose id is the tool call id; the item text repeats the
+// question; answers arrive as user messages serialized "> <title>\n\n<answer>"; the question
+// survives its turn (a late answer opens a new turn); skip records nothing anywhere.
+
+await test('async question lifecycle preserves retries, concurrent outcomes and settled identities', async () => {
+  const tracker = new CodexAsyncQuestionTracker();
+  const item = { type: 'agentMessage', id: 'retry', delivery: 'async', questions: [{ title: 'Branch?', options: ['main', 'dev'] }] };
+  tracker.observe(item, 'turn1');
+  let reject!: (error: Error) => void;
+  let sends = 0;
+  const transport = new Promise<void>((_resolve, fail) => { reject = fail; });
+  const send = async () => { sends++; await transport; };
+  const first = tracker.answer('codex:aq:retry', [['dev']], send);
+  const duplicate = tracker.answer('codex:aq:retry', [['main']], send);
+  const dismissal = tracker.dismiss('codex:aq:retry');
+  const outcomes = Promise.allSettled([first, duplicate, dismissal]);
+  await Promise.resolve();
+  assert.equal(tracker.cards().length, 1, 'reconnect during send retains the pending card');
+  assert.equal(tracker.observe(item, 'turn1'), undefined);
+  reject(new Error('fixture transport refused'));
+  assert.ok((await outcomes).every((result) => result.status === 'rejected'));
+  assert.equal(sends, 1);
+  assert.equal(tracker.cards().length, 1);
+  assert.equal(await tracker.answer('codex:aq:retry', [['dev']], async (text) => {
+    sends++;
+    assert.equal(text, '> Branch?\n\ndev');
+  }), true);
+  assert.equal(sends, 2);
+  assert.equal(tracker.cards().length, 0);
+  assert.equal(tracker.observe(item, 'turn1'), undefined, 'late completion cannot reopen an answered card');
+  assert.equal(await tracker.answer('codex:aq:retry', [['main']], send), false);
+  const skipped = { ...item, id: 'skipped' };
+  tracker.observe(skipped, 'turn1');
+  assert.equal(await tracker.dismiss('codex:aq:skipped'), true);
+  assert.equal(tracker.observe(skipped, 'turn1'), undefined, 'late completion cannot reopen a skipped card');
+  return [true, 'one attempt per concurrent submission; rejection retry; replay until acceptance; no reopened cards'];
+});
+
+await test('async terminal answers require complete, unambiguous native evidence', async () => {
+  const tracker = new CodexAsyncQuestionTracker();
+  const item = { type: 'agentMessage', id: 'multi', delivery: 'async', questions: [
+    { title: 'Branch?', options: ['main', 'dev'] }, { title: 'Notes?', options: null },
+  ] };
+  tracker.observe(item, 'turn1');
+  for (const text of ['unrelated', '> Branch?', '> Branch?\nmain', '> Branch?\n\n ']) {
+    assert.deepEqual(tracker.resolveFromUserText(text, text), []);
+  }
+  assert.deepEqual(tracker.resolveFromUserText('> Branch?\n\ndev', 'branch-answer'), []);
+  assert.deepEqual(tracker.resolveFromUserText('> Branch?\n\ndev', 'branch-answer'), [], 'duplicate answer cannot settle another question');
+  assert.equal(tracker.cards().length, 1);
+  assert.deepEqual(tracker.resolveFromUserText('> Notes?\n\nkeep tests', 'notes-answer'), ['codex:aq:multi']);
+  assert.equal(tracker.observe(item, 'turn1'), undefined);
+  tracker.observe({ ...item, id: 'one', questions: [item.questions[0]] }, 'turn1');
+  assert.deepEqual(tracker.resolveFromUserText('> Branch?\n\ndev', 'branch-answer'), [], 'replayed old user item cannot answer a later question');
+  tracker.observe({ ...item, id: 'two', questions: [item.questions[0]] }, 'turn1');
+  assert.deepEqual(tracker.resolveFromUserText('> Branch?\n\ndev', 'new-ambiguous-answer'), [], 'identical titles across native items are ambiguous');
+  assert.equal(tracker.cards().length, 2);
+  return [true, 'partial and ambiguous terminal answers preserve the open card'];
+});
+
+await test('async native answer echo settles a lost RPC reply without restoring the card', async () => {
+  const tracker = new CodexAsyncQuestionTracker();
+  tracker.observe({ type: 'agentMessage', id: 'echo', delivery: 'async', questions: [{ title: 'Branch?', options: null }, { title: 'Notes?', options: null }] }, 'turn1');
+  const result = await tracker.answer('codex:aq:echo', [['dev'], ['Keep tests']], async (text) => {
+    assert.deepEqual(tracker.resolveFromUserText(text, text), ['codex:aq:echo']);
+    throw new Error('RPC response lost after native echo');
+  });
+  assert.equal(result, false, 'the live echo already emitted settlement');
+  assert.equal(tracker.cards().length, 0);
+  return [true, 'native echo is acceptance evidence even when the RPC reply is lost'];
+});
+
+await test('async delayed compound echo settles after timeout and prevents another send', async () => {
+  const tracker = new CodexAsyncQuestionTracker();
+  const item = { type: 'agentMessage', id: 'delayed', delivery: 'async', questions: [
+    { title: 'Branch?', options: null }, { title: 'Notes?', options: null },
+  ] };
+  const id = 'codex:aq:delayed';
+  tracker.observe(item, 'turn1');
+  let acceptedText = '';
+  let sends = 0;
+  await assert.rejects(tracker.answer(id, [['dev'], ['keep tests']], async (text) => {
+    sends++;
+    acceptedText = text;
+    throw new Error('codex turn/steer timed out');
+  }), /timed out/);
+  assert.equal(tracker.cards().length, 1);
+  // The delayed echo arrives after timeout, just before a queued retry would send.
+  const retry = tracker.answer(id, [['main'], ['new notes']], async () => { sends++; });
+  assert.deepEqual(tracker.resolveFromUserText(acceptedText, 'delayed-echo'), [id]);
+  assert.equal(await retry, false);
+  assert.equal(await tracker.answer(id, [['dev'], ['keep tests']], async () => { sends++; }), false);
+  assert.deepEqual(tracker.resolveFromUserText(acceptedText, 'duplicate-echo'), []);
+  assert.equal(tracker.cards().length, 0);
+  assert.equal(sends, 1);
+  assert.equal(tracker.observe(item, 'turn1'), undefined);
+  return [true, 'delayed native acceptance settles the whole card; a queued retry cannot resend'];
+});
+
+await test('async uncertain compound answers survive changed retries and native refusals', async () => {
+  for (const retryAnswers of [[['main'], ['new notes']], [['dev'], ['keep tests']]]) {
+    const tracker = new CodexAsyncQuestionTracker();
+    const id = 'codex:aq:retry-echo';
+    tracker.observe({ type: 'agentMessage', id: 'retry-echo', delivery: 'async', questions: [
+      { title: 'Branch?', options: null }, { title: 'Notes?', options: null },
+    ] }, 'turn1');
+    let acceptedText = '';
+    await assert.rejects(tracker.answer(id, [['dev'], ['keep tests']], async (text) => {
+      acceptedText = text;
+      throw new Error('codex turn/steer timed out');
+    }), /timed out/);
+    await assert.rejects(tracker.answer(id, retryAnswers, async () => {
+      throw Object.assign(new Error('native refusal'), { rpcRejected: true });
+    }), /native refusal/);
+    assert.deepEqual(tracker.resolveFromUserText(acceptedText, 'delayed-old-attempt'), [id]);
+    assert.equal(tracker.cards().length, 0);
+  }
+  return [true, 'neither changed answers nor refusal of the same text discard earlier uncertainty'];
+});
+
+await test('async definite rejection and connection reset discard compound correlation', async () => {
+  for (const reset of [false, true]) {
+    const tracker = new CodexAsyncQuestionTracker();
+    const id = 'codex:aq:discard';
+    const item = { type: 'agentMessage', id: 'discard', delivery: 'async', questions: [
+      { title: 'Branch?', options: null }, { title: 'Notes?', options: null },
+    ] };
+    tracker.observe(item, 'turn1');
+    let text = '';
+    await assert.rejects(tracker.answer(id, [['dev'], ['keep tests']], async (value) => {
+      text = value;
+      throw Object.assign(new Error('failed submission'), { rpcRejected: !reset });
+    }), /failed submission/);
+    if (reset) {
+      tracker.clear();
+      tracker.observe(item, 'turn2');
+    }
+    assert.deepEqual(tracker.resolveFromUserText(text, 'uncorrelated-compound'), []);
+    assert.equal(tracker.cards().length, 1);
+  }
+  return [true, 'no compound acceptance inferred from a refused attempt or prior connection'];
+});
+
+await test('async connection close does not turn a rejected submission into acceptance', async () => {
+  const tracker = new CodexAsyncQuestionTracker();
+  tracker.observe({ type: 'agentMessage', id: 'close', delivery: 'async', questions: [{ title: 'Branch?', options: null }] }, 'turn1');
+  await assert.rejects(tracker.answer('codex:aq:close', [['dev']], async () => {
+    tracker.clear();
+    throw new Error('connection closed before acceptance');
+  }), /connection closed before acceptance/);
+  return [true, 'connection teardown is not native answer evidence'];
+});
+
+// Hold a real adapter submission at a native RPC boundary; no real broker or Codex process.
+const ASYNC_ANSWER_QUEUE_FAKE = String.raw`#!/usr/bin/env bun
+const send = (value) => console.log(JSON.stringify(value));
+let blocked;
+let blockedRead;
+let mode = 'queue-settled';
+const steers = [];
+const starts = [];
+const user = (id, text) => send({ method: 'item/started', params: {
+  threadId: 'fake-thread', turnId: 'turn1', item: {
+    type: 'userMessage', id, content: [{ type: 'text', text, text_elements: [] }],
+  },
+} });
+const question = { type: 'agentMessage', id: 'call_q', delivery: 'async',
+  text: 'Branch?', questions: [{ title: 'Branch?', options: ['main', 'dev'] }] };
+const decoder = new TextDecoder();
+let buffer = '';
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk, { stream: true });
+  let newline;
+  while ((newline = buffer.indexOf('\n')) >= 0) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    if (!line.trim()) continue;
+    const msg = JSON.parse(line);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: {
+      thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider',
+    } });
+    else if (msg.method === 'turn/start') {
+      starts.push(msg.params.input[0].text);
+      send({ id: msg.id, result: { turn: { id: 'turn1' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn1' } } });
+      send({ method: 'item/started', params: { threadId: 'fake-thread', turnId: 'turn1', item: question } });
+    } else if (msg.method === 'turn/steer') {
+      const text = msg.params.input[0].text;
+      steers.push(text);
+      if (text === 'blocker') {
+        blocked = msg.id;
+        user('blocker-echo', text);
+      } else if (mode.startsWith('recovery') && steers.length === 1) {
+        send({ id: msg.id, error: { code: 'expected_active_turn', message: 'expected active turn mismatch' } });
+      } else send({ id: msg.id, result: { turnId: 'turn1' } });
+    } else if (msg.method === 'thread/read' && mode.startsWith('recovery')) {
+      blockedRead = msg.id;
+      user('recovery-barrier', 'recovery-ready');
+    } else if (msg.method === 'fixture/configure') {
+      mode = msg.params.mode;
+      send({ id: msg.id, result: {} });
+    } else if (msg.method === 'fixture/release') {
+      if (mode !== 'queue-pending') user('terminal-answer', '> Branch?\n\nmain');
+      if (mode === 'queue-idle') send({ method: 'turn/completed', params: {
+        threadId: 'fake-thread', turn: { id: 'turn1', status: 'completed' },
+      } });
+      if (blockedRead !== undefined) send({ id: blockedRead, result: {
+        thread: { status: { type: mode === 'recovery-idle' ? 'idle' : 'active' },
+          turns: [{ id: 'turn2', status: 'in-progress' }] },
+      } });
+      if (blocked !== undefined) send({ id: blocked, result: { turnId: 'turn1' } });
+      send({ id: msg.id, result: {} });
+    } else if (msg.method === 'fixture/snapshot') send({ id: msg.id, result: { steers, starts } });
+    else if (msg.id !== undefined) send({ id: msg.id, result: {} });
+  }
+}
+`;
+
+for (const mode of ['queue-settled', 'queue-idle', 'queue-pending', 'recovery-active', 'recovery-idle']) {
+  await test(`async answer checks pending authority at native send boundary (${mode})`, async () => {
+    return withFakeCodex(ASYNC_ANSWER_QUEUE_FAKE, async (rollout) => {
+      const conn: any = await new CodexAdapter().attach(Buffer.from(rollout).toString('base64url'), 'resume');
+      const events: any[] = [];
+      let questionReady!: () => void;
+      let blockerReady!: () => void;
+      let recoveryReady!: () => void;
+      const question = new Promise<void>((resolve) => { questionReady = resolve; });
+      const blocker = new Promise<void>((resolve) => { blockerReady = resolve; });
+      const recovery = new Promise<void>((resolve) => { recoveryReady = resolve; });
+      conn.subscribe((message: any) => {
+        events.push(message);
+        if (message.type === 'question-request') questionReady();
+        if (message.type === 'user-message' && message.text === 'blocker') blockerReady();
+        if (message.type === 'user-message' && message.text === 'recovery-ready') recoveryReady();
+      });
+      try {
+        await conn.sendPrompt({ text: 'start' });
+        await question;
+        await conn.rpc('fixture/configure', { mode });
+        const busy = mode.startsWith('queue') ? conn.sendPrompt({ text: 'blocker' }) : Promise.resolve();
+        if (mode.startsWith('queue')) await blocker;
+        const answer = conn.answerQuestion('codex:aq:call_q', [['dev']]);
+        // Enter the transport queue; a tracker-only microtask check cannot cancel this send.
+        await Promise.resolve();
+        await Promise.resolve();
+        if (mode.startsWith('queue')) assert.equal(conn.pendingPromptStarts, 2);
+        else await recovery;
+        await conn.rpc('fixture/release', {});
+        await Promise.all([busy, answer]);
+        const { steers, starts } = await conn.rpc('fixture/snapshot', {});
+        const expected = mode === 'queue-pending' ? ['blocker', '> Branch?\n\ndev']
+          : mode.startsWith('queue') ? ['blocker'] : ['> Branch?\n\ndev'];
+        assert.deepEqual(steers, expected, 'no send or recovery retry after native settlement');
+        assert.deepEqual(starts, ['start'], 'settlement cannot open a new turn');
+        assert.equal(conn.pendingPromptStarts, 0);
+        assert.deepEqual(await conn.getPending(), []);
+        assert.equal(events.filter((m) => m.type === 'question-resolved' && m.requestId === 'codex:aq:call_q').length, 1);
+        await conn.sendPrompt({ text: 'follow-up' });
+        assert.equal(conn.pendingPromptStarts, 0, 'cancellation releases the queue for ordinary input');
+        return [true, `steers=${JSON.stringify(steers)} starts=${JSON.stringify(starts)}; queue released`];
+      } finally {
+        await conn.close();
+      }
+    });
+  });
+}
+
+await test('async question renders one nonblocking card and steers the measured answer text', async () => {
+  return await withFakeCodex(`#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+const { appendFileSync } = require('node:fs');
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+let attempts = 0;
+const QUESTION_ITEM = { type: 'agentMessage', id: 'call_q1', text: 'Which color?\\n- Crimson\\n- Teal', phase: 'final_answer', delivery: 'async', questions: [{ title: 'Which color?', options: ['Crimson', 'Teal'] }, { title: 'Any notes?', options: null }] };
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      send({ id: msg.id, result: { turn: { id: 'turn1' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn1' } } });
+      setTimeout(() => {
+        send({ method: 'item/started', params: { threadId: 'fake-thread', turnId: 'turn1', item: QUESTION_ITEM } });
+        send({ method: 'item/completed', params: { threadId: 'fake-thread', turnId: 'turn1', item: QUESTION_ITEM } });
+      }, 40);
+    } else if (msg.method === 'turn/steer') {
+      mark({ kind: 'turn/steer-request', expectedTurnId: String(msg.params?.expectedTurnId ?? ''), text: msg.params?.input?.[0]?.text ?? '' });
+      attempts++;
+      if (attempts === 1) send({ id: msg.id, error: { code: -32000, message: 'fixture answer refusal' } });
+      else {
+        send({ method: 'item/completed', params: { threadId: 'fake-thread', turnId: 'turn1', item: QUESTION_ITEM } });
+        send({ id: msg.id, result: { turnId: 'turn1' } });
+      }
+    }
+  }
+}
+`, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'start' });
+      await waitFor(() => messages.some((m) => m.type === 'question-request'), 5000);
+      const cards = messages.filter((m) => m.type === 'question-request');
+      const card = cards[0];
+      const pending: any[] = await Promise.resolve(conn.getPending?.() ?? []);
+      const pendingCard = pending.find((m: any) => m.type === 'question-request');
+      // The duplicated item text must not ALSO render as assistant output.
+      const textLeak = messages.some((m) => m.type === 'model-output' && String(m.text ?? m.delta ?? '').includes('Which color?'));
+      await assert.rejects(conn.answerQuestion!(card.requestId, [['Teal'], ['custom note']]), /fixture answer refusal/);
+      assert.ok((await conn.getPending!()).some((m) => m.type === 'question-request' && m.requestId === card.requestId));
+      assert.ok(!messages.some((m) => m.type === 'question-resolved'));
+      await Promise.all([
+        conn.answerQuestion!(card.requestId, [['Teal'], ['custom note']]),
+        conn.answerQuestion!(card.requestId, [['Crimson'], []]),
+      ]);
+      await waitFor(() => messages.some((m) => m.type === 'question-resolved' && m.requestId === card.requestId), 5000);
+      // Duplicate and late answers are no-ops (no second steer).
+      await conn.answerQuestion!(card.requestId, [['Crimson'], []]);
+      await conn.rejectQuestion!(card.requestId);
+      const pendingAfter: any[] = await Promise.resolve(conn.getPending?.() ?? []);
+      const steers = readMarkers(marker).filter((m) => m.kind === 'turn/steer-request');
+      return [
+        cards.length === 1 &&
+          card.requestId === 'codex:aq:call_q1' &&
+          card.blocking === false &&
+          card.readOnly !== true &&
+          card.questions.length === 2 &&
+          card.questions[0].question === 'Which color?' &&
+          card.questions[0].options.length === 2 &&
+          card.questions[1].options.length === 0 &&
+          pendingCard?.requestId === card.requestId && pendingCard?.blocking === false &&
+          !textLeak &&
+          steers.length === 2 &&
+          messages.filter((m) => m.type === 'question-resolved').length === 1 &&
+          messages.filter((m) => m.type === 'question-request').length === 1 &&
+          steers[0].expectedTurnId === 'turn1' &&
+          steers[0].text === '> Which color?\n\nTeal\n\n> Any notes?\n\ncustom note' &&
+          pendingAfter.length === 0,
+        `cards=${cards.length} steers=${JSON.stringify(steers)} textLeak=${textLeak} pendingAfter=${pendingAfter.length}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
+await test('async question survives its turn end and a late answer starts a new turn', async () => {
+  return await withFakeCodex(`#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+const { appendFileSync } = require('node:fs');
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+const QUESTION_ITEM = { type: 'agentMessage', id: 'call_late', text: 'Pick a branch?', phase: 'final_answer', delivery: 'async', questions: [{ title: 'Pick a branch?', options: ['main', 'dev'] }] };
+let starts = 0;
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      starts += 1;
+      const turnId = 'turn' + starts;
+      mark({ kind: 'turn/start-request', turnId, text: msg.params?.input?.[0]?.text ?? '' });
+      send({ id: msg.id, result: { turn: { id: turnId } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: turnId } } });
+      if (starts === 1) {
+        setTimeout(() => {
+          send({ method: 'item/started', params: { threadId: 'fake-thread', turnId, item: QUESTION_ITEM } });
+          send({ method: 'item/completed', params: { threadId: 'fake-thread', turnId, item: QUESTION_ITEM } });
+        }, 40);
+        // The asking turn ends with the question still unanswered — it must NOT settle.
+        setTimeout(() => {
+          send({ method: 'turn/completed', params: { threadId: 'fake-thread', turn: { id: turnId, status: 'completed' } } });
+          send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'idle' } } });
+        }, 90);
+      }
+    } else if (msg.method === 'turn/steer') {
+      mark({ kind: 'turn/steer-request', text: msg.params?.input?.[0]?.text ?? '' });
+      send({ id: msg.id, result: {} });
+    }
+  }
+}
+`, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'ask' });
+      await waitFor(() => messages.some((m) => m.type === 'question-request'), 5000);
+      // Turn-end evidence (completion + idle) arrived, yet the async card must still be pending.
+      await waitFor(() => messages.some((m) => m.type === 'status' && m.status === 'idle'), 5000);
+      await sleep(150);
+      const pendingAfterIdle: any[] = await Promise.resolve(conn.getPending?.() ?? []);
+      const card = pendingAfterIdle.find((m: any) => m.type === 'question-request');
+      const resolvedEarly = messages.some((m) => m.type === 'question-resolved');
+      // Late answer: idle, so it must become a NEW turn carrying the measured serialization.
+      await conn.answerQuestion!('codex:aq:call_late', [['dev']]);
+      await waitFor(() => messages.some((m) => m.type === 'question-resolved' && m.requestId === 'codex:aq:call_late'), 5000);
+      const marks = readMarkers(marker);
+      const starts = marks.filter((m) => m.kind === 'turn/start-request');
+      const steers = marks.filter((m) => m.kind === 'turn/steer-request');
+      return [
+        !resolvedEarly &&
+          card?.blocking === false &&
+          starts.length === 2 &&
+          starts[1].text === '> Pick a branch?\n\ndev' &&
+          steers.length === 0,
+        `resolvedEarly=${resolvedEarly} pendingAfterIdle=${pendingAfterIdle.length} starts=${JSON.stringify(starts)} steers=${JSON.stringify(steers)}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
+await test('async question skip is a local-only dismiss and a terminal answer resolves the card', async () => {
+  return await withFakeCodex(`#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+const { appendFileSync } = require('node:fs');
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+const Q1 = { type: 'agentMessage', id: 'call_skip', text: 'First?', phase: 'final_answer', delivery: 'async', questions: [{ title: 'First?', options: ['a', 'b'] }] };
+const Q2 = { type: 'agentMessage', id: 'call_ext', text: 'Second?', phase: 'final_answer', delivery: 'async', questions: [{ title: 'Second?', options: ['x', 'y'] }] };
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      send({ id: msg.id, result: { turn: { id: 'turn1' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn1' } } });
+      setTimeout(() => {
+        send({ method: 'item/completed', params: { threadId: 'fake-thread', turnId: 'turn1', item: Q1 } });
+        send({ method: 'item/completed', params: { threadId: 'fake-thread', turnId: 'turn1', item: Q2 } });
+        send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'active', activeFlags: ['waitingOnUserInput'] } } });
+        setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'active', activeFlags: [] } } }), 20);
+      }, 40);
+      // An unrelated user message must NOT resolve anything; the exact native answer shape must.
+      setTimeout(() => {
+        send({ method: 'item/started', params: { threadId: 'fake-thread', turnId: 'turn1', item: { type: 'userMessage', id: 'u0', clientId: null, content: [{ type: 'text', text: 'an unrelated terminal message', text_elements: [] }] } } });
+      }, 90);
+      setTimeout(() => {
+        send({ method: 'item/started', params: { threadId: 'fake-thread', turnId: 'turn1', item: { type: 'userMessage', id: 'u1', clientId: null, content: [{ type: 'text', text: '> Second?\\n\\ny', text_elements: [] }] } } });
+      }, 150);
+    } else if (msg.method === 'turn/steer' || msg.method === 'turn/interrupt') {
+      mark({ kind: msg.method });
+      send({ id: msg.id, result: {} });
+    }
+  }
+}
+`, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'ask' });
+      await waitFor(() => messages.filter((m) => m.type === 'question-request' && !m.readOnly).length === 2, 5000);
+      const skip = messages.find((m) => m.type === 'question-request' && m.requestId === 'codex:aq:call_skip');
+      // Skip: resolves locally, sends nothing native.
+      await conn.rejectQuestion!(skip.requestId);
+      // The unrelated message resolved nothing; the exact native answer shape resolved Q2.
+      await waitFor(() => messages.some((m) => m.type === 'question-resolved' && m.requestId === 'codex:aq:call_ext'), 5000);
+      const pending: any[] = await Promise.resolve(conn.getPending?.() ?? []);
+      const nativeWrites = readMarkers(marker);
+      return [
+        messages.some((m) => m.type === 'question-resolved' && m.requestId === 'codex:aq:call_skip') &&
+          messages.some((m) => m.type === 'question-request' && m.readOnly && m.requestId.startsWith('codex:waiting:question:')) &&
+          pending.length === 0 &&
+          nativeWrites.length === 0,
+        `pending=${pending.length} nativeWrites=${JSON.stringify(nativeWrites)} resolved=${messages.filter((m) => m.type === 'question-resolved').map((m) => m.requestId).join(',')}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
+await test('requestUserInput RPC propagates isBlocking and still answers over the RPC channel', async () => {
+  return await withFakeCodex(`#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+const { appendFileSync } = require('node:fs');
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      send({ id: msg.id, result: { turn: { id: 'turn1' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn1' } } });
+      setTimeout(() => {
+        send({ id: 61, method: 'item/tool/requestUserInput', params: { threadId: 'fake-thread', turnId: 'turn1', itemId: 'tool-blocking', questions: [{ id: 'b1', header: 'H', question: 'Blocking?', options: [{ label: 'Yes', description: 'y' }] }], isBlocking: true, autoResolutionMs: null } });
+        send({ id: 62, method: 'item/tool/requestUserInput', params: { threadId: 'fake-thread', turnId: 'turn1', itemId: 'tool-nb', questions: [{ id: 'n1', header: 'H', question: 'Nonblocking?', options: [{ label: 'No', description: 'n' }] }], isBlocking: false, autoResolutionMs: null } });
+      }, 40);
+    } else if ((msg.id === 61 || msg.id === 62) && msg.result !== undefined) {
+      mark({ kind: 'rpc-answer', rpcId: msg.id, result: msg.result });
+    } else if (msg.method === 'turn/steer') {
+      mark({ kind: 'turn/steer-request' });
+      send({ id: msg.id, result: {} });
+    }
+  }
+}
+`, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'ask' });
+      await waitFor(() => messages.filter((m) => m.type === 'question-request').length === 2, 5000);
+      const blocking = messages.find((m) => m.type === 'question-request' && m.questions?.[0]?.question === 'Blocking?');
+      const nonblocking = messages.find((m) => m.type === 'question-request' && m.questions?.[0]?.question === 'Nonblocking?');
+      await conn.answerQuestion!(blocking.requestId, [['Yes']]);
+      await conn.answerQuestion!(nonblocking.requestId, [['No']]);
+      await waitFor(() => readMarkers(marker).filter((m) => m.kind === 'rpc-answer').length === 2, 5000);
+      const marks = readMarkers(marker);
+      const rpcAnswers = marks.filter((m) => m.kind === 'rpc-answer');
+      return [
+        blocking && !('blocking' in blocking) &&
+          nonblocking?.blocking === false &&
+          rpcAnswers.length === 2 &&
+          rpcAnswers.every((m) => m.result?.answers && Object.keys(m.result.answers).length === 1) &&
+          !marks.some((m) => m.kind === 'turn/steer-request'),
+        `blockingField=${JSON.stringify(blocking?.blocking)} nb=${JSON.stringify(nonblocking?.blocking)} rpc=${JSON.stringify(rpcAnswers)}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
     }
   });
 });
@@ -3929,6 +4501,102 @@ for await (const chunk of Bun.stdin.stream()) {
   );
 });
 
+// Sanitized gpt-6-astra entry in the exact shape of the installed 0.154.0 catalog
+// ($CODEX_HOME/models_cache.json, fetched 2026-09-14): six-effort ladder, medium default.
+const ASTRA_CATALOG_CACHE = JSON.stringify({
+  models: [
+    {
+      slug: 'gpt-6-astra',
+      display_name: 'GPT-6-Astra',
+      supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      default_reasoning_level: 'medium',
+    },
+    {
+      slug: 'gpt-5.6-sol',
+      display_name: 'GPT-5.6 Sol',
+      supported_reasoning_levels: ['low', 'medium', 'high'],
+      default_reasoning_level: 'low',
+    },
+  ],
+});
+
+const ASTRA_RESUME_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') {
+      mark({ kind: 'thread/settings/update', params: msg.params });
+      send({ id: msg.id, result: {} });
+    } else if (msg.method === 'thread/resume') {
+      send({ id: msg.id, result: { thread: { name: 'astra session' }, model: 'gpt-5.6-sol', modelProvider: 'openai' } });
+    } else if (msg.method === 'turn/start') {
+      mark({ kind: 'turn/start', params: msg.params });
+      send({ id: msg.id, result: { turn: { id: 'turn-astra' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn-astra' } } });
+    } else if (msg.id != null && msg.method) send({ id: msg.id, result: {} });
+  }
+}
+`;
+
+await test('gpt-6-astra catalog entry survives selection and resume with its exact effort ladder', async () => {
+  return await withCodexHome(
+    { 'config.toml': 'model = "gpt-6-astra"\n', 'models_cache.json': ASTRA_CATALOG_CACHE },
+    async () => {
+      return await withFakeCodex(ASTRA_RESUME_FAKE, async (rollout, dir, marker) => {
+        // Creation-time catalog: the picker must surface Astra with its native effort ladder.
+        const models = await new CodexAdapter().listModels();
+        const astra = models.find((m) => m.modelID === 'gpt-6-astra');
+        const efforts = astra?.reasoningEfforts?.map((e) => e.effort);
+        // Resume with a stored exact Astra selection: it must reach native settings unchanged.
+        writeFileSync(rollout, JSON.stringify({
+          type: 'session_meta',
+          payload: { id: 'fake-thread', cwd: dir, model_provider: 'openai', originator: 'cosyncing' },
+        }) + '\n');
+        const adapter = new CodexAdapter({
+          resolveStoredCurrentModel: (info) => info.nativeId === 'fake-thread'
+            ? { providerID: 'openai', modelID: 'gpt-6-astra', reasoningEffort: 'ultra' }
+            : undefined,
+        });
+        const conn = await adapter.attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+        try {
+          // In-session selection: an exact Astra pick rides the prompt unchanged.
+          await conn.sendPrompt({ text: 'hi', model: { providerID: 'openai', modelID: 'gpt-6-astra', reasoningEffort: 'xhigh' } });
+          await waitFor(() => readMarkers(marker).some((r) => r.kind === 'turn/start'), 5000);
+          const records = readMarkers(marker);
+          const update = records.find((r) => r.kind === 'thread/settings/update');
+          const start = records.find((r) => r.kind === 'turn/start');
+          return [
+            astra?.providerID === 'openai' &&
+              astra?.label === 'GPT-6-Astra' &&
+              JSON.stringify(efforts) === JSON.stringify(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']) &&
+              astra?.defaultReasoningEffort === 'medium' &&
+              update?.params?.model === 'gpt-6-astra' &&
+              update?.params?.effort === 'ultra' &&
+              start?.params?.model === 'gpt-6-astra' &&
+              start?.params?.effort === 'xhigh' &&
+              conn.info.currentModel?.modelID === 'gpt-6-astra',
+            `astra=${JSON.stringify(astra)} update=${JSON.stringify(update)} start=${JSON.stringify(start)} current=${JSON.stringify(conn.info.currentModel)}`,
+          ];
+        } finally {
+          await conn.close().catch(() => {});
+        }
+      });
+    },
+  );
+});
+
 function profileRollout(dir: string, provider: string | undefined, model: string): string[] {
   return [
     JSON.stringify({
@@ -4488,7 +5156,7 @@ await test('codex advertises and returns each request-local approval scope exact
       await conn.sendPrompt({ text: 'trigger every approval shape' });
       const arrived = await waitFor(() => messages.filter((m) => m.type === 'permission-request').length === 5, 5000);
       const requests = messages.filter((m) => m.type === 'permission-request');
-      const pending = await Promise.resolve(conn.getPending?.() ?? []);
+      const pending: any[] = await Promise.resolve(conn.getPending?.() ?? []);
       const advertised = requests.every((m) => m.toolName === 'exec_command'
         && m.detail?.includes('v2 command')
         ? m.options?.join(',') === 'approve,approve-rule,reject'

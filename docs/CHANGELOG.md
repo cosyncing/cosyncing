@@ -23,6 +23,18 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   the configured port, suggesting the next available port and retaining the choice
   in configuration, service setup, and pairing URLs.
 
+### Added
+
+- Codex non-blocking questions (`request_user_input_async`, Codex 0.154+) now
+  render as the shared question card while Codex keeps working. The session
+  keeps its working/idle status instead of switching to Needs input; answering
+  sends the reply as a follow-up user message Codex consumes at its next input
+  boundary, and dismissing the card matches the terminal's unrecorded skip.
+  Blocking questions (Plan mode `request_user_input`) are unchanged, including
+  on older Codex versions. The broker/client contract gains an optional
+  `blocking` flag on `question-request` (revision 24); older clients ignore it
+  and render the same card.
+
 ## 0.5.4 — 2026-09-14
 
 ### Added

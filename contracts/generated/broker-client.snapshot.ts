@@ -944,6 +944,15 @@ export type AgentMessage =
       requestId: string;
       /** Read-only observe surfacing: show the question, but do not render answer controls. */
       readOnly?: boolean;
+      /**
+       * Whether the agent is BLOCKED waiting for this answer. Omitted or true reproduces the
+       * pre-revision-24 behavior: a pending question forces the session status to `needs-input`.
+       * `false` marks an asynchronous question (for example a Codex `delivery: "async"` agent
+       * message): the agent keeps working, so the card must stay visible and answerable WITHOUT
+       * overriding the native working/idle status. A `false` entry never masks a blocking one —
+       * any pending blocking question or permission still wins the status.
+       */
+      blocking?: boolean;
       questions: {
         question: string;
         header?: string;
@@ -1720,8 +1729,24 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * The overlap arithmetic moves with the number -- 22 is now the newest revision
  * inside the window, so a revision-22-or-later client has to ship before a
  * revision-23 broker does.
+ *
+ * Revision 24 adds the optional `blocking` flag on `question-request`. Until now
+ * every pending question forced the session into `needs-input`, which is false
+ * for an asynchronous question (Codex `delivery: "async"` agent items): the agent
+ * keeps working and consumes the answer at a later input boundary. An adapter
+ * sets `blocking: false` on such a card; the broker keeps it visible and retained
+ * without letting it override the native working/idle status. Omission reproduces
+ * the pre-24 behavior exactly, so an older client ignores the field and loses
+ * nothing — the card renders the same, and only the broker reads the flag. Adding
+ * no route, frame kind, message type or error code, it leaves the surface hash
+ * where revision 23 left it; the number moves because the DTO did, which is the
+ * rule this comment opens with.
+ *
+ * The overlap arithmetic moves with the number -- 23 is now the newest revision
+ * inside the window, so a revision-23-or-later client has to ship before a
+ * revision-24 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 23 as const;
+export const BROKER_CONTRACT_REVISION = 24 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -2647,8 +2672,9 @@ export interface SessionConnection {
   /** Mutating approval response; same ownership precondition as {@link sendPrompt}. */
   respondPermission(requestId: string, decision: PermissionDecision): Promise<void>;
   /** Answer a `question-request`. `answers` is one array of selected labels per question
-   *  (custom free-text answers are passed as a label). Distinct from sending a prompt. Mutating; same
-   *  ownership precondition as {@link sendPrompt}. */
+   *  (custom free-text answers are passed as a label). The adapter owns the native transport:
+   *  an RPC response or, for async questions, user input. Mutating; same ownership precondition
+   *  as {@link sendPrompt}. */
   answerQuestion?(requestId: string, answers: string[][]): Promise<void>;
   /** Dismiss a `question-request` without answering. Mutating; same ownership precondition. */
   rejectQuestion?(requestId: string): Promise<void>;

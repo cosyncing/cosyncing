@@ -427,6 +427,30 @@ void main() {
       );
     });
 
+    test('nonblocking questions preserve actions and the flag', () {
+      final json = {
+        'type': 'question-request',
+        'requestId': 'codex:aq:choice',
+        'blocking': false,
+        'questions': [
+          {
+            'question': 'Which branch?',
+            'options': [
+              {'label': 'main'},
+              {'label': 'dev'},
+            ],
+          },
+          {'question': 'Any notes?', 'options': <Object?>[]},
+        ],
+      };
+      final message = AgentMessage.fromJson(json);
+      expect(message.requestIsReadOnly, isFalse);
+      expect(message.questionRequestQuestions, hasLength(2));
+      expect(message.questionRequestQuestions.first.options.last.label, 'dev');
+      expect(message.questionRequestQuestions.last.options, isEmpty);
+      expect(message.toJson()['blocking'], isFalse);
+    });
+
     test('types canonical structured questions and drops malformed rows', () {
       final message = AgentMessage.fromJson({
         'type': 'question-request',

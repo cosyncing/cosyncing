@@ -8,6 +8,7 @@
  */
 export {};
 import { join } from 'node:path';
+import { BROKER_CONTRACT_REVISION, CLIENT_REVISION_WITH_ROSTER_COMPLETENESS } from '../../../protocol/src/index.ts';
 import {
   AgentRegistry,
   type SessionDiscoveryOptions,
@@ -300,16 +301,11 @@ check('reusable: nothing cached is not reusable',
   );
 }
 
-{
-  const protocolSource = await Bun.file(
-    join(import.meta.dir, '..', '..', '..', 'protocol', 'src', 'index.ts'),
-  ).text();
-  check(
-    'the gate constant is the contract revision that introduced the flag',
-    /CLIENT_REVISION_WITH_ROSTER_COMPLETENESS = 23 as const/.test(protocolSource)
-      && /BROKER_CONTRACT_REVISION = 23 as const/.test(protocolSource),
-  );
-}
+check(
+  'roster completeness remains gated at its introducing revision as the contract advances',
+  CLIENT_REVISION_WITH_ROSTER_COMPLETENESS === 23
+    && BROKER_CONTRACT_REVISION >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
+);
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${failed.length === 0 ? '✅' : '❌'} ${results.length - failed.length}/${results.length} roster-http checks passed.`);

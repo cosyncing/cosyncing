@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/features/sessions/attachments/session_attac
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_bootstrap_state.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_connection.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_live_state.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_question_state.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_telemetry.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_request_action_helpers.dart';
@@ -1072,6 +1073,7 @@ final class TranscriptHistoryWindow {
       latestHistoryTruncation = null,
       liveState = null,
       telemetry = SessionTelemetry.empty,
+      questionState = SessionQuestionState.empty,
       tailPrefixEvicted = false;
 
   const TranscriptHistoryWindow._({
@@ -1081,6 +1083,7 @@ final class TranscriptHistoryWindow {
     required this.latestHistoryTruncation,
     required this.liveState,
     required this.telemetry,
+    required this.questionState,
     required this.tailPrefixEvicted,
   }) : initialized = true;
 
@@ -1093,7 +1096,13 @@ final class TranscriptHistoryWindow {
   /// upserts landed on the first copy while position said the last copy was
   /// newest, so later merges could resurrect a stale value.
   factory TranscriptHistoryWindow.fromHistory(HistoryWireEvent event) {
-    final tailMessages = _collapseLatestWinsRestatements(event.messages);
+    var questionState = SessionQuestionState.empty;
+    for (final message in event.messages) {
+      questionState = questionState.applyMessage(message);
+    }
+    final tailMessages = _collapseLatestWinsRestatements(
+      event.messages.map(questionState.restoreMessage).toList(),
+    );
     var tailBytes = tailMessages.fold<int>(
       0,
       (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
@@ -1124,6 +1133,7 @@ final class TranscriptHistoryWindow {
           : event.truncated,
       liveState: SessionLiveState.fromMessages(tailMessages),
       telemetry: SessionTelemetry.fromMessages(tailMessages),
+      questionState: questionState,
       tailPrefixEvicted: prefixEvicted,
     );
   }
@@ -1158,6 +1168,7 @@ final class TranscriptHistoryWindow {
             latestHistoryTruncation: null,
             liveState: SessionLiveState.fromMessages(const []),
             telemetry: SessionTelemetry.empty,
+            questionState: SessionQuestionState.empty,
             tailPrefixEvicted: false,
           );
   }
@@ -1182,6 +1193,9 @@ final class TranscriptHistoryWindow {
 
   /// Incremental latest telemetry projection.
   final SessionTelemetry telemetry;
+
+  /// Live question authority retained independently of bounded history pages.
+  final SessionQuestionState questionState;
 
   /// The retained tail discarded older local rows that have no opaque native
   /// boundary. This is surfaced as reconnect-required, never hidden.
@@ -1250,6 +1264,9 @@ final class TranscriptHistoryWindow {
     final result = <String, String?>{};
     for (final page in pages) {
       result.addAll(_pageDerived(page).resolvedRequestDecisions);
+    }
+    for (final id in questionState.resolvedRequestIds) {
+      result.putIfAbsent(id, () => null);
     }
     return Map<String, String?>.unmodifiable(result);
   }
@@ -1476,7 +1493,7 @@ final class TranscriptHistoryWindow {
       for (final message in pages[anchorPageIndex].messages) {
         final key = stableTranscriptMessageKey(message);
         if (key == null || !replacementKeys.contains(key)) {
-          anchorMessages.add(message);
+          anchorMessages.add(SessionQuestionState.historicalMessage(message));
         }
       }
       var protectedIndex = anchorMessages.indexWhere(
@@ -1519,6 +1536,7 @@ final class TranscriptHistoryWindow {
         latestHistoryTruncation: replacement.latestHistoryTruncation,
         liveState: replacement.liveState,
         telemetry: replacement.telemetry,
+        questionState: replacement.questionState,
         tailPrefixEvicted: true,
       );
     }
@@ -1555,6 +1573,7 @@ final class TranscriptHistoryWindow {
       latestHistoryTruncation: event.truncated ?? next.latestHistoryTruncation,
       liveState: next.liveState,
       telemetry: next.telemetry,
+      questionState: next.questionState,
       tailPrefixEvicted: next.tailPrefixEvicted,
     );
   }
@@ -1586,16 +1605,36 @@ final class TranscriptHistoryWindow {
           latestHistoryTruncation: latestHistoryTruncation,
           liveState: liveState ?? SessionLiveState.fromMessages(const []),
           telemetry: telemetry,
+          questionState: questionState,
           tailPrefixEvicted: tailPrefixEvicted,
         );
+
+  /// Ends live question authority without changing history or its cursors.
+  /// The same adapter restores pending cards through live replay. A replacement
+  /// can return an empty delta with no pending requests.
+  TranscriptHistoryWindow invalidateQuestionAuthority() {
+    if (!initialized) return this;
+    return TranscriptHistoryWindow._(
+      pages: _mapQuestionPages(pages, SessionQuestionState.historicalMessage),
+      historyCursor: historyCursor,
+      latestHistoryGap: latestHistoryGap,
+      latestHistoryTruncation: latestHistoryTruncation,
+      liveState: liveState,
+      telemetry: telemetry,
+      questionState: SessionQuestionState.empty,
+      tailPrefixEvicted: tailPrefixEvicted,
+    );
+  }
 
   /// Applies one live message by inspecting at most the 100-message tail in
   /// the common append/stream-update path.
   TranscriptHistoryWindow applyLiveMessage(
-    AgentMessage message, {
+    AgentMessage incomingMessage, {
     TranscriptHistoryWorkCounter? work,
   }) {
     final base = _tailWritableBase;
+    final nextQuestionState = base.questionState.applyMessage(incomingMessage);
+    final message = nextQuestionState.restoreMessage(incomingMessage);
     final tailIndex = base.pages.lastIndexWhere((page) => page.isTail);
     final safeTailIndex = tailIndex < 0 ? base.pages.length - 1 : tailIndex;
     final tail = base.pages[safeTailIndex];
@@ -1648,13 +1687,16 @@ final class TranscriptHistoryWindow {
       nextPages[safeTailIndex] = nextTail;
     }
     return TranscriptHistoryWindow._(
-      pages: List.unmodifiable(nextPages),
+      pages: identical(nextQuestionState, base.questionState)
+          ? List.unmodifiable(nextPages)
+          : _mapQuestionPages(nextPages, nextQuestionState.restoreMessage),
       historyCursor: base.historyCursor,
       latestHistoryGap: base.latestHistoryGap,
       latestHistoryTruncation: base.latestHistoryTruncation,
       liveState: (base.liveState ?? SessionLiveState.fromMessages(const []))
           .applyMessage(message),
       telemetry: base.telemetry.applyMessage(message),
+      questionState: nextQuestionState,
       tailPrefixEvicted: prefixEvicted,
     );
   }
@@ -1677,7 +1719,15 @@ final class TranscriptHistoryWindow {
       retained: tail.messages,
       frame: messages,
     );
-    final nextTailMessages = List<AgentMessage>.of(reconciled.messages);
+    var nextQuestionState = base.questionState;
+    if (!reconciled.frameSuperseded) {
+      for (final message in messages) {
+        nextQuestionState = nextQuestionState.applyMessage(message);
+      }
+    }
+    final nextTailMessages = reconciled.messages
+        .map(nextQuestionState.restoreMessage)
+        .toList();
     var nextBytes = nextTailMessages.fold<int>(
       0,
       (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
@@ -1711,12 +1761,15 @@ final class TranscriptHistoryWindow {
       }
     }
     return TranscriptHistoryWindow._(
-      pages: List.unmodifiable(nextPages),
+      pages: identical(nextQuestionState, base.questionState)
+          ? List.unmodifiable(nextPages)
+          : _mapQuestionPages(nextPages, nextQuestionState.restoreMessage),
       historyCursor: base.historyCursor,
       latestHistoryGap: base.latestHistoryGap,
       latestHistoryTruncation: base.latestHistoryTruncation,
       liveState: liveState,
       telemetry: telemetry,
+      questionState: nextQuestionState,
       tailPrefixEvicted: prefixEvicted,
     );
   }
@@ -1731,7 +1784,10 @@ final class TranscriptHistoryWindow {
     if (!initialized || requestedCursor.isEmpty) {
       return TranscriptHistoryPageMutation(window: this, accepted: false);
     }
-    final pageBytes = event.messages.fold<int>(0, (sum, message) {
+    final pageMessages = event.messages
+        .map(questionState.restoreMessage)
+        .toList();
+    final pageBytes = pageMessages.fold<int>(0, (sum, message) {
       work?.estimatedMessages += 1;
       return sum + estimatedAgentMessageDecodedBytes(message);
     });
@@ -1745,7 +1801,7 @@ final class TranscriptHistoryWindow {
       return TranscriptHistoryPageMutation(window: this, accepted: false);
     }
     final inserted = TranscriptHistoryPage(
-      messages: event.messages,
+      messages: pageMessages,
       olderCursor: event.hasMore ? event.cursor : null,
       newerCursor: requestedCursor,
       isTail: false,
@@ -1826,11 +1882,28 @@ final class TranscriptHistoryWindow {
         latestHistoryTruncation: null,
         liveState: liveState,
         telemetry: telemetry,
+        questionState: questionState,
         tailPrefixEvicted: tailPrefixEvicted,
       ),
     );
   }
 }
+
+List<TranscriptHistoryPage> _mapQuestionPages(
+  List<TranscriptHistoryPage> pages,
+  AgentMessage Function(AgentMessage) restoreMessage,
+) => List.unmodifiable([
+  for (final page in pages)
+    if (page.messages.every((m) => identical(m, restoreMessage(m))))
+      page
+    else
+      TranscriptHistoryPage(
+        messages: page.messages.map(restoreMessage).toList(),
+        olderCursor: page.olderCursor,
+        newerCursor: page.newerCursor,
+        isTail: page.isTail,
+      ),
+]);
 
 _TranscriptHistoryPageDerived _pageDerived(
   TranscriptHistoryPage page, {

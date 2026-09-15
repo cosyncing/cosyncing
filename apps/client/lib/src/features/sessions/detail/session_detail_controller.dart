@@ -1467,6 +1467,9 @@ class SessionDetailController
     unawaited(previousStateSub?.cancel());
     unawaited(previousEventSub?.cancel());
 
+    state = state.copyWith(
+      transcriptWindow: state.transcriptWindow.invalidateQuestionAuthority(),
+    );
     _stateSub = connection.stateStream.listen((status) {
       if (!_isCurrentBootstrapAttempt(bootstrapAttempt) ||
           !identical(_connection, connection)) {
@@ -1522,6 +1525,9 @@ class SessionDetailController
           : state.bootstrapState;
       state = state.copyWith(
         connectionStatus: status,
+        transcriptWindow: status == SessionDetailConnectionStatus.connected
+            ? state.transcriptWindow
+            : state.transcriptWindow.invalidateQuestionAuthority(),
         bootstrapState: bootstrapState,
         interruptPhase: status == SessionDetailConnectionStatus.connected
             ? state.interruptPhase
@@ -1681,7 +1687,11 @@ class SessionDetailController
       LocalizedFailure? historyPageError;
       String? historyPageErrorCode;
       var clearHistoryPageError = false;
-      var transcriptWindow = state.transcriptWindow;
+      // Hello starts a wire connection epoch even if transport status was
+      // coalesced. Cursor continuity does not prove adapter continuity.
+      var transcriptWindow = event is HelloWireEvent
+          ? state.transcriptWindow.invalidateQuestionAuthority()
+          : state.transcriptWindow;
       var acceptedHistoryPage = true;
       switch (event) {
         case HistoryWireEvent():

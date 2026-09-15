@@ -67,6 +67,33 @@ the terminal can resume through the shared daemon. A session already on that
 daemon can be joined directly. If another foreground app client still drives
 the session, close that client before handing off.
 
+## Questions from Codex
+
+Codex can ask two kinds of questions, and cosyncing renders both as the same
+question card used by every agent.
+
+A blocking question (for example in Plan mode) pauses Codex until you answer;
+the session shows **Needs input** and answering responds to Codex directly.
+
+A non-blocking question (`request_user_input_async`, Codex 0.154 and newer)
+does not pause Codex: the session follows its **Working** or **Idle** status,
+and the card stays open alongside the running output. Answering sends your
+reply as an ordinary follow-up message that Codex reads at its next input
+boundary — during the current turn when one is running, or as a new turn when
+the asking turn already finished. Dismissing the card only dismisses it in
+cosyncing, matching the terminal's skip, which Codex does not record anywhere.
+
+A terminal answer can resolve the app card while cosyncing is attached. Codex
+sends these as quoted question titles followed by the answer, without a question
+identifier. The app resolves a card only after answers for all its questions
+arrive; repeated titles are ambiguous and leave the card open. Terminal skips
+publish no event, so they cannot dismiss the app's card.
+
+Reconnecting an app to the same running broker connection retains its pending
+cards. If the broker's Codex connection closes or the thread is reopened, Codex
+does not re-offer unanswered async questions. The history then shows read-only
+cards.
+
 ## Recovering a stalled daemon
 
 If terminal resumes report **This conversation is open in another app** and
