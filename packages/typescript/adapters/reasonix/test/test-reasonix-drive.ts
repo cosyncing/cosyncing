@@ -639,6 +639,8 @@ try {
     sessionId: id,
     update: { sessionUpdate: 'tool_call', toolCallId: 'pending-create-tool', title: 'Bash' },
   });
+  await waitFor(() => pendingIdentitySeen.some((message) => message.type === 'tool-call'
+    && message.callId === 'pending-create-tool'));
   check('the entire pending-create turn withholds keyless assistant chunks after materialization',
     !pendingIdentitySeen.some((message) => message.type === 'model-output')
       && pendingIdentitySeen.some((message) => message.type === 'tool-call'
