@@ -11,17 +11,7 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
-- Codex completion notices retain their opening event when the start response
-  arrives before the start notification.
-- Desktop installers complete automatic pairing when the local broker is ready
-  but an agent-list or service-status check fails. Client handoff results now
-  distinguish failed pairing from a saved credential.
-
-- The all-in-one shell and PowerShell installers ask for language before installation
-  and carry the choice into setup without a second language prompt.
-- Interactive setup offers another broker port when a different process occupies
-  the configured port, suggesting the next available port and retaining the choice
-  in configuration, service setup, and pairing URLs.
+## 0.5.5 — 2026-09-15
 
 ### Added
 
@@ -34,6 +24,23 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   on older Codex versions. The broker/client contract gains an optional
   `blocking` flag on `question-request` (revision 24); older clients ignore it
   and render the same card.
+
+### Changed
+
+- The all-in-one shell and PowerShell installers ask for language before
+  installation and carry the choice into setup without a second language
+  prompt.
+- Interactive setup offers another broker port when a different process
+  occupies the configured port, suggesting the next available port and
+  retaining the choice in configuration, service setup, and pairing URLs.
+
+### Fixed
+
+- Codex completion notices retain their opening event when the start response
+  arrives before the start notification.
+- Desktop installers complete automatic pairing when the local broker is ready
+  but an agent-list or service-status check fails. Client handoff results now
+  distinguish failed pairing from a saved credential.
 
 ## 0.5.4 — 2026-09-14
 
