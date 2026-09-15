@@ -580,7 +580,7 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
     omp: 'Packaged in-session bridge when omp is installed.',
-    reasonix: 'Observe + Resume only; Reasonix has no daemon to manage, and setup never touches Reasonix state.',
+    reasonix: 'Observe plus Create/Resume; Reasonix has no daemon to manage, and setup never touches Reasonix state.',
     grok: 'Create/Resume is enabled for authenticated Grok Build 1.0.13 or newer; setup preserves Grok state and records its executable for the service.',
     cline: 'Default-profile Observe plus Create/Resume for app-created sessions through an isolated managed Cline Hub, on 3.0.61 or newer; setup persists explicit non-secret provider/model selection and paths, never credentials.',
     kilo: 'Observe plus authenticated Create/Drive on Kilo Code 7.4.23 or newer; the broker manages only its dedicated loopback port 4097 host and leaves foreign servers untouched.',
