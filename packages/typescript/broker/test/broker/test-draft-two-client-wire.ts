@@ -41,6 +41,7 @@ import {
   captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
+  startHealthyFixtureBroker,
   waitForBrokerHealth,
 } from '../helpers/isolated-broker-fixture.ts';
 
@@ -119,6 +120,28 @@ const waitHealth = async (phase: string): Promise<void> => {
 };
 
 const startBroker = async (phase: string): Promise<void> => {
+  if (!forcedFailureFixture) {
+    const captures = new Map<ReturnType<typeof Bun.spawn>, ReturnType<typeof captureProcessOutput>>();
+    const started = await startHealthyFixtureBroker({
+      spawn: (attemptPort) => {
+        const child = spawnBroker(attemptPort);
+        captures.set(child, captureProcessOutput(child));
+        return child;
+      },
+      healthUrl: (attemptPort) => `http://127.0.0.1:${attemptPort}/api/health`,
+      capture: (child) => captures.get(child)!,
+      stop: async (child) => {
+        await stopCapturedBroker(child, captures.get(child), `${phase} retry cleanup`);
+      },
+    });
+    broker = started.child;
+    brokerOutput = captures.get(started.child);
+    port = started.port;
+    brokerBase = `http://127.0.0.1:${port}`;
+    websocketBase = brokerBase.replace(/^http/, 'ws');
+    return;
+  }
+
   const lease = await reserveLoopbackFixturePort();
   activePortLease = lease;
   port = lease.port;
@@ -143,26 +166,24 @@ const startBroker = async (phase: string): Promise<void> => {
   await waitHealth(phase);
 };
 
-const stopBrokerGeneration = async (phase: string): Promise<void> => {
-  const child = broker;
-  const output = brokerOutput;
-  broker = undefined;
-  brokerOutput = undefined;
-  if (child) {
-    if (child.exitCode === null) child.kill('SIGTERM');
-    let exited = await Promise.race([
+const stopCapturedBroker = async (
+  child: ReturnType<typeof Bun.spawn>,
+  output: ReturnType<typeof captureProcessOutput> | undefined,
+  phase: string,
+): Promise<void> => {
+  if (child.exitCode === null) child.kill('SIGTERM');
+  let exited = await Promise.race([
+    child.exited.then(() => true),
+    sleep(5_000).then(() => false),
+  ]);
+  if (!exited && child.exitCode === null) {
+    child.kill('SIGKILL');
+    exited = await Promise.race([
       child.exited.then(() => true),
-      sleep(5_000).then(() => false),
+      sleep(2_000).then(() => false),
     ]);
-    if (!exited && child.exitCode === null) {
-      child.kill('SIGKILL');
-      exited = await Promise.race([
-        child.exited.then(() => true),
-        sleep(2_000).then(() => false),
-      ]);
-    }
-    if (!exited) throw new Error(`${phase}: broker did not exit after SIGTERM/SIGKILL`);
   }
+  if (!exited) throw new Error(`${phase}: broker did not exit after SIGTERM/SIGKILL`);
   if (output) {
     const drained = await Promise.race([
       output.done.then(() => true),
@@ -170,6 +191,14 @@ const stopBrokerGeneration = async (phase: string): Promise<void> => {
     ]);
     if (!drained) throw new Error(`${phase}: broker stdout/stderr did not reach EOF`);
   }
+};
+
+const stopBrokerGeneration = async (phase: string): Promise<void> => {
+  const child = broker;
+  const output = brokerOutput;
+  broker = undefined;
+  brokerOutput = undefined;
+  if (child) await stopCapturedBroker(child, output, phase);
 };
 
 const cleanupFixture = async (phase: string): Promise<void> => {

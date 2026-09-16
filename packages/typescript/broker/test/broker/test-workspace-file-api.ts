@@ -21,6 +21,11 @@ import {
 } from '../../src/artifacts/fs-browse.ts';
 import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../../src/artifacts/fs-browse.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
+import {
+  captureProcessOutput,
+  isolatedBrokerFixtureEnvironment,
+  startHealthyFixtureBrokerOnPort,
+} from '../helpers/isolated-broker-fixture.ts';
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
   try {
@@ -46,19 +51,6 @@ async function freePort(): Promise<number> {
   return addr.port;
 }
 
-async function waitHealthy(base: string): Promise<void> {
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    try {
-      if ((await fetch(`${base}/api/health`)).ok) return;
-    } catch {
-      /* wait */
-    }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error('broker did not become healthy');
-}
-
 async function startBroker(port: number, token: string, opencodeData: string, home: string, fsReadCap = '64', userHome?: string): Promise<{ broker: ReturnType<typeof Bun.spawn>; base: string }> {
   return startBrokerWithEnv({
     PORT: String(port),
@@ -77,20 +69,48 @@ async function startBroker(port: number, token: string, opencodeData: string, ho
 }
 
 async function startBrokerWithEnv(env: Record<string, string>): Promise<{ broker: ReturnType<typeof Bun.spawn>; base: string }> {
-  const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
-    env: {
-      ...process.env,
-      COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
-      COSYNCING_WEB_COI: '0',
-      COSYNCING_FS_REMOTE_ENABLED: '',
-      ...env,
-    },
-    stdout: 'ignore',
-    stderr: 'pipe',
-  });
+  const fixtureHome = env.COSYNCING_HOME;
+  const fixturePort = Number(env.PORT);
+  if (!fixtureHome || !Number.isInteger(fixturePort)) throw new Error('workspace fixture requires COSYNCING_HOME and PORT');
   // The listener is pinned to BROKER_LISTEN_HOST (127.0.0.1); HOST is not read at all.
-  const base = `http://127.0.0.1:${env.PORT}`;
-  await waitHealthy(base);
+  const base = `http://127.0.0.1:${fixturePort}`;
+  const captures = new Map<ReturnType<typeof Bun.spawn>, ReturnType<typeof captureProcessOutput>>();
+  const stop = async (child: ReturnType<typeof Bun.spawn>): Promise<void> => {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    let exited = await Promise.race([
+      child.exited.then(() => true, () => true),
+      Bun.sleep(2_000).then(() => false),
+    ]);
+    if (!exited && child.exitCode === null) {
+      child.kill('SIGKILL');
+      exited = await Promise.race([
+        child.exited.then(() => true, () => true),
+        Bun.sleep(2_000).then(() => false),
+      ]);
+    }
+    if (!exited) throw new Error('workspace fixture broker did not exit after SIGTERM/SIGKILL');
+  };
+  const broker = await startHealthyFixtureBrokerOnPort({
+    port: fixturePort,
+    healthUrl: `${base}/api/health`,
+    spawn: () => {
+      const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
+        env: isolatedBrokerFixtureEnvironment(fixtureHome, {
+          overrides: {
+            COSYNCING_WEB_COI: '0',
+            COSYNCING_FS_REMOTE_ENABLED: '',
+            ...env,
+          },
+        }),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      captures.set(child, captureProcessOutput(child));
+      return child;
+    },
+    capture: (child) => captures.get(child)!,
+    stop,
+  });
   return { broker, base };
 }
 
