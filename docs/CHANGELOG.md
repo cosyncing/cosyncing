@@ -13,6 +13,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Linux and macOS shell installers register `cosyncing` and `cosy` in Bash/Zsh
+  startup files, using the selected Bun runtime and printing an activation
+  command for the current terminal. Existing startup content is preserved.
 - Agent CLI readiness probes no longer block unrelated broker requests while
   native processes start. Version and write-authority checks remain enforced.
 - Large Claude Observe histories yield while reading and mapping records, and

@@ -70,6 +70,7 @@ import { javaScriptReleaseRegressions } from './javascript-release-regressions.t
 const ROOT = resolve(import.meta.dir, '../../../..');
 import { installerOnboardingRegressions } from './installer-onboarding-regressions.ts';
 import { installerPairingRegressions } from './installer-pairing-regressions.ts';
+import { installerShellPathRegressions } from './installer-shell-path-regressions.ts';
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -307,6 +308,7 @@ const root = mkdtempSync(join(tmpdir(), 'cosyncing-release-supply-chain-'));
 try {
   await installerOnboardingRegressions(check);
   installerPairingRegressions(check);
+  installerShellPathRegressions(check);
   const timeoutRetryMarker = join(root, 'timeout-retry-marker');
   let timeoutRetryCleanupCalls = 0;
   const timeoutRetryControl = await run([
@@ -1015,9 +1017,11 @@ try {
       && installedReceipt.includes(`webRoot=${installedWebRoot}\n`)
       && installedReceipt.includes(`runtime=${join(fakeBin, 'bun')}\n`),
     installedReceipt.trim().replaceAll('\n', ' | '));
-  check('bootstrap never edits shell startup files and prints the absolute setup command',
-    readFileSync(join(home, '.bashrc'), 'utf8') === '# preserve\n'
-      && install.stdout.includes(`'${binary}' setup`) && install.stdout.includes('PATH was not changed'));
+  check('bootstrap preserves shell startup content, registers commands, and prints absolute setup',
+    readFileSync(join(home, '.bashrc'), 'utf8').startsWith('# preserve\n')
+      && readFileSync(join(home, '.bashrc'), 'utf8').includes('shell-path.sh')
+      && existsSync(join(home, '.cosyncing', 'shell-path.sh'))
+      && install.stdout.includes(`'${binary}' setup`) && install.stdout.includes('Commands: cosyncing and cosy'));
   check('a capable openssl reports the signature as verified, not merely checked',
     /Release signature: verified/.test(install.stdout)
       && /Artifact digests: matched/.test(install.stdout),
@@ -1027,7 +1031,7 @@ try {
     !existsSync(join(home, '.cosyncing', 'client'))
       && !existsSync(join(home, '.cosyncing', 'client-pairing.json'))
       && !existsSync(join(home, '.local', 'share', 'applications', 'cosyncing.desktop'))
-      && install.stdout.includes('PATH was not changed')
+      && install.stdout.includes('Run setup with the absolute command')
       && !/Desktop client|Pairing handoff|Running setup/.test(install.stdout));
 
   // ---- Taking over an npm install ------------------------------------------------------------------
@@ -1802,6 +1806,12 @@ exec /usr/bin/openssl "$@"
       const setup = await run([shell, '-c', printed], { env: freshEnvironment });
       check(`${installer} printed setup runs in ${shell} with quoted paths and no Bun on PATH`,
         setup.exitCode === 0 && setup.stdout.trim() === 'fixture setup completed', setup.stderr.trim());
+      const discovered = await run([shell, '-c', '. "$HOME/.profile"; cosyncing version --json && cosy version --json'], {
+        env: freshEnvironment,
+      });
+      check(`${installer} registers both commands and downloaded Bun in a fresh ${shell}`,
+        discovered.exitCode === 0 && discovered.stdout.split('"product": "cosyncing"').length === 3,
+        discovered.stderr.trim());
     }
   }
 
