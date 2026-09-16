@@ -664,7 +664,7 @@ export class KiloAdapter implements AgentBackend {
     const loopback = url.protocol === 'http:' && !url.username && !url.password
       && (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1');
     const port = Number(url.port || 80);
-    const invocation = loopback && port === 4097 ? kiloVerifiedInvocation(this.command, this.env) : undefined;
+    const invocation = loopback && port === 4097 ? await kiloVerifiedInvocation(this.command, this.env) : undefined;
     const launchable = invocation?.kind === 'native';
     return {
       identityKey: `${url.origin}|${kiloDataRoot(this.env, this.homeDir)}`,
@@ -760,14 +760,14 @@ export class KiloAdapter implements AgentBackend {
     return [...merged.values()];
   }
 
-  canCreateSession(): Promise<boolean> | boolean {
-    return kiloVerifiedInvocation(this.command, this.env)
+  async canCreateSession(): Promise<boolean> {
+    return await kiloVerifiedInvocation(this.command, this.env)
       ? this.liveServerAvailable()
       : false;
   }
 
   async prepareCreateSession(): Promise<void> {
-    if (!kiloVerifiedInvocation(this.command, this.env)) {
+    if (!await kiloVerifiedInvocation(this.command, this.env)) {
       throw new Error(`Kilo Code Drive requires an authenticated ${KILO_MINIMUM_SUPPORTED_VERSION}-or-newer server at ${this.safeBaseUrl()}.`);
     }
     const readiness = await this.probeLiveServer();

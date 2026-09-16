@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
@@ -1118,6 +1119,28 @@ void main() {
 
     await refresh();
     expect(roster.loadCount, 2);
+  });
+
+  test('resume does not wait for creation readiness', () async {
+    final roster = _ResumeRosterController();
+    final clientGate = Completer<BrokerClient?>();
+    final container = ProviderContainer(
+      overrides: [
+        sessionListControllerProvider.overrideWith(() => roster),
+        activeBrokerProfileProvider.overrideWith(
+          (ref) => _profile(endpoint: 'http://127.0.0.1:7734'),
+        ),
+        brokerClientProvider.overrideWith((ref) => clientGate.future),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container
+        .read(sessionRosterResumeRefreshProvider)()
+        .timeout(const Duration(seconds: 1));
+    expect(roster.loadCount, 1);
+    expect(clientGate.isCompleted, isFalse);
+    clientGate.complete(null);
+    await Future<void>.delayed(Duration.zero);
   });
 }
 

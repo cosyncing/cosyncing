@@ -241,7 +241,7 @@ export class GrokAdapter implements AgentBackend {
   }
 
   async discoverSessions(options?: { updatedAfter?: number }): Promise<SessionInfo[]> {
-    const candidateEnabled = this.hasPinnedBinaryVersion();
+    const candidateEnabled = await this.hasPinnedBinaryVersion();
     // Batched, not fanned out over every row at once: each element below opens
     // the session's `updates.jsonl` for its boundary, so an unbounded map is one
     // simultaneous fd per discovered session inside a process already running
@@ -287,12 +287,21 @@ export class GrokAdapter implements AgentBackend {
     );
   }
 
+  private authReadinessFlight?: Promise<boolean>;
+
   async canCreateSession(): Promise<boolean> {
-    if (!this.hasPinnedBinaryVersion()) return false;
+    if (!await this.hasPinnedBinaryVersion()) return false;
     const now = Date.now();
     if (this.authReadiness && now - this.authReadiness.checkedAt < 30_000) {
       return this.authReadiness.ready;
     }
+    if (this.authReadinessFlight) return this.authReadinessFlight;
+    const operation = this.probeAuthReadiness().finally(() => { this.authReadinessFlight = undefined; });
+    this.authReadinessFlight = operation;
+    return operation;
+  }
+
+  private async probeAuthReadiness(): Promise<boolean> {
     let ready = false;
     let client: AcpClient | undefined;
     try {
@@ -310,7 +319,7 @@ export class GrokAdapter implements AgentBackend {
     } finally {
       await client?.close().catch(() => undefined);
     }
-    this.authReadiness = { checkedAt: now, ready };
+    this.authReadiness = { checkedAt: Date.now(), ready };
     return ready;
   }
 
@@ -330,7 +339,7 @@ export class GrokAdapter implements AgentBackend {
    * process and every later create was refused against it.
    */
   async listModels(): Promise<ModelOption[]> {
-    if (!this.hasPinnedBinaryVersion()) {
+    if (!await this.hasPinnedBinaryVersion()) {
       throw new Error(`Grok model catalog requires Grok Build ${GROK_MINIMUM_SUPPORTED_VERSION} or newer.`);
     }
     if (this.cachedModels?.length) return this.cachedModels.map((model) => ({ ...model }));
@@ -358,7 +367,7 @@ export class GrokAdapter implements AgentBackend {
   }
 
   async listModes(): Promise<ModeOption[]> {
-    if (!this.hasPinnedBinaryVersion()) return [];
+    if (!await this.hasPinnedBinaryVersion()) return [];
     return GROK_PERMISSION_MODES.map((mode) => ({ ...mode }));
   }
 
@@ -368,7 +377,7 @@ export class GrokAdapter implements AgentBackend {
     model?: PromptInput['model'];
     permissionMode?: string;
   } = {}): Promise<SessionInfo> {
-    if (!this.hasPinnedBinaryVersion()) {
+    if (!await this.hasPinnedBinaryVersion()) {
       throw new NativeSessionUnresumableError(`Grok create requires Grok Build ${GROK_MINIMUM_SUPPORTED_VERSION} or newer.`);
     }
     const requestedMode = options.permissionMode ?? 'default';
@@ -482,7 +491,7 @@ export class GrokAdapter implements AgentBackend {
       && !storedBoundaryValid && !activeDrive) {
       this.invalidateDriveEligibility(session.id);
     }
-    const eligible = this.hasPinnedBinaryVersion() && !isSubagent
+    const eligible = await this.hasPinnedBinaryVersion() && !isSubagent
       && (activeDrive || this.driveEligible.has(sessionId) || storedBoundaryValid);
     const sharedTerminalSummaries = !isSubagent && (activeDrive || storedBoundaryValid)
       ? this.sessionTerminalSummaries(
@@ -492,7 +501,7 @@ export class GrokAdapter implements AgentBackend {
         )
       : undefined;
     if (mode === 'observe') {
-      const info = sessionInfo(session, false, eligible, 'observe', this.hasPinnedBinaryVersion());
+      const info = sessionInfo(session, false, eligible, 'observe', await this.hasPinnedBinaryVersion());
       const selectedModel = isSubagent ? undefined
         : this.driveModels.get(sessionId)
           ?? preserveModelLabel(session.currentModel, stored?.currentModel);
@@ -517,7 +526,7 @@ export class GrokAdapter implements AgentBackend {
     }
     if (mode !== 'resume') throw new Error(`Grok does not support ${mode} attach.`);
     if (!eligible) throw new NativeSessionUnresumableError('Grok Drive is limited to sessions created by this broker installation; Observe remains available.');
-    if (!this.hasPinnedBinaryVersion()) throw new NativeSessionUnresumableError(`Grok Resume requires Grok Build ${GROK_MINIMUM_SUPPORTED_VERSION} or newer.`);
+    if (!await this.hasPinnedBinaryVersion()) throw new NativeSessionUnresumableError(`Grok Resume requires Grok Build ${GROK_MINIMUM_SUPPORTED_VERSION} or newer.`);
     if (this.drivenSessions.get(sessionId)?.driving || this.pendingDriveOpens.has(sessionId)) {
       throw new NativeSessionUnresumableError('Grok already has a Drive owner; join the existing broker connection instead of opening another child.');
     }
@@ -597,7 +606,7 @@ export class GrokAdapter implements AgentBackend {
   isDriving(sessionId: string): boolean { return this.drivenSessions.get(sessionId)?.driving === true; }
   driveConnection(sessionId: string): GrokDriveConnection | undefined { return this.drivenSessions.get(sessionId); }
 
-  private hasPinnedBinaryVersion(): boolean {
+  private hasPinnedBinaryVersion(): Promise<boolean> {
     return grokBinaryMatchesVerifiedVersion(this.command, this.env);
   }
 

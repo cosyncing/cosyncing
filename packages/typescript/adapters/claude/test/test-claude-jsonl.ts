@@ -607,6 +607,8 @@ await (async () => {
 // what the verification lane reports as a stray.
 await drainClaudeLiveStatusProbes();
 
+await import('./test-history-source.ts');
+
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

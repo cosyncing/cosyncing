@@ -327,7 +327,7 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       this.starting = (async () => {
         const command = this.options.command ?? 'grok';
         const env = grokChildEnv(this.options.env ?? process.env);
-        if (!grokBinaryMatchesVerifiedVersion(command, env)) {
+        if (!await grokBinaryMatchesVerifiedVersion(command, env)) {
           throw new Error('Grok binary changed from the exact native-contract-measured version before child start.');
         }
         const abort = new AbortController();
