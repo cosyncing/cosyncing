@@ -29,6 +29,8 @@ export function installerShellPathRegressions(check: Check): void {
       const runtime = join(home, "Bun's runtime", runtimeName);
       const work = join(home, 'work');
       for (const directory of [bin, work, join(home, "Bun's runtime")]) mkdirSync(directory, { recursive: true, mode: 0o700 });
+      // Ubuntu's system bashrc otherwise prints a first-login sudo hint on stdout.
+      writeFileSync(join(home, '.hushlogin'), '');
       writeFileSync(runtime, `#!/bin/sh\nexec ${quote(process.execPath)} "$@"\n`, { mode: 0o755 });
       writeFileSync(join(bin, 'cosyncing'), '#!/usr/bin/env bun\nconsole.log(JSON.stringify({ args: process.argv.slice(2), state: process.env.COSYNCING_HOME }));\n', { mode: 0o755 });
       symlinkSync('cosyncing', join(bin, 'cosy'));
