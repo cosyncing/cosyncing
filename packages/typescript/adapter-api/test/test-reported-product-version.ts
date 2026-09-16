@@ -123,3 +123,4 @@ check('an empty list is a programming error, not a silently absent floor',
 
 console.log(`\n${failures === 0 ? '✅' : '❌'} ${total - failures}/${total} reported-product-version checks passed.`);
 if (failures > 0) process.exit(1);
+await import('./test-invocation-probe.ts');

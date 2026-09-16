@@ -1026,7 +1026,7 @@ try {
       + `echo "kilo ${KILO_MEASURED_VERSIONS[0]}"\n`, { mode: 0o755 });
     // PATH is left alone: `fakeKilo` is absolute, and narrowing PATH to the
     // temp dir would strand the script's own `#!/usr/bin/env bash`.
-    const invocation = kiloVerifiedInvocation(fakeKilo, process.env);
+    const invocation = await kiloVerifiedInvocation(fakeKilo, process.env);
     check('the measured fake kilo is admitted, so the probe really ran',
       invocation !== undefined);
     check('the kilo version probe starts its child with the in-place updater disabled',

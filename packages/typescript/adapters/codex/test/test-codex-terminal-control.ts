@@ -14,6 +14,8 @@ import {
   classifyCodexTerminalPresence,
   qualifyCodexRolloutStatus,
 } from '../src/index.ts';
+import * as fs from 'node:fs';
+import { spyOn } from 'bun:test';
 
 // Writer ownership also depends on daemon lifetime when its control socket disappears.
 await import('./test-codex-daemon-restart.ts');
@@ -61,6 +63,27 @@ const cwd = '/tmp/cosyncing/test/cwd';
 const sharedThread = '019f1234-0000-4000-8000-000000000001';
 const privateThread = '019f1234-0000-4000-8000-000000000002';
 const unknownThread = '019f1234-0000-4000-8000-000000000003';
+
+// Empty buckets and old birth times must not touch archived cwd paths. Keep
+// path resolution fresh when a real birth candidate exists; do not cache proof.
+const realpathProbe = spyOn(fs, 'realpathSync');
+try {
+  const unmatched = mkScan({ candidates: [{ pid: 42, proof: 'shared', cwd, startedAtMs: now }] });
+  check('empty presence buckets skip filesystem resolution',
+    classifyCodexTerminalPresence(mkScan({}), sharedThread, cwd, now) === 'absent');
+  check('old births skip filesystem resolution',
+    classifyCodexTerminalPresence(unmatched, sharedThread, cwd, now - 86_400_000) === 'absent');
+  check('macOS old births skip filesystem resolution',
+    classifyCodexTerminalPresence({ ...unmatched, source: 'darwin' }, sharedThread, cwd, now - 86_400_000) === 'absent');
+  check('unmatched archive classification makes no realpath calls', realpathProbe.mock.calls.length === 0);
+  classifyCodexTerminalPresence(unmatched, sharedThread, cwd, now);
+  const firstCalls = realpathProbe.mock.calls.length;
+  classifyCodexTerminalPresence(unmatched, sharedThread, cwd, now);
+  check('matching births still resolve fresh paths on each classification',
+    firstCalls > 0 && realpathProbe.mock.calls.length === firstCalls * 2);
+} finally {
+  realpathProbe.mockRestore();
+}
 
 check(
   'an abandoned unmatched start is Idle when no daemon or terminal owns it',

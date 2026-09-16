@@ -3,6 +3,7 @@ export * from '@cosyncing/protocol';
 export * from './diagnosis.ts';
 export * from './integration.ts';
 export * from './invocation.ts';
+export * from './invocation-probe.ts';
 export * from './host-process.ts';
 export * from './windows-ffi.ts';
 export * from './tool-semantics.ts';

@@ -1,5 +1,5 @@
 import {
-  bunSpawnSyncResolvedInvocation,
+  probeResolvedInvocation,
   reportedProductVersion,
   resolveInvocation,
   type ResolvedInvocation,
@@ -26,17 +26,17 @@ export function clearClineVersionProbeCache(): void {
   versionCache.clear();
 }
 
-export function clineBinaryMatchesVerifiedVersion(
+export async function clineBinaryMatchesVerifiedVersion(
   command: string,
   env: NodeJS.ProcessEnv,
-): boolean {
-  return clineVerifiedInvocation(command, env) !== undefined;
+): Promise<boolean> {
+  return await clineVerifiedInvocation(command, env) !== undefined;
 }
 
-export function clineVerifiedInvocation(
+export async function clineVerifiedInvocation(
   command: string,
   env: NodeJS.ProcessEnv,
-): ResolvedInvocation | undefined {
+): Promise<ResolvedInvocation | undefined> {
   const invocation = resolveInvocation(command, { env });
   if (!invocation) return undefined;
   const key = invocationCacheKey(invocation);
@@ -50,17 +50,14 @@ export function clineVerifiedInvocation(
   // the lane: kilocode's identical probe already wraps this.
   let result = false;
   try {
-    const probe = bunSpawnSyncResolvedInvocation(invocation, ['--version'], {
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
+    const probe = await probeResolvedInvocation(invocation, ['--version'], {
       env: { ...clineChildEnvWithoutHubLaunch(env), CLINE_NO_AUTO_UPDATE: '1' },
       timeout: 5_000,
-      windowsHide: true,
+      maxBuffer: 64 * 1024,
     });
-    result = probe.exitCode === 0
+    result = !probe.error && probe.status === 0
       && clineVersionAllowsDrive(reportedProductVersion(
-        `${new TextDecoder().decode(probe.stdout)}\n${new TextDecoder().decode(probe.stderr)}`,
+        `${probe.stdout}\n${probe.stderr}`,
         ['cline'],
       ));
   } catch {

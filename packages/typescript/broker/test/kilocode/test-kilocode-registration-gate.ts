@@ -188,7 +188,7 @@ try {
   });
   check('existing local SQLite makes Kilo available without starting a serve', await adapter.isAvailable());
   check('Kilo Create is registered but dynamically false without exact binary and managed health',
-    typeof adapter.createSession === 'function' && adapter.canCreateSession() === false);
+    typeof adapter.createSession === 'function' && await adapter.canCreateSession() === false);
   const bare = await adapter.attach(KILO_FIXTURE_SESSION_ID);
   let bareWriteRefused = false;
   try { await bare.sendPrompt({ text: 'must refuse' }); } catch { bareWriteRefused = true; }
