@@ -1651,13 +1651,15 @@ function canonicalizePathForPresence(cwd?: string): string | undefined {
 }
 
 function scanCandidateByProof(candidates: Array<{ cwd?: string; startedAtMs?: number }>, cwd?: string, createdAtMs?: number): boolean {
-  const targetCwd = canonicalizePathForPresence(cwd);
-  if (!targetCwd || createdAtMs === undefined) return false;
+  if (!cwd || createdAtMs === undefined) return false;
+  let targetCwd: string | undefined;
   return candidates.some(
     (candidate) =>
       candidate.cwd !== undefined &&
       Math.abs(createdAtMs - (candidate.startedAtMs ?? Number.NaN)) <= CODEX_TUI_BIRTH_WINDOW_MS &&
-      canonicalizePathForPresence(candidate.cwd) === targetCwd,
+      // Archived sessions rarely pass the birth test. Do not resolve their
+      // paths (possibly on a mounted filesystem) until there is a candidate.
+      canonicalizePathForPresence(candidate.cwd) === (targetCwd ??= canonicalizePathForPresence(cwd)),
   );
 }
 
@@ -1678,14 +1680,10 @@ export function classifyCodexTerminalPresence(
   const isUnattributedCandidate = (candidate: { threadIds?: string[] }) => !(candidate.threadIds && candidate.threadIds.length);
 
   if (scan.source === 'darwin') {
-    const targetCwd = canonicalizePathForPresence(cwd);
     const matchingCandidates = scan.candidates.filter((candidate) => {
       if (candidate.threadIds?.some((id) => id.toLowerCase() === canonicalThreadId)) return true;
-      if (candidate.threadIds?.length || !targetCwd || createdAtMs === undefined) return false;
-      return candidate.cwd !== undefined &&
-        candidate.startedAtMs !== undefined &&
-        canonicalizePathForPresence(candidate.cwd) === targetCwd &&
-        Math.abs(createdAtMs - candidate.startedAtMs) <= CODEX_TUI_BIRTH_WINDOW_MS;
+      if (candidate.threadIds?.length) return false;
+      return scanCandidateByProof([candidate], cwd, createdAtMs);
     });
     // One stable process identity is required for positive macOS ownership. Multiple matches could
     // be duplicate launchers, PID churn, or competing owners, so automatic restore must not guess.

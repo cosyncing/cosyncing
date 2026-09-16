@@ -1,5 +1,5 @@
 import {
-  bunSpawnSyncResolvedInvocation,
+  probeResolvedInvocation,
   compareSemanticVersions,
   lowestSemanticVersion,
   reportedProductVersion,
@@ -88,10 +88,10 @@ function key(invocation: ResolvedInvocation): string | undefined {
   }
 }
 
-export function kiloVerifiedInvocation(
+export async function kiloVerifiedInvocation(
   command: string,
   env: NodeJS.ProcessEnv,
-): ResolvedInvocation | undefined {
+): Promise<ResolvedInvocation | undefined> {
   const invocation = resolveInvocation(command, { env });
   if (!invocation) return undefined;
   const identity = key(invocation);
@@ -100,19 +100,18 @@ export function kiloVerifiedInvocation(
   if (remembered && remembered.expiresAt > now) return remembered.result ? invocation : undefined;
   let result = false;
   try {
-    const probe = bunSpawnSyncResolvedInvocation(invocation, ['--version'], {
-      stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
+    const probe = await probeResolvedInvocation(invocation, ['--version'], {
       // Applied HERE because this is the only place the adapter starts a kilo
       // child outside the `kilo serve` descriptor. Wrapping the env handed to
       // `discoverKiloStore` LOOKED like suppression but was not: that env is
       // read only for `XDG_DATA_HOME`/`KILO_DATA_DIR` path resolution and
       // spawns nothing.
       env: kiloChildEnv(env),
-      timeout: 5_000, windowsHide: true,
+      timeout: 5_000, maxBuffer: 64 * 1024,
     });
-    result = probe.exitCode === 0
+    result = !probe.error && probe.status === 0
       && kiloVersionAllowsDrive(reportedProductVersion(
-        `${new TextDecoder().decode(probe.stdout)}\n${new TextDecoder().decode(probe.stderr)}`,
+        `${probe.stdout}\n${probe.stderr}`,
         ['kilo', 'kilocode'],
       ));
   } catch {

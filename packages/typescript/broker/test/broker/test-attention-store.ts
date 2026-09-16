@@ -4,6 +4,7 @@
  * Governing design: docs/architecture/attention.md
  */
 import assert from 'node:assert/strict';
+import { spyOn } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -425,7 +426,46 @@ async function main(): Promise<void> {
   await testSemanticComparatorIgnoresNestedKeyOrderAndPresentationStageAppend();
   await testBaselineThroughCursorOnPagination();
   await testCorruptionAndUnknownKindTolerance();
-  console.log('PASS broker attention store (8 groups)');
+  await testNoOpReplayDoesNotCloneStore();
+  console.log('PASS broker attention store (9 groups)');
+}
+
+async function testNoOpReplayDoesNotCloneStore(): Promise<void> {
+  const root = tempRoot('no-op-replay');
+  const path = join(root, 'attention-events.json');
+  const store = new AttentionStore({ path, now: clock, idFactory, resolvedRetentionMs: 1_000 });
+  const row = await store.upsertEvent(event('resolved-replay'));
+  await store.resolveByDedupeKey(row.event.dedupeKey);
+  const clone = spyOn(globalThis, 'structuredClone');
+  try {
+    for (let index = 0; index < 1_000; index++) {
+      assert.equal(await store.resolveByDedupeKey(`historical:${index}`), undefined);
+      assert.equal(await store.deleteObservation(`missing:${index}`), false);
+    }
+    const replay = await store.resolveByDedupeKey(row.event.dedupeKey);
+    assert.equal(replay?.state, 'resolved');
+    assert.equal(clone.mock.calls.filter(([value]) => Array.isArray((value as any)?.events)).length, 0,
+      'no-op historical replay must not clone the entire durable store');
+    if (replay) replay.title = 'caller changed its copy';
+    assert.equal(store.getEvent(row.event.id)?.title, row.event.title);
+  } finally {
+    clone.mockRestore();
+  }
+
+  const pending = store.upsertEvent(event('queued-before-resolve'));
+  const resolve = store.resolveByDedupeKey('queued-before-resolve');
+  await pending;
+  assert.equal((await resolve)?.state, 'resolved', 'no-op checks must see earlier queued writes');
+  const reservation = await store.reserveDelivery({ deviceId: 'phone', eventId: row.event.id, stage: 'test' });
+  await store.resolveByDedupeKey(row.event.dedupeKey);
+  assert.equal(store.getDelivery(reservation.delivery.key)?.state, 'superseded',
+    'resolving an already resolved event must still retire reserved deliveries');
+
+  now += 2_000;
+  await store.resolveByDedupeKey('absent-but-prune-due');
+  assert.equal(store.getPage({}).events.length, 0, 'a no-op must still perform due retention');
+  assert.equal(new AttentionStore({ path }).getPage({}).events.length, 0,
+    'retention remains durable through the ordinary atomic mutation path');
 }
 
 try {

@@ -2,7 +2,7 @@
 import {
   reportedProductVersion,
   resolveInvocation,
-  spawnSyncResolvedInvocation,
+  probeResolvedInvocation,
 } from '@cosyncing/adapter-api';
 import { grokVersionAllowsDrive } from './store.ts';
 
@@ -41,23 +41,21 @@ export function grokChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * cache cannot see an update that preserves size, and the failure it would let
  * through is exactly the one this gate exists to prevent.
  *
- * The cost is one blocking `spawnSync` per sweep, measured at ~20ms against a
- * 1s budget, and it is NOT per session — `discoverSessions` calls it once. That
- * is a real cost on a shared event loop and it is the smaller of the two.
+ * The probe is asynchronous and bounded to one second. Discovery asks once per
+ * sweep; every mutable child start still obtains a fresh answer.
  *
  * `grokChildEnv` above reduces how often drift happens; it does not remove the
  * need for this gate. A user can still update Grok themselves at any moment,
  * which is their right, so the answer has to stay re-read rather than cached.
  */
-export function grokBinaryMatchesVerifiedVersion(
+export async function grokBinaryMatchesVerifiedVersion(
   command: string,
   env: NodeJS.ProcessEnv,
-): boolean {
+): Promise<boolean> {
   const invocation = resolveInvocation(command, { env });
   if (!invocation) return false;
   try {
-    const probe = spawnSyncResolvedInvocation(invocation, ['--version'], {
-      encoding: 'utf8',
+    const probe = await probeResolvedInvocation(invocation, ['--version'], {
       // Suppressed here too. `--version` was measured NOT to trigger an update,
       // but that is a property of one release of an updater we do not control,
       // and this probe runs on every Drive-eligibility question. `drive.ts`
@@ -66,7 +64,6 @@ export function grokBinaryMatchesVerifiedVersion(
       env: grokChildEnv(env),
       timeout: 1_000,
       maxBuffer: 64 * 1024,
-      windowsHide: true,
     });
     return !probe.error
       && probe.status === 0

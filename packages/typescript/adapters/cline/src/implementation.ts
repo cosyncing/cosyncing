@@ -432,7 +432,7 @@ export class ClineAdapter implements AgentBackend {
     const profileRoot = clineManagedDataRoot(this.env, this.homeDir);
     const port = clineManagedHubPort(this.env);
     const discoveryPath = clineManagedHubDiscoveryPath(this.env, this.homeDir);
-    const invocation = clineVerifiedInvocation(this.command, this.env);
+    const invocation = await clineVerifiedInvocation(this.command, this.env);
     const launchable = invocation?.kind === 'native';
     return {
       identityKey: clineManagedHubIdentity(this.env, this.homeDir),
@@ -483,9 +483,9 @@ export class ClineAdapter implements AgentBackend {
     const sessions = await this.storedSessions(options);
     const descriptor = this.candidateDrive ? undefined : await this.describeManagedHost();
     const writerAvailable = this.candidateDrive
-      ? clineBinaryMatchesVerifiedVersion(this.command, this.env)
+      ? await clineBinaryMatchesVerifiedVersion(this.command, this.env)
       : !!this.configuredHubModel()
-        && clineVerifiedInvocation(this.command, this.env) !== undefined
+        && await clineVerifiedInvocation(this.command, this.env) !== undefined
         && descriptor !== undefined
         && await this.isManagedHostOwned?.(descriptor.identityKey) === true
         && await this.isManagedHostReady({ ...(options?.signal ? { signal: options.signal } : {}) });
@@ -576,11 +576,11 @@ export class ClineAdapter implements AgentBackend {
 
   async canCreateSession(): Promise<boolean> {
     if (this.candidateDrive) {
-      if (!clineBinaryMatchesVerifiedVersion(this.command, this.env)) return false;
+      if (!await clineBinaryMatchesVerifiedVersion(this.command, this.env)) return false;
       if (this.authMethodId) return true;
       return (await resolveClineAcpEnvironment({ env: this.env })) !== undefined;
     }
-    if (!clineVerifiedInvocation(this.command, this.env) || !this.configuredHubModel()) return false;
+    if (!await clineVerifiedInvocation(this.command, this.env) || !this.configuredHubModel()) return false;
     const descriptor = await this.describeManagedHost();
     return await this.isManagedHostOwned?.(descriptor.identityKey) === true
       && await this.isManagedHostReady();
@@ -597,7 +597,7 @@ export class ClineAdapter implements AgentBackend {
    *  "that model is no longer available", which is not what an unverified
    *  binary establishes. A configured-but-unset hub model is a genuine empty. */
   private async listHubModels(): Promise<ModelOption[]> {
-    if (!clineVerifiedInvocation(this.command, this.env)) {
+    if (!await clineVerifiedInvocation(this.command, this.env)) {
       throw new Error(`Cline model catalog requires a ${CLINE_MINIMUM_SUPPORTED_VERSION}-or-newer binary.`);
     }
     const model = this.configuredHubModel();
@@ -623,7 +623,7 @@ export class ClineAdapter implements AgentBackend {
   }
 
   private async listCandidateModels(): Promise<ModelOption[]> {
-    if (!clineBinaryMatchesVerifiedVersion(this.command, this.env)) {
+    if (!await clineBinaryMatchesVerifiedVersion(this.command, this.env)) {
       throw new Error(`Cline model catalog requires a ${CLINE_MINIMUM_SUPPORTED_VERSION}-or-newer binary.`);
     }
     const configured = await resolveClineAcpEnvironment({
@@ -1116,7 +1116,7 @@ export class ClineAdapter implements AgentBackend {
   }
 
   private async runNativeHistoryRename(session: ClineStoredSession, title: string): Promise<boolean> {
-    const invocation = clineVerifiedInvocation(this.command, this.env);
+    const invocation = await clineVerifiedInvocation(this.command, this.env);
     if (!invocation) {
       throw new NativeSessionUnresumableError(
         `Cline native rename requires a ${CLINE_MINIMUM_SUPPORTED_VERSION}-or-newer binary.`);
@@ -1229,9 +1229,9 @@ export class ClineAdapter implements AgentBackend {
     }
     const descriptor = this.candidateDrive ? undefined : await this.describeManagedHost();
     const writerReady = this.candidateDrive
-      ? clineBinaryMatchesVerifiedVersion(this.command, this.env)
+      ? await clineBinaryMatchesVerifiedVersion(this.command, this.env)
       : managed && !!this.configuredHubModel()
-        && clineVerifiedInvocation(this.command, this.env) !== undefined
+        && await clineVerifiedInvocation(this.command, this.env) !== undefined
         && descriptor !== undefined
         && await this.isManagedHostOwned?.(descriptor.identityKey) === true
         && await this.isManagedHostReady();

@@ -103,6 +103,7 @@ import {
   spawnResolvedInvocation,
 } from '@cosyncing/adapter-api';
 import { diagnoseClaudeSetup } from './diagnostics.ts';
+import { JsonlHistorySource } from './history-source.ts';
 
 const CAPS: AgentCapabilities = {
   integrationKind: 'sdk-callback',
@@ -1684,6 +1685,8 @@ export class ClaudeAdapter implements AgentBackend {
  * tail once its newline lands), and (c) the old double full-read (the constructor no longer slurps).
  */
 export class ClaudeObserveConnection implements SessionConnection {
+  private readonly historySource = new JsonlHistorySource();
+  private historyFlight?: Promise<AgentMessage[]>;
   private readonly handlers = new Set<AgentMessageHandler>();
   private watcher?: FSWatcher;
   private offset = 0; // bytes consumed by the live tail (baselined by getHistory)
@@ -1807,16 +1810,24 @@ export class ClaudeObserveConnection implements SessionConnection {
     }
   }
 
-  async getHistory(): Promise<AgentMessage[]> {
+  getHistory(): Promise<AgentMessage[]> {
+    if (this.historyFlight) return this.historyFlight;
+    const operation = this.readHistory().finally(() => {
+      this.historyFlight = undefined;
+      if (this.watcher) setTimeout(() => this.drainTail(), 0);
+    });
+    this.historyFlight = operation;
+    return operation;
+  }
+
+  private async readHistory(): Promise<AgentMessage[]> {
     // ONE read. Map only COMPLETE lines (up to the last newline B); a partial trailing line being
     // written right now is excluded — the tail re-reads it whole once its newline lands.
-    const buf = readFileBuffer(this.path);
-    const nl = buf.lastIndexOf(0x0a); // last '\n'
-    const boundary = nl >= 0 ? nl + 1 : 0;
-    const lines = splitLines(buf.subarray(0, boundary).toString('utf8')).map(parseLineOrNull);
+    const { lines, boundary } = await this.historySource.read(this.path, parseLineOrNull);
     if (!this.primed) {
       // Baseline the tail at the boundary and seed its name-map + token dedup from these lines, so the
       // tail emits ONLY lines after B (no overlap with this history → keyless messages don't double).
+      let seeded = 0;
       for (const ln of lines) {
         if (!ln) continue;
         accumulateCallMeta(ln, this.callMeta);
@@ -1824,6 +1835,7 @@ export class ClaudeObserveConnection implements SessionConnection {
         feedQueuedSends(this.queuedSends, ln); // seed pending enqueues so the tail can key their delivery
         const id = messageId(ln);
         if (id) this.seenTokenIds.add(id);
+        if (++seeded % 256 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
       }
       this.offset = boundary;
       this.tailBuf = '';
@@ -1844,7 +1856,7 @@ export class ClaudeObserveConnection implements SessionConnection {
     this.taskLedger = new ClaudeTaskLedger(); // fresh per (re)play — the tail feeds the same instance
     this.blockOrdinals = newClaudeBlockOrdinals();
     this.contextWindow = newClaudeContextWindowState();
-    const mapped = mapTranscript(
+    const mapped = await mapTranscriptAsync(
       lines,
       this.runtime,
       this.taskLedger,
@@ -1886,7 +1898,7 @@ export class ClaudeObserveConnection implements SessionConnection {
   /** Read bytes appended past `offset`, map each newly-completed line, emit. Inert until getHistory()
    *  has baselined the offset/seeds, so the tail never overlaps the history it partitions with. */
   private drainTail(): void {
-    if (!this.primed) return;
+    if (!this.primed || this.historyFlight) return;
     let bytes: Buffer;
     try {
       const st = statSafe(this.path);
@@ -1941,6 +1953,7 @@ export class ClaudeObserveConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
+    this.historySource.close();
     this.watcher?.close();
     this.watcher = undefined;
     this.activity?.close();
@@ -5220,8 +5233,40 @@ export function mapTranscript(
   queuedSends: ClaudeQueuedSends = newClaudeQueuedSends(),
   contextWindow: ClaudeContextWindowState = newClaudeContextWindowState(),
 ): AgentMessage[] {
+  const replay = mapTranscriptBatches(lines, tracker, tasks, blocks, queuedSends, contextWindow);
+  for (;;) {
+    const step = replay.next();
+    if (step.done) return step.value;
+  }
+}
+
+/** Same mapper and ordering as synchronous fixture/export replay, with bounded
+ * event-loop turns for interactive history reads. */
+async function mapTranscriptAsync(
+  ...args: Parameters<typeof mapTranscript>
+): Promise<AgentMessage[]> {
+  const replay = mapTranscriptBatches(...args);
+  for (;;) {
+    const step = replay.next();
+    if (step.done) return step.value;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+function* mapTranscriptBatches(
+  lines: any[],
+  tracker?: ClaudeRuntimeTracker,
+  tasks: ClaudeTaskLedger = new ClaudeTaskLedger(),
+  blocks: ClaudeBlockOrdinals = newClaudeBlockOrdinals(),
+  queuedSends: ClaudeQueuedSends = newClaudeQueuedSends(),
+  contextWindow: ClaudeContextWindowState = newClaudeContextWindowState(),
+): Generator<void, AgentMessage[], void> {
   const callMeta = new Map<string, ClaudeCall>();
-  for (const ln of lines) if (ln) accumulateCallMeta(ln, callMeta);
+  let processed = 0;
+  for (const ln of lines) {
+    if (ln) accumulateCallMeta(ln, callMeta);
+    if (++processed % 256 === 0) yield;
+  }
   const seenTokenIds = new Set<string>();
   const out: AgentMessage[] = [];
   for (const ln of lines) {
@@ -5230,6 +5275,7 @@ export function mapTranscript(
     out.push(...mapped);
     out.push(...tasks.feed(ln)); // TaskCreate/TaskUpdate → the upserted task-list-state panel
     if (tracker) out.push(...tracker.feed(ln, mapped)); // interleave run-summary at turn boundaries
+    if (++processed % 256 === 0) yield;
   }
   return out;
 }

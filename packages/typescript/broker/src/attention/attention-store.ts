@@ -505,6 +505,14 @@ export class AttentionStore {
       event.cursor = this.allocateCursor(next);
       supersedeReservedDeliveriesInState(next, event.id, now);
       return { value: structuredClone(event), changed: true };
+    }, true, (current) => {
+      const event = current.events.find((item) => item.dedupeKey === dedupeKey);
+      if (!event) return { value: undefined };
+      if (event.state === 'resolved' && !current.deliveries.some((item) =>
+        item.eventId === event.id && item.state === 'reserved')) {
+        return { value: structuredClone(event) };
+      }
+      return undefined;
     });
   }
 
@@ -819,7 +827,8 @@ export class AttentionStore {
       next.observations = next.observations.filter((item) => item.key !== key);
       const deleted = next.observations.length !== before;
       return { value: deleted, changed: deleted };
-    });
+    }, true, (current) => current.observations.some((item) => item.key === key)
+      ? undefined : { value: false });
   }
 
   getDelivery(key: string): AttentionDelivery | undefined {
@@ -950,8 +959,14 @@ export class AttentionStore {
   private mutate<T>(
     operation: (next: AttentionStoreFile) => { value: T; changed: boolean },
     pruneAfter = true,
+    unchanged?: (current: Readonly<AttentionStoreFile>) => { value: T } | undefined,
   ): Promise<T> {
     const run = this.mutationTail.then(() => {
+      // Check inside the serialized queue, never against a snapshot preceding
+      // a pending write. Historical resolved requests often have no feed row;
+      // replaying them must not copy the whole store for each message.
+      const skipped = unchanged?.(this.state);
+      if (skipped && (!pruneAfter || !this.needsPrune())) return skipped.value;
       const next = cloneState(this.state);
       const result = operation(next);
       const pruned = pruneAfter ? this.pruneState(next) : 0;
@@ -964,6 +979,13 @@ export class AttentionStore {
     });
     this.mutationTail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  private needsPrune(): boolean {
+    const cutoff = this.now() - this.resolvedRetentionMs;
+    let resolved = 0;
+    return this.state.events.some((event) => event.state === 'resolved'
+      && ((event.resolvedAt ?? event.updatedAt) < cutoff || ++resolved > this.maxResolved));
   }
 
   private pruneState(state: AttentionStoreFile): number {

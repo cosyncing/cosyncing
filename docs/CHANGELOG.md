@@ -11,6 +11,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Agent CLI readiness probes no longer block unrelated broker requests while
+  native processes start. Version and write-authority checks remain enforced.
+- Large Claude Observe histories yield while reading and mapping records, and
+  recently opened histories reuse parsed records when the transcript grows.
+- Returning to a session refreshes the roster without waiting for agent
+  creation-readiness checks.
+- Archived Codex sessions skip irrelevant filesystem presence lookups, and
+  replayed resolved requests avoid copying the attention store for no-op updates.
+
 ## 0.5.6 — 2026-09-15
 
 ### Added

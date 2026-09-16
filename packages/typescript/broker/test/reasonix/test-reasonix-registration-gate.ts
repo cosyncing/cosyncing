@@ -389,7 +389,7 @@ try {
   let prereleaseRefused = false;
   try { await prerelease.attach(tree.id, 'resume'); } catch { prereleaseRefused = true; }
   check('a prerelease sharing the 1.25.2 numeric core remains Observe-only',
-    !prerelease.canCreateSession()
+    !await prerelease.canCreateSession()
       && prereleaseRefused
       && !prerelease.isDriving(tree.id)
       && prereleaseFake.spawnCount() === 0);

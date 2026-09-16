@@ -924,12 +924,14 @@ final sessionRosterResumeRefreshProvider = Provider<SessionRosterResumeRefresh>(
     return () {
       final active = inFlight;
       if (active != null) return active;
+      // Existing sessions need the roster, not the new-session picker. A slow
+      // native readiness probe must not hold resident reconnect admission.
+      unawaited(ref.read(sessionCreationReadyProvider.notifier).refresh());
       late final Future<void> operation;
-      operation =
-          Future.wait<void>([
-            ref.read(sessionListControllerProvider.notifier).load(silent: true),
-            ref.read(sessionCreationReadyProvider.notifier).refresh(),
-          ]).whenComplete(() {
+      operation = ref
+          .read(sessionListControllerProvider.notifier)
+          .load(silent: true)
+          .whenComplete(() {
             if (identical(inFlight, operation)) inFlight = null;
           });
       inFlight = operation;

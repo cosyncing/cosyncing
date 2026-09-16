@@ -42,7 +42,7 @@ import {
   NativeSessionUnresumableError,
   reportedProductVersion,
   resolveInvocation,
-  spawnSyncResolvedInvocation,
+  probeResolvedInvocation,
   type AgentBackend,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
@@ -170,6 +170,7 @@ export class ReasonixAdapter implements AgentBackend {
   private readonly correlationRegistry = new ReasonixCorrelationRegistry();
   private readonly pendingCreateTimeoutMs: number;
   private pinnedBinaryVersion?: { result: boolean; expiresAt: number };
+  private pinnedBinaryProbe?: Promise<boolean>;
 
   constructor(options: ReasonixAdapterOptions = {}) {
     this.command = options.command ?? 'reasonix';
@@ -189,13 +190,9 @@ export class ReasonixAdapter implements AgentBackend {
   /**
    * The exact-version gate, cached with ASYMMETRIC TTLs.
    *
-   * Note what the cache is paying for: the probe is a BLOCKING `spawnSync` with
-   * a 1s timeout, and `discoverSessions` calls it, so on a failure it re-spawns
-   * every 30s and stops the broker's event loop while it runs. That is the cost
-   * of the TTL replacing a process-lifetime cache, and it is the smaller cost —
-   * grok pays the same one on every sweep, deliberately, for the same reason.
-   * It is bounded by the cache and by the 1s timeout, and a SUCCESSFUL probe
-   * pays it only once per five minutes.
+   * The asynchronous one-second probe is shared by concurrent callers. A
+   * success lasts five minutes, a failure only thirty seconds; expiry starts
+   * when the answer arrives, not before native startup.
    *
    * It used to cache for the life of the broker process and to write a probe
    * FAILURE — a 1s timeout, an EAGAIN, an EMFILE — into that cache as a
@@ -207,36 +204,35 @@ export class ReasonixAdapter implements AgentBackend {
    * failure usually is not, and holding a failure is how a healthy binary stays
    * locked out.
    */
-  private hasPinnedBinaryVersion(): boolean {
+  private async hasPinnedBinaryVersion(): Promise<boolean> {
     const now = Date.now();
     if (this.pinnedBinaryVersion && this.pinnedBinaryVersion.expiresAt > now) {
       return this.pinnedBinaryVersion.result;
     }
+    if (this.pinnedBinaryProbe) return this.pinnedBinaryProbe;
     const remember = (result: boolean): boolean => {
       this.pinnedBinaryVersion = {
         result,
-        expiresAt: now + (result ? VERSION_SUCCESS_TTL_MS : VERSION_FAILURE_TTL_MS),
+        expiresAt: Date.now() + (result ? VERSION_SUCCESS_TTL_MS : VERSION_FAILURE_TTL_MS),
       };
       return result;
     };
     const invocation = resolveInvocation(this.command, { env: this.env });
     if (!invocation) return remember(false);
-    try {
-      const probe = spawnSyncResolvedInvocation(invocation, ['--version'], {
-        encoding: 'utf8',
+    const operation = (async () => {
+      const probe = await probeResolvedInvocation(invocation, ['--version'], {
         env: this.env,
         timeout: 1_000,
         maxBuffer: 64 * 1024,
-        windowsHide: true,
       });
       if (probe.error || probe.status !== 0) return remember(false);
       return remember(
         reportedProductVersion(`${probe.stdout}\n${probe.stderr}`, ['reasonix'])
           === REASONIX_VERIFIED_VERSION,
       );
-    } catch {
-      return remember(false);
-    }
+    })().catch(() => remember(false)).finally(() => { this.pinnedBinaryProbe = undefined; });
+    this.pinnedBinaryProbe = operation;
+    return operation;
   }
 
   diagnoseSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
@@ -246,12 +242,12 @@ export class ReasonixAdapter implements AgentBackend {
   async discoverSessions(options?: { updatedAfter?: number }): Promise<SessionInfo[]> {
     // Probed ONCE per sweep rather than per row: it is cached, but the rows must
     // also agree with each other within a sweep.
-    const writerAvailable = this.hasPinnedBinaryVersion();
+    const writerAvailable = await this.hasPinnedBinaryVersion();
     return (await discoverReasonixStore({ root: this.root, updatedAfter: options?.updatedAfter }))
       .map((session) => sessionInfo(session, this.isDriving(session.id), writerAvailable));
   }
 
-  canCreateSession(): boolean {
+  canCreateSession(): Promise<boolean> {
     return this.hasPinnedBinaryVersion();
   }
 
@@ -291,17 +287,15 @@ export class ReasonixAdapter implements AgentBackend {
     // established. Every other caller already tolerates a throw
     // (`collectSessionOptions` softens it to `[]`, `client-message-policy`
     // reports MODEL_UNSUPPORTED), so the honest channel is reachable at last.
-    if (!this.hasPinnedBinaryVersion()) {
+    if (!await this.hasPinnedBinaryVersion()) {
       throw new Error(`Reasonix model catalog requires the exactly-verified ${REASONIX_VERIFIED_VERSION} binary.`);
     }
     const invocation = resolveInvocation(this.command, { env: this.env });
     if (!invocation) throw new Error('Reasonix is not installed or is not visible to the broker.');
-    const probe = spawnSyncResolvedInvocation(invocation, ['doctor', '--json'], {
-      encoding: 'utf8',
+    const probe = await probeResolvedInvocation(invocation, ['doctor', '--json'], {
       env: this.env,
       timeout: 10_000,
       maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true,
     });
     if (probe.error || probe.status !== 0) {
       throw new Error(`Reasonix doctor --json did not answer (status ${String(probe.status)}).`);
@@ -342,7 +336,7 @@ export class ReasonixAdapter implements AgentBackend {
   }
 
   async listModes(): Promise<ModeOption[]> {
-    if (!this.hasPinnedBinaryVersion()) return [];
+    if (!await this.hasPinnedBinaryVersion()) return [];
     return REASONIX_APPROVAL_MODES.map((value) => ({
       value,
       label: value === 'ask' ? 'Ask' : value === 'auto' ? 'Auto' : 'Yolo',
@@ -363,7 +357,7 @@ export class ReasonixAdapter implements AgentBackend {
     model?: PromptInput['model'];
     permissionMode?: string;
   } = {}): Promise<SessionInfo> {
-    if (!this.hasPinnedBinaryVersion()) {
+    if (!await this.hasPinnedBinaryVersion()) {
       throw new NativeSessionUnresumableError(
         'Reasonix create is enabled only for the native-contract-measured 1.25.2 binary.',
       );
@@ -456,7 +450,7 @@ export class ReasonixAdapter implements AgentBackend {
       timer.unref?.();
       this.pendingCreatedOwners.set(createdSessionId, { connection, claimed: false, timer });
       if (!provisionalSession) throw new Error('Reasonix pending create did not establish its native identity.');
-      return sessionInfo(provisionalSession, false, this.hasPinnedBinaryVersion());
+      return sessionInfo(provisionalSession, false, await this.hasPinnedBinaryVersion());
     } catch (error) {
       await connection?.close().catch(() => undefined);
       throw error;
@@ -483,7 +477,7 @@ export class ReasonixAdapter implements AgentBackend {
     if (!session) throw new NativeSessionUnresumableError('Reasonix session is missing or its store schema is unsupported.');
     if (mode === 'observe') return new ReasonixObserveConnection({
       session,
-      info: sessionInfo(session, false, this.hasPinnedBinaryVersion()),
+      info: sessionInfo(session, false, await this.hasPinnedBinaryVersion()),
       correlationRegistry: this.correlationRegistry,
     });
     if (mode !== 'resume') throw new Error(`Reasonix does not support ${mode} attach.`);
@@ -498,7 +492,7 @@ export class ReasonixAdapter implements AgentBackend {
         'Reasonix resume requires a valid absolute workspace from native ACP metadata; Observe remains available.',
       );
     }
-    if (!this.hasPinnedBinaryVersion()) {
+    if (!await this.hasPinnedBinaryVersion()) {
       throw new NativeSessionUnresumableError(
         'Reasonix Resume is enabled only for the native-contract-measured 1.25.2 binary; Observe remains available.',
       );
