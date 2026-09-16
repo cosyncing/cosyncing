@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.7 — 2026-09-17
+
 ### Fixed
 
 - Linux and macOS shell installers register `cosyncing` and `cosy` in Bash/Zsh

@@ -5,12 +5,12 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.6 adds the client behavior for Codex non-blocking questions. Update the
-client before, or together with, the broker to keep those question cards from
-interrupting the session's working state.
+0.5.7 reduces delays when opening and returning to active sessions. Update the
+client before, or together with, the broker for the matching roster-refresh
+behavior.
 
-0.5.6 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.6 broker. Those clients do not expose features
+0.5.7 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.7 broker. Those clients do not expose features
 introduced by newer contract revisions. A 0.4.1 or older client remains
 read-only against current brokers.
 
@@ -18,19 +18,16 @@ Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's new in 0.5.6
+## What's new in 0.5.7
 
-- Codex 0.154 and newer can present non-blocking questions without pausing the
-  active turn. The client renders the shared question card, keeps the session
-  Working/Idle state, and sends an answer as a follow-up at Codex's next input
-  boundary.
-- Dismissing a non-blocking Codex question matches the terminal's unrecorded
-  skip, while blocking Plan-mode questions retain their existing Needs input
-  behavior.
-- Desktop installer handoff distinguishes a failed automatic pairing from a
-  credential that was saved successfully.
+- Returning to a session refreshes its roster entry immediately instead of
+  waiting for agent creation-readiness checks.
+- Large Claude Observe histories yield during parsing and reuse recent parsed
+  records as the transcript grows, keeping other broker and client work
+  responsive.
+- Agent startup readiness probes no longer hold up unrelated broker requests.
 
-For these features, use a 0.5.6 client with a 0.5.6 broker.
+For these features, use a 0.5.7 client with a 0.5.7 broker.
 
 ## Downloads
 
