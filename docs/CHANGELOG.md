@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Linux and macOS shell installers register `cosyncing` and `cosy` in Bash/Zsh
+  startup files, using the selected Bun runtime and printing an activation
+  command for the current terminal. Existing startup content is preserved.
+
 ## 0.5.6 — 2026-09-15
 
 ### Added

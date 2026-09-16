@@ -97,6 +97,133 @@ print_setup_command() {
   printf ' setup\n'
 }
 
+# A pipe runs in a child shell: persist discovery for future terminals, then print
+# the activation command for the caller. Keep the signed application unchanged.
+register_shell_commands() {
+  SHELL_ENV="$STATE_HOME/shell-path.sh"
+  SHELL_ENV_MARKER='# cosyncing shell environment v1'
+  COMMAND_PATH="$STATE_HOME/shell-bin"
+  LAUNCHER_MARKER='# cosyncing command launcher v1'
+  ENV_QUOTED="$(shell_quote "$SHELL_ENV")"
+  SOURCE_LINE="[ ! -f $ENV_QUOTED ] || . $ENV_QUOTED"
+
+  # This file is generated, but an unrelated file or symlink is never ours to replace.
+  if [ -e "$SHELL_ENV" ] || [ -L "$SHELL_ENV" ]; then
+    if [ ! -f "$SHELL_ENV" ] || [ -L "$SHELL_ENV" ] \
+      || [ "$(stat_owner "$SHELL_ENV")" != "$(id -u)" ] \
+      || [ "$(head -n 1 "$SHELL_ENV")" != "$SHELL_ENV_MARKER" ]; then
+      printf 'Shell commands were not registered: refusing to replace %s\n' "$SHELL_ENV" >&2
+      print_setup_command
+      return
+    fi
+  fi
+  ensure_owned_directory "$COMMAND_PATH"
+  for command_name in cosyncing cosy; do
+    launcher="$COMMAND_PATH/$command_name"
+    if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+      if [ ! -f "$launcher" ] || [ -L "$launcher" ] \
+        || [ "$(stat_owner "$launcher")" != "$(id -u)" ] \
+        || [ "$(sed -n '2p' "$launcher")" != "$LAUNCHER_MARKER" ]; then
+        printf 'Shell commands were not registered: refusing to replace %s\n' "$launcher" >&2
+        print_setup_command
+        return
+      fi
+    fi
+  done
+  # Pin the exact runtime, not its directory: an explicit runtime may have a
+  # different filename, or its directory may contain an older executable called bun.
+  {
+    printf '#!/bin/sh\n%s\nif [ -z "${COSYNCING_HOME:-}" ]; then\n  export COSYNCING_HOME=' "$LAUNCHER_MARKER"
+    shell_quote "$STATE_HOME"
+    printf '\nfi\nexec '
+    shell_quote "$BUN_BIN"
+    printf ' '
+    shell_quote "$APPLICATION"
+    printf ' "$@"\n'
+  } > "$WORK/command-launcher"
+  for command_name in cosyncing cosy; do
+    STAGED_SHELL_ENV="$(mktemp "$COMMAND_PATH/.launcher.XXXXXXXX")"
+    cp "$WORK/command-launcher" "$STAGED_SHELL_ENV"
+    chmod 700 "$STAGED_SHELL_ENV"
+    mv "$STAGED_SHELL_ENV" "$COMMAND_PATH/$command_name"
+    STAGED_SHELL_ENV=''
+  done
+  {
+    printf '%s\n' "$SHELL_ENV_MARKER"
+    # A single prefix makes repeated activation idempotent.
+    printf 'case "${PATH-}" in\n  '
+    shell_quote "$COMMAND_PATH"
+    printf '|'
+    shell_quote "$COMMAND_PATH:"
+    printf '*) ;;\n  *) '
+    print_shell_path_export
+    printf ' ;;\nesac\n'
+  } > "$WORK/shell-path.sh"
+  chmod 600 "$WORK/shell-path.sh"
+  # STATE_HOME is already checked as an owner-only, non-symlink directory.
+  STAGED_SHELL_ENV="$(mktemp "$STATE_HOME/.shell-path.XXXXXXXX")"
+  cp "$WORK/shell-path.sh" "$STAGED_SHELL_ENV"
+  chmod 600 "$STAGED_SHELL_ENV"
+  mv "$STAGED_SHELL_ENV" "$SHELL_ENV"
+  STAGED_SHELL_ENV=''
+
+  # Bash login shells read only the first existing login file. Do not create a
+  # .bash_profile that would hide an operator's .profile. Interactive shells use rc.
+  register_shell_profile "$HOME/.profile"
+  register_shell_profile "$HOME/.bashrc"
+  if [ -e "$HOME/.bash_profile" ] || [ -L "$HOME/.bash_profile" ]; then
+    register_shell_profile "$HOME/.bash_profile"
+  elif [ -e "$HOME/.bash_login" ] || [ -L "$HOME/.bash_login" ]; then
+    register_shell_profile "$HOME/.bash_login"
+  fi
+  ZSH_PROFILE_HOME="${ZDOTDIR:-$HOME}"
+  case "${SHELL:-}" in
+    */zsh) REGISTER_ZSH=1 ;;
+    *) REGISTER_ZSH=0 ;;
+  esac
+  if [ "$REGISTER_ZSH" = 1 ] || [ -f "$ZSH_PROFILE_HOME/.zshrc" ] || [ -f "$ZSH_PROFILE_HOME/.zprofile" ]; then
+    case "$ZSH_PROFILE_HOME" in
+      /*) register_shell_profile "$ZSH_PROFILE_HOME/.zprofile"
+          register_shell_profile "$ZSH_PROFILE_HOME/.zshrc" ;;
+      *) printf 'Shell profile not changed: ZDOTDIR must be absolute.\n' >&2 ;;
+    esac
+  fi
+  installer_message 'Commands: cosyncing and cosy. Open a new Bash/Zsh terminal, or run in this terminal:' \
+    '命令：cosyncing 和 cosy。请打开新的 Bash/Zsh 终端，或在当前终端运行：'
+  printf '  . %s\n' "$ENV_QUOTED"
+  case "${SHELL:-}" in
+    ''|*/bash|*/zsh|*/sh|*/dash|*/ksh) ;;
+    *) printf 'For other shells, add this directory to PATH using your shell configuration:\n  %s\n' \
+         "$COMMAND_PATH" ;;
+  esac
+}
+
+print_shell_path_export() {
+  printf 'export PATH='
+  shell_quote "$COMMAND_PATH"
+  printf '${PATH:+:"$PATH"}'
+}
+
+register_shell_profile() {
+  profile="$1"
+  # Dotfiles may be managed elsewhere. Report those rather than following a link,
+  # changing permissions, truncating content, or failing an otherwise usable install.
+  if [ -e "$profile" ] || [ -L "$profile" ]; then
+    if [ ! -f "$profile" ] || [ -L "$profile" ] \
+      || [ "$(stat_owner "$profile")" != "$(id -u)" ] \
+      || [ ! -w "$profile" ] || [ $(( 0$(stat_mode "$profile") & 022 )) -ne 0 ]; then
+      printf 'Shell profile not changed: %s; add this line yourself:\n  %s\n' "$profile" "$SOURCE_LINE" >&2
+      return
+    fi
+    grep -Fxq "$SOURCE_LINE" "$profile" && return
+  fi
+  if printf '\n# cosyncing commands\n%s\n' "$SOURCE_LINE" >> "$profile"; then
+    printf 'Shell commands registered in %s\n' "$profile"
+  else
+    printf 'Shell profile not changed: %s; add this line yourself:\n  %s\n' "$profile" "$SOURCE_LINE" >&2
+  fi
+}
+
 [ "$(id -u)" -ne 0 ] || fail 'refusing a root install; run this as the target user'
 
 for command in curl openssl base64 uname stat mktemp awk sed tar; do
@@ -148,6 +275,7 @@ LINE_FEED='
 CARRIAGE_RETURN="$(printf '\r')"
 case "$STATE_HOME" in
   *"$LINE_FEED"*|*"$CARRIAGE_RETURN"*) fail 'state path contains a line break' ;;
+  *:*) fail 'state path contains a colon and cannot be registered on PATH' ;;
 esac
 
 INSTALL_DIR="$STATE_HOME/bin"
@@ -160,6 +288,7 @@ RECEIPT="$STATE_HOME/bootstrap-receipt"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cosyncing-install.XXXXXXXX")"
 STAGED_APPLICATION=''
 STAGED_RECEIPT=''
+STAGED_SHELL_ENV=''
 # Set when this run took over an npm install, so the tail can offer to remove the package it came from.
 ADOPTED_NPM_INSTALL=''
 STAGED_WEB=''
@@ -178,6 +307,7 @@ cleanup() {
   rm -rf "$WORK"
   [ -z "$STAGED_APPLICATION" ] || rm -f "$STAGED_APPLICATION"
   [ -z "$STAGED_RECEIPT" ] || rm -f "$STAGED_RECEIPT"
+  [ -z "$STAGED_SHELL_ENV" ] || rm -f "$STAGED_SHELL_ENV"
   [ -z "$STAGED_WEB" ] || rm -rf "$STAGED_WEB"
   [ -z "$STAGED_CLIENT" ] || rm -rf "$STAGED_CLIENT"
   [ -z "$STAGED_DESKTOP" ] || rm -f "$STAGED_DESKTOP"
@@ -469,6 +599,13 @@ else
     "Bun $MINIMUM_BUN or newer is still not runnable after installing it into $BUN_PREFIX; install it from https://bun.sh and rerun this installer"
   BUN_STATE="installed by this script ($(bun_version_of "$BUN_BIN") at $BUN_BIN)"
 fi
+case "$BUN_BIN" in
+  /*) ;;
+  *) BUN_BIN="$(pwd)/$BUN_BIN" ;;
+esac
+case "$BUN_BIN" in
+  *"$LINE_FEED"*|*"$CARRIAGE_RETURN"*) fail 'Bun path contains a line break' ;;
+esac
 
 # Run the verified bundle through the resolved Bun and make it identify itself, exactly as the compiled
 # artifact used to be asked directly. A bundle cannot be exec'd on its own here: its shebang would resolve
@@ -626,6 +763,7 @@ if [ -n "$RETIRED_WEB" ]; then
   RETIRED_WEB=''
 fi
 [ -L "$ALIAS" ] || ln -s 'cosyncing' "$ALIAS"
+register_shell_commands
 
 installer_message "Installed cosyncing $VERSION at $APPLICATION" "已安装 cosyncing $VERSION：$APPLICATION"
 installer_message "Web client: $WEB_ROOT" "网页客户端：$WEB_ROOT"
@@ -670,7 +808,7 @@ if [ "$INSTALL_MODE" != all ]; then
     [ -d "$SUPERSEDED" ] && [ ! -L "$SUPERSEDED" ] && [ "$SUPERSEDED" != "$WEB_ROOT" ] || continue
     printf 'A previous web client is still at %s. setup moves the service to the new one,\nafter which that directory can be removed.\n' "$SUPERSEDED"
   done
-  printf 'PATH was not changed. Run setup with the absolute command:\n'
+  printf 'Run setup with the absolute command (no shell restart needed):\n'
   print_setup_command
   exit 0
 fi

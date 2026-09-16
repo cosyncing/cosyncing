@@ -14,9 +14,8 @@ Each release publishes four installers, rendered from two templates in one step:
 
 An `install-server.*` run places the JavaScript application bundle and the web client sidecar into
 `$COSYNCING_HOME/bin`, bootstraps a pinned Bun if the host has none new enough, writes an ownership
-receipt, and stops. It starts no service, changes no `PATH`, and edits no shell startup file. That is
-the right installer for a headless box, for a configuration-managed host, and for anywhere you want the
-files and the service to be two decisions.
+receipt, and registers the commands for future terminals. It starts no service.
+That keeps installing the files and starting the service as two separate decisions.
 
 ## What a release carries
 
@@ -121,6 +120,41 @@ curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
 ```
 
 Supported hosts are Linux x64, Linux arm64, and Apple Silicon macOS. Intel macOS is refused by name.
+
+Both shell installers register `cosyncing` and its short name `cosy` for Bash/Zsh.
+They write a generated `$COSYNCING_HOME/shell-path.sh` (default
+`~/.cosyncing/shell-path.sh`) and append a guarded source line to `.profile`,
+`.bashrc`, and an existing `.bash_profile` or `.bash_login`. For Zsh, they also
+register `.zprofile` and `.zshrc` when Zsh is the login shell or those files
+already exist, respecting an exported `ZDOTDIR`.
+
+The generated environment puts `$COSYNCING_HOME/shell-bin` first on `PATH`.
+The two small command launchers there use the selected Bun runtime and the
+installed application by absolute path, defaulting `COSYNCING_HOME` for that
+command without changing your shell's environment or an explicit state override. This also works
+when Bun is outside `PATH` or has a custom filename, or when `COSYNCING_HOME`
+and `BUN_INSTALL` contain spaces. Repeated
+installation does not duplicate the source line. Existing startup content is
+preserved; symlinked, read-only, foreign-owned, or group/world-writable startup
+files are skipped with a message and a source line to add manually.
+
+A `curl ... | sh` child cannot change the terminal that launched it. Open a new
+terminal, or copy the activation command printed by the installer. For a default
+installation it is:
+
+```bash
+. "$HOME/.cosyncing/shell-path.sh"
+cosyncing version --json
+cosy status
+```
+
+For other shells, add the printed `shell-bin` directory to `PATH` using that
+shell's syntax.
+Removing this shell registration means removing the `# cosyncing commands`
+source lines, generated `shell-path.sh`, and generated `shell-bin` launchers;
+it does not stop the broker.
+The installed service keeps using its recorded absolute runtime and application
+paths, independently of interactive-shell registration.
 
 The installer verifies the signed release manifest and checksum list before it downloads anything
 else, then checks each artifact against a digest baked into the script itself. It verifies Ed25519
