@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import {
   captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
-  waitForBrokerHealth,
+  startHealthyFixtureBrokerOnPort,
 } from '../helpers/isolated-broker-fixture.ts';
 import type { SessionInfo } from '../../../protocol/src/index.ts';
 import { RosterRevisionStore } from '../../src/roster/roster-revision.ts';
@@ -301,47 +301,62 @@ writeAmbiguousClaudePair(
   [4, undefined],
 );
 const port = await freePort();
-const startRosterBroker = (listenPort: number): ReturnType<typeof Bun.spawn> =>
-  Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
-  cwd: process.cwd(),
-  env: isolatedBrokerFixtureEnvironment(testHome, {
-    overrides: {
-      PORT: String(listenPort),
-      HOST: '127.0.0.1',
-      HOME: testHome,
-      XDG_CONFIG_HOME: join(testHome, '.config'),
-      XDG_DATA_HOME: join(testHome, '.local', 'share'),
-      XDG_STATE_HOME: join(testHome, '.local', 'state'),
-      COSYNCING_HOME: testHome,
-      COSYNCING_MACHINE: 'roster-http-test',
-      COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
-      COSYNCING_CODEX_SYNC_SERVER: '0',
-      COSYNCING_PI_SESSIONS_ROOT: piRoot,
-      PI_CODING_AGENT_SESSION_DIR: piRoot,
-      PI_CODING_AGENT_DIR: join(testHome, '.pi', 'agent'),
-      COSYNCING_ROSTER_SAFETY_RECONCILE_MS: '1000',
-      COSYNCING_RESTART_DRY_RUN: '1',
+const captures = new Map<ReturnType<typeof Bun.spawn>, ReturnType<typeof captureProcessOutput>>();
+const stopRosterBroker = async (child: ReturnType<typeof Bun.spawn>): Promise<void> => {
+  if (child.exitCode === null) child.kill('SIGTERM');
+  let exited = await Promise.race([
+    child.exited.then(() => true, () => true),
+    Bun.sleep(2_000).then(() => false),
+  ]);
+  if (!exited && child.exitCode === null) {
+    child.kill('SIGKILL');
+    exited = await Promise.race([
+      child.exited.then(() => true, () => true),
+      Bun.sleep(2_000).then(() => false),
+    ]);
+  }
+  if (!exited) throw new Error('roster fixture broker did not exit after SIGTERM/SIGKILL');
+};
+const startRosterBroker = async (listenPort: number): Promise<ReturnType<typeof Bun.spawn>> =>
+  startHealthyFixtureBrokerOnPort({
+    port: listenPort,
+    healthUrl: `http://127.0.0.1:${listenPort}/api/health`,
+    spawn: () => {
+      const child = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
+        cwd: process.cwd(),
+        env: isolatedBrokerFixtureEnvironment(testHome, {
+          overrides: {
+            PORT: String(listenPort),
+            HOST: '127.0.0.1',
+            HOME: testHome,
+            XDG_CONFIG_HOME: join(testHome, '.config'),
+            XDG_DATA_HOME: join(testHome, '.local', 'share'),
+            XDG_STATE_HOME: join(testHome, '.local', 'state'),
+            COSYNCING_HOME: testHome,
+            COSYNCING_MACHINE: 'roster-http-test',
+            COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+            COSYNCING_CODEX_SYNC_SERVER: '0',
+            COSYNCING_PI_SESSIONS_ROOT: piRoot,
+            PI_CODING_AGENT_SESSION_DIR: piRoot,
+            PI_CODING_AGENT_DIR: join(testHome, '.pi', 'agent'),
+            COSYNCING_ROSTER_SAFETY_RECONCILE_MS: '1000',
+            COSYNCING_RESTART_DRY_RUN: '1',
+          },
+        }),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      captures.set(child, captureProcessOutput(child));
+      return child;
     },
-  }),
-  stdout: 'ignore',
-  stderr: 'pipe',
-});
-const broker = startRosterBroker(port);
-const brokerOutput = captureProcessOutput(broker);
+    capture: (child) => captures.get(child)!,
+    stop: stopRosterBroker,
+  });
+const broker = await startRosterBroker(port);
 const base = `http://127.0.0.1:${port}`;
 try {
-  // Readiness gets no wall-clock budget of its own: a broker booting beside
-  // other suites is slow, not broken, and the fixed 10s here was really a
-  // claim about how fast the host is.
-  let healthy = true;
-  try {
-    await waitForBrokerHealth(broker, `${base}/api/health`);
-  } catch (error) {
-    healthy = false;
-    console.log(`      ${(error as Error).message}\n${brokerOutput.read().trim().slice(-2000)}`);
-  }
-  check('isolated broker starts for roster HTTP checks', healthy);
-  if (healthy) {
+  check('isolated broker starts for roster HTTP checks', true);
+  {
     const sevenDaysMs = 7 * 86_400_000;
     // Admit the row with a comfortable margin. A one-second margin made the
     // snapshot race the broker scan under aggregate load.
@@ -454,15 +469,13 @@ try {
 
     // Claude removes its pid registry on clean exit. The exact generation winner must survive both
     // that removal and a cold broker process, while the retired Working transcript stays hidden.
-    broker.kill();
-    await broker.exited.catch(() => null);
+    await stopRosterBroker(broker);
     unlinkSync(oldRegistry);
     unlinkSync(replacementRegistry);
     const coldPort = await freePort();
-    const coldBroker = startRosterBroker(coldPort);
-    const coldOutput = captureProcessOutput(coldBroker);
+    const coldBroker = await startRosterBroker(coldPort);
+    const coldOutput = captures.get(coldBroker)!;
     try {
-      await waitForBrokerHealth(coldBroker, `http://127.0.0.1:${coldPort}/api/health`);
       const coldRoster = await (
         await fetch(`http://127.0.0.1:${coldPort}/api/sessions?refresh=1`)
       ).json() as { sessions?: SessionInfo[] };
@@ -478,13 +491,11 @@ try {
     } catch (error) {
       check('cold broker restarts after Claude registry deletion', false, `${String(error)} ${coldOutput.read().slice(-1000)}`);
     } finally {
-      coldBroker.kill();
-      await coldBroker.exited.catch(() => null);
+      await stopRosterBroker(coldBroker);
     }
   }
 } finally {
-  broker.kill();
-  await broker.exited.catch(() => null);
+  await stopRosterBroker(broker);
   rmSync(testHome, { recursive: true, force: true });
 }
 
