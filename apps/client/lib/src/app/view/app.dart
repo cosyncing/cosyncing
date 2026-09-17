@@ -26,6 +26,7 @@ import 'package:cosyncing_client/src/features/settings/controller/theme_controll
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
 import 'package:cosyncing_client/src/platform/startup/browser_close_protection.dart';
 import 'package:cosyncing_client/src/platform/startup/startup_shell.dart';
+import 'package:cosyncing_client/src/platform/update/android_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_bridge.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_freeze.dart';
@@ -47,10 +48,16 @@ class _AppState extends ConsumerState<App> {
   /// Guards the one-shot browser startup-shell handshake (N3).
   bool _announcedFirstFrame = false;
   Future<void> _attentionNavigationTail = Future<void>.value();
+  late final AppLifecycleListener _androidUpdateLifecycle;
 
   @override
   void initState() {
     super.initState();
+    _androidUpdateLifecycle = AppLifecycleListener(
+      onResume: () => unawaited(
+        ref.read(androidClientUpdateControllerProvider.notifier).checkIfStale(),
+      ),
+    );
     // N3b: give the participant registry its browser hook before any surface
     // can register. Installing it here — rather than from the first
     // registration — keeps the whole JS-interop dependency in one place and
@@ -69,6 +76,12 @@ class _AppState extends ConsumerState<App> {
   }
 
   @override
+  void dispose() {
+    _androidUpdateLifecycle.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     ref
       ..watch(activeBrokerProfileHydrationProvider)
@@ -81,6 +94,9 @@ class _AppState extends ConsumerState<App> {
       ..watch(attentionMutationDrainRuntimeProvider)
       ..watch(attentionUnreadBadgeRuntimeProvider)
       ..watch(sessionNotificationLaunchBootstrapProvider)
+      // Android checks the stable release channel without holding the first
+      // frame. Every other platform resolves immediately to `unsupported`.
+      ..watch(androidClientUpdateControllerProvider)
       ..listen(sessionNotificationTapPayloadProvider, (_, payload) {
         if (payload == null) return;
         // A tap is navigation only. Read/dismiss state changes only after an
@@ -262,6 +278,9 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
     return Consumer(
       builder: (context, ref, _) {
         final webUpdate = ref.watch(webClientUpdateProvider).valueOrNull;
+        final androidUpdate = ref
+            .watch(androidClientUpdateControllerProvider)
+            .valueOrNull;
         return Stack(
           children: [
             ForegroundAttentionHost(
@@ -275,6 +294,13 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
             // a surface, and even then a nonblocking one.
             if (webUpdate?.handoffFailed ?? false)
               const _WebClientUpdateBanner(),
+            if (androidUpdate != null &&
+                androidUpdate.status != AndroidClientUpdateStatus.unsupported &&
+                androidUpdate.status != AndroidClientUpdateStatus.current &&
+                androidUpdate.status !=
+                    AndroidClientUpdateStatus.installerLaunched &&
+                androidUpdate.status != AndroidClientUpdateStatus.failed)
+              _AndroidClientUpdateBanner(state: androidUpdate),
           ],
         );
       },
@@ -283,6 +309,115 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
 
   @override
   Widget build(BuildContext context) => Overlay(initialEntries: [_entry]);
+}
+
+class _AndroidClientUpdateBanner extends ConsumerWidget {
+  const _AndroidClientUpdateBanner({required this.state});
+
+  final AndroidClientUpdateState state;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
+    final tokens = context.tokens;
+    final colors = Theme.of(context).colorScheme;
+    final candidate = state.candidate;
+    if (candidate == null) return const SizedBox.shrink();
+
+    final downloading = state.status == AndroidClientUpdateStatus.downloading;
+    final opening = state.status == AndroidClientUpdateStatus.openingInstaller;
+    final permission =
+        state.status == AndroidClientUpdateStatus.permissionRequired;
+    final message = permission
+        ? l10n.androidUpdatePermissionBody
+        : downloading
+        ? l10n.androidUpdateDownloadingBody(candidate.version)
+        : opening
+        ? l10n.androidUpdateOpeningBody
+        : l10n.androidUpdateAvailableBody(candidate.version);
+
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Material(
+          key: const Key('android-client-update-banner'),
+          color: colors.tertiaryContainer,
+          elevation: 2,
+          borderRadius: BorderRadius.circular(tokens.radiusMd),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.system_update_alt,
+                    size: 18,
+                    color: colors.onTertiaryContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          l10n.androidUpdateAvailableTitle,
+                          style: Theme.of(context).textTheme.labelMedium
+                              ?.copyWith(color: colors.onTertiaryContainer),
+                        ),
+                        Text(
+                          message,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: colors.onTertiaryContainer,
+                              ),
+                        ),
+                        if (downloading)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: LinearProgressIndicator(
+                              value: state.progress,
+                              color: colors.onTertiaryContainer,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (!downloading && !opening)
+                    TextButton(
+                      key: const Key('android-client-update-action'),
+                      onPressed: () => unawaited(
+                        ref
+                            .read(
+                              androidClientUpdateControllerProvider.notifier,
+                            )
+                            .downloadAndInstall(),
+                      ),
+                      child: Text(
+                        permission
+                            ? l10n.androidUpdatePermissionAction
+                            : l10n.androidUpdateAction,
+                      ),
+                    )
+                  else
+                    const Padding(
+                      padding: EdgeInsets.all(8),
+                      child: SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// Nonblocking recovery notice for a handoff that really did not land (N3b).

@@ -47,9 +47,11 @@ import {
 } from '../../../verification/supervised-process.ts';
 import {
   assembleRelease,
+  androidClientAssetName,
   canonicalProductVersion,
   parseRenderedClientTable,
   resolveClientArtifacts,
+  resolveAndroidClientArtifact,
   sha256,
   BOOTSTRAP_TEMPLATES,
   CLIENT_HOSTS,
@@ -276,6 +278,10 @@ function writeClientArtifacts(directory: string, version: string): void {
     });
     if (!zipped.success) throw new Error(`${asset} fixture: ${zipped.stderr.toString()}`);
   }
+  writeFileSync(
+    join(directory, androidClientAssetName(version)),
+    'PK fixture Android package\n',
+  );
   rmSync(staging, { recursive: true, force: true });
 }
 
@@ -560,6 +566,13 @@ try {
   check('manifest carries exact version, commit and embedded signature',
     assembled.manifest.version === version && assembled.manifest.sourceCommit === commit
       && assembled.manifest.signature.keyId === 'test-2026');
+  const expectedAndroid = resolveAndroidClientArtifact(clientDirectory, version);
+  check('signed manifest binds the accepted Android APK identity',
+    assembled.manifest.androidApp?.name === expectedAndroid.name
+      && assembled.manifest.androidApp?.versionCode === expectedAndroid.versionCode
+      && assembled.manifest.androidApp?.sha256 === expectedAndroid.sha256
+      && assembled.manifest.androidApp?.signerSha256 === expectedAndroid.signerSha256
+      && assembled.publishedFiles.includes(expectedAndroid.name));
   check('JavaScript release verifies against the pinned Ed25519 key',
     verifyUpgradeCandidate({value: assembled.manifest,
       buildInfo: {distribution: 'bootstrap-js', target: 'universal'},
@@ -926,10 +939,10 @@ try {
   check('the signed checksum list covers every client artifact',
     expectedClients.every((client) =>
       signedChecksums.includes(`${client.sha256}  ${client.name}\n`))
-      // Not in the manifest, and deliberately: the manifest describes what a broker can upgrade ITSELF
-      // to, and a GUI client is not a broker upgrade.
-      && !readFileSync(join(releaseDirectory, 'release-manifest.json'), 'utf8')
-        .includes('cosyncing-client-'));
+      && signedChecksums.includes(`${expectedAndroid.sha256}  ${expectedAndroid.name}\n`)
+      // Desktop clients stay out of the manifest; Android has its own typed field and is never a broker
+      // artifact target.
+      && !assembled.manifest.artifacts.some((item) => item.name.includes('client')));
   // A release assembled with a client missing for one host must fail rather than publish an all-in-one
   // installer that silently degrades to a server install wherever the gap is.
   const incompleteClients = join(root, 'clients-incomplete');
@@ -968,7 +981,7 @@ try {
   check('release inventory and notices distinguish external Bun from distributed dependencies',
     inventory.format === 'cosyncing-javascript-software-inventory'
       && inventory.externalRuntime.bundled === false
-      && inventory.releaseArtifacts.length === 5
+      && inventory.releaseArtifacts.length === 6
       && thirdPartyNotices.includes('Bun is installed separately')
       && !thirdPartyNotices.includes('Bun 1.3.8 runtime')
       && thirdPartyNotices.includes('app/assets/NOTICES')

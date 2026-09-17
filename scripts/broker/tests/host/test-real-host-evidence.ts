@@ -18,7 +18,11 @@ import {
   candidateAssetBlockers,
   promotionAssetBlockers,
 } from '../../release/verify-promotion-assets.ts';
-import { CLIENT_HOSTS, canonicalProductVersion } from '../../release/release-files.ts';
+import {
+  CLIENT_HOSTS,
+  androidClientAssetName,
+  canonicalProductVersion,
+} from '../../release/release-files.ts';
 import {
   EXPECTED_STAGING_ASSETS,
   stagingAssetBlockers,
@@ -178,7 +182,7 @@ try {
 }
 
 /**
- * The fixed asset spine plus the three client artifacts a release now publishes.
+ * The fixed asset spine plus the desktop and Android client artifacts a release publishes.
  *
  * The client names carry the release version and are resolved from the directory rather than listed, so a
  * fixture that wants an EXACT set has to write a manifest a reader can take the version from. `fixture` in
@@ -202,6 +206,7 @@ function writeExactAssetSet(directory: string, files: readonly string[]): void {
     const extension = CLIENT_HOSTS[host as keyof typeof CLIENT_HOSTS];
     writeFileSync(join(directory, `cosyncing-client-${version}-${host}${host === "linux-x64" ? "" : "-unsigned"}${extension}`), 'fixture\n');
   }
+  writeFileSync(join(directory, androidClientAssetName(version)), 'fixture\n');
 }
 
 const candidateDirectory = mkdtempSync(join(tmpdir(), 'cosyncing-real-evidence-candidate-'));

@@ -293,6 +293,12 @@ jobs:
           bun run client:build:android -- --mode release
           source_apk="apps/client/build/app/outputs/flutter-apk/app-release.apk"
           test -f "$source_apk"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -print | sort -V | tail -1)"
+          test -x "$aapt"
+          expected_version_code="$(sed -nE 's/^version: [0-9]+\.[0-9]+\.[0-9]+\+([0-9]+)$/\1/p' apps/client/pubspec.yaml)"
+          actual_version_code="$("$aapt" dump badging "$source_apk" | sed -nE "s/^package: .*versionCode='([0-9]+)'.*$/\1/p")"
+          test -n "$expected_version_code"
+          test "$actual_version_code" = "$expected_version_code"
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -1)"
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs "$source_apk" | tee "$RUNNER_TEMP/apksigner.txt"
@@ -305,6 +311,24 @@ jobs:
           if test "$actual_signer" != "$expected_signer"; then
             echo 'The Android package signer does not match the reviewed cosyncing release certificate.' >&2
             exit 1
+          fi
+          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+            --json tagName --jq '.[].tagName' | grep '^client-v[0-9]\+\.[0-9]\+\.[0-9]\+$' \
+            | grep -vx "$GITHUB_REF_NAME" | sort -V | tail -1 || true)"
+          if test -n "$previous_tag"; then
+            previous_version="${previous_tag#client-v}"
+            previous_dir="$RUNNER_TEMP/previous-android"
+            mkdir -p "$previous_dir"
+            gh release download "$previous_tag" --dir "$previous_dir" \
+              --pattern "cosyncing-client-$previous_version-android.apk"
+            previous_apk="$previous_dir/cosyncing-client-$previous_version-android.apk"
+            previous_version_code="$("$aapt" dump badging "$previous_apk" \
+              | sed -nE "s/^package: .*versionCode='([0-9]+)'.*$/\1/p")"
+            test -n "$previous_version_code"
+            if test "$actual_version_code" -le "$previous_version_code"; then
+              echo "Android versionCode must increase beyond the previous stable APK." >&2
+              exit 1
+            fi
           fi
           mkdir -p output/client-release
           asset="output/client-release/cosyncing-client-$version-android.apk"

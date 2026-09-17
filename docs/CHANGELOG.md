@@ -11,6 +11,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- The sideloaded Android client checks the stable GitHub release channel at
+  startup. When a newer accepted APK exists, it can download the exact signed
+  artifact and open Android's installer; Android still requires the user to
+  approve the installation and, when needed, allow Cosyncing as an install
+  source. Other client update paths are unchanged.
+
 ### Fixed
 
 - Standalone installers accept applications replaced by a verified in-app

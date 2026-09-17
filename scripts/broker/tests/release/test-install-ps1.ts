@@ -400,6 +400,10 @@ Compress-Archive -Path $Source -DestinationPath $Destination -Force
       join(clientDirectory, `cosyncing-client-${VERSION}-macos-arm64-unsigned.zip`),
       'fixture\n',
     );
+    writeFileSync(
+      join(clientDirectory, `cosyncing-client-${VERSION}-android.apk`),
+      'fixture\n',
+    );
   }
 
   assembleRelease({

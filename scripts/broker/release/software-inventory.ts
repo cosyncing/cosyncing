@@ -47,7 +47,10 @@ export interface JavaScriptSoftwareInventory extends Omit<CompiledSoftwareInvent
   format: 'cosyncing-javascript-software-inventory';
   scope: 'Broker JavaScript dependency closure; Flutter dependencies retain their notices inside each web/client archive';
   externalRuntime: { name: 'Bun'; minimumVersion: string; bundled: false; acquisition: 'https://github.com/oven-sh/bun/releases' };
-  releaseArtifacts: Array<{ name: string; kind: 'javascript-broker' | 'flutter-web' | 'flutter-desktop' }>;
+  releaseArtifacts: Array<{
+    name: string;
+    kind: 'javascript-broker' | 'flutter-web' | 'flutter-desktop' | 'flutter-android';
+  }>;
 }
 
 export interface SpdxSoftwareBom {

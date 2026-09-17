@@ -29,14 +29,29 @@ downloading by hand would get.
 
 They are covered by the broker release's signed `SHA256SUMS`, and each
 installer carries their digests baked in. They are deliberately **not** in the
-release manifest: that manifest describes what a running broker can upgrade
-*itself* to, and a GUI client is not a broker upgrade. Adding them there would
-tell every installed broker to treat a client as a candidate for its own swap.
+release manifest's broker `artifacts` array: that array describes what a
+running broker can replace itself with, and a GUI client is not a broker
+upgrade.
 
 This makes a broker release depend on the matching client release already
 existing, which is the client-first order below stated as a build step rather
-than as a habit. Android is not carried: it installs from its own APK and no
-installer places it.
+than as a habit. The accepted Android APK is also copied unchanged into the
+broker release and described by the signed `androidApp` manifest field. Shell
+and PowerShell installers ignore it; Android clients use it as their stable
+update channel and hand it to Android's system installer after explicit user
+action.
+
+The Android client checks the channel at startup, retries transient failures,
+and checks again after a sufficiently long background interval. It authenticates
+the exact manifest bytes with the release key pinned in the application and in
+`docs/release/release-public-key.txt`. It requires both semantic version and Android
+`versionCode` to advance, verifies the downloaded size and digest, then asks
+Android to confirm the package ID, version name, version code, and long-lived
+signing certificate before requesting install-source permission or opening the
+installer. Broker assembly independently repeats those APK identity checks
+before signing the manifest. Candidate publication also refuses a `versionCode`
+that does not exceed the previous stable APK. The client never silently installs
+an update, and the behavior is compiled out on every other platform.
 
 ## Who owns the `latest` pointer
 
