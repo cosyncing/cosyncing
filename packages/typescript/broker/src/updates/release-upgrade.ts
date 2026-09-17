@@ -121,6 +121,22 @@ export interface ReleaseJavaScriptApp {
   minimumBunVersion: string;
 }
 
+/** Accepted Android client carried by the stable release channel.
+ *
+ * Brokers never select or install this artifact. It lives beside the broker
+ * payload so an Android client can discover one promoted APK without listing
+ * GitHub releases or taking ownership of GitHub's `latest` pointer.
+ */
+export interface ReleaseAndroidApp {
+  name: string;
+  applicationId: 'com.cosyncing.client';
+  versionCode: number;
+  size: number;
+  sha256: string;
+  url: string;
+  signerSha256: string;
+}
+
 export interface ReleaseManifest {
   schemaVersion: typeof RELEASE_MANIFEST_SCHEMA_VERSION;
   product: typeof PRODUCT_IDENTITY.productName;
@@ -135,6 +151,8 @@ export interface ReleaseManifest {
   webApp?: ReleaseWebSidecar;
   /** Signed JavaScript application. Omitted only by manifests published before the JS channel existed. */
   jsApp?: ReleaseJavaScriptApp;
+  /** Signed Android update metadata. Omitted by releases predating in-app Android updates. */
+  androidApp?: ReleaseAndroidApp;
   signature: {
     algorithm: 'ed25519';
     keyId: string;
@@ -354,6 +372,19 @@ function validReleaseJavaScriptApp(value: unknown): value is ReleaseJavaScriptAp
     && /^\d+\.\d+\.\d+$/.test(value.minimumBunVersion);
 }
 
+function validReleaseAndroidApp(value: unknown): value is ReleaseAndroidApp {
+  if (!plainObject(value)) return false;
+  return typeof value.name === 'string'
+    && /^cosyncing-client-\d+\.\d+\.\d+-android\.apk$/.test(value.name)
+    && value.applicationId === 'com.cosyncing.client'
+    && Number.isSafeInteger(value.versionCode) && (value.versionCode as number) > 0
+    && Number.isSafeInteger(value.size) && (value.size as number) > 0
+    && (value.size as number) <= MAX_RELEASE_ARTIFACT_BYTES
+    && validSha(value.sha256)
+    && safeHttpsUrl(value.url)
+    && validSha(value.signerSha256);
+}
+
 function parseManifest(value: unknown): ReleaseManifest {
   if (!plainObject(value)
       || value.schemaVersion !== RELEASE_MANIFEST_SCHEMA_VERSION
@@ -371,6 +402,7 @@ function parseManifest(value: unknown): ReleaseManifest {
       || (value.contract !== undefined && !validReleaseContract(value.contract))
       || (value.webApp !== undefined && !validReleaseWebSidecar(value.webApp))
       || (value.jsApp !== undefined && !validReleaseJavaScriptApp(value.jsApp))
+      || (value.androidApp !== undefined && !validReleaseAndroidApp(value.androidApp))
       || !plainObject(value.signature)
       || value.signature.algorithm !== 'ed25519'
       || typeof value.signature.keyId !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(value.signature.keyId)

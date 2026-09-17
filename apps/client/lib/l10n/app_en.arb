@@ -1968,6 +1968,36 @@
   "@settingsDesktopBuildUpdateLaunchFailed": {
     "description": "Snackbar shown when the operating system cannot open the desktop release download page."
   },
+  "androidUpdateAvailableTitle": "Android update available",
+  "@androidUpdateAvailableTitle": {
+    "description": "Title of the Android in-app update banner."
+  },
+  "androidUpdateAvailableBody": "Version {version} is ready to download.",
+  "@androidUpdateAvailableBody": {
+    "description": "Android update banner body before download.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
+  "androidUpdateDownloadingBody": "Downloading version {version}…",
+  "@androidUpdateDownloadingBody": {
+    "description": "Android update banner body while downloading.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
+  "androidUpdateOpeningBody": "Opening Android’s installer…",
+  "@androidUpdateOpeningBody": {
+    "description": "Android update banner body while the system installer opens."
+  },
+  "androidUpdatePermissionBody": "Allow Cosyncing to install updates, then tap Continue.",
+  "@androidUpdatePermissionBody": {
+    "description": "Android update banner body after opening the unknown-app source permission screen."
+  },
+  "androidUpdateAction": "Update",
+  "@androidUpdateAction": {
+    "description": "Button that downloads an Android update and opens the system installer."
+  },
+  "androidUpdatePermissionAction": "Continue",
+  "@androidUpdatePermissionAction": {
+    "description": "Button that retries installation after Android install-source permission is granted."
+  },
   "settingsQuotaPanelTitle": "Usage limits",
   "@settingsQuotaPanelTitle": {
     "description": "Heading above the Tokdash quota status bars."

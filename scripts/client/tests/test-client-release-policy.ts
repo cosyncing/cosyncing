@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { createPublicKey } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,14 +20,29 @@ function check(ok: unknown, message: string): void {
 const read = (path: string): Promise<string> =>
   readFile(join(REPOSITORY_ROOT, path), 'utf8');
 
-const [pubspec, gradle, candidate, promotion, notes, androidCertificate] =
+const [
+  pubspec,
+  gradle,
+  candidate,
+  promotion,
+  brokerRelease,
+  notes,
+  androidCertificate,
+  releaseKey,
+  androidUpdate,
+  androidActivity,
+] =
   await Promise.all([
     read('apps/client/pubspec.yaml'),
     read('apps/client/android/app/build.gradle.kts'),
     read('.github/workflows/client-release.yml'),
     read('.github/workflows/client-release-promote.yml'),
+    read('.github/workflows/broker-release.yml'),
     read('docs/release/client-release-notes.md'),
     read('docs/release/android-signing-certificate.sha256'),
+    read('docs/release/release-public-key.txt'),
+    read('apps/client/lib/src/platform/update/android_client_update.dart'),
+    read('apps/client/android/app/src/main/kotlin/com/cosyncing/client/MainActivity.kt'),
   ]);
 
 const pubspecVersion = /^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\+[0-9]+$/m
@@ -93,6 +109,41 @@ check(
     candidate.includes('actual_signer') &&
     candidate.includes('expected_signer'),
   'candidate binds the Android APK to the reviewed signing certificate',
+);
+check(
+  candidate.includes('aapt" dump badging') &&
+    candidate.includes(
+      'test "$actual_version_code" = "$expected_version_code"',
+    ),
+  'candidate binds the APK versionCode to the reviewed pubspec build number',
+);
+check(
+  candidate.includes('Android versionCode must increase') &&
+    candidate.includes('gh release list') &&
+    candidate.includes('gh release download'),
+  'candidate refuses a versionCode that cannot upgrade the prior stable APK',
+);
+const releaseKeyDer = createPublicKey(releaseKey).export({
+  format: 'der',
+  type: 'spki',
+}).toString('base64url');
+check(
+  androidUpdate.includes(`'${releaseKeyDer}'`) &&
+    brokerRelease.includes(
+      'cmp docs/release/release-public-key.txt "$RUNNER_TEMP/cosyncing-release.pub.pem"',
+    ),
+  'Android embeds the exact public key that signs promoted release manifests',
+);
+check(
+  brokerRelease.includes('aapt" dump badging') &&
+    brokerRelease.includes('versionName') &&
+    brokerRelease.includes('extract-android-signer-digest.sh'),
+  'broker signing independently validates the accepted APK identity',
+);
+check(
+  androidActivity.indexOf('archive.versionName != expectedVersion') <
+      androidActivity.indexOf('canRequestPackageInstalls()'),
+  'native APK identity is validated before requesting install-source permission',
 );
 
 const signerExtractor = join(

@@ -18,6 +18,7 @@ import {
   WEB_SIDECAR_NAME,
   parseRenderedClientTable,
   clientAssetName,
+  androidClientAssetName,
   type ClientHost,
 } from './release-files.ts';
 
@@ -169,6 +170,16 @@ function signedPairingBlockers(directory: string): string[] {
     const verified = verifySignedManifest(manifest, { [keyId]: publicKey });
     if (verified.artifacts.length !== 0) return ['JavaScript release must not describe native broker artifacts'];
     const pairing = verifyReleasePairing(verified);
+    const android = verified.androidApp;
+    if (!android || android.name !== androidClientAssetName(verified.version)) {
+      return ['signed Android update metadata is missing or misnamed'];
+    }
+    const androidPath = resolve(directory, android.name);
+    const androidBytes = readFileSync(androidPath);
+    if (statSync(androidPath).size !== android.size
+        || createHash('sha256').update(androidBytes).digest('hex') !== android.sha256) {
+      return ['signed Android APK size or digest does not match the candidate'];
+    }
     const webPath = resolve(directory, pairing.webApp.name);
     const webBytes = readFileSync(webPath);
     const digest = createHash('sha256').update(webBytes).digest('hex');
@@ -269,6 +280,7 @@ function assetBlockers(directory: string, label: 'candidate' | 'promotion'): str
   const expected = [
     ...(label === 'candidate' ? EXPECTED_CANDIDATE_ASSETS : EXPECTED_PROMOTION_ASSETS),
     ...clients.names,
+    androidClientAssetName(version),
   ].sort();
   const blockers = exactAssetSetBlocker(directory, expected, label);
   if (blockers.length > 0) return blockers;
@@ -307,6 +319,6 @@ if (import.meta.main) {
     process.exit(1);
   }
   const expected = (candidateOnly ? EXPECTED_CANDIDATE_ASSETS : EXPECTED_PROMOTION_ASSETS).length
-    + Object.keys(CLIENT_HOSTS).length;
+    + Object.keys(CLIENT_HOSTS).length + 1;
   console.log(`PASS: exact ${candidateOnly ? 'candidate' : 'promotion'} asset set (${expected} files)`);
 }

@@ -100,6 +100,57 @@ export interface ClientArtifact {
   size: number;
 }
 
+export interface AndroidClientArtifact {
+  name: string;
+  applicationId: 'com.cosyncing.client';
+  versionCode: number;
+  sha256: string;
+  size: number;
+  signerSha256: string;
+}
+
+export function androidClientAssetName(version: string): string {
+  return `${PRODUCT_IDENTITY.releaseAssetPrefix}-client-${version}-android.apk`;
+}
+
+/** Resolve the accepted APK and its source-controlled Android identity. */
+export function resolveAndroidClientArtifact(
+  directory: string,
+  releaseVersion: string,
+): AndroidClientArtifact {
+  const name = androidClientAssetName(releaseVersion);
+  const path = join(directory, name);
+  const bytes = readFileSync(path);
+  const stats = statSync(path);
+  if (!stats.isFile() || stats.size === 0) {
+    throw new Error(`Android client artifact is not a file: ${name}`);
+  }
+  const pubspec = readFileSync(join(ROOT, 'apps/client/pubspec.yaml'), 'utf8');
+  const versionMatch = /^version:\s*([^+\s]+)\+(\d+)\s*$/m.exec(pubspec);
+  if (!versionMatch || versionMatch[1] !== releaseVersion) {
+    throw new Error('Android client version does not match apps/client/pubspec.yaml');
+  }
+  const versionCode = Number(versionMatch[2]);
+  if (!Number.isSafeInteger(versionCode) || versionCode <= 0) {
+    throw new Error('Android client versionCode is invalid');
+  }
+  const signerSha256 = readFileSync(
+    join(ROOT, 'docs/release/android-signing-certificate.sha256'),
+    'utf8',
+  ).trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(signerSha256)) {
+    throw new Error('Android signing certificate fingerprint is invalid');
+  }
+  return {
+    name,
+    applicationId: 'com.cosyncing.client',
+    versionCode,
+    sha256: sha256(bytes),
+    size: stats.size,
+    signerSha256,
+  };
+}
+
 /**
  * Read the client table back out of a RENDERED installer.
  *
@@ -745,7 +796,11 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     exactReleaseFiles(options.evidenceDirectory, evidenceFiles);
   }
   const clients = resolveClientArtifacts(options.clientDirectory, releaseVersion);
-  exactReleaseFiles(options.clientDirectory, clients.map((client) => client.name));
+  const androidClient = resolveAndroidClientArtifact(options.clientDirectory, releaseVersion);
+  exactReleaseFiles(options.clientDirectory, [
+    ...clients.map((client) => client.name),
+    androidClient.name,
+  ]);
   mkdirSync(options.outputDirectory, { recursive: true });
   exactReleaseFiles(options.outputDirectory, []);
   const publicKeyName = 'release-key.pem';
@@ -767,6 +822,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
       { name: RELEASE_JAVASCRIPT_APP_NAME, kind: 'javascript-broker' },
       { name: WEB_SIDECAR_NAME, kind: 'flutter-web' },
       ...clients.map((client) => ({ name: client.name, kind: 'flutter-desktop' as const })),
+      { name: androidClient.name, kind: 'flutter-android' as const },
     ],
   });
   const inventoryName = 'software-inventory.json';
@@ -898,6 +954,15 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
       directorySha256: webEvidence.directorySha256,
       fileCount: webEvidence.fileCount,
     },
+    androidApp: {
+      name: androidClient.name,
+      applicationId: androidClient.applicationId,
+      versionCode: androidClient.versionCode,
+      size: androidClient.size,
+      sha256: androidClient.sha256,
+      url: `${releaseBase}/${androidClient.name}`,
+      signerSha256: androidClient.signerSha256,
+    },
   };
   const manifest: ReleaseManifest = {
     ...unsigned,
@@ -937,6 +1002,11 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
       { mode: 0o644 },
     );
   }
+  writeFileSync(
+    join(options.outputDirectory, androidClient.name),
+    readFileSync(join(options.clientDirectory, androidClient.name)),
+    { mode: 0o644 },
+  );
 
   const bootstraps = renderBootstraps({
     version: releaseVersion,
@@ -977,6 +1047,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     `${manifestName}${P256_DER_SIGNATURE_SUFFIX}`,
     ...bootstrapNames,
     ...clients.map((client) => client.name),
+    androidClient.name,
   ].sort();
   const checksums = `${checksumCandidates.map((name) =>
     `${sha256(readFileSync(join(options.outputDirectory, name)))}  ${name}`).join('\n')}\n`;

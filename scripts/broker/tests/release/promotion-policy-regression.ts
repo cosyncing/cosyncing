@@ -101,7 +101,7 @@ writeFileSync('legacy-verifier-executed', 'yes');
   const native = join(root, 'signed-legacy-native-candidate');
   const javascript = join(root, 'signed-javascript-candidate');
   candidate(native, true); candidate(javascript, false);
-  assert.equal(readdirSync(native).length, 37);
+  assert.equal(readdirSync(native).length, 38);
   git('checkout', '--detach', candidateCommit);
   const oldPolicy = run([process.execPath, 'run', policyRelative, native, '--version', 'ignored', '--commit', 'ignored']);
   assert.equal(oldPolicy.code, 0, oldPolicy.stderr);
