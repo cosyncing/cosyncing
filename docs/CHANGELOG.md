@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.8 — 2026-09-17
+
 ### Added
 
 - The sideloaded Android client checks the stable GitHub release channel at

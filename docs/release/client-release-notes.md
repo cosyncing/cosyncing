@@ -5,12 +5,12 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.7 reduces delays when opening and returning to active sessions. Update the
-client before, or together with, the broker for the matching roster-refresh
-behavior.
+0.5.8 adds a verified self-update flow for sideloaded Android clients. The app
+checks the stable GitHub release channel at startup and, when a newer accepted
+APK exists, can download it and open Android's installer.
 
-0.5.7 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.7 broker. Those clients do not expose features
+0.5.8 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.8 broker. Those clients do not expose features
 introduced by newer contract revisions. A 0.4.1 or older client remains
 read-only against current brokers.
 
@@ -18,16 +18,15 @@ Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's new in 0.5.7
+## What's new in 0.5.8
 
-- Returning to a session refreshes its roster entry immediately instead of
-  waiting for agent creation-readiness checks.
-- Large Claude Observe histories yield during parsing and reuse recent parsed
-  records as the transcript grows, keeping other broker and client work
-  responsive.
-- Agent startup readiness probes no longer hold up unrelated broker requests.
+- The Android client authenticates the release manifest, verifies the APK
+  digest, application ID, version, and signing certificate, then asks Android
+  to install it. Android still requires user confirmation and may require
+  permission to install apps from Cosyncing.
+- Other native clients retain their existing update behavior.
 
-For these features, use a 0.5.7 client with a 0.5.7 broker.
+For these features, use a 0.5.8 Android client with a 0.5.8 broker release.
 
 ## Downloads
 
