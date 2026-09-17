@@ -1208,7 +1208,36 @@ try {
         Fail 'existing bootstrap receipt checksum is invalid'
       }
       if ((Get-Sha256 -Path $application) -ne $prior[0]) {
-        Fail 'existing application differs from its bootstrap ownership receipt'
+        $installStatePath = Join-Path $stateHome 'install-state.json'
+        $setupOwnsApplication = $false
+        if (Test-Path -LiteralPath $installStatePath -PathType Leaf) {
+          $installStateItem = Get-Item -LiteralPath $installStatePath -Force
+          if ((-not (Test-ReparsePoint -Item $installStateItem)) -and
+              (Get-PathOwnerSid -Path $installStatePath) -eq $CURRENT_USER_SID) {
+            try {
+              $installState = [IO.File]::ReadAllText($installStatePath) | ConvertFrom-Json
+              $binaryReceipts = @($installState.resources | Where-Object { $_.id -ceq 'broker-binary' })
+              $binaryReceipt = if ($binaryReceipts.Count -eq 1) { $binaryReceipts[0] } else { $null }
+              $receiptTarget = if ($binaryReceipt) {
+                [IO.Path]::GetFullPath([string]$binaryReceipt.target)
+              } else { '' }
+              $setupOwnsApplication = $installState.schemaVersion -eq 1 -and
+                $installState.product -ceq 'cosyncing' -and
+                $installState.setup.status -ceq 'committed' -and
+                $binaryReceipt.kind -ceq 'binary' -and
+                [string]::Equals($receiptTarget, [IO.Path]::GetFullPath($application),
+                  [StringComparison]::OrdinalIgnoreCase) -and
+                @('package-hash', 'receipt') -ccontains $binaryReceipt.ownership.proof -and
+                $binaryReceipt.ownership.installedSha256 -cmatch '^[0-9a-f]{64}$' -and
+                (Get-Sha256 -Path $application) -ceq $binaryReceipt.ownership.installedSha256
+            } catch {
+              $setupOwnsApplication = $false
+            }
+          }
+        }
+        if (-not $setupOwnsApplication) {
+          Fail 'existing application differs from its bootstrap ownership receipt'
+        }
       }
     }
   }

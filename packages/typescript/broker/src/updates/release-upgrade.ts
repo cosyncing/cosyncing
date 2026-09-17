@@ -221,6 +221,14 @@ interface UpgradeJournal {
   updatedAt: string;
 }
 
+interface BootstrapReceipt {
+  path: string;
+  target: string;
+  host: string;
+  application: string;
+  runtime: string;
+}
+
 export interface UpgradeDependencies {
   home: string;
   cacheRoot?: string;
@@ -900,6 +908,81 @@ function safeInstalledBinaryPath(
 }
 
 /**
+ * Read the standalone installer's receipt when this installation has one.
+ *
+ * The setup receipt is the lifecycle authority, but the standalone installer deliberately keeps its own
+ * narrow ownership proof so it never overwrites an unrelated file. A bootstrap-js self-upgrade changes the
+ * file both receipts describe, so leaving this second receipt behind makes the next signed installer reject
+ * a legitimate upgraded application as drift. Missing is valid for acquisition paths that never used the
+ * standalone installer; a present receipt must be exactly the installer-owned schema before upgrade may
+ * rewrite it.
+ */
+function inspectBootstrapReceipt(home: string, targetPath: string): BootstrapReceipt | undefined {
+  const path = join(home, 'bootstrap-receipt');
+  const inspection = inspectOwnerOnlyFile(path);
+  if (inspection.status === 'missing') return undefined;
+  if (inspection.status !== 'ok') throw new Error('upgrade-bootstrap-receipt-unsafe');
+
+  const values = new Map<string, string>();
+  for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    if (!line) continue;
+    const separator = line.indexOf('=');
+    if (separator < 1) throw new Error('upgrade-bootstrap-receipt-invalid');
+    const key = line.slice(0, separator);
+    if (values.has(key)) throw new Error('upgrade-bootstrap-receipt-invalid');
+    values.set(key, line.slice(separator + 1));
+  }
+  const expectedKeys = [
+    'schemaVersion', 'product', 'version', 'target', 'distribution',
+    'host', 'application', 'webRoot', 'runtime', 'sha256',
+  ];
+  if (values.size !== expectedKeys.length || expectedKeys.some((key) => !values.has(key))
+      || values.get('schemaVersion') !== '2'
+      || values.get('product') !== PRODUCT_IDENTITY.productName
+      || values.get('distribution') !== 'bootstrap-js'
+      || values.get('target') !== RELEASE_JAVASCRIPT_APP_TARGET
+      || !validVersion(values.get('version'))
+      || !validSha(values.get('sha256'))
+      || resolve(values.get('application') ?? '') !== resolve(targetPath)
+      || resolve(values.get('webRoot') ?? '')
+        !== resolve(join(dirname(targetPath), `cosyncing-web-${values.get('version') ?? ''}`))
+      || !isAbsolute(values.get('runtime') ?? '')
+      || !/^[a-z0-9]+-[a-z0-9]+$/.test(values.get('host') ?? '')) {
+    throw new Error('upgrade-bootstrap-receipt-invalid');
+  }
+  return {
+    path,
+    target: values.get('target')!,
+    host: values.get('host')!,
+    application: values.get('application')!,
+    runtime: values.get('runtime')!,
+  };
+}
+
+function writeBootstrapReceipt(
+  receipt: BootstrapReceipt | undefined,
+  targetPath: string,
+  version: string,
+  installedSha256: string,
+): void {
+  if (!receipt) return;
+  const webRoot = join(dirname(targetPath), `cosyncing-web-${version}`);
+  atomicWriteOwnerOnly(receipt.path, [
+    'schemaVersion=2',
+    `product=${PRODUCT_IDENTITY.productName}`,
+    `version=${version}`,
+    `target=${receipt.target}`,
+    'distribution=bootstrap-js',
+    `host=${receipt.host}`,
+    `application=${receipt.application}`,
+    `webRoot=${webRoot}`,
+    `runtime=${receipt.runtime}`,
+    `sha256=${installedSha256}`,
+    '',
+  ].join('\n'), { mode: 0o600 });
+}
+
+/**
  * The installation and version identifiers a service-version undo is driven from.
  *
  * Validated to the same shape the Windows service layer accepts, here rather than there: a journal is
@@ -992,6 +1075,7 @@ async function recoverUpgrade(options: {
 }): Promise<boolean> {
   const journal = parseJournal(options.home, options.targetPath);
   if (!journal) return false;
+  const bootstrapReceipt = inspectBootstrapReceipt(options.home, journal.targetPath);
   // A journal written before this field existed is necessarily from the revision-16 updater. If
   // broker-instance v2 now exists, the candidate crossed the one-way security fence: restoring or
   // starting the recorded revision-16 binary would reactivate whatever v1 store failed to migrate.
@@ -1053,6 +1137,12 @@ async function recoverUpgrade(options: {
     resources: [...resources.values()].sort((left, right) => left.id.localeCompare(right.id)),
     installer: { ...installer, version: journal.fromVersion },
   }, options.home);
+  writeBootstrapReceipt(
+    bootstrapReceipt,
+    journal.targetPath,
+    journal.fromVersion,
+    journal.previousSha256,
+  );
   if (journal.serviceWasActive && options.service) await options.service.start();
   unlinkRegular(journal.stagingPath);
   // The journal goes before the rollback copy it names. Removing the copy first would leave a journal
@@ -1211,6 +1301,21 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     try { targetPath = safeInstalledBinaryPath(dependencies.home, installState); }
     catch (error) {
       return result('blocked', 1, error instanceof Error ? error.message : 'installed-binary-invalid', 'The installed binary differs from its ownership receipt; run cosyncing repair.', fromVersion, recovered);
+    }
+    let bootstrapReceipt: BootstrapReceipt | undefined;
+    try {
+      bootstrapReceipt = javaScriptCandidate
+        ? inspectBootstrapReceipt(dependencies.home, targetPath)
+        : undefined;
+    } catch (error) {
+      return result(
+        'blocked',
+        1,
+        error instanceof Error ? error.message : 'upgrade-bootstrap-receipt-invalid',
+        'The standalone installer ownership receipt is unsafe or invalid; repair is required.',
+        fromVersion,
+        recovered,
+      );
     }
     if (recovered) {
       return result('rolled-back', 3, 'upgrade-interrupted-recovered', 'Recovered an interrupted upgrade and restored the previous release; rerun upgrade to try again.', fromVersion, true);
@@ -1416,6 +1521,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         // on disk without its receipt is the same defect a rollback used to leave behind, in a new place.
         serviceVersion ? dependencies.service?.versions?.resources(serviceVersion.toVersionKey) ?? [] : [],
       ), dependencies.home);
+      writeBootstrapReceipt(bootstrapReceipt, targetPath, toVersion, candidate.sha256);
       if (dependencies.faultAfter === 'receipt-committed') throw new Error('upgrade-fixture-interrupted');
       unlinkRegular(stagingPath);
       unlinkRegular(upgradeJournalPath(dependencies.home));
@@ -1478,6 +1584,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           previousWritten ? withoutPreviousBinaryReceipt(installState) : installState,
           dependencies.home,
         );
+        writeBootstrapReceipt(bootstrapReceipt, targetPath, fromVersion, previousSha256);
         if (serviceWasActive && dependencies.service) await dependencies.service.start();
         unlinkRegular(stagingPath);
         // The journal goes before the rollback copy it names, for the same reason it does in recovery.
