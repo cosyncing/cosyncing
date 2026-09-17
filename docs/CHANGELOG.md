@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Standalone installers accept applications replaced by a verified in-app
+  upgrade, and future bootstrap JavaScript upgrades keep both ownership
+  receipts synchronized across success, rollback, and recovery.
+
 ## 0.5.7 — 2026-09-17
 
 ### Fixed

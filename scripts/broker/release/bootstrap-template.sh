@@ -666,6 +666,37 @@ adopt_npm_application() {
   ADOPTED_NPM_INSTALL=1
 }
 
+# A bootstrap-js self-upgrade updates the setup transaction's binary receipt. Releases predating the
+# bootstrap-receipt synchronization fix could leave this installer's narrower receipt naming the previous
+# application bytes. Accept that historical state only when the owner-only setup receipt independently
+# proves the exact current file; every other mismatch remains a hard refusal.
+setup_receipt_owns_application() {
+  install_state="$STATE_HOME/install-state.json"
+  [ -f "$install_state" ] && [ ! -L "$install_state" ] || return 1
+  [ "$(stat_owner "$install_state")" = "$(id -u)" ] || return 1
+  mode="$(stat_mode "$install_state")"
+  [ $(( 0$mode & 077 )) -eq 0 ] || return 1
+  actual_sha="$(sha256_of "$APPLICATION")" || return 1
+  "$BUN_BIN" -e '
+    import { readFileSync } from "node:fs";
+    import { resolve } from "node:path";
+    const [statePath, application, actualSha] = Bun.argv.slice(1);
+    try {
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      const records = Array.isArray(state.resources)
+        ? state.resources.filter((item) => item?.id === "broker-binary") : [];
+      const record = records[0];
+      const owned = state.schemaVersion === 1 && state.product === "cosyncing"
+        && state.setup?.status === "committed" && records.length === 1
+        && record?.kind === "binary" && resolve(record.target) === resolve(application)
+        && ["package-hash", "receipt"].includes(record.ownership?.proof)
+        && /^[0-9a-f]{64}$/.test(record.ownership?.installedSha256 ?? "")
+        && record.ownership.installedSha256 === actualSha;
+      process.exit(owned ? 0 : 1);
+    } catch { process.exit(1); }
+  ' "$install_state" "$APPLICATION" "$actual_sha" >/dev/null 2>&1
+}
+
 ensure_owned_directory() {
   path="$1"
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -707,8 +738,10 @@ if [ -e "$APPLICATION" ] || [ -L "$APPLICATION" ]; then
     grep -Fxq "application=$APPLICATION" "$RECEIPT" || fail 'existing bootstrap receipt names another application'
     PRIOR="$(sed -n 's/^sha256=//p' "$RECEIPT")"
     [ "${#PRIOR}" -eq 64 ] || fail 'existing bootstrap receipt checksum is invalid'
-    [ "$(sha256_of "$APPLICATION")" = "$PRIOR" ] \
-      || fail 'existing application differs from its bootstrap ownership receipt'
+    if [ "$(sha256_of "$APPLICATION")" != "$PRIOR" ]; then
+      setup_receipt_owns_application \
+        || fail 'existing application differs from its bootstrap ownership receipt'
+    fi
   fi
 fi
 
