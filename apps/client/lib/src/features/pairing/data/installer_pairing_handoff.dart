@@ -107,6 +107,9 @@ abstract class InstallerPairingInbox {
   /// Returns the handoff document, or `null` when there is none to read.
   Future<String?> read();
 
-  /// Removes the handoff file, whatever became of its contents.
-  Future<void> discard();
+  /// Removes the handoff before its one-use offer is redeemed.
+  ///
+  /// Returns false when removal failed. Callers must not redeem the offer while
+  /// its reusable bytes remain on disk.
+  Future<bool> discard();
 }

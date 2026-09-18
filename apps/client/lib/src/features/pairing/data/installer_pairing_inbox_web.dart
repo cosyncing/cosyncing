@@ -13,5 +13,5 @@ class FileInstallerPairingInbox implements InstallerPairingInbox {
   Future<String?> read() async => null;
 
   @override
-  Future<void> discard() async {}
+  Future<bool> discard() async => true;
 }
