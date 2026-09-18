@@ -43,7 +43,6 @@ void main() {
       locale: locale,
       theme: ThemeData(
         brightness: brightness,
-        platform: platform,
         extensions: [
           if (brightness == Brightness.dark)
             themeSpecById(kDefaultThemeId).dark
