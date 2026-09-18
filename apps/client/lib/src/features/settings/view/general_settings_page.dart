@@ -1,8 +1,11 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
+import 'package:cosyncing_client/src/features/settings/view/native_client_update_settings_section.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -29,6 +32,13 @@ class GeneralSettingsPage extends ConsumerWidget {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            if (supportsNativeClientUpdates(
+              ref.watch(clientTargetPlatformProvider),
+              isWeb: ref.watch(clientIsWebProvider),
+            )) ...[
+              const NativeClientUpdateSettingsSection(),
+              const SizedBox(height: 16),
+            ],
             SettingsLinkGroup(
               tiles: [
                 SettingsLinkTile(

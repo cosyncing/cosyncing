@@ -41,7 +41,10 @@ const [
     read('docs/release/client-release-notes.md'),
     read('docs/release/android-signing-certificate.sha256'),
     read('docs/release/release-public-key.txt'),
-    read('apps/client/lib/src/platform/update/android_client_update.dart'),
+    Promise.all([
+      read('apps/client/lib/src/platform/update/android_client_update.dart'),
+      read('apps/client/lib/src/platform/update/stable_release_manifest.dart'),
+    ]).then((parts) => parts.join('\n')),
     read('apps/client/android/app/src/main/kotlin/com/cosyncing/client/MainActivity.kt'),
   ]);
 

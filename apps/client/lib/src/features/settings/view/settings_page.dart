@@ -1,7 +1,10 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 /// The Settings hub: layer one of a two-layer information architecture.
@@ -11,7 +14,7 @@ import 'package:go_router/go_router.dart';
 /// screen rather than being the flat wall of every setting in the app that it
 /// used to be.
 ///
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends ConsumerWidget {
   /// Creates the [SettingsPage].
   const SettingsPage({this.showSessionsBack = false, super.key});
 
@@ -19,8 +22,15 @@ class SettingsPage extends StatelessWidget {
   final bool showSessionsBack;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
+    final clientUpdateAvailable = ref.watch(
+      nativeClientUpdateAvailableProvider,
+    );
+    final nativeUpdatesSupported = supportsNativeClientUpdates(
+      ref.watch(clientTargetPlatformProvider),
+      isWeb: ref.watch(clientIsWebProvider),
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -79,7 +89,10 @@ class SettingsPage extends StatelessWidget {
                   tileKey: const Key('settings-category-general'),
                   icon: Icons.tune_outlined,
                   title: l10n.settingsCategoryGeneralTitle,
-                  subtitle: l10n.settingsCategoryGeneralSubtitle,
+                  subtitle: nativeUpdatesSupported
+                      ? l10n.settingsCategoryGeneralNativeSubtitle
+                      : l10n.settingsCategoryGeneralSubtitle,
+                  showAttentionDot: clientUpdateAvailable,
                   onTap: () => context.push(generalSettingsRoute),
                 ),
               ],

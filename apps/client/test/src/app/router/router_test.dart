@@ -27,6 +27,8 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -159,6 +161,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            clientIsWebProvider.overrideWithValue(true),
             sessionNotificationSettingsStoreProvider.overrideWithValue(
               _InMemorySessionNotificationSettingsStore(),
             ),
@@ -903,6 +906,37 @@ void main() {
         ),
         findsNothing,
       );
+    });
+
+    testWidgets('compact bottom nav marks Settings for a client update', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await pumpApp(
+        tester,
+        surfaceSize: const Size(600, 900),
+        overrides: [
+          nativeClientUpdateAvailableProvider.overrideWithValue(true),
+        ],
+      );
+
+      final destination = find.widgetWithText(
+        NavigationDestination,
+        'Settings',
+      );
+      final badges = find.descendant(
+        of: destination,
+        matching: find.byType(Badge),
+      );
+      expect(badges, findsOneWidget);
+      for (final badge in tester.widgetList<Badge>(badges)) {
+        expect(badge.isLabelVisible, isTrue);
+      }
+      expect(
+        find.bySemanticsLabel(RegExp('App update available')),
+        findsOneWidget,
+      );
+      semantics.dispose();
     });
 
     testWidgets(

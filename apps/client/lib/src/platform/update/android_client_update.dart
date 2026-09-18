@@ -3,29 +3,19 @@
 // ignore_for_file: public_member_api_docs
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:broker_crypto/broker_crypto.dart';
 import 'package:cosyncing_client/src/platform/update/android_update_platform.dart';
 import 'package:cosyncing_client/src/platform/update/android_update_platform_contract.dart';
+import 'package:cosyncing_client/src/platform/update/stable_release_manifest.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-const androidReleaseManifestUrl =
-    'https://github.com/cosyncing/cosyncing/releases/latest/download/'
-    'release-manifest.json';
-const androidReleaseManifestSignatureUrl = '$androidReleaseManifestUrl.sig';
-// DER SPKI for docs/release/release-public-key.txt, encoded as base64url.
-const androidReleasePublicKey =
-    'MCowBQYDK2VwAyEA212_jMFGHeMA4GFANcquhrjxzNOA37XXpUbYj4lusI8';
 const _applicationId = 'com.cosyncing.client';
-const int _maxManifestBytes = 256 * 1024;
-const int _ed25519SignatureBytes = 64;
 const int _maxApkBytes = 256 * 1024 * 1024;
 const _resumeCheckInterval = Duration(minutes: 15);
 const _retryDelays = <Duration>[
@@ -82,7 +72,7 @@ final class AndroidClientUpdateState {
   final String? detailCode;
 }
 
-typedef AndroidManifestFetcher = Future<Map<String, Object?>> Function();
+typedef AndroidManifestFetcher = StableReleaseManifestFetcher;
 typedef AndroidApkDownloader =
     Future<File> Function(
       AndroidClientUpdateCandidate candidate,
@@ -97,31 +87,8 @@ final androidClientVersionProvider = Provider<String>(
   (_) => cosyncingClientVersion,
 );
 
-final androidUpdateDioProvider = Provider<Dio>((_) => Dio());
-
 final androidManifestFetcherProvider = Provider<AndroidManifestFetcher>((ref) {
-  return () async {
-    final dio = ref.read(androidUpdateDioProvider);
-    final bytes = await _boundedGet(
-      dio,
-      androidReleaseManifestUrl,
-      maxBytes: _maxManifestBytes,
-      accept: 'application/json',
-    );
-    final signature = await _boundedGet(
-      dio,
-      androidReleaseManifestSignatureUrl,
-      maxBytes: _ed25519SignatureBytes,
-      accept: 'application/octet-stream',
-    );
-    if (!await verifyAndroidReleaseManifestSignature(
-      manifestBytes: bytes,
-      signatureBytes: signature,
-    )) {
-      throw const FormatException('release manifest signature is invalid');
-    }
-    return decodeAndroidReleaseManifest(bytes);
-  };
+  return ref.watch(stableReleaseManifestFetcherProvider);
 });
 
 final androidApkDownloaderProvider = Provider<AndroidApkDownloader>((ref) {
@@ -131,7 +98,7 @@ final androidApkDownloaderProvider = Provider<AndroidApkDownloader>((ref) {
     final cancelToken = CancelToken();
     try {
       await ref
-          .read(androidUpdateDioProvider)
+          .read(stableReleaseDioProvider)
           .download(
             candidate.url.toString(),
             file.path,
@@ -263,7 +230,7 @@ final class AndroidClientUpdateController
           detailCode: 'release-identity-invalid',
         );
       }
-      final versionComparison = _compareVersions(
+      final versionComparison = compareStableReleaseVersions(
         candidate.version,
         ref.read(androidClientVersionProvider),
       );
@@ -405,63 +372,18 @@ final class AndroidClientUpdateController
   }
 }
 
-Future<List<int>> _boundedGet(
-  Dio dio,
-  String url, {
-  required int maxBytes,
-  required String accept,
-}) async {
-  final response = await dio.get<ResponseBody>(
-    url,
-    options: Options(
-      responseType: ResponseType.stream,
-      receiveTimeout: const Duration(seconds: 20),
-      sendTimeout: const Duration(seconds: 20),
-      headers: {'Accept': accept},
-    ),
-  );
-  final body = response.data;
-  if (body == null) {
-    throw const FormatException('release metadata size is invalid');
-  }
-  final bytes = BytesBuilder(copy: false);
-  await for (final chunk in body.stream) {
-    if (bytes.length + chunk.length > maxBytes) {
-      throw const FormatException('release metadata size is invalid');
-    }
-    bytes.add(chunk);
-  }
-  final value = bytes.takeBytes();
-  if (value.isEmpty) {
-    throw const FormatException('release metadata size is invalid');
-  }
-  return value;
-}
-
 Future<bool> verifyAndroidReleaseManifestSignature({
   required List<int> manifestBytes,
   required List<int> signatureBytes,
-  String publicKey = androidReleasePublicKey,
-}) async {
-  if (manifestBytes.isEmpty ||
-      manifestBytes.length > _maxManifestBytes ||
-      signatureBytes.length != _ed25519SignatureBytes) {
-    return false;
-  }
-  return PairingCrypto.verifyIdentitySignature(
-    publicKey: publicKey,
-    message: manifestBytes,
-    signature: base64UrlNoPadding(signatureBytes),
-  );
-}
+  String publicKey = stableReleasePublicKey,
+}) => verifyStableReleaseManifestSignature(
+  manifestBytes: manifestBytes,
+  signatureBytes: signatureBytes,
+  publicKey: publicKey,
+);
 
-Map<String, Object?> decodeAndroidReleaseManifest(List<int> bytes) {
-  final value = jsonDecode(utf8.decode(bytes));
-  if (value is! Map<String, Object?>) {
-    throw const FormatException('release manifest is not an object');
-  }
-  return value;
-}
+Map<String, Object?> decodeAndroidReleaseManifest(List<int> bytes) =>
+    decodeStableReleaseManifest(bytes);
 
 void _deleteIfPresent(File file) {
   try {
@@ -491,7 +413,7 @@ AndroidClientUpdateCandidate? parseAndroidUpdateCandidate(
   final signerSha256 = value['signerSha256'];
   final expectedName = 'cosyncing-client-$version-android.apk';
   final uri = urlValue is String ? Uri.tryParse(urlValue) : null;
-  if (!_releaseVersion.hasMatch(version) ||
+  if (!stableReleaseVersionPattern.hasMatch(version) ||
       name is! String ||
       name != expectedName ||
       applicationId != _applicationId ||
@@ -524,18 +446,4 @@ AndroidClientUpdateCandidate? parseAndroidUpdateCandidate(
   );
 }
 
-final _releaseVersion = RegExp(r'^\d+\.\d+\.\d+$');
 final _sha256 = RegExp(r'^[a-f0-9]{64}$');
-
-int? _compareVersions(String candidate, String current) {
-  if (!_releaseVersion.hasMatch(candidate) ||
-      !_releaseVersion.hasMatch(current)) {
-    return null;
-  }
-  final left = candidate.split('.').map(int.parse).toList(growable: false);
-  final right = current.split('.').map(int.parse).toList(growable: false);
-  for (var index = 0; index < 3; index += 1) {
-    if (left[index] != right[index]) return left[index].compareTo(right[index]);
-  }
-  return 0;
-}

@@ -17,10 +17,14 @@ class SettingsLinkTile {
     required this.subtitle,
     required this.onTap,
     this.tileKey,
+    this.showAttentionDot = false,
   });
 
   /// Widget key for tests and deep-link targeting.
   final Key? tileKey;
+
+  /// Shows a small attention dot on the leading icon.
+  final bool showAttentionDot;
 
   /// Leading glyph.
   final IconData icon;
@@ -81,7 +85,17 @@ class SettingsLinkGroup extends StatelessWidget {
                 if (index > 0) const Divider(height: 1, indent: 56),
                 ListTile(
                   key: tiles[index].tileKey,
-                  leading: Icon(tiles[index].icon),
+                  leading: Semantics(
+                    label: tiles[index].showAttentionDot
+                        ? AppLocalizations.of(
+                            context,
+                          ).settingsClientUpdateAvailableSemantics
+                        : null,
+                    child: Badge(
+                      isLabelVisible: tiles[index].showAttentionDot,
+                      child: Icon(tiles[index].icon),
+                    ),
+                  ),
                   title: Text(tiles[index].title),
                   subtitle: Text(tiles[index].subtitle),
                   trailing: const Icon(Icons.chevron_right),

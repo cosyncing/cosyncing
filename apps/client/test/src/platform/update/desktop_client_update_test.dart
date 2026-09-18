@@ -1,4 +1,5 @@
 import 'package:cosyncing_client/src/platform/update/desktop_client_update.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -161,6 +162,39 @@ void main() {
       desktopClientDownloadUrl,
       'https://github.com/cosyncing/cosyncing/releases',
     );
+  });
+
+  test('builds the exact platform download URL from a stable version', () {
+    expect(
+      desktopClientDownloadUri(TargetPlatform.linux, '1.2.3').toString(),
+      'https://github.com/cosyncing/cosyncing/releases/download/'
+      'client-v1.2.3/cosyncing-client-1.2.3-linux-x64.tar.gz',
+    );
+    expect(
+      desktopClientDownloadUri(TargetPlatform.macOS, '1.2.3').toString(),
+      'https://github.com/cosyncing/cosyncing/releases/download/'
+      'client-v1.2.3/cosyncing-client-1.2.3-macos-arm64-unsigned.dmg',
+    );
+    expect(
+      desktopClientDownloadUri(TargetPlatform.windows, '1.2.3').toString(),
+      'https://github.com/cosyncing/cosyncing/releases/download/'
+      'client-v1.2.3/cosyncing-client-1.2.3-windows-x64-unsigned.zip',
+    );
+  });
+
+  test('parses a broker-independent desktop update candidate', () {
+    final state = parseDesktopClientUpdate(
+      const {
+        'schemaVersion': 1,
+        'product': 'cosyncing',
+        'channel': 'stable',
+        'version': '1.2.3',
+      },
+      platform: TargetPlatform.windows,
+      currentVersion: '1.2.2',
+    );
+    expect(state.status, DesktopClientUpdateStatus.available);
+    expect(state.candidate?.version, '1.2.3');
   });
 
   group('isDesktopClientPlatform', () {

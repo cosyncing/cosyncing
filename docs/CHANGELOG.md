@@ -11,6 +11,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Native clients now check the signed stable release channel independently of
+  broker connectivity and show their installed version under Settings →
+  General. Android can install the verified APK in-app; Linux, macOS, and
+  Windows open the matching download in the browser. Available updates add an
+  attention dot to Settings and General. The web UI remains self-updating and
+  does not show native-client controls.
+
 ### Changed
 
 - Installation guidance now identifies Windows 11 x64 as the supported Windows host and warns

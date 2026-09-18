@@ -34,6 +34,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -612,6 +613,9 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                 .setWindow(SessionRosterQueryWindow.any),
           );
     final unreadCount = ref.watch(attentionUnreadCountProvider);
+    final clientUpdateAvailable = ref.watch(
+      nativeClientUpdateAvailableProvider,
+    );
     final openAsync = ref.watch(openSessionsControllerProvider);
     // Never render a previous source's tab membership while the source-keyed
     // controller is rehydrating. AsyncValue may retain its old value during a
@@ -638,6 +642,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
         activeSource: activeSource,
         buildDetail: buildDetail,
         unreadCount: unreadCount,
+        clientUpdateAvailable: clientUpdateAvailable,
         hasActiveBrokerClient: hasActiveBrokerClient,
         hasCompletedEmptyRoster: hasCompletedEmptyRoster,
         canCreateSession: canCreateSession,
@@ -664,6 +669,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     required RosterSource? activeSource,
     required SessionDetailPaneBuilder buildDetail,
     required int unreadCount,
+    required bool clientUpdateAvailable,
     required bool hasActiveBrokerClient,
     required bool hasCompletedEmptyRoster,
     required bool canCreateSession,
@@ -738,6 +744,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                     separatorColor: tokens.separator,
                     unreadCount: unreadCount,
                     unreadLabel: navBadgeLabel(unreadCount),
+                    settingsAttention: clientUpdateAvailable,
                     onExpand: _expandRoster,
                     onNewSession: canCreateSession
                         ? () => unawaited(_openNewSession())
@@ -754,6 +761,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                       listState,
                       open,
                       unreadCount,
+                      clientUpdateAvailable,
                       rosterWidth,
                       hasActiveBrokerClient,
                       canCreateSession,
@@ -892,6 +900,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     SessionListState listState,
     OpenSessionsState open,
     int unreadCount,
+    bool clientUpdateAvailable,
     double rosterWidth,
     bool hasActiveBrokerClient,
     bool canCreateSession,
@@ -941,7 +950,15 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                   tooltip: l10n.settingsTitle,
                   visualDensity: VisualDensity.compact,
                   onPressed: () => context.go(settingsRoute),
-                  icon: const Icon(Icons.settings_outlined),
+                  icon: Semantics(
+                    label: clientUpdateAvailable
+                        ? l10n.settingsClientUpdateAvailableSemantics
+                        : null,
+                    child: Badge(
+                      isLabelVisible: clientUpdateAvailable,
+                      child: const Icon(Icons.settings_outlined),
+                    ),
+                  ),
                 ),
               ],
               IconButton.filledTonal(

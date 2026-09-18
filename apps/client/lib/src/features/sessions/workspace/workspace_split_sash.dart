@@ -170,6 +170,7 @@ class WorkspaceCollapsedRosterRail extends StatelessWidget {
     required this.separatorColor,
     required this.unreadCount,
     required this.unreadLabel,
+    required this.settingsAttention,
     required this.onExpand,
     required this.onNewSession,
     required this.onAttention,
@@ -185,6 +186,9 @@ class WorkspaceCollapsedRosterRail extends StatelessWidget {
 
   /// Pre-formatted badge label for [unreadCount].
   final String unreadLabel;
+
+  /// Whether Settings contains an available native client update.
+  final bool settingsAttention;
 
   /// Called when the user reopens the roster.
   final VoidCallback onExpand;
@@ -245,7 +249,15 @@ class WorkspaceCollapsedRosterRail extends StatelessWidget {
                 tooltip: l10n.settingsTitle,
                 visualDensity: VisualDensity.compact,
                 onPressed: onSettings,
-                icon: const Icon(Icons.settings_outlined),
+                icon: Semantics(
+                  label: settingsAttention
+                      ? l10n.settingsClientUpdateAvailableSemantics
+                      : null,
+                  child: Badge(
+                    isLabelVisible: settingsAttention,
+                    child: const Icon(Icons.settings_outlined),
+                  ),
+                ),
               ),
             ],
           ),

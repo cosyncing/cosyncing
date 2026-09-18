@@ -913,6 +913,10 @@
   "@settingsCategoryGeneralSubtitle": {
     "description": "Subtitle of the General category row on the Settings hub."
   },
+  "settingsCategoryGeneralNativeSubtitle": "App updates, keyboard shortcuts, scheduled sends, and transfers",
+  "@settingsCategoryGeneralNativeSubtitle": {
+    "description": "Subtitle of the General category row on native clients that support update checks."
+  },
   "settingsGroupActivity": "Activity",
   "@settingsGroupActivity": {
     "description": "Heading over the Settings group holding Scheduled sends and Transfers."
@@ -1967,6 +1971,43 @@
   "settingsDesktopBuildUpdateLaunchFailed": "Couldn’t open the desktop download page. Check your browser settings and try again.",
   "@settingsDesktopBuildUpdateLaunchFailed": {
     "description": "Snackbar shown when the operating system cannot open the desktop release download page."
+  },
+  "settingsAndroidAppUpdatesSection": "App updates",
+  "@settingsAndroidAppUpdatesSection": {
+    "description": "Title of the native app-update section in General settings."
+  },
+  "settingsClientUpdateAvailableSemantics": "App update available",
+  "@settingsClientUpdateAvailableSemantics": {
+    "description": "Screen-reader label for an attention dot that indicates a native client update is available."
+  },
+  "settingsAndroidAppUpdateTitle": "Cosyncing {version}",
+  "@settingsAndroidAppUpdateTitle": {
+    "description": "Installed Android client version shown in Settings.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
+  "settingsAndroidAppUpdateChecking": "Checking for updates…",
+  "@settingsAndroidAppUpdateChecking": {
+    "description": "Android app-update status while checking the stable release channel."
+  },
+  "settingsAndroidAppUpdateCurrent": "You have the latest version.",
+  "@settingsAndroidAppUpdateCurrent": {
+    "description": "Android app-update status when no newer accepted release exists."
+  },
+  "settingsAndroidAppUpdateInstallerLaunched": "Android’s installer is open.",
+  "@settingsAndroidAppUpdateInstallerLaunched": {
+    "description": "Android app-update status after handing the verified APK to the system installer."
+  },
+  "settingsAndroidAppUpdateInstallFailed": "The update failed. Try again.",
+  "@settingsAndroidAppUpdateInstallFailed": {
+    "description": "Android app-update status after downloading or opening the installer fails."
+  },
+  "settingsAndroidAppUpdateCheckFailed": "Couldn’t check for updates.",
+  "@settingsAndroidAppUpdateCheckFailed": {
+    "description": "Android app-update status when the stable release check fails."
+  },
+  "settingsAndroidAppUpdateCheckAction": "Check for updates",
+  "@settingsAndroidAppUpdateCheckAction": {
+    "description": "Button that manually checks the stable Android release channel."
   },
   "androidUpdateAvailableTitle": "Android update available",
   "@androidUpdateAvailableTitle": {

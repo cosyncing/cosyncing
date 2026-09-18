@@ -41,17 +41,21 @@ and PowerShell installers ignore it; Android clients use it as their stable
 update channel and hand it to Android's system installer after explicit user
 action.
 
-The Android client checks the channel at startup, retries transient failures,
-and checks again after a sufficiently long background interval. It authenticates
-the exact manifest bytes with the release key pinned in the application and in
-`docs/release/release-public-key.txt`. It requires both semantic version and Android
-`versionCode` to advance, verifies the downloaded size and digest, then asks
-Android to confirm the package ID, version name, version code, and long-lived
-signing certificate before requesting install-source permission or opening the
-installer. Broker assembly independently repeats those APK identity checks
-before signing the manifest. Candidate publication also refuses a `versionCode`
-that does not exceed the previous stable APK. The client never silently installs
-an update, and the behavior is compiled out on every other platform.
+Native clients check the signed stable manifest at startup and again after a
+sufficiently long background interval, without requiring a broker connection.
+They authenticate the exact manifest bytes with the release key pinned in the
+application and in `docs/release/release-public-key.txt`. Linux, macOS, and
+Windows use its accepted semantic version to offer the exact platform download
+in the browser; they do not silently replace a running desktop app.
+
+Android additionally requires both semantic version and `versionCode` to
+advance, verifies the downloaded size and digest, then asks Android to confirm
+the package ID, version name, version code, and long-lived signing certificate
+before requesting install-source permission or opening the installer. Broker
+assembly independently repeats those APK identity checks before signing the
+manifest. Candidate publication also refuses a `versionCode` that does not
+exceed the previous stable APK. The web UI keeps its existing automatic
+same-origin handoff and does not show native-client update controls.
 
 ## Who owns the `latest` pointer
 

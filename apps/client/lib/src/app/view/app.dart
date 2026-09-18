@@ -28,6 +28,7 @@ import 'package:cosyncing_client/src/features/settings/controller/ui_scale_contr
 import 'package:cosyncing_client/src/platform/startup/browser_close_protection.dart';
 import 'package:cosyncing_client/src/platform/startup/startup_shell.dart';
 import 'package:cosyncing_client/src/platform/update/android_client_update.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_bridge.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_freeze.dart';
@@ -49,15 +50,24 @@ class _AppState extends ConsumerState<App> {
   /// Guards the one-shot browser startup-shell handshake (N3).
   bool _announcedFirstFrame = false;
   Future<void> _attentionNavigationTail = Future<void>.value();
-  late final AppLifecycleListener _androidUpdateLifecycle;
+  late final AppLifecycleListener _nativeUpdateLifecycle;
 
   @override
   void initState() {
     super.initState();
-    _androidUpdateLifecycle = AppLifecycleListener(
-      onResume: () => unawaited(
-        ref.read(androidClientUpdateControllerProvider.notifier).checkIfStale(),
-      ),
+    _nativeUpdateLifecycle = AppLifecycleListener(
+      onResume: () {
+        unawaited(
+          ref
+              .read(androidClientUpdateControllerProvider.notifier)
+              .checkIfStale(),
+        );
+        unawaited(
+          ref
+              .read(desktopClientUpdateControllerProvider.notifier)
+              .checkIfStale(),
+        );
+      },
     );
     // N3b: give the participant registry its browser hook before any surface
     // can register. Installing it here — rather than from the first
@@ -78,7 +88,7 @@ class _AppState extends ConsumerState<App> {
 
   @override
   void dispose() {
-    _androidUpdateLifecycle.dispose();
+    _nativeUpdateLifecycle.dispose();
     super.dispose();
   }
 
@@ -95,9 +105,10 @@ class _AppState extends ConsumerState<App> {
       ..watch(attentionMutationDrainRuntimeProvider)
       ..watch(attentionUnreadBadgeRuntimeProvider)
       ..watch(sessionNotificationLaunchBootstrapProvider)
-      // Android checks the stable release channel without holding the first
-      // frame. Every other platform resolves immediately to `unsupported`.
+      // Native clients check the signed stable release channel without holding
+      // the first frame or requiring a broker connection.
       ..watch(androidClientUpdateControllerProvider)
+      ..watch(desktopClientUpdateControllerProvider)
       ..listen(sessionNotificationTapPayloadProvider, (_, payload) {
         if (payload == null) return;
         // A tap is navigation only. Read/dismiss state changes only after an
