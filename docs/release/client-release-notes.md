@@ -5,12 +5,12 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.8 adds a verified self-update flow for sideloaded Android clients. The app
-checks the stable GitHub release channel at startup and, when a newer accepted
-APK exists, can download it and open Android's installer.
+0.5.9 makes the signed stable update channel visible across native clients.
+Android can install a verified APK in-app; Linux, macOS, and Windows show their
+installed version and open the matching accepted download in the browser.
 
-0.5.8 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.8 broker. Those clients do not expose features
+0.5.9 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.9 broker. Those clients do not expose features
 introduced by newer contract revisions. A 0.4.1 or older client remains
 read-only against current brokers.
 
@@ -18,15 +18,18 @@ Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's new in 0.5.8
+## What's new in 0.5.9
 
-- The Android client authenticates the release manifest, verifies the APK
-  digest, application ID, version, and signing certificate, then asks Android
-  to install it. Android still requires user confirmation and may require
-  permission to install apps from Cosyncing.
-- Other native clients retain their existing update behavior.
+- Native clients check the signed release channel without a broker connection,
+  show their installed version under Settings → General, and mark Settings when
+  an accepted update is available.
+- Android authenticates and installs the verified APK after user confirmation;
+  desktop clients open the exact accepted platform download in the browser.
+- Linux clients verify that Secret Service can persist credentials before
+  consuming an installer's one-use pairing. WSLg retries briefly while its
+  keyring becomes ready and reports a recoverable setup error if it cannot.
 
-For these features, use a 0.5.8 Android client with a 0.5.8 broker release.
+For these features, use a 0.5.9 native client with a 0.5.9 broker release.
 
 ## Downloads
 

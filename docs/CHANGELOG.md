@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.9 — 2026-09-18
+
 ### Added
 
 - Native clients now check the signed stable release channel independently of
