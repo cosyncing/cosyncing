@@ -18,6 +18,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_pr
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_auth_barrier.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
+import 'package:cosyncing_client/src/features/pairing/view/installer_pairing_startup_barrier.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
@@ -286,7 +287,9 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
             ForegroundAttentionHost(
               onOpen: widget.onOpenAttention,
               onOpenEntry: widget.onOpenAttentionEntry,
-              child: BrokerAuthBarrier(child: widget.child),
+              child: InstallerPairingStartupBarrier(
+                child: BrokerAuthBarrier(child: widget.child),
+              ),
             ),
             // N3b: a waiting build is routine and shows nothing — the page's
             // handoff coordinator moves this tab through the swap by itself.

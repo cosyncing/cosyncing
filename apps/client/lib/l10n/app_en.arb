@@ -4361,6 +4361,46 @@
   "brokerProfilesTitle": "Saved servers",
   "savedServers": "Saved servers",
   "pairingTitle": "Pairing",
+  "installerPairingFinishingTitle": "Finishing setup…",
+  "@installerPairingFinishingTitle": {
+    "description": "Title shown while the desktop client imports the installer's one-use pairing handoff."
+  },
+  "installerPairingFinishingBody": "Saving this device’s secure access to your server.",
+  "@installerPairingFinishingBody": {
+    "description": "Body shown while the desktop client imports the installer's one-use pairing handoff."
+  },
+  "installerPairingStorageTitle": "Couldn’t save secure access",
+  "@installerPairingStorageTitle": {
+    "description": "Title shown when the desktop secure credential store is unavailable during installer pairing."
+  },
+  "installerPairingStorageBody": "Your server has not consumed the pairing offer. Unlock or start your system keyring, then try again.",
+  "@installerPairingStorageBody": {
+    "description": "Recovery guidance when the desktop secure credential store is unavailable during installer pairing."
+  },
+  "installerPairingRetry": "Try again",
+  "@installerPairingRetry": {
+    "description": "Retries the retained installer pairing handoff after secure storage becomes available."
+  },
+  "installerPairingDiscardTitle": "Couldn’t secure the setup request",
+  "@installerPairingDiscardTitle": {
+    "description": "Title shown when the client cannot claim the installer's pairing handoff before redemption."
+  },
+  "installerPairingDiscardBody": "The pairing request was not sent. Close any other Cosyncing windows, then try again.",
+  "@installerPairingDiscardBody": {
+    "description": "Recovery guidance when the client cannot claim the installer's pairing handoff."
+  },
+  "installerPairingFailedTitle": "Automatic setup didn’t finish",
+  "@installerPairingFailedTitle": {
+    "description": "Title shown when installer pairing fails after its one-use offer has been claimed."
+  },
+  "installerPairingFailedBody": "The one-use pairing request may already be consumed. Continue and pair this device manually.",
+  "@installerPairingFailedBody": {
+    "description": "Recovery guidance when installer pairing fails after its one-use offer has been claimed."
+  },
+  "installerPairingContinue": "Continue to sign in",
+  "@installerPairingContinue": {
+    "description": "Dismisses a failed automatic pairing notice and opens the normal authentication flow."
+  },
   "backToSessions": "Back to Sessions",
   "connectionReset": "Reset",
   "connectionManagedRuntimeTitle": "cosyncing manages agent runtimes",

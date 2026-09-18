@@ -27,15 +27,16 @@ class FileInstallerPairingInbox implements InstallerPairingInbox {
   }
 
   @override
-  Future<void> discard() async {
+  Future<bool> discard() async {
     final path = _path;
-    if (path == null) return;
+    if (path == null) return true;
     try {
-      final file = File(path);
-      if (file.existsSync()) await file.delete();
+      // A successful unlink is the claim. If another client already removed
+      // the handoff, this launch must not redeem the same one-use offer.
+      await File(path).delete();
+      return true;
     } on Object {
-      // Best effort. The offer expires in five minutes either way, and the
-      // client never reads the file twice in one run.
+      return false;
     }
   }
 }

@@ -17,6 +17,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   Windows 10 users not to disable Microsoft Defender to force an installation it may classify as
   a Trojan.
 
+### Fixed
+
+- Linux desktop clients verify that the system keyring can persist credentials
+  before consuming an installer's one-use pairing offer. WSLg startup retries
+  briefly while Secret Service becomes ready and shows a recoverable setup
+  error instead of falling through to an unexplained unauthenticated state.
+
 ## 0.5.8 — 2026-09-17
 
 ### Added

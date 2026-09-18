@@ -41,6 +41,7 @@ void main() {
     container = ProviderContainer(
       overrides: [
         installerPairingInboxProvider.overrideWithValue(installerInbox),
+        installerPairingStoragePreflightProvider.overrideWithValue(() async {}),
         credentialStoreProvider.overrideWithValue(credentialStore),
         brokerProfileRepositoryProvider.overrideWithValue(repository),
         activeBrokerProfileStoreProvider.overrideWithValue(activeStore),
@@ -955,7 +956,8 @@ class _InstallerInbox implements InstallerPairingInbox {
   Future<String?> read() async => raw;
 
   @override
-  Future<void> discard() async {
+  Future<bool> discard() async {
     raw = null;
+    return true;
   }
 }

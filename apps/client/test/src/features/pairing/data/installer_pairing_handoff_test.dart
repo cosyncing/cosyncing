@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/pairing_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/data/installer_pairing_handoff.dart';
+import 'package:cosyncing_client/src/features/pairing/data/secure_storage_preflight.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -126,6 +127,12 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           installerPairingInboxProvider.overrideWithValue(inbox),
+          installerPairingStoragePreflightProvider.overrideWithValue(
+            _StoragePreflight().verify,
+          ),
+          installerPairingRetryDelayProvider.overrideWithValue(
+            (_) async {},
+          ),
           if (now != null)
             installerPairingClockProvider.overrideWithValue(() => now),
           ...overrides,
@@ -225,9 +232,134 @@ void main() {
 
       expect(
         await container.read(installerPairingHandoffProvider.future),
-        InstallerPairingHandoffOutcome.unreadable,
+        InstallerPairingHandoffOutcome.failed,
       );
       expect(inbox.discarded, isTrue);
+    });
+
+    test('reports a malformed offer that cannot be removed', () async {
+      final inbox = _FakeInbox('{ not json', discardSucceeds: false);
+      final container = containerFor(inbox);
+
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.discardFailed,
+      );
+      expect(inbox.discarded, isTrue);
+    });
+
+    test('keeps the offer when secure storage never becomes ready', () async {
+      final inbox = _FakeInbox(
+        jsonEncode({
+          'qr': 'https://broker.example:9443',
+          'expiresAt': '2026-09-05T12:05:00.000Z',
+        }),
+      );
+      final preflight = _StoragePreflight(failuresBeforeSuccess: 99);
+      final container = containerFor(
+        inbox,
+        now: DateTime.utc(2026, 9, 5, 12),
+        overrides: [
+          installerPairingStoragePreflightProvider.overrideWithValue(
+            preflight.verify,
+          ),
+          pairingControllerProvider.overrideWith(_RecordingController.new),
+        ],
+      );
+
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.secureStorageUnavailable,
+      );
+      expect(preflight.attempts, 5);
+      expect(inbox.discarded, isFalse);
+      final controller =
+          container.read(pairingControllerProvider.notifier)
+              as _RecordingController;
+      expect(controller.imported, isEmpty);
+    });
+
+    test('discards an offer that expires during storage retries', () async {
+      final inbox = _FakeInbox(
+        jsonEncode({
+          'qr': 'https://broker.example:9443',
+          'expiresAt': '2026-09-05T12:05:00.000Z',
+        }),
+      );
+      final moments = <DateTime>[
+        DateTime.utc(2026, 9, 5, 12),
+        DateTime.utc(2026, 9, 5, 12, 6),
+      ];
+      var clockReads = 0;
+      final container = containerFor(
+        inbox,
+        overrides: [
+          installerPairingClockProvider.overrideWithValue(
+            () =>
+                moments[clockReads < moments.length
+                    ? clockReads++
+                    : moments.length - 1],
+          ),
+          installerPairingStoragePreflightProvider.overrideWithValue(
+            _StoragePreflight(failuresBeforeSuccess: 99).verify,
+          ),
+        ],
+      );
+
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.expired,
+      );
+      expect(inbox.discarded, isTrue);
+    });
+
+    test('retries secure storage before redeeming the offer', () async {
+      final inbox = _FakeInbox(
+        jsonEncode({
+          'qr': 'https://broker.example:9443',
+          'expiresAt': '2026-09-05T12:05:00.000Z',
+        }),
+      );
+      final preflight = _StoragePreflight(failuresBeforeSuccess: 2);
+      final container = containerFor(
+        inbox,
+        now: DateTime.utc(2026, 9, 5, 12),
+        overrides: [
+          installerPairingStoragePreflightProvider.overrideWithValue(
+            preflight.verify,
+          ),
+          pairingControllerProvider.overrideWith(_RecordingController.new),
+        ],
+      );
+
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.imported,
+      );
+      expect(preflight.attempts, 3);
+      expect(inbox.discarded, isTrue);
+    });
+
+    test('does not redeem when the offer cannot be removed', () async {
+      final inbox = _FakeInbox(
+        '{"qr": "https://broker.example:9443"}',
+        discardSucceeds: false,
+      );
+      final container = containerFor(
+        inbox,
+        overrides: [
+          pairingControllerProvider.overrideWith(_RecordingController.new),
+        ],
+      );
+
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.discardFailed,
+      );
+      final controller =
+          container.read(pairingControllerProvider.notifier)
+              as _RecordingController;
+      expect(controller.imported, isEmpty);
     });
 
     // Redeeming calls the broker and then writes to the platform credential
@@ -277,10 +409,15 @@ void main() {
 }
 
 class _FakeInbox implements InstallerPairingInbox {
-  _FakeInbox(this._document, {this.throwOnRead = false});
+  _FakeInbox(
+    this._document, {
+    this.throwOnRead = false,
+    this.discardSucceeds = true,
+  });
 
   final String? _document;
   final bool throwOnRead;
+  final bool discardSucceeds;
   bool discarded = false;
 
   @override
@@ -290,8 +427,9 @@ class _FakeInbox implements InstallerPairingInbox {
   }
 
   @override
-  Future<void> discard() async {
+  Future<bool> discard() async {
     discarded = true;
+    return discardSucceeds;
   }
 }
 
@@ -321,5 +459,21 @@ class _ThrowingController extends PairingController {
   @override
   Future<void> importPayload(String rawPayload, {String? brokerUrl}) async {
     throw StateError('pairing exploded');
+  }
+}
+
+class _StoragePreflight {
+  _StoragePreflight({this.failuresBeforeSuccess = 0});
+
+  final int failuresBeforeSuccess;
+  int attempts = 0;
+
+  Future<void> verify() async {
+    attempts += 1;
+    if (attempts <= failuresBeforeSuccess) {
+      throw const SecureStoragePreflightException(
+        'fixture storage unavailable',
+      );
+    }
   }
 }
