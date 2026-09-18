@@ -26,6 +26,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_state.d
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:drift/native.dart';
@@ -179,6 +180,7 @@ void main() {
         webClientUpdateProvider.overrideWith(
           (_) => webUpdates ?? Stream.value(webUpdate),
         ),
+        clientIsWebProvider.overrideWithValue(true),
       ],
     );
 

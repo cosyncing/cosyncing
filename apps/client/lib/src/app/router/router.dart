@@ -37,6 +37,7 @@ import 'package:cosyncing_client/src/features/settings/view/tool_display_setting
 import 'package:cosyncing_client/src/features/transfers/view/transfer_manager_page.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -760,6 +761,9 @@ class _CompactBottomNav extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final unreadCount = ref.watch(attentionUnreadCountProvider);
+    final clientUpdateAvailable = ref.watch(
+      nativeClientUpdateAvailableProvider,
+    );
     const branchIndexes = <int>[0, 1, 3];
     final displayedIndex = branchIndexes.indexOf(
       navigationShell.currentIndex,
@@ -797,8 +801,24 @@ class _CompactBottomNav extends ConsumerWidget {
           label: l10n.notificationsTitle,
         ),
         NavigationDestination(
-          icon: const Icon(Icons.settings_outlined),
-          selectedIcon: const Icon(Icons.settings),
+          icon: Semantics(
+            label: clientUpdateAvailable
+                ? l10n.settingsClientUpdateAvailableSemantics
+                : null,
+            child: Badge(
+              isLabelVisible: clientUpdateAvailable,
+              child: const Icon(Icons.settings_outlined),
+            ),
+          ),
+          selectedIcon: Semantics(
+            label: clientUpdateAvailable
+                ? l10n.settingsClientUpdateAvailableSemantics
+                : null,
+            child: Badge(
+              isLabelVisible: clientUpdateAvailable,
+              child: const Icon(Icons.settings),
+            ),
+          ),
           label: l10n.settingsTitle,
         ),
       ],

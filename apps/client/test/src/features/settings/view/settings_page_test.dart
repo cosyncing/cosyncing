@@ -26,6 +26,7 @@ import 'package:cosyncing_client/src/features/settings/view/notification_setting
 import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
 import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
@@ -70,6 +71,7 @@ void main() {
       ),
       String clientVersion = cosyncingClientVersion,
       TargetPlatform platform = TargetPlatform.linux,
+      bool clientUpdateAvailable = false,
       ManagedRuntimeApi Function(BrokerProfile?)? managedRuntimeApiForProfile,
     }) {
       final overrides = <Override>[
@@ -102,6 +104,9 @@ void main() {
           (ref) => Stream.value(webUpdate),
         ),
         desktopClientVersionProvider.overrideWithValue(clientVersion),
+        nativeClientUpdateAvailableProvider.overrideWithValue(
+          clientUpdateAvailable,
+        ),
         sessionDisplayPreferencesStoreProvider.overrideWithValue(
           InMemorySessionDisplayPreferencesStore(),
         ),
@@ -232,6 +237,34 @@ void main() {
         find.byKey(const Key('settings-local-session-notifications')),
         findsNothing,
       );
+    });
+
+    testWidgets('General category shows an available-update dot', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(buildSubject(clientUpdateAvailable: true));
+      await tester.pumpAndSettle();
+
+      final tile = find.byKey(const Key('settings-category-general'));
+      expect(tile, findsOneWidget);
+      expect(
+        find.descendant(of: tile, matching: find.byType(Badge)),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<Badge>(
+              find.descendant(of: tile, matching: find.byType(Badge)),
+            )
+            .isLabelVisible,
+        isTrue,
+      );
+      expect(
+        find.bySemanticsLabel(RegExp('App update available')),
+        findsOneWidget,
+      );
+      semantics.dispose();
     });
 
     testWidgets('shows empty state when no active profile', (tester) async {

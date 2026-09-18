@@ -32,6 +32,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -93,6 +94,7 @@ void main() {
         ),
         workspacePrefsStoreProvider.overrideWithValue(prefs),
         attentionUnreadCountProvider.overrideWith((ref) => unreadCount),
+        nativeClientUpdateAvailableProvider.overrideWithValue(false),
         openSessionsStoreProvider.overrideWithValue(_FakeOpenSessionsStore()),
         // The create flow persists app-created Drive provenance before
         // navigating; the real store would open a Drift database inside the

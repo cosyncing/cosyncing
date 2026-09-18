@@ -15,6 +15,23 @@ import 'package:flutter/foundation.dart';
 const String desktopClientDownloadUrl =
     'https://github.com/cosyncing/cosyncing/releases';
 
+/// Exact accepted client artifact for [platform] in stable [version].
+Uri? desktopClientDownloadUri(TargetPlatform platform, String version) {
+  if (!_releaseVersionPattern.hasMatch(version)) return null;
+  final suffix = switch (platform) {
+    TargetPlatform.linux => 'linux-x64.tar.gz',
+    TargetPlatform.macOS => 'macos-arm64-unsigned.dmg',
+    TargetPlatform.windows => 'windows-x64-unsigned.zip',
+    _ => null,
+  };
+  if (suffix == null) return null;
+  final name = 'cosyncing-client-$version-$suffix';
+  return Uri.https(
+    'github.com',
+    '/cosyncing/cosyncing/releases/download/client-v$version/$name',
+  );
+}
+
 /// Whether this build is a native desktop package.
 ///
 /// [isWeb] is a parameter rather than a direct `kIsWeb` read because it is not
