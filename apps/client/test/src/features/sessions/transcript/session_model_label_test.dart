@@ -27,7 +27,7 @@ void main() {
     expect(sessionModelLabel(session), 'GPT-5.4');
   });
 
-  test('does not derive a family label from a technical id', () {
+  test('derives a compact known-family label from a technical id', () {
     final session = _session(
       currentModel: const SessionCurrentModel(
         providerID: 'openai',
@@ -35,46 +35,45 @@ void main() {
       ),
     );
 
-    expect(sessionModelLabel(session), isNull);
+    expect(sessionModelLabel(session), 'GPT-5.4');
     expect(sessionModelTechnicalId(session), 'openai/gpt-5.4-codex');
   });
 
-  test('does not invent labels from family/version-shaped ids', () {
-    final cases = <String>[
-      'claude-3-7-sonnet-20250219',
-      'claude-opus-4-8-20260701',
-      'gpt-5.4-codex',
-    ];
+  test('finds family versions on either side and ignores release dates', () {
+    final cases = <String, String>{
+      'claude-3-7-sonnet-20250219': 'Sonnet 3.7',
+      'claude-opus-4-8-20260701': 'Opus 4.8',
+      'gpt-5.4-codex': 'GPT-5.4',
+    };
 
-    for (final modelId in cases) {
+    for (final entry in cases.entries) {
       expect(
         sessionModelLabel(
           _session(
             currentModel: SessionCurrentModel(
               providerID: 'provider',
-              modelID: modelId,
+              modelID: entry.key,
             ),
           ),
         ),
-        isNull,
-        reason: modelId,
+        entry.value,
+        reason: entry.key,
       );
     }
   });
 
-  test('keeps a legacy model id technical-only without an authored label', () {
+  test('derives a compact label from a legacy model id', () {
     final session = _session(model: 'claude-3-7-sonnet-20250219');
 
-    expect(sessionModelLabel(session), isNull);
+    expect(sessionModelLabel(session), 'Sonnet 3.7');
     expect(
       sessionModelTechnicalId(session),
       'claude-3-7-sonnet-20250219',
     );
   });
 
-  // P2/P8. A provider-qualified id is a raw id even without a digit, so it must
-  // never reach the roster as if it were a name, and the family/version guess
-  // must not invent one from it either. The adapter authors the label.
+  // P2/P8. A provider-qualified id is never printed verbatim. Its leaf can
+  // still identify a known family; unknown aliases remain technical-only.
   test('never shows a provider-qualified id as a human label', () {
     // Exactly what the kimi adapter reports today: the bare `/status.model`
     // string in the legacy slot and no authored label at all.
@@ -90,8 +89,44 @@ void main() {
       ),
     );
 
-    expect(sessionModelLabel(claude), isNull);
+    expect(sessionModelLabel(claude), 'Fable 5');
     expect(sessionModelTechnicalId(claude), 'anthropic/claude-fable-5');
+  });
+
+  test('covers model ids published by non-Kimi and non-Claude harnesses', () {
+    final cases = <String, String>{
+      'gpt-5.4-codex': 'GPT-5.4',
+      'gpt-4o': 'GPT-4o',
+      'o1': 'o1',
+      'o3': 'o3',
+      'o4-mini': 'o4-mini',
+      'qwen3.6-27b-fp8': 'Qwen 3.6',
+      'qwen3-32b': 'Qwen 3',
+      'llama-3-8b': 'Llama 3',
+      'gpt-oss-120b': 'GPT',
+      'minimax-m3': 'MiniMax M3',
+      'deepseek-v3.2': 'DeepSeek 3.2',
+      'gemini-3.7-flash-high': 'Gemini 3.7',
+      'grok-4-1-fast-reasoning': 'Grok 4.1',
+      'glm-5.2': 'GLM 5.2',
+      'claude-sonnet-4-6': 'Sonnet 4.6',
+      'openai/gpt-5.2': 'GPT-5.2',
+    };
+
+    for (final entry in cases.entries) {
+      expect(
+        sessionModelLabel(
+          _session(
+            currentModel: SessionCurrentModel(
+              providerID: 'harness',
+              modelID: entry.key,
+            ),
+          ),
+        ),
+        entry.value,
+        reason: entry.key,
+      );
+    }
   });
 
   test('shows the adapter-authored label for a provider-qualified id', () {
@@ -142,6 +177,21 @@ void main() {
       sessionModelTechnicalId(session),
       'private-provider/vendor-model-123-build-9',
     );
+
+    final familySubstring = _session(
+      currentModel: const SessionCurrentModel(
+        providerID: 'private-provider',
+        modelID: 'notgpt-model-123',
+      ),
+    );
+    expect(sessionModelLabel(familySubstring), isNull);
+  });
+
+  test('normalizes a short legacy technical id instead of printing it raw', () {
+    final session = _session(model: 'gpt-5.4');
+
+    expect(sessionModelLabel(session), 'GPT-5.4');
+    expect(sessionModelTechnicalId(session), 'gpt-5.4');
   });
 }
 

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:flutter/foundation.dart';
 
 /// Encoded shape version of a stored roster snapshot (N3).
@@ -10,11 +11,16 @@ import 'package:flutter/foundation.dart';
 /// starts inventing fields, so a mismatch fails open to normal loading and the
 /// row is deleted rather than guessed at.
 ///
+/// Version 3 stores only compact human-readable model labels inline and keeps
+/// technical model identities in [SessionRosterIdentity.modelId]. Version 2
+/// could store a provider-qualified identity in `modelLabel`, so those rows are
+/// dropped instead of briefly exposing the raw value after an upgrade.
+///
 /// Version 2 added [SessionRosterIdentity.createdAt], the anchor the
 /// authoritative roster orders its working band by. A version-1 row has no
 /// anchor at all, so it is dropped rather than rendered in an order this build
 /// no longer produces.
-const int rosterSnapshotPayloadVersion = 2;
+const int rosterSnapshotPayloadVersion = 3;
 
 /// Maximum broker profiles that may retain a roster snapshot.
 ///
@@ -125,8 +131,8 @@ final class SessionRosterIdentity {
       origin: session.origin,
       cwd: session.cwd,
       projectName: session.projectName,
-      modelLabel: session.currentModel?.label ?? session.model,
-      modelId: session.currentModel?.modelID,
+      modelLabel: sessionModelLabel(session),
+      modelId: sessionModelTechnicalId(session),
       updatedAt: session.updatedAt,
       createdAt: session.createdAt,
     );
