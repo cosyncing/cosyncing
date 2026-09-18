@@ -159,6 +159,9 @@ Windows x64 (PowerShell):
 powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 ```
 
+Windows 11 x64 をサポートしています。Windows 10 はサポート対象外です。Microsoft Defender が
+インストーラーをトロイの木馬と判定する場合がありますが、強制的にインストールするために Defender を無効にしないでください。
+
 インストーラーはリリースを検証し、Broker と対応するデスクトップクライアントを導入してから、
 対話式の setup とクライアントのペアリングを行います。ヘッドレス Linux と Linux arm64 には
 サーバーのみを導入します。Bun は必要に応じて取得するため、Node.js/npm の事前導入は不要です。
