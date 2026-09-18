@@ -137,12 +137,12 @@ void main() {
       expect(identity.parentThreadId, 'native-0');
       expect(identity.origin, SessionOrigin.subagent);
       expect(identity.modelLabel, 'Opus 5');
-      expect(identity.modelId, 'claude-opus-5');
+      expect(identity.modelId, 'anthropic/claude-opus-5');
       expect(identity.updatedAt, 1000);
     });
 
     test(
-      'falls back to the legacy model label when there is no rich model',
+      'derives a cached label and retains the legacy id for its tooltip',
       () async {
         await repository.save(
           brokerProfileId: 'profile-a',
@@ -150,8 +150,8 @@ void main() {
           sessions: [session(model: 'gpt-legacy')],
         );
         final loaded = await repository.load('profile-a', endpoint: endpoint);
-        expect(loaded!.rows.single.modelLabel, 'gpt-legacy');
-        expect(loaded.rows.single.modelId, isNull);
+        expect(loaded!.rows.single.modelLabel, 'GPT');
+        expect(loaded.rows.single.modelId, 'gpt-legacy');
       },
     );
   });
@@ -467,6 +467,23 @@ void main() {
       await database.customStatement(
         'UPDATE roster_snapshot_rows SET payload_version = '
         '${rosterSnapshotPayloadVersion + 1}',
+      );
+
+      expect(await repository.load('profile-a', endpoint: endpoint), isNull);
+      expect(
+        await database.customSelect('SELECT 1 FROM roster_snapshot_rows').get(),
+        isEmpty,
+      );
+    });
+
+    test('a version-2 snapshot returns null and deletes the row', () async {
+      await repository.save(
+        brokerProfileId: 'profile-a',
+        endpoint: endpoint,
+        sessions: [session()],
+      );
+      await database.customStatement(
+        'UPDATE roster_snapshot_rows SET payload_version = 2',
       );
 
       expect(await repository.load('profile-a', endpoint: endpoint), isNull);

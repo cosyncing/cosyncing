@@ -39,13 +39,37 @@ String? knownSessionTitle(
 
 /// Compact trustworthy model text for roster metadata.
 ///
-/// Raw provider ids never pass through as a fallback: an unknown id is omitted
-/// instead of turning the roster into a debug console.
+/// Raw provider ids never pass through as a fallback. When an adapter has not
+/// authored a label, a compact label is derived only for a known model family;
+/// an unknown id is omitted instead of turning the roster into a debug console.
 String? sessionModelLabel(SessionInfo session) {
   final currentRaw = _trimmedModelValue(session.currentModel?.modelID);
+  final legacyRaw = _trimmedModelValue(session.model);
   final authored = _humanModelLabel(session.currentModel?.label, currentRaw);
-  return authored;
+  if (authored != null) return authored;
+  if (currentRaw != null && legacyRaw != currentRaw) {
+    final legacy = _humanModelLabel(legacyRaw, currentRaw);
+    if (legacy != null) return legacy;
+  }
+  return _derivedModelLabel(currentRaw ?? legacyRaw);
 }
+
+const _modelFamilies = <String, String>{
+  'opus': 'Opus',
+  'sonnet': 'Sonnet',
+  'haiku': 'Haiku',
+  'fable': 'Fable',
+  'gpt': 'GPT',
+  'gemini': 'Gemini',
+  'grok': 'Grok',
+  'llama': 'Llama',
+  'mistral': 'Mistral',
+  'minimax': 'MiniMax',
+  'deepseek': 'DeepSeek',
+  'qwen': 'Qwen',
+  'glm': 'GLM',
+  'longcat': 'LongCat',
+};
 
 String? _humanModelLabel(String? value, String? raw) {
   var candidate = value?.trim() ?? '';
@@ -76,6 +100,63 @@ bool _looksLikeRawModelId(String value) {
   return parts.length >= 3 &&
       value.contains(RegExp('[A-Za-z]')) &&
       value.contains(RegExp('[0-9]'));
+}
+
+String? _derivedModelLabel(String? modelId) {
+  final raw = modelId?.trim().toLowerCase() ?? '';
+  if (raw.isEmpty) return null;
+
+  // Provider-qualified identities are safe to inspect only after discarding
+  // the provider. The complete identity remains available in the tooltip.
+  final leaf = raw.split(RegExp('[/:]')).last;
+  final openAiReasoning = RegExp(r'^o(\d+(?:\.\d+)?)(-mini)?$').firstMatch(
+    leaf,
+  );
+  if (openAiReasoning != null) {
+    return 'o${openAiReasoning.group(1)}${openAiReasoning.group(2) ?? ''}';
+  }
+  for (final entry in _modelFamilies.entries) {
+    final familyMatch = RegExp(
+      '(?:^|[-_.])(${RegExp.escape(entry.key)})(?=\$|[-_.0-9])',
+    ).firstMatch(leaf);
+    if (familyMatch == null) continue;
+    final familyStart = familyMatch.end - entry.key.length;
+    final familyEnd = familyStart + entry.key.length;
+    final matches =
+        RegExp(
+          r'\d+(?:\.\d+)?[a-z]?',
+        ).allMatches(leaf).where((match) {
+          final value = match.group(0)!;
+          // Release dates and context sizes are technical suffixes, not
+          // versions.
+          final suffix = leaf.substring(match.end);
+          return value.replaceAll(RegExp('[^0-9]'), '').length < 6 &&
+              !value.endsWith('b') &&
+              !value.endsWith('k') &&
+              !suffix.startsWith(RegExp('[bk]'));
+        }).toList();
+    final before = matches.where((match) => match.end <= familyStart).toList();
+    final after = matches.where((match) => match.start >= familyEnd).toList();
+    final useAfter =
+        before.isEmpty ||
+        (after.isNotEmpty &&
+            after.first.start - familyEnd <= familyStart - before.last.end);
+    final nearest = useAfter
+        ? after.take(2).toList()
+        : before.reversed.take(2).toList().reversed.toList();
+    if (nearest.isEmpty) return entry.value;
+    final first = nearest.first.group(0)!;
+    final version = first.contains('.') || nearest.length == 1
+        ? first
+        : '$first.${nearest[1].group(0)!}';
+    if (entry.key == 'minimax' && leaf.contains('m$version')) {
+      return '${entry.value} M$version';
+    }
+    return entry.key == 'gpt'
+        ? '${entry.value}-$version'
+        : '${entry.value} $version';
+  }
+  return null;
 }
 
 /// Full technical model identity for a tooltip, never inline roster text.

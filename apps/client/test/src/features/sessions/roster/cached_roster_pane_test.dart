@@ -42,6 +42,8 @@ void main() {
     String? nativeId,
     String? parentThreadId,
     SessionOrigin? origin,
+    String? modelLabel,
+    String? modelId,
   }) => SessionRosterIdentity(
     tool: tool,
     sessionId: id,
@@ -51,6 +53,8 @@ void main() {
     nativeId: nativeId,
     parentThreadId: parentThreadId,
     origin: origin,
+    modelLabel: modelLabel,
+    modelId: modelId,
   );
 
   CachedRosterPresentation presentation({
@@ -75,6 +79,38 @@ void main() {
   }
 
   group('truthfulness', () {
+    testWidgets(
+      'shows the derived cached label and keeps the id in a tooltip',
+      (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          host(
+            CachedRosterPane(
+              presentation: presentation(
+                rows: [
+                  identity(modelLabel: 'GPT-4o', modelId: 'openai/gpt-4o'),
+                ],
+              ),
+              onOpen: (_) {},
+              visibilityPreferences: const SessionVisibilityPreferences(),
+            ),
+          ),
+        );
+        await expandGroup(tester, groupKey);
+
+        expect(find.textContaining('GPT-4o'), findsOneWidget);
+        expect(find.textContaining('openai/gpt-4o'), findsNothing);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Tooltip && widget.message == 'Model: openai/gpt-4o',
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
     testWidgets(
       'a cached row claims no status, count, ready state or control',
       (

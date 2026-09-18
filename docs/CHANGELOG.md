@@ -29,6 +29,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Session roster rows again show compact model names for harnesses that report
+  a model identity without a separate display label. Full technical model IDs
+  remain confined to tooltips.
 - Standalone installers accept applications replaced by a verified in-app
   upgrade, and future bootstrap JavaScript upgrades keep both ownership
   receipts synchronized across success, rollback, and recovery.

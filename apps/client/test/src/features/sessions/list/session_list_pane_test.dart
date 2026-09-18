@@ -442,7 +442,6 @@ void main() {
                 currentModel: const SessionCurrentModel(
                   providerID: 'openai',
                   modelID: 'gpt-5.4-codex',
-                  label: 'GPT-5.4',
                   variant: 'fast',
                   reasoningEffort: 'high',
                 ),
