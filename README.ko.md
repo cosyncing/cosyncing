@@ -155,6 +155,9 @@ Windows x64 (PowerShell):
 powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 ```
 
+Windows 11 x64를 지원합니다. Windows 10은 지원하지 않습니다. Microsoft Defender가 설치 프로그램을
+트로이 목마로 분류할 수 있으며, 설치를 강제로 진행하려고 Defender를 비활성화해서는 안 됩니다.
+
 설치 스크립트는 릴리스를 검증하고 Broker와 지원되는 데스크톱 클라이언트를 설치한 다음,
 대화형 setup과 클라이언트 페어링을 진행합니다. GUI가 없는 Linux와 Linux arm64에는 서버만
 설치합니다. 필요할 때 Bun을 설치하므로 Node.js/npm을 미리 설치할 필요가 없습니다.

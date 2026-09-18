@@ -143,6 +143,9 @@ Windows x64 (PowerShell):
 powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 ```
 
+支持 Windows 11 x64。不支持 Windows 10：Microsoft Defender 可能会将安装脚本判定为木马，
+请勿为强制安装而禁用 Defender。
+
 脚本会验证发行版，安装 Broker 和受支持的桌面客户端，然后交互式运行 setup 并完成客户端配对。
 无图形界面的 Linux 和 Linux arm64 只安装服务端。脚本会按需安装 Bun，无需预装 Node.js/npm。
 仅安装服务端、无人值守安装和签名通道更新请见[安装指南](docs/installation/script-install.md)（英文）。

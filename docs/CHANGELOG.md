@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- Installation guidance now identifies Windows 11 x64 as the supported Windows host and warns
+  Windows 10 users not to disable Microsoft Defender to force an installation it may classify as
+  a Trojan.
+
 ## 0.5.8 — 2026-09-17
 
 ### Added

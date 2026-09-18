@@ -158,6 +158,9 @@ Windows x64 (PowerShell):
 powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 ```
 
+Windows 11 x64 is supported. Windows 10 is not supported: Microsoft Defender may classify the
+installer as a Trojan, and you should not disable Defender to force installation.
+
 The installer verifies the release, installs the broker and a supported desktop client, then
 runs interactive setup and pairs the client. Headless Linux and Linux arm64 receive the server
 without a desktop client. Bun is acquired when needed; Node.js/npm are not required. See the

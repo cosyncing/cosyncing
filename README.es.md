@@ -159,6 +159,9 @@ Windows x64 (PowerShell):
 powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 ```
 
+Windows 11 x64 es compatible. Windows 10 no es compatible: Microsoft Defender puede clasificar el
+instalador como troyano; no desactives Defender para forzar la instalación.
+
 El instalador verifica la versión, instala el broker y un cliente de escritorio compatible,
 y después ejecuta la configuración interactiva y empareja el cliente. Linux sin entorno gráfico
 y Linux arm64 reciben solo el servidor. Bun se instala si hace falta; no se requiere Node.js/npm.
