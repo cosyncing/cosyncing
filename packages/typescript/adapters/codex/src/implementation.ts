@@ -124,6 +124,7 @@ import {
   codexTurnStartGeneration,
   decideCodexObserveRunState,
   decideCodexRunStateRepair,
+  mergeCodexNativeRunEvidence,
   readCodexNativeRunEvidence,
 } from './run-state-repair.ts';
 import {
@@ -4580,11 +4581,68 @@ class CodexResumeConnection implements SessionConnection {
     }
     // Any live frame delivered while the probe was in flight is NEWER than what it read.
     if (this.turnRunStateVersion !== expectedVersion) return;
-    const evidence = readCodexNativeRunEvidence(read);
     const current = this.turnRunState.kind === 'active'
       ? { kind: 'active' as const, turnId: this.turnRunState.turnId }
       : { kind: this.turnRunState.kind };
-    const repair = decideCodexRunStateRepair(current, evidence, (turnId) => this.recentlyCompletedTurnIds.has(turnId));
+    let evidence = readCodexNativeRunEvidence(read);
+    const nativeEvidenceReads: any[] = [read];
+    if (
+      current.kind === 'active'
+      && current.turnId
+      && evidence.statusType
+      && evidence.statusType !== 'active'
+      && !evidence.terminalTurnIds.has(current.turnId)
+    ) {
+      try {
+        // Codex may omit old turns from `thread/read`. Walk a bounded number of native pages so an
+        // admitted turn just beyond the first page is still accounted for, while a pathological
+        // history cannot make one watcher repair unbounded.
+        let cursor: string | undefined;
+        const seenCursors = new Set<string>();
+        for (let page = 0; page < 10; page++) {
+          const turns = await this.rpc(
+            'thread/turns/list',
+            {
+              threadId: this.threadId,
+              limit: 100,
+              sortDirection: 'desc',
+              ...(cursor ? { cursor } : {}),
+            },
+            5000,
+          );
+          nativeEvidenceReads.push(turns);
+          evidence = mergeCodexNativeRunEvidence(evidence, readCodexNativeRunEvidence(turns));
+          if (evidence.activeTurnId || evidence.terminalTurnIds.has(current.turnId)) break;
+          // Cursors are opaque. Preserve the daemon's exact bytes; only the empty string terminates.
+          const nextCursor = typeof turns?.nextCursor === 'string' ? turns.nextCursor : '';
+          if (!nextCursor || seenCursors.has(nextCursor)) break;
+          seenCursors.add(nextCursor);
+          cursor = nextCursor;
+        }
+      } catch {
+        // The rollout proof below is the second exact source. Failure stays unknown.
+      }
+    }
+    let rolloutTerminalTurnId: string | undefined;
+    if (
+      current.kind === 'active'
+      && current.turnId
+      && evidence.statusType
+      && evidence.statusType !== 'active'
+      && !evidence.terminalTurnIds.has(current.turnId)
+      && !this.recentlyCompletedTurnIds.has(current.turnId)
+      && await rolloutHasExactTerminalTurn(this.path, current.turnId)
+    ) {
+      rolloutTerminalTurnId = current.turnId;
+    }
+    // The bounded rollout proof above yields to the event loop. A delivered live frame is newer
+    // than both reads and must win instead of being repaired over.
+    if (this.turnRunStateVersion !== expectedVersion) return;
+    const repair = decideCodexRunStateRepair(
+      current,
+      evidence,
+      (turnId) => this.recentlyCompletedTurnIds.has(turnId) || rolloutTerminalTurnId === turnId,
+    );
     if (repair.kind === 'none') return;
     // A repaired transition is a real turn boundary, so it takes the SAME lifecycle a delivered one
     // takes — run-summary open/close, footer, Attention observation, retention release. Emitting only
@@ -4598,12 +4656,12 @@ class CodexResumeConnection implements SessionConnection {
         // The runtime reports a DIFFERENT turn in progress, so the one this owner held is over.
         // Close its lifecycle without settling to idle — a newer turn is active — exactly as the
         // "old completion while a newer turn is active" branch of `turn/completed` does.
-        this.rememberCompletedTurn(superseded, this.nativeTurnEvidence(read, superseded));
+        this.rememberCompletedTurn(superseded, this.nativeTurnEvidence(nativeEvidenceReads, superseded));
         this.emitCompletedTurnEvidence(superseded, false);
       }
       this.markRunning(repair.turnId);
       this.emit({ type: 'status', status: 'running' });
-      this.emitNativeRunSummary(this.nativeTurnEvidence(read, repair.turnId), 'running');
+      this.emitNativeRunSummary(this.nativeTurnEvidence(nativeEvidenceReads, repair.turnId), 'running');
       return;
     }
     const admitted = this.activeTurnId();
@@ -4617,7 +4675,7 @@ class CodexResumeConnection implements SessionConnection {
       return;
     }
     const alreadyEmitted = this.completedTurnEvidence.get(admitted)?.emitted === true;
-    this.rememberCompletedTurn(admitted, this.nativeTurnEvidence(read, admitted));
+    this.rememberCompletedTurn(admitted, this.nativeTurnEvidence(nativeEvidenceReads, admitted));
     this.markIdle();
     if (alreadyEmitted) {
       // This turn's terminal evidence was already published (e.g. closed while a newer turn was
@@ -4634,13 +4692,17 @@ class CodexResumeConnection implements SessionConnection {
    *  notification params the run-summary path consumes. A turn the read does not list carries no
    *  status: `codexRunStatusFromNative(undefined)` is the neutral terminal, which is the most this
    *  knows — the runtime proved the turn is no longer in progress, not how it ended. */
-  private nativeTurnEvidence(read: any, turnId: string): any {
-    const turns: any[] = [
+  private nativeTurnEvidence(readOrReads: any | any[], turnId: string): any {
+    const reads = Array.isArray(readOrReads) ? readOrReads : [readOrReads];
+    const turns: any[] = reads.flatMap((read) => [
       ...(Array.isArray(read?.thread?.turns) ? read.thread.turns : []),
       ...(Array.isArray(read?.turns) ? read.turns : []),
       ...(Array.isArray(read?.data) ? read.data : []),
-    ];
-    const record = turns.find((turn) => turn?.id != null && String(turn.id) === turnId);
+      ...(Array.isArray(read?.initialTurnsPage?.data) ? read.initialTurnsPage.data : []),
+    ]);
+    // Supplemental pages are appended after `thread/read` specifically because the read omitted an
+    // exact state for this turn. Prefer the later native record if both surfaces mention the id.
+    const record = turns.findLast((turn) => turn?.id != null && String(turn.id) === turnId);
     return { threadId: this.threadId, turn: { ...(record ?? {}), id: turnId } };
   }
 
@@ -8124,6 +8186,23 @@ export async function inferRolloutStatusResult(
   return inferRolloutRawStatus(path, statSafe(path), options);
 }
 
+/**
+ * Prove that the newest rollout lifecycle closes one exact turn.
+ *
+ * This deliberately bypasses the warm status cache: the caller is repairing a live owner whose
+ * latched state already contradicts the point-in-time daemon status, and a missed incremental edge
+ * can be the reason that cache is stale. The cold reverse scan is bounded and source-validated, so
+ * an unreadable, moving, oversized, or over-budget rollout returns false rather than guessing.
+ */
+export async function rolloutHasExactTerminalTurn(path: string, turnId: string): Promise<boolean> {
+  const st = statSafe(path);
+  if (!st || !turnId) return false;
+  const recovered = await scanRolloutColdStatus(path, st);
+  return recovered.kind === 'authority'
+    && recovered.status === 'idle'
+    && recovered.terminalTurnId === turnId;
+}
+
 type RolloutAuthorityStat = {
   size: number;
   mtimeMs: number;
@@ -8276,6 +8355,7 @@ type RolloutColdScan =
       scannedThrough: number;
       scannedBytes: number;
       activeTurnId?: string;
+      terminalTurnId?: string;
       tail?: RolloutAuthorityTail;
       reason?: undefined;
     }
@@ -8318,6 +8398,7 @@ async function scanRolloutColdStatus(
       result = {
         kind: 'authority',
         status: 'idle',
+        terminalTurnId: marker.turnId,
         scannedThrough: scannedThrough ?? 0,
         scannedBytes,
       };

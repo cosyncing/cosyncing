@@ -733,6 +733,84 @@ try {
       check('S a repeated repair round adds no second terminal run summary',
         runSummaries('turn-latched-2', true).length === 1 && runSummaries('turn-latched', true).length === 1,
         `t2=${runSummaries('turn-latched-2', true).length} t1=${runSummaries('turn-latched', true).length}`);
+
+      // `thread/read` can omit older turns. Exercise the production repair method through two
+      // `thread/turns/list` pages, and require the terminal payload itself (not just its id) to
+      // survive into the canonical error/footer emissions.
+      repairDaemon.notify('turn/started', { threadId: LATCHED, turn: { id: 'turn-paged' } });
+      await waitFor(() => runSummaries('turn-paged', false).length === 1, 'paged turn admission');
+      repairDaemon.configure({
+        readResult: () => ({ thread: { id: LATCHED, status: { type: 'idle' }, turns: [] } }),
+        turnsResult: (params) => params?.cursor === 'page-2'
+          ? {
+              data: [{
+                id: 'turn-paged',
+                status: 'failed',
+                error: 'paged native failure',
+                completedAt: '2026-08-03T00:00:14.000Z',
+              }],
+              nextCursor: null,
+            }
+          : {
+              data: Array.from({ length: 100 }, (_, index) => ({ id: `older-${index}`, status: 'completed' })),
+              nextCursor: 'page-2',
+            },
+      });
+      await (live.hub.getConn('codex', latchedId)!.conn as any).requestRunStateRepair();
+      const pagedTerminal = runSummaries('turn-paged', true);
+      check('S a matching terminal on a later native page retires the admitted turn',
+        live.hub.getConn('codex', latchedId)?.status === 'idle' && pagedTerminal.length === 1,
+        `status=${String(live.hub.getConn('codex', latchedId)?.status)} terminals=${pagedTerminal.length}`);
+      check('S a paged failed terminal preserves its native status and error',
+        pagedTerminal[0]?.status === 'error'
+        && frames.some((message) => message?.type === 'error' && message.message === 'paged native failure'),
+        `summary=${JSON.stringify(pagedTerminal[0])}`);
+
+      // If native history is bounded before the admitted turn, the durable rollout remains the
+      // second exact source. Drive this through the real connection method, not the scan helper.
+      repairDaemon.notify('turn/started', { threadId: LATCHED, turn: { id: 'turn-rollout' } });
+      await waitFor(() => runSummaries('turn-rollout', false).length === 1, 'rollout turn admission');
+      appendFileSync(latchedPath, taskStarted('turn-rollout') + taskComplete('turn-rollout'));
+      repairDaemon.configure({
+        readResult: () => ({ thread: { id: LATCHED, status: { type: 'idle' }, turns: [] } }),
+        turnsResult: () => ({ data: [], nextCursor: null }),
+      });
+      await (live.hub.getConn('codex', latchedId)!.conn as any).requestRunStateRepair();
+      check('S an exact rollout terminal retires through the production repair path',
+        live.hub.getConn('codex', latchedId)?.status === 'idle'
+        && runSummaries('turn-rollout', true).length === 1,
+        `status=${String(live.hub.getConn('codex', latchedId)?.status)} terminals=${runSummaries('turn-rollout', true).length}`);
+
+      // A live frame delivered while the supplemental native page is awaited is newer evidence.
+      // Its run-state version must fence out the stale terminal response.
+      repairDaemon.notify('turn/started', { threadId: LATCHED, turn: { id: 'turn-race-old' } });
+      await waitFor(() => runSummaries('turn-race-old', false).length === 1, 'race turn admission');
+      let releaseRacePage!: () => void;
+      let racePageRequested!: () => void;
+      const racePageStarted = new Promise<void>((resolve) => { racePageRequested = resolve; });
+      const racePageRelease = new Promise<void>((resolve) => { releaseRacePage = resolve; });
+      repairDaemon.configure({
+        readResult: () => ({ thread: { id: LATCHED, status: { type: 'idle' }, turns: [] } }),
+        turnsResult: async () => {
+          racePageRequested();
+          await racePageRelease;
+          return { data: [{ id: 'turn-race-old', status: 'completed' }], nextCursor: null };
+        },
+      });
+      const racedRepair = (live.hub.getConn('codex', latchedId)!.conn as any).requestRunStateRepair();
+      await racePageStarted;
+      repairDaemon.notify('turn/started', { threadId: LATCHED, turn: { id: 'turn-race-new' } });
+      releaseRacePage();
+      await racedRepair;
+      const newTurnDelivered = await waitFor(
+        () => runSummaries('turn-race-new', false).length === 1,
+        'new live turn during repair',
+      );
+      check('S a live frame fences out a stale paged terminal repair',
+        newTurnDelivered
+        && live.hub.getConn('codex', latchedId)?.status === 'working'
+        && runSummaries('turn-race-old', true).length === 0,
+        `status=${String(live.hub.getConn('codex', latchedId)?.status)} old terminals=${runSummaries('turn-race-old', true).length}`);
       stopFrames();
 
       // ── Lane M — mark/emit coherence ──────────────────────────────────────────────────────────
