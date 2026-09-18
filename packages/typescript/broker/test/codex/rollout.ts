@@ -21,6 +21,7 @@ import { isolatedBrokerFixtureEnvironment } from '../helpers/isolated-broker-fix
 import { historySourceStillContainsSnapshot } from '../../src/sessions/history-page-cache.ts';
 import type { AgentMessage, HistorySnapshotSink } from '../../../adapter-api/src/index.ts';
 import { CANONICAL_MESSAGE_TYPES, isHistorySnapshotRefusal, isOwnershipConflictError } from '../../../adapter-api/src/index.ts';
+import { mergeCodexNativeRunEvidence, readCodexNativeRunEvidence } from '../../../adapters/codex/src/run-state-repair.ts';
 
 /** The broker side of a capture, with an optional budget so a refusal can be provoked. */
 class CollectingSink implements HistorySnapshotSink {
@@ -38,7 +39,7 @@ async function capture(conn: any): Promise<{ sink: CollectingSink; outcome: unkn
   const sink = new CollectingSink();
   return { sink, outcome: await conn.captureHistorySnapshot?.(sink) };
 }
-import { CodexAdapter, captureFileHistoryInto, codexAttachMode, inferRolloutStatus, inferRolloutStatusResult, codexSessionOrigin, mapRollout } from '../../../adapters/codex/src/index.ts';
+import { CodexAdapter, captureFileHistoryInto, codexAttachMode, inferRolloutStatus, inferRolloutStatusResult, codexSessionOrigin, mapRollout, rolloutHasExactTerminalTurn } from '../../../adapters/codex/src/index.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 // Mirrors codexLiveSyncEnabled(): sync is ON BY DEFAULT (issues-part2) — an unset env means enabled;
@@ -48,6 +49,19 @@ const syncServerEnabled = syncEnv === '' ? true : /^(1|true|yes|on)$/i.test(sync
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+}
+
+{
+  const merged = mergeCodexNativeRunEvidence(
+    readCodexNativeRunEvidence({ thread: { status: { type: 'idle' }, turns: [] } }),
+    readCodexNativeRunEvidence({ data: [{ id: 'turn-paged', status: 'completed' }] }),
+  );
+  check(
+    'paged Codex turn evidence keeps exact Idle status and recovers the matching terminal',
+    merged.statusType === 'idle'
+      && merged.terminalTurnIds.has('turn-paged')
+      && merged.activeTurnId === undefined,
+  );
 }
 
 // ── 1. synthetic double-free mapping ────────────────────────────────────────────
@@ -1285,8 +1299,20 @@ await (async () => {
     );
     appendFileSync(path, JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 't2' } }) + '\n');
     check('the exact matching terminal retires the newer authority once', await inferRolloutStatus(path) === 'idle', await inferRolloutStatus(path));
+    check(
+      'cold rollout proof identifies the exact completed turn for live-owner repair',
+      await rolloutHasExactTerminalTurn(path, 't2')
+        && !await rolloutHasExactTerminalTurn(path, 't1'),
+    );
     appendFileSync(path, JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 't2' } }) + '\n');
     check('a duplicate matching terminal cannot create a second status transition', await inferRolloutStatus(path) === 'idle', await inferRolloutStatus(path));
+
+    appendFileSync(path, JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't3' } }) + '\n');
+    check(
+      'cold rollout proof refuses a completed older turn while a newer turn is open',
+      !await rolloutHasExactTerminalTurn(path, 't2')
+        && !await rolloutHasExactTerminalTurn(path, 't3'),
+    );
 
     const coldPath = join(dir, 'rollout-2026-06-16T00-00-01-019ed00e-aac3-78f1-b373-cd365cf6a9b3.jsonl');
     writeFileSync(coldPath, base.map((line) => JSON.stringify(line)).join('\n') + '\n' + progress);

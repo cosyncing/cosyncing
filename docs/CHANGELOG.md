@@ -33,6 +33,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   briefly while Secret Service becomes ready and shows a recoverable setup
   error instead of falling through to an unexplained unauthenticated state.
 
+- Codex sessions no longer remain Working after the daemon reports Idle when the matching completed
+  turn is available only through paged history or the durable rollout.
+
 ## 0.5.8 — 2026-09-17
 
 ### Added

@@ -126,9 +126,9 @@ export interface FakeCodexDaemonOptions {
   /** Result for `thread/resume`; the thread id is filled in when omitted. */
   resumeResult?: (params: any) => unknown;
   /** Result for `thread/read` — the exact-evidence probe the repair channel reads. */
-  readResult?: (params: any) => unknown;
+  readResult?: (params: any) => unknown | Promise<unknown>;
   /** Result for `thread/turns/list`. */
-  turnsResult?: (params: any) => unknown;
+  turnsResult?: (params: any) => unknown | Promise<unknown>;
 }
 
 /** A fake app-server daemon with recorded RPC traffic and a push channel for notifications. */
@@ -180,8 +180,12 @@ export class FakeCodexDaemon {
     if (!message?.method) return;
     this.calls.push(String(message.method));
     if (this.options.ignoreMethods?.includes(String(message.method))) return;
-    const reply = (result: unknown): void => {
-      if (message.id != null) client.send({ id: message.id, result });
+    const reply = (result: unknown | Promise<unknown>): void => {
+      if (message.id == null) return;
+      void Promise.resolve(result).then(
+        (resolved) => client.send({ id: message.id, result: resolved }),
+        (error) => client.send({ id: message.id, error: { message: String(error) } }),
+      );
     };
     switch (message.method) {
       case 'initialize':

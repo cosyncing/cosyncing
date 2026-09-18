@@ -61,6 +61,23 @@ export function readCodexNativeRunEvidence(read: any): CodexNativeRunEvidence {
   };
 }
 
+/** Preserve the thread-level status while adding a separately paged turns result. */
+export function mergeCodexNativeRunEvidence(
+  primary: CodexNativeRunEvidence,
+  supplemental: CodexNativeRunEvidence,
+): CodexNativeRunEvidence {
+  return {
+    statusType: primary.statusType || supplemental.statusType,
+    ...(primary.activeTurnId || supplemental.activeTurnId
+      ? { activeTurnId: primary.activeTurnId ?? supplemental.activeTurnId }
+      : {}),
+    terminalTurnIds: new Set([
+      ...primary.terminalTurnIds,
+      ...supplemental.terminalTurnIds,
+    ]),
+  };
+}
+
 export type CodexRunStateRepair =
   | { kind: 'none' }
   | { kind: 'running'; turnId: string }
