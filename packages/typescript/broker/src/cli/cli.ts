@@ -165,7 +165,8 @@ function invocationName(explicit?: string, applicationPath?: string): string {
   return PRODUCT_IDENTITY.primaryBinary;
 }
 
-function help(command: string, packaged: boolean): string {
+function help(packaged: boolean): string {
+  const command = PRODUCT_IDENTITY.aliasBinary;
   const brokerUsage = packaged ? `${command} broker` : `${command} broker [--dev-bypass-first-run]`;
   return `${PRODUCT_IDENTITY.productName} broker CLI
 
@@ -588,7 +589,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       stderr.write(`${command}: help takes no arguments\n`);
       return 2;
     }
-    stdout.write(help(command, buildInfo.packaged));
+    stdout.write(help(buildInfo.packaged));
     return 0;
   }
 
@@ -977,7 +978,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   }
 
   if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) {
-    stdout.write(help(command, buildInfo.packaged));
+    stdout.write(help(buildInfo.packaged));
     return 0;
   }
 

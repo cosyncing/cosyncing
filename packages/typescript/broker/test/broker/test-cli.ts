@@ -102,11 +102,16 @@ process.env.COSYNCING_HOME = pureCliHome;
 // Pure command behavior: importing cli.ts above must not start a listener or write user state.
 {
   const help = await callCli(['--help']);
-  check('source help uses the locked primary and alias names',
-    help.code === 0 && help.stdout.includes('cosyncing broker CLI') && help.stdout.includes('cosy command'));
+  check('source help uses cosy for command examples and keeps the canonical product name',
+    help.code === 0
+      && help.stdout.includes('cosyncing broker CLI')
+      && help.stdout.includes('  cosy broker [--dev-bypass-first-run]')
+      && help.stdout.includes('  cosy help')
+      && !help.stdout.includes('  cosyncing broker')
+      && help.stdout.includes('cosy command'));
   const brokerHelp = await callCli(['broker', '--help']);
   check('broker --help stays read-only and bypasses first-run inspection',
-    brokerHelp.code === 0 && brokerHelp.stdout.includes('cosyncing broker'));
+    brokerHelp.code === 0 && brokerHelp.stdout.includes('  cosy broker'));
 
   const invalid = await callCli(['wat']);
   check('unknown command exits 2 with bounded guidance',
