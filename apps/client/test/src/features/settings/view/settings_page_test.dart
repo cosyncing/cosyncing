@@ -441,6 +441,159 @@ void main() {
       expect(find.byKey(const Key('settings-quota-warnings')), findsOneWidget);
     });
 
+    testWidgets('offers force restart on a runtime with nothing pending', (
+      tester,
+    ) async {
+      // The broker reports no blocker count for a current runtime because it
+      // probes activity only before applying a pending change. That absence
+      // once printed a failed-probe line and hid the only recovery control,
+      // leaving a wedged daemon unrecoverable from the app.
+      managedRuntimeApi.runtimeUpdatesOverride = const [
+        AgentRuntimeUpdateStatus(
+          agent: 'codex',
+          displayName: 'Codex',
+          managed: true,
+          state: 'current',
+          updateAvailable: false,
+          autoRestartReady: false,
+          checkedAt: 1,
+          runningVersion: '0.155.1',
+          installedVersion: '0.155.1',
+        ),
+      ];
+
+      await tester.pumpWidget(buildSubject(home: const AgentsSettingsPage()));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings-managed-runtimes')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Up to date; no restart needed.'), findsOneWidget);
+      expect(
+        find.textContaining('Activity check unavailable'),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('settings-restart-runtime-codex')),
+        findsOneWidget,
+      );
+      expect(find.text('Force restart'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('settings-restart-runtime-codex')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Force restart Codex?'), findsOneWidget);
+      expect(find.textContaining('Nothing is pending.'), findsOneWidget);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('Force restart'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(managedRuntimeApi.restartedRuntimes, ['codex']);
+    });
+
+    testWidgets('a pending runtime keeps the plain restart action', (
+      tester,
+    ) async {
+      // Guards the other half of the split: the forced label and its dialog
+      // must not leak onto a row that has a change to apply.
+      await tester.pumpWidget(buildSubject(home: const AgentsSettingsPage()));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings-managed-runtimes')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Restart now'), findsOneWidget);
+      expect(find.text('Force restart'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('settings-restart-runtime-codex')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Restart Codex now?'), findsOneWidget);
+      expect(find.textContaining('Nothing is pending.'), findsNothing);
+    });
+
+    testWidgets('a runtime the server does not own offers no restart', (
+      tester,
+    ) async {
+      // The OpenCode provider is registered unconditionally and reports
+      // managed:false whenever the broker did not spawn serve. Its restart
+      // route can only refuse, and the refusal caches state:'error' onto every
+      // connected client, so the row must carry no control at all.
+      managedRuntimeApi.runtimeUpdatesOverride = const [
+        AgentRuntimeUpdateStatus(
+          agent: 'opencode',
+          displayName: 'OpenCode',
+          managed: false,
+          state: 'unavailable',
+          updateAvailable: false,
+          autoRestartReady: false,
+          checkedAt: 1,
+        ),
+      ];
+
+      await tester.pumpWidget(buildSubject(home: const AgentsSettingsPage()));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings-managed-runtimes')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('OpenCode'), findsOneWidget);
+      expect(
+        find.byKey(const Key('settings-restart-runtime-opencode')),
+        findsNothing,
+      );
+      expect(managedRuntimeApi.restartedRuntimes, isEmpty);
+    });
+
+    testWidgets('a safe pending runtime is never described as blocked', (
+      tester,
+    ) async {
+      // OpenCode clears its gate through `autoRestartReady` and sends no
+      // blocker counts. Reading that absence as a failed probe put "automatic
+      // restart remains blocked" directly under an "Update ready" pill.
+      managedRuntimeApi.runtimeUpdatesOverride = const [
+        AgentRuntimeUpdateStatus(
+          agent: 'opencode',
+          displayName: 'OpenCode',
+          managed: true,
+          state: 'pending',
+          updateAvailable: true,
+          autoRestartReady: true,
+          pendingChanges: ['binary-version'],
+          checkedAt: 1,
+          runningVersion: '1.0.0',
+          installedVersion: '1.1.0',
+        ),
+      ];
+
+      await tester.pumpWidget(buildSubject(home: const AgentsSettingsPage()));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings-managed-runtimes')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Update ready'), findsOneWidget);
+      expect(find.text('No blocking sessions.'), findsOneWidget);
+      expect(find.textContaining('Activity check unavailable'), findsNothing);
+    });
+
     testWidgets('hides owner-only runtime controls for paired peers', (
       tester,
     ) async {
@@ -1739,6 +1892,8 @@ final class _FakePermissionRequester {
 
 final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   final List<String> policyWrites = [];
+  final List<String> restartedRuntimes = [];
+  List<AgentRuntimeUpdateStatus>? runtimeUpdatesOverride;
   int restartAllCalls = 0;
   String? brokerVersion = '1.0.0';
   Completer<void>? runtimeUpdatesGate;
@@ -1753,6 +1908,10 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
     if (gate != null) await gate.future;
     final error = runtimeUpdatesError;
     if (error != null) throw error;
+    final override = runtimeUpdatesOverride;
+    if (override != null) {
+      return RuntimeUpdatesResponse(ok: true, updates: override);
+    }
     return const RuntimeUpdatesResponse(
       ok: true,
       updates: [
@@ -1865,8 +2024,10 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   }) async => TokdashQuotaPreferenceResponse(ok: true, enabled: enabled);
 
   @override
-  Future<RuntimeUpdateRestartResponse> restartRuntime(String agent) async =>
-      const RuntimeUpdateRestartResponse(ok: true);
+  Future<RuntimeUpdateRestartResponse> restartRuntime(String agent) async {
+    restartedRuntimes.add(agent);
+    return const RuntimeUpdateRestartResponse(ok: true);
+  }
 
   @override
   Future<BrokerRestartAllResponse> restartAll() async {

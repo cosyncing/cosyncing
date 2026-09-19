@@ -11,6 +11,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Settings → Agents no longer reports "Activity check unavailable" for a managed runtime
+  that is up to date. The server measures session activity only before applying a pending
+  change, so a current runtime has no activity to report.
+- The per-runtime restart is now offered on any server-managed runtime when nothing is
+  pending, as Force restart. A wedged Codex daemon — one whose terminal will not start, or
+  whose new sessions fail — reports no pending change, which is exactly when the control
+  used to disappear.
+
 ## 0.5.9 — 2026-09-18
 
 ### Added
