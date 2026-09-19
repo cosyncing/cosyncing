@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.10 — 2026-09-19
+
 ### Fixed
 
 - Installer pairing now keeps an exclusive, recoverable claim while a newly
