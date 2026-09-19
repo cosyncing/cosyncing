@@ -989,6 +989,14 @@
   "@settingsRuntimeActivityUnavailable": {
     "description": "Runtime row status when the broker could not report session activity. Used whether or not a raw detail string exists."
   },
+  "settingsRuntimeNoRestartNeeded": "Up to date; no restart needed.",
+  "@settingsRuntimeNoRestartNeeded": {
+    "description": "Runtime row status when nothing is pending. The broker measures session activity only to decide whether a pending change may be applied, so a current runtime carries no blocker count and must not be described as a failed activity check."
+  },
+  "settingsRuntimeNoBlockingSessions": "No blocking sessions.",
+  "@settingsRuntimeNoBlockingSessions": {
+    "description": "Runtime row status when a pending change has cleared the provider's safety gate but the provider reports no blocker counts, as OpenCode does. Never describe this row as blocked: the same row shows the update as ready."
+  },
   "keyboardShortcutsTitle": "Keyboard Shortcuts",
   "@keyboardShortcutsTitle": {
     "description": "Title of the keyboard shortcuts help screen. Capitalization matches the app menu entry."
@@ -1720,6 +1728,24 @@
   "settingsRestartNow": "Restart now",
   "@settingsRestartNow": {
     "description": "Restart action label, used both on the runtime status row's inline button and the confirm dialog's affirmative button."
+  },
+  "settingsForceRestartRuntimeAction": "Force restart",
+  "@settingsForceRestartRuntimeAction": {
+    "description": "Recovery action label on a managed runtime row with no pending change, and on that dialog's affirmative button."
+  },
+  "settingsForceRestartRuntimeConfirmTitle": "Force restart {agentName}?",
+  "@settingsForceRestartRuntimeConfirmTitle": {
+    "description": "Title of the confirm dialog before restarting a managed agent runtime that reports no pending change.",
+    "placeholders": {
+      "agentName": {
+        "type": "String",
+        "example": "Codex"
+      }
+    }
+  },
+  "settingsForceRestartRuntimeConfirmBody": "Nothing is pending. Restart only to recover a stuck runtime: a terminal that will not start, or a new session that fails. Unfinished turns are interrupted and connected clients disconnect.",
+  "@settingsForceRestartRuntimeConfirmBody": {
+    "description": "Body of the confirm dialog before force-restarting a managed agent runtime that reports no pending change."
   },
   "settingsRestartEverythingConfirmTitle": "Restart everything?",
   "@settingsRestartEverythingConfirmTitle": {

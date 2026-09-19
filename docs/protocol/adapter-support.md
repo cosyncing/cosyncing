@@ -186,3 +186,20 @@ recovery may terminate a stalled daemon only after independently verifying its
 process identity. A missing control socket never proves that the old process
 exited or released its thread writer locks. Concurrent restart requests share
 one operation, and failed replacement verification remains an error.
+
+The manual restart is a recovery control, not an update control. It stays
+offered when the provider reports no pending change, because a wedged runtime
+reports none: a terminal that will not start or a session create that fails is
+invisible to the freshness probe. Clients gate it on `managed`, never on pending
+drift. `managed` is the broker's own claim to the runtime's lifecycle, and it is
+the only claim the restart route can honour: a provider that does not own the
+runtime can only refuse, and that refusal caches an error state every connected
+client then reads. Starting a runtime the broker does not currently own is a
+different action and is not offered here.
+
+A client must not describe a runtime as having failed its activity check merely
+because the status carries no blocker count. Providers report counts only where
+they have them: the Codex provider measures loaded-thread activity solely to
+decide whether a pending change may be applied, so a current runtime carries
+none, and the OpenCode provider gates on managed-session activity and never
+sends counts at all. An absent count is not a probe result.

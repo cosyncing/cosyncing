@@ -51,16 +51,29 @@ class AgentsSettingsPage extends ConsumerWidget {
     AgentRuntimeUpdateStatus update,
   ) async {
     final l10n = AppLocalizations.of(context);
+    // A runtime with nothing pending is restarted only to recover it, so the
+    // dialog states that no update is being applied and that work is lost.
+    final forced = !_runtimeRestartIsPending(update);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(
-          l10n.settingsRestartRuntimeConfirmTitle(update.displayName),
+          forced
+              ? l10n.settingsForceRestartRuntimeConfirmTitle(update.displayName)
+              : l10n.settingsRestartRuntimeConfirmTitle(update.displayName),
         ),
-        content: Text(l10n.settingsRestartRuntimeConfirmBody),
+        content: Text(
+          forced
+              ? l10n.settingsForceRestartRuntimeConfirmBody
+              : l10n.settingsRestartRuntimeConfirmBody,
+        ),
         actions: [
           const SettingsDialogCancelButton(),
-          SettingsDialogConfirmButton(label: l10n.settingsRestartNow),
+          SettingsDialogConfirmButton(
+            label: forced
+                ? l10n.settingsForceRestartRuntimeAction
+                : l10n.settingsRestartNow,
+          ),
         ],
       ),
     );
@@ -343,7 +356,7 @@ class _RuntimeStatusRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final colors = Theme.of(context).colorScheme;
-    final pending = update.updateAvailable || update.state == 'pending';
+    final pending = _runtimeRestartIsPending(update);
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border.all(color: colors.outlineVariant),
@@ -386,16 +399,33 @@ class _RuntimeStatusRow extends StatelessWidget {
                 ],
               ),
             ),
-            if (pending && onRestart != null) ...[
+            // The recovery control stays reachable with nothing pending: a
+            // wedged daemon reports no pending change, and gating the button on
+            // one left the only escape hatch behind a failure it cannot see.
+            // `managed` still gates it, because that is the broker's own claim
+            // to this runtime's lifecycle. Without it the restart route can
+            // only refuse, and that refusal caches an error state onto every
+            // connected client.
+            if (onRestart != null && update.managed) ...[
               const SizedBox(height: 12),
               Align(
                 alignment: Alignment.centerRight,
-                child: FilledButton.tonalIcon(
-                  key: Key('settings-restart-runtime-${update.agent}'),
-                  onPressed: () => unawaited(onRestart!()),
-                  icon: const Icon(Icons.restart_alt, size: 18),
-                  label: Text(l10n.settingsRestartNow),
-                ),
+                child: pending
+                    ? FilledButton.tonalIcon(
+                        key: Key('settings-restart-runtime-${update.agent}'),
+                        onPressed: () => unawaited(onRestart!()),
+                        icon: const Icon(Icons.restart_alt, size: 18),
+                        label: Text(l10n.settingsRestartNow),
+                      )
+                    : OutlinedButton.icon(
+                        key: Key('settings-restart-runtime-${update.agent}'),
+                        onPressed: () => unawaited(onRestart!()),
+                        icon: const Icon(Icons.restart_alt, size: 18),
+                        label: Text(l10n.settingsForceRestartRuntimeAction),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: colors.error,
+                        ),
+                      ),
               ),
             ],
           ],
@@ -437,12 +467,29 @@ String _runtimeBlockerCopy(
     );
   }
   if (update.blockers == null) {
+    // The broker probes loaded-thread activity only to decide whether a pending
+    // change may be applied, so a current runtime carries no blocker count.
+    // Reading that absence as a failed probe reported a fault on a healthy row.
+    // Keyed on the reported state rather than on the missing pending change: an
+    // errored or unavailable runtime has none either and is not up to date.
+    if (update.state == 'current') return l10n.settingsRuntimeNoRestartNeeded;
+    // A provider that cleared its own safety gate proved there is no blocker,
+    // whether or not it reports counts: OpenCode gates on session activity and
+    // never sends any. Calling that a blocked restart contradicted the same
+    // row's "Update ready" pill.
+    if (update.autoRestartReady) return l10n.settingsRuntimeNoBlockingSessions;
     // Deliberately the same line whether or not `update.detail` exists:
     // appending a raw diagnostic told the user nothing they could act on.
     return l10n.settingsRuntimeActivityUnavailable;
   }
   return l10n.settingsRuntimeBlockersCount('${update.blockers}');
 }
+
+// Whether this runtime carries a change a restart would apply. The row's pill
+// and button label and the confirm dialog all key off it: without a pending
+// change a restart applies nothing and only recovers a stuck runtime.
+bool _runtimeRestartIsPending(AgentRuntimeUpdateStatus update) =>
+    update.updateAvailable || update.state == 'pending';
 
 class _RuntimeError extends StatelessWidget {
   const _RuntimeError({required this.error, required this.onRetry});
