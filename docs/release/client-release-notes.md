@@ -5,12 +5,12 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.9 makes the signed stable update channel visible across native clients.
-Android can install a verified APK in-app; Linux, macOS, and Windows show their
-installed version and open the matching accepted download in the browser.
+0.5.10 is a fix release. It repairs installer pairing on clients whose broker
+is still starting, and restores the runtime controls that disappeared from
+Settings → Agents when a managed runtime had nothing pending.
 
-0.5.9 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.9 broker. Those clients do not expose features
+0.5.10 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.10 broker. Those clients do not expose features
 introduced by newer contract revisions. A 0.4.1 or older client remains
 read-only against current brokers.
 
@@ -18,18 +18,18 @@ Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's new in 0.5.9
+## What's fixed in 0.5.10
 
-- Native clients check the signed release channel without a broker connection,
-  show their installed version under Settings → General, and mark Settings when
-  an accepted update is available.
-- Android authenticates and installs the verified APK after user confirmation;
-  desktop clients open the exact accepted platform download in the browser.
-- Linux clients verify that Secret Service can persist credentials before
-  consuming an installer's one-use pairing. WSLg retries briefly while its
-  keyring becomes ready and reports a recoverable setup error if it cannot.
+- Installer pairing holds its one-use claim while a newly started broker becomes
+  responsive. Clients retry transient startup failures instead of dropping the
+  offer and falling through to manual authentication.
+- Settings → Agents no longer reports "Activity check unavailable" for a managed
+  runtime that is already up to date.
+- Force restart is offered on any server-managed runtime when nothing is
+  pending. A wedged Codex daemon reports no pending change, which is exactly
+  when the control used to disappear.
 
-For these features, use a 0.5.9 native client with a 0.5.9 broker release.
+Use a 0.5.10 native client with a 0.5.10 broker release.
 
 ## Downloads
 
