@@ -828,9 +828,8 @@ try {
   // rename fail outright. Neither installer may report a launch that did not happen.
   check('an already-open desktop client is named, not silently left on the previous version',
     /pgrep -f "\$CLIENT_LAUNCH"/.test(shellInstaller)
-      && /the desktop client is already running/.test(shellInstaller)
-      && /it was already running, so the window on screen is still the previous version/
-        .test(shellInstaller)
+      && /pkill -TERM -f "\$CLIENT_LAUNCH"/.test(shellInstaller)
+      && /closed the previous version and will restart/.test(shellInstaller)
       && /Get-Process -Name 'cosyncing'/.test(powerShellInstaller)
       && /Windows cannot replace it while it /.test(powerShellInstaller));
 
@@ -1517,16 +1516,25 @@ try {
   mkdirSync(runningClientBin);
   writeFileSync(join(runningClientBin, 'pgrep'), `#!/usr/bin/env bash
 # A pgrep that reports the desktop client as running, and nothing else.
+[ -f '${join(runningClientBin, 'stopped')}' ] && exit 1
 for argument in "$@"; do
   case "$argument" in */.cosyncing/client/cosyncing) exit 0 ;; esac
 done
 exit 1
+`, { mode: 0o755 });
+  writeFileSync(join(runningClientBin, 'pkill'), `#!/usr/bin/env bash
+touch '${join(runningClientBin, 'stopped')}'
+exit 0
 `, { mode: 0o755 });
   const runningClientHome = join(root, 'running-client-home');
   mkdirSync(runningClientHome);
   const runningClient = await run(['bash', join(handoffRelease, 'install.sh')], {
     cwd: root,
     stage: 'already-running client',
+    // The replacement fixture exits immediately after the installer detaches it.
+    // Give that expected process the same bounded reap window as the first-launch
+    // case above; a client that remains alive past it is still reported as a leak.
+    strayGraceMs: 5_000,
     env: {
       PATH: `${runningClientBin}:${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: runningClientHome,
@@ -1536,13 +1544,15 @@ exit 1
       LANG: 'C.UTF-8',
     },
   });
-  check('an open client is updated on disk, told about, and handed no offer it cannot read',
+  check('an open old client is stopped and the updated client receives the pairing offer',
     runningClient.exitCode === 0
       && existsSync(join(runningClientHome, '.cosyncing', 'client', 'cosyncing'))
-      && runningClient.stdout.includes('the desktop client is already running')
-      && runningClient.stdout.includes('it was already running, so the window on screen is still the')
-      && !existsSync(join(runningClientHome, '.cosyncing', 'client-pairing.json'))
-      && !/^Started |^Launched /m.test(runningClient.stdout),
+      && existsSync(join(runningClientBin, 'stopped'))
+      && runningClient.stdout.includes('closed the previous version and will restart')
+      && existsSync(join(runningClientHome, '.cosyncing', 'client-pairing.json'))
+      && runningClient.stdout.indexOf('closed the previous version and will restart')
+        < runningClient.stdout.indexOf('Pairing handoff:')
+      && /^Started |^Launched /m.test(runningClient.stdout),
     `${runningClient.exitCode}: ${runningClient.stdout.trim().split('\n').slice(-4).join(' | ')}`);
 
   // Stock macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all — the real physical failure.

@@ -42,6 +42,7 @@ void main() {
       overrides: [
         installerPairingInboxProvider.overrideWithValue(installerInbox),
         installerPairingStoragePreflightProvider.overrideWithValue(() async {}),
+        installerPairingBrokerPreflightProvider.overrideWithValue((_) async {}),
         credentialStoreProvider.overrideWithValue(credentialStore),
         brokerProfileRepositoryProvider.overrideWithValue(repository),
         activeBrokerProfileStoreProvider.overrideWithValue(activeStore),
@@ -191,36 +192,30 @@ void main() {
       },
     );
 
-    test(
-      'updates existing profile and preserves createdAt and credential key '
-      'without token',
-      () async {
-        const profileId = 'https://broker.example.com:9443';
-        const credentialKey = 'broker-token:$profileId';
-        final existing = existingProfile(credentialKey: credentialKey);
-        await repository.save(existing);
-        await credentialStore.writeBrokerToken(credentialKey, 'old-token');
+    test('updates existing profile and preserves createdAt and credential key '
+        'without token', () async {
+      const profileId = 'https://broker.example.com:9443';
+      const credentialKey = 'broker-token:$profileId';
+      final existing = existingProfile(credentialKey: credentialKey);
+      await repository.save(existing);
+      await credentialStore.writeBrokerToken(credentialKey, 'old-token');
 
-        await container
-            .read(pairingControllerProvider.notifier)
-            .importPayload(
-              '{ "brokerUrl": "$profileId", "displayName": "New Name" }',
-            );
+      await container
+          .read(pairingControllerProvider.notifier)
+          .importPayload(
+            '{ "brokerUrl": "$profileId", "displayName": "New Name" }',
+          );
 
-        final merged = await repository.getById(profileId);
-        expect(merged, isNotNull);
-        expect(merged!.displayName, 'New Name');
-        expect(merged.createdAt, existing.createdAt);
-        expect(merged.credentialKey, credentialKey);
-        expect(
-          await credentialStore.readBrokerToken(credentialKey),
-          'old-token',
-        );
-        expect(credentialStore.writeCount, 1);
-        expect(credentialStore.deleteCount, 0);
-        expect(activeStore.activeProfileId, profileId);
-      },
-    );
+      final merged = await repository.getById(profileId);
+      expect(merged, isNotNull);
+      expect(merged!.displayName, 'New Name');
+      expect(merged.createdAt, existing.createdAt);
+      expect(merged.credentialKey, credentialKey);
+      expect(await credentialStore.readBrokerToken(credentialKey), 'old-token');
+      expect(credentialStore.writeCount, 1);
+      expect(credentialStore.deleteCount, 0);
+      expect(activeStore.activeProfileId, profileId);
+    });
 
     test('returns clear error for empty input', () async {
       await container
@@ -311,9 +306,7 @@ void main() {
             brokerProfileRepositoryProvider.overrideWithValue(
               activeFailRepository,
             ),
-            activeBrokerProfileStoreProvider.overrideWithValue(
-              activeFailStore,
-            ),
+            activeBrokerProfileStoreProvider.overrideWithValue(activeFailStore),
           ],
         );
 
@@ -355,10 +348,7 @@ void main() {
         pairingControllerProvider.notifier,
       );
       final future = notifier.importPayload('https://broker.example.com:9443');
-      expect(
-        delayedContainer.read(pairingControllerProvider).isBusy,
-        isTrue,
-      );
+      expect(delayedContainer.read(pairingControllerProvider).isBusy, isTrue);
       delayedRepo.complete();
       await future;
 
@@ -431,10 +421,7 @@ void main() {
 
         await container
             .read(pairingControllerProvider.notifier)
-            .importPayload(
-              qr,
-              brokerUrl: 'https://cosy.example.com',
-            );
+            .importPayload(qr, brokerUrl: 'https://cosy.example.com');
 
         expect(
           container.read(pairingControllerProvider).notice,
@@ -536,10 +523,7 @@ void main() {
 
       await container
           .read(pairingControllerProvider.notifier)
-          .importPayload(
-            qr,
-            brokerUrl: 'not a url',
-          );
+          .importPayload(qr, brokerUrl: 'not a url');
       expect(
         container.read(pairingControllerProvider).notice,
         PairingNotice.brokerUrlInvalid,
@@ -608,56 +592,49 @@ void main() {
       },
     );
 
-    test(
-      'retains peer profile and credential when activation fails',
-      () async {
-        const profileId = 'http://broker:7734';
-        const credentialKey = 'broker-peer-token:$profileId';
-        final activeFailRepository = _InMemoryBrokerProfileRepository();
-        final activeFailCredentialStore = _SpyCredentialStore();
-        final activeFailStore = _FailingActiveBrokerProfileStore();
-        final activeFailTransportStore = _InMemoryTransportPairingStore();
-        final activeFailContainer = ProviderContainer(
-          overrides: [
-            credentialStoreProvider.overrideWithValue(
-              activeFailCredentialStore,
-            ),
-            brokerProfileRepositoryProvider.overrideWithValue(
-              activeFailRepository,
-            ),
-            activeBrokerProfileStoreProvider.overrideWithValue(
-              activeFailStore,
-            ),
-            transportPairingAcceptServiceProvider.overrideWithValue(
-              transportAcceptService,
-            ),
-            transportPairingStoreProvider.overrideWithValue(
-              activeFailTransportStore,
-            ),
-          ],
-        );
+    test('retains peer profile and credential when activation fails', () async {
+      const profileId = 'http://broker:7734';
+      const credentialKey = 'broker-peer-token:$profileId';
+      final activeFailRepository = _InMemoryBrokerProfileRepository();
+      final activeFailCredentialStore = _SpyCredentialStore();
+      final activeFailStore = _FailingActiveBrokerProfileStore();
+      final activeFailTransportStore = _InMemoryTransportPairingStore();
+      final activeFailContainer = ProviderContainer(
+        overrides: [
+          credentialStoreProvider.overrideWithValue(activeFailCredentialStore),
+          brokerProfileRepositoryProvider.overrideWithValue(
+            activeFailRepository,
+          ),
+          activeBrokerProfileStoreProvider.overrideWithValue(activeFailStore),
+          transportPairingAcceptServiceProvider.overrideWithValue(
+            transportAcceptService,
+          ),
+          transportPairingStoreProvider.overrideWithValue(
+            activeFailTransportStore,
+          ),
+        ],
+      );
 
-        await activeFailContainer
-            .read(pairingControllerProvider.notifier)
-            .importPayload(
-              _transportQr(version: 2, pairingId: 'pair_active_fail'),
-            );
+      await activeFailContainer
+          .read(pairingControllerProvider.notifier)
+          .importPayload(
+            _transportQr(version: 2, pairingId: 'pair_active_fail'),
+          );
 
-        final state = activeFailContainer.read(pairingControllerProvider);
-        expect(state.notice, PairingNotice.deviceActivationFailed);
-        expect(
-          (await activeFailRepository.getById(profileId))?.credentialKey,
-          credentialKey,
-        );
-        expect(
-          await activeFailCredentialStore.readBrokerToken(credentialKey),
-          'broker-peer-token',
-        );
-        expect(activeFailTransportStore.credentials, hasLength(1));
-        expect(activeFailContainer.read(activeBrokerProfileProvider), isNull);
-        activeFailContainer.dispose();
-      },
-    );
+      final state = activeFailContainer.read(pairingControllerProvider);
+      expect(state.notice, PairingNotice.deviceActivationFailed);
+      expect(
+        (await activeFailRepository.getById(profileId))?.credentialKey,
+        credentialKey,
+      );
+      expect(
+        await activeFailCredentialStore.readBrokerToken(credentialKey),
+        'broker-peer-token',
+      );
+      expect(activeFailTransportStore.credentials, hasLength(1));
+      expect(activeFailContainer.read(activeBrokerProfileProvider), isNull);
+      activeFailContainer.dispose();
+    });
 
     test(
       'guides legacy QR v1 payloads back to the token import path',
@@ -960,4 +937,13 @@ class _InstallerInbox implements InstallerPairingInbox {
     raw = null;
     return true;
   }
+
+  @override
+  Future<void> release() async {}
+
+  @override
+  Future<bool> hasPending() async => false;
+
+  @override
+  Stream<void> changes() => const Stream<void>.empty();
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
@@ -80,6 +82,21 @@ void main() {
     expect(result.error?.kind, FailureKind.unknown);
     expect(result.error?.detail, contains('network down'));
     expect(result.detail, contains('network down'));
+    verify(() => client.close()).called(1);
+  });
+
+  test('closes the client when a bounded probe times out', () async {
+    final response = Completer<HealthResponse>();
+    when(() => client.getHealth()).thenAnswer((_) => response.future);
+    probe = RealBrokerHealthProbe(
+      clientFactory: (_) => client,
+      timeout: const Duration(milliseconds: 1),
+    );
+
+    final result = await probe.probe(Uri.parse('http://127.0.0.1:7734'));
+
+    expect(result.isSuccess, isFalse);
+    expect(result.error?.lead, FailureLead.reachServer);
     verify(() => client.close()).called(1);
   });
 }

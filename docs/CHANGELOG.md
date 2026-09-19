@@ -13,6 +13,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Installer pairing now keeps an exclusive, recoverable claim while a newly
+  started broker becomes responsive. Native clients retry transient startup
+  failures instead of losing the one-use offer and falling through to manual
+  authentication.
 - Settings → Agents no longer reports "Activity check unavailable" for a managed runtime
   that is up to date. The server measures session activity only before applying a pending
   change, so a current runtime has no activity to report.

@@ -15,10 +15,15 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
   ///
   /// [clientFactory] is optional for testing and defaults to constructing
   /// a real client with the provided broker URL.
-  RealBrokerHealthProbe({BrokerClient Function(String baseUrl)? clientFactory})
-    : _clientFactory = clientFactory ?? _defaultClientFactory;
+  RealBrokerHealthProbe({
+    BrokerClient Function(String baseUrl)? clientFactory,
+    this.timeout,
+  }) : _clientFactory = clientFactory ?? _defaultClientFactory;
 
   final BrokerClient Function(String baseUrl) _clientFactory;
+
+  /// Optional upper bound for the transport request.
+  final Duration? timeout;
 
   static BrokerClient _defaultClientFactory(String baseUrl) {
     return BrokerClient(baseUrl: baseUrl);
@@ -28,7 +33,11 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
   Future<HealthProbeResult> probe(Uri baseUrl) async {
     final client = _clientFactory(baseUrl.toString());
     try {
-      final response = await client.getHealth();
+      final request = client.getHealth();
+      final requestTimeout = timeout;
+      final response = requestTimeout == null
+          ? await request
+          : await request.timeout(requestTimeout);
       if (!response.ok) {
         return const HealthProbeResult.failure(
           error: LocalizedFailure.notice(FailureLead.serverUnhealthy),

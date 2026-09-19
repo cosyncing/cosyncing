@@ -1372,6 +1372,8 @@
   "installerPairingFinishingBody": "Guardando el acceso seguro de este dispositivo a tu servidor.",
   "installerPairingStorageTitle": "No se pudo guardar el acceso seguro",
   "installerPairingStorageBody": "El servidor aún no ha consumido la solicitud de emparejamiento. Inicia o desbloquea el llavero del sistema e inténtalo de nuevo.",
+  "installerPairingBrokerTitle": "El servidor aún se está iniciando",
+  "installerPairingBrokerBody": "La solicitud de emparejamiento sigue protegida. Espera un momento y vuelve a intentarlo.",
   "installerPairingRetry": "Intentar de nuevo",
   "installerPairingDiscardTitle": "No se pudo proteger la solicitud de configuración",
   "installerPairingDiscardBody": "La solicitud de emparejamiento no se envió. Cierra las demás ventanas de Cosyncing e inténtalo de nuevo.",

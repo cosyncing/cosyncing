@@ -17,17 +17,25 @@ class InstallerPairingStartupBarrier extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen(installerPairingInboxChangesProvider, (_, next) {
+      if (next.hasValue) ref.invalidate(installerPairingHandoffProvider);
+    });
     final handoff = ref.watch(installerPairingHandoffProvider);
     final outcome = handoff.valueOrNull;
     if (outcome == InstallerPairingHandoffOutcome.secureStorageUnavailable ||
+        outcome == InstallerPairingHandoffOutcome.brokerUnavailable ||
         outcome == InstallerPairingHandoffOutcome.discardFailed) {
       final l10n = AppLocalizations.of(context);
       final discardFailed =
           outcome == InstallerPairingHandoffOutcome.discardFailed;
+      final brokerUnavailable =
+          outcome == InstallerPairingHandoffOutcome.brokerUnavailable;
       return Scaffold(
         key: Key(
           discardFailed
               ? 'installer-pairing-discard-error'
+              : brokerUnavailable
+              ? 'installer-pairing-broker-error'
               : 'installer-pairing-storage-error',
         ),
         body: SafeArea(
@@ -42,6 +50,8 @@ class InstallerPairingStartupBarrier extends ConsumerWidget {
                     Text(
                       discardFailed
                           ? l10n.installerPairingDiscardTitle
+                          : brokerUnavailable
+                          ? l10n.installerPairingBrokerTitle
                           : l10n.installerPairingStorageTitle,
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.titleMedium,
@@ -50,6 +60,8 @@ class InstallerPairingStartupBarrier extends ConsumerWidget {
                     Text(
                       discardFailed
                           ? l10n.installerPairingDiscardBody
+                          : brokerUnavailable
+                          ? l10n.installerPairingBrokerBody
                           : l10n.installerPairingStorageBody,
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodyMedium,

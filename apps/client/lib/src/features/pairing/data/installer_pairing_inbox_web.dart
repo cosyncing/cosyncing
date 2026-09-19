@@ -14,4 +14,13 @@ class FileInstallerPairingInbox implements InstallerPairingInbox {
 
   @override
   Future<bool> discard() async => true;
+
+  @override
+  Future<void> release() async {}
+
+  @override
+  Future<bool> hasPending() async => false;
+
+  @override
+  Stream<void> changes() => const Stream<void>.empty();
 }
