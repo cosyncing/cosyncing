@@ -1377,6 +1377,8 @@
   "installerPairingFinishingBody": "正在安全保存此设备访问服务器所需的凭据。",
   "installerPairingStorageTitle": "无法保存安全访问凭据",
   "installerPairingStorageBody": "服务器尚未使用此配对请求。请解锁或启动系统密钥环，然后重试。",
+  "installerPairingBrokerTitle": "服务器仍在启动",
+  "installerPairingBrokerBody": "配对请求仍然安全。请稍候片刻，然后重试。",
   "installerPairingRetry": "重试",
   "installerPairingDiscardTitle": "无法安全处理设置请求",
   "installerPairingDiscardBody": "配对请求尚未发送。请关闭其他 Cosyncing 窗口，然后重试。",

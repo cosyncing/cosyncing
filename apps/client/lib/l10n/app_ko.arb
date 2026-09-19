@@ -1372,6 +1372,8 @@
   "installerPairingFinishingBody": "이 기기에서 서버에 안전하게 접근할 수 있도록 자격 증명을 저장하고 있습니다.",
   "installerPairingStorageTitle": "보안 접근 정보를 저장하지 못했습니다",
   "installerPairingStorageBody": "서버는 아직 페어링 요청을 사용하지 않았습니다. 시스템 키링을 시작하거나 잠금 해제한 후 다시 시도하세요.",
+  "installerPairingBrokerTitle": "서버가 아직 시작 중입니다",
+  "installerPairingBrokerBody": "페어링 요청은 안전하게 보관되어 있습니다. 잠시 기다린 후 다시 시도하세요.",
   "installerPairingRetry": "다시 시도",
   "installerPairingDiscardTitle": "설정 요청을 안전하게 처리하지 못했습니다",
   "installerPairingDiscardBody": "페어링 요청은 아직 전송되지 않았습니다. 다른 Cosyncing 창을 닫은 후 다시 시도하세요.",

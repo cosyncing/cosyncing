@@ -102,14 +102,26 @@ String? installerPairingHandoffPath(
       '$installerPairingHandoffFileName';
 }
 
-/// Reads and consumes the installer's one-shot pairing handoff.
+/// Claims and consumes the installer's one-shot pairing handoff.
 abstract class InstallerPairingInbox {
-  /// Returns the handoff document, or `null` when there is none to read.
+  /// Atomically claims and returns the handoff, or `null` when none is ready.
+  ///
+  /// The claim prevents another client process from redeeming the same offer.
+  /// It remains recoverable across process exits until [discard] succeeds.
   Future<String?> read();
 
-  /// Removes the handoff before its one-use offer is redeemed.
+  /// Permanently removes the claimed handoff.
   ///
   /// Returns false when removal failed. Callers must not redeem the offer while
   /// its reusable bytes remain on disk.
   Future<bool> discard();
+
+  /// Releases this process's claim while preserving the handoff for retry.
+  Future<void> release();
+
+  /// Whether an unclaimed handoff is waiting behind the current claim.
+  Future<bool> hasPending();
+
+  /// Emits when an installer places a new handoff into this inbox.
+  Stream<void> changes();
 }

@@ -30,7 +30,14 @@ void main() {
 
   testWidgets('shows its child when startup pairing is idle', (tester) async {
     await tester.pumpWidget(
-      const ProviderScope(child: _TestApp()),
+      ProviderScope(
+        overrides: [
+          installerPairingHandoffProvider.overrideWith(
+            (ref) async => InstallerPairingHandoffOutcome.absent,
+          ),
+        ],
+        child: const _TestApp(),
+      ),
     );
     await tester.pump();
 
@@ -45,9 +52,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          installerPairingHandoffProvider.overrideWith(
-            (ref) => outcome.future,
-          ),
+          installerPairingHandoffProvider.overrideWith((ref) => outcome.future),
         ],
         child: const _TestApp(),
       ),
@@ -61,6 +66,38 @@ void main() {
 
     outcome.complete(InstallerPairingHandoffOutcome.absent);
     await tester.pump();
+    expect(find.text('routed content'), findsOne);
+  });
+
+  testWidgets('rechecks the inbox when an open client receives a handoff', (
+    tester,
+  ) async {
+    final changes = StreamController<void>();
+    addTearDown(changes.close);
+    var reads = 0;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          installerPairingInboxChangesProvider.overrideWith(
+            (ref) => changes.stream,
+          ),
+          installerPairingHandoffProvider.overrideWith((ref) async {
+            reads += 1;
+            return reads == 1
+                ? InstallerPairingHandoffOutcome.absent
+                : InstallerPairingHandoffOutcome.imported;
+          }),
+        ],
+        child: const _TestApp(),
+      ),
+    );
+    await tester.pump();
+    expect(reads, 1);
+
+    changes.add(null);
+    await tester.pump();
+    await tester.pump();
+    expect(reads, 2);
     expect(find.text('routed content'), findsOne);
   });
 
@@ -107,6 +144,25 @@ void main() {
     expect(find.text('routed content'), findsNothing);
   });
 
+  testWidgets('explains a delayed broker and retains retry', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          installerPairingHandoffProvider.overrideWith(
+            (ref) async => InstallerPairingHandoffOutcome.brokerUnavailable,
+          ),
+        ],
+        child: const _TestApp(),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('installer-pairing-broker-error')), findsOne);
+    expect(find.text('Your server is still starting'), findsOne);
+    expect(find.text('Try again'), findsOne);
+    expect(find.text('routed content'), findsNothing);
+  });
+
   testWidgets('explains a consumed offer failure before manual sign-in', (
     tester,
   ) async {
@@ -141,9 +197,7 @@ class _TestApp extends StatelessWidget {
     return const MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
-      home: InstallerPairingStartupBarrier(
-        child: Text('routed content'),
-      ),
+      home: InstallerPairingStartupBarrier(child: Text('routed content')),
     );
   }
 }

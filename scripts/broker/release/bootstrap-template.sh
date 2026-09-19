@@ -1075,14 +1075,37 @@ for SUPERSEDED in "$INSTALL_DIR"/cosyncing-web-*; do
   fi
 done
 
+# Stop an open desktop client before publishing a one-use offer. A client from
+# this release watches the inbox while running; publishing first would let it
+# claim the offer and then receive SIGTERM between acceptance and persistence.
+# Never escalate to SIGKILL. If the process does not exit, leave it untouched
+# from here onward and publish the offer for its watcher or a manual reopen.
+if [ -z "$CLIENT_SKIP" ] && [ -n "$CLIENT_RUNNING" ]; then
+  if command -v pkill >/dev/null 2>&1 \
+    && pkill -TERM -f "$CLIENT_LAUNCH" >/dev/null 2>&1
+  then
+    CLIENT_STOP_WAIT=0
+    while pgrep -f "$CLIENT_LAUNCH" >/dev/null 2>&1 \
+      && [ "$CLIENT_STOP_WAIT" -lt 5 ]
+    do
+      sleep 1
+      CLIENT_STOP_WAIT=$((CLIENT_STOP_WAIT + 1))
+    done
+    if ! pgrep -f "$CLIENT_LAUNCH" >/dev/null 2>&1; then
+      CLIENT_RUNNING=''
+      printf 'Desktop client: closed the previous version and will restart %s.\n' "$VERSION"
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------------------------------
 # The pairing handoff.
 #
-# The client reads $COSYNCING_HOME/client-pairing.json once at startup, imports it, and deletes it — so
-# the first launch after an all-in-one install is already paired with the broker beside it instead of
-# asking a user to retype a QR payload from one window into another. The offer is one-use and expires in
-# five minutes, exactly as `pair` prints it, so a file left behind by a client that never started is a
-# dead offer rather than a standing credential.
+# The client reads $COSYNCING_HOME/client-pairing.json at startup and watches for a new handoff while it
+# remains open. It imports and deletes the offer, so an all-in-one install is already paired with the
+# broker beside it instead of asking a user to retype a QR payload from one window into another. The
+# offer is one-use and expires in five minutes, exactly as `pair` prints it, so a file left behind by a
+# client that never started is a dead offer rather than a standing credential.
 #
 # Parsed with the Bun this install just resolved rather than with awk: it is already a hard dependency of
 # the thing being installed, and a JSON reader assembled from line matching would be the least trustworthy
@@ -1122,11 +1145,6 @@ if [ -n "$CLIENT_SKIP" ]; then
   # No client on this host, so no offer is created. Writing one would burn a one-use pairing that expires
   # in five minutes and that nothing here can redeem, and leave it on disk looking like a credential.
   printf 'Pairing handoff: not needed, no desktop client was installed. Pair another device with:\n  %s pair\n' \
-    "$APPLICATION"
-elif [ -n "$CLIENT_RUNNING" ]; then
-  # The same rule as the no-client case: an offer only a startup reads, written for a client that is not
-  # going to start, is a one-use credential on disk that nothing can redeem and that expires unattended.
-  printf 'Pairing handoff: not written — the desktop client is already running and reads an offer only at\nstartup. Quit and reopen it, then pair with:\n  %s pair\n' \
     "$APPLICATION"
 elif ! ensure_handoff_home; then
   handoff_failed "the client's own home could not be created at $HANDOFF_HOME"
@@ -1173,7 +1191,7 @@ fi
 
 if [ -z "$CLIENT_SKIP" ]; then
   if [ -n "$CLIENT_RUNNING" ]; then
-    printf 'Desktop client: it was already running, so the window on screen is still the previous version.\nQuit and reopen %s to use %s.\n' \
+    printf 'Desktop client: could not close the previous version safely. Quit and reopen %s within five minutes to finish pairing and use %s.\n' \
       "$CLIENT_LAUNCH" "$VERSION"
   elif [ -n "$CLIENT_CONTAINER" ]; then
     # Deliberately WITHOUT --env. COSYNCING_HOME is the only thing this client reads that variable for,

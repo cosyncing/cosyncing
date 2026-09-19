@@ -4444,6 +4444,14 @@
   "@installerPairingStorageBody": {
     "description": "Recovery guidance when the desktop secure credential store is unavailable during installer pairing."
   },
+  "installerPairingBrokerTitle": "Your server is still starting",
+  "@installerPairingBrokerTitle": {
+    "description": "Title shown when automatic installer pairing cannot reach the newly started broker"
+  },
+  "installerPairingBrokerBody": "The pairing offer is still safe. Wait a moment, then try again.",
+  "@installerPairingBrokerBody": {
+    "description": "Body shown when automatic installer pairing keeps an offer after transient broker failures"
+  },
   "installerPairingRetry": "Try again",
   "@installerPairingRetry": {
     "description": "Retries the retained installer pairing handoff after secure storage becomes available."

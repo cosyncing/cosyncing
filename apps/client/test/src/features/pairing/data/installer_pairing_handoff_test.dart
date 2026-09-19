@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/pairing_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/data/installer_pairing_handoff.dart';
+import 'package:cosyncing_client/src/features/pairing/data/installer_pairing_inbox.dart';
 import 'package:cosyncing_client/src/features/pairing/data/secure_storage_preflight.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -101,20 +102,29 @@ void main() {
   });
 
   group('FileInstallerPairingInbox', () {
-    test('reads then removes the file, and reads nothing twice', () async {
+    test('atomically claims, releases, and later discards an offer', () async {
       final home = Directory.systemTemp.createTempSync('cosy-handoff-');
       addTearDown(() => home.deleteSync(recursive: true));
       final path = installerPairingHandoffPath({'COSYNCING_HOME': home.path})!;
       File(path).writeAsStringSync('{"qr": "cosy://x"}');
+      final inbox = FileInstallerPairingInbox(path: path);
 
-      // The real inbox reads Platform.environment, which a test cannot set, so
-      // the file behaviour is exercised through the same path resolver the
-      // inbox uses rather than through the inbox's own environment read.
-      expect(File(path).existsSync(), isTrue);
-      final raw = File(path).readAsStringSync();
-      File(path).deleteSync();
-      expect(parseInstallerPairingHandoff(raw), isNotNull);
+      expect(parseInstallerPairingHandoff((await inbox.read())!), isNotNull);
       expect(File(path).existsSync(), isFalse);
+      expect(File('$path.claimed').existsSync(), isTrue);
+
+      await inbox.release();
+      File(path).writeAsStringSync('{"qr": "cosy://fresh"}');
+      final retry = FileInstallerPairingInbox(path: path);
+      expect(parseInstallerPairingHandoff((await retry.read())!), isNotNull);
+      expect(await retry.discard(), isTrue);
+      expect(File('$path.claimed').existsSync(), isFalse);
+      final fresh = FileInstallerPairingInbox(path: path);
+      expect(
+        parseInstallerPairingHandoff((await fresh.read())!)!.qr,
+        'cosy://fresh',
+      );
+      expect(await fresh.discard(), isTrue);
     });
   });
 
@@ -130,9 +140,10 @@ void main() {
           installerPairingStoragePreflightProvider.overrideWithValue(
             _StoragePreflight().verify,
           ),
-          installerPairingRetryDelayProvider.overrideWithValue(
-            (_) async {},
+          installerPairingBrokerPreflightProvider.overrideWithValue(
+            _BrokerPreflight().verify,
           ),
+          installerPairingRetryDelayProvider.overrideWithValue((_) async {}),
           if (now != null)
             installerPairingClockProvider.overrideWithValue(() => now),
           ...overrides,
@@ -205,6 +216,35 @@ void main() {
       expect(inbox.discarded, isTrue);
     });
 
+    test('a fresh pending offer follows an expired stale claim', () async {
+      final inbox = _FakeInbox(
+        jsonEncode({
+          'qr': 'https://broker.example/stale',
+          'expiresAt': '2026-09-05T11:00:00.000Z',
+        }),
+        nextDocument: jsonEncode({
+          'qr': 'https://broker.example/fresh',
+          'expiresAt': '2026-09-05T12:05:00.000Z',
+        }),
+      );
+      final container = containerFor(
+        inbox,
+        now: DateTime.utc(2026, 9, 5, 12),
+        overrides: [
+          pairingControllerProvider.overrideWith(_RecordingController.new),
+        ],
+      );
+
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.imported,
+      );
+      final controller =
+          container.read(pairingControllerProvider.notifier)
+              as _RecordingController;
+      expect(controller.imported, ['https://broker.example/fresh']);
+    });
+
     test('a malformed offer is discarded without importing', () async {
       final inbox = _FakeInbox('{ not json');
       final container = containerFor(
@@ -221,21 +261,28 @@ void main() {
       expect(inbox.discarded, isTrue);
     });
 
-    test('an import that throws still consumes the file', () async {
-      final inbox = _FakeInbox('{"qr": "https://broker.example:9443"}');
-      final container = containerFor(
-        inbox,
-        overrides: [
-          pairingControllerProvider.overrideWith(_ThrowingController.new),
-        ],
-      );
+    test(
+      'an ambiguous import failure is not retried',
+      () async {
+        final inbox = _FakeInbox('{"qr": "https://broker.example:9443"}');
+        final container = containerFor(
+          inbox,
+          overrides: [
+            pairingControllerProvider.overrideWith(_ThrowingController.new),
+          ],
+        );
 
-      expect(
-        await container.read(installerPairingHandoffProvider.future),
-        InstallerPairingHandoffOutcome.failed,
-      );
-      expect(inbox.discarded, isTrue);
-    });
+        expect(
+          await container.read(installerPairingHandoffProvider.future),
+          InstallerPairingHandoffOutcome.failed,
+        );
+        expect(inbox.discarded, isTrue);
+        final controller =
+            container.read(pairingControllerProvider.notifier)
+                as _ThrowingController;
+        expect(controller.attempts, 1);
+      },
+    );
 
     test('reports a malformed offer that cannot be removed', () async {
       final inbox = _FakeInbox('{ not json', discardSucceeds: false);
@@ -273,6 +320,7 @@ void main() {
       );
       expect(preflight.attempts, 5);
       expect(inbox.discarded, isFalse);
+      expect(inbox.released, isTrue);
       final controller =
           container.read(pairingControllerProvider.notifier)
               as _RecordingController;
@@ -340,7 +388,7 @@ void main() {
       expect(inbox.discarded, isTrue);
     });
 
-    test('does not redeem when the offer cannot be removed', () async {
+    test('does not redeem when the claimed offer cannot be erased', () async {
       final inbox = _FakeInbox(
         '{"qr": "https://broker.example:9443"}',
         discardSucceeds: false,
@@ -362,14 +410,10 @@ void main() {
       expect(controller.imported, isEmpty);
     });
 
-    // Redeeming calls the broker and then writes to the platform credential
-    // store, which on macOS can sit on a login-keychain prompt. A discard that
-    // waits for that leaves a live one-use offer on disk for as long as it
-    // takes — observed on a real Mac, where the broker had already registered
-    // the peer while the file was still there. The file must be gone before the
-    // import is even reached.
+    // Claiming protects the safe preflights. The reusable bytes are erased
+    // immediately before the non-idempotent acceptance call.
     test(
-      'the offer is gone before redemption is attempted, not after',
+      'the offer is erased before redemption is attempted',
       () async {
         final inbox = _FakeInbox(
           jsonEncode({
@@ -392,9 +436,40 @@ void main() {
                 as _StalledController;
         await controller.started.future;
 
+        expect(inbox.claimed, isTrue);
         expect(inbox.discarded, isTrue);
       },
     );
+
+    test('retries broker readiness and accepts the offer only once', () async {
+      final inbox = _FakeInbox(
+        jsonEncode({
+          'qr': 'https://broker.example:9443',
+          'expiresAt': '2026-09-05T12:05:00.000Z',
+        }),
+      );
+      final container = containerFor(
+        inbox,
+        now: DateTime.utc(2026, 9, 5, 12),
+        overrides: [
+          installerPairingBrokerPreflightProvider.overrideWithValue(
+            _BrokerPreflight(failuresBeforeSuccess: 3).verify,
+          ),
+          pairingControllerProvider.overrideWith(_RecordingController.new),
+        ],
+      );
+
+      expect(
+        await container.read(installerPairingHandoffProvider.future),
+        InstallerPairingHandoffOutcome.imported,
+      );
+      final controller =
+          container.read(pairingControllerProvider.notifier)
+              as _RecordingController;
+      expect(controller.imported, ['https://broker.example:9443']);
+      expect(inbox.discarded, isTrue);
+      expect(inbox.released, isFalse);
+    });
 
     test('an unreadable inbox never blocks startup', () async {
       final inbox = _FakeInbox(null, throwOnRead: true);
@@ -413,24 +488,47 @@ class _FakeInbox implements InstallerPairingInbox {
     this._document, {
     this.throwOnRead = false,
     this.discardSucceeds = true,
+    this.nextDocument,
   });
 
-  final String? _document;
+  String? _document;
+  String? nextDocument;
+  bool _pendingReady = false;
   final bool throwOnRead;
   final bool discardSucceeds;
   bool discarded = false;
+  bool released = false;
+  bool claimed = false;
 
   @override
   Future<String?> read() async {
     if (throwOnRead) throw const FileSystemException('unreadable');
+    _pendingReady = false;
+    claimed = _document != null;
     return _document;
   }
 
   @override
   Future<bool> discard() async {
     discarded = true;
+    if (discardSucceeds) {
+      _document = nextDocument;
+      nextDocument = null;
+      _pendingReady = _document != null;
+    }
     return discardSucceeds;
   }
+
+  @override
+  Future<void> release() async {
+    released = true;
+  }
+
+  @override
+  Future<bool> hasPending() async => _pendingReady;
+
+  @override
+  Stream<void> changes() => const Stream<void>.empty();
 }
 
 class _RecordingController extends PairingController {
@@ -456,9 +554,26 @@ class _StalledController extends PairingController {
 }
 
 class _ThrowingController extends PairingController {
+  int attempts = 0;
+
   @override
   Future<void> importPayload(String rawPayload, {String? brokerUrl}) async {
+    attempts += 1;
     throw StateError('pairing exploded');
+  }
+}
+
+class _BrokerPreflight {
+  _BrokerPreflight({this.failuresBeforeSuccess = 0});
+
+  final int failuresBeforeSuccess;
+  int attempts = 0;
+
+  Future<void> verify(String brokerUrl) async {
+    attempts += 1;
+    if (attempts <= failuresBeforeSuccess) {
+      throw StateError('fixture broker unavailable');
+    }
   }
 }
 

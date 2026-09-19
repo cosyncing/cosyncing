@@ -1372,6 +1372,8 @@
   "installerPairingFinishingBody": "この端末からサーバーへ安全にアクセスするための認証情報を保存しています。",
   "installerPairingStorageTitle": "安全なアクセス情報を保存できませんでした",
   "installerPairingStorageBody": "サーバーはまだペアリング要求を使用していません。システムのキーリングを起動またはロック解除してから、もう一度お試しください。",
+  "installerPairingBrokerTitle": "サーバーはまだ起動中です",
+  "installerPairingBrokerBody": "ペアリング要求は安全に保持されています。しばらく待ってから、もう一度お試しください。",
   "installerPairingRetry": "もう一度試す",
   "installerPairingDiscardTitle": "セットアップ要求を安全に処理できませんでした",
   "installerPairingDiscardBody": "ペアリング要求はまだ送信されていません。他の Cosyncing ウィンドウを閉じてから、もう一度お試しください。",
