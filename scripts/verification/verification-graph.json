@@ -1733,6 +1733,9 @@
           ],
           "sourceOwners": [
             "packages/typescript/broker/src/installation/tokdash-report.ts",
+            "packages/typescript/broker/src/installation/tokdash-report-store.ts",
+            "packages/typescript/broker/src/installation/tokdash-report-service.ts",
+            "packages/typescript/broker/src/installation/tokdash-report-validation.ts",
             "packages/typescript/broker/test/broker/test-tokdash-report.ts"
           ]
         },

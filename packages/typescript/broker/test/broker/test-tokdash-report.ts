@@ -9,7 +9,7 @@
  * report, and the window cache is keyed, bounded and expiring.
  */
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -28,7 +28,9 @@ import {
   TOKDASH_REPORT_WINDOW_FLOOR,
   withoutProjectNames,
 } from '../../src/installation/tokdash-report.ts';
+import { TokdashReportService } from '../../src/installation/tokdash-report-service.ts';
 import {
+  TOKDASH_REPORT_STORE_MAX_AGE_MS,
   brokerLocalToday,
   fetchTokdashPricingIdentity,
   isClosedTokdashReportWindow,
@@ -674,7 +676,7 @@ const sampleReport = await (async () => {
   return fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
 })();
 
-const FP = 'r1|tokdash:2.5.7|pricing:baseline:2.0.25';
+const FP = tokdashReportStoreFingerprint(sampleReport.runtime.version, 'baseline:2.0.25')!;
 
 await test('the day a window is judged against is the local one', () => {
   // Local components, zero-padded. A Tokdash day is a local day, so a broker
@@ -692,7 +694,7 @@ await test('the day a window is judged against is the local one', () => {
 
 await test('only a window that has ended is treated as finished', () => {
   // The window the reader is inside is still taking writes; one that ended is
-  // the same figures forever.
+  // eligible for bounded historical caching.
   assert.equal(isClosedTokdashReportWindow({ from: '2026-08-01', to: '2026-08-31' }, '2026-09-19'), true);
   assert.equal(isClosedTokdashReportWindow({ from: '2026-09-01', to: '2026-09-19' }, '2026-09-19'), false);
   assert.equal(isClosedTokdashReportWindow({ from: '2026-09-01', to: '2026-09-20' }, '2026-09-19'), false);
@@ -819,19 +821,19 @@ await test('an unidentifiable derivation has no fingerprint', () => {
 });
 
 await test('a stored window comes back with the time it was read', () => {
-  const { store, file } = storeAt({ now: () => 1_700_000_000_000 });
+  const { store, file } = storeAt({ now: () => 1_789_776_000_000 });
   assert.equal(store.read(WINDOW, FP), undefined, 'nothing is stored yet');
 
   store.write(WINDOW, sampleReport, FP);
   const stored = store.read(WINDOW, FP);
   assert.notEqual(stored, undefined);
-  assert.equal(stored?.storedAt, 1_700_000_000_000);
+  assert.equal(stored?.storedAt, 1_789_776_000_000);
   assert.deepEqual(stored?.report.totals, sampleReport.totals);
   // Read back through a second instance on the same file: the point of the
   // store is surviving the process that wrote it.
-  const reopened = storeAt({ file }).store;
+  const reopened = storeAt({ file, now: () => 1_789_776_000_000 }).store;
   assert.notEqual(reopened.read(WINDOW, FP), undefined);
-  assert.equal(reopened.read(WINDOW, FP)?.storedAt, 1_700_000_000_000);
+  assert.equal(reopened.read(WINDOW, FP)?.storedAt, 1_789_776_000_000);
 });
 
 await test('a different derivation drops every stored window', () => {
@@ -841,7 +843,7 @@ await test('a different derivation drops every stored window', () => {
   // A pricing edit or a Tokdash upgrade moves the fingerprint. Entries written
   // under the old one are not mixed in with the new: they go.
   const moved = storeAt({ file }).store;
-  const other = 'r1|tokdash:2.5.8|pricing:baseline:2.0.25';
+  const other = tokdashReportStoreFingerprint(sampleReport.runtime.version, 'baseline:2.0.26')!;
   assert.equal(moved.read(WINDOW, other), undefined);
   moved.write(WINDOW, sampleReport, other);
   assert.equal(moved.size(other), 1, 'the file is replaced, not appended to');
@@ -863,13 +865,13 @@ await test('eviction drops the least recently READ, not the oldest written', () 
   const february = { from: '2026-02-01', to: '2026-02-28' };
   const march = { from: '2026-03-01', to: '2026-03-31' };
   const { store } = storeAt({ maxEntries: 2 });
-  store.write(january, sampleReport, FP);
-  store.write(february, sampleReport, FP);
+  store.write(january, { ...sampleReport, range: { ...sampleReport.range, ...january } }, FP);
+  store.write(february, { ...sampleReport, range: { ...sampleReport.range, ...february } }, FP);
 
   // January is the oldest WRITE, but the reader keeps coming back to it. The
   // entry nothing has asked for is the one that should go.
   assert.notEqual(store.read(january, FP), undefined);
-  store.write(march, sampleReport, FP);
+  store.write(march, { ...sampleReport, range: { ...sampleReport.range, ...march } }, FP);
 
   assert.equal(store.size(FP), 2);
   assert.notEqual(store.read(january, FP), undefined, 'the re-read window survives');
@@ -894,11 +896,11 @@ await test('an entry of the wrong shape is dropped, not rendered as zeros', () =
   // missing field, so without this backstop a wrong-shaped entry renders as a
   // month of zeros on a page with no refresh.
   const file = join(storeRoot, `shapes-${(storeSeq += 1)}.json`);
-  const entry = (from: string, report: unknown) => ({ from, to: from, storedAt: 1, report });
+  const entry = (from: string, report: unknown) => ({ from, to: WINDOW.to, storedAt: Date.now(), report });
   writeFileSync(
     file,
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       fingerprint: FP,
       entries: [
         entry('2026-01-01', {}),
@@ -914,7 +916,173 @@ await test('an entry of the wrong shape is dropped, not rendered as zeros', () =
   );
   const store = storeAt({ file }).store;
   assert.equal(store.size(FP), 1, 'only the well-formed entry survives');
-  assert.notEqual(store.read({ from: WINDOW.from, to: WINDOW.from }, FP), undefined);
+  assert.notEqual(store.read(WINDOW, FP), undefined);
+});
+
+
+await test('empty required upstream objects cannot become durable reports', async () => {
+  for (const overrides of [{ insights: {} }, { activeTime: {} }, { insights: insightsBody({ projects: {} }) }]) {
+    const report = await fetchTokdashReport(undefined, WINDOW, { fetch: stubFetch(overrides).fetch });
+    assert.equal(isPersistableTokdashReport(report), false);
+    const { store } = storeAt();
+    store.write(WINDOW, report, FP);
+    assert.equal(store.read(WINDOW, FP), undefined);
+  }
+});
+
+await test('a complete idle window is persistable without inventing activity', async () => {
+  const report = await fetchTokdashReport(undefined, WINDOW, { fetch: stubFetch({
+    usage: usageBody({ total_tokens: 0, total_cost: 0, total_messages: 0, by_tool: {}, coding_apps: {} }),
+    activeTime: activeTimeBody({ active_ms: 0, active_ms_sum: 0, by_tool: {} }),
+    insights: insightsBody({
+      hourly: { buckets: [], peak_hour: null, night_share: null, night_hours: [] },
+      weekday: { buckets: [], peak_weekday: null }, daily: [],
+      projects: { projects: [], unattributed: { tokens: 0, cost: 0, messages: 0 }, attributed_project_count: 0, names_included: true },
+      streaks: { current_streak: 0, longest_streak: 0, active_days: 0, total_days: 31 },
+      firsts: { first_active_day: null, last_active_day: null, busiest_day: null, busiest_day_tokens: null },
+    }),
+  }).fetch });
+  assert.equal(isPersistableTokdashReport(report), true);
+  assert.deepEqual(report.daily, []);
+  const { store } = storeAt(); store.write(WINDOW, report, FP);
+  assert.equal(store.read(WINDOW, FP)?.report.totals.tokens, 0);
+});
+
+await test('disk reads reject degraded DTOs, malformed rows, wrong ranges and old schemas', () => {
+  const corruptions = [
+    (r: any) => { delete r.runtime.version; },
+    (r: any) => { r.insightsUnavailable = 'unavailable'; },
+    (r: any) => { r.activeTime = null; },
+    (r: any) => { r.sourceErrors = ['codex']; },
+    (r: any) => { r.tools[0].tokens = '100'; },
+    (r: any) => { r.range.from = '2026-07-01'; },
+    (r: any) => { delete r.topModelsByTokens; },
+  ];
+  for (const corrupt of corruptions) {
+    const { store, file } = storeAt(); store.write(WINDOW, sampleReport, FP);
+    const disk = JSON.parse(readFileSync(file, 'utf8')); corrupt(disk.entries[0].report);
+    writeFileSync(file, JSON.stringify(disk)); store.forget();
+    assert.equal(store.read(WINDOW, FP), undefined);
+  }
+  const { store, file } = storeAt(); store.write(WINDOW, sampleReport, FP);
+  const disk = JSON.parse(readFileSync(file, 'utf8')); disk.schemaVersion = 1;
+  writeFileSync(file, JSON.stringify(disk)); store.forget();
+  assert.equal(store.read(WINDOW, FP), undefined, 'old potentially poisoned caches must be rebuilt');
+});
+
+/** Deterministic live-source changes without sleeping or touching real runtime state. */
+function serviceFixture(options: { identityTtlMs?: number; ttlMs?: number } = {}) {
+  let now = Date.parse('2026-09-20T12:00:00Z');
+  const { store, file } = storeAt({ now: () => now });
+  const state = {
+    source: 'baseline', pricingFails: false, usageFails: false, version: '2.5.3',
+    tokens: 100, cost: 1, calls: [] as URL[],
+    onUsage: undefined as undefined | (() => void | Promise<void>),
+  };
+  const upstream = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input)); state.calls.push(url);
+    if (url.pathname === '/api/pricing-db') return state.pricingFails
+      ? new Response('', { status: 503 })
+      : Response.json({ source: state.source, baseline_version: '2.0.25' });
+    if (url.pathname === '/api/version') return Response.json(versionBody({ runtime_version: state.version }));
+    const range = { from: url.searchParams.get('date_from'), to: url.searchParams.get('date_to'), recognized: true };
+    if (url.pathname === '/api/usage') {
+      await state.onUsage?.();
+      return state.usageFails ? new Response('', { status: 503 })
+        : Response.json(usageBody({ range, total_tokens: state.tokens, total_cost: state.cost }));
+    }
+    if (url.pathname === '/api/active-time') return Response.json(activeTimeBody());
+    return Response.json(insightsBody({ range }));
+  }) as typeof fetch;
+  const create = () => new TokdashReportService({
+    baseUrl: 'http://127.0.0.1:9876', store: new TokdashReportStore({ path: file, now: () => now }),
+    cache: new TokdashReportCache({ now: () => now, ttlMs: options.ttlMs }),
+    now: () => now, fetch: upstream, identityTtlMs: options.identityTtlMs,
+  });
+  return { state, store, file, create, advance: (ms: number) => { now += ms; }, now: () => now };
+}
+const JULY = { from: '2026-07-01', to: '2026-07-31' };
+
+await test('identity failure recovers without five minutes of negative memoization', async () => {
+  const f = serviceFixture(); const service = f.create(); f.state.pricingFails = true;
+  await service.read(WINDOW);
+  assert.equal(existsSync(f.file), false);
+  f.state.pricingFails = false;
+  await service.read(JULY); f.store.forget();
+  assert.notEqual(f.store.read(JULY, FP), undefined);
+});
+
+await test('a verified disk hit warms memory without changing its original timestamp', async () => {
+  const f = serviceFixture({ identityTtlMs: 0 }); await f.create().read(WINDOW);
+  const captured = f.now(); f.advance(60_000); const service = f.create();
+  const disk = await service.read(WINDOW);
+  assert.equal(disk.entry.cachedAt, captured);
+  const calls = f.state.calls.length; f.state.pricingFails = true; f.state.usageFails = true;
+  const memory = await service.read(WINDOW);
+  assert.equal(memory.servedFromCache, true); assert.equal(memory.entry.cachedAt, captured);
+  assert.equal(f.state.calls.length, calls);
+  f.advance(5 * 60_000);
+  await assert.rejects(service.read(WINDOW), /usage request failed/);
+});
+
+await test('warming memory cannot extend a memoized identity beyond its freshness budget', async () => {
+  const f = serviceFixture(); const seed = f.create();
+  await seed.read(WINDOW); await seed.read(JULY);
+  const service = f.create(); await service.read(WINDOW);
+  f.advance(5 * 60_000 - 1); await service.read(JULY);
+  f.state.pricingFails = true; f.state.usageFails = true; f.advance(1);
+  await assert.rejects(service.read(JULY), /usage request failed/);
+});
+
+await test('historical changes refresh at the durable deadline, including upstream caches', async () => {
+  const f = serviceFixture(); await f.create().read(WINDOW);
+  f.advance(TOKDASH_REPORT_STORE_MAX_AGE_MS - 1); const service = f.create();
+  assert.equal((await service.read(WINDOW)).entry.report.totals.tokens, 100);
+  f.state.tokens = 999; f.advance(1); f.state.calls.length = 0;
+  const rebuilt = await service.read(WINDOW);
+  assert.equal(rebuilt.entry.report.totals.tokens, 999); assert.equal(rebuilt.servedFromCache, false);
+  const scans = f.state.calls.filter((u) => ['/api/usage', '/api/active-time', '/api/insights'].includes(u.pathname));
+  assert.equal(scans.length, 3); assert.equal(scans.every((u) => u.searchParams.get('refresh') === 'true'), true);
+  assert.equal((await f.create().read(WINDOW)).entry.report.totals.tokens, 999, 'fresh result survives restart');
+});
+
+await test('a remembered baseline cannot stamp a new override-derived window', async () => {
+  const f = serviceFixture(); const service = f.create(); await service.read(WINDOW);
+  f.state.source = 'override'; f.state.cost = 77;
+  assert.equal((await service.read(JULY)).entry.report.totals.cost, 77);
+  f.store.forget(); assert.equal(f.store.read(JULY, FP), undefined);
+  f.state.source = 'baseline'; f.state.cost = 1;
+  assert.equal((await f.create().read(JULY)).entry.report.totals.cost, 1);
+});
+
+await test('an identity change or failed identity check during a scan refuses persistence', async () => {
+  for (const change of ['pricing', 'version', 'unavailable']) {
+    const f = serviceFixture();
+    f.state.onUsage = () => {
+      if (change === 'pricing') f.state.source = 'override';
+      if (change === 'version') f.state.version = '2.5.4';
+      if (change === 'unavailable') f.state.pricingFails = true;
+    };
+    await f.create().read(WINDOW);
+    assert.equal(existsSync(f.file), false, change);
+  }
+});
+
+await test('coalesced readers still spend one scan and open windows bypass identity', async () => {
+  const f = serviceFixture(); const service = f.create();
+  await Promise.all([service.read(WINDOW), service.read(WINDOW)]);
+  assert.equal(f.state.calls.filter((u) => u.pathname === '/api/usage').length, 1);
+  f.state.calls.length = 0;
+  await service.read({ from: '2026-09-01', to: '2026-09-20' });
+  assert.equal(f.state.calls.some((u) => u.pathname === '/api/pricing-db'), false);
+  assert.equal(f.state.calls.some((u) => u.searchParams.has('refresh')), false);
+});
+
+await test('future timestamps and mismatched report windows are never trusted', () => {
+  const f = serviceFixture(); f.store.write(WINDOW, sampleReport, FP);
+  f.advance(-1); assert.equal(f.store.read(WINDOW, FP), undefined);
+  const { store } = storeAt(); store.write(JULY, sampleReport, FP);
+  assert.equal(store.read(JULY, FP), undefined);
 });
 
 rmSync(storeRoot, { recursive: true, force: true });
@@ -932,6 +1100,7 @@ rmSync(storeRoot, { recursive: true, force: true });
 
 /** Every upstream path a fixture Tokdash was asked for. */
 const brokerCalls: string[] = [];
+let brokerUpstreamUnavailable = false;
 function fixtureBody(pathname: string): unknown {
   if (pathname.startsWith('/api/usage')) return usageBody();
   if (pathname.startsWith('/api/active-time')) return activeTimeBody();
@@ -950,6 +1119,7 @@ const fixtureTokdash = Bun.serve({
   fetch(request) {
     const { pathname } = new URL(request.url);
     brokerCalls.push(pathname);
+    if (brokerUpstreamUnavailable) return new Response('', { status: 503 });
     const body = fixtureBody(pathname);
     return body === null ? new Response('nope', { status: 404 }) : Response.json(body);
   },
@@ -1046,7 +1216,16 @@ try {
     assert.equal(report.servedFromCache, true, 'and they are reported as cached');
     assert.equal(hits('/api/insights'), scansBefore, 'no second scan');
   });
+  await test('the route keeps a verified disk hit available during an immediate upstream outage', async () => {
+    const before = brokerCalls.length;
+    brokerUpstreamUnavailable = true;
+    const report = await readReport(secondBroker.base);
+    assert.equal(report.ok, true);
+    assert.equal(report.data?.totals?.tokens, firstTokens);
+    assert.equal(brokerCalls.length, before, 'the disk hit warmed the route memory cache');
+  });
 } finally {
+  brokerUpstreamUnavailable = false;
   await stopFixtureBroker(secondBroker.proc);
   rmSync(brokerHome, { recursive: true, force: true });
   fixtureTokdash.stop(true);

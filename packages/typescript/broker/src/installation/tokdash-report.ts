@@ -271,6 +271,8 @@ export type TokdashReportInsightsRefusal = 'unsupported' | 'unavailable' | 'malf
 export interface TokdashReportFetchOptions {
   timeoutMs?: number;
   fetch?: typeof fetch;
+  /** Recompute upstream response caches when rebuilding a durable window. */
+  refresh?: boolean;
 }
 
 /**
@@ -658,7 +660,6 @@ function parseHourly(insights: Record<string, unknown>): TokdashReportHourly | n
       requests: optionalInteger(entry.messages) ?? 0,
     });
   }
-  if (buckets.length === 0) return null;
   return {
     buckets,
     peakHour: optionalInteger(hourly.peak_hour),
@@ -687,7 +688,6 @@ function parseWeekday(insights: Record<string, unknown>): TokdashReportWeekday |
       requests: optionalInteger(entry.messages) ?? 0,
     });
   }
-  if (buckets.length === 0) return null;
   return { buckets, peakWeekday: optionalInteger(weekday.peak_weekday) };
 }
 
@@ -707,7 +707,7 @@ function parseDaily(insights: Record<string, unknown>): TokdashReportDay[] | nul
       intensity: optionalInteger(entry.intensity),
     });
   }
-  return days.length === 0 ? null : days;
+  return days;
 }
 
 function parseProjects(insights: Record<string, unknown>): TokdashReportProjects | null {
@@ -801,7 +801,7 @@ export async function fetchTokdashReport(
     throw new Error('Invalid Tokdash report window: from must not be after to');
   }
   const baseUrl = normalizeTokdashQuotaBaseUrl(baseInput);
-  const query = windowQuery(window);
+  const query = windowQuery(window) + (options.refresh ? '&refresh=true' : '');
 
   const usageBody = await getJson(`${baseUrl}/api/usage?${query}`, options, 'usage');
   if (!isRecord(usageBody)) invalid('body', 'an object');
@@ -907,7 +907,7 @@ export interface TokdashReportCacheEntry {
  * the user glances at Month and comes back.
  */
 export class TokdashReportCache {
-  readonly #entries = new Map<string, TokdashReportCacheEntry>();
+  readonly #entries = new Map<string, TokdashReportCacheEntry & { expiresAt: number }>();
   readonly #inFlight = new Map<string, Promise<TokdashReportCacheEntry>>();
   readonly #ttlMs: number;
   readonly #maxEntries: number;
@@ -972,7 +972,7 @@ export class TokdashReportCache {
     const key = cacheKey(window);
     const entry = this.#entries.get(key);
     if (entry === undefined) return undefined;
-    if (this.#now() - entry.cachedAt >= this.#ttlMs) {
+    if (this.#now() >= entry.expiresAt) {
       this.#entries.delete(key);
       return undefined;
     }
@@ -983,9 +983,17 @@ export class TokdashReportCache {
   }
 
   /** Stores a window, evicting the least recently used entry when full. */
-  set(window: TokdashReportWindow, report: TokdashReport): TokdashReportCacheEntry {
+  set(
+    window: TokdashReportWindow,
+    report: TokdashReport,
+    provenance: { cachedAt?: number; expiresAt?: number } = {},
+  ): TokdashReportCacheEntry {
     const key = cacheKey(window);
-    const entry: TokdashReportCacheEntry = { report, cachedAt: this.#now() };
+    const now = this.#now();
+    const entry = {
+      report, cachedAt: provenance.cachedAt ?? now,
+      expiresAt: Math.min(now + this.#ttlMs, provenance.expiresAt ?? Infinity),
+    };
     this.#entries.delete(key);
     this.#entries.set(key, entry);
     while (this.#entries.size > this.#maxEntries) {
