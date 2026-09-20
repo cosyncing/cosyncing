@@ -1107,24 +1107,39 @@ export type AgentMessage =
     }
   | {
       /**
-       * A subagent (Task) or a workflow run, surfaced as live progress the UI upserts by
-       * {@link key} (NOT a durable chat bubble). Running activity is visible; terminal done/error
-       * states remove the live surface so completed subagents do not stack in history. The adapter
-       * does ALL tool-specific correlation (e.g. Claude:
-       * Task `tool_use_id` ↔ `subagents/agent-*.meta.json`; `workflows/wf_*.json` + `journal.jsonl`);
+       * A subagent (Task), a workflow run, or a long-running background command, surfaced as live
+       * progress the UI upserts by {@link key} (NOT a durable chat bubble). The adapter does ALL
+       * tool-specific correlation (e.g. Claude: Task `tool_use_id` ↔ `subagents/agent-*.meta.json`;
+       * `workflows/wf_*.json` + `journal.jsonl`; a background command's ack + task notification);
        * the UI renders these structured fields tool-agnostically and never branches on a tool name.
+       *
+       * Lifetime: a running frame is visible, and a terminal (done/error) frame PERSISTS until the
+       * reader dismisses it — the result is what the card exists to deliver, so it is not retired
+       * automatically. A canonical idle status additionally retires anything still `running`, which
+       * bounds a card whose terminal frame was never observed. `command` is exempt from that sweep
+       * alone: it outlives the turn that launched it, which is the whole reason it is surfaced, so
+       * the session going idle says nothing about whether it is still running.
        */
       type: 'agent-activity';
       /** Upsert handle, stable across re-emits so progress replaces in place. Convention:
-       *  'agent:'+toolUseId (subagent), 'wf:'+runId (workflow). Distinct from a tool card's
-       *  'tool-'+callId so a card and its originating tool row never collide. */
+       *  'agent:'+toolUseId (subagent), 'wf:'+runId (workflow), 'cmd:'+toolUseId (background
+       *  command). Distinct from a tool card's 'tool-'+callId so a card and its originating tool
+       *  row never collide. */
       key: string;
-      kind: 'subagent' | 'workflow';
+      /** `command` is a shell command the agent launched in the background (Claude Code's
+       *  `run_in_background`). It is NOT the slash-command progress bar, which is its own surface. */
+      kind: 'subagent' | 'workflow' | 'command';
       /** Primary label: subagent description||agentType, or workflowName. */
       title: string;
       /** Muted secondary label (e.g. the subagent's agentType, or the workflow's current phase). */
       subtitle?: string;
-      status: 'running' | 'done' | 'error';
+      /** `retired` is not a lifecycle outcome — it is a REMOVAL: the adapter can no longer vouch
+       *  for this card and the client drops it. Every other frame is an upsert, so omitting a card
+       *  from a later snapshot does not take it off screen; a background command that goes silent
+       *  past its evidence horizon needs this to say so, rather than sitting at `running` forever
+       *  on an attached client. A client that predates the value maps it to `unknown`, which also
+       *  removes the row, so it is safe in both directions. */
+      status: 'running' | 'done' | 'error' | 'retired';
       /** Wall-clock so far (ms); the UI formats it "2m 22s". */
       elapsedMs?: number;
       /** Epoch ms the work started — lets the UI keep ticking a running card's elapsed between
@@ -1137,6 +1152,13 @@ export type AgentMessage =
       agentsTotal?: number;
       /** Tool-call count chip (workflow totalToolCalls). */
       toolCalls?: number;
+      /** Bounded tail of a `command`'s live output, newest-last. Carries `truncated` when leading
+       *  bytes were dropped. Re-sent only when these visible bytes change, because the broker fans
+       *  each frame out to every client rather than collapsing it by {@link key}. */
+      output?: ToolOutputStream;
+      /** A `command`'s exit code, present ONLY when the tool actually reported one. Absent means
+       *  absent — never a synthesized 0, and never inferred from a terminal status. */
+      exitCode?: number;
       /** Optional rows shown when the card is expanded — per-agent (workflow) or phases. */
       children?: {
         key: string;
@@ -1727,7 +1749,7 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * inside the window, so a revision-23-or-later client has to ship before a
  * revision-24 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 24 as const;
+export const BROKER_CONTRACT_REVISION = 25 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.

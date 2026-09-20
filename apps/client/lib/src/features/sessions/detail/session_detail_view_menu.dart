@@ -38,6 +38,7 @@ class _SessionViewMenu extends StatelessWidget {
     required this.showDebug,
     required this.statusBadgeCount,
     required this.terminalFresh,
+    required this.backgroundCommandCount,
     required this.reportView,
     required this.toolsExpanded,
     required this.onSelectView,
@@ -52,6 +53,9 @@ class _SessionViewMenu extends StatelessWidget {
   final bool showDebug;
   final int statusBadgeCount;
   final bool terminalFresh;
+
+  /// Background shell commands still running, counted for the attention dot.
+  final int backgroundCommandCount;
   final bool reportView;
   final bool toolsExpanded;
   final ValueChanged<_SessionDetailView> onSelectView;
@@ -67,6 +71,10 @@ class _SessionViewMenu extends StatelessWidget {
       l10n.sessionViewMenuStatusUpdates(statusBadgeCount),
     if (showTerminal && terminalFresh && view != _SessionDetailView.terminal)
       l10n.sessionViewMenuTerminalOutput,
+    // Chat carries the cards, so the signal is about Chat — and it is only a
+    // signal from somewhere else, since in Chat the band is already on screen.
+    if (backgroundCommandCount > 0 && view != _SessionDetailView.chat)
+      l10n.sessionViewMenuBackgroundCommands(backgroundCommandCount),
   ];
 
   @override
@@ -143,6 +151,7 @@ class _SessionViewMenu extends StatelessWidget {
             target: _SessionDetailView.chat,
             name: 'chat',
             label: l10n.sessionViewChat,
+            badgeCount: backgroundCommandCount,
           ),
           _destination(
             context,

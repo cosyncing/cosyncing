@@ -2302,6 +2302,16 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     final statusBadgeCount = attentionCount > 0
         ? attentionCount
         : archivedCount;
+    // The band that carries these cards lives only in the chat view, so from
+    // Status, Files or Terminal a running background command has no surface at
+    // all. The overflow button is the one control visible from every view.
+    final backgroundCommandCount = state.liveState.activities
+        .where(
+          (activity) =>
+              activity.kind == AgentActivityKind.command &&
+              activity.status == AgentActivityStatus.running,
+        )
+        .length;
     final progressBadge = _primaryLiveStateProgress(liveItems);
     final canRename =
         hasActiveBrokerClient &&
@@ -2385,6 +2395,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                     showDebug: showDebugViews,
                     statusBadgeCount: statusBadgeCount,
                     terminalFresh: _terminalFresh,
+                    backgroundCommandCount: backgroundCommandCount,
                     reportView: _reportView,
                     toolsExpanded: _toolsExpanded,
                     onSelectView: _selectView,

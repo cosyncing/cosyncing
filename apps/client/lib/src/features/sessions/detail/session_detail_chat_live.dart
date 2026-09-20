@@ -365,10 +365,19 @@ class _SessionLiveStateSurface extends StatelessWidget {
         key: Key('session-live-state-surface'),
       );
     }
+    // Which single item fronts the stack. Anything needing an answer wins. A
+    // background command is ranked last: nothing about it is actionable and it
+    // is expected to sit there for minutes, so letting one front the band would
+    // bury a subagent or a plan behind a progress line nobody has to read.
     final actionIndex = visibleItems.indexWhere((item) => item.actionRequired);
-    final primary = actionIndex < 0
-        ? visibleItems.first
-        : visibleItems[actionIndex];
+    final preferredIndex = visibleItems.indexWhere(
+      (item) => !_isBackgroundCommand(item),
+    );
+    final primary = actionIndex >= 0
+        ? visibleItems[actionIndex]
+        : preferredIndex >= 0
+        ? visibleItems[preferredIndex]
+        : visibleItems.first;
     final orderedItems = <_LiveStateItem>[
       primary,
       for (final item in visibleItems)
@@ -503,6 +512,13 @@ class _LiveStateItem {
   final int? total;
 }
 
+/// Whether an item is a background shell command, the band's lowest rank.
+bool _isBackgroundCommand(_LiveStateItem item) {
+  final value = item.value;
+  return value is AgentActivitySnapshot &&
+      value.kind == AgentActivityKind.command;
+}
+
 List<_LiveStateItem> _liveStateItemsFromParts(
   AppLocalizations l10n,
   SessionLiveState liveState,
@@ -524,22 +540,45 @@ List<_LiveStateItem> _liveStateItemsFromParts(
     for (final activity in liveState.activities)
       _LiveStateItem(
         id: 'activity:${activity.key}',
+        // The identity deliberately excludes elapsed and output, so a
+        // ticking card does not un-archive itself every frame. For a
+        // background command it DOES carry whether the work has ended:
+        // archiving one while it runs means "not now", and hiding its result
+        // forever would discard the one fact the card exists to deliver. It
+        // re-surfaces once when it ends, and a second archive is permanent. A
+        // subagent or workflow keeps the original identity — those are read
+        // while they run.
         archiveIdentity: [
           activity.key,
           activity.startedAtMs,
           activity.title,
+          if (activity.kind == AgentActivityKind.command)
+            activity.status == AgentActivityStatus.running
+                ? 'running'
+                : 'ended',
         ].join('|'),
         kind: _LiveStateItemKind.activity,
         value: activity,
-        label: l10n.activity,
+        label: switch (activity.kind) {
+          AgentActivityKind.command => l10n.backgroundCommand,
+          AgentActivityKind.workflow => l10n.backgroundWorkflow,
+          AgentActivityKind.subagent ||
+          AgentActivityKind.unknown => l10n.activity,
+        },
         title: activity.title,
         statusLabel: switch (activity.status) {
           AgentActivityStatus.running => l10n.running,
           AgentActivityStatus.done => l10n.done,
           AgentActivityStatus.error => l10n.failed,
+          // Withdrawn or unrecognized: the projection drops the row before it
+          // becomes an item, so this branch is for exhaustiveness only.
+          AgentActivityStatus.retired ||
           AgentActivityStatus.unknown => l10n.activity,
         },
-        icon: Icons.psychology_outlined,
+        // A shell is not an agent, and the band can hold both at once.
+        icon: activity.kind == AgentActivityKind.command
+            ? Icons.terminal_outlined
+            : Icons.psychology_outlined,
         actionRequired: false,
         done: activity.agentsDone,
         total: activity.agentsTotal,

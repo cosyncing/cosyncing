@@ -1542,6 +1542,13 @@ final class TaskListStateSnapshot {
 enum AgentActivityKind {
   subagent('subagent'),
   workflow('workflow'),
+
+  /// A shell command the agent launched in the background.
+  ///
+  /// Not the slash-command progress bar, which is its own surface. Unlike the
+  /// other kinds this one outlives its turn, so a terminal frame stays visible
+  /// until the reader dismisses it.
+  command('command'),
   unknown('unknown');
 
   const AgentActivityKind(this.wireValue);
@@ -1553,6 +1560,7 @@ enum AgentActivityKind {
   static AgentActivityKind fromWire(String? value) => switch (value) {
     'subagent' => AgentActivityKind.subagent,
     'workflow' => AgentActivityKind.workflow,
+    'command' => AgentActivityKind.command,
     _ => AgentActivityKind.unknown,
   };
 }
@@ -1562,6 +1570,9 @@ enum AgentActivityStatus {
   running('running'),
   done('done'),
   error('error'),
+
+  /// The adapter withdrew the card. Not an outcome — the row is removed.
+  retired('retired'),
   unknown('unknown');
 
   const AgentActivityStatus(this.wireValue);
@@ -1574,6 +1585,7 @@ enum AgentActivityStatus {
     'running' => AgentActivityStatus.running,
     'done' => AgentActivityStatus.done,
     'error' => AgentActivityStatus.error,
+    'retired' => AgentActivityStatus.retired,
     _ => AgentActivityStatus.unknown,
   };
 }
@@ -1648,6 +1660,8 @@ final class AgentActivitySnapshot {
     this.agentsDone,
     this.agentsTotal,
     this.toolCalls,
+    this.output,
+    this.exitCode,
   });
 
   /// Decodes [message], returning null for another or malformed message.
@@ -1678,6 +1692,8 @@ final class AgentActivitySnapshot {
       agentsTotal: _nonNegativeInt(message.raw['agentsTotal']),
       toolCalls: _nonNegativeInt(message.raw['toolCalls']),
       children: _activityChildren(message.raw['children']),
+      output: ToolOutputStream.fromJson(message.raw['output']),
+      exitCode: _nonNegativeInt(message.raw['exitCode']),
     );
   }
 
@@ -1716,6 +1732,16 @@ final class AgentActivitySnapshot {
 
   /// Optional structured workflow children.
   final List<AgentActivityChild> children;
+
+  /// Bounded tail of a background command's output, newest-last.
+  final ToolOutputStream? output;
+
+  /// A background command's exit code, when the tool reported one.
+  ///
+  /// Null means the tool reported none. It is never inferred from [status]: a
+  /// stopped command has no exit code, and inventing a zero would report a
+  /// success that was never observed.
+  final int? exitCode;
 }
 
 AgentActivityTokens? _activityTokens(Object? raw) {

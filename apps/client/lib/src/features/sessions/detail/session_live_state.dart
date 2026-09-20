@@ -44,10 +44,17 @@ final class SessionLiveState {
     // frame carries that boundary, and the sweep runs ALONGSIDE the type
     // dispatch below: chaining it in front dropped any state frame that also
     // reported a status.
+    //
+    // A background command is exempt: it outlives the turn that launched it,
+    // which is the whole reason it is surfaced. Sweeping it here would retire
+    // the card at the exact moment it becomes the only sign that work is still
+    // running, and its own terminal frame is what retires it instead.
     if (message.type == AgentMessageType.status &&
         message.agentMessageStatus == AgentMessageStatus.idle) {
       activities.removeWhere(
-        (_, activity) => activity.status == AgentActivityStatus.running,
+        (_, activity) =>
+            activity.status == AgentActivityStatus.running &&
+            activity.kind != AgentActivityKind.command,
       );
     }
 
@@ -88,6 +95,10 @@ final class SessionLiveState {
         case AgentActivityStatus.done:
         case AgentActivityStatus.error:
           activities[activity.key] = activity;
+        // `retired` is a withdrawal, not an outcome: the server can no longer
+        // vouch for the card. It shares the fail-closed removal that an
+        // unrecognized future value already gets.
+        case AgentActivityStatus.retired:
         case AgentActivityStatus.unknown:
           activities.remove(activity.key);
       }

@@ -6,6 +6,7 @@
 /// files. See `lib/src/design/README.md`.
 library;
 
+export 'components/command_output_block.dart';
 export 'components/copyable_code_line.dart';
 export 'components/file_mark_glyph.dart';
 export 'components/inline_notice.dart';
