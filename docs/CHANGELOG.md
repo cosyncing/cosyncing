@@ -13,12 +13,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
-- The usage report keeps finished windows on disk. A window that has already
-  ended is read once and served from the broker's own state afterwards, so the
-  report returns immediately after a restart instead of re-scanning every past
-  session. Stored windows are dropped whenever the reporting runtime or its
-  pricing table changes, so a cached figure can never outlive the prices it was
-  computed from.
+- The usage report keeps finished windows on disk for up to 24 hours, avoiding
+  repeat scans after a restart. Stored reports are checked against the reporting
+  runtime and baseline pricing identity before use, with a five-minute identity
+  memo. Historical windows are refreshed upstream when rebuilt.
 - The shareable usage image can now be shared from Android, alongside desktop
   and the web UI.
 
@@ -32,7 +30,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   which hid a reader's own agent whenever the upstream report did not count it
   as one.
 - Cost figures no longer carry the "API list prices — not your bill" note. The
-  qualification is documented once rather than repeated on every surface.
+  qualification is explained in [Usage reports](usage-reports.md) rather than
+  repeated on every surface.
+
+### Fixed
+
+- Usage-report caching retries failed identity reads, warms memory after verified
+  disk hits, and preserves the original report timestamp. Scans whose runtime or
+  pricing identity changes are not saved to disk. Incomplete or malformed stored
+  reports are rebuilt, and historical corrections no longer remain hidden by an
+  indefinitely cached window.
 
 ## 0.5.10 — 2026-09-19
 

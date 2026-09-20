@@ -18,3 +18,6 @@ Platform build support is gated on GitHub-hosted Ubuntu, macOS, and Windows
 runners. Specialized devices and private-network topologies may be tested as
 optional maintainer validation, but they are not required merge or release
 checks.
+
+For usage totals, estimated costs, cache refresh behavior, and image sharing,
+see [Usage reports](usage-reports.md).

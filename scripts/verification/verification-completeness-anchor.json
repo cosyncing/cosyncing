@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "21e7a4800de25394929c5e5b9e29a20b2c2143fa",
+  "acceptedBase": "8c8795dab0b780e7523c487c86389c08c4ea4c4c",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -884,7 +884,7 @@
     },
     {
       "id": "tokdash-report",
-      "fingerprint": "sha256:a7de355c32c7159470ce9875db0175ec0ed74087647fb05f2f8e71c9713788a8"
+      "fingerprint": "sha256:7ed9cff51e026a66615ec441a0378dddbbac36a4a769afbc2efdbbf76659953c"
     },
     {
       "id": "tool-semantics",
