@@ -1920,7 +1920,7 @@ export class ClaudeObserveConnection implements SessionConnection {
       const ln = parseLineOrNull(raw);
       if (!ln) continue;
       accumulateCallMeta(ln, this.callMeta); // a tool_use precedes its result in append order
-      collectParentActivity(ln, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity()); // completing/notified subagents flip cards
+      collectParentActivity(ln, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity(), true); // completing/notified subagents flip cards
       // User echoes stay UNSTAMPED here: Claude Code writes the JSONL itself and gives an app send
       // no id handle, so exact attribution is impossible (a terminal prompt with identical text is
       // indistinguishable). The client's narrow legacy reconcile converges the optimistic bubble.
@@ -2737,7 +2737,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       // "Running" for the rest of the session — and the client's idle-sweep exemption guarantees
       // nothing else would ever clear it. Terminal state only; the subagent and roster sets are
       // deliberately untouched here, since those are fed from stdout in this mode.
-      collectBackgroundCommandTerminal(ln, this.backgroundCommands);
+      collectBackgroundCommandTerminal(ln, this.backgroundCommands, true);
       if (ln.type === 'user') {
         // A task-notification line is the CLI waking OUR OWN CHILD for a background-agent result: the
         // continuation's assistant rows follow it IN TRANSCRIPT ORDER, so opening the exoneration
@@ -3294,7 +3294,7 @@ export class ClaudeResumeConnection implements SessionConnection {
         ) this.liveContinuationHasOutput = true;
         if (typeof o?.message?.id === 'string' && o.message.id) this.noteChildMessageId(o.message.id);
         accumulateCallMeta(o, this.callMeta);
-        collectParentActivity(o, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity());
+        collectParentActivity(o, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity(), true);
         if (this.taskLedger) for (const m of this.taskLedger.feed(o)) this.emit(m);
         // Final, authoritative blocks — re-emitted under the streamed deltas' key so they REPLACE the
         // accumulation (idempotent), plus tool-calls. token-count comes from `result` (with cost).
@@ -3306,7 +3306,7 @@ export class ClaudeResumeConnection implements SessionConnection {
           this.beginAutonomousTurn(typeof o.uuid === 'string' && o.uuid ? String(o.uuid) : undefined);
         }
         accumulateCallMeta(o, this.callMeta);
-        collectParentActivity(o, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity());
+        collectParentActivity(o, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity(), true);
         if (this.taskLedger) for (const m of this.taskLedger.feed(o)) this.emit(m);
         for (const m of mapLine(o, this.callMeta, this.seenTokenIds, undefined, undefined, this.contextWindow)) this.emit(m);
         return;
@@ -5546,8 +5546,7 @@ export interface ParentActivityState {
  * path) and the completion notification (`status`, exit code).
  *
  * `status` is absent while the command is still running. A staleness fallback is NOT a status —
- * see the activity snapshot, which reports an unresolved stale command as 'running' rather than
- * inventing a terminal state it never observed.
+ * the snapshot withdraws a stale command rather than inventing a terminal state it never observed.
  */
 export interface ClaudeBackgroundCommand {
   toolUseId: string;
@@ -5559,6 +5558,8 @@ export interface ClaudeBackgroundCommand {
   status?: 'completed' | 'failed' | 'killed';
   exitCode?: number;
   endedAtMs?: number;
+  /** Live terminal evidence not yet delivered by the activity watcher; history never sets this. */
+  pendingResult?: boolean;
 }
 
 /**
@@ -5667,6 +5668,7 @@ function backgroundOutputPath(raw: string | undefined, taskId: string | undefine
 function collectBackgroundCommandTerminal(
   ln: any,
   commands: Map<string, ClaudeBackgroundCommand> | undefined,
+  live = false,
 ): void {
   if (!commands || commands.size === 0) return;
   const payload = claudeTaskNotificationPayload(ln);
@@ -5682,17 +5684,20 @@ function collectBackgroundCommandTerminal(
   // the card's finished-in time by the whole gap. The first terminal observation is the one that
   // happened; a repeat may only fill a gap it left.
   if (prev.status !== undefined) {
+    if (live && prev.pendingResult === undefined) prev.pendingResult = true;
     if (!prev.outputPath) {
       const filled = backgroundOutputPath(n.outputFile, prev.taskId ?? n.taskId);
       if (filled) commands.set(n.toolUseId, { ...prev, outputPath: filled });
     }
     return;
   }
-  // The exit code exists only in the summary prose; absent means absent, never a synthesized 0.
-  const exit = /exit code (\d+)/.exec(n.summary ?? '')?.[1];
+  // Only the result suffix is evidence: the model-chosen description may also mention an exit
+  // code. The CLI uses `(exit code N)` for success and `with exit code N` for failure.
+  const exit = /\bexit code (\d+)\)?\s*$/.exec(n.summary ?? '')?.[1];
   commands.set(n.toolUseId, {
     ...prev,
     status,
+    ...(live ? { pendingResult: true } : {}),
     ...(exit !== undefined ? { exitCode: Number(exit) } : {}),
     endedAtMs: timestampToMs(ln.timestamp) ?? prev.endedAtMs,
     // All three carriers repeat the identical payload, so a later one must not overwrite a path
@@ -5718,9 +5723,10 @@ export function collectParentActivity(
     ParentActivityState,
     'killedAgentIds' | 'agentIdToToolUseId' | 'stopRequests' | 'backgroundCommands'
   >,
+  live = false,
 ): void {
   collectToolResultIds(ln, resolved);
-  collectBackgroundCommandTerminal(ln, extra?.backgroundCommands);
+  collectBackgroundCommandTerminal(ln, extra?.backgroundCommands, live);
   const c = ln?.message?.content;
   if (ln?.type === 'assistant' && Array.isArray(c)) {
     for (const b of c) {
@@ -5769,7 +5775,8 @@ export function collectParentActivity(
             : '';
       // A background COMMAND's ack. `toolUseResult.backgroundTaskId` is structured, unlike the
       // prose beside it that names the output file, so it is what the path is bound to.
-      const backgroundTaskId = ln.toolUseResult?.backgroundTaskId;
+      // Stream-json uses snake_case; the on-disk transcript uses camelCase.
+      const backgroundTaskId = (ln.tool_use_result ?? ln.toolUseResult)?.backgroundTaskId;
       if (extra?.backgroundCommands && typeof backgroundTaskId === 'string' && backgroundTaskId) {
         const prev = extra.backgroundCommands.get(tuid);
         // Non-greedy up to the extension: the real ack ends the sentence with a period
@@ -6109,8 +6116,8 @@ export function buildActivitySnapshot(activityDir: string, resolved: Set<string>
     if (cmd.status === undefined) {
       const lastSign = Math.max(cmd.startedAtMs ?? 0, tail.mtimeMs ?? 0);
       if (lastSign > 0 && now - lastSign > BACKGROUND_EVIDENCE_MAX_AGE_MS) continue;
-    } else if (terminalBudget-- <= 0) {
-      continue; // older finished commands: the result was delivered when it happened
+    } else if (terminalBudget-- <= 0 && !cmd.pendingResult) {
+      continue; // history is bounded; undelivered live results always get one frame
     }
     const status: ActivityMsg['status'] =
       cmd.status === 'completed' ? 'done' : cmd.status === undefined ? 'running' : 'error';
@@ -6195,7 +6202,20 @@ function readBackgroundCommandTail(path: string | undefined): {
   } catch {
     return { stream: undefined, hash: 'absent' };
   }
-  const lines = readTailLines(path, BACKGROUND_TAIL_MAX_BYTES);
+  // Unlike transcript records, a partial output line is useful. Keep its suffix even when
+  // a single line (including CR-driven progress) exceeds the byte window.
+  let bytes: Buffer;
+  try {
+    bytes = readBytesFrom(path, Math.max(0, size - BACKGROUND_TAIL_MAX_BYTES), Math.min(size, BACKGROUND_TAIL_MAX_BYTES));
+  } catch {
+    return { stream: undefined, hash: 'absent' };
+  }
+  // A byte window may begin inside a UTF-8 code point. Drop only that incomplete prefix;
+  // a streaming decode also withholds an incomplete code point at the writer's current end.
+  let first = 0;
+  if (size > BACKGROUND_TAIL_MAX_BYTES) while (first < bytes.length && (bytes[first]! & 0xc0) === 0x80) first++;
+  const lines = new TextDecoder().decode(bytes.subarray(first), { stream: true }).split('\n');
+  if (lines.at(-1) === '') lines.pop();
   if (!lines.length) return { stream: undefined, hash: 'empty', mtimeMs };
   const kept = lines.slice(-BACKGROUND_TAIL_MAX_LINES);
   const text = stripControlBytes(kept.join('\n'));
@@ -6203,7 +6223,7 @@ function readBackgroundCommandTail(path: string | undefined): {
   const truncated = kept.length < lines.length || size > BACKGROUND_TAIL_MAX_BYTES;
   return {
     stream: { text, ...(truncated ? { truncated: true } : {}) },
-    hash: createHash('sha256').update(text).digest('base64url').slice(0, 16),
+    hash: `${truncated ? 'truncated:' : ''}${createHash('sha256').update(text).digest('base64url').slice(0, 16)}`,
     mtimeMs,
   };
 }
@@ -6313,7 +6333,11 @@ export class ClaudeActivityWatcher {
     for (const f of frames) {
       if (f.msg.kind === 'command') {
         if (f.msg.status === 'running') this.runningCommandTitles.set(f.msg.key, f.msg.title);
-        else this.runningCommandTitles.delete(f.msg.key); // it ended; the result is its own card now
+        else {
+          this.runningCommandTitles.delete(f.msg.key); // it ended; the result is its own card now
+          const command = this.parent.backgroundCommands?.get(f.msg.key.slice('cmd:'.length));
+          if (command) command.pendingResult = false; // the terminal frame is delivered in this sweep
+        }
       }
       if (this.seen.get(f.msg.key) === f.src) continue; // unchanged source file → no re-emit
       // A command's payload carries its output tail, and the broker FANS EACH FRAME OUT to every

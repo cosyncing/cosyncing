@@ -19,7 +19,7 @@ export {};
 import { mkdirSync, writeFileSync, rmSync, existsSync, utimesSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { buildActivitySnapshot, collectParentActivity, claudeActivityDir, ClaudeActivityWatcher, mapTranscript } from '../src/index.ts';
+import { buildActivitySnapshot, collectParentActivity, claudeActivityDir, ClaudeActivityWatcher, ClaudeResumeConnection, mapTranscript } from '../src/index.ts';
 import type { AgentMessage } from '../../../adapter-api/src/index.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
@@ -460,6 +460,71 @@ if (existsSync(REAL)) {
   check('  the output tail rides the frame', /step 2 ok/.test((running?.msg as any)?.output?.text ?? ''), (running?.msg as any)?.output?.text);
   check('  a running command reports NO exit code', (running?.msg as any)?.exitCode === undefined);
 
+  // Exercise stream-json through the real connection, then complete through its transcript tail.
+  // No child or broker is launched. A transcript-shaped fixture misses the SDK's snake_case ack.
+  {
+    const path = join(CMD_ROOT, 'driven.jsonl');
+    writeFileSync(path, '');
+    const conn = new ClaudeResumeConnection(
+      { configDir: CMD_ROOT, projectsRoot: CMD_ROOT, bin: 'unused', isDefault: true },
+      path,
+      { id: 'driven', tool: 'claude', title: 'fixture', cwd: CMD_ROOT, status: 'idle', attachMode: 'resume' },
+    );
+    const emitted: AgentMessage[] = [];
+    conn.subscribe((m) => emitted.push(m));
+    const stream = (o: unknown) => (conn as any).onStdout(Buffer.from(JSON.stringify(o) + '\n'));
+    const sweep = () => (conn as any).activity.sweep();
+    const commandFrames = () => emitted.flatMap((m) => m.type === 'agent-activity' && m.kind === 'command' ? [m] : []);
+    const started = Date.now() - 10_000;
+    for (let i = 0; i < 9; i++) {
+      const id = `toolu_driven${i}`;
+      stream({ ...spawn(id), timestamp: new Date(started).toISOString() });
+      const { toolUseResult, ...user } = ack(id, `bdriven${i}`, join(tasksDir, `bdriven${i}.output`));
+      stream({ ...user, timestamp: new Date(started + 1000).toISOString(), tool_use_result: toolUseResult });
+    }
+    sweep();
+    check('stream-json acknowledgements surface all nine running cards', commandFrames().filter((m) => m.status === 'running').length === 9);
+    for (let i = 0; i < 9; i++) {
+      writeFileSync(path, JSON.stringify({
+        type: 'queue-operation', timestamp: new Date(started + 2000 + i).toISOString(),
+        content: notificationText(`bdriven${i}`, `toolu_driven${i}`, join(tasksDir, `bdriven${i}.output`), 'failed', 'Background command failed (exit code 2)'),
+      }) + '\n', { flag: 'a' });
+    }
+    (conn as any).drainUserEcho();
+    sweep();
+    check('all nine live failures survive the eight-card history window', commandFrames().filter((m) => m.status === 'error' && m.exitCode === 2).length === 9);
+    check('a burst of completions never substitutes retirement for failure', !commandFrames().some((m) => m.status === 'retired'));
+    const after = commandFrames().length;
+    sweep();
+    check('delivered burst results do not repeat next sweep', commandFrames().length === after);
+    check('history stays bounded after delivering every live result', (await conn.getHistory()).filter((m) => m.type === 'agent-activity' && m.kind === 'command').length === 8);
+    // A job can launch and finish entirely between sweeps; it still needs its result delivered.
+    for (let i = 9; i < 18; i++) {
+      const id = `toolu_driven${i}`;
+      stream({ ...spawn(id), timestamp: new Date(started).toISOString() });
+      const { toolUseResult, ...user } = ack(id, `bdriven${i}`, join(tasksDir, `bdriven${i}.output`));
+      stream({ ...user, tool_use_result: toolUseResult });
+      writeFileSync(path, JSON.stringify({
+        type: 'queue-operation', timestamp: new Date(started + 3000 + i).toISOString(),
+        content: notificationText(`bdriven${i}`, id, join(tasksDir, `bdriven${i}.output`), 'failed', 'Background command failed (exit code 3)'),
+      }) + '\n', { flag: 'a' });
+    }
+    // A concurrent history fetch may see these completions before the live tail does.
+    await conn.getHistory();
+    (conn as any).drainUserEcho();
+    sweep();
+    check('jobs launched and finished between sweeps all deliver their failures', commandFrames().filter((m) => m.exitCode === 3).length === 9);
+    const delivered = commandFrames().length;
+    writeFileSync(path, JSON.stringify({
+      type: 'queue-operation', operation: 'remove', timestamp: new Date().toISOString(),
+      content: notificationText('bdriven0', 'toolu_driven0', join(tasksDir, 'bdriven0.output'), 'failed', 'Background command failed (exit code 2)'),
+    }) + '\n', { flag: 'a' });
+    (conn as any).drainUserEcho();
+    sweep();
+    check('a repeated carrier does not resurrect an old delivered result', commandFrames().length === delivered);
+    await conn.close();
+  }
+
   // (2) D3 — the roster's pending-spawn set must not learn about shell commands, or every session
   //     that backgrounds one is pinned to Working for 30 minutes while it is genuinely idle.
   const { background: bgSet } = ledgerFor([spawn('toolu_bg1'), ack('toolu_bg1', 'btask01', outPath)]);
@@ -483,6 +548,21 @@ if (existsSync(REAL)) {
     const done = cardFor([spawn('toolu_bg1'), ack('toolu_bg1', 'btask01', outPath), carrier]);
     check(`completion on a ${label} line resolves the card`, done?.msg.status === 'done', `${label}: ${done?.msg.status}`);
     check(`  exit code parsed from the ${label} summary`, (done?.msg as any)?.exitCode === 0, String((done?.msg as any)?.exitCode));
+  }
+
+  // The description is model-written and can itself mention an exit code. Only the CLI's
+  // final result suffix is evidence, including its distinct completed/failed wording.
+  for (const [status, summary, expected] of [
+    ['completed', 'Background command "Check exit code 9" completed (exit code 0)', 0],
+    ['failed', 'Background command "Check exit code 0" failed with exit code 2', 2],
+    ['failed', 'Background command "Check exit code 0" failed (exit code 3)', 3],
+    ['killed', 'Background command "Check (exit code 4)" was stopped', undefined],
+  ] as const) {
+    const card = cardFor([spawn('toolu_bg1'), ack('toolu_bg1', 'btask01', outPath), {
+      type: 'queue-operation', timestamp: '2026-09-20T10:04:00.000Z',
+      content: notificationText('btask01', 'toolu_bg1', outPath, status, summary),
+    }]);
+    check(`exit code comes from the result suffix: ${summary}`, card?.msg.exitCode === expected, String(card?.msg.exitCode));
   }
 
   // (4) failure must NOT read as success. A card that fell back to a staleness timeout would be
@@ -721,6 +801,32 @@ if (existsSync(REAL)) {
   check('  bounded to the retained line count', bigText.split('\n').length <= 40, String(bigText.split('\n').length));
   check('  keeps the NEWEST lines', /line 399/.test(bigText));
   check('  reports that earlier bytes were dropped', (big?.msg as any)?.output?.truncated === true);
+
+  // A log's partial line is data, unlike a partial JSONL record. CR-only progress and large
+  // one-line JSON output must keep the newest bytes even when no newline fits in the window.
+  {
+    const longOut = join(tasksDir, 'blongline.output');
+    for (const [label, log] of [
+      ['one long line', 'x'.repeat(5000) + 'LATEST'],
+      ['a newline-terminated long line', 'x'.repeat(5000) + 'LATEST\n'],
+      ['carriage-return progress', 'step\r'.repeat(1000) + 'LATEST'],
+      ['a UTF-8 boundary', '界'.repeat(2000) + 'LATEST'],
+    ]) {
+      writeFileSync(longOut, log!);
+      const frame = cardFor([spawn('toolu_longline'), ack('toolu_longline', 'blongline', longOut)]);
+      const output = frame?.msg.output;
+      check(`${label}: the newest partial line survives`, output?.text.endsWith('LATEST') === true, output?.text.slice(-30));
+      check(`${label}: the tail stays byte-bounded and marked truncated`, !!output && Buffer.byteLength(output.text) <= 4096 && output.truncated === true);
+      check(`${label}: no broken UTF-8 or CR control reaches the wire`, !!output && !/[\uFFFD\r]/.test(output.text));
+    }
+    // Same visible text, different completeness: the marker is part of the emitted payload too.
+    const lines = [spawn('toolu_longline'), ack('toolu_longline', 'blongline', longOut)];
+    writeFileSync(longOut, 'LATEST');
+    const complete = cardFor(lines);
+    writeFileSync(longOut, '\0'.repeat(5000) + 'LATEST');
+    const truncated = cardFor(lines);
+    check('a changed truncation marker re-emits even when text is identical', complete?.msg.output?.text === truncated?.msg.output?.text && complete?.src !== truncated?.src && truncated?.msg.output?.truncated === true);
+  }
 
   // (12) ANSI progress-bar noise never reaches the wire.
   const ansiOut = join(tasksDir, 'btask11.output');

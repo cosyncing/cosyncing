@@ -23,9 +23,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   agent goes idle, because the command does too, and it stays after it finishes
   until dismissed. A command that leaves no sign of life for long enough is
   withdrawn rather than left claiming to run, and a job that finishes after
-  several shorter ones still delivers its result. Currently available for
-  Claude Code. Broker contract revision 25; older clients show the card without
-  the output preview.
+  several shorter ones still delivers its result. Live completion bursts retain
+  every result, and output previews retain the tail of long lines. Available
+  for Claude Code in both observed and driven sessions. Broker contract revision
+  25; older clients show the card without the output preview.
 - The usage report keeps finished windows on disk for up to 24 hours, avoiding
   repeat scans after a restart. Stored reports are checked against the reporting
   runtime and baseline pricing identity before use, with a five-minute identity
