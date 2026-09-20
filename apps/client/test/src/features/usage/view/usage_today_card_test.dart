@@ -1,11 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_today_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -236,14 +239,12 @@ void main() {
     );
   });
 
-  testWidgets('cost carries its qualifier here too', (tester) async {
+  testWidgets('cost renders bare here too', (tester) async {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
     await tester.pumpAndSettle();
 
-    expect(
-      find.textContaining('at API list prices — not your bill'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('API list price'), findsNothing);
+    expect(find.textContaining('not your bill'), findsNothing);
   });
 
   testWidgets('rankings rank by tokens and print their shares', (tester) async {
@@ -255,6 +256,27 @@ void main() {
     // The fixture's leading harness carries its tokdash label and its share.
     expect(find.text('Claude Code'), findsOneWidget);
     expect(find.textContaining('10.1B · 51%'), findsOneWidget);
+  });
+
+  testWidgets('harness rows carry the mark, model rows do not', (tester) async {
+    await tester.pumpWidget(buildSubject(response: served(sampleReport())));
+    await tester.pumpAndSettle();
+
+    // The same mark the report page's podium prints, so one machine's agents
+    // are recognisable on both surfaces rather than only on the page that
+    // happens to draw logos.
+    final marks = find.byType(UsageAgentNameMark);
+    expect(marks, findsWidgets);
+    for (final mark in tester.widgetList<UsageAgentNameMark>(marks)) {
+      expect(mark.tool, isNotEmpty);
+    }
+    // One mark per harness row and none for the models, which have no tool to
+    // stand for.
+    final harnesses = sampleReport()['tools']! as List<Object?>;
+    expect(
+      marks.evaluate().length,
+      min(harnesses.length, usageRankingRows),
+    );
   });
 
   testWidgets('prompt text appears nowhere in the card', (tester) async {
@@ -277,6 +299,6 @@ void main() {
 
     expect(find.text('本机'), findsOneWidget);
     expect(find.text('今日'), findsOneWidget);
-    expect(find.textContaining('非实际账单'), findsOneWidget);
+    expect(find.textContaining('非实际账单'), findsNothing);
   });
 }

@@ -54,8 +54,6 @@ class UsageHero extends StatelessWidget {
         label: l10n.usageStatCost,
         value: formatUsageCost(totals.cost, locale: locale, compact: true),
         valueColor: context.tokens.costInk,
-        // Cost is never a bare figure: the qualifier rides on the tile itself.
-        tooltip: l10n.usageCostFooterNote,
       ),
       _StatTile(
         label: l10n.usageStatMessages,

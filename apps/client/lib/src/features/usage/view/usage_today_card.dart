@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:flutter/material.dart';
@@ -203,9 +204,7 @@ class _CardBody extends StatelessWidget {
         ),
         UsageFigureRow(
           label: l10n.usageCostLabel,
-          value: l10n.usageCostQualified(
-            formatUsageCost(totals.cost, locale: locale, compact: true),
-          ),
+          value: formatUsageCost(totals.cost, locale: locale, compact: true),
         ),
         UsageFigureRow(
           label: l10n.usageRequestsLabel,
@@ -284,9 +283,10 @@ class _Rankings extends StatelessWidget {
     final harnesses = _RankingList(
       title: l10n.usageRankHarnesses,
       rows: [
-        for (final tool in report.tools.take(5))
+        for (final tool in report.tools.take(usageRankingRows))
           (
             name: tool.label ?? tool.tool,
+            tool: tool.tool,
             tokens: tool.tokens,
             share: tool.tokens / total,
           ),
@@ -296,9 +296,10 @@ class _Rankings extends StatelessWidget {
     final models = _RankingList(
       title: l10n.usageRankModels,
       rows: [
-        for (final model in report.topModelsByTokens.take(5))
+        for (final model in report.topModelsByTokens.take(usageRankingRows))
           (
             name: model.name,
+            tool: null,
             tokens: model.tokens,
             share: model.tokens / total,
           ),
@@ -323,7 +324,12 @@ class _Rankings extends StatelessWidget {
   }
 }
 
-typedef _RankingRow = ({String name, double tokens, double share});
+typedef _RankingRow = ({
+  String name,
+  String? tool,
+  double tokens,
+  double share,
+});
 
 class _RankingList extends StatelessWidget {
   const _RankingList({
@@ -353,6 +359,18 @@ class _RankingList extends StatelessWidget {
               children: [
                 Row(
                   children: [
+                    if (row.tool != null) ...[
+                      UsageAgentNameMark(
+                        tool: row.tool!,
+                        style:
+                            theme.textTheme.bodySmall ??
+                            DefaultTextStyle.of(context).style,
+                      ),
+                      const SizedBox(
+                        width:
+                            usageAgentNameMarkOffset - usageAgentNameMarkSize,
+                      ),
+                    ],
                     Expanded(
                       child: Text(
                         row.name,

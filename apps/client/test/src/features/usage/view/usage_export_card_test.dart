@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_export_card.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
@@ -17,6 +18,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:share_plus/share_plus.dart';
 
 Map<String, dynamic> sampleReport() =>
     jsonDecode(
@@ -163,9 +165,9 @@ void main() {
       );
     });
 
-    test('three of each rank land when three exist', () {
+    test('every rank prints all it has when the rung holds', () {
       // The sample serves two models and two projects; add thirds so the
-      // ladder has something to admit, and all three must fit on the first
+      // ladder has something to admit, and all of them must fit on the first
       // rung of an ordinary month.
       final data = sampleReport();
       (data['topModelsByTokens']! as List<dynamic>).add({
@@ -192,7 +194,9 @@ void main() {
         }).report,
         includeCost: true,
       );
-      expect(plan.maxProjects, 3);
+      // The rung the fitter held, not the row count: the card asks for five
+      // and prints the three that exist.
+      expect(plan.maxProjects, usageRankingRows);
       expect(plan.slack, greaterThanOrEqualTo(12));
       for (final name in [
         'Claude Code',
@@ -276,7 +280,7 @@ void main() {
   test('an ordinary period fits on the first rung of the ladder', () {
     // The fitter exists so a dense period cannot overflow, not so every card
     // drops content it had room for. The sample month keeps the densest heat
-    // cells and, on the project tier, all three project rows, with the full
+    // cells and, on the project tier, the ladder's top rung, with the full
     // 12px of breathing room the first pass asks for.
     final overview = planFor(includeCost: true);
     expect(overview.cellCap, 11);
@@ -286,7 +290,7 @@ void main() {
       kind: UsageExportCardKind.projectDetail,
       includeCost: true,
     );
-    expect(projects.maxProjects, 3);
+    expect(projects.maxProjects, usageRankingRows);
     expect(projects.cellCap, 11);
     expect(projects.slack, greaterThanOrEqualTo(12));
   });
@@ -294,10 +298,32 @@ void main() {
   testWidgets('a dense period drops project rows rather than overflowing', (
     tester,
   ) async {
-    // Five projects with long names is ordinary on a real machine and taller
-    // than the frame. The ladder answers by taking fewer rows at smaller heat
-    // cells; text never shrinks.
+    // A machine running five harnesses across five models, with five long
+    // repository names, is ordinary and taller than the frame. The ladder
+    // answers by taking fewer project rows at smaller heat cells; text never
+    // shrinks, and the harness and model blocks never give a row back.
     final data = sampleReport();
+    (data['tools']! as List<dynamic>).addAll([
+      for (var index = 0; index < 3; index++)
+        {
+          'tool': 'harness_$index',
+          'label': 'Harness $index',
+          'coding': true,
+          'tokens': 1500000000 - index * 100000000,
+          'cost': 400.0,
+          'requests': 9000,
+          'sessions': 40,
+        },
+    ]);
+    (data['topModelsByTokens']! as List<dynamic>).addAll([
+      for (var index = 0; index < 3; index++)
+        {
+          'name': 'a-rather-long-model-name-$index',
+          'tokens': 1400000000 - index * 100000000,
+          'cost': 380.0,
+          'requests': 8000,
+        },
+    ]);
     (data['projects']! as Map<String, dynamic>)['rows'] = [
       for (var index = 0; index < 5; index++)
         {
@@ -318,9 +344,21 @@ void main() {
       includeCost: true,
     );
     expect(plan.slack, greaterThanOrEqualTo(0));
-    expect(plan.maxProjects, lessThan(5));
+    expect(plan.maxProjects, lessThan(usageRankingRows));
     final shown = plan.texts.where((text) => text.contains('a_rather_long'));
     expect(shown.length, plan.maxProjects);
+    // The ranks above keep their full five: a project row is what the ladder
+    // spends, because the reader can lose one repository name and still read
+    // the card, and losing a harness makes it claim a machine that isn't this
+    // one.
+    final harnesses = [
+      for (final tool in dense.tools.take(usageRankingRows))
+        tool.label ?? tool.tool,
+    ];
+    expect(harnesses, hasLength(usageRankingRows));
+    for (final name in harnesses) {
+      expect(plan.texts, contains(name), reason: name);
+    }
     // The section survives even when the rows don't all fit: the label is the
     // promise, the ladder is the admission.
     expect(plan.texts, contains('TOP PROJECTS'));
@@ -481,9 +519,11 @@ void main() {
           usageExportCaptureProvider.overrideWithValue(
             (key) async => Uint8List.fromList(const [137, 80, 78, 71]),
           ),
-          // flutter_test reports Android, where the export is deliberately not
-          // offered. Pinned so these cases exercise the platforms that have it.
+          // flutter_test reports Android, which shares rather than writes.
+          // Pinned so these cases exercise the directory sink's wording; the
+          // share sheet has its own case below.
           usageExportSupportedProvider.overrideWithValue(true),
+          usageExportIsShareSheetProvider.overrideWithValue(false),
         ],
         child: MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -519,6 +559,50 @@ void main() {
       );
       // The sender never chose a theme, and never had to.
       expect(find.textContaining('Saved '), findsOneWidget);
+    });
+
+    testWidgets('a share sheet says it shared, never that it saved', (
+      tester,
+    ) async {
+      final sink = _RecordingSink();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            usageNowProvider.overrideWithValue(() => DateTime(2026, 9, 2)),
+            usageReportApiProvider.overrideWithValue(_StubApi()),
+            usageExportSinkProvider.overrideWithValue(sink),
+            usageExportCaptureProvider.overrideWithValue(
+              (key) async => Uint8List.fromList(const [137, 80, 78, 71]),
+            ),
+            usageExportSupportedProvider.overrideWithValue(true),
+            usageExportIsShareSheetProvider.overrideWithValue(true),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            theme: buildAppTheme(
+              themeSpecById(kDefaultThemeId).light,
+              Brightness.light,
+            ),
+            home: const MediaQuery(
+              data: MediaQueryData(size: Size(1100, 3400)),
+              child: UsageReportPage(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final button = find.byKey(const Key('usage-export-overview'));
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+
+      // "Saved" names a file the reader can go and open. The sheet handed the
+      // images to whatever they picked and promised no such thing.
+      expect(find.textContaining('Shared '), findsOneWidget);
+      expect(find.textContaining('Saved '), findsNothing);
     });
 
     testWidgets('the file name says which card and which window', (
@@ -811,20 +895,76 @@ void main() {
       await tester.pumpAndSettle();
 
       // Not a button that fails: `file_selector_ios` has no directory picker at
-      // all, and Android's answers with a path scoped storage will not let this
-      // app write. A failing press would read as a bug in the report.
+      // all, and no iOS share sheet has been run against this export. A failing
+      // press would read as a bug in the report.
       expect(find.byKey(const Key('usage-export-unsupported')), findsOneWidget);
       expect(find.byKey(const Key('usage-export-overview')), findsNothing);
       expect(find.byKey(const Key('usage-export-projectDetail')), findsNothing);
       expect(find.byKey(const Key('usage-export-cost')), findsNothing);
     });
 
-    test('the capability names the two platforms with no sink', () {
+    test('iOS is the one platform with no destination at all', () {
       expect(usageExportSupportedOn(TargetPlatform.iOS), isFalse);
-      expect(usageExportSupportedOn(TargetPlatform.android), isFalse);
+      expect(usageExportSupportedOn(TargetPlatform.android), isTrue);
       expect(usageExportSupportedOn(TargetPlatform.linux), isTrue);
       expect(usageExportSupportedOn(TargetPlatform.macOS), isTrue);
       expect(usageExportSupportedOn(TargetPlatform.windows), isTrue);
+    });
+
+    test('Android shares; every other platform writes a folder', () {
+      expect(usageExportSharesOn(TargetPlatform.android), isTrue);
+      expect(usageExportSharesOn(TargetPlatform.iOS), isFalse);
+      expect(usageExportSharesOn(TargetPlatform.linux), isFalse);
+      expect(usageExportSharesOn(TargetPlatform.macOS), isFalse);
+      expect(usageExportSharesOn(TargetPlatform.windows), isFalse);
+    });
+
+    group('the share sheet', () {
+      final files = [
+        UsageExportFile(
+          name: 'light.png',
+          bytes: Uint8List.fromList(const [137, 80, 78, 71]),
+        ),
+        UsageExportFile(
+          name: 'dark.png',
+          bytes: Uint8List.fromList(const [137, 80, 78, 71]),
+        ),
+      ];
+
+      test('takes every file in one gesture', () async {
+        var calls = 0;
+        List<UsageExportFile>? handed;
+        final sink = ShareSheetUsageExportSink(
+          share: (shared) async {
+            calls += 1;
+            handed = shared;
+            return ShareResultStatus.success;
+          },
+        );
+
+        expect(await sink.write(files), ['light.png', 'dark.png']);
+        // One sheet, not one per image: four cards are one export.
+        expect(calls, 1);
+        expect(handed, hasLength(2));
+      });
+
+      test('a dismissed sheet is a cancel, not a success', () async {
+        final sink = ShareSheetUsageExportSink(
+          share: (_) async => ShareResultStatus.dismissed,
+        );
+
+        expect(await sink.write(files), isNull);
+      });
+
+      test('an undetermined destination is still a success', () async {
+        // The platform shared the files and declined to say where. Reporting
+        // that as a cancel would tell the sender nothing happened when it did.
+        final sink = ShareSheetUsageExportSink(
+          share: (_) async => ShareResultStatus.unavailable,
+        );
+
+        expect(await sink.write(files), ['light.png', 'dark.png']);
+      });
     });
 
     testWidgets('the browser is told it may be asked about the second file', (

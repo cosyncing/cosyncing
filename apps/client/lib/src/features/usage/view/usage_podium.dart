@@ -7,7 +7,7 @@ import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:flutter/material.dart';
 
-/// The period's leaders: harness, model, project — three rows each.
+/// The period's leaders: harness, model, project — five rows each.
 ///
 /// The project tile is the one that needs care. Its share is a share of the
 /// *project facet*, and the facet cannot see every source — so the tile always
@@ -16,10 +16,12 @@ import 'package:flutter/material.dart';
 /// no project records. Without that line a 39% leader reads as "39% of my
 /// work", which is not what the number means.
 ///
-/// Each tile lists its top three in the export card's row idiom — mark, name
+/// Each tile lists its top five in the export card's row idiom — mark, name
 /// left, figure right, a bar read against the leader — because the podium is
 /// where the reader decides whether the period looks like what they remember,
-/// and one name per facet answers only the easy half of that.
+/// and one name per facet answers only the easy half of that. Five rather than
+/// three for the same reason: a machine running four harnesses had its fourth
+/// cut off the page it exists to be read from.
 class UsagePodium extends StatelessWidget {
   /// Creates the podium.
   const UsagePodium({
@@ -44,12 +46,12 @@ class UsagePodium extends StatelessWidget {
     final total = report.totals.tokens;
     if (total <= 0) return const SizedBox.shrink();
 
-    final harnesses = report.tools.take(3).toList();
-    final models = report.topModelsByTokens.take(3).toList();
+    final harnesses = report.tools.take(usageRankingRows).toList();
+    final models = report.topModelsByTokens.take(usageRankingRows).toList();
     final projects = report.projects;
     final projectRows = projects == null
         ? const <UsageReportProjectRow>[]
-        : projects.rows.take(3).toList();
+        : projects.rows.take(usageRankingRows).toList();
     if (harnesses.isEmpty &&
         models.isEmpty &&
         projectRows.isEmpty &&
@@ -86,8 +88,10 @@ class UsagePodium extends StatelessWidget {
                 share: model.tokens / total,
               ),
           ],
-          detail: l10n.usageCostQualified(
-            formatUsageCost(models.first.cost, locale: locale, compact: true),
+          detail: formatUsageCost(
+            models.first.cost,
+            locale: locale,
+            compact: true,
           ),
           locale: locale,
         ),
@@ -220,8 +224,8 @@ class _PodiumTile extends StatelessWidget {
   final List<_PodiumEntry> rows;
   final String locale;
 
-  /// The leader's subline (sessions · agent time, cost qualifier); rows two
-  /// and three stand without one.
+  /// The leader's subline (sessions · agent time, cost); the rows beneath it
+  /// stand without one.
   final String? detail;
 
   @override

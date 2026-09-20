@@ -11,6 +11,29 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- The usage report keeps finished windows on disk. A window that has already
+  ended is read once and served from the broker's own state afterwards, so the
+  report returns immediately after a restart instead of re-scanning every past
+  session. Stored windows are dropped whenever the reporting runtime or its
+  pricing table changes, so a cached figure can never outlive the prices it was
+  computed from.
+- The shareable usage image can now be shared from Android, alongside desktop
+  and the web UI.
+
+### Changed
+
+- Usage rankings show the top five agents, models, and projects, on the usage
+  overview, under Settings → Agents, and in the shareable image. Settings →
+  Agents shows each agent's logo, matching the overview.
+- By agent now lists every tool the machine reported. The table used to lead
+  with the coding-agent classification and fold the rest behind an expander,
+  which hid a reader's own agent whenever the upstream report did not count it
+  as one.
+- Cost figures no longer carry the "API list prices — not your bill" note. The
+  qualification is documented once rather than repeated on every surface.
+
 ## 0.5.10 — 2026-09-19
 
 ### Fixed

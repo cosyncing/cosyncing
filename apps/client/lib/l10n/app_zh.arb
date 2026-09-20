@@ -1871,17 +1871,7 @@
   },
   "usageCostLabel": "费用",
   "@usageCostLabel": {
-    "description": "Row label for the API list-price equivalent."
-  },
-  "usageCostQualified": "按 API 目录价估算 {cost}，非实际账单",
-  "@usageCostQualified": {
-    "description": "Cost value. The qualifier is part of the string: cost must never render bare, because tokdash reports an API-equivalent figure and not money spent on a plan.",
-    "placeholders": {
-      "cost": {
-        "type": "String",
-        "example": "$899.40"
-      }
-    }
+    "description": "Row label for the period cost."
   },
   "usageRequestsLabel": "请求",
   "@usageRequestsLabel": {
@@ -2061,7 +2051,7 @@
   },
   "usageStatCost": "费用",
   "@usageStatCost": {
-    "description": "Hero stat tile label: API list-price equivalent. Rendered in the costInk token, with the qualifier on its tooltip."
+    "description": "Hero stat tile label: the period cost, rendered in the costInk token."
   },
   "usageStatMessages": "消息数",
   "@usageStatMessages": {
@@ -2317,31 +2307,13 @@
   "@usageColCache": {
     "description": "Table column: cache-read tokens."
   },
-  "usageColCost": "费用 · 目录价",
+  "usageColCost": "费用",
   "@usageColCost": {
     "description": "Table column: the qualifier rides in the header so cells stay bare figures."
   },
   "usageColActive": "活跃",
   "@usageColActive": {
     "description": "Table column: active time."
-  },
-  "usageOtherToolsCount": "本机其他工具 · {count} 个会话",
-  "@usageOtherToolsCount": {
-    "description": "Expander row for tools cosyncing does not adapt.",
-    "placeholders": {
-      "count": {
-        "type": "String",
-        "example": "48"
-      }
-    }
-  },
-  "usageOtherTools": "本机其他工具",
-  "@usageOtherTools": {
-    "description": "The expander row when the active-time API served no session count."
-  },
-  "usageCostFooterNote": "费用为 API 目录价估算，非实际账单。",
-  "@usageCostFooterNote": {
-    "description": "Footer restatement of the cost qualifier, so the page carries it once more outside any single figure."
   },
   "usageActiveTimeNote": "活跃时间不计超过 {minutes} 分钟的空闲。",
   "@usageActiveTimeNote": {
@@ -2477,7 +2449,7 @@
   "@usageShareTitle": {
     "description": "Share section heading."
   },
-  "usageSharePreamble": "两张图，两种隐私级别。「本机概况」只含统计数字，不含身份信息，可直接发布；「项目明细」包含项目名称，请谨慎分享或自己留存。费用默认关闭，开启后也始终标注为 API 目录价，而非实际账单。",
+  "usageSharePreamble": "两张图，两种隐私级别。「本机概况」只含统计数字，不含身份信息，可直接发布；「项目明细」包含项目名称，请谨慎分享或自己留存。费用默认关闭。",
   "@usageSharePreamble": {
     "description": "States the privacy boundary before either button is pressed. The boundary is which button, not a toggle."
   },
@@ -2521,13 +2493,27 @@
   "@usageExportBothThemes": {
     "description": "The recipient picks the legible one; the sender never thinks about theme state."
   },
-  "usageCostToggle": "包含费用（按 API 目录价，非实际账单）",
+  "usageCostToggle": "包含费用",
   "@usageCostToggle": {
     "description": "The only toggle on the cards, and it stays inside the green tier."
   },
   "usageExportSaved": "已保存 {light} 与 {dark}",
   "@usageExportSaved": {
     "description": "Confirmation naming both written files.",
+    "placeholders": {
+      "light": {
+        "type": "String",
+        "example": "usage-2026-light.png"
+      },
+      "dark": {
+        "type": "String",
+        "example": "usage-2026-dark.png"
+      }
+    }
+  },
+  "usageExportShared": "已分享 {light} 与 {dark}",
+  "@usageExportShared": {
+    "description": "Confirmation on a share sheet, which hands the files on rather than writing them somewhere the reader can go and open.",
     "placeholders": {
       "light": {
         "type": "String",
@@ -2547,7 +2533,7 @@
   "@usageProjectsOwnerOnly": {
     "description": "Shown when the broker withheld the project facet from a non-owner. Says the names are missing, not the work."
   },
-  "usageExportDesktopOnly": "导出功能可在桌面端与网页端使用。手机端没有可写入的文件夹。",
+  "usageExportDesktopOnly": "导出功能可在桌面端、网页端与 Android 上使用。",
   "@usageExportDesktopOnly": {
     "description": "Replaces the export controls on iOS and Android, where no directory sink exists."
   },

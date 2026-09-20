@@ -222,8 +222,8 @@ class UsageReportTotals {
   /// doubles anyway.
   final double tokens;
 
-  /// API list-price equivalent. Never render bare — see the cost qualifier
-  /// rule.
+  /// The period cost, as Tokdash derives it from its pricing table. Rendered
+  /// as a plain figure; the surfaces carry no qualifier around it.
   final double cost;
 
   /// Requests (Tokdash's `messages`).
