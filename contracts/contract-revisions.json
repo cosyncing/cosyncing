@@ -143,6 +143,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "question-request carries an optional `blocking` flag so an adapter can surface an asynchronous question (Codex delivery:\"async\" agent items) that stays visible and answerable without forcing the session into needs-input; omission reproduces the pre-24 blocking behavior. The answer transport stays adapter-owned: a native RPC request is answered with its RPC response, an async question is steered in as user input. The flag adds no route, frame kind, message type or error code, so the surface hash is unchanged from revision 22; the number moves because the DTO did. The minimum client revision stays at 17: an older client ignores the field and renders the same card, and only the broker reads the flag."
+    },
+    {
+      "revision": 25,
+      "surfaceHash": "fnv1a32:caf34ce7",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "`agent-activity` gains the `command` kind, a bounded `output` tail and an `exitCode`, so a shell command the agent launched in the background is visible while it runs and reports how it ended. Such a command outlives the turn that started it, which is why it needs a surface at all: the transcript records the launch with an empty result body and never updates it, so today a job that runs for forty minutes is indistinguishable from one that never started. The kind also carries a different lifetime, now stated in the message's doc comment -- a subagent or workflow retires its live surface on a terminal frame, while a command's terminal frame persists until the reader dismisses it, because how it ended is the fact the card exists to deliver. `exitCode` is present only when the tool reported one and is never synthesized from a status. No route, frame kind, message type or error code changes, so the surface hash is unchanged from revision 22; the number moves because the DTO did. The minimum client revision stays at 17: an older client decodes an unrecognized kind as its generic activity value and ignores fields it does not read, so it renders the card with a title and a status exactly as it renders any other activity."
     }
   ]
 }

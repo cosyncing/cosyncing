@@ -13,6 +13,19 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Shell commands an agent runs in the background now appear as a live card in
+  the session, alongside goals, plans and subagent activity. The card shows the
+  command, how long it has been running and the latest lines of its output, and
+  reports how it ended -- including a non-zero exit code, and including a
+  failure the session never mentioned. Until now the transcript recorded the
+  launch with an empty result and never updated it, so a job that ran for forty
+  minutes looked the same as one that never started. The card stays after the
+  agent goes idle, because the command does too, and it stays after it finishes
+  until dismissed. A command that leaves no sign of life for long enough is
+  withdrawn rather than left claiming to run, and a job that finishes after
+  several shorter ones still delivers its result. Currently available for
+  Claude Code. Broker contract revision 25; older clients show the card without
+  the output preview.
 - The usage report keeps finished windows on disk for up to 24 hours, avoiding
   repeat scans after a restart. Stored reports are checked against the reporting
   runtime and baseline pricing identity before use, with a five-minute identity
@@ -35,6 +48,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- An expanded live-state card now shows its real state. The card in the session
+  band reported "Running" with a running icon whatever the underlying work was
+  doing, and its elapsed time kept climbing after the work had finished, so a
+  failed subagent read as one still in progress.
 - Usage-report caching retries failed identity reads, warms memory after verified
   disk hits, and preserves the original report timestamp. Scans whose runtime or
   pricing identity changes are not saved to disk. Incomplete or malformed stored

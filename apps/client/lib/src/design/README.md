@@ -22,6 +22,7 @@ lib/src/design/
 │   ├── metadata_chip.dart # MetadataChip: neutral surface-2 chip for quiet metadata
 │   ├── section_header.dart# SectionHeader: accent-tinted section title
 │   ├── copyable_code_line.dart # selectable, exact-copy command or path
+│   ├── command_output_block.dart # bounded monospace command output + dropped-bytes marker
 │   ├── selectable_tap_region.dart # selectable text in an activating row
 │   └── transcript_box.dart # compact tinted shell for boxed transcript content
 ├── themes/                # one isolated module per theme

@@ -443,6 +443,7 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
         oldWidget.activity.startedAtMs != widget.activity.startedAtMs) {
       _syncStart();
     }
+    if (oldWidget.activity.status != widget.activity.status) _startTicker();
   }
 
   @override
@@ -463,7 +464,11 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
 
   void _startTicker() {
     _ticker?.cancel();
-    _ticker = _tickerEnabled
+    // Only a running card has an elapsed that moves. Ticking a finished one
+    // rebuilt it every second AND, with the wall-clock floor below, made its
+    // duration climb past the figure the adapter actually measured.
+    _ticker =
+        _tickerEnabled && widget.activity.status == AgentActivityStatus.running
         ? Timer.periodic(const Duration(seconds: 1), (_) {
             if (mounted) setState(() {});
           })
@@ -482,14 +487,41 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final wallClock = DateTime.now().millisecondsSinceEpoch - _startedAtMs;
-    final elapsed = wallClock > (widget.activity.elapsedMs ?? 0)
-        ? wallClock
-        : widget.activity.elapsedMs ?? 0;
+    final running = widget.activity.status == AgentActivityStatus.running;
+    // A running card floors elapsed at wall-clock, because a quiet agent emits
+    // nothing for minutes. A finished one reports exactly what was measured:
+    // the floor would otherwise keep a completed duration growing on screen.
+    final elapsed = running
+        ? (wallClock > (widget.activity.elapsedMs ?? 0)
+              ? wallClock
+              : widget.activity.elapsedMs ?? 0)
+        : widget.activity.elapsedMs ?? wallClock;
     final label = switch (widget.activity.kind) {
       AgentActivityKind.workflow => l10n.backgroundWorkflow,
       AgentActivityKind.subagent => l10n.backgroundAgent,
+      AgentActivityKind.command => l10n.backgroundCommand,
       AgentActivityKind.unknown => l10n.backgroundActivity,
     };
+    // Chrome follows the reported status. It was pinned to the working color
+    // and the word "Running", so a finished or failed card announced itself as
+    // still running — which for a background command is the opposite of the
+    // fact the card exists to deliver.
+    final statusColor = switch (widget.activity.status) {
+      AgentActivityStatus.running => tokens.statusWorking,
+      AgentActivityStatus.error => tokens.statusError,
+      // `retired` is a withdrawal: the projection removes the row before it can
+      // reach a card, so these two branches exist for exhaustiveness only.
+      AgentActivityStatus.done ||
+      AgentActivityStatus.retired ||
+      AgentActivityStatus.unknown => tokens.statusIdle,
+    };
+    final statusLabel = switch (widget.activity.status) {
+      AgentActivityStatus.running => l10n.running,
+      AgentActivityStatus.done => l10n.done,
+      AgentActivityStatus.error => l10n.failed,
+      AgentActivityStatus.retired || AgentActivityStatus.unknown => label,
+    };
+    final isCommand = widget.activity.kind == AgentActivityKind.command;
     final tokenFigure =
         widget.activity.tokens?.input ?? widget.activity.tokens?.output;
     final details = <String>[
@@ -502,19 +534,22 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
         ),
       if (tokenFigure != null) l10n.tokensCount(_formatTokenCount(tokenFigure)),
       if (widget.activity.toolCalls case final calls?) l10n.toolsCount(calls),
+      if (widget.activity.exitCode case final code?) l10n.exitCode(code),
     ];
 
     return Material(
       color: tokens.surface2,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(tokens.radiusMd),
-        side: BorderSide(
-          color: tokens.statusWorking.withValues(alpha: 0.45),
-        ),
+        side: BorderSide(color: statusColor.withValues(alpha: 0.45)),
       ),
       clipBehavior: Clip.antiAlias,
       child: ExpansionTile(
-        leading: Icon(Icons.psychology, color: tokens.statusWorking),
+        // A shell is not an agent, and the band can hold both at once.
+        leading: Icon(
+          isCommand ? Icons.terminal : Icons.psychology,
+          color: statusColor,
+        ),
         title: Text(widget.activity.title),
         subtitle: Text(
           [
@@ -524,10 +559,7 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
           ].join(' · '),
           key: const Key('session-agent-activity-summary'),
         ),
-        trailing: StatusPill(
-          label: l10n.running,
-          color: tokens.statusWorking,
-        ),
+        trailing: StatusPill(label: statusLabel, color: statusColor),
         children: [
           for (final child in widget.activity.children)
             ListTile(
@@ -549,13 +581,28 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
                 ].join(' · '),
               ),
             ),
-          if (widget.activity.children.isEmpty)
+          if (widget.activity.output case final output?)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+              child: CommandOutputBlock(
+                key: const Key('session-agent-activity-output'),
+                text: output.text,
+                truncated: output.truncated,
+                truncationLabel: l10n.outputEarlierLinesDropped,
+              ),
+            ),
+          if (widget.activity.children.isEmpty &&
+              widget.activity.output == null)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  l10n.activityProgressLive,
+                  // A running command with nothing on stdout yet is not the
+                  // same fact as an agent whose progress is live elsewhere.
+                  isCommand && running
+                      ? l10n.commandNoOutputYet
+                      : l10n.activityProgressLive,
                   style: theme.textTheme.bodySmall,
                 ),
               ),

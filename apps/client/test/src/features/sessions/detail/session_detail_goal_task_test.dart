@@ -480,9 +480,17 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        // A terminal activity is NOT retired automatically: it stays until the
+        // reader archives it, so the expanded card is still on screen. The key
+        // is namespaced by the live-state item id ('activity:' + the broker
+        // key), which is what this used to get wrong -- it asserted
+        // findsNothing against a key no widget has ever carried, so it
+        // passed vacuously.
         expect(
-          find.byKey(const Key('session-agent-activity-agent:review')),
-          findsNothing,
+          find.byKey(
+            const Key('session-agent-activity-activity:agent:review'),
+          ),
+          findsOneWidget,
         );
         expect(
           find.byKey(
@@ -490,7 +498,75 @@ void main() {
           ),
           findsOneWidget,
         );
-        expect(find.text('Done'), findsOneWidget);
+        // Both surfaces report the status, and both report the SAME one. The
+        // expanded card's pill used to be hardcoded to 'Running', so a finished
+        // activity announced itself as still running and this expectation read
+        // findsOneWidget only because one of the two was lying.
+        expect(find.text('Done'), findsNWidgets(2));
+        expect(find.text('Running'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'an archived background command comes back when it ends',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: [
+            mutableSession(),
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage.fromJson({
+                'type': 'agent-activity',
+                'key': 'cmd:toolu_1',
+                'kind': 'command',
+                'title': 'Build the bundle',
+                'status': 'running',
+                'startedAtMs': DateTime.now().millisecondsSinceEpoch - 5000,
+              }),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        const strip = ValueKey('session-live-strip-activity:cmd:toolu_1');
+        expect(find.byKey(strip), findsOneWidget);
+
+        // Dismissing a RUNNING command means "not now", not "never tell me".
+        await tester.tap(
+          find.byKey(
+            const ValueKey(
+              'session-live-strip-archive-activity:cmd:toolu_1',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(strip), findsNothing);
+
+        connection.emitEvent(
+          MessageWireEvent(
+            seq: 2,
+            message: AgentMessage.fromJson({
+              'type': 'agent-activity',
+              'key': 'cmd:toolu_1',
+              'kind': 'command',
+              'title': 'Build the bundle',
+              'status': 'error',
+              'exitCode': 1,
+              'elapsedMs': 7000,
+            }),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The archive identity carries whether the work has ended, so the
+        // terminal frame is a different identity and the card returns once,
+        // carrying the outcome. Without that, dismissing a running command
+        // would silently discard how it finished.
+        expect(find.byKey(strip), findsOneWidget);
+        expect(find.text('Failed'), findsWidgets);
       },
     );
   });
@@ -548,6 +624,110 @@ void main() {
 
       expect(state.taskLists.single.key, 'plan');
       expect(state.activities.single.key, 'agent:one');
+    });
+
+    test('an idle status frame never sweeps a running background command', () {
+      // A background command outlives the turn that launched it -- that is the
+      // whole reason it is surfaced. The turn boundary says nothing about
+      // whether the process is still running, so sweeping it here would retire
+      // the card at the exact moment it becomes the only sign of live work.
+      final state = SessionLiveState.fromMessages([
+        message(const {
+          'type': 'agent-activity',
+          'key': 'cmd:toolu_1',
+          'kind': 'command',
+          'title': 'Build the bundle',
+          'status': 'running',
+        }),
+        message(const {
+          'type': 'agent-activity',
+          'key': 'agent:one',
+          'kind': 'subagent',
+          'title': 'Explore',
+          'status': 'running',
+        }),
+        message(const {'type': 'status', 'status': 'idle'}),
+      ]);
+
+      // The subagent IS still swept: it is work inside the turn that
+      // just ended.
+      expect(state.activities.single.key, 'cmd:toolu_1');
+      expect(state.activities.single.kind, AgentActivityKind.command);
+    });
+
+    test('a command card is retired by its own terminal frame', () {
+      final state = SessionLiveState.fromMessages([
+        message(const {
+          'type': 'agent-activity',
+          'key': 'cmd:toolu_1',
+          'kind': 'command',
+          'title': 'Build the bundle',
+          'status': 'running',
+        }),
+        message(const {
+          'type': 'agent-activity',
+          'key': 'cmd:toolu_1',
+          'kind': 'command',
+          'title': 'Build the bundle',
+          'status': 'error',
+          'exitCode': 1,
+        }),
+        message(const {'type': 'status', 'status': 'idle'}),
+      ]);
+
+      // Terminal, so it survives the sweep for a different reason: it is no
+      // longer running. It stays until the reader archives it, carrying how the
+      // command ended -- which is the fact the card exists to deliver.
+      expect(state.activities.single.status, AgentActivityStatus.error);
+      expect(state.activities.single.exitCode, 1);
+    });
+
+    test('a retired frame withdraws a command card the server gave up on', () {
+      // Every activity frame is an upsert, and a command is exempt from the
+      // idle sweep, so nothing else can take this card off screen. Without an
+      // explicit withdrawal a command that went silent sits at Running for as
+      // long as the client stays connected.
+      final state = SessionLiveState.fromMessages([
+        message(const {
+          'type': 'agent-activity',
+          'key': 'cmd:toolu_1',
+          'kind': 'command',
+          'title': 'Build the bundle',
+          'status': 'running',
+        }),
+        message(const {
+          'type': 'agent-activity',
+          'key': 'cmd:toolu_1',
+          'kind': 'command',
+          'title': 'Build the bundle',
+          'status': 'retired',
+        }),
+      ]);
+
+      expect(state.activities, isEmpty);
+    });
+
+    test('an unrecognized future status also withdraws the card', () {
+      // A client that predates `retired` must still drop the row rather than
+      // keep a card the server has stopped vouching for.
+      final state = SessionLiveState.fromMessages([
+        message(const {
+          'type': 'agent-activity',
+          'key': 'cmd:toolu_1',
+          'kind': 'command',
+          'title': 'Build the bundle',
+          'status': 'running',
+        }),
+        message(const {
+          'type': 'agent-activity',
+          'key': 'cmd:toolu_1',
+          'kind': 'command',
+          'title': 'Build the bundle',
+          'status': 'a-status-from-the-future',
+        }),
+      ]);
+
+      expect(state.activities, isEmpty);
     });
   });
 }
