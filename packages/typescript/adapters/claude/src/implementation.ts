@@ -5779,11 +5779,11 @@ export function collectParentActivity(
       const backgroundTaskId = (ln.tool_use_result ?? ln.toolUseResult)?.backgroundTaskId;
       if (extra?.backgroundCommands && typeof backgroundTaskId === 'string' && backgroundTaskId) {
         const prev = extra.backgroundCommands.get(tuid);
-        // Non-greedy up to the extension: the real ack ends the sentence with a period
-        // ("…/b7y3u97xr.output. You will be notified when it completes."), and a greedy \S+
-        // swallows it, so every path would fail the task-id binding below.
+        // Read through the final output extension on the ack line: scratchpad roots may contain
+        // spaces or `.output` themselves. The extension excludes the sentence-ending period;
+        // the structured task-id binding below still decides whether the path is admissible.
         const outputPath = backgroundOutputPath(
-          /Output is being written to:\s*(\S+?\.output)/.exec(blockText)?.[1],
+          /Output is being written to:\s*([^\r\n]+\.output)/.exec(blockText)?.[1],
           backgroundTaskId,
         );
         extra.backgroundCommands.set(tuid, {

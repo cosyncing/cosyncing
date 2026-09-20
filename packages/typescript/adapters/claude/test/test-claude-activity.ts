@@ -775,6 +775,16 @@ if (existsSync(REAL)) {
   const resumed = ledgerFor([spawn('toolu_bg1'), ack('toolu_bg1', 'btask01', foreignPath)]);
   check('a tasks dir under a different session id is still admitted', resumed.backgroundCommands.get('toolu_bg1')?.outputPath === foreignPath, resumed.backgroundCommands.get('toolu_bg1')?.outputPath);
 
+  // Scratchpad roots may contain spaces (including native Windows profile paths). A directory
+  // may itself contain `.output`; the admitted path must reach the actual task-bound filename.
+  {
+    const spacedPath = join(CMD_ROOT, 'scratch.output folder', 'tasks', 'bspace.output');
+    mkdirSync(dirname(spacedPath), { recursive: true });
+    writeFileSync(spacedPath, 'live output from a spaced path\n');
+    const frame = cardFor([spawn('toolu_space'), ack('toolu_space', 'bspace', spacedPath)]);
+    check('an acknowledgement with spaces in its output path supplies live output', frame?.msg.output?.text === 'live output from a spaced path', frame?.msg.output?.text);
+  }
+
   // (9b) ...but only because the path still RESOLVES to a `tasks` dir. A symlinked component that
   //      satisfies the literal shape and lands elsewhere is refused.
   const decoyDir = join(CMD_ROOT, 'decoy');
