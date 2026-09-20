@@ -356,26 +356,25 @@ void main() {
     });
   });
 
-  testWidgets('cost never renders without its qualifier', (tester) async {
+  testWidgets('cost renders as a bare figure, unqualified', (tester) async {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
     await tester.pumpAndSettle();
 
-    // tokdash reports an API-equivalent figure, not money spent on a plan.
-    // The hero tile carries the qualifier on its tooltip, and the footer
-    // restates it as visible text outside any single figure.
-    expect(
-      find.textContaining('API list-price equivalents, not billed spend'),
-      findsWidgets,
-    );
     final figure = find.descendant(
       of: find.byKey(const Key('usage-report-hero')),
       matching: find.text(r'$12,977'),
     );
     expect(figure, findsOneWidget);
-    final tooltip = tester.widget<Tooltip>(
+    // The API list-price qualifier is gone from the product: not on the hero
+    // tile's tooltip, not in the footer, not beside the podium's cost.
+    expect(
       find.ancestor(of: figure, matching: find.byType(Tooltip)),
+      findsNothing,
     );
-    expect(tooltip.message, contains('not billed spend'));
+    expect(find.textContaining('list price'), findsNothing);
+    expect(find.textContaining('list-price'), findsNothing);
+    expect(find.textContaining('not your bill'), findsNothing);
+    expect(find.textContaining('billed spend'), findsNothing);
   });
 
   testWidgets('an empty period is empty, not unavailable', (tester) async {
@@ -453,9 +452,9 @@ void main() {
       ),
       findsOneWidget,
     );
-    // The qualifier appears wherever a cost does — the podium tile, the
-    // footer — and never once without one.
-    expect(find.textContaining('非实际账单'), findsWidgets);
+    // The API list-price qualifier is gone in every locale, not only English.
+    expect(find.textContaining('非实际账单'), findsNothing);
+    expect(find.textContaining('目录价'), findsNothing);
     // The machine-scope line is gone from the page, in every locale.
     expect(find.textContaining('本机全部 agent 活动'), findsNothing);
   });

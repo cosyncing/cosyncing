@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as path_util;
+import 'package:share_plus/share_plus.dart';
 
 /// One rendered PNG, named for the theme it was captured in.
 @immutable
@@ -117,30 +118,89 @@ Future<void> _handOverToBrowser(UsageExportFile file) async {
 
 const Duration _betweenBrowserDownloads = Duration(milliseconds: 400);
 
+/// Android: the system share sheet takes every file in one gesture.
+///
+/// Not a folder, because scoped storage has none this app may write to: the
+/// directory picker returns a Storage Access Framework tree URI, and the path
+/// behind it is not writable without a permission the app does not hold and
+/// should not ask for. The sheet needs no permission on any supported Android
+/// version, and it reaches the destinations a phone actually shares to —
+/// Photos, Files, Drive, a chat — rather than a folder the reader would then
+/// have to go and find.
+///
+/// One sheet for all of them, for the reason the directory sink writes both
+/// files at once: four cards are one export, not four.
+class ShareSheetUsageExportSink implements UsageExportSink {
+  /// Creates the sink.
+  const ShareSheetUsageExportSink({this.share = _shareFiles});
+
+  /// Share-sheet boundary, so a test can answer either outcome without a
+  /// platform channel.
+  final Future<ShareResultStatus> Function(List<UsageExportFile> files) share;
+
+  @override
+  Future<List<String>?> write(List<UsageExportFile> files) async {
+    // Dismissed is the sheet's cancel, and cancel is what the directory sink
+    // reports as `null`. `unavailable` is NOT a cancel: the platform shared the
+    // files and declined to say where, which is a success this sink must not
+    // report as one the reader abandoned.
+    final status = await share(files);
+    if (status == ShareResultStatus.dismissed) return null;
+    return [for (final file in files) file.name];
+  }
+}
+
+Future<ShareResultStatus> _shareFiles(List<UsageExportFile> files) async {
+  // Data-backed, so nothing writes a PNG anywhere this code has to clean up:
+  // share_plus materializes each one under the temporary directory, named by
+  // `XFile.name`, for as long as the receiving app needs it.
+  final result = await SharePlus.instance.share(
+    ShareParams(
+      files: [
+        for (final file in files)
+          XFile.fromData(file.bytes, name: file.name, mimeType: 'image/png'),
+      ],
+      fileNameOverrides: [for (final file in files) file.name],
+    ),
+  );
+  return result.status;
+}
+
 /// The sink for this platform.
 final Provider<UsageExportSink> usageExportSinkProvider =
-    Provider<UsageExportSink>(
-      (ref) => kIsWeb
-          ? const BrowserUsageExportSink()
-          : const DirectoryUsageExportSink(),
-    );
+    Provider<UsageExportSink>((ref) {
+      if (kIsWeb) return const BrowserUsageExportSink();
+      if (usageExportSharesOn(defaultTargetPlatform)) {
+        return const ShareSheetUsageExportSink();
+      }
+      return const DirectoryUsageExportSink();
+    });
 
-/// Whether this platform can write an export at all.
+/// Whether this platform hands the files to a share sheet rather than writing
+/// them to a chosen folder.
+bool usageExportSharesOn(TargetPlatform platform) =>
+    !kIsWeb && platform == TargetPlatform.android;
+
+/// Whether this platform can produce an export at all.
 ///
-/// False on iOS and Android, and the reason is the directory picker rather than
-/// anything about the card. `file_selector_ios` does not implement
-/// `getDirectoryPath`, so the platform-interface default throws; the Android
-/// plugin implements it but answers by converting a Storage Access Framework
+/// False on iOS alone, and the reason is the destination rather than anything
+/// about the card. `file_selector_ios` does not implement `getDirectoryPath`,
+/// so the platform-interface default throws, and nothing here has been run
+/// against an iOS share sheet — a button proven on one mobile platform is not
+/// evidence about the other.
+///
+/// Android reaches the share sheet instead of a picker: its `file_selector`
+/// plugin answers `getDirectoryPath` by converting a Storage Access Framework
 /// tree URI back into a raw path, which throws for anything but the primary
 /// volume and, when it does succeed, hands back a path scoped storage will not
-/// let this app write — it holds no storage permission.
+/// let this app write.
 ///
 /// Left as a capability check rather than a `try` around the export, because a
 /// button that always fails is worse than a button that is not there: the
 /// failure looks like a bug in the report, and it is a missing platform sink.
 bool usageExportSupportedOn(TargetPlatform platform) {
   if (kIsWeb) return true;
-  return platform != TargetPlatform.iOS && platform != TargetPlatform.android;
+  return platform != TargetPlatform.iOS;
 }
 
 /// Whether export is offered here. Overridable so a test can pin either answer.
@@ -151,6 +211,13 @@ final Provider<bool> usageExportSupportedProvider = Provider<bool>(
 /// Whether the destination is a browser. Overridable for the same reason.
 final Provider<bool> usageExportIsBrowserProvider = Provider<bool>(
   (ref) => kIsWeb,
+);
+
+/// Whether the destination is a share sheet, which the section says out loud:
+/// "saved" names a file the reader can go and open, and a share sheet has not
+/// promised them one.
+final Provider<bool> usageExportIsShareSheetProvider = Provider<bool>(
+  (ref) => usageExportSharesOn(defaultTargetPlatform),
 );
 
 /// Captures one laid-out `RepaintBoundary` as PNG bytes.

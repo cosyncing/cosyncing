@@ -89,11 +89,17 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
         setState(() => _status = l10n.usageExportFailed);
         return;
       }
+      final shareSheet = ref.read(usageExportIsShareSheetProvider);
       final written = await ref.read(usageExportSinkProvider).write(files);
       if (!mounted) return;
       setState(() {
+        // "Saved" names a file the reader can go and open. A share sheet has
+        // handed the images to whatever they picked and promised no such
+        // thing, so it says what it did instead.
         _status = written == null
             ? null
+            : shareSheet
+            ? l10n.usageExportShared(written.first, written.last)
             : l10n.usageExportSaved(written.first, written.last);
       });
     } on Object {

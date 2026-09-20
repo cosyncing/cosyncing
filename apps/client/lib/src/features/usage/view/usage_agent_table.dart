@@ -9,14 +9,15 @@ import 'package:flutter/material.dart';
 
 /// Every tool on the machine, ranked by tokens.
 ///
-/// Split by tokdash's own coding-apps classification: the harnesses it counts
-/// as coding apps are the primary rows, everything else folds into one
-/// expandable row. That split is served rather than a cosyncing-side list of
-/// "tools we adapt", which would go stale the moment an adapter lands.
+/// One ranking, every tool in it. The table used to lead with tokdash's
+/// coding-apps classification and fold the rest behind an expander, which put
+/// a reader's own agent below a disclosure triangle whenever tokdash did not
+/// count it as a coding app — a classification this section never claimed to
+/// report.
 ///
 /// A cell the active-time API has no value for is an em dash, never a zero: no
 /// reading and a reading of nothing are different facts.
-class UsageAgentTable extends StatefulWidget {
+class UsageAgentTable extends StatelessWidget {
   /// Creates the table.
   const UsageAgentTable({
     required this.tools,
@@ -31,26 +32,11 @@ class UsageAgentTable extends StatefulWidget {
   final String locale;
 
   @override
-  State<UsageAgentTable> createState() => _UsageAgentTableState();
-}
-
-class _UsageAgentTableState extends State<UsageAgentTable> {
-  bool _othersOpen = false;
-
-  @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    if (widget.tools.isEmpty) return const SizedBox.shrink();
+    if (tools.isEmpty) return const SizedBox.shrink();
 
-    final ranked = [...widget.tools]
-      ..sort((a, b) => b.tokens.compareTo(a.tokens));
-    final primary = ranked.where((tool) => tool.coding).toList();
-    final others = ranked.where((tool) => !tool.coding).toList();
-    // If tokdash classified nothing, one undifferentiated table is more honest
-    // than an expander that hides every row behind a label about "other" tools.
-    final rows = primary.isEmpty ? ranked : primary;
-    final hidden = primary.isEmpty ? const <UsageReportTool>[] : others;
-
+    final ranked = [...tools]..sort((a, b) => b.tokens.compareTo(a.tokens));
     final size = WindowSizeClass.of(context);
     final columns = _columnsFor(size);
 
@@ -60,50 +46,10 @@ class _UsageAgentTableState extends State<UsageAgentTable> {
       children: [
         UsageSectionTitle(title: l10n.usageByAgent),
         _HeaderRow(columns: columns),
-        for (final tool in rows)
-          _ToolRow(
-            tool: tool,
-            columns: columns,
-            locale: widget.locale,
-            indented: false,
-          ),
-        if (hidden.isNotEmpty) ...[
-          _OthersToggle(
-            open: _othersOpen,
-            label: _othersLabel(l10n, hidden),
-            onTap: () => setState(() => _othersOpen = !_othersOpen),
-          ),
-          if (_othersOpen)
-            for (final tool in hidden)
-              _ToolRow(
-                tool: tool,
-                columns: columns,
-                locale: widget.locale,
-                indented: true,
-              ),
-        ],
+        for (final tool in ranked)
+          _ToolRow(tool: tool, columns: columns, locale: locale),
       ],
     );
-  }
-
-  static String _othersLabel(
-    AppLocalizations l10n,
-    List<UsageReportTool> others,
-  ) {
-    var sessions = 0;
-    var known = false;
-    for (final tool in others) {
-      final count = tool.sessions;
-      if (count != null) {
-        sessions += count;
-        known = true;
-      }
-    }
-    // A session count nobody served is left out of the label rather than
-    // printed as zero.
-    return known
-        ? l10n.usageOtherToolsCount(sessions.toString())
-        : l10n.usageOtherTools;
   }
 }
 
@@ -163,8 +109,6 @@ enum _Column {
     _Column.tokensIn => l10n.usageColIn,
     _Column.tokensOut => l10n.usageColOut,
     _Column.cache => l10n.usageColCache,
-    // The qualifier rides in the header so every cell below can stay a bare
-    // figure without ever reading as billed spend.
     _Column.cost => l10n.usageColCost,
     _Column.active => l10n.usageColActive,
   };
@@ -210,13 +154,11 @@ class _ToolRow extends StatelessWidget {
     required this.tool,
     required this.columns,
     required this.locale,
-    required this.indented,
   });
 
   final UsageReportTool tool;
   final List<_Column> columns;
   final String locale;
-  final bool indented;
 
   @override
   Widget build(BuildContext context) {
@@ -224,7 +166,6 @@ class _ToolRow extends StatelessWidget {
     final theme = Theme.of(context);
     final tokens = context.tokens;
     final style = theme.textTheme.bodySmall?.copyWith(
-      color: indented ? tokens.textTertiary : null,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
 
@@ -240,40 +181,34 @@ class _ToolRow extends StatelessWidget {
           for (final column in columns)
             Expanded(
               flex: column.flex,
-              child: Padding(
-                padding: EdgeInsets.only(
-                  left: column == _Column.agent && indented ? 14 : 0,
-                ),
-                child: column == _Column.agent
-                    ? Row(
-                        children: [
-                          UsageAgentNameMark(
-                            tool: tool.tool,
-                            style: style ?? DefaultTextStyle.of(context).style,
+              child: column == _Column.agent
+                  ? Row(
+                      children: [
+                        UsageAgentNameMark(
+                          tool: tool.tool,
+                          style: style ?? DefaultTextStyle.of(context).style,
+                        ),
+                        // 15 + 4: the name starts 19px in, tokdash's card
+                        // metric.
+                        const SizedBox(
+                          width:
+                              usageAgentNameMarkOffset - usageAgentNameMarkSize,
+                        ),
+                        Flexible(
+                          child: Text(
+                            _cell(column, l10n),
+                            overflow: TextOverflow.ellipsis,
+                            style: style,
                           ),
-                          // 15 + 4: the name starts 19px in, tokdash's card
-                          // metric.
-                          const SizedBox(
-                            width:
-                                usageAgentNameMarkOffset -
-                                usageAgentNameMarkSize,
-                          ),
-                          Flexible(
-                            child: Text(
-                              _cell(column, l10n),
-                              overflow: TextOverflow.ellipsis,
-                              style: style,
-                            ),
-                          ),
-                        ],
-                      )
-                    : Text(
-                        _cell(column, l10n),
-                        textAlign: TextAlign.end,
-                        overflow: TextOverflow.ellipsis,
-                        style: style,
-                      ),
-              ),
+                        ),
+                      ],
+                    )
+                  : Text(
+                      _cell(column, l10n),
+                      textAlign: TextAlign.end,
+                      overflow: TextOverflow.ellipsis,
+                      style: style,
+                    ),
             ),
         ],
       ),
@@ -309,53 +244,4 @@ class _ToolRow extends StatelessWidget {
 
   String _optionalCount(double? value) =>
       value == null ? _emDash : formatCompactCount(value, locale: locale);
-}
-
-class _OthersToggle extends StatelessWidget {
-  const _OthersToggle({
-    required this.open,
-    required this.label,
-    required this.onTap,
-  });
-
-  final bool open;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tokens = context.tokens;
-    return InkWell(
-      key: const Key('usage-report-other-tools'),
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          border: Border(
-            top: BorderSide(color: tokens.separator.withValues(alpha: 0.5)),
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              open ? Icons.expand_more : Icons.chevron_right,
-              size: 16,
-              color: tokens.textTertiary,
-            ),
-            const SizedBox(width: 4),
-            Flexible(
-              child: Text(
-                label,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: tokens.textTertiary,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }

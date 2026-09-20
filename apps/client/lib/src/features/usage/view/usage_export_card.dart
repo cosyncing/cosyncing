@@ -126,9 +126,11 @@ class UsageExportCardPlan {
 
   /// Paints, measures, and adjusts, down tokdash's ladder: heat cells shrink
   /// before project rows drop, because a small cell is thin and a missing row
-  /// is a lie. The first pass wants breathing room; the second takes anything
-  /// that fits at all. Text never scales — except the hero, which steps 34→20
-  /// to hold its own line.
+  /// is a lie. Each project count runs its FULL cell ladder — every cell size
+  /// wanting breathing room, then every cell size taking anything that fits —
+  /// before that count is given up, so a row is never dropped while a smaller
+  /// heat cell could have paid for it. Text never scales — except the hero,
+  /// which steps 34→20 to hold its own line.
   factory UsageExportCardPlan.fit({
     required UsageExportCardKind kind,
     required UsagePeriod period,
@@ -139,34 +141,29 @@ class UsageExportCardPlan {
     required AppTokens tokens,
     required TextStyle baseStyle,
   }) {
-    final attempts = kind.carriesProjectNames
-        ? const <(int, double)>[
-            (3, 11),
-            (3, 10),
-            (3, 9),
-            (2, 10),
-            (1, 9),
-            // Last resort: the label stays, the rows go. Still a worse card,
-            // but never one that runs out of its own frame.
-            (0, 7),
-          ]
-        : const <(int, double)>[(0, 11), (0, 9), (0, 7), (0, 5)];
+    // Last count is zero: the label stays, the rows go. Still a worse card,
+    // but never one that runs out of its own frame.
+    final projectCounts = kind.carriesProjectNames
+        ? const <int>[usageRankingRows, 4, 3, 2, 1, 0]
+        : const <int>[0];
     UsageExportCardPlan? last;
-    for (final slack in const [12.0, 0.0]) {
-      for (final (maxProjects, cellCap) in attempts) {
-        last = _UsageCardBuilder(
-          kind: kind,
-          period: period,
-          report: report,
-          locale: locale,
-          includeCost: includeCost,
-          l10n: l10n,
-          tokens: tokens,
-          baseStyle: baseStyle,
-          maxProjects: maxProjects,
-          cellCap: cellCap,
-        ).build();
-        if (last.slack >= slack) return last;
+    for (final maxProjects in projectCounts) {
+      for (final slack in const [12.0, 0.0]) {
+        for (final cellCap in const [11.0, 9.0, 7.0, 5.0]) {
+          last = _UsageCardBuilder(
+            kind: kind,
+            period: period,
+            report: report,
+            locale: locale,
+            includeCost: includeCost,
+            l10n: l10n,
+            tokens: tokens,
+            baseStyle: baseStyle,
+            maxProjects: maxProjects,
+            cellCap: cellCap,
+          ).build();
+          if (last.slack >= slack) return last;
+        }
       }
     }
     return last!;
@@ -712,7 +709,7 @@ class _UsageCardBuilder {
 
     if (report.tools.isNotEmpty) {
       _label(l10n.usageRankHarnesses);
-      final leaders = report.tools.take(3).toList();
+      final leaders = report.tools.take(usageRankingRows).toList();
       for (final tool in leaders) {
         _rankRow(
           tool: tool.tool,
@@ -727,7 +724,7 @@ class _UsageCardBuilder {
     }
     if (report.topModelsByTokens.isNotEmpty) {
       _label(l10n.usageRankModels);
-      final leaders = report.topModelsByTokens.take(3).toList();
+      final leaders = report.topModelsByTokens.take(usageRankingRows).toList();
       for (final model in leaders) {
         _rankRow(
           name: model.name,

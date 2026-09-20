@@ -12,6 +12,15 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:intl/intl.dart';
 
+/// How deep every "top" ranking goes: podium tiles, the Agents & usage
+/// rankings, the export card's harness and model blocks, and the export card's
+/// first project rung.
+///
+/// One constant because these are the same three facets read on four surfaces.
+/// A reader who sees five harnesses on the report page and three on the card
+/// they exported from it has been told two different things about one machine.
+const int usageRankingRows = 5;
+
 /// Compact count with ASCII K/M/B/T suffixes.
 ///
 /// One decimal while the mantissa is below 100 and none above it, so a column
@@ -58,12 +67,13 @@ String _fixed(num value, int decimals, String? locale) {
   return format.format(value);
 }
 
-/// API list-price equivalent, as a bare figure.
+/// The period cost, as a bare figure.
 ///
-/// Never render the result on its own: cost is always wrapped in the qualifier
-/// that says it is a list-price equivalent and not a bill. Two decimals, and
-/// four below a cent so a genuinely tiny figure does not render as `$0.00`;
-/// large figures in prose drop the cents.
+/// Rendered on its own. The figure used to carry a qualifier naming it an API
+/// list-price equivalent rather than a bill; that wording is gone from every
+/// surface, and the number is unchanged — still Tokdash's `total_cost`. Two
+/// decimals, and four below a cent so a genuinely tiny figure does not render
+/// as `$0.00`; large figures in prose drop the cents.
 String formatUsageCost(num cost, {String? locale, bool compact = false}) {
   if (!cost.isFinite) return '';
   if (compact && cost.abs() >= 1000) {

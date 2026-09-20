@@ -698,7 +698,6 @@ class _Footer extends StatelessWidget {
     final active = report.activeTime;
     final notes = <String>[
       l10n.usageDayBoundaryNote,
-      l10n.usageCostFooterNote,
       if (active != null)
         l10n.usageActiveTimeNote(usageIdleGapMinutes(active).toString()),
       if (report.coverage != null)

@@ -508,35 +508,25 @@ void main() {
       );
     });
 
-    testWidgets('coding apps are rows; everything else folds into one', (
-      tester,
-    ) async {
+    testWidgets('every tool is a row, coding app or not', (tester) async {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
       final agents = find.byKey(const Key('usage-report-agents'));
       expect(agents, findsOneWidget);
+      // The header carries the figure's name and nothing else: the API
+      // list-price qualifier is gone from every surface.
       expect(
-        find.descendant(
-          of: agents,
-          matching: find.text('Cost · API list price'),
-        ),
+        find.descendant(of: agents, matching: find.text('Cost')),
         findsOneWidget,
       );
-      expect(
-        find.descendant(of: agents, matching: find.text('openclaw')),
-        findsNothing,
-      );
-
-      final toggle = find.byKey(const Key('usage-report-other-tools'));
-      await tester.ensureVisible(toggle);
-      await tester.pumpAndSettle();
-      await tester.tap(toggle);
-      await tester.pumpAndSettle();
+      // openclaw is not one of tokdash's coding apps. It used to sit behind a
+      // disclosure triangle; it is now a row like any other.
       expect(
         find.descendant(of: agents, matching: find.text('openclaw')),
         findsOneWidget,
       );
+      expect(find.byKey(const Key('usage-report-other-tools')), findsNothing);
     });
 
     testWidgets('a cell the API never served is a dash, never a zero', (
@@ -545,11 +535,6 @@ void main() {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
-      final toggle = find.byKey(const Key('usage-report-other-tools'));
-      await tester.ensureVisible(toggle);
-      await tester.pumpAndSettle();
-      await tester.tap(toggle);
-      await tester.pumpAndSettle();
       // openclaw has no sessions and no active time in the served rows.
       expect(
         find.descendant(
@@ -569,7 +554,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('local midnight'), findsOneWidget);
-      expect(find.textContaining('not billed spend'), findsOneWidget);
       expect(find.textContaining('idle gaps over 5 minutes'), findsOneWidget);
       expect(find.textContaining('5 tool sources'), findsOneWidget);
     });

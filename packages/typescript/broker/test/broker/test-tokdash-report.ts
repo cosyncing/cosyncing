@@ -9,6 +9,14 @@
  * report, and the window cache is keyed, bounded and expiring.
  */
 import { strict as assert } from 'node:assert';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  isolatedBrokerFixtureEnvironment,
+  reserveLoopbackFixturePort,
+  waitForBrokerHealth,
+} from '../helpers/isolated-broker-fixture.ts';
 import {
   checkTokdashReportWindow,
   fetchTokdashReport,
@@ -20,6 +28,17 @@ import {
   TOKDASH_REPORT_WINDOW_FLOOR,
   withoutProjectNames,
 } from '../../src/installation/tokdash-report.ts';
+import {
+  brokerLocalToday,
+  fetchTokdashPricingIdentity,
+  isClosedTokdashReportWindow,
+  isPersistableTokdashReport,
+  isStorableTokdashReportWindow,
+  TokdashReportStore,
+  tokdashReportStoreFingerprint,
+  TOKDASH_REPORT_STORE_MAX_SPAN_DAYS,
+  TOKDASH_REPORT_STORE_REVISION,
+} from '../../src/installation/tokdash-report-store.ts';
 import {
   activeTimeFixture as activeTimeBody,
   insightsFixture as insightsBody,
@@ -628,6 +647,411 @@ await test('the scan cap holds through the hand-off gap', async () => {
   assert.equal(cache.runningScans, 0, 'every slot is accounted for');
   assert.equal(cache.queuedScans, 0, 'nothing is left waiting');
 });
+
+// ---------------------------------------------------------------------------
+// The durable store for windows that have ended.
+// ---------------------------------------------------------------------------
+
+const storeRoot = mkdtempSync(join(tmpdir(), 'cosyncing-tokdash-report-store-'));
+let storeSeq = 0;
+/** A store on its own file, so one case cannot read another's. */
+function storeAt(
+  options: { maxEntries?: number; now?: () => number; file?: string } = {},
+): { store: TokdashReportStore; file: string } {
+  const file = options.file ?? join(storeRoot, `store-${(storeSeq += 1)}.json`);
+  return {
+    file,
+    store: new TokdashReportStore({
+      path: file,
+      ...(options.maxEntries === undefined ? {} : { maxEntries: options.maxEntries }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    }),
+  };
+}
+
+const sampleReport = await (async () => {
+  const { fetch: upstream } = stubFetch();
+  return fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
+})();
+
+const FP = 'r1|tokdash:2.5.7|pricing:baseline:2.0.25';
+
+await test('the day a window is judged against is the local one', () => {
+  // Local components, zero-padded. A Tokdash day is a local day, so a broker
+  // west of UTC must not call this evening's window finished because UTC has
+  // already rolled over.
+  assert.equal(brokerLocalToday(new Date(2026, 8, 19, 23, 30)), '2026-09-19');
+  assert.equal(brokerLocalToday(new Date(2026, 0, 2, 0, 5)), '2026-01-02');
+  const late = new Date(2026, 8, 19, 23, 30);
+  assert.equal(
+    isClosedTokdashReportWindow({ from: '2026-09-01', to: '2026-09-19' }, brokerLocalToday(late)),
+    false,
+    'the window the host is still writing into is not finished',
+  );
+});
+
+await test('only a window that has ended is treated as finished', () => {
+  // The window the reader is inside is still taking writes; one that ended is
+  // the same figures forever.
+  assert.equal(isClosedTokdashReportWindow({ from: '2026-08-01', to: '2026-08-31' }, '2026-09-19'), true);
+  assert.equal(isClosedTokdashReportWindow({ from: '2026-09-01', to: '2026-09-19' }, '2026-09-19'), false);
+  assert.equal(isClosedTokdashReportWindow({ from: '2026-09-01', to: '2026-09-20' }, '2026-09-19'), false);
+});
+
+await test('an unbounded span is served but never kept', () => {
+  const today = '2026-09-19';
+  // The route bounds a window's ends, not its length, so this is a legal
+  // request any paired device can make. Keeping it forever is the part refused.
+  assert.equal(
+    isStorableTokdashReportWindow({ from: '2000-01-01', to: '2026-09-18' }, today),
+    false,
+    'a 26-year window is not durable state',
+  );
+  // A full past year is the widest thing the client can ask for and close.
+  assert.equal(isStorableTokdashReportWindow({ from: '2025-01-01', to: '2025-12-31' }, today), true);
+  assert.equal(isStorableTokdashReportWindow({ from: '2026-08-01', to: '2026-08-31' }, today), true);
+  // Still subject to closedness.
+  assert.equal(isStorableTokdashReportWindow({ from: '2026-09-01', to: '2026-09-19' }, today), false);
+  // Exactly at the bound, and one day past it.
+  const from = new Date(Date.UTC(2025, 0, 1));
+  const atCap = new Date(from.getTime() + (TOKDASH_REPORT_STORE_MAX_SPAN_DAYS - 1) * 86_400_000);
+  const overCap = new Date(from.getTime() + TOKDASH_REPORT_STORE_MAX_SPAN_DAYS * 86_400_000);
+  const iso = (value: Date): string => value.toISOString().slice(0, 10);
+  assert.equal(isStorableTokdashReportWindow({ from: '2025-01-01', to: iso(atCap) }, today), true);
+  assert.equal(isStorableTokdashReportWindow({ from: '2025-01-01', to: iso(overCap) }, today), false);
+});
+
+await test('a report with a hole in it is never made permanent', () => {
+  // `fetchTokdashReport` does not throw when its optional reads fail, so a shed
+  // scan produces a valid-looking DTO. In memory that degrades for five
+  // minutes; on disk it would be this window's answer for months, and the
+  // reader has no way to refresh a file.
+  assert.equal(isPersistableTokdashReport(sampleReport), true, 'the whole fixture report is keepable');
+
+  assert.equal(
+    isPersistableTokdashReport({ ...sampleReport, insightsUnavailable: 'unavailable' }),
+    false,
+    'a shed facet scan renders every chart null',
+  );
+  assert.equal(
+    isPersistableTokdashReport({
+      ...sampleReport,
+      runtime: { version: null, minimumVersion: TOKDASH_MINIMUM_VERSION, belowMinimum: true },
+    }),
+    false,
+    'an unread version paints the client\'s upgrade page over the whole report',
+  );
+  assert.equal(
+    isPersistableTokdashReport({ ...sampleReport, activeTime: null }),
+    false,
+    'an idle month still answers with a record of zeros, so null is a failed read',
+  );
+  assert.equal(
+    isPersistableTokdashReport({ ...sampleReport, sourceErrors: ['codex'] }),
+    false,
+    'Tokdash itself says tokens are missing from the totals',
+  );
+});
+
+await test('the store refuses to keep a degraded report', () => {
+  const { store } = storeAt();
+  store.write(WINDOW, { ...sampleReport, insightsUnavailable: 'unavailable' }, FP);
+  assert.equal(store.read(WINDOW, FP), undefined, 'nothing was written');
+  // Enforced in the store, not only at the call site, so no later caller can
+  // put a hole on disk by forgetting the rule.
+  store.write(WINDOW, sampleReport, FP);
+  assert.notEqual(store.read(WINDOW, FP), undefined);
+});
+
+await test('pricing identity is the packaged baseline, or nothing', async () => {
+  const answer = (body: unknown, status = 200): typeof fetch =>
+    (async () =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+
+  assert.equal(
+    await fetchTokdashPricingIdentity(undefined, {
+      fetch: answer({ source: 'baseline', baseline_version: '2.0.25' }),
+    }),
+    'baseline:2.0.25',
+  );
+  // An override is the user's own table, and nothing on the wire names its
+  // contents. Declining to persist is the fail-closed direction: an override is
+  // exactly when a stale cost is most wrong.
+  assert.equal(
+    await fetchTokdashPricingIdentity(undefined, {
+      fetch: answer({ source: 'override', baseline_version: '2.0.25' }),
+    }),
+    null,
+  );
+  assert.equal(
+    await fetchTokdashPricingIdentity(undefined, {
+      fetch: answer({ source: 'baseline', baseline_version: 7 }),
+    }),
+    null,
+  );
+  assert.equal(
+    await fetchTokdashPricingIdentity(undefined, { fetch: answer({}, 404) }),
+    null,
+  );
+  assert.equal(
+    await fetchTokdashPricingIdentity(undefined, {
+      fetch: (async () => {
+        throw new Error('unreachable');
+      }) as unknown as typeof fetch,
+    }),
+    null,
+  );
+});
+
+await test('an unidentifiable derivation has no fingerprint', () => {
+  assert.equal(tokdashReportStoreFingerprint(null, 'baseline:2.0.25'), null);
+  assert.equal(tokdashReportStoreFingerprint('2.5.7', null), null);
+  const fingerprint = tokdashReportStoreFingerprint('2.5.7', 'baseline:2.0.25');
+  assert.equal(typeof fingerprint, 'string');
+  // Both halves and the revision are named, so none of the three can change
+  // without the stored windows being dropped.
+  assert.equal(fingerprint?.includes('2.5.7'), true);
+  assert.equal(fingerprint?.includes('baseline:2.0.25'), true);
+  assert.equal(fingerprint?.includes(`r${TOKDASH_REPORT_STORE_REVISION}`), true);
+});
+
+await test('a stored window comes back with the time it was read', () => {
+  const { store, file } = storeAt({ now: () => 1_700_000_000_000 });
+  assert.equal(store.read(WINDOW, FP), undefined, 'nothing is stored yet');
+
+  store.write(WINDOW, sampleReport, FP);
+  const stored = store.read(WINDOW, FP);
+  assert.notEqual(stored, undefined);
+  assert.equal(stored?.storedAt, 1_700_000_000_000);
+  assert.deepEqual(stored?.report.totals, sampleReport.totals);
+  // Read back through a second instance on the same file: the point of the
+  // store is surviving the process that wrote it.
+  const reopened = storeAt({ file }).store;
+  assert.notEqual(reopened.read(WINDOW, FP), undefined);
+  assert.equal(reopened.read(WINDOW, FP)?.storedAt, 1_700_000_000_000);
+});
+
+await test('a different derivation drops every stored window', () => {
+  const { store, file } = storeAt();
+  store.write(WINDOW, sampleReport, FP);
+
+  // A pricing edit or a Tokdash upgrade moves the fingerprint. Entries written
+  // under the old one are not mixed in with the new: they go.
+  const moved = storeAt({ file }).store;
+  const other = 'r1|tokdash:2.5.8|pricing:baseline:2.0.25';
+  assert.equal(moved.read(WINDOW, other), undefined);
+  moved.write(WINDOW, sampleReport, other);
+  assert.equal(moved.size(other), 1, 'the file is replaced, not appended to');
+  assert.equal(moved.size(FP), 0, 'and the old derivation is gone, not hidden');
+});
+
+await test('a request with no fingerprint neither reads nor writes', () => {
+  const { store, file } = storeAt();
+  store.write(WINDOW, sampleReport, null);
+  assert.equal(store.read(WINDOW, null), undefined);
+  // Nothing was written at all, so a later broker that CAN identify the
+  // derivation does not find a file it has to reason about.
+  const reopened = storeAt({ file }).store;
+  assert.equal(reopened.size(FP), 0);
+});
+
+await test('eviction drops the least recently READ, not the oldest written', () => {
+  const january = { from: '2026-01-01', to: '2026-01-31' };
+  const february = { from: '2026-02-01', to: '2026-02-28' };
+  const march = { from: '2026-03-01', to: '2026-03-31' };
+  const { store } = storeAt({ maxEntries: 2 });
+  store.write(january, sampleReport, FP);
+  store.write(february, sampleReport, FP);
+
+  // January is the oldest WRITE, but the reader keeps coming back to it. The
+  // entry nothing has asked for is the one that should go.
+  assert.notEqual(store.read(january, FP), undefined);
+  store.write(march, sampleReport, FP);
+
+  assert.equal(store.size(FP), 2);
+  assert.notEqual(store.read(january, FP), undefined, 'the re-read window survives');
+  assert.equal(store.read(february, FP), undefined, 'the untouched one is evicted');
+});
+
+await test('a file the broker did not write is a miss, never a throw', () => {
+  for (const body of ['{ not json', '[]', '{"schemaVersion":99}', '{"schemaVersion":1}']) {
+    const file = join(storeRoot, `damaged-${(storeSeq += 1)}.json`);
+    writeFileSync(file, body);
+    const store = storeAt({ file }).store;
+    assert.equal(store.read(WINDOW, FP), undefined, body);
+    // And it recovers: the next write replaces the file rather than refusing.
+    store.write(WINDOW, sampleReport, FP);
+    assert.notEqual(store.read(WINDOW, FP), undefined, body);
+  }
+});
+
+await test('an entry of the wrong shape is dropped, not rendered as zeros', () => {
+  // The revision constant is the intended guard against a DTO change, and it is
+  // a line a human has to remember to move. The Dart decoder defaults every
+  // missing field, so without this backstop a wrong-shaped entry renders as a
+  // month of zeros on a page with no refresh.
+  const file = join(storeRoot, `shapes-${(storeSeq += 1)}.json`);
+  const entry = (from: string, report: unknown) => ({ from, to: from, storedAt: 1, report });
+  writeFileSync(
+    file,
+    JSON.stringify({
+      schemaVersion: 1,
+      fingerprint: FP,
+      entries: [
+        entry('2026-01-01', {}),
+        entry('2026-01-02', { ...sampleReport, totals: undefined }),
+        entry('2026-01-03', { ...sampleReport, totals: { tokens: 'lots', cost: 1, requests: 1 } }),
+        entry('2026-01-04', { ...sampleReport, range: undefined }),
+        entry('2026-01-05', { ...sampleReport, runtime: undefined }),
+        entry('2026-01-06', { ...sampleReport, tools: 'claude' }),
+        { from: '2026-01-07', to: '2026-01-07', storedAt: 'yesterday', report: sampleReport },
+        entry(WINDOW.from, sampleReport),
+      ],
+    }),
+  );
+  const store = storeAt({ file }).store;
+  assert.equal(store.size(FP), 1, 'only the well-formed entry survives');
+  assert.notEqual(store.read({ from: WINDOW.from, to: WINDOW.from }, FP), undefined);
+});
+
+rmSync(storeRoot, { recursive: true, force: true });
+
+// ---------------------------------------------------------------------------
+// The store inside a real broker.
+// ---------------------------------------------------------------------------
+//
+// Everything above tests the module. Two claims it cannot make are the ones the
+// feature exists for, and both are properties of the ROUTE: that a window
+// already in memory waits on nothing upstream, and that a window read by one
+// broker is served from disk by the next one instead of being re-scanned. Both
+// were regressions a reviewer caught by reading, which is exactly the coverage
+// a unit suite cannot provide.
+
+/** Every upstream path a fixture Tokdash was asked for. */
+const brokerCalls: string[] = [];
+function fixtureBody(pathname: string): unknown {
+  if (pathname.startsWith('/api/usage')) return usageBody();
+  if (pathname.startsWith('/api/active-time')) return activeTimeBody();
+  if (pathname.startsWith('/api/insights')) return insightsBody();
+  if (pathname.startsWith('/api/version')) return versionBody();
+  // The store keeps a window only under a pricing table it can name, which is
+  // the packaged baseline and its version.
+  if (pathname.startsWith('/api/pricing-db')) {
+    return { source: 'baseline', baseline_version: '2.0.25' };
+  }
+  return null;
+}
+const fixtureTokdash = Bun.serve({
+  port: 0,
+  hostname: '127.0.0.1',
+  fetch(request) {
+    const { pathname } = new URL(request.url);
+    brokerCalls.push(pathname);
+    const body = fixtureBody(pathname);
+    return body === null ? new Response('nope', { status: 404 }) : Response.json(body);
+  },
+});
+const hits = (...paths: string[]): number =>
+  brokerCalls.filter((path) => paths.some((wanted) => path.startsWith(wanted))).length;
+const IDENTITY = ['/api/version', '/api/pricing-db'] as const;
+
+const brokerHome = mkdtempSync(join(tmpdir(), 'cosyncing-report-store-broker-'));
+const BROKER_TOKEN = 'tokdash-report-store-token';
+const reportPath = `/api/tokdash/report?from=${WINDOW.from}&to=${WINDOW.to}`;
+
+async function startFixtureBroker(): Promise<{ proc: Bun.Subprocess; base: string }> {
+  // Leased rather than hard-coded: this suite runs beside others.
+  const lease = await reserveLoopbackFixturePort();
+  const { port } = lease;
+  await lease.release();
+  const proc = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
+    cwd: process.cwd(),
+    env: isolatedBrokerFixtureEnvironment(brokerHome, {
+      overrides: {
+        PORT: String(port),
+        HOST: '127.0.0.1',
+        COSYNCING_HOME: brokerHome,
+        COSYNCING_TOKEN: BROKER_TOKEN,
+        COSYNCING_MACHINE: 'tokdash-report-store-fixture',
+        COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+        COSYNCING_TOKDASH_URL: `http://127.0.0.1:${fixtureTokdash.port}`,
+        // No identity memo, so a store consultation cannot hide behind a cached
+        // fingerprint: anything that reaches the store re-reads those two routes
+        // and shows up in the counts.
+        COSYNCING_TOKDASH_FINGERPRINT_TTL_MS: '0',
+      },
+    }),
+    stdin: 'ignore',
+    stdout: 'ignore',
+    stderr: 'ignore',
+  });
+  const base = `http://127.0.0.1:${port}`;
+  await waitForBrokerHealth(proc, `${base}/api/health`);
+  return { proc, base };
+}
+
+async function readReport(base: string): Promise<Record<string, any>> {
+  const response = await fetch(`${base}${reportPath}`, {
+    headers: { 'x-cosyncing-token': BROKER_TOKEN },
+  });
+  return await response.json() as Record<string, any>;
+}
+
+async function stopFixtureBroker(proc: Bun.Subprocess): Promise<void> {
+  proc.kill();
+  await proc.exited.catch(() => null);
+}
+
+let firstTokens: unknown;
+const firstBroker = await startFixtureBroker();
+try {
+  await test('a window already in memory costs no upstream identity read', async () => {
+    const before = hits(...IDENTITY);
+    const first = await readReport(firstBroker.base);
+    firstTokens = first.data?.totals?.tokens;
+    assert.equal(first.ok, true, 'the report was served');
+    assert.equal(typeof firstTokens, 'number');
+    const afterScan = hits(...IDENTITY);
+    assert.equal(afterScan > before, true, 'the read that scans establishes the identity');
+    assert.equal(
+      existsSync(join(brokerHome, 'tokdash-report-cache.json')),
+      true,
+      'the route keeps the finished window',
+    );
+
+    // Memory answers before the store does. The store cannot serve a window
+    // without first establishing the current identity, and this broker holds no
+    // identity memo, so a consultation would show as another pair of reads.
+    const second = await readReport(firstBroker.base);
+    assert.equal(second.data?.totals?.tokens, firstTokens);
+    assert.equal(hits(...IDENTITY), afterScan, 'the second read went nowhere upstream');
+  });
+} finally {
+  await stopFixtureBroker(firstBroker.proc);
+}
+
+const secondBroker = await startFixtureBroker();
+try {
+  await test('a later broker serves a finished window from disk, without re-scanning', async () => {
+    // The scan is the cost the store exists to avoid, so the scan is what is
+    // counted. A fresh process, the same home, the same window.
+    const scansBefore = hits('/api/insights');
+    assert.equal(scansBefore, 1, 'exactly one scan has happened so far');
+    const report = await readReport(secondBroker.base);
+    assert.equal(report.ok, true);
+    assert.equal(report.data?.totals?.tokens, firstTokens, 'the same figures come back');
+    assert.equal(report.servedFromCache, true, 'and they are reported as cached');
+    assert.equal(hits('/api/insights'), scansBefore, 'no second scan');
+  });
+} finally {
+  await stopFixtureBroker(secondBroker.proc);
+  rmSync(brokerHome, { recursive: true, force: true });
+  fixtureTokdash.stop(true);
+}
+
 
 console.log(`\nTokdash report: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

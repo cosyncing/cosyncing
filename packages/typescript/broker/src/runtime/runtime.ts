@@ -204,10 +204,18 @@ import {
 import {
   checkTokdashReportWindow,
   fetchTokdashReport,
+  fetchTokdashVersion,
   isTokdashReportDate,
   withoutProjectNames,
   TokdashReportCache,
 } from '../installation/tokdash-report.ts';
+import {
+  brokerLocalToday,
+  fetchTokdashPricingIdentity,
+  isStorableTokdashReportWindow,
+  TokdashReportStore,
+  tokdashReportStoreFingerprint,
+} from '../installation/tokdash-report-store.ts';
 import { AttentionReminderScheduler } from '../attention/attention-reminder-scheduler.ts';
 import {
   isValidTimeZone,
@@ -1452,6 +1460,53 @@ const tokdashQuotaEvaluator = new TokdashQuotaEvaluator();
 const tokdashReportCache = new TokdashReportCache({
   ttlMs: Math.max(0, envNumber('COSYNCING_TOKDASH_REPORT_CACHE_MS', 5 * 60_000)),
 });
+/**
+ * The identity a stored window must still match: Tokdash's version and its pricing table.
+ *
+ * Memoized, because it gates every closed-window read and the two upstream GETs behind it are
+ * cheap but not free. Coalesced for the same reason the report cache is: a page that opens four
+ * windows at once must not resolve the same fingerprint four times.
+ *
+ * Both reads carry an explicit short timeout. `fetchTokdashVersion`'s own default is the report
+ * module's 60s, sized for a full-year SCAN, and this is a small live read on the path to a cached
+ * answer: inheriting that ceiling would let a wedged Tokdash hold a request that needed nothing
+ * from it.
+ *
+ * Five minutes of memo means a pricing edit can still be served against for that long, and the
+ * stale file itself is dropped only when the next write finds the fingerprint moved — so an
+ * untouched store can hold pre-edit costs indefinitely. That is the same bargain the report cache
+ * makes, against a scan every caller would otherwise pay to learn nothing had changed.
+ */
+const TOKDASH_FINGERPRINT_TTL_MS = Math.max(
+  0,
+  envNumber('COSYNCING_TOKDASH_FINGERPRINT_TTL_MS', 5 * 60_000),
+);
+const TOKDASH_FINGERPRINT_TIMEOUT_MS = 5_000;
+let tokdashFingerprint: { value: string | null; at: number } | undefined;
+let tokdashFingerprintInFlight: Promise<string | null> | undefined;
+async function resolveTokdashReportFingerprint(): Promise<string | null> {
+  const fresh = tokdashFingerprint;
+  if (fresh !== undefined && Date.now() - fresh.at < TOKDASH_FINGERPRINT_TTL_MS) return fresh.value;
+  tokdashFingerprintInFlight ??= (async () => {
+    try {
+      const [version, pricing] = await Promise.all([
+        fetchTokdashVersion(TOKDASH_URL, { timeoutMs: TOKDASH_FINGERPRINT_TIMEOUT_MS }),
+        fetchTokdashPricingIdentity(TOKDASH_URL, { timeoutMs: TOKDASH_FINGERPRINT_TIMEOUT_MS }),
+      ]);
+      const value = tokdashReportStoreFingerprint(version, pricing);
+      tokdashFingerprint = { value, at: Date.now() };
+      return value;
+    } finally {
+      tokdashFingerprintInFlight = undefined;
+    }
+  })();
+  return tokdashFingerprintInFlight;
+}
+/**
+ * Closed windows on disk. A finished month is the same figures forever, so the reader who steps
+ * back into it pays a file read rather than the full upstream scan they paid last time.
+ */
+const tokdashReportStore = new TokdashReportStore();
 async function reconcileTokdashQuota(): Promise<void> {
   const optedIn = getQuotaWarningsEnabled();
   let lifecycle;
@@ -6540,20 +6595,45 @@ server = Bun.serve<WsData>({
         );
       }
       const window = { from, to };
+      const today = new Date().toISOString().slice(0, 10);
       // Bounded before anything upstream is touched. Each distinct window is a full Tokdash scan,
       // so an unbounded range is both an unbounded cost and an unbounded cache key space.
-      const refused = checkTokdashReportWindow(window, new Date().toISOString().slice(0, 10));
+      const refused = checkTokdashReportWindow(window, today);
       if (refused !== null) {
         return json({ ok: false, code: 'BAD_PARAM', error: refused }, 400);
       }
+      // A window that has ended cannot change. Its figures are read from disk and written there on
+      // the way past, so stepping back into last month costs a file read rather than the scan the
+      // reader already paid for it once. Judged against the LOCAL date, not the UTC one the bound
+      // above uses: a Tokdash day is a local day, and calling a window closed while the host is
+      // still writing into it would persist an unfinished one.
+      const storable = isStorableTokdashReportWindow(window, brokerLocalToday());
       try {
+        // Memory first. It answers with nothing upstream, while the store has to establish the
+        // current identity before it may trust a file — and a window already in hand must never
+        // wait on a Tokdash it does not need.
+        const memory = tokdashReportCache.get(window);
+        const consultStore = memory === undefined && storable;
+        // One fingerprint for the whole request. Resolving it again on the way out would let a
+        // scan that began under one pricing table be stamped with the next one, and that entry
+        // never self-heals: the file would match the current identity exactly.
+        const fingerprint = consultStore ? await resolveTokdashReportFingerprint() : null;
+        const stored = consultStore ? tokdashReportStore.read(window, fingerprint) : undefined;
         // Coalesced: a cold year window is a tens-of-seconds upstream scan, and a second caller
         // arriving mid-scan must join it rather than start a duplicate Tokdash refuses. Distinct
         // windows queue behind the cache's scan cap rather than fanning out.
-        const { entry, servedFromCache } = await tokdashReportCache.load(
-          window,
-          () => fetchTokdashReport(TOKDASH_URL, window),
-        );
+        const { entry, servedFromCache } = memory !== undefined
+          ? { entry: memory, servedFromCache: true }
+          : stored !== undefined
+            ? { entry: { report: stored.report, cachedAt: stored.storedAt }, servedFromCache: true }
+            : await tokdashReportCache.load(window, async () => {
+              const report = await fetchTokdashReport(TOKDASH_URL, window);
+              // `write` keeps only a whole report: a shed facet scan or an unread version answers
+              // with a DTO that renders as an empty page or an "upgrade Tokdash" notice, and on
+              // disk that would be the reader's permanent answer for this window.
+              if (storable) tokdashReportStore.write(window, report, fingerprint);
+              return report;
+            });
         // Project names are owner-only. The route stays observe-scoped because the counts are what
         // a paired device came for; it is the Amber facet that narrows, not the whole report.
         const owned = principal?.kind === 'owner';
