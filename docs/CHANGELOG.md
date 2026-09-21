@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.11 — 2026-09-21
+
 ### Added
 
 - Shell commands an agent runs in the background now appear as a live card in
