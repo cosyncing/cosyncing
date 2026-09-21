@@ -5,31 +5,37 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.10 is a fix release. It repairs installer pairing on clients whose broker
-is still starting, and restores the runtime controls that disappeared from
-Settings → Agents when a managed runtime had nothing pending.
+0.5.11 adds a live card for shell commands an agent runs in the background, and
+lets Android share the usage image. An expanded live-state card now reports what
+the underlying work is really doing.
 
-0.5.10 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.10 broker. Those clients do not expose features
-introduced by newer contract revisions. A 0.4.1 or older client remains
-read-only against current brokers.
+0.5.11 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.11 broker. Those clients do not expose features
+introduced by newer contract revisions; in particular an older client shows the
+background-command card without its output preview. A 0.4.1 or older client
+remains read-only against current brokers.
 
 Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's fixed in 0.5.10
+## What's new in 0.5.11
 
-- Installer pairing holds its one-use claim while a newly started broker becomes
-  responsive. Clients retry transient startup failures instead of dropping the
-  offer and falling through to manual authentication.
-- Settings → Agents no longer reports "Activity check unavailable" for a managed
-  runtime that is already up to date.
-- Force restart is offered on any server-managed runtime when nothing is
-  pending. A wedged Codex daemon reports no pending change, which is exactly
-  when the control used to disappear.
+- Shell commands an agent runs in the background appear as a live card in the
+  session, showing the command, how long it has been running, the latest output
+  lines, and how it ended — including a failure the session never mentioned.
+  The card stays until dismissed, and a command that goes silent is withdrawn
+  rather than left claiming to run.
+- The shareable usage image can now be shared from Android, alongside desktop
+  and the web UI.
+- Usage rankings show the top five agents, models, and projects, and
+  Settings → Agents shows each agent's logo. By agent lists every tool the
+  machine reported.
+- An expanded live-state card now shows its real state instead of always
+  reporting "Running" with a clock that keeps climbing after the work finished.
 
-Use a 0.5.10 native client with a 0.5.10 broker release.
+For the background-command card with its output preview, use a 0.5.11 native
+client with a 0.5.11 broker release.
 
 ## Downloads
 
