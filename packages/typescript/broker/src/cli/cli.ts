@@ -443,9 +443,9 @@ async function defaultRunLogs(options: {
   return result;
 }
 
-async function confirmAction(message: string): Promise<boolean> {
+async function confirmAction(message: string, initialValue = false): Promise<boolean> {
   const { confirm, isCancel } = await import('@clack/prompts');
-  const answer = await confirm({ message, initialValue: false });
+  const answer = await confirm({ message, initialValue });
   return !isCancel(answer) && answer === true;
 }
 
@@ -485,7 +485,10 @@ async function defaultRunUpgrade(options: {
   stderr: CliWriter;
   buildInfo: Readonly<BuildInfo>;
 }): Promise<{ exitCode: number }> {
-  const confirmed = options.yes || (options.interactive && await confirmAction('Download, verify, switch, and health-check the next signed cosyncing release?'));
+  const confirmed = options.yes || (options.interactive && await confirmAction(
+    'Download, verify, switch, and health-check the next signed cosyncing release?',
+    true,
+  ));
   if (!confirmed) {
     const result = { schemaVersion: 1, status: 'cancelled', exitCode: 2, detailCode: 'upgrade-confirmation-required', summary: 'Upgrade was not confirmed.' };
     writeCommandResult(result, options.json, options.stdout, options.stderr);

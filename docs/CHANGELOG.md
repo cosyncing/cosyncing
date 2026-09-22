@@ -13,6 +13,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- The interactive signed-release upgrade confirmation now selects Yes by
+  default, so pressing Enter starts the download, verification, switch, and
+  health check. Other destructive confirmations continue to default to No.
 - Only the most recent background commands carry an output preview. Every
   running command still shows a card with its status and elapsed time; a session
   holding many long-lived jobs at once no longer sends a preview for each of

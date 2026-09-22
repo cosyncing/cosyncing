@@ -128,6 +128,15 @@ process.env.COSYNCING_HOME = pureCliHome;
     aliasedUpgrade.code === 0 && aliasedUpgradeCalls === 1
       && help.stdout.includes('(alias: update)'));
 
+  const cliSource = readFileSync(join(ROOT, 'packages/typescript/broker/src/cli/cli.ts'), 'utf8');
+  const upgradeConfirmation = cliSource.match(
+    /confirmAction\(\s*'Download, verify, switch, and health-check the next signed cosyncing release\?',\s*(true|false),\s*\)/,
+  );
+  check('interactive signed-release upgrades default their confirmation to Yes',
+    upgradeConfirmation?.[1] === 'true'
+      && /async function confirmAction\(message: string, initialValue = false\)/.test(cliSource),
+    upgradeConfirmation?.[0] ?? '(upgrade confirmation not found)');
+
   const version = await callCli(['version', '--json']);
   const parsed = JSON.parse(version.stdout);
   check('version --json has the stable, redacted schema',
