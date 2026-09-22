@@ -368,16 +368,18 @@ class _SessionLiveStateSurface extends StatelessWidget {
     // Which single item fronts the stack. Anything needing an answer wins. A
     // background command is ranked last: nothing about it is actionable and it
     // is expected to sit there for minutes, so letting one front the band would
-    // bury a subagent or a plan behind a progress line nobody has to read.
-    final actionIndex = visibleItems.indexWhere((item) => item.actionRequired);
-    final preferredIndex = visibleItems.indexWhere(
-      (item) => !_isBackgroundCommand(item),
-    );
-    final primary = actionIndex >= 0
-        ? visibleItems[actionIndex]
-        : preferredIndex >= 0
-        ? visibleItems[preferredIndex]
-        : visibleItems.first;
+    // bury a subagent or a plan behind a progress line nobody has to read. That
+    // is one ranking, so it is read as one — the first item holding the lowest
+    // rank, which is exactly what the two separate scans used to compute.
+    int rankOf(_LiveStateItem item) => item.actionRequired
+        ? 0
+        : _isBackgroundCommand(item)
+        ? 2
+        : 1;
+    var primary = visibleItems.first;
+    for (final item in visibleItems) {
+      if (rankOf(item) < rankOf(primary)) primary = item;
+    }
     final orderedItems = <_LiveStateItem>[
       primary,
       for (final item in visibleItems)

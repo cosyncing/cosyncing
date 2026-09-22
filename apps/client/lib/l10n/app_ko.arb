@@ -784,6 +784,7 @@
   "exitCode": "종료 코드 {code}",
   "outputEarlierLinesDropped": "… 이전 출력이 삭제되었습니다",
   "commandNoOutputYet": "아직 출력이 없습니다",
+  "commandNoOutput": "출력이 없습니다",
   "sessionViewMenuBackgroundCommands": "{count, plural, other{백그라운드 명령 {count}개 실행 중}}",
   "agentsProgress": "에이전트 {done}/{total}",
   "tokensCount": "↓{count} 토큰",

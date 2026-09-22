@@ -53,7 +53,59 @@ void main() {
     }),
   );
 
+  /// A running background command is what drives the Chat badge.
+  MessageWireEvent backgroundCommand(int seq) => MessageWireEvent(
+    seq: seq,
+    message: AgentMessage.fromJson({
+      'type': 'agent-activity',
+      'key': 'cmd:toolu_1',
+      'kind': 'command',
+      'title': 'Build the bundle',
+      'status': 'running',
+      'startedAtMs': DateTime.now().millisecondsSinceEpoch - 5000,
+    }),
+  );
+
   group('SessionDetailPage view menu signals', () {
+    // The badge was counted off the raw activity snapshot while every other
+    // count on the same screen was taken from the projected items. Archiving a
+    // running command in the band is the reader saying "not now"; the signal
+    // pointing at it from every other view outlived that, and could not be
+    // cleared until the command itself ended.
+    testWidgets('archiving a running command clears its Chat badge', (
+      tester,
+    ) async {
+      useRoomyTestViewport(tester);
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: [session(), backgroundCommand(1)]),
+      );
+      await tester.pumpAndSettle();
+
+      await withSessionDetailViewMenu(tester, () async {
+        final badge = find.byKey(const Key('session-detail-view-badge-chat'));
+        expect(
+          find.descendant(of: badge, matching: find.text('1')),
+          findsOneWidget,
+          reason: 'a running command must announce itself from other views',
+        );
+      });
+
+      await tester.tap(
+        find.byKey(
+          const ValueKey('session-live-strip-archive-activity:cmd:toolu_1'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await withSessionDetailViewMenu(tester, () async {
+        final badge = find.byKey(const Key('session-detail-view-badge-chat'));
+        expect(
+          find.descendant(of: badge, matching: find.text('1')),
+          findsNothing,
+        );
+      });
+    });
+
     testWidgets('the Status badge renders its count inside the menu', (
       tester,
     ) async {

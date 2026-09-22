@@ -784,6 +784,7 @@
   "exitCode": "salida {code}",
   "outputEarlierLinesDropped": "… se descartó la salida anterior",
   "commandNoOutputYet": "Aún no hay salida",
+  "commandNoOutput": "Sin salida",
   "sessionViewMenuBackgroundCommands": "{count, plural, =1{1 comando en segundo plano en ejecución} other{{count} comandos en segundo plano en ejecución}}",
   "agentsProgress": "{done}/{total} agentes",
   "tokensCount": "↓{count} tokens",

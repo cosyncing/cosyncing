@@ -491,11 +491,22 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
     // A running card floors elapsed at wall-clock, because a quiet agent emits
     // nothing for minutes. A finished one reports exactly what was measured:
     // the floor would otherwise keep a completed duration growing on screen.
-    final elapsed = running
-        ? (wallClock > (widget.activity.elapsedMs ?? 0)
-              ? wallClock
-              : widget.activity.elapsedMs ?? 0)
-        : widget.activity.elapsedMs ?? wallClock;
+    //
+    // "Reports exactly what was measured" is taken literally: a finished card
+    // with NO measured duration shows no duration. Falling back to the wall
+    // clock there meant a terminal card that arrived without `elapsedMs` kept
+    // growing on every rebuild — the `_startedAtMs` it fell back to is a local
+    // first-render guess, and nothing re-syncs it when the status lands, which
+    // is the same climbing the floor above exists to prevent.
+    final elapsedText = running
+        ? _formatElapsedMilliseconds(
+            wallClock > (widget.activity.elapsedMs ?? 0)
+                ? wallClock
+                : widget.activity.elapsedMs ?? 0,
+          )
+        : widget.activity.elapsedMs != null
+        ? _formatElapsedMilliseconds(widget.activity.elapsedMs!)
+        : null;
     final label = switch (widget.activity.kind) {
       AgentActivityKind.workflow => l10n.backgroundWorkflow,
       AgentActivityKind.subagent => l10n.backgroundAgent,
@@ -554,7 +565,7 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
         subtitle: Text(
           [
             label,
-            _formatElapsedMilliseconds(elapsed),
+            if (elapsedText != null) elapsedText,
             ...details,
           ].join(' · '),
           key: const Key('session-agent-activity-summary'),
@@ -599,9 +610,15 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
                 alignment: Alignment.centerLeft,
                 child: Text(
                   // A running command with nothing on stdout yet is not the
-                  // same fact as an agent whose progress is live elsewhere.
-                  isCommand && running
-                      ? l10n.commandNoOutputYet
+                  // same fact as an agent whose progress is live elsewhere —
+                  // and neither is a command that has already FINISHED without
+                  // writing anything. That one used to read "progress remains
+                  // live until the Server reports completion" beside its own
+                  // Done pill and measured duration.
+                  isCommand
+                      ? (running
+                            ? l10n.commandNoOutputYet
+                            : l10n.commandNoOutput)
                       : l10n.activityProgressLive,
                   style: theme.textTheme.bodySmall,
                 ),

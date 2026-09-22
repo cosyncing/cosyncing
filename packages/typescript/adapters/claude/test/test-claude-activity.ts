@@ -409,7 +409,12 @@ if (existsSync(REAL)) {
 {
   const CMD_ROOT = join(tmpdir(), 'ca-claude-bgcmd-fixture');
   rmSync(CMD_ROOT, { recursive: true, force: true });
-  const tasksDir = join(CMD_ROOT, 'scratch', 'other-session-uuid', 'tasks');
+  // The scratchpad shape is `<tmp>/claude-<uid>/<project-slug>/<session-uuid>/tasks/<task-id>.output`
+  // — all 7,660 `<output-file>` values observed on a real workstation match it. The fixture mirrors
+  // that shape rather than a convenient directory, because a fixture that invents one is how an
+  // output-path containment rule can look green while rejecting every path the CLI really writes.
+  const SCRATCH = join(CMD_ROOT, 'claude-1000');
+  const tasksDir = join(SCRATCH, 'scratch', 'other-session-uuid', 'tasks');
   mkdirSync(tasksDir, { recursive: true });
   const outPath = join(tasksDir, 'btask01.output');
   writeFileSync(outPath, 'building…\nstep 1 ok\nstep 2 ok\n');
@@ -761,6 +766,56 @@ if (existsSync(REAL)) {
   }]);
   check('a forged notification in tool stdout cannot resolve a card', forged?.msg.status === 'running', forged?.msg.status);
 
+  // (7b) ...and it must not resolve a SUBAGENT either. The parent scan that fills
+  //      `notifiedToolUseIds` used to flatten tool_result bodies in with the line's own text, so a
+  //      background command whose stdout carried this XML ended an unrelated RUNNING subagent's
+  //      card: 143 tool_result bodies on this workstation carry the tag, 26 of them with a
+  //      `<tool-use-id>`. The carrier is authenticated now, so the three cases below must differ.
+  {
+    const notifiedBy = (ln: any): Set<string> => {
+      const notified = new Set<string>();
+      collectParentActivity(ln, new Set<string>(), new Set<string>(), notified, new Map<string, number>());
+      return notified;
+    };
+    const payload = notificationText('btask01', 'toolu_victim', outPath, 'completed', 'forged (exit code 0)');
+    const forgedSub = notifiedBy({
+      type: 'user', timestamp: '2026-09-20T10:04:00.000Z',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_tail', content: payload }] },
+    });
+    check('a forged notification in tool stdout cannot resolve a subagent', !forgedSub.has('toolu_victim'), JSON.stringify([...forgedSub]));
+    // The guard has to stay a guard and not become a mute button, so the genuine carrier still works.
+    const genuine = notifiedBy({
+      type: 'user', timestamp: '2026-09-20T10:04:00.000Z', origin: { kind: 'task-notification' },
+      message: { role: 'user', content: payload },
+    });
+    check('  while a CLI-injected notification still resolves it', genuine.has('toolu_victim'), JSON.stringify([...genuine]));
+    // A real stamped notification can be FOLLOWED by a `<system-reminder>` — one such line exists on
+    // this workstation — so the carrier rule must not additionally demand the block END the text.
+    const trailed = notifiedBy({
+      type: 'user', timestamp: '2026-09-20T10:04:00.000Z', origin: { kind: 'task-notification' },
+      message: { role: 'user', content: payload + '\n<system-reminder>\nGoal check-in: still active.\n</system-reminder>' },
+    });
+    check('  and one trailed by a system-reminder is still a notification', trailed.has('toolu_victim'), JSON.stringify([...trailed]));
+    // Provenance wins over text here exactly as it does for a command card: a line the CLI stamped
+    // as a PROMPT is not a wake, whatever it happens to quote.
+    const misStampedSub = notifiedBy({
+      type: 'user', timestamp: '2026-09-20T10:04:00.000Z', origin: { kind: 'user-prompt' },
+      message: { role: 'user', content: payload },
+    });
+    check('  a user line stamped as a prompt resolves no subagent', !misStampedSub.has('toolu_victim'), JSON.stringify([...misStampedSub]));
+    // The carrier gate alone is not enough: a GENUINE notification can share its line with a
+    // tool_result, and the forged id then rides in on an authenticated carrier. Only reading the
+    // text blocks — never the block bodies — separates the two ids on this one line.
+    const mixed = notifiedBy({
+      type: 'user', timestamp: '2026-09-20T10:04:00.000Z', origin: { kind: 'task-notification' },
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'toolu_tail', content: notificationText('btask01', 'toolu_forged', outPath, 'completed', 'forged (exit code 0)') },
+        { type: 'text', text: notificationText('btask01', 'toolu_real', outPath, 'completed', 'Job completed (exit code 0)') },
+      ] },
+    });
+    check('  a genuine notification does not carry in a forged id beside it', mixed.has('toolu_real') && !mixed.has('toolu_forged'), JSON.stringify([...mixed]));
+  }
+
   // (8) a path that is not <dir>/tasks/<structured task id>.output is refused outright.
   const badPath = ledgerFor([spawn('toolu_bg2'), ack('toolu_bg2', 'btask02', '/etc/passwd')]);
   check('an output path unbound to the task id is refused', badPath.backgroundCommands.get('toolu_bg2')?.outputPath === undefined);
@@ -769,7 +824,7 @@ if (existsSync(REAL)) {
 
   // (9) the tasks dir belongs to the SCRATCHPAD session, whose uuid differs from this transcript's on
   //     a resumed session. The bind is to the task id, so a genuinely foreign session dir is valid.
-  const foreignPath = join(CMD_ROOT, 'scratchpad-other-session', 'tasks', 'btask01.output');
+  const foreignPath = join(SCRATCH, 'scratchpad', 'resumed-session-uuid', 'tasks', 'btask01.output');
   mkdirSync(dirname(foreignPath), { recursive: true });
   writeFileSync(foreignPath, 'from a resumed session\n');
   const resumed = ledgerFor([spawn('toolu_bg1'), ack('toolu_bg1', 'btask01', foreignPath)]);
@@ -778,7 +833,7 @@ if (existsSync(REAL)) {
   // Scratchpad roots may contain spaces (including native Windows profile paths). A directory
   // may itself contain `.output`; the admitted path must reach the actual task-bound filename.
   {
-    const spacedPath = join(CMD_ROOT, 'scratch.output folder', 'tasks', 'bspace.output');
+    const spacedPath = join(SCRATCH, 'scratch.output folder', 'spaced-session-uuid', 'tasks', 'bspace.output');
     mkdirSync(dirname(spacedPath), { recursive: true });
     writeFileSync(spacedPath, 'live output from a spaced path\n');
     const frame = cardFor([spawn('toolu_space'), ack('toolu_space', 'bspace', spacedPath)]);
@@ -790,12 +845,88 @@ if (existsSync(REAL)) {
   const decoyDir = join(CMD_ROOT, 'decoy');
   mkdirSync(decoyDir, { recursive: true });
   writeFileSync(join(decoyDir, 'btask04.output'), 'secret\n');
-  const linkParent = join(CMD_ROOT, 'linked-session');
+  // A real scratchpad shape, so the ONLY reason the case below can fail is the symlink itself.
+  const linkParent = join(SCRATCH, 'linked-slug', 'linked-session-uuid');
   mkdirSync(linkParent, { recursive: true });
   rmSync(join(linkParent, 'tasks'), { force: true });
   symlinkSync(decoyDir, join(linkParent, 'tasks'));
   const viaLink = ledgerFor([spawn('toolu_bg4'), ack('toolu_bg4', 'btask04', join(linkParent, 'tasks', 'btask04.output'))]);
   check('a symlinked tasks dir is refused', viaLink.backgroundCommands.get('toolu_bg4')?.outputPath === undefined, viaLink.backgroundCommands.get('toolu_bg4')?.outputPath);
+
+  // (9c) The SAME refusal must hold BEFORE the file exists. Canonicalizing only an existing final
+  //      component left a plain string-resolve for a command whose first byte had not landed, so the
+  //      structural check saw the symlink's NAME and passed, and the reader then followed the
+  //      symlinked DIRECTORY on open and broadcast what was really behind it.
+  const notYetWritten = join(linkParent, 'tasks', 'btask09.output');
+  const beforeFirstByte = ledgerFor([spawn('toolu_bg9'), ack('toolu_bg9', 'btask09', notYetWritten)]);
+  check(
+    'a symlinked tasks dir is refused when the output file does not exist yet',
+    beforeFirstByte.backgroundCommands.get('toolu_bg9')?.outputPath === undefined,
+    beforeFirstByte.backgroundCommands.get('toolu_bg9')?.outputPath,
+  );
+
+  // (9d) Right shape, wrong tree: a `tasks` dir the CLI never wrote cannot point the reader at a file
+  //      of the line's choosing.
+  const outsideScratch = join(CMD_ROOT, 'home-like', '.ssh', 'tasks', 'btask10.output');
+  mkdirSync(dirname(outsideScratch), { recursive: true });
+  writeFileSync(outsideScratch, 'secret\n');
+  const notScratchpad = ledgerFor([spawn('toolu_bg10'), ack('toolu_bg10', 'btask10', outsideScratch)]);
+  check(
+    'a tasks dir outside the claude scratchpad root is refused',
+    notScratchpad.backgroundCommands.get('toolu_bg10')?.outputPath === undefined,
+    notScratchpad.backgroundCommands.get('toolu_bg10')?.outputPath,
+  );
+
+  // (9e) Admission and the READ are separated in time: a path is admitted before the command's first
+  //      byte lands (9c), so what sits there when the tail is finally read can be something else. The
+  //      reader's own lstat refusal and canonical re-check are the ONLY thing between an admitted
+  //      name and a swapped target, so they are pinned here instead of assumed.
+  {
+    const swapped = join(tasksDir, 'btask11.output');
+    rmSync(swapped, { force: true });
+    const admitted = ledgerFor([spawn('toolu_bg11'), ack('toolu_bg11', 'btask11', swapped)]);
+    check(
+      'an output path is admitted before its first byte lands',
+      admitted.backgroundCommands.get('toolu_bg11')?.outputPath === swapped,
+      admitted.backgroundCommands.get('toolu_bg11')?.outputPath,
+    );
+    const secret = join(CMD_ROOT, 'swapped-secret.txt');
+    writeFileSync(secret, 'SWAPPED SECRET\n');
+    symlinkSync(secret, swapped);
+    const swappedFrame = buildActivitySnapshot(cmdDir, new Set<string>(), Date.parse('2026-09-20T10:05:00.000Z'), {
+      backgroundToolUseIds: new Set(), notifiedToolUseIds: new Set(), backgroundCommands: admitted.backgroundCommands,
+    } as any).find((f) => f.msg.kind === 'command');
+    check('  a file swapped for a symlink after admission is not read', (swappedFrame?.msg as any)?.output === undefined, JSON.stringify((swappedFrame?.msg as any)?.output));
+    check('  and what it pointed at never reaches the wire', !JSON.stringify(swappedFrame ?? {}).includes('SWAPPED SECRET'));
+    check('  while the card itself survives the refusal', swappedFrame?.msg.status === 'running', swappedFrame?.msg.status);
+    rmSync(swapped, { force: true });
+
+    // A DIRECTORY at the admitted name must not surface as output either. This asserts the outcome,
+    // not the is-file test specifically: that test is a fail-fast the failing read would reach
+    // anyway, and mutating it away leaves this green — the canonical re-check below is the guard
+    // that is independently load-bearing.
+    mkdirSync(swapped, { recursive: true });
+    const dirFrame = buildActivitySnapshot(cmdDir, new Set<string>(), Date.parse('2026-09-20T10:05:00.000Z'), {
+      backgroundToolUseIds: new Set(), notifiedToolUseIds: new Set(), backgroundCommands: admitted.backgroundCommands,
+    } as any).find((f) => f.msg.kind === 'command');
+    check('  a directory at the admitted name is not read as output', (dirFrame?.msg as any)?.output === undefined, JSON.stringify((dirFrame?.msg as any)?.output));
+    rmSync(swapped, { recursive: true, force: true });
+
+    // ...and a symlinked PARENT leaves the final component a plain regular file, which lstat cannot
+    // fault: only re-checking that the path is still canonical catches it.
+    const realTasks = join(SCRATCH, 'swap-slug', 'swap-session-uuid', 'tasks');
+    mkdirSync(realTasks, { recursive: true });
+    const viaParent = join(SCRATCH, 'swap-slug', 'swap-session-uuid', 'link', 'btask12.output');
+    const parentLedger = ledgerFor([spawn('toolu_bg12'), ack('toolu_bg12', 'btask12', join(realTasks, 'btask12.output'))]);
+    writeFileSync(join(realTasks, 'btask12.output'), 'PARENT SWAP SECRET\n');
+    rmSync(dirname(viaParent), { force: true });
+    symlinkSync(realTasks, dirname(viaParent));
+    parentLedger.backgroundCommands.get('toolu_bg12')!.outputPath = viaParent;
+    const parentFrame = buildActivitySnapshot(cmdDir, new Set<string>(), Date.parse('2026-09-20T10:05:00.000Z'), {
+      backgroundToolUseIds: new Set(), notifiedToolUseIds: new Set(), backgroundCommands: parentLedger.backgroundCommands,
+    } as any).find((f) => f.msg.kind === 'command');
+    check('  a path reached through a symlinked parent is refused', (parentFrame?.msg as any)?.output === undefined, JSON.stringify((parentFrame?.msg as any)?.output));
+  }
 
   // (10) the scratchpad is reaped; a card must survive its output file vanishing.
   const goneOut = join(tasksDir, 'btask09.output');
@@ -811,6 +942,188 @@ if (existsSync(REAL)) {
   check('  bounded to the retained line count', bigText.split('\n').length <= 40, String(bigText.split('\n').length));
   check('  keeps the NEWEST lines', /line 399/.test(bigText));
   check('  reports that earlier bytes were dropped', (big?.msg as any)?.output?.truncated === true);
+
+  // A CR-driven progress bar must read as the frame a terminal would be SHOWING, not as every frame it
+  // overwrote. Deleting CR — which is what this used to do — concatenated a whole bar into one run-on
+  // line, and that single line then consumed the entire 4 KB / 40-line window and hid the real tail.
+  {
+    const progressOut = join(tasksDir, 'bprogress.output');
+    writeFileSync(progressOut, '[ 25%] compiling\r[100%] completed\n');
+    const progress = cardFor([spawn('toolu_progress'), ack('toolu_progress', 'bprogress', progressOut)]);
+    const progressText = (progress?.msg as any)?.output?.text ?? '';
+    check('a CR progress line renders the frame the terminal shows', progressText === '[100%] completed', JSON.stringify(progressText));
+    check('  and not the frames it overwrote', !progressText.includes('25%'), JSON.stringify(progressText));
+    // A SHORTER frame leaves the columns it did not overwrite, exactly as the terminal does. Skipping
+    // that would render a duration that never existed on screen.
+    writeFileSync(progressOut, '100%\r50%\n');
+    const leftover = cardFor([spawn('toolu_progress'), ack('toolu_progress', 'bprogress', progressOut)]);
+    check('  a shorter CR frame leaves the leftover column', (leftover?.msg as any)?.output?.text === '50%%', JSON.stringify((leftover?.msg as any)?.output?.text));
+  }
+
+  // (14) `toolUseResult.backgroundTaskId` is a property of the LINE while the ledger is keyed by BLOCK.
+  //      A line carrying the background ack beside an unrelated tool_result must register ONE command —
+  //      the block whose own text carries the ack. Inheriting it minted a second card claiming this
+  //      command's task id and output file.
+  {
+    const inherited = ledgerFor([
+      spawn('toolu_multi1'),
+      {
+        type: 'user',
+        timestamp: '2026-09-20T10:00:01.000Z',
+        toolUseResult: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'btaskmulti' },
+        message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_unrelated', content: 'a different tool finishing on the same line' },
+          { type: 'tool_result', tool_use_id: 'toolu_multi1', content: `Command running in background with ID: btaskmulti. Output is being written to: ${outPath}.` },
+        ] },
+      },
+    ]);
+    check('a multi-block line registers only the block carrying the ack', inherited.backgroundCommands.get('toolu_multi1')?.taskId === 'btaskmulti', JSON.stringify(inherited.backgroundCommands.get('toolu_multi1')));
+    check('  and no phantom entry inherits another command\'s task id', inherited.backgroundCommands.has('toolu_unrelated') === false, [...inherited.backgroundCommands.keys()].join(','));
+  }
+
+  // (15) The `queue-operation` carrier is the one carrier with NO provenance field — a terminal-typed
+  //      prompt arrives through the same `enqueue`. It stays accepted because ~48% of completions reach
+  //      the transcript no other way, so what binds it instead is the STRUCTURED ack it must agree with.
+  {
+    const acked = [spawn('toolu_qop'), ack('toolu_qop', 'btaskq', outPath)];
+    const settleWith = (extra: any[]) =>
+      ledgerFor([...acked, ...extra]).backgroundCommands.get('toolu_qop')?.status;
+    const queueOp = (content: string) => ({
+      type: 'queue-operation', operation: 'enqueue', timestamp: '2026-09-20T10:02:00.000Z', sessionId: 's', content,
+    });
+    check(
+      'a queue-operation notification still settles its own command (the carrier is load-bearing)',
+      settleWith([queueOp(notificationText('btaskq', 'toolu_qop', outPath, 'completed', 'done'))]) === 'completed',
+    );
+    check(
+      'a notification naming another task than the ack recorded is not this command\'s completion',
+      settleWith([queueOp(notificationText('btask-someone-else', 'toolu_qop', outPath, 'completed', 'done'))]) === undefined,
+    );
+    check(
+      'pasted prose that merely OPENS the tag is not a notification at all',
+      settleWith([queueOp('<task-notification> about that earlier failure — it definitely finished fine')]) === undefined,
+    );
+    // The prose above also lacks every field, so it dies at the next guard whether or not the block
+    // is required to CLOSE. This one carries the full, agreeing payload and is cut mid-write — the
+    // only case that tells a completeness rule apart from a prefix rule.
+    const complete = notificationText('btaskq', 'toolu_qop', outPath, 'completed', 'done');
+    check(
+      'a notification cut off before its closing tag is not acted on',
+      settleWith([queueOp(complete.slice(0, complete.lastIndexOf('</task-notification>')))]) === undefined,
+    );
+  }
+
+  // (16) Labels are model-written and have no natural ceiling (real spawns reach 4,956 characters). They
+  //      used to be clamped only at emit, so the ledger retained the full text for the life of the
+  //      connection whether or not anything ever rendered it.
+  {
+    const huge = 'y'.repeat(4956);
+    const recorded = ledgerFor([{
+      type: 'assistant',
+      timestamp: '2026-09-20T10:00:00.000Z',
+      message: { id: 'bgm9', role: 'assistant', content: [
+        { type: 'tool_use', id: 'toolu_huge', name: 'Bash', input: { command: huge, description: huge, run_in_background: true } },
+      ] },
+    }]);
+    const entry = recorded.backgroundCommands.get('toolu_huge');
+    check(
+      'a spawn label is clamped when RECORDED, not only when emitted',
+      (entry?.description?.length ?? 0) <= 120 && (entry?.command?.length ?? 0) <= 200,
+      `${entry?.description?.length}/${entry?.command?.length}`,
+    );
+  }
+
+  // (17) The ledger is rebuilt from the WHOLE transcript on every history read and lives as long as
+  //      the connection does, so it is capped. A real session here reached 234 spawns; the cap has to
+  //      hold at 300 while still keeping the results the emit window would actually render.
+  {
+    const many: any[] = [];
+    for (let i = 0; i < 300; i++) {
+      const id = `toolu_cap${i}`;
+      const taskId = `bcap${i}`;
+      const at = (sec: number) =>
+        `2026-09-20T${String(10 + Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:0${sec}.000Z`;
+      many.push(
+        { ...spawn(id), timestamp: at(0) },
+        { ...ack(id, taskId, outPath), timestamp: at(1) },
+        {
+          type: 'user', timestamp: at(2), origin: { kind: 'task-notification' },
+          message: { role: 'user', content: notificationText(taskId, id, outPath, 'completed', `Job ${i} completed (exit code 0)`) },
+        },
+      );
+    }
+    const capped = ledgerFor(many).backgroundCommands;
+    check('the background ledger stays bounded across a long session', capped.size <= 256, `${capped.size} entries from 300 commands`);
+    check('  and the cap evicts the OLDEST settled command', !capped.has('toolu_cap0'), [...capped.keys()].slice(0, 3).join(','));
+    check('  while the newest result survives it', capped.get('toolu_cap299')?.status === 'completed');
+  }
+
+  // (18) A DRIVEN attach sees the spawn and its ack on the child's stdout stream, which carries no
+  //      native timestamp (the broker stamps live turns with its own clock for exactly that reason).
+  //      An unstamped spawn left `startedAtMs` unset, and the evidence horizon reads an unset one as
+  //      no sign of life at all — so its `lastSign > 0` test failed OPEN and a driven command whose
+  //      output path was never admitted could never be withdrawn.
+  {
+    const undated = (ln: any) => { const { timestamp, ...rest } = ln; return rest; };
+    const drivenLedger = new Map<string, any>();
+    for (const ln of [undated(spawn('toolu_drv')), undated(ack('toolu_drv', 'bdrv', join(CMD_ROOT, 'unadmitted', 'tasks', 'bdrv.output')))]) {
+      collectParentActivity(ln, new Set<string>(), new Set<string>(), new Set<string>(), new Map<string, number>(), { backgroundCommands: drivenLedger } as any, true);
+    }
+    const drivenEntry = drivenLedger.get('toolu_drv');
+    check('a driven spawn with no native timestamp still records when it started', typeof drivenEntry?.startedAtMs === 'number', String(drivenEntry?.startedAtMs));
+    // The path must be genuinely unadmitted, or the output mtime would vouch for the card instead
+    // and the horizon would never be the thing under test.
+    check('  with no admitted output path to vouch for it', drivenEntry?.outputPath === undefined, drivenEntry?.outputPath);
+    const drivenFrames = (at: number) => buildActivitySnapshot(cmdDir, new Set<string>(), at, {
+      backgroundToolUseIds: new Set(), notifiedToolUseIds: new Set(), backgroundCommands: drivenLedger,
+    } as any).filter((f) => f.msg.kind === 'command');
+    check('  it is on screen while it is young', drivenFrames(Date.now()).length === 1, String(drivenFrames(Date.now()).length));
+    check('  and the horizon can still withdraw it', drivenFrames(Date.now() + 7 * 60 * 60_000).length === 0, String(drivenFrames(Date.now() + 7 * 60 * 60_000).length));
+  }
+
+  // (19) Every RUNNING command keeps a card — omitting one would leave it on screen anyway, because
+  //      omission is not removal — but only the newest few carry the bounded output preview beside
+  //      it. `getHistory` hands back every frame at once, so those tails are the one part of a
+  //      running card that grows with nothing bounding it.
+  {
+    const tailLedger = new Map<string, any>();
+    for (let i = 0; i < 12; i++) {
+      const taskId = `btail${i}`;
+      const outFile = join(tasksDir, `${taskId}.output`);
+      writeFileSync(outFile, `job ${i} is working\n`);
+      const at = `2026-09-20T10:${String(i).padStart(2, '0')}:00.000Z`;
+      for (const ln of [{ ...spawn(`toolu_tail${i}`), timestamp: at }, { ...ack(`toolu_tail${i}`, taskId, outFile), timestamp: at }]) {
+        collectParentActivity(ln, new Set<string>(), new Set<string>(), new Set<string>(), new Map<string, number>(), { backgroundCommands: tailLedger } as any);
+      }
+    }
+    const tailFrames = buildActivitySnapshot(cmdDir, new Set<string>(), Date.parse('2026-09-20T10:20:00.000Z'), {
+      backgroundToolUseIds: new Set(), notifiedToolUseIds: new Set(), backgroundCommands: tailLedger,
+    } as any).filter((f) => f.msg.kind === 'command');
+    check('every running command still gets a card', tailFrames.length === 12, String(tailFrames.length));
+    check('  and each of them still reads as running', tailFrames.every((f) => f.msg.status === 'running'));
+    const withPreview = tailFrames.filter((f) => (f.msg as any).output !== undefined);
+    check('  but only the newest few carry an output preview', withPreview.length === 8, String(withPreview.length));
+    check(
+      '  and it is the NEWEST commands that keep it',
+      withPreview.every((f) => Number(f.msg.key.replace('cmd:toolu_tail', '')) >= 4),
+      withPreview.map((f) => f.msg.key).join(','),
+    );
+  }
+
+  // (20) ...and the ledger cap must still be a bound when NOTHING has settled. It preferred the
+  //      oldest SETTLED entry and skipped running ones outright, so a session whose commands never
+  //      receive a notification — the documented ~4.5% miss rate, a crashed CLI, or simply jobs
+  //      still running — grew the ledger for the life of the connection while reporting a cap.
+  {
+    const allRunning: any[] = [];
+    for (let i = 0; i < 300; i++) {
+      const at = `2026-09-20T${String(10 + Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00.000Z`;
+      allRunning.push({ ...spawn(`toolu_run${i}`), timestamp: at }, { ...ack(`toolu_run${i}`, `brn${i}`, outPath), timestamp: at });
+    }
+    const runningCapped = ledgerFor(allRunning).backgroundCommands;
+    check('the cap bounds a ledger in which nothing has settled', runningCapped.size <= 256, `${runningCapped.size} entries from 300 running commands`);
+    check('  and it is the OLDEST running command that gives way', !runningCapped.has('toolu_run0') && runningCapped.has('toolu_run299'));
+  }
 
   // A log's partial line is data, unlike a partial JSONL record. CR-only progress and large
   // one-line JSON output must keep the newest bytes even when no newline fits in the window.

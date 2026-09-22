@@ -18,6 +18,9 @@
  *   4. observe-only — a child advertises no Drive and no take-over, offers no terminal command that
  *      cannot work, and a driving attach on a child is refused before any process path.
  *   5. budget — a parent OUTSIDE the discovery cutoff contributes no child rows.
+ *   6. status — Working needs an in-flight parent AND (a recently-appended child transcript OR a quiet one
+ *      whose OWN last record leaves a tool call unanswered, bounded). A settled child decays on the flat
+ *      window; the quiet-mid-tool-call case is the one the flat window used to misread as Idle.
  *
  *   bun run packages/typescript/adapters/claude/test/test-claude-roster-subagents.ts   (exit 0 = pass)
  */
@@ -50,6 +53,7 @@ const parentUuid = 'aaaaaaaa-1111-4222-8333-aaaaaaaaaaaa'; // has children, no b
 const bridgeUuid = 'bbbbbbbb-1111-4222-8333-bbbbbbbbbbbb'; // has children AND a bridge identity
 const plainUuid = 'cccccccc-1111-4222-8333-cccccccccccc'; // no subagent tree at all
 const coldUuid = 'dddddddd-1111-4222-8333-dddddddddddd'; // has children but sits outside the cutoff
+const busyUuid = 'eeeeeeee-1111-4222-8333-eeeeeeeeeeee'; // turn IN FLIGHT: the only parent whose children can be Working
 
 const transcriptOf = (uuid: string): string => join(slugDir, `${uuid}.jsonl`);
 const subDirOf = (uuid: string): string => join(slugDir, uuid, 'subagents');
@@ -89,6 +93,31 @@ function writeSubagent(dir: string, agent: string, meta: Record<string, unknown>
   return path;
 }
 
+/** One subagent transcript whose LAST record is a `tool_use` with no `tool_result`: the shape a real child
+ *  leaves on disk for the whole duration of a long Bash/build call — quiet, and still working. */
+function writeOpenToolSubagent(dir: string, agent: string, meta: Record<string, unknown>): string {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${agent}.meta.json`), JSON.stringify(meta));
+  const path = join(dir, `${agent}.jsonl`);
+  writeFileSync(
+    path,
+    [
+      JSON.stringify({ type: 'user', uuid: `${agent}-u1`, timestamp: '2026-08-20T10:00:10.000Z', cwd, message: { content: `run ${agent}` } }),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: `${agent}-a1`,
+        timestamp: '2026-08-20T10:00:20.000Z',
+        message: {
+          model: 'claude-haiku-4-5-20251001',
+          stop_reason: 'tool_use',
+          content: [{ type: 'tool_use', id: `${agent}-tool`, name: 'Bash', input: { command: 'bun run check' } }],
+        },
+      }),
+    ].join('\n') + '\n',
+  );
+  return path;
+}
+
 writeSession(parentUuid, 'Roster subagent parent');
 writeSession(plainUuid, 'Childless session');
 writeSession(coldUuid, 'Cold parent with children');
@@ -117,23 +146,54 @@ const nestedPath = writeSubagent(join(subDirOf(parentUuid), 'workflows', 'wf_run
 const bridgeKidPath = writeSubagent(subDirOf(bridgeUuid), 'agent-bridgekid', { description: 'Bridge child', toolUseId: 'toolu_bk' }, 'bridge kid finished');
 const coldKidPath = writeSubagent(subDirOf(coldUuid), 'agent-cold', { description: 'Cold child', toolUseId: 'toolu_cold' }, 'cold kid finished');
 
+// A parent whose turn is IN FLIGHT — an unanswered Task `tool_use` plus the busy `agents --json` row below.
+// Nothing about a child row can be 'working' unless the parent's own row is, so this fixture is what makes
+// the status assertions below mean anything at all.
+writeFileSync(
+  transcriptOf(busyUuid),
+  [
+    JSON.stringify({ type: 'user', uuid: 'busy-u1', timestamp: '2026-08-20T10:00:00.000Z', cwd, message: { content: 'In-flight parent' } }),
+    JSON.stringify({
+      type: 'assistant',
+      uuid: 'busy-a1',
+      timestamp: '2026-08-20T10:00:30.000Z',
+      message: {
+        model: 'claude-haiku-4-5-20251001',
+        stop_reason: 'tool_use',
+        content: [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { description: 'Second review of fix commits' } }],
+      },
+    }),
+  ].join('\n') + '\n',
+);
+// Four children, three of them deliberately quiet: mid-tool-call (the bug), settled, and mid-tool-call past
+// the open-turn bound. The fourth is fresh, which the flat window already got right.
+const quietWorkingKidPath = writeOpenToolSubagent(subDirOf(busyUuid), 'agent-quiet-working', { description: 'Quiet mid tool call', toolUseId: 'toolu_qw' });
+const quietSettledKidPath = writeSubagent(subDirOf(busyUuid), 'agent-quiet-settled', { description: 'Settled child', toolUseId: 'toolu_qs' }, 'settled');
+const openStaleKidPath = writeOpenToolSubagent(subDirOf(busyUuid), 'agent-open-stale', { description: 'Abandoned open call', toolUseId: 'toolu_os' });
+const openFreshKidPath = writeOpenToolSubagent(subDirOf(busyUuid), 'agent-open-fresh', { description: 'Fresh open call', toolUseId: 'toolu_of' });
+
 // Recency: everything fresh except the cold parent (and its child), which sits 3h back.
 const now = Date.now();
 const old = new Date(now - 3 * 60 * 60_000);
-for (const p of [transcriptOf(parentUuid), transcriptOf(bridgeUuid), transcriptOf(plainUuid), alphaPath, betaPath, wfOwnedPath, noMetaPath, nestedPath, bridgeKidPath]) {
+const quiet = new Date(now - 5 * 60_000); // past the flat 120 s window, inside the 15 min open-turn window
+const abandoned = new Date(now - 20 * 60_000); // past both windows
+for (const p of [transcriptOf(parentUuid), transcriptOf(bridgeUuid), transcriptOf(plainUuid), transcriptOf(busyUuid), alphaPath, betaPath, wfOwnedPath, noMetaPath, nestedPath, bridgeKidPath, openFreshKidPath]) {
   utimesSync(p, new Date(now), new Date(now));
 }
 utimesSync(transcriptOf(coldUuid), old, old);
+utimesSync(quietWorkingKidPath, quiet, quiet);
+utimesSync(quietSettledKidPath, quiet, quiet);
+utimesSync(openStaleKidPath, abandoned, abandoned);
 utimesSync(coldKidPath, old, old);
 
-// A fake `claude agents --json` reporting NO live rows: every parent is idle, so the fixture is
-// clock-independent (the working case is unit-checked against claudeSubagentStatus below).
+// A fake `claude agents --json` reporting exactly ONE busy row — the in-flight parent. Every other parent
+// stays idle, so the fixture is clock-independent.
 const fakeClaude = join(ROOT, 'fake-claude');
 writeFileSync(
   fakeClaude,
   `#!/usr/bin/env bash
 if [ "$1" = "agents" ] && [ "$2" = "--json" ]; then
-  printf '%s\\n' '[]'
+  printf '%s\\n' '[{"sessionId":"${busyUuid}","status":"busy"}]'
   exit 0
 fi
 exit 0
@@ -154,6 +214,7 @@ const {
   claudeSubagentPathInfo,
   claudeSubagentStatus,
   claudeSubagentTranscripts,
+  claudeSubagentTailState,
 } = await import('../src/index.ts');
 
 const adapter = new ClaudeAdapter();
@@ -165,6 +226,11 @@ const plainRow = byId.get(enc(transcriptOf(plainUuid)));
 const alphaRow = byId.get(enc(alphaPath));
 const betaRow = byId.get(enc(betaPath));
 const bridgeKidRow = byId.get(enc(bridgeKidPath));
+const quietWorkingRow = byId.get(enc(quietWorkingKidPath));
+const quietSettledRow = byId.get(enc(quietSettledKidPath));
+const openStaleRow = byId.get(enc(openStaleKidPath));
+const openFreshRow = byId.get(enc(openFreshKidPath));
+const inFlightParentRow = byId.get(enc(transcriptOf(busyUuid)));
 
 // ── 1. lineage ──────────────────────────────────────────────────────────────────────────────────
 check('parent transcript is still a normal session row', !!parentRow && parentRow.origin === undefined, `rows=${rows.length}`);
@@ -216,6 +282,35 @@ check(
   JSON.stringify({ model: alphaRow?.model, currentModel: alphaRow?.currentModel }),
 );
 check('child rows are idle while the parent has no turn in flight', alphaRow?.status === 'idle', String(alphaRow?.status));
+// ── 1b. child status evidence ──────────────────────────────────────────────────────────────────────────
+// Without this row being Working the four checks below would pass for a fixture that proved nothing.
+check('fixture parent with an unanswered Task tool_use + busy row is Working', inFlightParentRow?.status === 'working', String(inFlightParentRow?.status));
+check(
+  'quiet child whose OWN last record is an unanswered tool_use is Working (the flat-window bug)',
+  quietWorkingRow?.status === 'working',
+  String(quietWorkingRow?.status),
+);
+check(
+  'quiet child whose transcript SETTLED stays idle — no fabricated Working that nothing finishes',
+  quietSettledRow?.status === 'idle',
+  String(quietSettledRow?.status),
+);
+check(
+  'open tool call past the open-turn window is idle (an abandoned child decays on its own)',
+  openStaleRow?.status === 'idle',
+  String(openStaleRow?.status),
+);
+check('fresh child under an in-flight parent is Working', openFreshRow?.status === 'working', String(openFreshRow?.status));
+check(
+  'claudeSubagentTailState: unanswered tool_use reads in-tool-call',
+  claudeSubagentTailState(quietWorkingKidPath) === 'in-tool-call',
+  String(claudeSubagentTailState(quietWorkingKidPath)),
+);
+check(
+  'claudeSubagentTailState: a final-text tail reads final-text',
+  claudeSubagentTailState(quietSettledKidPath) === 'final-text',
+  String(claudeSubagentTailState(quietSettledKidPath)),
+);
 
 // ── 2. selection ────────────────────────────────────────────────────────────────────────────────
 check('a workflow-owned meta (no toolUseId) publishes no row', !byId.has(enc(wfOwnedPath)));
@@ -273,6 +368,21 @@ check(
     && childConn.info.currentModel?.modelID === alphaRow.currentModel?.modelID,
   JSON.stringify({ roster: alphaRow.currentModel, attached: childConn.info.currentModel }),
 );
+// Attach must reproduce discovery's rule INCLUDING the child's own open-turn probe. It used to pass
+// only the mtime, so opening a quiet child that was mid-tool-call flipped it to Idle in Session
+// Detail while the roster row beside it still read Working — the disagreement the shared rule exists
+// to prevent. Pinned on the attach path because pinning it on discovery alone left this one free.
+const quietConn = (await adapter.attach(enc(quietWorkingKidPath), 'observe')) as any;
+check(
+  'attaching a quiet child mid-tool-call keeps it Working',
+  quietConn.info.status === 'working',
+  String(quietConn.info.status),
+);
+check(
+  '  and attach agrees with the roster row for that same child',
+  quietConn.info.status === byId.get(enc(quietWorkingKidPath))?.status,
+  JSON.stringify({ attach: quietConn.info.status, roster: byId.get(enc(quietWorkingKidPath))?.status }),
+);
 check('attached child control is observe-only', childConn.info.control?.drive?.supported === false && childConn.info.control?.terminalSync?.supported === false, JSON.stringify(childConn.info.control?.drive));
 const history = (await childConn.getHistory()) as any[];
 check(
@@ -312,10 +422,35 @@ check(
   JSON.stringify(nestedInfo),
 );
 check('claudeSubagentPathInfo returns undefined for a normal session transcript', claudeSubagentPathInfo(transcriptOf(parentUuid)) === undefined);
-check('claudeSubagentStatus: parent working + fresh child → working', claudeSubagentStatus('working', now - 1_000, now) === 'working');
-check('claudeSubagentStatus: parent working + stale child → idle', claudeSubagentStatus('working', now - 10 * 60_000, now) === 'idle');
-check('claudeSubagentStatus: parent idle → idle whatever the child mtime', claudeSubagentStatus('idle', now, now) === 'idle');
-check('claudeSubagentStatus: no parent evidence → idle', claudeSubagentStatus(undefined, now, now) === 'idle');
+check('claudeSubagentStatus: parent working + fresh child → working', claudeSubagentStatus('working', { mtimeMs: now - 1_000 }, now) === 'working');
+check('claudeSubagentStatus: parent working + no child mtime → idle', claudeSubagentStatus('working', {}, now) === 'idle');
+check(
+  'claudeSubagentStatus: quiet child mid-tool-call → working',
+  claudeSubagentStatus('working', { mtimeMs: now - 10 * 60_000, openTurn: () => 'in-tool-call' }, now) === 'working',
+);
+check(
+  'claudeSubagentStatus: quiet child with a settled tail → idle',
+  claudeSubagentStatus('working', { mtimeMs: now - 10 * 60_000, openTurn: () => 'final-text' }, now) === 'idle',
+);
+check(
+  'claudeSubagentStatus: quiet child with no probe offered → idle',
+  claudeSubagentStatus('working', { mtimeMs: now - 10 * 60_000 }, now) === 'idle',
+);
+check(
+  'claudeSubagentStatus: open tool call past the window → idle',
+  claudeSubagentStatus('working', { mtimeMs: now - 16 * 60_000, openTurn: () => 'in-tool-call' }, now) === 'idle',
+);
+let probeCalls = 0;
+const countingProbe = (): 'in-tool-call' => {
+  probeCalls += 1;
+  return 'in-tool-call';
+};
+claudeSubagentStatus('idle', { mtimeMs: now, openTurn: countingProbe }, now); // parent gate
+claudeSubagentStatus('working', { mtimeMs: now - 1_000, openTurn: countingProbe }, now); // freshness wins
+claudeSubagentStatus('working', { mtimeMs: now - 20 * 60_000, openTurn: countingProbe }, now); // past the bound
+check('claudeSubagentStatus never probes where the answer cannot change', probeCalls === 0, `probes=${probeCalls}`);
+check('claudeSubagentStatus: parent idle → idle whatever the child mtime', claudeSubagentStatus('idle', { mtimeMs: now }, now) === 'idle');
+check('claudeSubagentStatus: no parent evidence → idle', claudeSubagentStatus(undefined, { mtimeMs: now }, now) === 'idle');
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

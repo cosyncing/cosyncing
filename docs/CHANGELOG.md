@@ -11,6 +11,67 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- Only the most recent background commands carry an output preview. Every
+  running command still shows a card with its status and elapsed time; a session
+  holding many long-lived jobs at once no longer sends a preview for each of
+  them on every history load.
+
+### Fixed
+
+- A Claude subagent now keeps its Working badge while it is busy but quiet. A subagent's
+  session writes nothing for the whole duration of a single long step -- a test suite, a
+  build, a long thinking pass -- and the roster read that silence as Idle after two minutes,
+  so a subagent reviewing a change set could look finished while it was still reading it,
+  even though its parent session correctly showed Working because of that same subagent. It
+  now stays Working while its own unfinished step is still open, bounded, so a subagent that
+  stops reporting stops claiming to work on its own. The card for that subagent inside the
+  parent session already allowed the long step; the roster row no longer disagrees with it.
+- A finished background command card stops inventing a duration. A command that
+  reported how long it took showed that figure and held it; a command that
+  reported none showed a clock that started the moment the card was drawn and
+  ran upwards for as long as the card stayed on screen. It now shows no duration
+  at all rather than a made-up one, and a running command still counts.
+- A background command is no longer marked finished by text that only looks like
+  a completion. A pasted transcript line naming a running command could report
+  it as successfully finished, because naming it was treated as evidence that it
+  had ended. A completion now has to agree with the launch it reports on, and a
+  truncated or partial one is ignored.
+- Progress output that redraws one line renders as the line a terminal would
+  show, instead of every frame it ever overwrote joined into one line long
+  enough to fill the command's whole output preview on its own. A download bar,
+  a compiler, and a test runner that repaints no longer push each other out of
+  view.
+- The web UI now shows a background command's result. It rendered a running
+  command as a generic background agent and removed the card the moment the
+  command stopped, so the exit code and the output tail -- the facts the card
+  exists to deliver -- never appeared, and a failed job looked the same as one
+  that never started. A finished command now stays until it is dismissed, and a
+  card the server withdraws is removed on its own.
+- A running subagent is no longer reported finished by a completion notice that
+  appeared in another command's output. A background job whose own output quoted
+  a completion notice -- a log tailer, or a search over past sessions -- ended an
+  unrelated subagent's card. Only a notice the agent itself raised counts.
+- A background command started from a driven session can now be withdrawn when
+  it goes silent. Driven sessions record no launch time of their own, and the
+  rule that retires a command with no remaining sign of life treated a missing
+  launch time as no evidence at all, so such a card could sit at Running for the
+  rest of the session however long ago the work stopped.
+- Dismissing a running background command now also clears the badge that points
+  at it from the Status, Files and Terminal views. The badge counted commands
+  the band had already been told to hide, so it could not be cleared until the
+  command itself ended.
+- A background command that finished without writing any output now says so,
+  instead of reporting that its progress remains live until the server reports
+  completion -- beside the Done pill and measured duration of the completion it
+  had already reported.
+- A background command's output preview reads only the file the command itself
+  writes, and only inside the directory the tool owns for it. A launch that
+  pointed its output somewhere else -- including through a link, including at a
+  file that had not been created yet -- no longer has that file's contents sent
+  to everyone watching the session.
+
 ## 0.5.11 — 2026-09-21
 
 ### Added

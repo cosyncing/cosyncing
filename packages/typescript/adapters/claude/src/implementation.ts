@@ -266,13 +266,42 @@ export function claudeStores(): ClaudeStore[] {
 
 /** realpath (symlink-resolving) when the path exists, else a plain string-resolve — so a missing path
  *  (a not-yet-written session) still resolves and existing paths are symlink-canonicalized. Shared by
- *  every store-containment check so they agree on one namespace (Fable review 2026-07-09). */
+ *  every store-containment check so they agree on one namespace (Fable review 2026-07-09).
+ *
+ *  A missing FINAL component must not skip canonicalization of the components above it. `resolve()` on
+ *  `/x/tasks/new.output` whose `tasks` is a symlink hands back the literal, so every structural check on
+ *  the answer sees the symlink's NAME and a guard that means "inside the real directory" passes for a
+ *  directory that points anywhere. Canonicalize the nearest EXISTING ancestor and rejoin the missing
+ *  tail, so a path that has not been written yet is still spoken of in the real namespace. */
 function realOrResolve(p: string): string {
   try {
     return realpathSync(p);
   } catch {
-    return resolve(p);
+    /* the path itself is missing — canonicalize what of it does exist */
   }
+  const absolute = resolve(p);
+  let base = absolute;
+  const missing: string[] = [];
+  for (;;) {
+    const parent = dirname(base);
+    if (parent === base) return absolute; // nothing on this volume exists; nothing to canonicalize
+    const name = basename(base);
+    if (name) missing.unshift(name);
+    base = parent;
+    let real: string;
+    try {
+      real = realpathSync(base);
+    } catch {
+      continue;
+    }
+    return missing.length ? join(real, ...missing) : real;
+  }
+}
+
+/** Path equality as the platform means it. The output reader compares a freshly taken realpath against
+ *  the path it admitted, and a Windows realpath can differ from it in case alone. */
+function sameCanonicalPath(a: string, b: string): boolean {
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 /** The store that owns a transcript path (longest matching projectsRoot prefix), or the default. Must
@@ -1513,7 +1542,11 @@ export class ClaudeAdapter implements AgentBackend {
               currentModel: childModel
                 ? { providerID: store.isDefault ? 'anthropic' : 'wrapper', modelID: childModel, ...labelOf(childModel) }
                 : undefined,
-              status: claudeSubagentStatus(status, child.mtimeMs, now),
+              status: claudeSubagentStatus(
+                status,
+                { mtimeMs: child.mtimeMs, openTurn: () => claudeSubagentTailState(child.path) },
+                now,
+              ),
               attachMode: 'observe',
               control: claudeSubagentControl(),
               // A subagent transcript has none of the timestamp-less sidecar churn the parent has
@@ -1651,14 +1684,19 @@ export class ClaudeAdapter implements AgentBackend {
       return conn;
     }
     if (subagent) {
-      // A child has no `agents --json` row of its own, so reproduce discovery's rule exactly (parent turn
-      // in flight AND a fresh child transcript) — otherwise opening a working child would flip it to idle.
+      // A child has no `agents --json` row of its own, so reproduce discovery's rule exactly — otherwise
+      // opening a working child would flip it to idle. Same evidence, including the child's own open-turn
+      // probe, so attach and discovery can never disagree about one child.
       const now = Date.now();
       const parentRaw = (await liveStatusByStore(store)).get(subagent.parentUuid)?.status;
       const parentStatus = existsSync(subagent.parentTranscript)
         ? await claudeSessionStatus(subagent.parentTranscript, parentRaw, now)
         : parentRaw;
-      info.status = claudeSubagentStatus(parentStatus, statSafe(path)?.mtimeMs, now);
+      info.status = claudeSubagentStatus(
+        parentStatus,
+        { mtimeMs: statSafe(path)?.mtimeMs, openTurn: () => claudeSubagentTailState(path) },
+        now,
+      );
       return new ClaudeObserveConnection(path, info);
     }
     // Observe: surface WHY a session is blocked (its `<bin> agents --json` waiting reason) so the app
@@ -3974,7 +4012,13 @@ export function newClaudeQueuedSends(): ClaudeQueuedSends {
 /** True for an enqueue record worth showing (typed words, not harness noise; DRIVEN-session enqueues
  *  carry NO content field at all — probed live 2.1.207 — and are skipped here). */
 function isRenderableEnqueue(ln: any): boolean {
-  return ln.operation === 'enqueue' && typeof ln.content === 'string' && !!ln.content.trim() && !isWrapper(ln.content) && !/^<task-notification>|^<system-reminder>/.test(ln.content.trim());
+  // {@link isWrapper} owns this rule and already covers BOTH `task-notification` and
+  // `system-reminder`, on a word boundary, so the literal `/^<task-notification>|^<system-reminder>/`
+  // that used to trail this expression could never decide anything. It was not merely dead: stating
+  // the same rule twice, once strictly and once loosely, reads as a gap in the loose copy — an
+  // attributed `<task-notification version="2">` visibly defeats it — and invites a fix for a hole
+  // the strict copy beside it had already closed.
+  return ln.operation === 'enqueue' && typeof ln.content === 'string' && !!ln.content.trim() && !isWrapper(ln.content);
 }
 function queuedSendKey(ln: any): string {
   return `queued:${String(ln.timestamp ?? '')}:${String(ln.content).trim().length}`;
@@ -5501,18 +5545,93 @@ export function claudeSubagentTitle(agent: string, meta: Record<string, any> | u
   return agent;
 }
 
+/** How long a child transcript may sit quiet and still claim 'working' because its OWN last record leaves
+ *  a tool call unanswered. Claude appends a child line only when a record COMPLETES, so one long test run,
+ *  build, or thinking pass writes nothing for minutes while the child works — on real transcripts the gaps
+ *  immediately after a `tool_use` line commonly run 2-10 minutes, so a two-minute window is below ordinary
+ *  tool behavior rather than an edge case.
+ *
+ *  This is the SAME ceiling the activity card applies to the same tail evidence, which is what stops the
+ *  two from disagreeing about how long one quiet-but-open child may claim to work. It does NOT make the
+ *  verdicts identical and it is not meant to: the roster row ALSO gates on the parent having a turn in
+ *  flight, because a child row has no lifecycle of its own to close, while the card describes the child on
+ *  its own terms and settles on final text, a parent answer, or a TaskStop. So a child whose parent's turn
+ *  has closed can read idle in the roster while its card still says running — intended, and documented at
+ *  {@link claudeSubagentStatus}. Bounded either way, so a child that dies without its settle line stops
+ *  claiming 'working' on its own. */
+export const CLAUDE_SUBAGENT_OPEN_TURN_STALE_MS = 15 * 60_000;
+
+/** Tail window read to classify one child transcript (the same ceiling as the activity card's stats read). */
+const CLAUDE_SUBAGENT_TAIL_BYTES = 512 * 1024;
+
+/** What the last record of a child transcript leaves open. */
+export type ClaudeSubagentTailState = 'in-tool-call' | 'final-text' | 'idle';
+
+/** The rule, applied to segments already read: what did the child's LAST record leave open? Kept
+ *  separate from the reader so a caller that has ALREADY paid for the tail (the card's token pass)
+ *  does not read the file a second time to classify it.
+ *
+ *  A trailing `tool_use` is by itself the whole "its result has not landed" test: the result would
+ *  be a later record, and any `tool_result` becomes the last event in its place. This tracked a set
+ *  of pending ids as well, and asked whether the trailing id was in it — a question that could not
+ *  come out the other way, so the set, its add and its delete were bookkeeping for an unreachable
+ *  branch. */
+function classifyClaudeSubagentTail(segs: readonly string[]): ClaudeSubagentTailState | undefined {
+  let lastEvent: 'tool_use' | 'final_text' | 'tool_result' | undefined;
+  for (const seg of segs) {
+    const o = parseLineOrNull(seg);
+    if (!o) continue;
+    const content = Array.isArray(o.message?.content) ? o.message.content : [];
+    if (o.type === 'assistant') {
+      for (const b of content) {
+        if (b?.type === 'tool_use' && b.id != null) lastEvent = 'tool_use';
+        else if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) lastEvent = 'final_text';
+      }
+    } else if (o.type === 'user') {
+      for (const b of content) if (b?.type === 'tool_result' && b.tool_use_id != null) lastEvent = 'tool_result';
+    }
+  }
+  if (lastEvent === 'tool_use') return 'in-tool-call';
+  if (lastEvent === 'final_text') return 'final-text';
+  return lastEvent ? 'idle' : undefined;
+}
+
+/** The same rule, for a caller holding only a PATH. Cached on (size, mtime) so a child that is not
+ *  appending is scanned once per quiet stretch rather than once per sweep. A child that IS appending
+ *  misses this cache by design — but that is exactly the child whose mtime answers the question inside
+ *  the freshness bound, so the probe never runs for it either. */
+export function claudeSubagentTailState(jsonlPath: string): ClaudeSubagentTailState | undefined {
+  return cachedFileFact(jsonlPath, 'subagent-tail-state', () =>
+    classifyClaudeSubagentTail(readTailLines(jsonlPath, CLAUDE_SUBAGENT_TAIL_BYTES)),
+  );
+}
+
+/** The evidence a child row's status is decided from. */
+export interface ClaudeSubagentStatusEvidence {
+  /** Absent (or undefined) when the child transcript could not be stat'd — no mtime is no evidence. */
+  mtimeMs?: number;
+  /** The child's own open-turn probe, consulted ONLY in the window between the freshness bound and the
+   *  open-turn bound, and only under a parent whose turn is still in flight. */
+  openTurn?: () => ClaudeSubagentTailState | undefined;
+}
+
 /** Status for a child row. A subagent has NO `agents --json` row of its own (the CLI reports the parent),
- *  so 'working' requires both evidences at once: the parent has a turn in flight AND this child's own
- *  transcript is still fresh. Anything else is idle — a fabricated 'working' would outlive the parent's
- *  turn and never clear, since nothing ever "finishes" a child row. */
+ *  so 'working' always requires the parent to have a turn in flight. On top of that the child's own
+ *  transcript either appended recently, or has been quiet WHILE its last record left a tool call
+ *  unanswered — the quiet-but-working case the flat window used to misread as idle. A child whose last
+ *  record settled (final text, or a resolved tool call) still decays on the freshness bound, and the
+ *  parent gate bounds everything: when the parent's turn closes the row goes idle, because nothing else
+ *  ever "finishes" a child row. */
 export function claudeSubagentStatus(
   parentStatus: RawStatus | undefined,
-  childMtimeMs: number | undefined,
+  child: ClaudeSubagentStatusEvidence,
   now: number,
 ): RawStatus {
-  return parentStatus === 'working' && childMtimeMs != null && now - childMtimeMs <= WORKING_FRESH_MS
-    ? 'working'
-    : 'idle';
+  if (parentStatus !== 'working' || child.mtimeMs == null) return 'idle';
+  const quietMs = now - child.mtimeMs;
+  if (quietMs <= WORKING_FRESH_MS) return 'working';
+  if (quietMs > CLAUDE_SUBAGENT_OPEN_TURN_STALE_MS) return 'idle';
+  return child.openTurn?.() === 'in-tool-call' ? 'working' : 'idle';
 }
 
 /** Collect tool_use_ids the PARENT has already answered (a user-turn `tool_result`), so a subagent whose
@@ -5562,6 +5681,52 @@ export interface ClaudeBackgroundCommand {
   pendingResult?: boolean;
 }
 
+/** Ceiling on the per-connection background-command ledger. A long-lived session measured 234
+ *  spawns, all of which the history scan re-derives, and the card window below never renders more
+ *  than a handful of them. */
+const BACKGROUND_LEDGER_MAX = 256;
+
+/** Record one ledger entry, keeping the map bounded.
+ *
+ *  Over the cap this evicts the OLDEST SETTLED entry — precisely the ones the emit window drops
+ *  anyway. A running or not-yet-delivered entry is preferred over for eviction, because its ack and
+ *  its terminal notice arrive on later lines of the same scan and an entry dropped before them
+ *  cannot be re-derived, which would strand a card claiming to run.
+ *
+ *  But "preferred over" is not "never": skipping them unconditionally meant the cap did nothing at
+ *  all for the one session shape that can actually grow without limit — thousands of spawns none of
+ *  which ever settles (the documented ~4.5% of acks that never receive a notification, a crashed
+ *  CLI, or simply jobs still running). In that state the scan found no settled entry, evicted
+ *  nothing, and the ledger grew for the life of the connection while reporting a cap. So when there
+ *  is nothing settled to drop, the oldest entry goes regardless: one stale card is the smaller
+ *  error, and the entry just inserted is never the one chosen. */
+function rememberBackgroundCommand(
+  ledger: Map<string, ClaudeBackgroundCommand>,
+  entry: ClaudeBackgroundCommand,
+): void {
+  ledger.set(entry.toolUseId, entry);
+  if (ledger.size <= BACKGROUND_LEDGER_MAX) return;
+  let settledKey: string | undefined;
+  let settledMs = Number.POSITIVE_INFINITY;
+  let anyKey: string | undefined;
+  let anyMs = Number.POSITIVE_INFINITY;
+  for (const [key, value] of ledger) {
+    if (key === entry.toolUseId) continue; // never the entry this call just recorded
+    const recency = value.endedAtMs ?? value.startedAtMs ?? 0;
+    if (recency < anyMs) {
+      anyMs = recency;
+      anyKey = key;
+    }
+    if (value.status === undefined || value.pendingResult) continue;
+    if (recency < settledMs) {
+      settledMs = recency;
+      settledKey = key;
+    }
+  }
+  const evict = settledKey ?? anyKey;
+  if (evict !== undefined) ledger.delete(evict);
+}
+
 /**
  * The `<task-notification>` payload of a line that genuinely IS a CLI task notification, or null.
  *
@@ -5579,14 +5744,23 @@ export interface ClaudeBackgroundCommand {
  * and because an unresolved command would then fall to a staleness path, every lost `failed`
  * would have rendered as a success.
  *
- * `tool_result` block content is deliberately NOT searched, and a user line stamped as something
- * other than a task notification is rejected: the payload decides an output path that is later
- * tail-read and broadcast, and any command whose stdout contains this XML would otherwise be able
- * to choose it.
+ * PROVENANCE IS NOT EQUAL ACROSS THE THREE. `tool_result` block content is never searched, and the
+ * `user` carrier is authenticated by its `origin` stamp when the CLI writes one (all 2,642
+ * notification user lines on this workstation carry `origin.kind: 'task-notification'`), the
+ * `attachment` carrier by `commandMode`. A `queue-operation` record has NO provenance field — its
+ * only keys are content / operation / reason / sessionId / timestamp — and a terminal-typed prompt
+ * arrives through the same `enqueue`, so pasted text beginning with this tag is indistinguishable
+ * from a notification at this layer. That carrier stays load-bearing because ~48% of completions
+ * reach the transcript no other way; in exchange what it may DO is bounded where it is consumed
+ * ({@link collectBackgroundCommandTerminal}): it can only name a command the structured ack already
+ * recorded, it must agree with that ack's task id, and it cannot point the output reader outside the
+ * CLI's own scratchpad shape. What it can never become is a user prompt — which is also why
+ * {@link isRenderableEnqueue} keeps this same prefix out of the queued bubbles.
  */
 export function claudeTaskNotificationPayload(ln: any): string | null {
+  // A complete block, not merely a prefix: an enqueue that opens the tag and rambles is prose.
   const payload = (s: unknown): string | null =>
-    typeof s === 'string' && /^\s*<task-notification\b/.test(s) ? s : null;
+    typeof s === 'string' && TASK_NOTIFICATION_BLOCK.test(s) ? s : null;
   if (ln?.type === 'queue-operation') return payload(ln.content);
   if (ln?.type === 'attachment') {
     const att = ln.attachment;
@@ -5594,21 +5768,38 @@ export function claudeTaskNotificationPayload(ln: any): string | null {
       ? payload(att.prompt)
       : null;
   }
-  if (ln?.type !== 'user' || ln.isMeta || ln.isCompactSummary) return null;
-  // A line that carries an `origin` stamp must say it is a task notification; only pre-stamp
-  // transcripts (no `origin` at all) fall back to the text prefix.
-  if (ln.origin != null && ln.origin?.kind !== 'task-notification') return null;
-  const c = ln.message?.content;
-  const text =
-    typeof c === 'string'
-      ? c
-      : Array.isArray(c)
-        ? c
-            .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
-            .map((b: any) => b.text)
-            .join('\n')
-        : '';
-  return payload(text);
+  if (!claudeTaskNotificationUserLine(ln)) return null;
+  return payload(claudeUserLineText(ln));
+}
+
+/** Opening of a CLI task notification, and the complete block. */
+const TASK_NOTIFICATION_PREFIX = /^\s*<task-notification\b/;
+const TASK_NOTIFICATION_BLOCK = /^\s*<task-notification\b[\s\S]*<\/task-notification>\s*$/;
+
+/** A user line's text blocks, flattened the ONE way every notification reader must read them. Three
+ *  readers used to copy this join, and a fourth copy is how a predicate starts disagreeing with the
+ *  function it was supposed to share a rule with. */
+function claudeUserLineText(ln: any): string {
+  const c = ln?.message?.content;
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c)) return '';
+  return c
+    .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+    .map((b: any) => b.text)
+    .join('\n');
+}
+
+/** Is this `user` line a CLI-injected task notification? THE predicate — the turn-authority scanner,
+ *  the runtime tracker, the continuation file fact and the payload reader all answer through here, so
+ *  they cannot disagree about what counts as a wake.
+ *
+ *  Provenance wins over text whenever the CLI states it: a user line stamped as anything other than a
+ *  task notification is a PROMPT that happens to contain the tag, not a wake, and must not open a
+ *  continuation run or resolve a card. Only a pre-stamp transcript falls back to the prefix. */
+function claudeTaskNotificationUserLine(ln: any): boolean {
+  if (ln?.type !== 'user' || ln.isMeta || ln.isCompactSummary) return false;
+  if (ln.origin != null) return ln.origin?.kind === 'task-notification';
+  return TASK_NOTIFICATION_PREFIX.test(claudeUserLineText(ln));
 }
 
 /** Fields of a `<task-notification>` payload. A Monitor event carries no `<tool-use-id>`. */
@@ -5644,18 +5835,46 @@ function backgroundCommandStatus(raw: string | undefined): ClaudeBackgroundComma
  * The path arrives as prose in the ack and as `<output-file>` in the notification, both of which
  * sit in text a tool result can contain. Requiring `<dir>/tasks/<taskId>.output`, with `taskId`
  * taken from `toolUseResult.backgroundTaskId`, means a forged line cannot name a file of its
- * choosing. The reader adds the filesystem half of the guard (realpath, no symlinks, regular
- * files only).
+ * choosing — and it cannot choose the DIRECTORY either, which is what the scratchpad shape below is
+ * for: with the file name fixed by the id, prose still controls the directory, so without a shape
+ * bound a line could name `~/.ssh/tasks/<id>.output` and have 4 KB of it broadcast.
  */
 function backgroundOutputPath(raw: string | undefined, taskId: string | undefined): string | undefined {
   if (!raw || !taskId || !isAbsolute(raw)) return undefined;
+  // A task id is a short opaque token (`b98numq4h`). A prose id carrying a separator or a traversal
+  // segment is not one, and the equality below would only ever be satisfied by a path crafted to match.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(taskId)) return undefined;
   // Checked on the REALPATH, not the literal. The structural bind is only worth anything if a
   // symlinked directory component cannot carry it somewhere else: a `tasks` symlink pointing at
   // `/etc` satisfies the literal check and resolves to `/etc/<taskId>.output`, which does not.
-  // `realOrResolve` falls back to a plain resolve while the file is still unwritten, so a command
-  // whose first byte has not landed yet is admitted rather than dropped.
+  // `realOrResolve` canonicalizes through the nearest EXISTING ancestor, so a command whose first byte
+  // has not landed yet is still admitted — and still checked against the directory it really lands in.
   const real = realOrResolve(raw);
-  return basename(real) === `${taskId}.output` && basename(dirname(real)) === 'tasks' ? real : undefined;
+  return basename(real) === `${taskId}.output` && basename(dirname(real)) === 'tasks' && inClaudeScratchpad(real)
+    ? real
+    : undefined;
+}
+
+/** How far above a `tasks` output dir the scratchpad root may sit. Observed shape:
+ *  `<tmp>/claude-<uid>/<project-slug>/<session-uuid>/tasks/<task-id>.output` — root three up. */
+const CLAUDE_SCRATCHPAD_MAX_DEPTH = 3;
+
+/** Is this canonical path inside the CLI's own scratch output tree?
+ *
+ *  Measured over every transcript on this workstation, all 7,660 `<output-file>` values sit in
+ *  `<tmp>/claude-<uid>/…/tasks/`, and the CLI owns that root. Requiring an ancestor named `claude-*`
+ *  above the `tasks` dir keeps a prose-named directory from pointing the reader at a tree the CLI
+ *  never wrote, without hardcoding a temp location (Windows puts the scratchpad elsewhere). A real
+ *  path that stops matching loses only its output tail, never its status. */
+function inClaudeScratchpad(realPath: string): boolean {
+  let dir = dirname(realPath); // the `tasks` dir
+  for (let depth = 0; depth < CLAUDE_SCRATCHPAD_MAX_DEPTH; depth++) {
+    const parent = dirname(dir);
+    if (parent === dir) return false; // reached the volume root
+    if (/^claude-/i.test(basename(parent))) return true;
+    dir = parent;
+  }
+  return false;
 }
 
 /**
@@ -5677,6 +5896,11 @@ function collectBackgroundCommandTerminal(
   if (!n.toolUseId) return;
   const prev = commands.get(n.toolUseId);
   if (!prev) return;
+  // Bind the claim to the structured ack. A `tool_use_id` is readable in the very transcript a
+  // poisoned tool output arrived in, so naming a live command is not evidence — agreeing with the
+  // ack's `backgroundTaskId` is. An OMITTED `<task-id>` is tolerated (older carriers wrote one and
+  // the entry may predate the ack), a contradicting one is not: it cannot resolve this command.
+  if (prev.taskId && n.taskId !== undefined && n.taskId !== prev.taskId) return;
   const status = backgroundCommandStatus(n.status);
   if (!status) return;
   // All three carriers repeat the SAME completion, and they are not simultaneous: a notification
@@ -5699,7 +5923,7 @@ function collectBackgroundCommandTerminal(
     status,
     ...(live ? { pendingResult: true } : {}),
     ...(exit !== undefined ? { exitCode: Number(exit) } : {}),
-    endedAtMs: timestampToMs(ln.timestamp) ?? prev.endedAtMs,
+    endedAtMs: timestampToMs(ln.timestamp) ?? (live ? Date.now() : undefined) ?? prev.endedAtMs,
     // All three carriers repeat the identical payload, so a later one must not overwrite a path
     // the ack already bound; only fill a gap, and bind it to the same structured task id.
     ...(prev.outputPath ? {} : { outputPath: backgroundOutputPath(n.outputFile, prev.taskId ?? n.taskId) }),
@@ -5727,6 +5951,13 @@ export function collectParentActivity(
 ): void {
   collectToolResultIds(ln, resolved);
   collectBackgroundCommandTerminal(ln, extra?.backgroundCommands, live);
+  // Stream-json carries no native timestamp — a driven turn is stamped with the broker's own wall
+  // clock for exactly this reason (see `startLive`). Leaving a driven spawn's `startedAtMs` unset
+  // is not merely a missing label: the evidence horizon reads it as the only sign of life a
+  // command has before it writes output, and its `lastSign > 0` test then fails OPEN, so a driven
+  // command whose output path was never admitted could never be withdrawn and sat at Running for
+  // the life of the connection. Observing the line IS the sign of life, so stamp it.
+  const lineMs = (): number | undefined => timestampToMs(ln.timestamp) ?? (live ? Date.now() : undefined);
   const c = ln?.message?.content;
   if (ln?.type === 'assistant' && Array.isArray(c)) {
     for (const b of c) {
@@ -5745,26 +5976,29 @@ export function collectParentActivity(
       if (b.name === 'Bash' && b.input?.run_in_background === true && extra?.backgroundCommands) {
         const id = String(b.id);
         const prev = extra.backgroundCommands.get(id);
-        extra.backgroundCommands.set(id, {
+        // Clamped HERE, not at emit: the ledger is rebuilt from the whole transcript per connection
+        // and lives as long as the connection does, so an unbounded model-written label is retained
+        // whether or not it is ever rendered. Real spawns on this machine reach 4,956 characters.
+        rememberBackgroundCommand(extra.backgroundCommands, {
           ...(prev ?? { toolUseId: id }),
           toolUseId: id,
-          ...(typeof b.input.description === 'string' && b.input.description
-            ? { description: b.input.description }
-            : {}),
-          ...(typeof b.input.command === 'string' && b.input.command ? { command: b.input.command } : {}),
-          startedAtMs: prev?.startedAtMs ?? timestampToMs(ln.timestamp),
+          ...(clampLabel(b.input.description, COMMAND_TITLE_MAX) ? { description: clampLabel(b.input.description, COMMAND_TITLE_MAX) } : {}),
+          ...(clampLabel(b.input.command, COMMAND_SUBTITLE_MAX) ? { command: clampLabel(b.input.command, COMMAND_SUBTITLE_MAX) } : {}),
+          startedAtMs: prev?.startedAtMs ?? lineMs(),
         });
       }
     }
   }
   if (ln?.type !== 'user') return;
-  const texts: string[] = [];
-  if (typeof c === 'string') texts.push(c);
-  else if (Array.isArray(c)) {
+  // A background COMMAND's ack. `toolUseResult.backgroundTaskId` is structured, unlike the prose
+  // beside it that names the output file, so it is what the path is bound to. Stream-json uses
+  // snake_case; the on-disk transcript uses camelCase. It is a property of the LINE, while the entry
+  // is keyed by BLOCK, so reading it here (once) and binding it below is the only thing that keeps a
+  // second, unrelated tool_result on the same line from inheriting another command's task id.
+  const lineBackgroundTaskId = (ln.tool_use_result ?? ln.toolUseResult)?.backgroundTaskId;
+  const toolResultBlocks = Array.isArray(c) ? c.filter((b: any) => b?.type === 'tool_result').length : 0;
+  if (Array.isArray(c)) {
     for (const b of c) {
-      if (typeof b === 'string') texts.push(b);
-      else if (typeof b?.text === 'string') texts.push(b.text);
-      else if (typeof b?.content === 'string') texts.push(b.content);
       if (b?.type !== 'tool_result' || b.tool_use_id == null) continue;
       const tuid = String(b.tool_use_id);
       const blockText =
@@ -5773,25 +6007,27 @@ export function collectParentActivity(
           : Array.isArray(b.content)
             ? b.content.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('\n')
             : '';
-      // A background COMMAND's ack. `toolUseResult.backgroundTaskId` is structured, unlike the
-      // prose beside it that names the output file, so it is what the path is bound to.
-      // Stream-json uses snake_case; the on-disk transcript uses camelCase.
-      const backgroundTaskId = (ln.tool_use_result ?? ln.toolUseResult)?.backgroundTaskId;
-      if (extra?.backgroundCommands && typeof backgroundTaskId === 'string' && backgroundTaskId) {
+      const ackOutputPath = /Output is being written to:\s*([^\r\n]+\.output)/.exec(blockText)?.[1];
+      if (
+        extra?.backgroundCommands &&
+        typeof lineBackgroundTaskId === 'string' &&
+        lineBackgroundTaskId &&
+        // WHICH block a LINE-level ack belongs to. With one tool_result on the line there is no doubt;
+        // with several, only the block whose own text carries the bound ack is the background command's
+        // ack, and the others must not inherit its task id.
+        (toolResultBlocks === 1 || ackOutputPath !== undefined)
+      ) {
         const prev = extra.backgroundCommands.get(tuid);
         // Read through the final output extension on the ack line: scratchpad roots may contain
         // spaces or `.output` themselves. The extension excludes the sentence-ending period;
         // the structured task-id binding below still decides whether the path is admissible.
-        const outputPath = backgroundOutputPath(
-          /Output is being written to:\s*([^\r\n]+\.output)/.exec(blockText)?.[1],
-          backgroundTaskId,
-        );
-        extra.backgroundCommands.set(tuid, {
+        const outputPath = backgroundOutputPath(ackOutputPath, lineBackgroundTaskId);
+        rememberBackgroundCommand(extra.backgroundCommands, {
           ...(prev ?? { toolUseId: tuid }),
           toolUseId: tuid,
-          taskId: backgroundTaskId,
+          taskId: lineBackgroundTaskId,
           ...(outputPath ? { outputPath } : {}),
-          startedAtMs: prev?.startedAtMs ?? timestampToMs(ln.timestamp),
+          startedAtMs: prev?.startedAtMs ?? lineMs(),
         });
       }
       // The async-launch ack IS the background classification on ≥2.1.25x CLIs: those
@@ -5816,12 +6052,24 @@ export function collectParentActivity(
       }
     }
   }
-  for (const text of texts) {
-    if (!text.includes('<task-notification')) continue;
-    const re = /<tool-use-id>([^<]+)<\/tool-use-id>/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) if (m[1]) notified.add(m[1]);
-  }
+  // A subagent is resolved by a notification the CLI INJECTED, never by one that merely appeared in
+  // a tool_result body. This scan used to read the blocks' `content` too, so a background command
+  // whose stdout contained this XML — a log tailer, a grep over transcripts, this repo's own
+  // fixtures — marked an unrelated RUNNING subagent done: 143 tool_result bodies on this
+  // workstation carry the tag and 26 of them carry a `<tool-use-id>` with it. So the carrier is
+  // authenticated through {@link claudeTaskNotificationUserLine} (THE predicate) and read through
+  // {@link claudeUserLineText}, the same pair every other notification reader uses.
+  //
+  // Deliberately NOT {@link claudeTaskNotificationPayload}: that one additionally demands a
+  // COMPLETE block, because a truncated payload must never resolve a command card with a status it
+  // half-read. Here the tool-use-ids are extracted by regex and a partial read simply yields fewer,
+  // while requiring the block to END the text would drop a real shape — a stamped notification
+  // followed by a `<system-reminder>`, which exists on this workstation.
+  if (!claudeTaskNotificationUserLine(ln)) return;
+  const re = /<tool-use-id>([^<]+)<\/tool-use-id>/g;
+  let m: RegExpExecArray | null;
+  const text = claudeUserLineText(ln);
+  while ((m = re.exec(text))) if (m[1]) notified.add(m[1]);
 }
 
 function safeReaddir(dir: string): string[] {
@@ -5842,17 +6090,18 @@ function readTextSafe(path: string): string {
 /** elapsed (first→last timestamp) + an output-token estimate for ONE subagent transcript, from bounded
  *  head/tail reads (a long subagent file is never slurped). Tokens dedupe by message.id (usage repeats
  *  per line of a turn) over the tail window — exact for short agents, an estimate for very long ones. */
-function subagentStats(jsonlPath: string): { elapsedMs?: number; startedAtMs?: number; tokens?: number; ctxTokens?: number; mtimeMs?: number; tailState?: 'in-tool-call' | 'final-text' | 'idle' } {
+function subagentStats(jsonlPath: string): { elapsedMs?: number; startedAtMs?: number; tokens?: number; ctxTokens?: number; mtimeMs?: number; tailState?: ClaudeSubagentTailState } {
   const st = statSafe(jsonlPath);
+  // ONE tail read feeds both the token/elapsed pass and the tail classification below. Asking for the
+  // classification through the cached path reader would read the same bytes a second time per child,
+  // and it is precisely the appending children that miss that cache.
+  const tailSegs = readTailLines(jsonlPath, CLAUDE_SUBAGENT_TAIL_BYTES);
   let firstTs: number | undefined;
   let lastTs: number | undefined;
   const tokenMax = new Map<string, number>();
   let anonToken = 0;
   let ctxTokens: number | undefined; // latest call's input+cacheRead+cacheWrite — the number the TUI shows
-  let tailState: 'in-tool-call' | 'final-text' | 'idle' | undefined;
   const note = (segs: string[], wantTokens: boolean): void => {
-    const pendingToolUses = new Set<string>();
-    let lastEvent: { type: 'tool_use'; id: string } | { type: 'tool_result' } | { type: 'final_text' } | undefined;
     for (const seg of segs) {
       const o = parseLineOrNull(seg);
       if (!o) continue;
@@ -5881,35 +6130,10 @@ function subagentStats(jsonlPath: string): { elapsedMs?: number; startedAtMs?: n
           if (ctx > 0) ctxTokens = ctx;
         }
       }
-      if (wantTokens && o.type === 'assistant') {
-        const content = Array.isArray(o.message?.content) ? o.message.content : [];
-        for (const b of content) {
-          if (b?.type === 'tool_use' && b.id != null) {
-            const id = String(b.id);
-            pendingToolUses.add(id);
-            lastEvent = { type: 'tool_use', id };
-          } else if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-            lastEvent = { type: 'final_text' };
-          }
-        }
-      } else if (wantTokens && o.type === 'user') {
-        const content = Array.isArray(o.message?.content) ? o.message.content : [];
-        for (const b of content) {
-          if (b?.type === 'tool_result' && b.tool_use_id != null) {
-            pendingToolUses.delete(String(b.tool_use_id));
-            lastEvent = { type: 'tool_result' };
-          }
-        }
-      }
-    }
-    if (wantTokens) {
-      if (lastEvent?.type === 'tool_use' && pendingToolUses.has(lastEvent.id)) tailState = 'in-tool-call';
-      else if (lastEvent?.type === 'final_text') tailState = 'final-text';
-      else if (lastEvent) tailState = 'idle';
     }
   };
   note(readHeadLines(jsonlPath, 64 * 1024), false); // earliest timestamp
-  note(readTailLines(jsonlPath, 512 * 1024), true); // latest timestamp + token sum
+  note(tailSegs, true); // latest timestamp + token sum
   const tokens = [...tokenMax.values()].reduce((a, b) => a + b, 0) + anonToken;
   return {
     elapsedMs: firstTs != null && lastTs != null && lastTs >= firstTs ? lastTs - firstTs : undefined,
@@ -5917,7 +6141,8 @@ function subagentStats(jsonlPath: string): { elapsedMs?: number; startedAtMs?: n
     tokens: tokens > 0 ? tokens : undefined,
     ctxTokens,
     mtimeMs: st?.mtimeMs,
-    tailState,
+    // The same classifier the roster child row consults — see {@link classifyClaudeSubagentTail}.
+    tailState: classifyClaudeSubagentTail(tailSegs),
   };
 }
 
@@ -5941,7 +6166,7 @@ export function buildActivitySnapshot(activityDir: string, resolved: Set<string>
     const stat = statSafe(jsonlPath);
     const s = subagentStats(jsonlPath);
     const tuid = String(meta.toolUseId);
-    const staleWindow = s.tailState === 'in-tool-call' ? 15 * 60_000 : WORKING_FRESH_MS;
+    const staleWindow = s.tailState === 'in-tool-call' ? CLAUDE_SUBAGENT_OPEN_TURN_STALE_MS : WORKING_FRESH_MS;
     const stale = s.mtimeMs != null && now - s.mtimeMs > staleWindow;
     const background = parent.backgroundToolUseIds.has(tuid);
     // A TaskStop'd agent is done the moment the parent's stop tool_result lands — its own file just
@@ -6103,8 +6328,8 @@ export function buildActivitySnapshot(activityDir: string, resolved: Set<string>
     .filter((c) => c.taskId) // a spawn we never saw acked is not yet a real background command
     .sort((a, b) => resultRecency(b) - resultRecency(a));
   let terminalBudget = BACKGROUND_TERMINAL_CARD_LIMIT;
+  let runningTailBudget = BACKGROUND_RUNNING_TAIL_LIMIT;
   for (const cmd of commands) {
-    const tail = readBackgroundCommandTail(cmd.outputPath);
     // A command with no terminal notification is RUNNING. Reporting a silent one as 'done' is what
     // would turn an unobserved failure into a rendered success, so that is never done — but
     // claiming it is still running forever is the opposite error. Measured over every transcript
@@ -6114,11 +6339,20 @@ export function buildActivitySnapshot(activityDir: string, resolved: Set<string>
     // written for a long time — the honest frame is NO frame: the adapter says nothing rather than
     // asserting a state it cannot observe.
     if (cmd.status === undefined) {
-      const lastSign = Math.max(cmd.startedAtMs ?? 0, tail.mtimeMs ?? 0);
+      // A stat, not a tail read: on a long-lived session nearly every entry in the ledger is
+      // dropped by one of the two gates below, and reading 4 KB to decide to drop it is the cost
+      // this ordering exists to avoid.
+      const lastSign = Math.max(cmd.startedAtMs ?? 0, backgroundOutputMtime(cmd.outputPath) ?? 0);
       if (lastSign > 0 && now - lastSign > BACKGROUND_EVIDENCE_MAX_AGE_MS) continue;
     } else if (terminalBudget-- <= 0 && !cmd.pendingResult) {
       continue; // history is bounded; undelivered live results always get one frame
     }
+    // A terminal card is already bounded to the newest few by the budget above, so it always keeps
+    // its result. A RUNNING card past the window keeps its status, title and elapsed — everything
+    // that says it is still running — and gives up only the preview.
+    const tail = cmd.status !== undefined || runningTailBudget-- > 0
+      ? readBackgroundCommandTail(cmd.outputPath)
+      : { stream: undefined, hash: 'windowed' };
     const status: ActivityMsg['status'] =
       cmd.status === 'completed' ? 'done' : cmd.status === undefined ? 'running' : 'error';
     out.push({
@@ -6164,6 +6398,11 @@ function firstLine(s: string | undefined): string | undefined {
 const BACKGROUND_REEMIT_MIN_MS = 5_000;
 /** Finished commands still worth a card. Older results were delivered when they happened. */
 const BACKGROUND_TERMINAL_CARD_LIMIT = 8;
+/** How many RUNNING commands carry an output preview. Every running command still gets a card —
+ *  dropping one would leave it on screen anyway, because omission is not removal — but the 4 KB
+ *  tail beside it is the part that can grow without limit, and `getHistory` returns them all at
+ *  once. A session that backgrounds dev servers, watchers and tails is the case this bounds. */
+const BACKGROUND_RUNNING_TAIL_LIMIT = 8;
 /** How long a command may go with no notification and no output before it stops being claimed. */
 const BACKGROUND_EVIDENCE_MAX_AGE_MS = 6 * 60 * 60_000; // 6h
 /** Ceilings for the two model-chosen labels on a command card. */
@@ -6183,22 +6422,38 @@ const BACKGROUND_TAIL_MAX_LINES = 40;
  * regular file — no symlink, no directory, no device — before a byte is read. A missing file is
  * normal (the scratchpad is reaped) and yields an empty tail rather than dropping the card.
  */
+/** Evidence-of-life probe for the staleness gate: the output file's mtime, with NO byte read.
+ *  A symlink, directory or device answers "no mtime", which is what the reader would refuse anyway. */
+function backgroundOutputMtime(path: string | undefined): number | undefined {
+  if (!path) return undefined;
+  try {
+    const st = lstatSync(path);
+    return st.isSymbolicLink() || !st.isFile() ? undefined : st.mtimeMs;
+  } catch {
+    return undefined; // absent is not evidence of life
+  }
+}
+
 function readBackgroundCommandTail(path: string | undefined): {
   stream: ToolOutputStream | undefined;
   hash: string;
-  mtimeMs?: number;
 } {
   if (!path) return { stream: undefined, hash: '' };
   let size: number;
-  let mtimeMs: number;
   try {
     const st = lstatSync(path);
     if (st.isSymbolicLink() || !st.isFile()) return { stream: undefined, hash: 'refused' };
+    // `lstat` only declines to follow a symlink at the FINAL component; every component above it is
+    // followed by the open itself. The admitted path was canonical when it was bound, so requiring it
+    // to still be canonical also catches a scratchpad entry swapped for a symlink after admission.
+    if (!sameCanonicalPath(realpathSync(path), path)) return { stream: undefined, hash: 'refused' };
     // Taken from THIS stat, not a later one. The scratchpad is documented as reapable, so a second
     // stat can find nothing — and a non-null assertion on it would throw inside callers whose catch
-    // discards the entire history, not merely this card.
+    // discards the entire history, not merely this card. The mtime this stat also has is NOT
+    // returned: the only caller that needs one asks {@link backgroundOutputMtime} before deciding
+    // whether this read is worth doing at all, and a second copy of the answer here was a rule
+    // stated twice that nothing read.
     size = st.size;
-    mtimeMs = st.mtimeMs;
   } catch {
     return { stream: undefined, hash: 'absent' };
   }
@@ -6216,15 +6471,14 @@ function readBackgroundCommandTail(path: string | undefined): {
   if (size > BACKGROUND_TAIL_MAX_BYTES) while (first < bytes.length && (bytes[first]! & 0xc0) === 0x80) first++;
   const lines = new TextDecoder().decode(bytes.subarray(first), { stream: true }).split('\n');
   if (lines.at(-1) === '') lines.pop();
-  if (!lines.length) return { stream: undefined, hash: 'empty', mtimeMs };
+  if (!lines.length) return { stream: undefined, hash: 'empty' };
   const kept = lines.slice(-BACKGROUND_TAIL_MAX_LINES);
   const text = stripControlBytes(kept.join('\n'));
-  if (!text) return { stream: undefined, hash: 'empty', mtimeMs };
+  if (!text) return { stream: undefined, hash: 'empty' };
   const truncated = kept.length < lines.length || size > BACKGROUND_TAIL_MAX_BYTES;
   return {
     stream: { text, ...(truncated ? { truncated: true } : {}) },
     hash: `${truncated ? 'truncated:' : ''}${createHash('sha256').update(text).digest('base64url').slice(0, 16)}`,
-    mtimeMs,
   };
 }
 
@@ -6241,11 +6495,28 @@ function stripControlBytes(s: string): string {
   return s
     .replace(/\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g, '') // OSC … BEL / ST
     .replace(/\u001B[@-Z\\-_]|\u001B\[[0-?]*[ -/]*[@-~]/g, '') // CSI and two-byte escapes
-    // \u000D (CR) is included: it is THE progress-bar control, and readTailLines splits on
-    // \n only, so a CR-driven log would otherwise arrive as one line of overwritten garbage.
-    // \t is preserved — it is layout in real command output, not noise.
-    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '')
+    // CR (0x0D) is deliberately NOT in this class. Deleting it concatenates every frame a progress
+    // bar overwrote into ONE line long enough to swallow the whole byte/line window, which is the
+    // opposite of what the comment here used to claim it fixed. It is collapsed instead, below,
+    // after the invisible sequences are gone so they cannot occupy columns. \t is preserved — it is
+    // layout in real command output, not noise.
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .split('\n')
+    .map(collapseCarriageReturns)
+    .join('\n')
     .trimEnd();
+}
+
+/** Emulate what a terminal shows for one line's worth of CR writes: each segment restarts at column
+ *  zero and OVERWRITES, so a shorter frame leaves the tail of the longer one it replaced. */
+function collapseCarriageReturns(line: string): string {
+  if (!line.includes('\r')) return line;
+  const columns: string[] = [];
+  for (const segment of line.split('\r')) {
+    let column = 0;
+    for (const char of segment) columns[column++] = char;
+  }
+  return columns.join('');
 }
 
 /**
@@ -6477,39 +6748,17 @@ function claudeStopRunStatus(stopReason: unknown): 'done' | 'error' | undefined 
 }
 
 /** A CLI-injected task-notification user line — the wake that starts a CONTINUATION
- *  turn with no real user prompt. Keyed on the structured `origin` stamp (≥2.1.25x
- *  writes `origin: {kind:'task-notification'}` on the line), with a text-prefix
- *  fallback for transcripts from before the stamp. Shared by the turn-authority
- *  scanner, the runtime tracker, and the continuation-pending file fact so the three
- *  cannot disagree about what counts as a wake. */
+ *  turn with no real user prompt. THE predicate for that question: the turn-authority
+ *  scanner, the runtime tracker, the continuation-pending file fact and the payload
+ *  reader all answer through it, so none of them can disagree about what counts as a
+ *  wake. Rule and provenance live in {@link claudeTaskNotificationUserLine}. */
 export function claudeTaskNotificationLine(line: any): boolean {
-  if (line?.type !== 'user' || line.isMeta || line.isCompactSummary) return false;
-  if (line.origin?.kind === 'task-notification') return true;
-  const content = line.message?.content;
-  const text =
-    typeof content === 'string'
-      ? content
-      : Array.isArray(content)
-        ? content
-            .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
-            .map((b: any) => b.text)
-            .join('\n')
-        : '';
-  return /^\s*<task-notification\b/.test(text);
+  return claudeTaskNotificationUserLine(line);
 }
 
 /** Canonical continuation boundary for a CLI-injected task notification. */
 function claudeTaskNotificationNotice(line: any): AgentMessage {
-  const content = line?.message?.content;
-  const text =
-    typeof content === 'string'
-      ? content
-      : Array.isArray(content)
-        ? content
-            .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
-            .map((b: any) => b.text)
-            .join('\n')
-        : '';
+  const text = claudeUserLineText(line);
   const summary = /<summary>([\s\S]*?)<\/summary>/.exec(text)?.[1]?.trim();
   const turnId = typeof line?.uuid === 'string' && line.uuid ? line.uuid : undefined;
   return {
