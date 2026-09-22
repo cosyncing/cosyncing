@@ -38,6 +38,26 @@ final class SessionLiveState {
       for (final value in this.activities) value.key: value,
     };
 
+    // An incremental reconnect preserves old cards. A bounded broker ledger can
+    // forget withdrawals, so reconcile only Codex running identities.
+    // Completed results and other agents' activities stay until dismissed.
+    if (message.eventName == 'codex.background-running-snapshot') {
+      final payload = message.raw['payload'];
+      final keys = payload is Map ? payload['keys'] : null;
+      if (keys is List &&
+          keys.length <= 128 &&
+          keys.every((key) => key is String && key.startsWith('cmd:codex:'))) {
+        final retained = keys.toSet();
+        activities.removeWhere(
+          (key, activity) =>
+              key.startsWith('cmd:codex:') &&
+              activity.kind == AgentActivityKind.command &&
+              activity.status == AgentActivityStatus.running &&
+              !retained.contains(key),
+        );
+      }
+    }
+
     // `agent-activity` is a volatile progress overlay. A canonical idle status
     // is the authoritative turn boundary and prevents a missed terminal
     // activity frame from leaving a forever-running card. Only a `status`
@@ -130,7 +150,8 @@ final class SessionLiveState {
 bool isSessionLiveStateMessage(AgentMessage message) {
   return message.type == AgentMessageType.goalState ||
       message.type == AgentMessageType.taskListState ||
-      message.type == AgentMessageType.agentActivity;
+      message.type == AgentMessageType.agentActivity ||
+      message.eventName == 'codex.background-running-snapshot';
 }
 
 String? _stateKey(AgentMessage message, {String? fallback}) {

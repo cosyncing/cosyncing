@@ -7,6 +7,7 @@ export {};
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { CodexAsyncQuestionTracker } from '../../../adapters/codex/src/async-user-input.ts';
+import { testBackgroundLedger, testBackgroundIncrementalReconnect, testBackgroundReconciliation, testBackgroundDaemonAndClients } from './background-commands.ts';
 import {
   appendFileSync,
   chmodSync,
@@ -16,6 +17,8 @@ import {
   readFileSync,
   truncateSync,
   writeFileSync,
+  symlinkSync,
+  unlinkSync,
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -28,8 +31,10 @@ import {
 import {
   CodexAdapter,
   codexLiveSyncEnabled,
+  codexAppServerSocketFingerprint,
   type CodexAttachDiagnostic,
 } from '../../../adapters/codex/src/index.ts';
+import { inspectCodexRuntimeSocket } from '../../../adapters/codex/src/runtime-socket.ts';
 import {
   codexModelCatalogSources,
   codexProviderConfigOverride,
@@ -130,12 +135,18 @@ function readMarkers(marker: string): any[] {
 async function withFakeCodex<T>(scriptBody: string, fn: (rollout: string, dir: string, marker: string) => Promise<T>): Promise<T> {
   const { dir, rollout, fake, marker } = fakeCodexDir(scriptBody);
   const oldBin = process.env.COSYNCING_CODEX_BIN;
+  const oldSock = process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
   process.env.COSYNCING_CODEX_BIN = fake;
+  // A fake stdio executable must never probe the developer's real daemon.
+  // Dedicated daemon fixtures override this absent, fixture-local endpoint.
+  process.env.COSYNCING_CODEX_APP_SERVER_SOCK = join(dir, 'unused-app-server.sock');
   try {
     return await fn(rollout, dir, marker);
   } finally {
     if (oldBin == null) delete process.env.COSYNCING_CODEX_BIN;
     else process.env.COSYNCING_CODEX_BIN = oldBin;
+    if (oldSock == null) delete process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+    else process.env.COSYNCING_CODEX_APP_SERVER_SOCK = oldSock;
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -5290,6 +5301,80 @@ await test('availableDecisions is honored when a server actually sends it, and n
       await conn.close().catch(() => {});
     }
   });
+});
+
+await test('Codex background commands preserve exact lifecycle and bounded result ordering', async () => {
+  await testBackgroundLedger();
+  return [true, 'verified item identities, outcomes, withdrawal, reuse, and output limits'];
+});
+await test('Codex background commands reconcile capabilities, paging, detach and offline completion', async () => {
+  await testBackgroundReconciliation();
+  return [true, 'verified client gating, unsupported caching, recovery, and throttle'];
+});
+await test('Codex background commands use the owning daemon and actual Hub client lifecycle', async () => {
+  await testBackgroundDaemonAndClients();
+  return [true, 'verified real adapter notification and Hub fanout wiring'];
+});
+
+await test('Codex background commands repair incremental reconnect and restore fresh no-list output', async () => {
+  await testBackgroundIncrementalReconnect();
+  return [true, 'verified two-client cursor reconnect, retained resolutions, and notification-only restoration'];
+});
+
+await test('Codex background commands isolate stdio fixtures from host daemon routing', async () => {
+  const previous = process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+  const hostEndpoint = '/unavailable-host-daemon-fixture.sock';
+  process.env.COSYNCING_CODEX_APP_SERVER_SOCK = hostEndpoint;
+  try {
+    await withFakeCodex(RESUME_ONLY_FAKE, async (_rollout, dir) => {
+      assert.equal(process.env.COSYNCING_CODEX_APP_SERVER_SOCK, join(dir, 'unused-app-server.sock'));
+      await withLoadedDaemon(dir, [], async () => {
+        assert.equal(process.env.COSYNCING_CODEX_APP_SERVER_SOCK, join(dir, 'app-server-control.sock'));
+      });
+      assert.equal(process.env.COSYNCING_CODEX_APP_SERVER_SOCK, join(dir, 'unused-app-server.sock'));
+    });
+    assert.equal(process.env.COSYNCING_CODEX_APP_SERVER_SOCK, hostEndpoint);
+    return [true, 'stdio routing is fixture-local; explicit daemon overrides and outer restoration remain intact'];
+  } finally {
+    if (previous == null) delete process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+    else process.env.COSYNCING_CODEX_APP_SERVER_SOCK = previous;
+  }
+});
+
+await test('Codex background commands support control-socket symlinks without granting process ownership', async () => {
+  return withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => withLoadedDaemon(dir, ['fake-thread'], async () => {
+    const target = process.env.COSYNCING_CODEX_APP_SERVER_SOCK!;
+    const alias = join(dir, 'control-link.sock');
+    symlinkSync(target, alias);
+    assert.deepEqual(inspectCodexRuntimeSocket(alias), inspectCodexRuntimeSocket(target));
+    assert.equal(codexAppServerSocketFingerprint(alias), undefined, 'read-only routing does not relax process-stop ownership evidence');
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = alias;
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout).toString('base64url'), 'live');
+    await conn.close();
+    const before = inspectCodexRuntimeSocket(alias).fingerprint;
+    const replacement = new FakeCodexDaemon(join(dir, 'replacement.sock'), []);
+    await replacement.start();
+    try {
+      unlinkSync(alias);
+      symlinkSync(join(dir, 'replacement.sock'), alias);
+      assert.notDeepEqual(inspectCodexRuntimeSocket(alias).fingerprint, before, 'a replaced symlink target is a new runtime');
+    } finally {
+      await replacement.stop();
+    }
+    const missing = join(dir, 'missing.sock');
+    const dangling = join(dir, 'dangling.sock');
+    symlinkSync(missing, dangling);
+    assert.equal(inspectCodexRuntimeSocket(missing).state, 'absent');
+    assert.equal(inspectCodexRuntimeSocket(dangling).state, 'unknown');
+    const regular = join(dir, 'regular');
+    writeFileSync(regular, 'not a socket');
+    symlinkSync(regular, join(dir, 'regular-link'));
+    assert.equal(inspectCodexRuntimeSocket(join(dir, 'regular-link')).state, 'unknown');
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = dangling;
+    await assert.rejects(new CodexAdapter().attach(Buffer.from(rollout).toString('base64url'), 'resume'),
+      /ownership could not be verified/);
+    return [true, 'real socket aliases support live attach; dangling/non-socket aliases remain unknown and replacement changes scope'];
+  }));
 });
 
 const passed = results.filter((r) => r.kind === 'pass').length;

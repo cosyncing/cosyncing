@@ -11,6 +11,9 @@ export * from './terminal-summary-registry.ts';
 import { decodeSessionInfo, type AgentCapabilities, type AttachMode, type DriveAttachReason, type FileChange, type FileOperation, type ModeOption, type ModelOption, type PromptInput, type SessionConnection, type SessionInfo, type Unsubscribe } from '@cosyncing/protocol';
 import type { AgentSetupDiagnosis, SetupDiagnosisContext } from './diagnosis.ts';
 
+/** Shared minimum interval for changing output on a still-running background command. */
+export const BACKGROUND_REEMIT_MIN_MS = 5_000;
+
 // ── Backend (one per tool) ───────────────────────────────────────────────────
 
 /** Additive attach context. `reason` only accompanies an authenticated DRIVE

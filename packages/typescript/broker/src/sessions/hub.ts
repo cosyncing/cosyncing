@@ -763,6 +763,7 @@ export class ManagedConn {
     }
     const retainedBefore = this.requiresAttentionRetention;
     const old = this.conn;
+    old.setClientCount?.(0);
     try {
       this.unsub();
     } catch {
@@ -770,6 +771,7 @@ export class ManagedConn {
     }
     this.conn = conn;
     this.unsub = conn.subscribe((m) => this.push(m));
+    conn.setClientCount?.(this.clients.size);
     this.clearLiveText();
     this.liveRunning = conn.info.status !== 'idle';
     this.liveNeedsInput = conn.info.status === 'needs-input';
@@ -1550,11 +1552,13 @@ export class ManagedConn {
 
   addClient(c: Client): void {
     this.clients.add(c);
+    this.conn.setClientCount?.(this.clients.size);
     this.attentionHooks.onClientCountChanged?.(this.conn.info, this.clients.size);
   }
 
   removeClient(c: Client): void {
     this.clients.delete(c);
+    this.conn.setClientCount?.(this.clients.size);
     this.attentionHooks.onClientCountChanged?.(this.conn.info, this.clients.size);
   }
 
@@ -1572,6 +1576,8 @@ export class ManagedConn {
     }
     this.attentionHooks.onClientCountChanged?.(this.conn.info, this.clients.size);
     target.attentionHooks.onClientCountChanged?.(target.conn.info, target.clients.size);
+    this.conn.setClientCount?.(this.clients.size);
+    target.conn.setClientCount?.(target.clients.size);
     return moving.length;
   }
 
@@ -1636,6 +1642,7 @@ export class ManagedConn {
       /* subscription already torn down */
     }
     this.clients.clear(); // never fan out to a stale client after teardown
+    this.conn.setClientCount?.(0);
     this.ring.length = 0;
     this.ringBytes = 0;
     if (this.pendingResyncRetry) clearTimeout(this.pendingResyncRetry);

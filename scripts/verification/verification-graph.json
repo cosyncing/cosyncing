@@ -1748,7 +1748,12 @@
             "packages/typescript/broker/test/codex/resume-fake.ts"
           ],
           "sourceOwners": [
-            "packages/typescript/broker/test/codex/resume-fake.ts"
+            "packages/typescript/broker/test/codex/resume-fake.ts",
+            "packages/typescript/broker/test/codex/background-commands.ts",
+            "packages/typescript/adapters/codex/src/background-commands.ts",
+            "packages/typescript/adapters/codex/src/background-history.ts",
+            "packages/typescript/adapters/codex/src/runtime-socket.ts",
+            "packages/typescript/broker/src/sessions/background-compatibility.ts"
           ]
         },
         {

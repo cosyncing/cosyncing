@@ -714,6 +714,64 @@ void main() {
       expect(state.activities, isEmpty);
     });
 
+    test(
+      'Codex reconnect removes forgotten running cards but keeps outcomes',
+      () {
+        final before = SessionLiveState.fromMessages([
+          for (final entry in {
+            'cmd:codex:old': 'running',
+            'cmd:codex:current': 'running',
+            'cmd:codex:failed': 'error',
+            'cmd:claude:other': 'running',
+          }.entries)
+            message({
+              'type': 'agent-activity',
+              'key': entry.key,
+              'kind': 'command',
+              'title': 'Build',
+              'status': entry.value,
+            }),
+        ]);
+        final snapshot = message(const {
+          'type': 'event',
+          'name': 'codex.background-running-snapshot',
+          'payload': {
+            'keys': ['cmd:codex:current'],
+          },
+        });
+        expect(isSessionLiveStateMessage(snapshot), isTrue);
+        final after = before.applyMessage(snapshot);
+        expect(after.activities.map((a) => a.key), [
+          'cmd:codex:current',
+          'cmd:codex:failed',
+          'cmd:claude:other',
+        ]);
+        for (final keys in [
+          null,
+          ['cmd:claude:other'],
+          [42],
+        ]) {
+          final invalid = message({
+            'type': 'event',
+            'name': 'codex.background-running-snapshot',
+            'payload': {'keys': keys},
+          });
+          expect(before.applyMessage(invalid).activities.length, 4);
+        }
+        final restarted = after.applyMessage(
+          message(const {
+            'type': 'event',
+            'name': 'codex.background-running-snapshot',
+            'payload': {'keys': <String>[]},
+          }),
+        );
+        expect(restarted.activities.map((a) => a.key), [
+          'cmd:codex:failed',
+          'cmd:claude:other',
+        ]);
+      },
+    );
+
     test('an unrecognized future status also withdraws the card', () {
       // A client that predates `retired` must still drop the row rather than
       // keep a card the server has stopped vouching for.

@@ -11,6 +11,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.12 — 2026-09-22
+
+### Added
+
+- Codex background command cards in driven and shared-runtime sessions show
+  running work, available output tails, and exact exit results. Commands can
+  finish after their turn ends; known results can be recovered after a client
+  reconnects to the same runtime. Availability follows native capabilities,
+  with no new Codex version minimum. See the [capability limits](protocol/adapter-support.md#codex-background-commands).
+
 ### Changed
 
 - The interactive signed-release upgrade confirmation now selects Yes by
@@ -22,6 +32,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   them on every history load.
 
 ### Fixed
+
+- Codex sessions remain attachable when the native runtime exposes its control
+  socket through a symlink. Background reconnects track the resolved runtime
+  without weakening process-stop ownership checks.
+
+- Codex command results remain available after reconnect until dismissed.
+  Reconnecting also clears stale running command cards after the broker's
+  bounded recovery ledger is evicted or restarted. This surface uses client
+  contract revision 26; older clients retain their existing Codex functionality.
 
 - A Claude subagent now keeps its Working badge while it is busy but quiet. A subagent's
   session writes nothing for the whole duration of a single long step -- a test suite, a
