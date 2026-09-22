@@ -789,6 +789,7 @@
   "exitCode": "退出码 {code}",
   "outputEarlierLinesDropped": "… 较早的输出已丢弃",
   "commandNoOutputYet": "暂无输出",
+  "commandNoOutput": "无输出",
   "sessionViewMenuBackgroundCommands": "{count, plural, =1{1 个后台命令正在运行} other{{count} 个后台命令正在运行}}",
   "agentsProgress": "{done}/{total} 个代理",
   "tokensCount": "↓{count} 个 token",

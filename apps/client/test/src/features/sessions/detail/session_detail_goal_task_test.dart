@@ -510,6 +510,12 @@ void main() {
     testWidgets(
       'an archived background command comes back when it ends',
       (tester) async {
+        // The adapter stamps the SAME startedAtMs on a command's running and
+        // terminal frames, so the fixture must too. Leaving it off the terminal
+        // frame made the archive identity differ on that field alone, and the
+        // card re-surfaced whether or not the identity carried how the work
+        // ended — the test passed with the running/ended component deleted.
+        final startedAtMs = DateTime.now().millisecondsSinceEpoch - 5000;
         final connection = ScriptedSessionDetailConnection(
           events: [
             mutableSession(),
@@ -521,7 +527,7 @@ void main() {
                 'kind': 'command',
                 'title': 'Build the bundle',
                 'status': 'running',
-                'startedAtMs': DateTime.now().millisecondsSinceEpoch - 5000,
+                'startedAtMs': startedAtMs,
               }),
             ),
           ],
@@ -556,6 +562,7 @@ void main() {
               'status': 'error',
               'exitCode': 1,
               'elapsedMs': 7000,
+              'startedAtMs': startedAtMs,
             }),
           ),
         );

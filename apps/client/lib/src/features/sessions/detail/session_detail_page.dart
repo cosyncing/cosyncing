@@ -2305,11 +2305,18 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     // The band that carries these cards lives only in the chat view, so from
     // Status, Files or Terminal a running background command has no surface at
     // all. The overflow button is the one control visible from every view.
-    final backgroundCommandCount = state.liveState.activities
+    // Counted off the same projected items as the two counts above, not the raw
+    // snapshot: archiving a running command is the reader saying "not now", and
+    // reading past it here left an attention dot from every other view that
+    // pointed at a card the chat band no longer shows — and that the reader
+    // could not clear until the command itself ended.
+    final backgroundCommandCount = liveItems
         .where(
-          (activity) =>
-              activity.kind == AgentActivityKind.command &&
-              activity.status == AgentActivityStatus.running,
+          (item) =>
+              _isBackgroundCommand(item) &&
+              (item.value as AgentActivitySnapshot).status ==
+                  AgentActivityStatus.running &&
+              archivedLiveState[item.id] != item.archiveIdentity,
         )
         .length;
     final progressBadge = _primaryLiveStateProgress(liveItems);

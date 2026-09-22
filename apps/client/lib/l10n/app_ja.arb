@@ -784,6 +784,7 @@
   "exitCode": "終了コード {code}",
   "outputEarlierLinesDropped": "… 以前の出力は破棄されました",
   "commandNoOutputYet": "まだ出力はありません",
+  "commandNoOutput": "出力はありません",
   "sessionViewMenuBackgroundCommands": "{count, plural, other{バックグラウンドコマンド {count} 件が実行中}}",
   "agentsProgress": "エージェント {done}/{total}",
   "tokensCount": "↓{count} トークン",

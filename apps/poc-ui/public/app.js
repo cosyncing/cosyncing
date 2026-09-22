@@ -2886,6 +2886,7 @@ function barStart(m, key) {
 function resetSessionBars() {
   activeBars.clear();
   taskLists.clear();
+  dismissedCommands.clear();
   // goalNotes dedups a goal-state replayed live-then-resync within ONE thread build; the callers of
   // this reset all wipe the thread DOM, so the seen-set must reset with it or a replayed terminal
   // note ("Goal paused") is swallowed on every reopen/resync until a hard reload.
@@ -3002,8 +3003,27 @@ function clearCommandBars() {
   if (hit) renderSessionBars();
 }
 
+// A background COMMAND's terminal frame is the whole point of its card — the exit code and the
+// output tail — so unlike a subagent/workflow bar it PERSISTS after it stops, until the reader
+// dismisses it (contract revision 25). Deleting it on the first non-running frame is what made a
+// failed background build look identical to one that never started.
+const dismissedCommands = new Set(); // upsert keys the reader cleared; reset with the session
 function activitySessionBar(m) {
   const key = 'activity:' + m.key;
+  // `retired` is a REMOVAL, not an outcome: the adapter is withdrawing a card it can no longer
+  // vouch for. It takes the bar off screen for EVERY kind, including a command the reader never
+  // dismissed — which is the whole reason the value exists. An older client maps it to `unknown`
+  // and also removes the row, so both directions are safe.
+  if (m.status === 'retired') {
+    activeBars.delete(key);
+    dismissedCommands.delete(m.key);
+    renderSessionBars();
+    return;
+  }
+  if (m.kind === 'command') {
+    commandActivityBar(m, key);
+    return;
+  }
   if (m.status !== 'running') {
     activeBars.delete(key);
     renderSessionBars();
@@ -3020,6 +3040,46 @@ function activitySessionBar(m) {
     startedAt: barStart(m, key),
   });
   renderSessionBars();
+}
+function commandActivityBar(m, key) {
+  if (dismissedCommands.has(m.key)) return; // already cleared by the reader; a re-emit must not resurrect it
+  const running = m.status === 'running';
+  const tail = m.output && typeof m.output.text === 'string' ? m.output.text : '';
+  const lines = tail.split('\n').filter((l) => l.trim().length);
+  const last = lines.length ? (m.output.truncated && lines.length === 1 ? '…' : '') + lines[lines.length - 1] : '';
+  // exitCode is present ONLY when the tool reported one, so none is synthesized here either: a
+  // terminal frame without one says how the command ended, not with what number.
+  const outcome = running ? '' : m.exitCode != null ? 'exit ' + m.exitCode : m.status === 'error' ? 'failed' : 'finished';
+  activeBars.set(key, {
+    kind: 'activity',
+    commandKey: m.key,
+    commandStatus: m.status,
+    label: running ? 'Background command' : m.status === 'error' ? 'Command failed' : 'Command done',
+    title: m.title || m.key,
+    detail: [m.subtitle, outcome, last || (running ? '' : 'no output')].filter(Boolean).join(' · '),
+    startedAt: barStart(m, key),
+    // A finished command's elapsed must stop where the work stopped. When the adapter could not
+    // measure one it sends none, and the bar then shows NO duration rather than counting up from
+    // an invented start — the same rule the native client's card follows.
+    frozenElapsedMs: running ? undefined : m.elapsedMs,
+    hideElapsed: !running && m.elapsedMs == null,
+  });
+  renderSessionBars();
+}
+function commandBarActions(bar) {
+  const wrap = document.createElement('span');
+  wrap.className = 'baractions';
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = 'Dismiss';
+  b.title = 'Clear this finished background command';
+  b.onclick = () => {
+    dismissedCommands.add(bar.commandKey);
+    activeBars.delete('activity:' + bar.commandKey);
+    renderSessionBars();
+  };
+  wrap.append(b);
+  return wrap;
 }
 function taskListCounts(items) {
   const counts = { total: items.length, done: 0, inProgress: 0, open: 0, cancelled: 0 };
@@ -3246,9 +3306,13 @@ function renderSessionBars() {
     elapsed.className = 'elapsed';
     // Paused/blocked goals show the goal's frozen used-time, not a ticking wall-clock: the
     // transition may be days old and counting up from it would misread as still running.
-    elapsed.textContent = (bar.frozenElapsedMs != null ? fmtDur(bar.frozenElapsedMs) : fmtDur(Math.max(0, Date.now() - bar.startedAt))) || '';
+    // A terminal command with no measured duration shows none at all; falling back to the wall
+    // clock here would make a finished card count up for as long as it stays on screen.
+    elapsed.textContent = bar.hideElapsed ? ''
+      : (bar.frozenElapsedMs != null ? fmtDur(bar.frozenElapsedMs) : fmtDur(Math.max(0, Date.now() - bar.startedAt))) || '';
     el.append(label, title, elapsed);
     if (bar.kind === 'goal') el.append(goalBarActions(bar));
+    if (bar.commandKey && bar.commandStatus !== 'running') el.append(commandBarActions(bar));
     if (bar.detail) {
       const detail = document.createElement('span');
       detail.className = 'detail';
@@ -3261,7 +3325,7 @@ function renderSessionBars() {
     row.append(renderTaskList(list, taskOpen.get(list.key)));
   }
   // Tick only while some bar shows live wall-clock; a row of frozen (paused/blocked) bars is static.
-  const needsTick = [...activeBars.values()].some((bar) => bar.frozenElapsedMs == null);
+  const needsTick = [...activeBars.values()].some((bar) => bar.frozenElapsedMs == null && !bar.hideElapsed);
   if (needsTick && !activeBarTimer) activeBarTimer = setInterval(renderSessionBars, 1000);
   if (!needsTick && activeBarTimer) {
     clearInterval(activeBarTimer);

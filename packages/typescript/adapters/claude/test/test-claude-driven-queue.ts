@@ -298,6 +298,28 @@ async function main(): Promise<void> {
     await h.conn.close();
   }
 
+  // ── (i2) a notification tag carrying an ATTRIBUTE is a notification, never a queued bubble ──────
+  // The CLI's own tags are kept out of the queued bubbles by `isWrapper`, which matches the tag NAME
+  // on a word boundary. A second, looser literal test used to trail it in `isRenderableEnqueue`, and
+  // an attributed `<task-notification version="2">` defeats that copy — which reads as a hole where
+  // one line becomes both a queued prompt and a card-resolving completion. It never was one, because
+  // the strict test runs first. This pins the behaviour so the rule that actually decides it cannot
+  // be loosened unnoticed now that the misleading duplicate is gone.
+  {
+    const h = newConn();
+    const tagged = '<task-notification version="2">\n<tool-use-id>toolu_attr</tool-use-id>\n<status>completed</status>\n</task-notification>';
+    h.append({ type: 'queue-operation', operation: 'enqueue', timestamp: nowIso(), content: tagged });
+    h.drain();
+    check('an attributed task-notification never becomes a queued bubble',
+      !h.um().some((u: any) => String(u.text ?? '').includes('task-notification')), JSON.stringify(h.um()));
+    // ...while an ordinary terminal enqueue beside it still does, so the filter stays a filter.
+    h.append({ type: 'queue-operation', operation: 'enqueue', timestamp: nowIso(), content: 'an ordinary typed prompt' });
+    h.drain();
+    check('  and an ordinary terminal enqueue still does',
+      h.um().some((u: any) => u.text === 'an ordinary typed prompt' && u.queued === true), JSON.stringify(h.um()));
+    await h.conn.close();
+  }
+
   // ── (j) a terminal retract names its message: it must not unlink the driven prompt beside it ─────
   // The queue mixes app-minted and terminal-typed entries. A `remove` with content (every terminal
   // retract since CLI 2.1.203) used to retire the OLDEST entry regardless — the driven one — so the

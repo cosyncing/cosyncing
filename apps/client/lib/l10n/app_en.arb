@@ -2688,6 +2688,7 @@
   "exitCode": "exit {code}",
   "outputEarlierLinesDropped": "… earlier output dropped",
   "commandNoOutputYet": "No output yet",
+  "commandNoOutput": "No output",
   "sessionViewMenuBackgroundCommands": "{count, plural, =1{1 background command running} other{{count} background commands running}}",
   "@exitCode": {
     "description": "Detail-line fragment: the exit code a finished background command reported.",
@@ -2703,6 +2704,9 @@
   },
   "@commandNoOutputYet": {
     "description": "Shown inside a running background command's card before it has written output."
+  },
+  "@commandNoOutput": {
+    "description": "Shown inside a FINISHED background command's card when it wrote no output at all."
   },
   "@sessionViewMenuBackgroundCommands": {
     "description": "Attention-dot tooltip fragment counting background commands still running.",
