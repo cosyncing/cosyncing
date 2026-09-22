@@ -1145,8 +1145,8 @@ export type AgentMessage =
        *  command). Distinct from a tool card's 'tool-'+callId so a card and its originating tool
        *  row never collide. */
       key: string;
-      /** `command` is a shell command the agent launched in the background (Claude Code's
-       *  `run_in_background`). It is NOT the slash-command progress bar, which is its own surface. */
+      /** `command` is a shell command the agent launched in the background, including
+       *  Claude background tasks and Codex managed terminals. Slash commands use their own surface. */
       kind: 'subagent' | 'workflow' | 'command';
       /** Primary label: subagent description||agentType, or workflowName. */
       title: string;
@@ -1768,7 +1768,7 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * inside the window, so a revision-23-or-later client has to ship before a
  * revision-24 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 25 as const;
+export const BROKER_CONTRACT_REVISION = 26 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -2637,6 +2637,9 @@ export function decodeSessionInfo(value: unknown): SessionInfo | undefined {
  */
 export interface SessionConnection {
   readonly info: SessionInfo;
+  /** Attached product clients, independent of the broker's persistent message subscription.
+   * Optional adapter lifecycle hook; zero suspends client-only observation work. */
+  setClientCount?(count: number): void;
   /** Replay prior conversation (history) as normalized messages. */
   getHistory(query?: HistoryQuery): Promise<AgentMessage[]>;
   /**

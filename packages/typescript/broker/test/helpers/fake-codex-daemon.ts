@@ -129,6 +129,8 @@ export interface FakeCodexDaemonOptions {
   readResult?: (params: any) => unknown | Promise<unknown>;
   /** Result for `thread/turns/list`. */
   turnsResult?: (params: any) => unknown | Promise<unknown>;
+  backgroundResult?: (params: any) => unknown | Promise<unknown>;
+  itemsResult?: (params: any) => unknown | Promise<unknown>;
 }
 
 /** A fake app-server daemon with recorded RPC traffic and a push channel for notifications. */
@@ -200,6 +202,10 @@ export class FakeCodexDaemon {
         return reply(this.options.readResult?.(message.params) ?? {});
       case 'thread/turns/list':
         return reply(this.options.turnsResult?.(message.params) ?? { data: [] });
+      case 'thread/backgroundTerminals/list':
+        return reply(this.options.backgroundResult?.(message.params) ?? { data: [], nextCursor: null });
+      case 'thread/items/list':
+        return reply(this.options.itemsResult?.(message.params) ?? { data: [], nextCursor: null });
       default:
         return reply({});
     }

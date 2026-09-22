@@ -8,6 +8,7 @@
  * Source-development env: PORT (7734), COSYNCING_MACHINE, OPENCODE_URL.
  */
 import { assertSupportedBrokerHost } from './assert-supported-host.ts';
+import { canSendBackgroundMessage } from '../sessions/background-compatibility.ts';
 import os from 'node:os';
 import { closeSync, createReadStream, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -7074,6 +7075,7 @@ server = Bun.serve<WsData>({
       const compatibility = ws.data.compatibility ?? evaluateBrokerClientCompatibility();
       const sendRaw: Client = (ev) => {
         if (!historyBootstrapActive()) return;
+        if (ev.kind === 'message' && !canSendBackgroundMessage(ev.message, compatibility.client?.revision ?? 0)) return;
         try {
           const prepared =
             ev.kind === 'message'

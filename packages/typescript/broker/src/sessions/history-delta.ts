@@ -37,7 +37,8 @@ export interface HistoryDelta {
  *  overlays are replayed as catch-up frames so elapsed time/progress changes do not invalidate the
  *  transcript prefix and force a full long-session resend. */
 export function isCursorDurableMessage(message: AgentMessage): boolean {
-  return message.type !== 'agent-activity';
+  return message.type !== 'agent-activity'
+    && !(message.type === 'event' && message.name === 'codex.background-running-snapshot');
 }
 
 function encodeCursor(payload: CursorPayload): string {

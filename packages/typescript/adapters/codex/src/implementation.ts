@@ -22,6 +22,8 @@
  * items directly to the existing canonical message union.
  */
 import { createHash, randomBytes } from 'node:crypto';
+import { CodexBackgroundCommands } from './background-commands.ts';
+import { inspectCodexRuntimeSocket } from './runtime-socket.ts';
 import { connect, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import {
@@ -1126,14 +1128,8 @@ export class CodexAdapter implements AgentBackend {
   private async liveLoadedDecision(threadId: string, requireCurrentProof = false): Promise<CodexLoadedThreadDecision> {
     const socket = codexAppServerSock();
     if (!this.options.queryLoadedThreadIds) {
-      if (!socket || !existsSync(socket)) return 'absent';
-      try {
-        if (!lstatSync(socket).isSocket()) return 'unknown';
-      } catch {
-        // We already observed an entry at this path. Failure to establish its
-        // type is not evidence that daemon ownership is absent.
-        return 'unknown';
-      }
+      const observation = inspectCodexRuntimeSocket(socket);
+      if (observation.state !== 'socket') return observation.state;
     }
     const cached = this.liveThreadCache;
     // Display discovery may reuse a short-lived cache. A Drive/take-over
@@ -1456,7 +1452,8 @@ function truthyEnv(v: string | undefined): boolean {
 function codexAppServerSock(): string | undefined {
   const explicit = process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim();
   if (explicit) return explicit;
-  return existsSync(DEFAULT_APP_SERVER_CONTROL_SOCK) ? DEFAULT_APP_SERVER_CONTROL_SOCK : undefined;
+  return inspectCodexRuntimeSocket(DEFAULT_APP_SERVER_CONTROL_SOCK).state === 'absent'
+    ? undefined : DEFAULT_APP_SERVER_CONTROL_SOCK;
 }
 
 function emptyCodexTuiScan(): CodexTuiScan {
@@ -3266,7 +3263,13 @@ class CodexObserveConnection implements SessionConnection {
     // Position-preserving parse: each newline segment maps to its raw index (blank/malformed → null
     // slot that still occupies its index), so keys match the live tail's per-segment counter.
     const segs = await readRolloutSegmentsSettled(this.path);
-    return mapRollout(segs.map(parseLineOrNull), this.published);
+    return [...mapRollout(segs.map(parseLineOrNull), this.published), ...await this.getHistoryOverlays()];
+  }
+
+  async getHistoryOverlays(): Promise<AgentMessage[]> {
+    // Observe has no runtime liveness authority. Clear cached running Codex cards
+    // when reconnect falls back to this connection, while preserving known outcomes.
+    return [{ type: 'event', name: 'codex.background-running-snapshot', payload: { keys: [] } }];
   }
 
   /** H1b: messages and identity from ONE captured rollout prefix, so an append stays compatible.
@@ -3846,6 +3849,9 @@ class CodexResumeConnection implements SessionConnection {
   private liveRuntimeUpdatedAt: number | undefined;
   private readonly countedLiveRuntimeTurns = new Set<string>();
   private closeFlight: Promise<void> | undefined;
+  private backgroundCommands?: CodexBackgroundCommands;
+
+  setClientCount(count: number): void { this.backgroundCommands?.setClientCount(count); }
   private firstRealTurnStart = true;
   /** `undefined` = not yet read; `null` = read, the rollout records no provider. */
   private rolloutProviderCache: string | null | undefined;
@@ -4141,6 +4147,10 @@ class CodexResumeConnection implements SessionConnection {
     this.info.currentMode = codexModeFromSettings(approvalPolicy, approvalsReviewer, sandboxPolicy);
     if (resumed?.thread?.name) this.info.title = String(resumed.thread.name);
     this.refreshSyncHint();
+    const backgroundRuntime = this.daemon ? inspectCodexRuntimeSocket(codexAppServerSock()).fingerprint : undefined;
+    this.backgroundCommands = new CodexBackgroundCommands(this.threadId,
+      JSON.stringify([this.threadId, backgroundRuntime ?? this.waitingPlaceholderEpoch]),
+      (method, params, timeout) => this.rpc(method, params, timeout), (message) => this.emit(message));
     this.bootstrapApplying = false;
     await this.flushBootstrapQueue();
     this.diagnostic({
@@ -4319,6 +4329,7 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   private handleNotification(method: string, params: any): void {
+    this.backgroundCommands?.notification(method, params);
     this.updateCurrentModelFromNative(params);
     switch (method) {
       case 'turn/started': {
@@ -5170,6 +5181,7 @@ class CodexResumeConnection implements SessionConnection {
       'turn/plan/updated',
       'item/started',
       'item/completed',
+      'item/commandExecution/outputDelta',
       'item/agentMessage/delta',
       'item/reasoning/textDelta',
       'item/reasoning/summaryTextDelta',
@@ -5421,13 +5433,16 @@ class CodexResumeConnection implements SessionConnection {
     const out = mapRollout(segs.map(parseLineOrNull), this.published);
     const goal = await this.currentGoalMessage();
     if (goal) out.push(goal);
+    // Client attachment owns reconciliation; transcript reads use its current snapshot.
+    out.push(...(this.backgroundCommands?.replayCards() ?? []));
     return out;
   }
 
   /** Current app-server state is bounded and deliberately outside rollout cursors. */
   async getHistoryOverlays(): Promise<AgentMessage[]> {
     const goal = await this.currentGoalMessage();
-    return goal ? [goal] : [];
+    // Client attachment owns reconciliation; transcript reads use its current snapshot.
+    return [...(goal ? [goal] : []), ...(this.backgroundCommands?.replayCards() ?? [])];
   }
 
   /** H1b: messages and identity from ONE captured rollout prefix.
@@ -5791,6 +5806,7 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   private async closeResources(): Promise<void> {
+    this.backgroundCommands?.close();
     try {
       if (this.transport === 'stdio' && this.activeTurnId()) this.write({ id: ++this.reqId, method: 'turn/interrupt', params: { threadId: this.threadId, turnId: this.activeTurnId() } });
     } catch {

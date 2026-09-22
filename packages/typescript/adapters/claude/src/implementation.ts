@@ -60,6 +60,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join, basename, dirname, resolve, relative, sep, extname, isAbsolute } from 'node:path';
 import {
   PRODUCT_IDENTITY,
+  BACKGROUND_REEMIT_MIN_MS,
   HostProcessProvider,
   terminateHostProcessTree,
   summarizeDiff,
@@ -6395,7 +6396,7 @@ function firstLine(s: string | undefined): string | undefined {
 }
 
 /** Floor between two frames of the SAME still-running command. A terminal frame ignores it. */
-const BACKGROUND_REEMIT_MIN_MS = 5_000;
+// Shared with runtime-observed background commands in other adapters.
 /** Finished commands still worth a card. Older results were delivered when they happened. */
 const BACKGROUND_TERMINAL_CARD_LIMIT = 8;
 /** How many RUNNING commands carry an output preview. Every running command still gets a card —

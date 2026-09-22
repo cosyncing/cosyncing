@@ -54,6 +54,79 @@ The generated table describes protocol support, not a promise that every
 upstream agent exposes every feature. A partial or unavailable cell must remain
 explicit rather than being inferred from tool names in client code.
 
+## Codex background commands
+
+Driven and shared-runtime Codex connections observe background commands on the
+app-server connection that already owns their session. The adapter never starts
+a server, loads an unrelated thread, or calls `clean` or `terminate` to observe
+commands. Rollout-only Observe sessions do not advertise live command cards.
+The new surface requires client contract revision 26 for safe reconnect
+reconciliation. Older clients keep existing Codex functionality; this does not
+raise the minimum supported Codex version or the general client minimum.
+Native control-socket symlinks are supported for read-only routing and runtime
+identity. Dangling or non-socket targets remain unknown; this does not grant
+permission to start, stop or claim the target process.
+
+Capabilities are independent of the general Codex version requirement:
+
+| Evidence available | Behavior |
+| --- | --- |
+| Validated running-terminal list | Reconcile running commands, including on idle threads |
+| Correlated command lifecycle notifications | Record exact exit code, outcome and duration; a command still open when its turn ends can be shown without list support |
+| Command output notifications | Show a bounded available tail, marked truncated because Codex may omit output already returned at yield |
+| Paginated item history plus a retained command identity | Recover the exact result after reconnecting to the same runtime |
+| Missing or stale runtime evidence | Withdraw the running card without claiming success or failure |
+
+Real isolated captures verified live success and failure on Codex 0.142.5 and
+0.155.1, and disconnected bounded-history recovery on 0.155.1. The measured
+0.142.5 binary lacks `thread/items/list` and advertises a per-turn item endpoint
+that replies “not supported yet”; its live command results remain supported,
+but bounded offline recovery is unavailable. The adapter probes the declared
+legacy endpoint rather than using a version cutoff. This evidence sample is
+not a version allowlist. Production-daemon, joined-terminal and phone physical
+acceptance remain separate from these isolated captures and fixture tests.
+
+The adapter retains up to 128 identities per session and caches up to 32 active
+or recently closed session ledgers for six hours in broker memory. Reconnect recovery is
+limited to those identities and the newest 128 native history items; it is not
+a complete historical job archive. A broker restart loses this memory. A native
+runtime replacement starts a different identity scope. Commands completed before
+they were observed cannot safely be reconstructed as background work from the
+rollout alone. Existing session, history and control support remain available
+when a runtime lacks one of these background capabilities.
+
+Only attached product clients enable reconciliation. The normal interval is five
+seconds, with bounded transient-error backoff to ten seconds. One sweep permits
+four pages of 32 running rows and, when exact completion is missing, four
+history requests of at most 32 items. Legacy history discovery and capability
+probes consume the same four-request budget; discovery inspects four recent
+turn IDs. Requests are serial, each has a 1.5-second timeout, and
+overlapping sweeps coalesce. A response over 128 KiB is rejected after receipt.
+Malformed, failed, repeated or capped pagination never counts as an empty list.
+Running evidence expires after 30 seconds and is withdrawn on the next sweep.
+
+At most 16 running cards and eight recent finished cards are included in current
+overlays. Each output preview is at most 4 KiB and 40 lines; unchanged cards are
+not re-emitted, and changing running output has a five-second minimum interval.
+Thus steady preview text is bounded to 12.8 KiB/s per attached client, plus
+bounded labels, identities and JSON framing. Exact completion and withdrawal
+transitions bypass that delay. Every completion is delivered before the result
+window is applied. Finished cards remain available for dismissal in the client.
+Reconnect replays retained outcomes without automatically dismissing older
+results. A bounded `codex.background-running-snapshot` event reconciles missing
+running identities even when individual withdrawals were evicted or broker
+memory was lost. It never removes completed results or another agent's cards.
+
+Cursor reconnects also replay retained withdrawals and exact outcomes outside
+that display window, without withdrawing completed results. Those older catch-up
+frames omit output and are bounded by the same 128 retained identities
+(at most 129 frames including current cards and running-state reconciliation).
+They repair missed live updates without resetting transcript history.
+This reconciliation has the same in-memory retention limits described above.
+On notification-only runtimes, fresh nonempty output matching an admitted
+command and its exact turn can restore a stale card. Empty output, another
+turn, replayed starts, and output after a terminal outcome cannot reopen it.
+
 ## Experimental adapters
 
 Kimi Code is not yet part of the generated stable support matrix. Its source

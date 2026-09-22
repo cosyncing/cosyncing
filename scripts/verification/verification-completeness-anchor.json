@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "8c8795dab0b780e7523c487c86389c08c4ea4c4c",
+  "acceptedBase": "4073929a4fb5e176f67f28cc3f399ce14a15ec3b",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -476,7 +476,7 @@
     },
     {
       "id": "codex-permissions",
-      "fingerprint": "sha256:59566a6d5a2f6b03b638c8a2a9453fd42b0442c2327e240df5cec0cf20c6374d"
+      "fingerprint": "sha256:d9c7c4c74d6201fa89c61c44dbc32c001aaadeb029bfcf35088868be3d885265"
     },
     {
       "id": "codex-rollout-mapping",
