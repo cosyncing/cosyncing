@@ -1,10 +1,29 @@
-import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import type { SetupDiagnosisContext, SetupListenerProcess } from '@cosyncing/adapter-api';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import type { BrokerConfig } from '../runtime/configuration.ts';
 import type { SetupInspection } from './setup.ts';
 
 export function validSetupPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1024 && port <= 65535;
+}
+
+/**
+ * The Windows images that republish a WSL listener onto the Windows loopback.
+ *
+ * A broker running inside WSL answers `127.0.0.1:7734` for a Windows installer that has never
+ * seen it, and from the outside it is indistinguishable from a contributor broker sitting on
+ * the same machine — which setup must NOT displace, and which a second port would not make
+ * safe. Behind one of these relays the situation inverts: the other broker shares no PATH, no
+ * shim, no daemon socket and no service with this install, so taking the next port is exactly
+ * what an operator would want. Only these names count, and only on Windows.
+ */
+const WSL_RELAY_PROCESSES = ['wslrelay.exe', 'wslservice.exe'];
+
+/** Whether the listener was proven to be a WSL relay rather than a process on this OS instance. */
+export function listenerLivesInWsl(owner: SetupListenerProcess | undefined, platform: string): boolean {
+  return platform === 'win32'
+    && owner !== undefined
+    && WSL_RELAY_PROCESSES.includes(owner.name.toLowerCase());
 }
 
 /** Only suggest a port whose probe completed as closed; never treat a timeout as free. */
@@ -44,8 +63,14 @@ export async function setupPortStatus(options: {
         && (health.json as any)?.product === PRODUCT_IDENTITY.productName) {
       // A cosyncing broker on the port with no committed receipt of our own is
       // a contributor build, which is still a conflict: setup owns no receipt
-      // that would let it stop or replace that process.
-      return options.installed ? 'owned-running' : 'unowned-broker';
+      // that would let it stop or replace that process. The one case where that
+      // reading is wrong is a broker in another OS instance reachable through a
+      // WSL relay, and the OS can name the listener to tell the two apart.
+      if (options.installed) return 'owned-running';
+      const owner = await options.context.listenerProcess?.(options.config.broker.port);
+      return listenerLivesInWsl(owner, options.context.platform)
+        ? 'other-environment-broker'
+        : 'unowned-broker';
     }
     if (health.status !== 'unreachable') return 'conflict';
   }

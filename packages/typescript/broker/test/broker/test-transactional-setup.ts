@@ -279,6 +279,10 @@ function contextFor(home: string, extraEnv: Record<string, string> = {}, platfor
     ...context,
     probeTcp: async () => 'closed' as const,
     fetchJson: async () => ({ status: 'unreachable' as const }),
+    // Same reason as the two probes above: naming a listener's owner would read the process
+    // table of whoever is running this suite. `undefined` is "cannot prove", so a fixture that
+    // means to identify a listener has to say so itself.
+    listenerProcess: async () => undefined,
     // A win32 fixture has to say what MACHINE it is. Left to the real probe it would answer 'unknown' on
     // the host running these tests, so every Windows fixture would quietly become the unverifiable-host
     // case rather than the supported one it means to describe.
@@ -2622,6 +2626,69 @@ try {
       `${completed.status}:${JSON.stringify(completed.issueCodes)}:${prompts}`);
   }
 
+  // A cosyncing broker on the far side of a WSL relay answers the Windows loopback, and the OS
+  // can prove the listener is the relay rather than a process on this machine. That broker
+  // shares no PATH, shim, daemon socket or service with the Windows install, so this install
+  // takes the next port and the other broker keeps running. Measured on the real host:
+  // Get-NetTCPConnection names wslrelay.exe, and /api/health answers as cosyncing.
+  {
+    const machine = join(root, 'port-selection-wsl-relay');
+    const home = join(machine, '.cosyncing');
+    const reasons: Array<string | undefined> = [];
+    const presenter = Object.assign(new ScriptedPresenter({ opencodeShim: false }), {
+      async chooseBrokerPort(_current: number, suggested?: number, reason?: string) {
+        reasons.push(reason);
+        return suggested!;
+      },
+    });
+    const relayProbes = () => ({
+      probeTcp: async (_host: string, port: number) => port === 7734 ? 'open' as const : 'closed' as const,
+      fetchJson: async () => ({ status: 'ok' as const, statusCode: 200, json: { ok: true, product: 'cosyncing' } }),
+      listenerProcess: async () => ({ name: 'wslrelay.exe', executable: 'C:\\Program Files\\WSL\\wslrelay.exe' }),
+    });
+    const completed = await runSetup(setupOptions(machine, presenter, {
+      context: { ...contextFor(machine, {}, 'win32'), ...relayProbes() },
+    }));
+    check('a broker proven to sit behind the WSL relay yields the port and keeps running',
+      completed.status === 'complete' && reasons.join(',') === 'other-environment'
+        && completed.access?.loopbackUrl === 'http://127.0.0.1:7735'
+        && JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')).broker.port === 7735,
+      `${completed.status}:${reasons.join(',')}:${completed.issueCodes?.join(',')}`);
+
+    // Where nothing can ask for a port, the install still refuses one it could not bind. The
+    // finding is its own code because the remedy is a terminal, not a stopped competitor.
+    const unpromptedMachine = join(root, 'port-selection-wsl-relay-unprompted');
+    const unprompted = await runSetup(setupOptions(unpromptedMachine, new ScriptedPresenter({ opencodeShim: false }), {
+      context: { ...contextFor(unpromptedMachine, {}, 'win32'), ...relayProbes() },
+    }));
+    check('a broker in another environment without a port choice stays blocked, and names itself',
+      unprompted.status === 'blocked'
+        && unprompted.issueCodes?.includes('broker-port-other-environment') === true
+        && unprompted.issueCodes?.includes('broker-port-conflict') !== true,
+      `${unprompted.status}:${unprompted.issueCodes?.join(',')}`);
+  }
+  // The relay name is the whole evidence, so an unidentified listener stays exactly as refused as
+  // it was before, and a Windows-named relay seen from a Linux install proves nothing: only the
+  // Windows side can meet a WSL listener on its own loopback.
+  for (const [name, platform, owner] of [
+    ['unprovable-owner', 'win32', undefined],
+    ['foreign-process', 'win32', { name: 'chrome.exe', executable: 'C:\\Program Files\\Google\\Chrome\\chrome.exe' }],
+    ['relay-name-off-windows', 'linux', { name: 'wslrelay.exe' }],
+  ] as const) {
+    const machine = join(root, `port-selection-not-the-relay-${name}`);
+    const blocked = await runSetup(setupOptions(machine, new ScriptedPresenter({ opencodeShim: platform !== 'win32' }), {
+      context: {
+        ...contextFor(machine, {}, platform),
+        probeTcp: async (_host: string, port: number) => port === 7734 ? 'open' as const : 'closed' as const,
+        fetchJson: async () => ({ status: 'ok' as const, statusCode: 200, json: { ok: true, product: 'cosyncing' } }),
+        listenerProcess: async () => owner,
+      },
+    }));
+    check(`a cosyncing broker nobody proved behind a relay stays a conflict (${name})`,
+      blocked.status === 'blocked' && blocked.issueCodes?.includes('broker-port-conflict') === true
+        && !existsSync(join(machine, '.cosyncing', 'config.json')),
+      `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
   {
     const machine = join(root, 'port-selection-credential-scope');
     await zeroAgentSetup(machine);

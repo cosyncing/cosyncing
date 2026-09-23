@@ -92,6 +92,7 @@ export function setupLanguageFromEnv(env: Readonly<Record<string, string | undef
 export interface SetupMessages {
   languagePrompt: string;
   brokerPortOccupied: (port: number) => string;
+  brokerPortOtherEnvironment: (port: number) => string;
   brokerPortPrompt: string;
   brokerPortInvalid: string;
   introTitle: (product: string) => string;
@@ -192,6 +193,7 @@ export interface SetupMessages {
 const en: SetupMessages = {
   languagePrompt: 'Language',
   brokerPortOccupied: (port) => `Port ${port} is in use. Choose another port; the existing process will keep running.`,
+  brokerPortOtherEnvironment: (port) => `Port ${port} already serves a cosyncing broker that runs outside this operating system, such as in WSL. Choose another port; that broker keeps running.`,
   brokerPortPrompt: 'Broker port',
   brokerPortInvalid: 'Enter a whole number from 1024 to 65535.',
   introTitle: (product) => `${product} setup`,
@@ -425,6 +427,7 @@ const en: SetupMessages = {
 const zhHans: SetupMessages = {
   languagePrompt: '选择语言 / Language',
   brokerPortOccupied: (port) => `端口 ${port} 已被占用。请选择其他端口；现有进程会继续运行。`,
+  brokerPortOtherEnvironment: (port) => `端口 ${port} 已由运行在本操作系统之外（例如 WSL）的 cosyncing broker 占用。请选择其他端口；该 broker 会继续运行。`,
   brokerPortPrompt: 'Broker 端口',
   brokerPortInvalid: '请输入 1024 到 65535 之间的整数。',
   introTitle: (product) => `${product} 安装配置`,

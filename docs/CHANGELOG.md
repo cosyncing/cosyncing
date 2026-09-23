@@ -11,6 +11,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Installing a second Server on Windows next to one already running in WSL stopped
+  with "port 7734 is already owned", because Windows republishes the WSL broker's port
+  on its own loopback and setup read that as a competing broker it must not displace.
+  Setup now asks the operating system who owns the listener: proven to be the WSL relay,
+  it is treated as a broker in another environment, so the Windows install is offered the
+  next port and the WSL broker keeps running. A broker setup cannot place still has to be
+  stopped explicitly.
+
 ## 0.5.13 — 2026-09-23
 
 ### Fixed

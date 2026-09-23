@@ -14,10 +14,16 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, parse, posix, win32 } from 'node:path';
 import { connect } from 'node:net';
-import { resolveInvocation, spawnResolvedInvocation, windowsNativeMachineArchitecture } from '@cosyncing/adapter-api';
+import {
+  HostProcessProvider,
+  resolveInvocation,
+  spawnResolvedInvocation,
+  windowsNativeMachineArchitecture,
+} from '@cosyncing/adapter-api';
 import type {
   SetupCommandProbe,
   SetupDiagnosisContext,
+  SetupListenerProcess,
   SetupHttpProbe,
   SetupPathInspection,
 } from '@cosyncing/adapter-api';
@@ -372,9 +378,31 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/**
+ * The single process holding a listening port, named the way the OS names it.
+ *
+ * Attribution only: an unprovable owner is `undefined`, never a guess, because the caller's
+ * alternative to proof is to refuse to move anything. This reads the same provider the managed
+ * runtimes use to name a listener, so the two cannot disagree about who owns a port.
+ */
+async function listenerProcess(
+  hostProcesses: HostProcessProvider,
+  port: number,
+): Promise<SetupListenerProcess | undefined> {
+  const listener = await hostProcesses.listenerAsync(port, { fresh: true });
+  if (listener.state !== 'identified') return undefined;
+  const owner = hostProcesses.liveProcess(listener.pid, { fresh: true });
+  if (owner.state !== 'running') return undefined;
+  return {
+    name: owner.identity.comm,
+    ...(owner.identity.executable ? { executable: owner.identity.executable } : {}),
+  };
+}
+
 export function createSetupDiagnosisContext(options: SetupDiagnosisContextOptions = {}): SetupDiagnosisContext {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
+  const hostProcesses = new HostProcessProvider({ platform: platform as NodeJS.Platform });
   const pathApi = platform === 'win32' ? win32 : posix;
   const homeDir = options.homeDir ?? homedir();
   const displayPath = (value: string): string => {
@@ -409,6 +437,7 @@ export function createSetupDiagnosisContext(options: SetupDiagnosisContextOption
     probeTcp,
     listDirectory,
     processAlive,
+    listenerProcess: (port) => listenerProcess(hostProcesses, port),
     currentUid: () => (typeof process.getuid === 'function' ? String(process.getuid()) : undefined),
     windowsMachineArchitecture: () => windowsNativeMachineArchitecture(),
     displayPath,
