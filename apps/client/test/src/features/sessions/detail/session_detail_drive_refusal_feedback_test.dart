@@ -67,7 +67,7 @@ void main() {
     await openSessionDetailTestTab(tester, 'session-detail-tab-status');
   }
 
-  testWidgets('ownership unknown uses the ownership-conflict feedback', (
+  testWidgets('ownership unknown does not imply a confirmed competing writer', (
     tester,
   ) async {
     await showRefusal(
@@ -79,8 +79,8 @@ void main() {
 
     expect(
       find.text(
-        'Drive was not restored automatically because another owner may be '
-        'active. You can still choose Take over.',
+        'Drive was not restored because Codex daemon ownership could not be '
+        'verified. The session remains read-only; you can retry Take over.',
       ),
       findsOneWidget,
     );
@@ -167,6 +167,24 @@ void main() {
 
   final manualOwnershipScenarios = [
     (
+      code: 'DRIVE_OWNERSHIP_UNKNOWN',
+      locale: const Locale('en'),
+      localeName: 'English unknown owner',
+      expected:
+          'Couldn’t verify who controls this session because the Codex '
+          'daemon’s '
+          'ownership check failed. It remains read-only; this does not mean '
+          'Codex Desktop is open.',
+    ),
+    (
+      code: 'DRIVE_OWNERSHIP_UNKNOWN',
+      locale: const Locale('zh'),
+      localeName: 'Chinese unknown owner',
+      expected:
+          'Codex 守护进程的控制权检查失败，无法确认谁在控制此会话。会话将保持只读；这并不表示 Codex Desktop 已打开。',
+    ),
+    (
+      code: 'DRIVE_OWNERSHIP_CONFLICT',
       locale: const Locale('en'),
       localeName: 'English',
       expected:
@@ -174,6 +192,7 @@ void main() {
           'may still control this session. It remains read-only in Cosyncing.',
     ),
     (
+      code: 'DRIVE_OWNERSHIP_CONFLICT',
       locale: const Locale('zh'),
       localeName: 'Chinese',
       expected:
@@ -183,7 +202,7 @@ void main() {
 
   for (final scenario in manualOwnershipScenarios) {
     testWidgets(
-      'manual active-writer refusal persists in Chat in '
+      'manual ownership refusal persists in Chat in '
       '${scenario.localeName}',
       (tester) async {
         final connection = ScriptedSessionDetailConnection(
@@ -209,10 +228,10 @@ void main() {
             ),
           ],
           reattachEvents: [
-            const AttachConflictWireEvent(
+            AttachConflictWireEvent(
               requestedMode: 'resume',
               reason: 'takeover',
-              code: 'DRIVE_OWNERSHIP_CONFLICT',
+              code: scenario.code,
               message: 'The native session already has an active writer.',
             ),
             SessionWireEvent(

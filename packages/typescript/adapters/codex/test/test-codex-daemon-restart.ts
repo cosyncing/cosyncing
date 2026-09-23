@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict';
 import { restartCodexDaemonVerified, type CodexRestartDependencies } from '../src/daemon-restart.ts';
-import { sameCodexInstallation, signalCodexDaemonProcess, type CodexDaemonProcess } from '../src/daemon-process.ts';
+import { managedCodexDaemonArguments, sameCodexInstallation, signalCodexDaemonProcess, type CodexDaemonProcess } from '../src/daemon-process.ts';
+
+for (const remote of [[], ['--remote-control']]) {
+  const legacy = ['app-server', ...remote, '--listen', 'unix://'];
+  assert.equal(managedCodexDaemonArguments(legacy), true);
+  assert.equal(managedCodexDaemonArguments([...legacy, '--managed-daemon']), true);
+  for (const unsafe of [
+    [...legacy, '--managed-daemon', '--managed-daemon'],
+    [...legacy, '--managed-daemon', '--extra'],
+    ['--managed-daemon', ...legacy],
+    [...legacy.slice(0, -1), 'unix:///other/socket', '--managed-daemon'],
+    [...legacy.slice(0, -1), 'ws://127.0.0.1:1234', '--managed-daemon'],
+    [...legacy, '--config', 'profile=other'],
+  ]) assert.equal(managedCodexDaemonArguments(unsafe), false, JSON.stringify(unsafe));
+}
+assert.equal(managedCodexDaemonArguments(['app-server', '--stdio', '--managed-daemon']), false);
+console.log('PASS exact legacy and marked daemon arguments; extra flags and alternate listeners refused');
 
 const target: CodexDaemonProcess = {
   pid: 123, start: '100', boot: 'boot', comm: 'codex', executable: '/fixture/codex',

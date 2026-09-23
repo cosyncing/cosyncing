@@ -3253,7 +3253,15 @@
   },
   "sessionDriveTakeoverOwnershipConflictNote": "Couldn’t take over because Codex Desktop or another Codex client may still control this session. It remains read-only in Cosyncing.",
   "@sessionDriveTakeoverOwnershipConflictNote": {
-    "description": "Persistent composer and immediate feedback after a manual Codex takeover is refused because another native writer is active or ownership is unknown."
+    "description": "Persistent composer and immediate feedback after a manual Codex takeover is refused because another native writer is active."
+  },
+  "sessionDriveTakeoverOwnershipUnknownNote": "Couldn’t verify who controls this session because the Codex daemon’s ownership check failed. It remains read-only; this does not mean Codex Desktop is open.",
+  "@sessionDriveTakeoverOwnershipUnknownNote": {
+    "description": "Manual takeover refused because daemon ownership could not be verified, not because another writer was confirmed."
+  },
+  "sessionDriveRestoreOwnershipUnknownNote": "Drive was not restored because Codex daemon ownership could not be verified. The session remains read-only; you can retry Take over.",
+  "@sessionDriveRestoreOwnershipUnknownNote": {
+    "description": "Automatic restoration refused because daemon ownership could not be verified."
   },
   "sessionDriveTakeoverFailureNote": "Couldn’t take over. The session remains in Observe.",
   "@sessionDriveTakeoverFailureNote": {

@@ -11,6 +11,21 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.13 — 2026-09-23
+
+### Fixed
+
+- Codex daemon restart recognizes the native `--managed-daemon` launch marker
+  while retaining support for older launch formats and all process-ownership
+  checks.
+- A Take over refusal now distinguishes an unverifiable Codex daemon owner from
+  a confirmed competing writer, instead of showing the same Codex Desktop
+  warning for both cases.
+- `cosyncing doctor` reads a Codex control socket that the runtime publishes as
+  a symlink, and proves the live listener by the socket it resolves to. A
+  healthy daemon no longer reports an unsafe file type, while an alias that
+  dangles or reaches a non-socket still fails.
+
 ## 0.5.12 — 2026-09-22
 
 ### Added

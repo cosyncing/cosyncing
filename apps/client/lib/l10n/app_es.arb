@@ -1014,6 +1014,8 @@
   "sessionDriveNativeTakeoverUnresumableNote": "Codex no pudo reanudar esta sesión para tomar el control. Se queda en Observar.",
   "sessionDriveTakeoverTimeoutNote": "El servidor no confirmó la toma de control. La sesión se queda en Observar; puedes volver a intentarlo.",
   "sessionDriveTakeoverOwnershipConflictNote": "No se pudo tomar el control porque Codex Desktop u otro cliente de Codex puede seguir controlando esta sesión. En Cosyncing sigue en solo lectura.",
+  "sessionDriveTakeoverOwnershipUnknownNote": "No se pudo verificar quién controla esta sesión porque falló la comprobación del daemon de Codex. Sigue en solo lectura; esto no significa que Codex Desktop esté abierto.",
+  "sessionDriveRestoreOwnershipUnknownNote": "No se restauró el control porque no se pudo verificar quién controla la sesión en el daemon de Codex. Sigue en solo lectura; puedes volver a intentar tomar el control.",
   "sessionDriveTakeoverFailureNote": "No se pudo tomar el control. La sesión se queda en Observar.",
   "sessionForkAgentOwnedRefusal": "Esta sesión la creó otra sesión de agente; bifurca la sesión de la que procede.",
   "sessionRosterLoadFailed": "No se pudieron cargar las sesiones.",

@@ -9,6 +9,7 @@ import {
   readFileSync,
   readSync,
   realpathSync,
+  statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, parse, posix, win32 } from 'node:path';
@@ -52,6 +53,41 @@ function boundedAppend(current: string, chunk: Buffer | string, limit: number): 
   return `${current}${String(chunk).slice(0, limit - current.length)}`;
 }
 
+/**
+ * Follow a final-component symlink one level of meaning deeper, without changing what the link ITSELF is
+ * reported to be. `realpathSync` settles the whole chain, so the target it answers with is never another
+ * link, and a loop or an over-long path arrives here as `unreadable` rather than as a stack of aliases.
+ */
+function inspectSymbolicLinkTarget(
+  path: string,
+): NonNullable<SetupPathInspection['link']> {
+  let resolved: string;
+  try {
+    resolved = realpathSync(path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // A dangling alias is a fact about the host, not a failed read: the target was simply not there.
+    return {
+      status: code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unreadable',
+      readable: false,
+      resolvedPath: path,
+    };
+  }
+  try {
+    const stat = statSync(resolved);
+    const kind = stat.isSocket()
+      ? 'socket'
+      : stat.isFile() ? 'file' : stat.isDirectory() ? 'directory' : 'other';
+    let readable = true;
+    try { accessSync(resolved, constants.R_OK); } catch { readable = false; }
+    // `status` stays truthful about the TYPE and `readable` carries the permission question, so a caller
+    // can still tell "the alias points at a regular file" from "the alias points at a socket it cannot read".
+    return { status: kind, readable, resolvedPath: resolved };
+  } catch {
+    return { status: 'unreadable', readable: false, resolvedPath: resolved };
+  }
+}
+
 function inspectPath(path: string, displayPath: (value: string) => string): SetupPathInspection {
   const shown = displayPath(path);
   try {
@@ -61,6 +97,9 @@ function inspectPath(path: string, displayPath: (value: string) => string): Setu
     if (stat.isFile()) return { status: readable ? 'file' : 'unreadable', readable, displayPath: shown };
     if (stat.isDirectory()) return { status: readable ? 'directory' : 'unreadable', readable, displayPath: shown };
     if (stat.isSocket()) return { status: readable ? 'socket' : 'unreadable', readable, displayPath: shown };
+    if (stat.isSymbolicLink()) {
+      return { status: 'other', readable, displayPath: shown, link: inspectSymbolicLinkTarget(path) };
+    }
     return { status: 'other', readable, displayPath: shown };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

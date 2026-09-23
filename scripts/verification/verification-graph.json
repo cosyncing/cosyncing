@@ -82,7 +82,8 @@
       "id": "runtime-replacement",
       "description": "Replacing or restarting a review broker is a separate ownership-aware deployment action.",
       "owners": [
-        "scripts/dev/rebuild-restart-app.sh"
+        "scripts/dev/rebuild-restart-app.sh",
+        "scripts/dev/review-broker-request.ts"
       ]
     },
     {

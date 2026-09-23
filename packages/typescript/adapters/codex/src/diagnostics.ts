@@ -123,6 +123,122 @@ function pathCheck(options: {
   };
 }
 
+const CODEX_DAEMON_SOCKET_LABEL = 'Codex managed app-server socket';
+
+/** What {@link daemonEndpoint} decided about the control endpoint, plus what listener lookup should use. */
+type CodexDaemonEndpoint =
+  | {
+      check: SetupCheck;
+      state: 'usable';
+      /** The path an active listener appears as in the kernel's Unix-socket table. */
+      listenerPath: string;
+      resolvedPath: string;
+      viaAlias: boolean;
+    }
+  | {
+      check: SetupCheck;
+      state: 'unusable';
+      skipDetailCode: 'daemon-socket-missing' | 'daemon-socket-invalid';
+    };
+
+/**
+ * Judge the managed control endpoint the way the native runtime actually publishes it.
+ *
+ * A current Codex runtime replaces `app-server-control/app-server-control.sock` with a symlink into a
+ * runtime-owned directory, so one endpoint carries two names. Refusing the link, as this check used to,
+ * told the operator their healthy daemon was an unsafe file — and the same rejection in the live routing
+ * path is what made Drive report ownership unknown for ordinary sessions. So the alias is admitted, and
+ * listener lookup then uses the TARGET: the Unix-socket table records the bound path and never the alias,
+ * so a match on the alias could only ever prove that the alias exists.
+ *
+ * Admitting a name is not admitting anything else. A link that reaches a non-socket is still a hard
+ * failure, an unreadable target is still a failure, and a dangling link is still only evidence that the
+ * endpoint is absent. Nothing here touches process-stop ownership, which keeps refusing aliases.
+ */
+function daemonEndpoint(options: {
+  context: SetupDiagnosisContext;
+  path: string;
+  missingStatus: 'warn' | 'skip';
+}): CodexDaemonEndpoint {
+  const { context, path, missingStatus } = options;
+  const inspected = context.inspectPath(path);
+  const unusable = (check: SetupCheck): CodexDaemonEndpoint => ({
+    check,
+    state: 'unusable',
+    skipDetailCode: check.detailCode === 'socket-missing' || check.detailCode === 'socket-alias-dangling'
+      ? 'daemon-socket-missing'
+      : 'daemon-socket-invalid',
+  });
+  if (inspected.status !== 'other' || inspected.link === undefined) {
+    const check = pathCheck({
+      context,
+      id: 'codex.daemon-socket',
+      label: CODEX_DAEMON_SOCKET_LABEL,
+      path,
+      expected: 'socket',
+      missingStatus,
+    });
+    return check.status === 'pass'
+      ? { check, state: 'usable', listenerPath: path, resolvedPath: path, viaAlias: false }
+      : unusable(check);
+  }
+  const { link } = inspected;
+  if (link.status === 'socket' && link.readable) {
+    return {
+      check: {
+        id: 'codex.daemon-socket',
+        status: 'pass',
+        detailCode: 'socket-alias-readable',
+        summary: `${CODEX_DAEMON_SOCKET_LABEL} is readable through the runtime control-socket alias.`,
+        evidence: { path: inspected.displayPath, resolved: context.displayPath(link.resolvedPath) },
+      },
+      state: 'usable',
+      listenerPath: link.resolvedPath,
+      resolvedPath: link.resolvedPath,
+      viaAlias: true,
+    };
+  }
+  if (link.status === 'missing') {
+    return unusable({
+      id: 'codex.daemon-socket',
+      status: missingStatus,
+      detailCode: 'socket-alias-dangling',
+      summary: `${CODEX_DAEMON_SOCKET_LABEL} points at a runtime socket that is no longer present.`,
+      evidence: { path: inspected.displayPath },
+      ...(missingStatus === 'warn'
+        ? { remediation: { kind: 'command' as const, message: 'Reconcile the managed Codex daemon.', command: 'cosyncing repair' } }
+        : {}),
+    });
+  }
+  return unusable({
+    id: 'codex.daemon-socket',
+    status: 'fail',
+    detailCode: link.status === 'socket' ? 'socket-alias-unreadable' : 'socket-alias-unsafe-type',
+    summary: link.status === 'socket'
+      ? `${CODEX_DAEMON_SOCKET_LABEL} is readable through an alias but cannot be read.`
+      : `${CODEX_DAEMON_SOCKET_LABEL} aliases something that is not a socket.`,
+    evidence: { path: inspected.displayPath, resolved: context.displayPath(link.resolvedPath) },
+    remediation: { kind: 'command', message: 'Inspect and repair the Codex installation state.', command: 'cosyncing repair' },
+  });
+}
+
+/**
+ * Match a Unix-socket table row by PATH rather than by substring.
+ *
+ * `/proc/net/unix` puts the bound path in the last column, so a row matches only when the path ends the
+ * row at a column boundary. The substring test this replaces let one socket answer for every longer path
+ * that merely contained its name, and a runtime directory holding several generation-named sockets is
+ * exactly where that coincidence stops being hypothetical.
+ */
+function unixSocketTableListensFor(table: string, socketPath: string): boolean {
+  if (socketPath.length === 0) return false;
+  return table.split('\n').some((line) => {
+    if (!line.endsWith(socketPath)) return false;
+    const boundary = line[line.length - socketPath.length - 1];
+    return boundary === undefined || /\s/.test(boundary);
+  });
+}
+
 export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
   const binary = await diagnoseBinaryVersion({
     context,
@@ -150,7 +266,11 @@ export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promis
   const codexHome = context.env.CODEX_HOME?.trim() || join(context.homeDir, '.codex');
   const daemonSocket = context.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim()
     || join(codexHome, 'app-server-control', 'app-server-control.sock');
-  const daemonSocketInspection = context.inspectPath(daemonSocket);
+  const endpoint = daemonEndpoint({
+    context,
+    path: daemonSocket,
+    missingStatus: binary.executable ? 'warn' : 'skip',
+  });
   const checks: SetupCheck[] = [
     ...binary.checks,
     standaloneInstallCheck(context, codexHome, binary.executable),
@@ -170,23 +290,16 @@ export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promis
       expected: 'file',
       missingStatus: binary.executable ? 'warn' : 'skip',
     }),
-    pathCheck({
-      context,
-      id: 'codex.daemon-socket',
-      label: 'Codex managed app-server socket',
-      path: daemonSocket,
-      expected: 'socket',
-      missingStatus: binary.executable ? 'warn' : 'skip',
-    }),
+    endpoint.check,
   ];
 
-  if (!binary.executable || daemonSocketInspection.status !== 'socket') {
+  if (!binary.executable || endpoint.state !== 'usable') {
     checks.push({
       id: 'codex.daemon-status',
       status: 'skip',
       detailCode: !binary.executable
         ? 'daemon-binary-missing'
-        : daemonSocketInspection.status === 'missing' ? 'daemon-socket-missing' : 'daemon-socket-invalid',
+        : endpoint.state === 'unusable' ? endpoint.skipDetailCode : 'daemon-socket-invalid',
       summary: 'Codex daemon status was not queried because its binary or safe socket is unavailable.',
     });
   } else if (context.platform !== 'linux') {
@@ -198,18 +311,22 @@ export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promis
       status: 'skip',
       detailCode: 'daemon-status-platform-unsupported',
       summary: 'The Codex daemon socket is present; active-listener verification is Linux/WSL-only on this host.',
-      evidence: { socket: context.displayPath(daemonSocket) },
+      evidence: { socket: context.displayPath(endpoint.resolvedPath) },
     });
   } else {
     const unixSockets = context.readText('/proc/net/unix', 2 * 1024 * 1024);
-    const listening = unixSockets.ok && unixSockets.text.split('\n').some((line) => line.includes(daemonSocket));
+    const listening = unixSockets.ok
+      && unixSocketTableListensFor(unixSockets.text, endpoint.listenerPath);
     if (listening) {
       checks.push({
         id: 'codex.daemon-status',
         status: 'pass',
         detailCode: 'daemon-socket-listening',
         summary: 'Codex daemon socket has an active Unix listener.',
-        evidence: { socket: context.displayPath(daemonSocket) },
+        evidence: {
+          socket: context.displayPath(endpoint.resolvedPath),
+          ...(endpoint.viaAlias ? { aliased: true } : {}),
+        },
       });
     } else {
       checks.push({

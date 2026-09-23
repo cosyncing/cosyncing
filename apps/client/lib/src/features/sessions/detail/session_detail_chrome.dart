@@ -1418,7 +1418,11 @@ String _driveConflictFeedback(
 ) {
   final manualTakeover = conflict.reason == kDriveAttachReasonTakeover;
   return switch (conflict.code) {
-    'DRIVE_OWNERSHIP_CONFLICT' || 'DRIVE_OWNERSHIP_UNKNOWN' =>
+    'DRIVE_OWNERSHIP_UNKNOWN' =>
+      manualTakeover
+          ? l10n.sessionDriveTakeoverOwnershipUnknownNote
+          : l10n.sessionDriveRestoreOwnershipUnknownNote,
+    'DRIVE_OWNERSHIP_CONFLICT' =>
       manualTakeover
           ? l10n.sessionDriveTakeoverOwnershipConflictNote
           : l10n.sessionDriveRestoreConflictNote,

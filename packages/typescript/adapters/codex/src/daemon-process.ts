@@ -19,6 +19,15 @@ const processes = new HostProcessProvider();
 const unknown = (detail: string): CodexDaemonProcessRead => ({ state: 'unknown', detail });
 const normalizeStart = (value: string) => value.trim().replace(/\s+/g, ' ');
 
+/** Exact native daemon forms, including the explicit marker observed on 0.156.
+ * This is only one ownership check; a matching argument list never grants ownership alone. */
+export function managedCodexDaemonArguments(args: readonly string[]): boolean {
+  const legacy = args.at(-1) === '--managed-daemon' ? args.slice(0, -1) : args;
+  const signature = legacy.join('\0');
+  return signature === 'app-server\0--remote-control\0--listen\0unix://'
+    || signature === 'app-server\0--listen\0unix://';
+}
+
 function psField(pid: number, field: string): string | undefined {
   const result = Bun.spawnSync(['/bin/ps', '-o', `${field}=`, '-p', String(pid)], {
     stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 3_000,
@@ -62,7 +71,7 @@ function inspectProcess(pid: number, home: string, cli: string): CodexDaemonProc
       if (Number(psField(pid, 'uid')) !== process.getuid?.()) return unknown('Codex daemon belongs to another user.');
       executable = realpathSync(live.identity.comm);
       const command = psField(pid, 'command');
-      const suffix = command?.match(/ (app-server(?: --remote-control)? --listen unix:\/\/)$/)?.[1];
+      const suffix = command?.match(/ (app-server(?: --remote-control)? --listen unix:\/\/(?: --managed-daemon)?)$/)?.[1];
       if (!suffix) return unknown('Codex daemon launch arguments could not be verified.');
       argv = [command!.slice(0, -suffix.length - 1), ...suffix.split(' ')];
     } else {
@@ -70,9 +79,7 @@ function inspectProcess(pid: number, home: string, cli: string): CodexDaemonProc
     }
     const resolvedCli = realpathSync(cli);
     if (!sameCodexInstallation(executable, resolvedCli)) return unknown('Codex daemon executable does not match this installation.');
-    const args = argv.slice(1).join('\0');
-    if (args !== 'app-server\0--remote-control\0--listen\0unix://'
-      && args !== 'app-server\0--listen\0unix://') return unknown('Codex daemon launch arguments do not match the managed daemon.');
+    if (!managedCodexDaemonArguments(argv.slice(1))) return unknown('Codex daemon launch arguments do not match the managed daemon.');
     const after = processes.liveProcess(pid, { fresh: true });
     if (after.state !== 'running' || after.identity.start !== live.identity.start || after.identity.boot !== live.identity.boot) {
       return unknown('Codex daemon identity changed during inspection.');
