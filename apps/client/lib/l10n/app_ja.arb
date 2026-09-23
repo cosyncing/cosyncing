@@ -1014,6 +1014,8 @@
   "sessionDriveNativeTakeoverUnresumableNote": "Codex が引き継ぎのためにこのセッションを再開できませんでした。閲覧モードのままです。",
   "sessionDriveTakeoverTimeoutNote": "サーバーが引き継ぎを確認しませんでした。セッションは閲覧モードのままです。もう一度「操作を引き継ぐ」を試せます。",
   "sessionDriveTakeoverOwnershipConflictNote": "Codex Desktop または別の Codex クライアントがまだこのセッションを操作している可能性があるため、引き継げませんでした。Cosyncing では読み取り専用のままです。",
+  "sessionDriveTakeoverOwnershipUnknownNote": "Codex デーモンの制御権チェックに失敗したため、このセッションの制御元を確認できませんでした。読み取り専用のままです。Codex Desktop が開いているという意味ではありません。",
+  "sessionDriveRestoreOwnershipUnknownNote": "Codex デーモンの制御権を確認できなかったため、操作を復元できませんでした。セッションは読み取り専用のままです。引き継ぎを再試行できます。",
   "sessionDriveTakeoverFailureNote": "引き継げませんでした。セッションは閲覧モードのままです。",
   "sessionForkAgentOwnedRefusal": "このセッションは別のエージェントセッションから生成されたものです。親のセッションを分岐してください。",
   "sessionRosterLoadFailed": "セッションを読み込めませんでした。",

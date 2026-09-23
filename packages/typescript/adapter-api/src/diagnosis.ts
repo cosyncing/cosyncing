@@ -46,6 +46,23 @@ export interface SetupPathInspection {
   status: 'missing' | 'file' | 'directory' | 'socket' | 'other' | 'unreadable';
   readable: boolean;
   displayPath: string;
+  /**
+   * Present ONLY when the last component of the path is a symbolic link, in which case `status` above
+   * still describes the LINK and this describes what the link reaches.
+   *
+   * Reported alongside `status` rather than by resolving the link into it, because an alias is not the
+   * thing it names: an ownership or write-capable decision must keep refusing the alias even when its
+   * target is perfectly good, while a read-only "is there a live endpoint here" question may follow it.
+   *
+   * `resolvedPath` is RAW, not display-shortened, and every intermediate link is already followed. A
+   * kernel socket table records the bound target, so a listener lookup against a `~/...` rendering would
+   * silently match nothing; render it with `displayPath` before showing it to anyone.
+   */
+  link?: {
+    status: 'file' | 'directory' | 'socket' | 'missing' | 'other' | 'unreadable';
+    readable: boolean;
+    resolvedPath: string;
+  };
 }
 
 export interface SetupCommandProbe {

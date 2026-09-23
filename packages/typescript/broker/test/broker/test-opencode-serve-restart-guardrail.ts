@@ -12,6 +12,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evaluateConfigRestart, newestConfigMtime } from '../../../adapters/opencode/src/managed-server.ts';
+import assert from 'node:assert/strict';
+import { reviewBrokerRequest } from '../../../../../scripts/dev/review-broker-request.ts';
+import { generateCredential, writeBrokerToken } from '../../src/security/credentials.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = '') => {
@@ -22,6 +25,35 @@ const check = (name: string, ok: boolean, detail = '') => {
 const startedAt = 1_000_000; // managed serve start mtime
 const cap = 10 * 60_000; // 10 min max defer
 
+{
+  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-review-auth-'));
+  const tokenFile = join(dir, 'broker-token');
+  const token = generateCredential();
+  writeBrokerToken(token, tokenFile);
+  const requests: string[] = [];
+  let fixture: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    fixture = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch(request) {
+      const path = new URL(request.url).pathname;
+      requests.push(path);
+      if (path === '/redirect') return Response.redirect(`http://127.0.0.1:${fixture!.port}/redirect-target`);
+      if (request.headers.get('x-cosyncing-token') !== token) return new Response('credential required', { status: 401 });
+      return Response.json({ contract: { revision: 26 }, sessions: [{ tool: 'opencode', status: 'working' }] });
+    } });
+    const url = `http://127.0.0.1:${fixture.port}`;
+    assert.equal(JSON.parse(await reviewBrokerRequest(url + '/api/health', tokenFile, 1000)).contract.revision, 26);
+    assert.equal(JSON.parse(await reviewBrokerRequest(url + '/api/sessions', tokenFile, 1000)).sessions[0].status, 'working');
+    await assert.rejects(reviewBrokerRequest(url + '/api/health', join(dir, 'missing'), 1000), /HTTP 401/);
+    await assert.rejects(reviewBrokerRequest(url + '/redirect', tokenFile, 1000));
+    assert.equal(requests.includes('/redirect-target'), false, 'credentials must not follow redirects');
+    writeFileSync(tokenFile, 'malformed');
+    const count = requests.length;
+    await assert.rejects(reviewBrokerRequest(url + '/api/health', tokenFile, 1000), /unsafe or unreadable/);
+    assert.equal(requests.length, count, 'invalid credentials must fail before a request');
+    check('review API probes authenticate health and active-turn safety checks without redirects', true);
+  } finally { fixture?.stop(true); rmSync(dir, { recursive: true, force: true }); }
+}
+
 // A full review-broker restart also owns the managed OpenCode server. It must not bypass the C5
 // runtime guardrail and silently terminate an active model turn while leaving `opencode attach`
 // alive. This checks the shipped restart workflow itself so deleting either the roster query or the
@@ -31,6 +63,9 @@ const cap = 10 * 60_000; // 10 min max defer
   const stopStart = script.indexOf('stop_review_broker()');
   const stopEnd = script.indexOf('\nstart_review_broker()', stopStart);
   const stopBody = script.slice(stopStart, stopEnd);
+  check('review launcher uses credential-aware probes for both health and pre-stop roster',
+    (script.match(/bun run scripts\/dev\/review-broker-request.ts/g) ?? []).length === 2
+      && script.includes('COSYNCING_TOKEN_FILE="${REVIEW_TOKEN_FILE}"'));
   check(
     'review restart queries a fresh roster for active OpenCode turns',
     script.includes('/api/sessions?window=all&refresh=1')

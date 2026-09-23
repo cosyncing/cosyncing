@@ -23,6 +23,7 @@ readonly INSTALLED_BROKER_PORT=7734
 readonly REVIEW_HOST="${COSYNCING_REVIEW_HOST:-127.0.0.1}"
 readonly REVIEW_STATE_HOME="${COSYNCING_REVIEW_STATE_HOME:-${REPO_ROOT}/output/review/state}"
 readonly REVIEW_CACHE_DIR="${COSYNCING_REVIEW_CACHE_DIR:-${REPO_ROOT}/output/review/cache}"
+readonly REVIEW_TOKEN_FILE="${COSYNCING_REVIEW_TOKEN_FILE:-${REVIEW_STATE_HOME}/secrets/broker-token}"
 readonly WEB_ROOT="${REPO_ROOT}/apps/client/build/web"
 readonly LOG_DIR="${REPO_ROOT}/output/broker"
 readonly LOG_FILE="${LOG_DIR}/broker.log"
@@ -51,6 +52,7 @@ usage() {
   echo "  COSYNCING_REVIEW_PORT       Default: 17734"
   echo "  COSYNCING_REVIEW_STATE_HOME Default: <repo>/output/review/state"
   echo "  COSYNCING_REVIEW_CACHE_DIR  Default: <repo>/output/review/cache"
+  echo "  COSYNCING_REVIEW_TOKEN_FILE Default: <review state>/secrets/broker-token"
 }
 
 die() {
@@ -109,6 +111,8 @@ done
   die "COSYNCING_REVIEW_STATE_HOME must be absolute"
 [[ "${REVIEW_CACHE_DIR}" = /* ]] ||
   die "COSYNCING_REVIEW_CACHE_DIR must be absolute"
+[[ "${REVIEW_TOKEN_FILE}" = /* ]] ||
+  die "COSYNCING_REVIEW_TOKEN_FILE must be absolute"
 
 for command in bun curl jq ps readlink setsid ss; do
   command -v "${command}" >/dev/null 2>&1 ||
@@ -164,8 +168,8 @@ assert_no_active_opencode_turns() {
   local roster
   local active
   local active_count
-  roster="$(curl -fsS --max-time 30 \
-    "http://${REVIEW_HOST}:${REVIEW_PORT}/api/sessions?window=all&refresh=1")" ||
+  roster="$(bun run scripts/dev/review-broker-request.ts \
+    "http://${REVIEW_HOST}:${REVIEW_PORT}/api/sessions?window=all&refresh=1" "${REVIEW_TOKEN_FILE}" 30000)" ||
     die "could not verify whether the broker owns an active OpenCode turn; refusing restart"
   active="$(jq -ce '
     if (.sessions | type) != "array" then
@@ -245,6 +249,7 @@ start_review_broker() {
   setsid env \
     -u PORT \
     -u COSYNCING_TOKEN \
+    -u COSYNCING_TOKEN_FILE \
     -u COSYNCING_BROKER \
     -u COSYNCING_WEB_DIR \
     -u COSYNCING_CODEX_REMOTE_ADDR \
@@ -257,6 +262,7 @@ start_review_broker() {
     PORT="${REVIEW_PORT}" \
     COSYNCING_HOME="${REVIEW_STATE_HOME}" \
     COSYNCING_CACHE_DIR="${REVIEW_CACHE_DIR}" \
+    COSYNCING_TOKEN_FILE="${REVIEW_TOKEN_FILE}" \
     COSYNCING_WEB_DIR="${WEB_ROOT}" \
     bun run broker >>"${LOG_FILE}" 2>&1 </dev/null &
   started_pid="$!"
@@ -266,7 +272,7 @@ start_review_broker() {
 wait_for_health() {
   local attempt
   for attempt in $(seq 1 120); do
-    if curl -fsS --max-time 1 "${HEALTH_URL}" >"${health_probe}" 2>/dev/null; then
+    if bun run scripts/dev/review-broker-request.ts "${HEALTH_URL}" "${REVIEW_TOKEN_FILE}" 1000 >"${health_probe}" 2>/dev/null; then
       return 0
     fi
     if ! kill -0 "${started_pid}" 2>/dev/null; then

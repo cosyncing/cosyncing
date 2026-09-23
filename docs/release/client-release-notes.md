@@ -5,34 +5,34 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.12 adds Codex background command cards with bounded output and exact exit
-results where the runtime supplies them. Reconnect preserves completed results
-and clears stale running cards even after recovery records are evicted.
+0.5.13 corrects how a refused Codex takeover is explained. A session whose
+Codex daemon ownership could not be verified no longer claims that Codex
+Desktop may still control it; it reports the ownership check that failed,
+which is a different problem with a different remedy.
 
-0.5.12 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.12 broker. Codex background cards require the new
-revision-26 client for safe reconnect reconciliation; older clients retain their
-existing Codex functionality. A 0.4.1 or older client
-remains read-only against current brokers.
+0.5.13 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.13 broker. Codex background command cards
+require a revision-26 client for safe reconnect reconciliation. A 0.4.1 or older
+client remains read-only against current brokers.
 
 Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's new in 0.5.12
+## What's new in 0.5.13
 
-- Shell commands Codex runs in the background appear as a live card in the
-  session, showing the command, available timing and output, and how it ended
-  when Codex reports an exact result — including an otherwise unmentioned failure.
-  The card stays until dismissed, and a command that goes silent is withdrawn
-  rather than left claiming to run.
-- Completed command results remain available after reconnect until dismissed.
-- Stale running command cards are reconciled after ledger eviction or restart.
-- Capability detection preserves broad Codex version compatibility; exact
-  offline recovery depends on the runtime's available history endpoints.
+- A refused Codex takeover names its actual cause. When the daemon's ownership
+  check could not be answered, the client says so instead of naming Codex
+  Desktop or another client as a possible writer; a confirmed competing writer
+  keeps the conflict wording. Applies to manual takeover and to automatic
+  restoration, in all five locales.
+- On the broker side of the same release, `cosyncing doctor` reads a Codex
+  control socket that the runtime publishes as a symlink, and a managed Codex
+  daemon is recognized on runtimes that append a `--managed-daemon` launch
+  marker, so restarts stop refusing a daemon they already own.
 
-For Codex background-command cards, use a 0.5.12 native client with a 0.5.12
-broker release. The web client ships with the matching broker.
+For Codex background-command cards, use a 0.5.12 or newer native client with a
+0.5.13 broker release. The web client ships with the matching broker.
 
 ## Downloads
 

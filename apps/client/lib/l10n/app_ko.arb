@@ -1014,6 +1014,8 @@
   "sessionDriveNativeTakeoverUnresumableNote": "Codex가 제어권 이전을 위해 이 세션을 재개하지 못했습니다. 보기 모드로 유지됩니다.",
   "sessionDriveTakeoverTimeoutNote": "서버가 제어권 이전을 확인하지 않았습니다. 세션은 보기 모드로 유지되며, 제어권 가져오기를 다시 시도할 수 있습니다.",
   "sessionDriveTakeoverOwnershipConflictNote": "Codex Desktop 또는 다른 Codex 클라이언트가 여전히 이 세션을 제어하고 있을 수 있어 제어권을 가져오지 못했습니다. Cosyncing에서는 읽기 전용으로 유지됩니다.",
+  "sessionDriveTakeoverOwnershipUnknownNote": "Codex 데몬의 제어권 확인에 실패하여 이 세션을 누가 제어하는지 확인하지 못했습니다. 읽기 전용으로 유지됩니다. Codex Desktop이 열려 있다는 뜻은 아닙니다.",
+  "sessionDriveRestoreOwnershipUnknownNote": "Codex 데몬의 제어권을 확인하지 못해 제어를 복원하지 못했습니다. 세션은 읽기 전용으로 유지됩니다. 제어권 가져오기를 다시 시도할 수 있습니다.",
   "sessionDriveTakeoverFailureNote": "제어권을 가져오지 못했습니다. 세션은 보기 모드로 유지됩니다.",
   "sessionForkAgentOwnedRefusal": "이 세션은 다른 에이전트 세션이 만든 것입니다. 상위 세션을 분기하세요.",
   "sessionRosterLoadFailed": "세션을 불러오지 못했습니다.",

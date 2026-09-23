@@ -7,12 +7,15 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
+import { createServer } from 'node:net';
 import * as ts from 'typescript';
 import type {
   AgentBackend,
@@ -20,6 +23,7 @@ import type {
   AgentSetupDiagnosis,
   SetupCheck,
   SetupDiagnosisContext,
+  SetupPathInspection,
 } from '../../../adapter-api/src/index.ts';
 import { diagnoseManagedRuntimeFailure } from '../../src/runtime/managed-runtime-state.ts';
 import { TOKDASH_DEFAULT_BASE_URL } from '../../src/installation/tokdash-quota.ts';
@@ -513,6 +517,165 @@ try {
       darwinShadowedPresence.detailCode === 'terminal-presence-tools-missing',
     `${darwinShadowedPresence.status}:${darwinShadowedPresence.detailCode}`);
 
+  // A current Codex runtime replaces `app-server-control/app-server-control.sock` with a symlink into a
+  // runtime-owned directory, so one endpoint carries two names. Doctor must read the alias AND look for
+  // the TARGET in the Unix-socket table: the kernel records the bound path and never the alias, so a row
+  // naming only the alias would prove nothing more than that the alias exists.
+  const aliasHome = '/fixture/home';
+  const aliasPath = join(aliasHome, '.codex', 'app-server-control', 'app-server-control.sock');
+  const aliasTarget = '/fixture/runtime/e9bd0.sock';
+  const unixTable = (bound: string): string => 'Num RefCount Protocol Flags Type St Inode Path\n'
+    + `0000: 00000002 00000000 00010000 0001 01 12345 ${bound}\n`;
+  const socketTableRows = [
+    'Num RefCount Protocol Flags Type St Inode Path',
+    `0000: 00000002 00000000 00010000 0001 01 12345 ${aliasTarget}`,
+    `0000: 00000003 00000000 00000000 0001 03 12399 ${aliasTarget}`,
+  ].join('\n');
+  const aliasLink: NonNullable<SetupPathInspection['link']> = {
+    status: 'socket',
+    readable: true,
+    resolvedPath: aliasTarget,
+  };
+  const aliasContext = (
+    link: NonNullable<SetupPathInspection['link']> | undefined,
+    table: string,
+  ): SetupDiagnosisContext => fakeContext({
+    executables: { codex: '/fixture/bin/codex' },
+    inspectPath: (path) => (path === aliasPath
+      ? (link === undefined
+        ? { status: 'socket', readable: true, displayPath: path }
+        : { status: 'other', readable: true, displayPath: path, link })
+      : { status: 'missing', readable: false, displayPath: path }),
+    readText: (path) => (path === '/proc/net/unix'
+      ? { ok: true, text: table }
+      : { ok: false, reason: 'missing' }),
+    runReadOnly: async () => ({ status: 'ok', stdout: 'codex-cli 0.156.1', stderr: '' }),
+  });
+  const aliasedLive = await diagnoseCodexSetup(aliasContext(aliasLink, socketTableRows));
+  const aliasedSocketCheck = checkById(aliasedLive, 'codex.daemon-socket');
+  const aliasedDaemonCheck = checkById(aliasedLive, 'codex.daemon-status');
+  check('Codex doctor reads a control-socket alias and proves the listener by its resolved path',
+    aliasedSocketCheck.status === 'pass' && aliasedSocketCheck.detailCode === 'socket-alias-readable'
+      && aliasedSocketCheck.evidence?.resolved === aliasTarget
+      && aliasedDaemonCheck.status === 'pass' && aliasedDaemonCheck.detailCode === 'daemon-socket-listening',
+    `${aliasedSocketCheck.status}:${aliasedSocketCheck.detailCode} vs ${aliasedDaemonCheck.status}:${aliasedDaemonCheck.detailCode}`);
+  // A row naming only the alias is the false positive the old substring test could never see.
+  const aliasOnlyRow = checkById(
+    await diagnoseCodexSetup(aliasContext(aliasLink, unixTable(aliasPath))),
+    'codex.daemon-status',
+  );
+  check('A Unix-socket row naming only the alias is not evidence of an active listener',
+    aliasOnlyRow.status === 'fail' && aliasOnlyRow.detailCode === 'daemon-socket-stale',
+    `${aliasOnlyRow.status}:${aliasOnlyRow.detailCode}`);
+  // Matching is per PATH, not per substring: a sibling socket that merely extends the control path must
+  // not satisfy the check, which is what `line.includes(socket)` used to allow.
+  const siblingRow = checkById(
+    await diagnoseCodexSetup(aliasContext(undefined, unixTable(`${aliasPath}.bak`))),
+    'codex.daemon-status',
+  );
+  const plainRow = checkById(
+    await diagnoseCodexSetup(aliasContext(undefined, unixTable(aliasPath))),
+    'codex.daemon-status',
+  );
+  check('A sibling socket whose path merely extends the control path does not prove a listener',
+    siblingRow.status === 'fail' && siblingRow.detailCode === 'daemon-socket-stale'
+      && plainRow.status === 'pass' && plainRow.detailCode === 'daemon-socket-listening',
+    `${siblingRow.detailCode} vs ${plainRow.detailCode}`);
+  // Admitting the alias is a naming decision, not a licence: every unsafe target still fails closed.
+  const aliasToFile = await diagnoseCodexSetup(aliasContext(
+    { status: 'file', readable: true, resolvedPath: '/fixture/runtime/release-notes' },
+    unixTable('/fixture/other.sock'),
+  ));
+  const fileLinked = checkById(aliasToFile, 'codex.daemon-socket');
+  const fileLinkedDaemon = checkById(aliasToFile, 'codex.daemon-status');
+  check('A control-socket alias that reaches a regular file stays a hard failure',
+    fileLinked.status === 'fail' && fileLinked.detailCode === 'socket-alias-unsafe-type'
+      && fileLinkedDaemon.status === 'skip' && fileLinkedDaemon.detailCode === 'daemon-socket-invalid',
+    `${fileLinked.status}:${fileLinked.detailCode} vs ${fileLinkedDaemon.detailCode}`);
+  const aliasDangling = await diagnoseCodexSetup(aliasContext(
+    { status: 'missing', readable: false, resolvedPath: aliasTarget },
+    socketTableRows,
+  ));
+  const dangling = checkById(aliasDangling, 'codex.daemon-socket');
+  const danglingDaemon = checkById(aliasDangling, 'codex.daemon-status');
+  check('A dangling control-socket alias reports an absent endpoint, not a corrupt one',
+    dangling.status === 'warn' && dangling.detailCode === 'socket-alias-dangling'
+      && dangling.remediation?.command === 'cosyncing repair'
+      && danglingDaemon.status === 'skip' && danglingDaemon.detailCode === 'daemon-socket-missing',
+    `${dangling.status}:${dangling.detailCode} vs ${danglingDaemon.detailCode}`);
+  const aliasUnreadable = checkById(
+    await diagnoseCodexSetup(aliasContext(
+      { status: 'socket', readable: false, resolvedPath: aliasTarget },
+      socketTableRows,
+    )),
+    'codex.daemon-socket',
+  );
+  check('An alias at a socket this diagnosis cannot read fails instead of passing on the link alone',
+    aliasUnreadable.status === 'fail' && aliasUnreadable.detailCode === 'socket-alias-unreadable',
+    `${aliasUnreadable.status}:${aliasUnreadable.detailCode}`);
+
+  // The link report is proven against real symlinks on a real filesystem: a hand-written fixture cannot be
+  // the evidence for what the host actually reports about an alias.
+  if (process.platform !== 'win32') {
+    const aliasRoot = mkdtempSync(join(tmpdir(), 'cosyncing-doctor-alias-'));
+    const server = createServer();
+    try {
+      const runtimeDir = join(aliasRoot, 'runtime');
+      const controlDir = join(aliasRoot, '.codex', 'app-server-control');
+      mkdirSync(runtimeDir, { recursive: true });
+      mkdirSync(controlDir, { recursive: true });
+      symlinkSync(join(aliasRoot, 'gone'), join(controlDir, 'dangling.sock'));
+      symlinkSync(join(runtimeDir, 'notes'), join(controlDir, 'file.sock'));
+      writeFileSync(join(runtimeDir, 'notes'), 'release notes');
+      const realContext = createSetupDiagnosisContext({ homeDir: aliasRoot, env: {} });
+      const danglingInspected = realContext.inspectPath(join(controlDir, 'dangling.sock'));
+      const fileInspected = realContext.inspectPath(join(controlDir, 'file.sock'));
+      check('diagnosis-context names the target of a real alias instead of flattening it to other',
+        danglingInspected.status === 'other' && danglingInspected.link?.status === 'missing'
+          && fileInspected.status === 'other' && fileInspected.link?.status === 'file'
+          && fileInspected.link?.readable === true
+          && fileInspected.link?.resolvedPath === realpathSync(join(runtimeDir, 'notes')),
+        `${danglingInspected.link?.status}/${fileInspected.link?.status}`);
+      const boundSocket = join(runtimeDir, 'e9bd0');
+      const controlAlias = join(controlDir, 'app-server-control.sock');
+      symlinkSync(boundSocket, controlAlias);
+      // A hardened host can refuse a Unix-socket bind outright. That is an environment limit rather than a
+      // product failure, so the socket-only case runs where the host allows it and says so where it does not.
+      const bound = await new Promise<boolean>((resolveBind) => {
+        server.once('error', () => resolveBind(false));
+        server.listen(boundSocket, () => resolveBind(true));
+      });
+      if (!bound) {
+        console.log('SKIP  real control-socket alias case: this host refuses to bind a Unix socket');
+      } else {
+        const aliasInspected = realContext.inspectPath(controlAlias);
+        const targetInspected = realContext.inspectPath(boundSocket);
+        check('diagnosis-context reports a socket alias as a link to its raw bound target',
+          aliasInspected.status === 'other' && aliasInspected.link?.status === 'socket'
+            && aliasInspected.link?.readable === true
+            && aliasInspected.link?.resolvedPath === realpathSync(boundSocket)
+            && targetInspected.status === 'socket' && targetInspected.link === undefined,
+          `${aliasInspected.status}/${aliasInspected.link?.status}/${targetInspected.status}`);
+        const realDiagnosis = await diagnoseCodexSetup({
+          ...realContext,
+          resolveExecutable: () => '/fixture/bin/codex',
+          runReadOnly: async () => ({ status: 'ok', stdout: 'codex-cli 0.156.1', stderr: '' }),
+          readText: (path, maxBytes) => (path === '/proc/net/unix'
+            ? { ok: true, text: unixTable(realpathSync(boundSocket)) }
+            : realContext.readText(path, maxBytes)),
+        });
+        const realSocketCheck = checkById(realDiagnosis, 'codex.daemon-socket');
+        const realDaemonCheck = checkById(realDiagnosis, 'codex.daemon-status');
+        check('Codex doctor reads a real control-socket alias as a live managed endpoint',
+          realSocketCheck.status === 'pass' && realSocketCheck.detailCode === 'socket-alias-readable'
+            && realDaemonCheck.status === 'pass' && realDaemonCheck.detailCode === 'daemon-socket-listening',
+          `${realSocketCheck.detailCode}/${realDaemonCheck.detailCode}`);
+      }
+    } finally {
+      server.close();
+      rmSync(aliasRoot, { recursive: true, force: true });
+    }
+  }
   const sentinel = 'sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890';
   const failureRecord = JSON.stringify({
     schemaVersion: 1,

@@ -1019,6 +1019,8 @@
   "sessionDriveNativeTakeoverUnresumableNote": "Codex 无法恢复此会话以供接管。会话将保持观察状态。",
   "sessionDriveTakeoverTimeoutNote": "代理未及时确认接管。会话保持观察模式，你可以再次尝试“接管”。",
   "sessionDriveTakeoverOwnershipConflictNote": "无法接管，因为 Codex Desktop 或其他 Codex 客户端可能仍在控制此会话。它将在 Cosyncing 中保持只读。",
+  "sessionDriveTakeoverOwnershipUnknownNote": "Codex 守护进程的控制权检查失败，无法确认谁在控制此会话。会话将保持只读；这并不表示 Codex Desktop 已打开。",
+  "sessionDriveRestoreOwnershipUnknownNote": "无法验证 Codex 守护进程的控制权，因此未恢复驾驶。会话将保持只读；你可以重试接管。",
   "sessionDriveTakeoverFailureNote": "无法接管。会话将保持观察状态。",
   "sessionForkAgentOwnedRefusal": "此会话由另一个 Agent 会话派生，请改为对其父会话执行 Fork。",
   "sessionRosterLoadFailed": "无法加载会话。",
