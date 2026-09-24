@@ -61,16 +61,19 @@ export async function setupPortStatus(options: {
     if (health.status === 'ok'
         && (health.json as any)?.ok === true
         && (health.json as any)?.product === PRODUCT_IDENTITY.productName) {
-      // A cosyncing broker on the port with no committed receipt of our own is
-      // a contributor build, which is still a conflict: setup owns no receipt
-      // that would let it stop or replace that process. The one case where that
-      // reading is wrong is a broker in another OS instance reachable through a
-      // WSL relay, and the OS can name the listener to tell the two apart.
-      if (options.installed) return 'owned-running';
+      // Ask who owns the listener BEFORE reading our own receipt, in either order of the
+      // argument. A commit that names this port says what we intended to run here, not what
+      // is running: when our own Windows broker has stopped and WSL has taken the port, the
+      // receipt still reads `installed` while the answer comes back from another OS instance.
+      // Calling that `owned-running` skips the port choice and leaves setup calling a broker
+      // it does not own its own. The attribution costs one process snapshot on this branch
+      // only, which is a preflight that already spawns PowerShell for a Windows service check.
       const owner = await options.context.listenerProcess?.(options.config.broker.port);
-      return listenerLivesInWsl(owner, options.context.platform)
-        ? 'other-environment-broker'
-        : 'unowned-broker';
+      if (listenerLivesInWsl(owner, options.context.platform)) return 'other-environment-broker';
+      // Otherwise a cosyncing broker on the port with no committed receipt of our own is a
+      // contributor build, which is a conflict: setup owns no receipt that would let it stop
+      // or replace that process.
+      return options.installed ? 'owned-running' : 'unowned-broker';
     }
     if (health.status !== 'unreachable') return 'conflict';
   }

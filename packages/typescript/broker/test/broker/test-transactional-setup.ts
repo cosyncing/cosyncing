@@ -2689,6 +2689,65 @@ try {
         && !existsSync(join(machine, '.cosyncing', 'config.json')),
       `${blocked.status}:${blocked.issueCodes?.join(',')}`);
   }
+  // A committed install is not ownership. This is the rerun the receipt order used to lose: the
+  // Windows broker named in `config.json` has stopped, WSL has taken 7734 in the meantime, and
+  // the health answer still arrives from behind the relay. Reading the receipt first called
+  // that `owned-running`, so the port was never offered and setup treated another OS instance's
+  // broker as the one it had installed. The counterpart below holds the line the other way.
+  {
+    const machine = join(root, 'port-selection-wsl-relay-committed');
+    const home = join(machine, '.cosyncing');
+    const committed = await runSetup(setupOptions(machine, new ScriptedPresenter({ opencodeShim: false }), {
+      context: contextFor(machine, {}, 'win32'),
+    }));
+    const reasons: Array<string | undefined> = [];
+    const presenter = Object.assign(new ScriptedPresenter({ opencodeShim: false }), {
+      async chooseBrokerPort(_current: number, suggested?: number, reason?: string) {
+        reasons.push(reason);
+        return suggested!;
+      },
+    });
+    const rerun = await runSetup(setupOptions(machine, presenter, {
+      context: {
+        ...contextFor(machine, {}, 'win32'),
+        probeTcp: async (_host: string, port: number) => port === 7734 ? 'open' as const : 'closed' as const,
+        fetchJson: async () => ({ status: 'ok' as const, statusCode: 200, json: { ok: true, product: 'cosyncing' } }),
+        listenerProcess: async () => ({ name: 'wslrelay.exe', executable: 'C:\\Program Files\\WSL\\wslrelay.exe' }),
+      },
+    }));
+    check('a committed install whose port WSL took over is offered a port, not called owned-running',
+      committed.status === 'complete' && rerun.status === 'complete'
+        && reasons.join(',') === 'other-environment' && rerun.access?.loopbackUrl === 'http://127.0.0.1:7735'
+        && JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')).broker.port === 7735,
+      `${committed.status}:${rerun.status}:${reasons.join(',')}:${rerun.issueCodes?.join(',')}`);
+
+    // And when nothing proves the listener belongs to a relay, a committed install keeps its own
+    // running broker and its own port: the new question must not move a healthy install.
+    const ownMachine = join(root, 'port-selection-relay-unproven-committed');
+    const ownHome = join(ownMachine, '.cosyncing');
+    await runSetup(setupOptions(ownMachine, new ScriptedPresenter({ opencodeShim: false }), {
+      context: contextFor(ownMachine, {}, 'win32'),
+    }));
+    let ownPrompts = 0;
+    const ownPresenter = Object.assign(new ScriptedPresenter({ opencodeShim: false }), {
+      async chooseBrokerPort() {
+        ownPrompts += 1;
+        return 7735;
+      },
+    });
+    const ownRerun = await runSetup(setupOptions(ownMachine, ownPresenter, {
+      context: {
+        ...contextFor(ownMachine, {}, 'win32'),
+        probeTcp: async () => 'open' as const,
+        fetchJson: async () => ({ status: 'ok' as const, statusCode: 200, json: { ok: true, product: 'cosyncing' } }),
+      },
+    }));
+    check('a committed install answering as itself keeps its port and is never offered another',
+      ownPrompts === 0 && !ownRerun.issueCodes?.includes('broker-port-conflict')
+        && !ownRerun.issueCodes?.includes('broker-port-other-environment')
+        && JSON.parse(readFileSync(join(ownHome, 'config.json'), 'utf8')).broker.port === 7734,
+      `${ownRerun.status}:${ownRerun.issueCodes?.join(',')}:prompts=${ownPrompts}`);
+  }
   {
     const machine = join(root, 'port-selection-credential-scope');
     await zeroAgentSetup(machine);
