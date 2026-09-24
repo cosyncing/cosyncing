@@ -73,6 +73,7 @@ const ROOT = resolve(import.meta.dir, '../../../..');
 import { installerOnboardingRegressions } from './installer-onboarding-regressions.ts';
 import { installerPairingRegressions } from './installer-pairing-regressions.ts';
 import { installerShellPathRegressions } from './installer-shell-path-regressions.ts';
+import { installerShellLocaleRegressions } from './installer-shell-locale-regressions.ts';
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -895,6 +896,9 @@ try {
     Object.keys(BOOTSTRAP_TEMPLATES).map((name) =>
       [name, readFileSync(join(releaseDirectory, name), 'utf8')] as const),
   );
+  for (const [name, script] of Object.entries(installers)) {
+    if (name.endsWith('.sh')) installerShellLocaleRegressions(check, script, name);
+  }
   const signedChecksums = readFileSync(join(releaseDirectory, 'SHA256SUMS'), 'utf8');
   check('all four installers are published, checksummed, and fully rendered',
     Object.keys(BOOTSTRAP_TEMPLATES).sort().join(',')

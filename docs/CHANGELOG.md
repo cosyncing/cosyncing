@@ -11,6 +11,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- The macOS shell installers no longer stop with an `unbound variable` error
+  after placing the broker in a UTF-8 locale, regardless of the selected
+  language. The all-in-one installer can continue to install the desktop
+  client and offer setup and pairing.
+
 ## 0.5.13 — 2026-09-23
 
 ### Fixed

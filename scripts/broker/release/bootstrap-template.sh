@@ -798,7 +798,7 @@ fi
 [ -L "$ALIAS" ] || ln -s 'cosyncing' "$ALIAS"
 register_shell_commands
 
-installer_message "Installed cosyncing $VERSION at $APPLICATION" "已安装 cosyncing $VERSION：$APPLICATION"
+installer_message "Installed cosyncing $VERSION at $APPLICATION" "已安装 cosyncing ${VERSION}：$APPLICATION"
 installer_message "Web client: $WEB_ROOT" "网页客户端：$WEB_ROOT"
 printf 'Bun runtime: %s\n' "$BUN_STATE"
 printf 'Artifact digests: matched the sha256 values embedded in this installer.\n'
