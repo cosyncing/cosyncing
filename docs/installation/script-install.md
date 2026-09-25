@@ -78,6 +78,12 @@ broker must be stopped explicitly because its managed agent runtimes can also co
 An unanswered health check also stays blocked until setup can identify the listener.
 Non-interactive `setup --yes` keeps reporting the conflict without changing the port.
 
+A broker that Windows republishes from WSL is the exception. A cosyncing broker running in
+WSL answers `127.0.0.1:7734` on the Windows side, and setup can prove the listener is the WSL
+relay rather than a process on this machine. The two share no managed agent runtime, so
+interactive setup offers the next port and leaves the WSL broker running; where setup cannot
+ask, it reports that finding by name instead of telling you to stop a broker it does not own.
+
 After the broker's files are in place — the same work `install-server.*` does, verified the same way —
 it continues:
 

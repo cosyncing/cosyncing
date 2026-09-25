@@ -79,6 +79,19 @@ export interface SetupHttpProbe {
 }
 
 /**
+ * The process that owns a TCP listener, as the operating system names it.
+ *
+ * This proves WHERE the listener is, which is a weaker claim than the identity a
+ * termination authority needs, so it is deliberately its own type: nothing may read
+ * it as permission to stop the process.
+ */
+export interface SetupListenerProcess {
+  /** The process image name, e.g. `wslrelay.exe`. Casing follows the OS. */
+  name: string;
+  executable?: string;
+}
+
+/**
  * Capability-limited context for adapter diagnosis. Implementations are read-only and bounded; adapters must
  * never call normal discovery from this path because discovery may launch a managed runtime or install assets.
  */
@@ -162,6 +175,15 @@ export interface SetupDiagnosisContext {
     maxBytes?: number,
   ): Promise<SetupHttpProbe>;
   probeTcp(host: string, port: number, timeoutMs?: number): Promise<'open' | 'closed' | 'unknown'>;
+  /**
+   * The one process that owns the listener on `port`, when the host can prove there is exactly
+   * one. Seamed because a fixture cannot present another machine's process table: an install
+   * has to be able to describe a listener that lives somewhere it cannot see.
+   *
+   * `undefined` means the owner could NOT be proven, which is not evidence that nothing is
+   * listening. Callers must fail closed on it.
+   */
+  listenerProcess?(port: number): Promise<SetupListenerProcess | undefined>;
   displayPath(path: string): string;
   /**
    * WHICH of this agent's external hosts cosyncing is responsible for starting

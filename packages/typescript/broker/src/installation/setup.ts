@@ -299,7 +299,12 @@ export interface SetupInspection {
   durableStatePermissionRepairs: DurableStatePermissionRepair[];
   agentSkills: AgentSkillInspection[];
   opencodeShim: OpencodeShimInspection;
-  portStatus: 'free' | 'owned-running' | 'unowned-broker' | 'conflict' | 'unknown';
+  /**
+   * `other-environment-broker` is a cosyncing broker the operating system can prove lives
+   * behind a WSL relay — a different OS instance, so no managed agent runtime is shared and a
+   * second port is the right answer rather than the wrong one.
+   */
+  portStatus: 'free' | 'owned-running' | 'unowned-broker' | 'other-environment-broker' | 'conflict' | 'unknown';
   /** Whether `pipx` is on PATH, i.e. whether the quota prompt may promise an auto-install at all. */
   pipxAvailable: boolean;
   /** Whether the `tokdash` command is on PATH, i.e. whether there is anything left to install. */
@@ -371,7 +376,16 @@ export interface SetupPresenter {
    * in some language. The non-interactive presenter answers from flag, stored state, or env without asking.
    */
   chooseLanguage(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<SetupLanguage>>;
-  chooseBrokerPort?(current: number, suggested?: number): Promise<SetupPromptResult<number>>;
+  /**
+   * Asked when the configured port is taken. `reason` says whose port it was: an unrelated
+   * listener, or a cosyncing broker proven to live in another OS instance behind a WSL relay,
+   * where moving this install to another port is the fix rather than the risk.
+   */
+  chooseBrokerPort?(
+    current: number,
+    suggested?: number,
+    reason?: 'occupied' | 'other-environment',
+  ): Promise<SetupPromptResult<number>>;
   intro(inspection: Readonly<SetupInspection>): Promise<void> | void;
   showBlockers(issues: readonly SetupBlockingIssue[]): Promise<void> | void;
   /**
@@ -1000,6 +1014,22 @@ export async function inspectSetupEnvironment(options: {
           remediation: currentPort === 'unowned-broker'
             ? '请先明确停止另一个 cosyncing broker；更换端口不能隔离托管的编程助手运行时。'
             : '请重新运行交互式 setup 选择其他端口，或明确停止占用进程；安装不会终止不属于它的进程。',
+        },
+      },
+    });
+  }
+  // Reached only where nothing can ask for a port: an interactive run is offered another port
+  // before this list is ever shown, because a broker on the other side of a WSL relay is nobody's
+  // competitor and should keep running untouched.
+  if (currentPort === 'other-environment-broker') {
+    issues.push({
+      code: 'broker-port-other-environment',
+      summary: `Port ${targetConfig.broker.port} already serves a cosyncing broker that runs outside this operating system.`,
+      remediation: 'Run setup in a terminal so it can choose another broker port; the broker in the other environment keeps running.',
+      localized: {
+        'zh-Hans': {
+          summary: `端口 ${targetConfig.broker.port} 已由运行在本操作系统之外的 cosyncing broker 占用。`,
+          remediation: '请在终端中运行 setup，让它选择其他 broker 端口；另一个环境中的 broker 会继续运行。',
         },
       },
     });
@@ -2368,11 +2398,12 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   // can be rendered. Cancelling here is a cancel like any other — nothing has been mutated yet.
   const language = await dependencies.presenter.chooseLanguage(inspection);
   if (language === SETUP_PROMPT_CANCELLED) return cancelled(dependencies, inspection, recovered, 'language choice');
-  while (inspection.portStatus === 'conflict' && inspection.config.status !== 'error'
-      && dependencies.presenter.chooseBrokerPort) {
+  while ((inspection.portStatus === 'conflict' || inspection.portStatus === 'other-environment-broker')
+      && inspection.config.status !== 'error' && dependencies.presenter.chooseBrokerPort) {
     const selected = await dependencies.presenter.chooseBrokerPort(
       inspection.targetConfig.broker.port,
       await nextAvailableSetupPort(context, inspection.targetConfig.broker.port),
+      inspection.portStatus === 'other-environment-broker' ? 'other-environment' : 'occupied',
     );
     if (selected === SETUP_PROMPT_CANCELLED) return cancelled(dependencies, inspection, recovered, 'broker port');
     if (!validSetupPort(selected)) throw new Error('Broker port must be an integer from 1024 to 65535.');

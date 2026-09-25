@@ -197,8 +197,10 @@ export function createClackSetupPresenter(): SetupPresenter {
       if (!isCancel(value)) language = value;
       return cancelled(value);
     },
-    async chooseBrokerPort(current, suggested): Promise<SetupPromptResult<number>> {
-      log.warn(text().brokerPortOccupied(current));
+    async chooseBrokerPort(current, suggested, reason): Promise<SetupPromptResult<number>> {
+      log.warn(reason === 'other-environment'
+        ? text().brokerPortOtherEnvironment(current)
+        : text().brokerPortOccupied(current));
       const value = await promptText({
         message: text().brokerPortPrompt,
         ...(suggested === undefined ? {} : { placeholder: String(suggested), defaultValue: String(suggested) }),
