@@ -8,12 +8,17 @@ import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_auto_read_runtime.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_remote_wake_runtime.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_web_push_runtime.dart';
+import 'package:cosyncing_client/src/features/attention/controller/notification_system_controller.dart';
 import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
 import 'package:cosyncing_client/src/features/attention/view/foreground_attention_host.dart';
+import 'package:cosyncing_client/src/features/attention/view/notification_onboarding_banner.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_auth_barrier.dart';
@@ -25,6 +30,8 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_state.d
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/theme_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
+import 'package:cosyncing_client/src/platform/android/android_background_connection.dart';
+import 'package:cosyncing_client/src/platform/desktop/desktop_keep_running.dart';
 import 'package:cosyncing_client/src/platform/startup/browser_close_protection.dart';
 import 'package:cosyncing_client/src/platform/startup/startup_shell.dart';
 import 'package:cosyncing_client/src/platform/update/android_client_update.dart';
@@ -101,18 +108,25 @@ class _AppState extends ConsumerState<App> {
       // it may hold up the first frame.
       ..watch(installerPairingHandoffProvider)
       ..watch(attentionFeedRuntimeProvider)
+      ..watch(attentionPermissionGrantRuntimeProvider)
+      ..watch(desktopKeepRunningRuntimeProvider)
+      ..watch(androidBackgroundConnectionRuntimeProvider)
       ..watch(attentionRemoteWakeRuntimeProvider)
+      ..watch(attentionWebPushRuntimeProvider)
       ..watch(attentionMutationDrainRuntimeProvider)
       ..watch(attentionUnreadBadgeRuntimeProvider)
+      ..watch(attentionAutoReadRuntimeProvider)
       ..watch(sessionNotificationLaunchBootstrapProvider)
+      ..watch(attentionNotificationChannelConfigurationProvider)
+      ..watch(windowsToastGroupMigrationProvider)
       // Native clients check the signed stable release channel without holding
       // the first frame or requiring a broker connection.
       ..watch(androidClientUpdateControllerProvider)
       ..watch(desktopClientUpdateControllerProvider)
       ..listen(sessionNotificationTapPayloadProvider, (_, payload) {
         if (payload == null) return;
-        // A tap is navigation only. Read/dismiss state changes only after an
-        // explicit inbox action, as required by the attention UX contract.
+        // A tap opens the event's target and marks the event read, which also
+        // clears its notification on this device.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           final pendingPayload = ref.read(
             sessionNotificationTapPayloadProvider,
@@ -199,6 +213,7 @@ class _AppState extends ConsumerState<App> {
   }
 
   void _openNotificationPayload(String payload) {
+    unawaited(raiseAppWindowForNotificationTap());
     _queueAttentionNavigation(() async {
       try {
         final decoded = jsonDecode(payload);
@@ -224,6 +239,10 @@ class _AppState extends ConsumerState<App> {
         await ref
             .read(brokerProfileManagerControllerProvider)
             .setActiveProfile(profile.id, expectedProfile: profile);
+        final eventId = decoded['eventId'];
+        if (eventId is String) {
+          unawaited(_acknowledgeTappedEvent(profile, sourceKey, eventId));
+        }
         _openAttentionAction(
           actionKind: decoded['actionKind'] as String?,
           tool: decoded['tool'] as String?,
@@ -233,6 +252,25 @@ class _AppState extends ConsumerState<App> {
         goRouter.go(attentionRoute);
       }
     });
+  }
+
+  Future<void> _acknowledgeTappedEvent(
+    BrokerProfile profile,
+    String sourceKey,
+    String eventId,
+  ) async {
+    try {
+      final events = await ref
+          .read(attentionRepositoryProvider)
+          .loadEvents(sourceKey);
+      final event = events.where((event) => event.id == eventId).firstOrNull;
+      if (event == null || event.readAt != null) return;
+      await ref
+          .read(attentionInboxActionsProvider)
+          .acknowledge(AttentionInboxEntry(profile: profile, event: event));
+    } on Object {
+      // Read state is durable locally; the mutation drain retries the post.
+    }
   }
 
   void _queueAttentionNavigation(Future<void> Function() navigation) {
@@ -293,6 +331,9 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
         final androidUpdate = ref
             .watch(androidClientUpdateControllerProvider)
             .valueOrNull;
+        final offerNotifications = ref.watch(
+          notificationOnboardingVisibleProvider,
+        );
         return Stack(
           children: [
             ForegroundAttentionHost(
@@ -315,6 +356,7 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
                     AndroidClientUpdateStatus.installerLaunched &&
                 androidUpdate.status != AndroidClientUpdateStatus.failed)
               _AndroidClientUpdateBanner(state: androidUpdate),
+            if (offerNotifications) const NotificationOnboardingBanner(),
           ],
         );
       },

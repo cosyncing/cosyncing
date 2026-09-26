@@ -58,6 +58,38 @@ void main() {
     }),
   );
 
+  String slotOf(AttentionInboxEntry entry) => attentionNotificationSlotId(
+    brokerProfileId: entry.profile.id,
+    event: entry.event,
+  )!;
+
+  AttentionInboxEntry outcome(
+    String id, {
+    required int createdAt,
+    String sessionId = 'session-1',
+  }) => AttentionInboxEntry(
+    profile: profile,
+    event: AttentionEventView.fromJson({
+      'id': id,
+      'cursor': createdAt,
+      'revision': 1,
+      'presentationRevision': 1,
+      'kind': 'run-finished',
+      'state': 'resolved',
+      'severity': 'informational',
+      'dedupeKey': 'run-finished:$id',
+      'createdAt': createdAt,
+      'updatedAt': createdAt,
+      'title': 'Turn finished',
+      'sessionId': sessionId,
+      'action': {
+        'kind': 'open-session',
+        'tool': 'codex',
+        'sessionId': sessionId,
+      },
+    }),
+  );
+
   setUp(() {
     database = AppDatabase(NativeDatabase.memory());
     repository = DriftAttentionRepository(database);
@@ -213,38 +245,16 @@ void main() {
             .revision,
         2,
       );
-      expect(
-        notificationSink.cleared,
-        isNot(
-          contains(
-            attentionNotificationId(
-              brokerProfileId: profile.id,
-              eventId: newerA.event.id,
-              dedupeKey: attentionNotificationCoalescingKey(newerA.event),
-              presentationRevision: newerA.event.presentationRevision,
-            ),
-          ),
-        ),
-      );
+      expect(notificationSink.cleared, contains(slotOf(oldB)));
+      expect(notificationSink.cleared, isNot(contains(slotOf(newerA))));
       expect(notificationSink.clearAllCallCount, 0);
-      expect(
-        notificationSink.cleared,
-        isNot(
-          contains(
-            attentionNotificationId(
-              brokerProfileId: profile.id,
-              eventId: inserted.event.id,
-              dedupeKey: attentionNotificationCoalescingKey(inserted.event),
-              presentationRevision: inserted.event.presentationRevision,
-            ),
-          ),
-        ),
-      );
+      expect(notificationSink.cleared, isNot(contains(slotOf(inserted))));
     },
   );
 
   test(
-    'Clear all platform clearing preserves arrivals and newer presentations',
+    'Clear all platform clearing spares arrivals and re-presents a newer '
+    'revision',
     () async {
       final oldA = entry('event-a');
       final oldB = entry('event-b');
@@ -263,43 +273,11 @@ void main() {
           .clearAll(AttentionInboxSections.fromEntries([oldA, oldB]));
 
       expect(notificationSink.clearManyCallCount, 1);
-      expect(
-        notificationSink.cleared,
-        contains(
-          attentionNotificationId(
-            brokerProfileId: profile.id,
-            eventId: oldA.event.id,
-            dedupeKey: attentionNotificationCoalescingKey(oldA.event),
-            presentationRevision: oldA.event.presentationRevision,
-          ),
-        ),
-      );
-      expect(
-        notificationSink.cleared,
-        isNot(
-          contains(
-            attentionNotificationId(
-              brokerProfileId: profile.id,
-              eventId: newerA.event.id,
-              dedupeKey: attentionNotificationCoalescingKey(newerA.event),
-              presentationRevision: newerA.event.presentationRevision,
-            ),
-          ),
-        ),
-      );
-      expect(
-        notificationSink.cleared,
-        isNot(
-          contains(
-            attentionNotificationId(
-              brokerProfileId: profile.id,
-              eventId: inserted.event.id,
-              dedupeKey: attentionNotificationCoalescingKey(inserted.event),
-              presentationRevision: inserted.event.presentationRevision,
-            ),
-          ),
-        ),
-      );
+      // The slot is shared by every revision of event-a; clearing it before
+      // the newer revision is presented is what lets that revision show.
+      expect(notificationSink.cleared, contains(slotOf(oldA)));
+      expect(notificationSink.cleared, contains(slotOf(oldB)));
+      expect(notificationSink.cleared, isNot(contains(slotOf(inserted))));
       final visible = AttentionInboxSections.fromEntries(
         (await repository.loadEvents(_scope(profile))).map(
           (event) => AttentionInboxEntry(profile: profile, event: event),
@@ -309,6 +287,72 @@ void main() {
         'event-a',
         'event-new',
       });
+      final pending = await repository.loadPendingPresentations(
+        _scope(profile),
+      );
+      expect(
+        pending.map((state) => state.event.id).toSet(),
+        containsAll(['event-a', 'event-new']),
+      );
+    },
+  );
+
+  test(
+    'reading an older turn keeps the notification a newer unread turn took',
+    () async {
+      final older = outcome('turn-1', createdAt: 10);
+      final newer = outcome('turn-2', createdAt: 20);
+      final elsewhere = outcome(
+        'turn-other',
+        createdAt: 30,
+        sessionId: 'session-2',
+      );
+      await _persist(repository, [older, newer, elsewhere]);
+      expect(slotOf(older), slotOf(newer));
+      final actions = container.read(attentionInboxActionsProvider);
+
+      await actions.acknowledge(older);
+      expect(notificationSink.cleared, isNot(contains(slotOf(older))));
+
+      await actions.acknowledge(newer);
+      expect(notificationSink.cleared, contains(slotOf(newer)));
+      expect(notificationSink.cleared, isNot(contains(slotOf(elsewhere))));
+    },
+  );
+
+  test(
+    'reading an older turn clears the slot once the newer turn is handled',
+    () async {
+      final older = outcome('turn-1', createdAt: 10);
+      final newer = outcome('turn-2', createdAt: 20);
+      await _persist(repository, [older, newer]);
+      await repository.markDismissed(
+        _scope(profile),
+        newer.event.id,
+        dismissedAt: DateTime(2026, 9, 23),
+      );
+
+      await container.read(attentionInboxActionsProvider).acknowledge(older);
+
+      expect(notificationSink.cleared, contains(slotOf(older)));
+    },
+  );
+
+  test(
+    'dismissing a request keeps the slot its stored reminder took',
+    () async {
+      final first = entry('request-r');
+      final reminder = entry('request-r', revision: 2, presentationRevision: 2);
+      await _persist(repository, [reminder]);
+
+      await container.read(attentionInboxActionsProvider).dismiss(first);
+
+      expect(notificationSink.cleared, isNot(contains(slotOf(first))));
+      // The event-id alias an older client used is still cleared.
+      expect(
+        notificationSink.cleared,
+        contains('attention:profile-1:request-r'),
+      );
     },
   );
 
@@ -542,5 +586,7 @@ final class _RecordingNotificationSink implements BrokerNotificationSink {
   }
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {}
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async => BrokerNotificationDeliveryResult.shown;
 }

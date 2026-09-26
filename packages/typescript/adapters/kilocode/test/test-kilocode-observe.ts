@@ -1,11 +1,15 @@
 #!/usr/bin/env bun
 export {};
 import { Database } from 'bun:sqlite';
-import { renameSync } from 'node:fs';
+import { mkdtempSync, renameSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentMessage, HistorySnapshotSink, SessionInfo } from '@cosyncing/adapter-api';
+import { AttentionPolicy } from '../../../broker/src/attention/attention-policy.ts';
+import { AttentionStore } from '../../../broker/src/attention/attention-store.ts';
 import { KiloObserveConnection } from '../src/observe.ts';
 import { discoverKiloStore } from '../src/store.ts';
-import { appendKiloTurn, buildKiloFixtureTree } from './fixtures/database.ts';
+import { appendKiloTurn, buildKiloFixtureTree, KILO_FIXTURE_SESSION_ID } from './fixtures/database.ts';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -134,6 +138,81 @@ try {
     unsubscribe();
     await connection.close();
   } finally { recoveryTree.cleanup(); }
+}
+
+{
+  // SQLite Observe is terminal-only by design: an unfinished assistant row projects no run
+  // footer, and a finished one appends its terminal. With no live `running` ahead of it, the
+  // broker's attention policy has no run to close, so an observed Kilo turn stays silent rather
+  // than half-pairing into a "turn finished" nobody driven from here asked for.
+  const turnTree = buildKiloFixtureTree();
+  const attentionRoot = mkdtempSync(join(tmpdir(), 'cosyncing-kilo-observe-attention-'));
+  try {
+    const session = (await discoverKiloStore({ env: { KILO_DATA_DIR: turnTree.dataRoot } }))[0]!;
+    const info: SessionInfo = {
+      id: session.id, nativeId: session.nativeId, tool: 'kilo', title: session.title,
+      cwd: session.cwd, status: session.status, attachMode: 'observe',
+    };
+    const connection = new KiloObserveConnection({ session, info });
+    await connection.getHistory();
+    const tail: AgentMessage[] = [];
+    const unsubscribe = connection.subscribe((message) => tail.push(message));
+    const runs = () => tail.filter((message): message is Extract<AgentMessage, { type: 'run-summary' }> =>
+      message.type === 'run-summary');
+    const describe = () => JSON.stringify(tail.map((message) =>
+      message.type === 'run-summary' ? `run-summary:${message.key}=${message.status}` : message.type));
+
+    const writer = new Database(turnTree.databasePath);
+    writer.exec('pragma wal_autocheckpoint = 0');
+    const startedAt = Date.parse('2026-08-23T10:00:20.000Z');
+    const assistant = (completed: boolean) => JSON.stringify({
+      role: 'assistant', parentID: 'msg-user-observed', providerID: 'vllm-fixture', modelID: 'qwen-fixture',
+      time: { created: startedAt + 100, ...(completed ? { completed: startedAt + 900 } : {}) },
+      ...(completed ? { finish: 'stop', cost: 0.1, tokens: { input: 4, output: 1, cache: { read: 0, write: 0 }, total: 5 } } : {}),
+    });
+    writer.query('insert into message values (?, ?, ?, ?, ?)').run(
+      'msg-user-observed', KILO_FIXTURE_SESSION_ID, startedAt, startedAt,
+      JSON.stringify({ role: 'user', time: { created: startedAt } }),
+    );
+    writer.query('insert into part values (?, ?, ?, ?, ?, ?)').run(
+      'prt-user-observed', 'msg-user-observed', KILO_FIXTURE_SESSION_ID, startedAt, startedAt,
+      JSON.stringify({ type: 'text', text: 'observed prompt' }),
+    );
+    writer.query('insert into message values (?, ?, ?, ?, ?)').run(
+      'msg-assistant-observed', KILO_FIXTURE_SESSION_ID, startedAt + 100, startedAt + 100, assistant(false),
+    );
+    writer.query('insert into part values (?, ?, ?, ?, ?, ?)').run(
+      'prt-answer-observed', 'msg-assistant-observed', KILO_FIXTURE_SESSION_ID, startedAt + 200, startedAt + 200,
+      JSON.stringify({ type: 'text', text: 'observed answer' }),
+    );
+    await wait(500);
+    check('an unfinished observed Kilo turn tails its rows with no run-summary at all',
+      tail.some((message) => message.type === 'model-output' && message.text === 'observed answer')
+        && runs().length === 0,
+      describe());
+
+    writer.query('update message set time_updated = ?, data = ? where id = ?')
+      .run(startedAt + 900, assistant(true), 'msg-assistant-observed');
+    await wait(500);
+    writer.close();
+    const observedRuns = runs().filter((message) => message.key === 'kilo:run:msg-assistant-observed');
+    check('its completion arrives as exactly one terminal, and the observe tail never says running',
+      observedRuns.length === 1 && observedRuns[0]!.status === 'done'
+        && runs().every((message) => message.status !== 'running'),
+      describe());
+
+    const attentionStore = new AttentionStore({ path: join(attentionRoot, 'attention-events.json'), onWarning: () => undefined });
+    const attentionPolicy = new AttentionPolicy(attentionStore);
+    for (const message of tail) await attentionPolicy.handleMessage(info, message);
+    check('the real attention policy raises nothing for an observe-only Kilo turn',
+      attentionStore.listEvents().length === 0 && attentionStore.listObservations().length === 0,
+      JSON.stringify(attentionStore.listEvents().map((event) => event.dedupeKey)));
+    unsubscribe();
+    await connection.close();
+  } finally {
+    turnTree.cleanup();
+    rmSync(attentionRoot, { recursive: true, force: true });
+  }
 }
 
 const failed = results.filter((result) => !result.ok);

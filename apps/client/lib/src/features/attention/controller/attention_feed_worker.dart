@@ -6,7 +6,9 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_coordinator.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_delivery_processor.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_presentation_coordinator.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_profile_sync_gate.dart';
+import 'package:cosyncing_client/src/features/attention/data/attention_notification_type_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
 import 'package:dio/dio.dart';
 
@@ -23,6 +25,12 @@ const Duration defaultAttentionFeedInitialRetryDelay = Duration(
 
 /// Maximum transient retry delay for fetch failures.
 const Duration defaultAttentionFeedMaxRetryDelay = Duration(minutes: 1);
+
+/// Longest wait before asking again with a credential the broker refused,
+/// unless the app returns to the foreground first.
+const Duration defaultAttentionFeedUnauthorizedRetryDelay = Duration(
+  minutes: 30,
+);
 
 /// Returns whether the current UI state is the foreground target for a run
 /// failure.
@@ -82,12 +90,17 @@ class AttentionFeedWorker implements AttentionFeedRunner {
     this.longPollWait = defaultAttentionFeedWait,
     this.initialRetryDelay = defaultAttentionFeedInitialRetryDelay,
     this.maxRetryDelay = defaultAttentionFeedMaxRetryDelay,
+    this.unauthorizedRetryDelay = defaultAttentionFeedUnauthorizedRetryDelay,
+    this.onUnauthorized,
     this.now,
     this.sleep = Future<void>.delayed,
     this.focusMatcher = _noForegroundFocus,
+    this.resolveSetting,
+    this.onDelivery,
     this.onSupportChanged,
     this.onPagePersisted,
     this.localizations,
+    this.presentationCoordinator = const SingleWindowPresentationCoordinator(),
     AttentionProfileSyncGate? profileSyncGate,
   }) : assert(pageSize > 0, 'pageSize must be greater than zero'),
        assert(
@@ -105,10 +118,24 @@ class AttentionFeedWorker implements AttentionFeedRunner {
       onForegroundEvent: onForegroundEvent,
       isCurrentSource: _ownsDeliverySource,
       focusMatcher: focusMatcher,
+      resolveSetting:
+          resolveSetting ??
+          (type) async => AttentionNotificationTypeSetting.defaultsFor(type),
+      onDelivery: onDelivery,
       now: now,
+      presentationCoordinator: presentationCoordinator,
       localizations: localizations,
     );
   }
+
+  /// Keeps this device's windows from presenting one event twice.
+  final AttentionPresentationCoordinator presentationCoordinator;
+
+  /// This device's effective per-type notification setting.
+  final AttentionNotificationSettingResolver? resolveSetting;
+
+  /// Observes OS presentation attempts.
+  final AttentionNotificationDeliveryObserver? onDelivery;
 
   /// Primary broker API client for attention polling and ack/dismiss.
   final BrokerClient brokerClient;
@@ -164,6 +191,14 @@ class AttentionFeedWorker implements AttentionFeedRunner {
   /// Optional durable-page observer for inbox/badge refresh.
   final AttentionFeedPersistedHandler? onPagePersisted;
 
+  /// Longest wait before asking again after the broker refused the
+  /// credential.
+  final Duration unauthorizedRetryDelay;
+
+  /// Called when the broker refuses this worker's credential, so the app can
+  /// re-read the saved one. A changed credential replaces this worker.
+  final void Function()? onUnauthorized;
+
   /// Reconciles durable mutation state and presentation state.
   late final AttentionFeedDeliveryProcessor _deliveryProcessor;
 
@@ -207,6 +242,15 @@ class AttentionFeedWorker implements AttentionFeedRunner {
       _stopSignal.complete();
     }
     await _loopFuture;
+  }
+
+  /// Presents again the open requests the OS refused before notifications
+  /// were allowed. Not serialized behind the poll cycle, which can hold the
+  /// profile for a whole long poll; presentation has its own lock.
+  @override
+  Future<void> presentPermissionBlockedRequests() async {
+    if (_loopFuture == null) return;
+    await _deliveryProcessor.presentPermissionBlockedRequests();
   }
 
   /// Marks an attention event as read and posts read state to broker.
@@ -274,6 +318,10 @@ class AttentionFeedWorker implements AttentionFeedRunner {
             if (_isStopped(cancelToken)) return null;
             _setSupportState(AttentionFeedSupportState.supported);
             if (_isStopped(cancelToken)) return null;
+            await _deliveryProcessor.clearResolvedRequests(page.events);
+            if (_isStopped(cancelToken)) return null;
+            await _deliveryProcessor.clearSeenElsewhere(page.events);
+            if (_isStopped(cancelToken)) return null;
             await onPagePersisted?.call(page);
             if (_isStopped(cancelToken)) return null;
             final durableCursor = await repository.loadCursor(brokerScopeKey);
@@ -299,6 +347,23 @@ class AttentionFeedWorker implements AttentionFeedRunner {
         _setSupportState(AttentionFeedSupportState.unsupported);
         await _sleepWithBoundedBackoff(retryDelay);
         retryDelay = _nextRetryDelay(retryDelay);
+      } on BrokerException catch (error) {
+        if (_isStopped(cancelToken)) return;
+        if (error.statusCode == 401) {
+          // A refused credential does not recover by asking again. The retry
+          // backoff would ask once a minute for as long as the app runs (a
+          // tab left open before a token was saved, a device whose token was
+          // revoked), and every refusal counts toward the Server's repeated
+          // authentication alert. Re-read the saved credential instead, and
+          // ask again only when the app returns to the foreground or after a
+          // long wait.
+          onUnauthorized?.call();
+          await _waitAfterUnauthorized();
+          retryDelay = initialRetryDelay;
+        } else {
+          await _sleepWithBoundedBackoff(retryDelay);
+          retryDelay = _nextRetryDelay(retryDelay);
+        }
       } on DioException catch (error) {
         if (cancelToken.isCancelled || error.type == DioExceptionType.cancel) {
           return;
@@ -327,6 +392,25 @@ class AttentionFeedWorker implements AttentionFeedRunner {
       sleep(duration),
       _stopSignal.future,
     ]);
+  }
+
+  Future<void> _waitAfterUnauthorized() async {
+    if (_cancelToken?.isCancelled ?? false) return;
+    final resumed = Completer<void>();
+    final subscription = lifecycleMonitor.stateChanges.listen((state) {
+      if (state == BrokerAppLifecycleState.resumed && !resumed.isCompleted) {
+        resumed.complete();
+      }
+    });
+    try {
+      await Future.any([
+        sleep(unauthorizedRetryDelay),
+        _stopSignal.future,
+        resumed.future,
+      ]);
+    } finally {
+      await subscription.cancel();
+    }
   }
 
   Future<AttentionEventsPage> _fetchPage({

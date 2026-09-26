@@ -24,6 +24,9 @@ const CLIENT_ROOT = join(REPOSITORY_ROOT, 'apps/client');
 /** Every browser-platform test file this lane owns, repo-relative. */
 const BROWSER_PLATFORM_TESTS = [
   'test/src/features/schedules/platform/device_time_zone_web_test.dart',
+  'test/src/platform/lifecycle/app_lifecycle_monitor_web_test.dart',
+  'test/src/platform/notifications/presentation_coordinator_web_test.dart',
+  'test/src/platform/notifications/web_notification_backend_web_test.dart',
   'test/src/platform/startup/browser_context_menu_startup_web_test.dart',
 ];
 

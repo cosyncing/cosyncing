@@ -190,11 +190,14 @@ function normalizeEvent(raw: unknown): AttentionEvent | undefined {
     return result ? { [key]: result } : {};
   };
   const resolvedAt = finiteInteger(value.resolvedAt, -1);
+  const seenAt = finiteInteger(value.seenAt, -1);
   const knownKeys = new Set([
     'id', 'cursor', 'revision', 'presentationRevision', 'presentationStage',
     'kind', 'state', 'severity', 'dedupeKey', 'createdAt', 'updatedAt',
     'resolvedAt', 'agent', 'sessionId', 'sessionTitle', 'requestId', 'turnId',
-    'goalKey', 'title', 'summary', 'action',
+    'goalKey', 'title', 'summary', 'action', 'seenAt',
+    // Stamped when served, never stored.
+    'notificationType', 'collapseKey',
   ]);
   const unknownFields = Object.fromEntries(
     Object.entries(value)
@@ -224,6 +227,7 @@ function normalizeEvent(raw: unknown): AttentionEvent | undefined {
     title,
     ...optionalText('summary', 320),
     action,
+    ...(seenAt >= 0 ? { seenAt } : {}),
   } as AttentionEvent;
 }
 
@@ -474,6 +478,8 @@ export class AttentionStore {
           : { resolvedAt: undefined }),
       };
       if (candidate.resolvedAt === undefined) delete candidate.resolvedAt;
+      const reopened = existing.state === 'resolved' && candidate.state === 'active';
+      if (reopened || candidate.presentationRevision > existing.presentationRevision) delete candidate.seenAt;
       const normalized = normalizeEvent(candidate);
       if (!normalized) throw new Error('invalid attention event');
       if (eventSemanticJson(normalized) === eventSemanticJson(existing)) {
@@ -484,6 +490,7 @@ export class AttentionStore {
       normalized.updatedAt = now;
       const resolved = existing.state === 'active' && normalized.state === 'resolved';
       Object.assign(existing, normalized);
+      if (normalized.seenAt === undefined) delete existing.seenAt;
       if (resolved) supersedeReservedDeliveriesInState(next, existing.id, now);
       return { value: { event: structuredClone(existing), created: false, changed: true }, changed: true };
     });
@@ -688,6 +695,10 @@ export class AttentionStore {
         return { value: undefined, changed: false };
       }
       if (event.presentationStage !== stage) {
+        // A later stage (a runtime update's delayed alert, a health escalation) alerts every client
+        // again, including ones another client's read cleared.
+        // The first stage is the original alert, which a read may already have raced.
+        if (event.presentationStage !== undefined) delete event.seenAt;
         event.presentationRevision += 1;
         event.presentationStage = cleanText(stage, 120);
         event.updatedAt = now;
@@ -777,6 +788,7 @@ export class AttentionStore {
           client.dismissedAt = now;
           client.dismissedRevision = event.revision;
           client.cursor = this.allocateCursor(next);
+          this.markSeen(next, event, now);
           changed = true;
         }
         accepted.push({
@@ -946,8 +958,21 @@ export class AttentionStore {
       }
       client[field] = now;
       client.cursor = this.allocateCursor(next);
+      this.markSeen(next, next.events.find((event) => event.id === eventId)!, now);
       return { value: structuredClone(client), changed: true };
     });
+  }
+
+  /**
+   * The first read or dismissal by any client marks the event seen for all of them, so each
+   * clears its own notification. The event moves to a new cursor, which puts it on every other
+   * client's next page. Its revision stays: an exact-revision dismissal elsewhere still applies,
+   * and nothing is presented again.
+   */
+  private markSeen(state: AttentionStoreFile, event: AttentionEvent, now: number): void {
+    if (event.seenAt !== undefined) return;
+    event.seenAt = now;
+    event.cursor = this.allocateCursor(state);
   }
 
   private allocateCursor(state: AttentionStoreFile): number {

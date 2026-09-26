@@ -734,6 +734,8 @@ async function main(): Promise<void> {
     check('q: result closes the continuation with a done summary and idle status',
       (h.conn as any).running === false && done.length === 1 && done[0].key === running[0].key
         && (h.msgs.filter((m: any) => m.type === 'status') as any[]).at(-1)?.status === 'idle', JSON.stringify(done));
+    check('q: the live continuation opens and closes as a background run, so it never notifies',
+      running[0].origin === 'background' && done[0].origin === 'background', JSON.stringify([running[0], done[0]]));
     await h.conn.close();
   }
   {

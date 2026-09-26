@@ -11,6 +11,9 @@ import {
   type RuntimeUpdateInspection,
 } from '../updates/runtime-update.ts';
 
+/** How long unfinished run and goal evidence survives the loss of the connection that saw it. */
+export const LIVE_EVIDENCE_MAX_AGE_MS = 24 * 60 * 60_000;
+
 export interface AttentionPolicyOptions {
   now?: () => number;
   /** @deprecated Ignored. Process lifetime never defines update occurrence identity. */
@@ -34,7 +37,12 @@ export class AttentionPolicy {
         if (!message.readOnly) await this.upsertRequest(session, 'permission-required', message.requestId);
         return;
       case 'question-request':
-        if (!message.readOnly) await this.upsertRequest(session, 'question-required', message.requestId);
+        // An asynchronous question (`blocking: false`) does not stop the agent, which reads the answer
+        // at a later input boundary. Its card stays in the session; it raises no attention event, so
+        // it neither notifies nor collects reminders.
+        if (!message.readOnly && message.blocking !== false) {
+          await this.upsertRequest(session, 'question-required', message.requestId);
+        }
         return;
       case 'permission-resolved':
         await this.store.resolveByDedupeKey(this.requestDedupe('permission-required', session, message.requestId));
@@ -51,6 +59,15 @@ export class AttentionPolicy {
       default:
         return;
     }
+  }
+
+  /** The session's own connection withdrew these requests without a resolution frame (answered in
+   *  the tool's terminal, or dropped). Their events resolve as if the frame had arrived. */
+  async handlePendingWithdrawn(session: SessionInfo, requestIds: readonly string[]): Promise<void> {
+    await Promise.all(requestIds.flatMap((requestId) => [
+      this.store.resolveByDedupeKey(this.requestDedupe('permission-required', session, requestId)),
+      this.store.resolveByDedupeKey(this.requestDedupe('question-required', session, requestId)),
+    ]));
   }
 
   async handleSessionEnded(session: SessionInfo): Promise<void> {
@@ -70,16 +87,24 @@ export class AttentionPolicy {
     ]);
   }
 
-  /** Drops incomplete live-transition evidence when the owning connection is replaced or disposed.
-   *  Existing actionable events stay active: losing observation is not proof the native request ended. */
+  /** Keeps a replaced or disposed connection's recent run and goal evidence.
+   *
+   *  A drive takeover, a reattach, or a lease-cap eviction swaps the owning connection while the
+   *  native turn keeps running, and the replacement reports that turn's end. Dropping the running
+   *  evidence here made that completion silent. Dedupe keys keep a terminal frame seen by both
+   *  owners to one event. Evidence older than {@link LIVE_EVIDENCE_MAX_AGE_MS} is dropped, so a turn
+   *  that never reported an end cannot hold a row forever. Actionable events stay active: losing
+   *  observation is not proof the native request ended. */
   async handleObservationLost(session: SessionInfo): Promise<void> {
     const prefixes = [
       `run:${session.tool}:${session.id}:`,
       `goal:${session.tool}:${session.id}:`,
     ];
-    const observations = this.store.listObservations().filter((observation) =>
-      prefixes.some((prefix) => observation.key.startsWith(prefix)));
-    await Promise.all(observations.map((observation) => this.store.deleteObservation(observation.key)));
+    const staleBefore = this.now() - LIVE_EVIDENCE_MAX_AGE_MS;
+    const stale = this.store.listObservations().filter((observation) =>
+      prefixes.some((prefix) => observation.key.startsWith(prefix))
+      && observation.observedAt < staleBefore);
+    await Promise.all(stale.map((observation) => this.store.deleteObservation(observation.key)));
   }
 
   async reconcileRuntimeStatus(status: AgentRuntimeUpdateStatus): Promise<void> {
@@ -176,6 +201,9 @@ export class AttentionPolicy {
     message: Extract<AgentMessage, { type: 'run-summary' }>,
   ): Promise<void> {
     const observationKey = `run:${session.tool}:${session.id}:${message.key}`;
+    // A run the tool opened itself (a background continuation) never notifies: without the
+    // running half its terminal has no pair.
+    if (message.origin === 'background') return;
     if (message.status === 'running') {
       const existing = this.store.getObservation(observationKey);
       if (!existing) {
@@ -193,11 +221,15 @@ export class AttentionPolicy {
     if (!observation) return;
     await this.store.deleteObservation(observationKey);
     const turnId = typeof observation.data.turnId === 'string' ? observation.data.turnId : message.turnId;
+    // One event per run occurrence, keyed as the adapter keys the run's transcript footer. A turn id
+    // alone is not an occurrence: Codex reopens a closed turn id as a new generation with its own
+    // `@gN` run key, and deduping on the turn id made every later generation silent.
+    const occurrence = `${session.tool}:${session.id}:${message.key}`;
     if (message.status === 'error') {
       await this.store.upsertEvent(this.completedSessionEvent({
         session,
         kind: 'run-failed',
-        dedupeKey: `run-failed:${session.tool}:${session.id}:${turnId}`,
+        dedupeKey: `run-failed:${occurrence}`,
         turnId,
         title: 'Agent run failed',
         summary: 'A background agent run ended with an error.',
@@ -205,10 +237,12 @@ export class AttentionPolicy {
       return;
     }
     if (message.status !== 'done') return;
+    // One step of a turn that goes on: the turn's last step raises its outcome.
+    if (message.turnContinues) return;
     await this.store.upsertEvent(this.completedSessionEvent({
       session,
       kind: 'run-finished',
-      dedupeKey: `run-finished:${session.tool}:${session.id}:${turnId}`,
+      dedupeKey: `run-finished:${occurrence}`,
       turnId,
       title: 'Agent run finished',
       summary: 'An agent task is ready to review.',
@@ -221,13 +255,17 @@ export class AttentionPolicy {
   ): Promise<void> {
     const goalKey = message.key ?? 'current';
     const observationKey = `goal:${session.tool}:${session.id}:${goalKey}`;
+    const startedAt = goalStartedAt(message.startedAt);
     if (message.status === 'active') {
-      if (!this.store.getObservation(observationKey)) {
+      const existing = this.store.getObservation(observationKey);
+      // A different start time under the same key is a new goal that replaced the old one (Codex keys
+      // goals by thread), so the observation follows the goal that is active now.
+      if (!existing || (startedAt !== undefined && existing.data.startedAt !== startedAt)) {
         await this.store.putObservation({
           key: observationKey,
           kind: 'goal',
           observedAt: this.now(),
-          data: { goalKey },
+          data: { goalKey, ...(startedAt !== undefined ? { startedAt } : {}) },
         });
       }
       return;
@@ -236,10 +274,13 @@ export class AttentionPolicy {
     if (!observation) return;
     await this.store.deleteObservation(observationKey);
     if (message.status !== 'done') return;
+    // The goal key names a slot, not a goal: Codex reuses the thread id for every goal in a thread,
+    // so the start time is what tells one finished goal from the next.
+    const occurrence = startedAt ?? goalStartedAt(observation.data.startedAt);
     await this.store.upsertEvent(this.completedSessionEvent({
       session,
       kind: 'goal-finished',
-      dedupeKey: `goal-finished:${session.tool}:${session.id}:${goalKey}`,
+      dedupeKey: `goal-finished:${session.tool}:${session.id}:${goalKey}${occurrence !== undefined ? `:${occurrence}` : ''}`,
       goalKey,
       title: 'Goal finished',
       summary: 'An agent goal is ready to review.',
@@ -277,6 +318,10 @@ export class AttentionPolicy {
     const sessionTitle = session.title?.replace(/\s+/g, ' ').trim();
     return sessionTitle ? { sessionTitle: sessionTitle.slice(0, 200) } : {};
   }
+}
+
+function goalStartedAt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : undefined;
 }
 
 export interface AuthFailureAttentionTrackerOptions {
@@ -320,7 +365,8 @@ export class AuthFailureAttentionTracker {
   }
 }
 
-/** Generic control-path evidence consumed by attention policy without agent-name branches. */
+/** Generic control-path evidence the Hub reports, without agent-name branches. Logged for diagnosis;
+ *  it raises no attention event. */
 export interface SessionControlTransition {
   tool: string;
   sessionId: string;
@@ -332,60 +378,4 @@ export interface SessionControlTransition {
   intentional?: boolean;
   observedAt: number;
   reason?: string;
-}
-
-export type SyncDegradationChange =
-  | {
-      type: 'upsert';
-      dedupeKey: string;
-      tool: string;
-      sessionId: string;
-      sessionTitle?: string;
-      path: SessionControlTransition['path'];
-      cause: SessionControlTransition['cause'];
-      at: number;
-    }
-  | { type: 'resolve'; dedupeKey: string; at: number };
-
-/** Tracks authoritative usable-to-unusable control transitions and their resolution. */
-export class SyncDegradationTracker {
-  private readonly active = new Set<string>();
-
-  constructor(private readonly now: () => number = Date.now) {}
-
-  restoreActive(dedupeKeys: Iterable<string>): void {
-    for (const dedupeKey of dedupeKeys) {
-      if (dedupeKey.startsWith('sync-degraded:')) this.active.add(dedupeKey);
-    }
-  }
-
-  observe(transition: SessionControlTransition): SyncDegradationChange | undefined {
-    const dedupeKey = `sync-degraded:${transition.tool}:${transition.sessionId}:${transition.path}`;
-    if (transition.intentional) {
-      if (!this.active.delete(dedupeKey)) return undefined;
-      return { type: 'resolve', dedupeKey, at: this.now() };
-    }
-
-    const fromUsable = transition.from === 'active' || transition.from === 'available';
-    if (fromUsable && transition.to === 'unavailable') {
-      if (this.active.has(dedupeKey)) return undefined;
-      this.active.add(dedupeKey);
-      return {
-        type: 'upsert',
-        dedupeKey,
-        tool: transition.tool,
-        sessionId: transition.sessionId,
-        ...(transition.sessionTitle ? { sessionTitle: transition.sessionTitle } : {}),
-        path: transition.path,
-        cause: transition.cause,
-        at: this.now(),
-      };
-    }
-
-    if (transition.to === 'active' || transition.to === 'available' || transition.to === 'ended') {
-      if (!this.active.delete(dedupeKey)) return undefined;
-      return { type: 'resolve', dedupeKey, at: this.now() };
-    }
-    return undefined;
-  }
 }

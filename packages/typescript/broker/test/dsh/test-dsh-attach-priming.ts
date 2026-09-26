@@ -36,10 +36,15 @@
  *   bun run packages/typescript/broker/test/dsh/test-dsh-attach-priming.ts
  */
 export {};
-import { AgentRegistry } from '@cosyncing/adapter-api';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { AgentRegistry, type AgentMessage } from '@cosyncing/adapter-api';
 import { DshAdapter } from '../../../adapters/dsh/src/index.ts';
 import type { DshSocketLike } from '../../../adapters/dsh/src/server.ts';
 import { DSH_RECONNECT_NOTICE } from '../../../adapters/dsh/src/observe.ts';
+import { AttentionPolicy } from '../../src/attention/attention-policy.ts';
+import { AttentionStore } from '../../src/attention/attention-store.ts';
 import { Hub, type ManagedConn, type WireEvent } from '../../src/sessions/hub.ts';
 
 const FIXTURE = await Bun.file(
@@ -221,10 +226,50 @@ const messagesIn = (events: WireEvent[]) =>
 const dshOwnerKeys = (h: Hub) =>
   h.liveSnapshot().map((entry) => entry.key).filter((key) => key.startsWith('dsh:')).sort();
 
+// ── The broker's attention feed ─────────────────────────────────────────────
+//
+// The Hub's live `onMessage` hook is the ONLY input the attention policy gets,
+// and production serializes it into the real policy. "Turn finished" needs a
+// live `running` then a terminal under one key, so a catch-up path that let a
+// finished turn's `turn/start` through as live would notify on attach.
+type RunSummaryRow = Extract<AgentMessage, { type: 'run-summary' }>;
+const attentionRoot = mkdtempSync(join(tmpdir(), 'dsh-attach-attention-'));
+const attentionStore = new AttentionStore({
+  path: join(attentionRoot, 'attention-events.json'),
+  onWarning: () => undefined,
+});
+const attentionPolicy = new AttentionPolicy(attentionStore);
+const attentionFeed: AgentMessage[] = [];
+const attentionFailures: unknown[] = [];
+let attentionTail: Promise<void> = Promise.resolve();
+const drainAttention = async (): Promise<void> => {
+  let tail: Promise<void>;
+  do {
+    tail = attentionTail;
+    await tail;
+  } while (tail !== attentionTail);
+};
+const liveRunsOf = (key: string): RunSummaryRow[] => attentionFeed.filter((message): message is RunSummaryRow =>
+  message.type === 'run-summary' && message.key === key);
+const describeLiveRuns = (): string => JSON.stringify(attentionFeed
+  .filter((message): message is RunSummaryRow => message.type === 'run-summary')
+  .map((message) => `${message.key}=${message.status}`));
+const runEvents = () => attentionStore.listEvents()
+  .filter((event) => event.kind === 'run-finished' || event.kind === 'run-failed');
+/** The captured turn the fixture history already closed (`turn/start` seq 5 … `turn/end` seq 20). */
+const FINISHED_TURN_KEY = `dsh:${SESSION_ID}:turn1`;
+
 let hub: Hub | undefined;
 
 try {
-  hub = new Hub(registry);
+  hub = new Hub(registry, 15_000, undefined, {
+    onMessage: (info, message) => {
+      if (info.tool === 'dsh' && info.id === SESSION_ID) attentionFeed.push(message);
+      attentionTail = attentionTail
+        .then(() => attentionPolicy.handleMessage(info, message))
+        .catch((error) => { attentionFailures.push(error); });
+    },
+  });
 
   // ══ Phase 0 — owner topology: ONE key, and only by explicit request ═══════
   //
@@ -280,11 +325,17 @@ try {
   // ══ Phase 1 — priming: history first, buffered live second ════════════════
   const conn = foreground.conn;
 
-  // Two live frames land BEFORE any history read — the production race. One is
-  // an event the coming history ALSO carries (seq 8, the human prompt); the
-  // other is genuinely newer than the whole capture (seq 21).
+  // Live frames land BEFORE any history read — the production race. Most are
+  // events the coming history ALSO carries: the human prompt (seq 8) and the
+  // captured turn's own `turn/start` and `turn/end` (seq 5 and 20), a turn that
+  // finished before this connection saw it. The last is genuinely newer than
+  // the whole capture (seq 21).
+  const historyEvent = (type: string) => FULL_HISTORY.events.find((entry) => entry.event.type === type)!
+    .event as unknown as Record<string, unknown>;
   const overlapEvent = FULL_HISTORY.events[8]!.event as unknown as Record<string, unknown>;
+  sessionEvent(SESSION_ID, historyEvent('turn/start'));
   sessionEvent(SESSION_ID, overlapEvent);
+  sessionEvent(SESSION_ID, historyEvent('turn/end'));
   sessionEvent(SESSION_ID, userEvent(21, 'arrived during the attach window', 'm21'));
   await Bun.sleep(20);
   check('live rows are withheld from the Hub until history primes the connection',
@@ -306,6 +357,14 @@ try {
     messagesIn(secondClientWire).filter((event) =>
       JSON.stringify(event.message).includes('arrived during the attach window')).length === 1,
     `${messagesIn(secondClientWire).length} rows on the second client`);
+  await drainAttention();
+  check('a turn that finished before the attach reaches the attention feed with NO live running',
+    liveRunsOf(FINISHED_TURN_KEY).length === 0 && runEvents().length === 0,
+    `${describeLiveRuns()} events=${JSON.stringify(runEvents().map((event) => event.dedupeKey))}`);
+  check('...while its terminal is still delivered, through history',
+    history.some((message) => message.type === 'run-summary' && message.key === FINISHED_TURN_KEY
+      && message.status === 'done'),
+    JSON.stringify(history.filter((message) => message.type === 'run-summary')));
 
   // One client leaving must not replace routing or silence the other. This is
   // the second half of the dual-owner hazard: `DshHostLink.unregister` stops the
@@ -367,6 +426,10 @@ try {
     .filter((event) => JSON.stringify(event.message).includes('the restarted host reused seq 6'));
   check('a sequence number REUSED by the restarted host is admitted as new content, exactly once',
     replacement.length === 1, `${replacement.length} deliveries`);
+  await drainAttention();
+  check('neither wholesale re-read replays the finished turn as live: still no running, no event',
+    liveRunsOf(FINISHED_TURN_KEY).every((row) => row.status !== 'running') && runEvents().length === 0,
+    `${describeLiveRuns()} events=${JSON.stringify(runEvents().map((event) => event.dedupeKey))}`);
 
   // ══ Phase 4 — removal is terminal ═════════════════════════════════════════
   //
@@ -445,11 +508,44 @@ try {
   check('a durable transcript event emitted before removal still reaches the Hub',
     messagesIn(otherWire).some((event) => JSON.stringify(event.message).includes('emitted before removal')),
     `${messagesIn(otherWire).length} rows`);
+
+  // ══ Phase 5 — a turn run live notifies exactly once ═══════════════════════
+  //
+  // The same Hub hook that stayed silent for every catch-up above must carry a
+  // turn this connection watched from its start: one `running`, then one
+  // terminal under the same key, and so one "turn finished". (The restarted
+  // host's log stopped inside turn 1, so the new turn's start first fences
+  // that one as cancelled, which is a terminal with no running and notifies
+  // nothing.)
+  const liveTurnKey = `dsh:${SESSION_ID}:turn2`;
+  sessionEvent(SESSION_ID, { type: 'turn/start', seq: 8, time: 2_000, data: { turn: 2 } });
+  sessionEvent(SESSION_ID, {
+    type: 'assistant/message',
+    seq: 9,
+    time: 2_100,
+    data: { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'live reply' }] } },
+    surfaceOp: 'append',
+  });
+  sessionEvent(SESSION_ID, { type: 'turn/end', seq: 10, time: 2_200, data: { turn: 2, reason: { kind: 'completed' } } });
+  await Bun.sleep(20);
+  await drainAttention();
+  const liveTurn = liveRunsOf(liveTurnKey);
+  check('a live turn reaches the attention feed as exactly one running then exactly one done, one key',
+    liveTurn.length === 2 && liveTurn[0]!.status === 'running' && liveTurn[1]!.status === 'done'
+      && attentionFeed.indexOf(liveTurn[0]!) < attentionFeed.indexOf(liveTurn[1]!),
+    describeLiveRuns());
+  check('the real attention policy raises exactly one turn-finished, for that live turn only',
+    runEvents().length === 1
+      && runEvents()[0]!.dedupeKey === `run-finished:dsh:${SESSION_ID}:${liveTurnKey}`
+      && attentionFailures.length === 0,
+    `events=${JSON.stringify(runEvents().map((event) => event.dedupeKey))} failures=${attentionFailures.length}`);
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? (error.stack ?? error.message) : String(error));
 } finally {
   await hub?.dispose().catch(() => {});
   server.stop(true);
+  await drainAttention().catch(() => {});
+  rmSync(attentionRoot, { recursive: true, force: true });
 }
 
 const failed = results.filter((r) => !r.ok).length;

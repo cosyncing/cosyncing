@@ -1,15 +1,14 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
-import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_delivery_settings_controller.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_coordinator.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_delivery_processor.dart'
     hide AttentionFeedForegroundHandler, AttentionFeedRunFailureFocusMatcher;
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_worker.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
+import 'package:cosyncing_client/src/features/attention/controller/notification_system_controller.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_feed_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
 import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
@@ -127,16 +126,6 @@ final foregroundAttentionEventProvider = StateProvider<AttentionInboxEntry?>(
 final attentionFeedSupportProvider =
     StateProvider<Map<String, AttentionFeedSupportState>>((_) => const {});
 
-/// Profiles whose resident feed has positively proved endpoint support and is
-/// currently owned by a running worker.
-///
-/// Session streams consult this set before invoking their legacy event policy,
-/// preventing one broker event from becoming both a live-session notification
-/// and a durable attention-feed notification.
-final attentionFeedDeliveryActiveProvider = StateProvider<Set<String>>(
-  (_) => const {},
-);
-
 /// One long-lived multi-profile feed coordinator.
 final attentionFeedCoordinatorProvider = Provider<AttentionFeedCoordinator>((
   ref,
@@ -144,6 +133,7 @@ final attentionFeedCoordinatorProvider = Provider<AttentionFeedCoordinator>((
   final coordinator = AttentionFeedCoordinator(
     settingsStore: ref.watch(attentionFeedSettingsStoreProvider),
     createRunner: (profile) => _createProfileRunner(ref, profile),
+    credentialOf: (profile) => _profileCredential(ref, profile),
     onSettingsChanged: () {
       ref.read(attentionFeedSettingsRevisionProvider.notifier).state += 1;
       ref.invalidate(attentionDeliverySettingsControllerProvider);
@@ -182,12 +172,41 @@ final attentionFeedRuntimeProvider = Provider<void>((ref) {
   }
 });
 
+/// Root-app trigger that re-presents the open requests the OS refused while
+/// notification permission was not granted, once it becomes granted.
+final attentionPermissionGrantRuntimeProvider = Provider<void>((ref) {
+  ref.listen(notificationPermissionControllerProvider, (previous, next) {
+    final was = previous?.valueOrNull?.state;
+    final now = next.valueOrNull?.state;
+    if (was == null || now != NotificationPermissionState.granted) return;
+    if (was == NotificationPermissionState.granted) return;
+    unawaited(
+      _ignoreRuntimeError(
+        ref
+            .read(attentionFeedCoordinatorProvider)
+            .notificationPermissionGranted(),
+      ),
+    );
+  });
+});
+
 /// Root-app mutation drain that retries read/dismiss posts for all saved profiles.
 final attentionMutationDrainRuntimeProvider = Provider<void>((ref) {
   final runtime = _AttentionMutationDrainRuntime(ref);
   unawaited(_ignoreRuntimeError(runtime.start()));
   ref.onDispose(runtime.dispose);
 });
+
+/// The credential a client for [profile] would send, as stored now: the key
+/// alone does not change when a token is pasted over an older one.
+Future<Object?> _profileCredential(Ref ref, BrokerProfile profile) async {
+  final credentialKey = profile.credentialKey;
+  if (credentialKey == null) return null;
+  final token = await ref
+      .read(credentialStoreProvider)
+      .readBrokerToken(credentialKey);
+  return (credentialKey, token?.trim());
+}
 
 Future<AttentionFeedRunner> _createProfileRunner(
   Ref ref,
@@ -205,22 +224,27 @@ Future<AttentionFeedRunner> _createProfileRunner(
     clientId: clientId,
     lifecycleMonitor: ref.read(sessionNotificationLifecycleMonitorProvider),
     notificationSink: ref.read(sessionNotificationSinkProvider),
-    localizations: lookupAppLocalizations(
-      selectedLocale ?? ui.PlatformDispatcher.instance.locale,
-    ),
+    localizations: resolveAppLocalizations(selectedLocale),
     focusMatcher: attentionRunFailureFocusMatcher(ref, profile),
     onForegroundEvent: attentionForegroundHandler(ref, profile),
+    resolveSetting: ref.read(attentionNotificationSettingResolverProvider),
+    onDelivery: ref.read(attentionNotificationDeliveryRecorderProvider),
+    presentationCoordinator: ref.read(attentionPresentationCoordinatorProvider),
+    // Re-read the saved profiles: a token saved since this worker started (in
+    // this tab or another) changes the credential and replaces the worker.
+    onUnauthorized: () {
+      try {
+        ref.invalidate(brokerProfileListProvider);
+      } on Object {
+        // The app is shutting down; there is nothing left to refresh.
+      }
+    },
     onSupportChanged: (support) {
       final current = ref.read(attentionFeedSupportProvider);
       ref.read(attentionFeedSupportProvider.notifier).state = {
         ...current,
         profile.id: support,
       };
-      _setAttentionFeedDeliveryActive(
-        ref,
-        profile.id,
-        support == AttentionFeedSupportState.supported,
-      );
     },
     onPagePersisted: (_) async {
       // The revision bump recomputes the inbox, and the root-app badge
@@ -229,27 +253,7 @@ Future<AttentionFeedRunner> _createProfileRunner(
       ref.read(attentionInboxRevisionProvider.notifier).state += 1;
     },
   );
-  return _OwnedAttentionFeedRunner(
-    worker: worker,
-    client: client,
-    onStop: () => _setAttentionFeedDeliveryActive(ref, profile.id, false),
-  );
-}
-
-void _setAttentionFeedDeliveryActive(
-  Ref ref,
-  String brokerProfileId,
-  bool active,
-) {
-  final current = ref.read(attentionFeedDeliveryActiveProvider);
-  final next = current.toSet();
-  if (active) {
-    next.add(brokerProfileId);
-  } else {
-    next.remove(brokerProfileId);
-  }
-  ref.read(attentionFeedDeliveryActiveProvider.notifier).state =
-      Set.unmodifiable(next);
+  return _OwnedAttentionFeedRunner(worker: worker, client: client);
 }
 
 /// Shared exact-session matcher used by polling and opaque-wake refetch.
@@ -293,15 +297,10 @@ Future<void> _ignoreRuntimeError(Future<void> operation) async {
 }
 
 final class _OwnedAttentionFeedRunner implements AttentionFeedRunner {
-  _OwnedAttentionFeedRunner({
-    required this.worker,
-    required this.client,
-    required this.onStop,
-  });
+  _OwnedAttentionFeedRunner({required this.worker, required this.client});
 
   final AttentionFeedWorker worker;
   final BrokerClient client;
-  final void Function() onStop;
 
   @override
   void start() => worker.start();
@@ -311,10 +310,13 @@ final class _OwnedAttentionFeedRunner implements AttentionFeedRunner {
     try {
       await worker.stop();
     } finally {
-      onStop();
       client.close();
     }
   }
+
+  @override
+  Future<void> presentPermissionBlockedRequests() =>
+      worker.presentPermissionBlockedRequests();
 }
 
 final class _AttentionFeedAppBinding {

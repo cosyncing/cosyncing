@@ -201,6 +201,10 @@ final class BrokerCredentialsController
             updatedAt: DateTime.now(),
           );
           final saved = await _brokerProfileRepository.save(updatedProfile);
+          // The profile list caches these rows; a stale row keeps the old
+          // credential key, so every client built from the list after this
+          // save would still be tokenless.
+          ref.invalidate(brokerProfileListProvider);
           _requireActiveIncarnation(activeProfile);
           ref.read(activeBrokerProfileProvider.notifier).state = saved;
 
@@ -327,6 +331,7 @@ final class BrokerCredentialsController
           updatedAt: DateTime.now(),
         );
         final saved = await _brokerProfileRepository.save(updatedProfile);
+        ref.invalidate(brokerProfileListProvider);
         _requireActiveIncarnation(expectedActive);
         ref.read(activeBrokerProfileProvider.notifier).state = saved;
         return true;

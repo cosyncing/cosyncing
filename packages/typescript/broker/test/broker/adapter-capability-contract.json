@@ -488,14 +488,15 @@
         "reason": "id === nativeId === the conversation UUID on every row, from day one; no path encoding."
       },
       "reflectionSurfaces": {
-        "supported": ["createModelPropagation", "modelLabels", "tokenUsage", "runSummary"],
+        "supported": ["createModelPropagation", "modelLabels", "tokenUsage"],
         "partial": ["subagentNesting", "contextUsage"],
         "unsupported": {
           "createPermissionModePropagation": "This adapter exposes no listModes hook, so the New Session sheet cannot offer a native permission-mode choice.",
           "currentMode": "No measured native permission-mode value is projected into SessionInfo.currentMode for this adapter.",
           "nativeRename": "The shipped adapter has no renameSession hook backed by a measured native rename operation.",
           "costUsage": "The native surface supplies no attributable monetary cost, so the adapter does not invent one.",
-          "slashCommands": "No measured native command registry and invocation path is exposed through this adapter."
+          "slashCommands": "No measured native command registry and invocation path is exposed through this adapter.",
+          "runSummary": "Antigravity's stream and conversation store record per-step DONE and RUNNING states but no turn end, so the adapter emits no run-summary and its turns raise no Turn finished or Turn failed."
         },
         "reason": "Antigravity storage, Drive, roster, model, and telemetry suites pin these explicit cross-agent answers."
       }

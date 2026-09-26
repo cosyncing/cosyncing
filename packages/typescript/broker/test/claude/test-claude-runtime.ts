@@ -123,6 +123,7 @@ const lines = [
   const fin = tracker.finishLive('done', 1_003_000, { input: 50, output: 9, cost: 0.0123 });
   const rf = fin.find((m: any) => m.type === 'run-summary') as any;
   check('finishLive → run-summary done + total runtime + authoritative usage/cost', rf?.status === 'done' && rf?.totalRuntimeMs === 3000 && rf?.tokens?.input === 50 && rf?.tokens?.output === 9 && rf?.tokens?.cost === 0.0123);
+  check('finishLive closes the turn under the key startLive opened, so the broker pairs them into one outcome', rf?.key === start.key && rf?.turnId === start.turnId, JSON.stringify([start.key, rf?.key]));
   check('finishLive also emits runtimeTotals', fin.some((m: any) => m.type === 'metadata-update' && m.key === 'runtimeTotals' && m.value.turnCount === 1 && m.value.totalRuntimeMs === 3000));
   const fin2 = tracker.finishLive('done', 9_999_999);
   check('finishLive with no open turn → no-op (no phantom summary)', fin2.length === 0);
@@ -541,7 +542,7 @@ const lines = [
     ].map((line) => JSON.stringify(line)).join('\n') + '\n');
     await waitFor(() => live.some((m: any) => m.type === 'run-summary' && m.turnId === 'u3' && m.status === 'done'), 3000);
     await Promise.all(attentionWork);
-    const attentionEvent = attention.store.findByDedupeKey('run-finished:claude:sess:u3');
+    const attentionEvent = attention.store.findByDedupeKey('run-finished:claude:sess:sess:run:u3');
     check(
       'one exact live running→done pair creates one turn-fenced Attention event',
       attentionEvent?.turnId === 'u3' && attentionEvent.presentationRevision === 1,
@@ -634,6 +635,8 @@ const lines = [
     check('continuation: the notification opens a running run and boundary notice', !!running && running.turnId === 'cn1' && running.userMessageKey === undefined && boundary?.semantic?.turnId === 'cn1' && boundary?.message === 'Agent finished');
     check('continuation: closes done with an assistant anchor in its own turn', done.status === 'done' && done.userMessageKey === undefined && typeof done.assistantMessageKey === 'string' && done.totalRuntimeMs === ms(N2) - ms(N0));
     check('continuation: totals count both the prompt turn and the continuation', lastTotals(out).turnCount === 2 && lastTotals(out).totalRuntimeMs === ms(A2) - ms(A0) + (ms(N2) - ms(N0)));
+    const promptFrames = out.filter((m: any) => m.type === 'run-summary' && m.turnId !== 'cn1') as any[];
+    check('continuation: every frame of the run is background-origin, the prompted turn is not', cont.length > 0 && cont.every((f: any) => f.origin === 'background') && promptFrames.length > 0 && promptFrames.every((f) => f.origin === undefined));
   }
   // consecutive notifications with no output between them coalesce into ONE wake
   {
@@ -718,12 +721,13 @@ const lines = [
   }
 }
 
-// ── real-data smoke (best-effort; SKIPS when no local transcript is present, e.g. CI) ──
+// ── real-data smoke (opt-in with COSYNCING_CLAUDE_RUNTIME_REAL_DATA=1; the gate never reads host data) ──
 {
   const projects = join(homedir(), '.claude', 'projects');
+  const optedIn = process.env.COSYNCING_CLAUDE_RUNTIME_REAL_DATA === '1';
   let smoked = false;
   try {
-    if (existsSync(projects)) {
+    if (optedIn && existsSync(projects)) {
       const slugs = readdirSync(projects, { withFileTypes: true }).filter((d) => d.isDirectory());
       outer: for (const slug of slugs) {
         const dir = join(projects, slug.name);
@@ -760,7 +764,11 @@ const lines = [
     check('real-data smoke ran without throwing', false, String(e));
     smoked = true;
   }
-  if (!smoked) console.log('SKIP  real-data smoke — no local transcript with a completed turn found (hermetic env)');
+  if (!smoked) {
+    console.log(optedIn
+      ? 'SKIP  real-data smoke — no local transcript with a completed turn found'
+      : 'SKIP  real-data smoke — set COSYNCING_CLAUDE_RUNTIME_REAL_DATA=1 to read local Claude transcripts');
+  }
 }
 
 const failed = results.filter((r) => !r.ok).length;

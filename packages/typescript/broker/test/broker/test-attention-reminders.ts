@@ -135,13 +135,6 @@ async function testRuntimePollsNeverResetCadence(): Promise<void> {
     assert.equal(occurrence.presentationStage, 'immediate');
     assert.equal(occurrence.presentationRevision, 1);
 
-    const boundaryStages = new Map([
-      [2 * 60, '2h'],
-      [12 * 60, '12h'],
-      [24 * 60, '24h'],
-      [48 * 60, '48h'],
-      [72 * 60, '72h'],
-    ]);
     for (let minute = 1; minute <= 72 * 60; minute++) {
       h.advance(MINUTE);
       await h.tick();
@@ -158,14 +151,14 @@ async function testRuntimePollsNeverResetCadence(): Promise<void> {
         `identical minute ${minute} poll must not recreate delivery reservations`);
       assert.equal(afterPoll.id, occurrence.id);
       assert.equal(afterPoll.createdAt, occurrence.createdAt);
-      const expectedStage = boundaryStages.get(minute);
-      if (expectedStage) assert.equal(afterPoll.presentationStage, expectedStage);
+      assert.equal(afterPoll.presentationStage, minute < 2 * 60 ? 'immediate' : '2h',
+        `minute ${minute}: the one alert comes at 2h, and nothing follows it`);
     }
 
     assert.deepEqual(
       h.dispatchesFor(occurrence.id).map((delivery) => delivery.stage),
-      ['2h', '12h', '24h', '48h', '72h'],
-      'one unchanged occurrence follows the ordinary 2h/12h/24h/daily cadence',
+      ['2h'],
+      'one unchanged occurrence alerts once, after its 2h grace, and never again',
     );
   } finally {
     h.cleanup();
@@ -265,7 +258,7 @@ async function testResolvedOrSupersededRuntimeReservationNeverDispatches(): Prom
   }
 }
 
-async function testCadenceMatrix(): Promise<void> {
+async function testEveryKindAlertsOnce(): Promise<void> {
   const h = new Harness();
   try {
     const permission = await h.addEvent({
@@ -276,48 +269,37 @@ async function testCadenceMatrix(): Promise<void> {
     });
     await h.tick();
     assert.deepEqual(h.dispatchesFor(permission.id).map((item) => item.stage), ['immediate']);
+    // The ladder this replaced re-alerted at 15m, 1h, 7h and then every 6h for as long as the
+    // request stayed open, so a few forgotten requests alerted every few minutes between them.
+    for (const step of [15 * MINUTE, 45 * MINUTE, 6 * HOUR, 6 * HOUR, 6 * HOUR, 21 * 24 * HOUR]) {
+      h.advance(step);
+      await h.tick();
+    }
+    assert.deepEqual(h.dispatchesFor(permission.id).map((item) => item.stage), ['immediate'],
+      'an unanswered request alerts once, however long it stays open');
+    assert.equal(h.store.getEvent(permission.id)?.presentationRevision, 1,
+      'and is never presented again, so no client alerts from the feed either');
 
-    h.advance(15 * MINUTE);
+    const question = await h.addEvent({ kind: 'question-required', dedupeKey: 'question:1' });
+    h.dispatches = [];
     await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(permission.id)), '15m');
-
-    h.advance(45 * MINUTE);
+    h.advance(3 * 24 * HOUR);
     await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(permission.id)), '1h');
-
-    h.advance(6 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(permission.id)), '7h');
-
-    h.advance(6 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(permission.id)), '13h');
-
-    h.advance(6 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(permission.id)), '19h');
+    assert.deepEqual(h.dispatchesFor(question.id).map((item) => item.stage), ['immediate']);
 
     const runtime = await h.addEvent({ kind: 'runtime-update-ready', dedupeKey: 'runtime:1' });
     h.dispatches = [];
+    await h.tick();
+    assert.equal(h.dispatchesFor(runtime.id).length, 0, 'a runtime update waits out its 2h grace');
     h.advance(2 * HOUR);
     await h.tick();
     assert.deepEqual(h.dispatchesFor(runtime.id).map((item) => item.stage), ['2h']);
-
-    h.advance(10 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(runtime.id)), '12h');
-
-    h.advance(12 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(runtime.id)), '24h');
-
-    h.advance(24 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(runtime.id)), '48h');
-
-    h.advance(24 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(runtime.id)), '72h');
+    for (const step of [10 * HOUR, 12 * HOUR, 24 * HOUR, 24 * HOUR]) {
+      h.advance(step);
+      await h.tick();
+    }
+    assert.deepEqual(h.dispatchesFor(runtime.id).map((item) => item.stage), ['2h'],
+      'a pending runtime update alerts once');
 
     const health = await h.addEvent({
       kind: 'broker-health',
@@ -326,16 +308,12 @@ async function testCadenceMatrix(): Promise<void> {
     });
     h.dispatches = [];
     await h.tick();
-    assert.deepEqual(h.dispatchesFor(health.id).map((item) => item.stage), ['immediate']);
-    h.advance(2 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(health.id)), '2h');
-    h.advance(10 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(health.id)), '12h');
-    h.advance(12 * HOUR);
-    await h.tick();
-    assert.equal(assertLastStage(h.dispatchesFor(health.id)), '24h');
+    for (const step of [2 * HOUR, 10 * HOUR, 12 * HOUR, 24 * HOUR]) {
+      h.advance(step);
+      await h.tick();
+    }
+    assert.deepEqual(h.dispatchesFor(health.id).map((item) => item.stage), ['immediate'],
+      'an unchanged health episode alerts once');
 
     const quota = await h.addEvent({ kind: 'usage-threshold', dedupeKey: 'quota:1' });
     h.dispatches = [];
@@ -358,6 +336,34 @@ async function testCadenceMatrix(): Promise<void> {
     h.advance(7 * HOUR);
     await h.tick();
     assert.equal(h.dispatchesFor(scheduledFailure.id).length, 1, 'scheduled-send failures push once and never repeat');
+  } finally {
+    h.cleanup();
+  }
+}
+
+async function testStageFromAnOlderBrokerIsNeverAdvanced(): Promise<void> {
+  const h = new Harness({ devices: ['phone'] });
+  try {
+    // A request an older broker kept re-alerting every 6 h for three weeks, as found on a real host.
+    h.now = 600 * HOUR;
+    const stale = await h.addEvent({
+      kind: 'permission-required',
+      dedupeKey: 'permission:stale',
+      createdAt: h.now - 517 * HOUR - 3 * MINUTE,
+      presentationRevision: 88,
+      presentationStage: '517h',
+    });
+    await h.store.advancePresentationAndReserve(stale.id, '517h', ['phone']);
+    await h.tick();
+    h.dispatches = [];
+    for (const step of [6 * HOUR, 6 * HOUR, 24 * HOUR]) {
+      h.advance(step);
+      await h.tick();
+    }
+    const current = h.store.getEvent(stale.id);
+    assert.equal(current?.presentationStage, '517h');
+    assert.equal(current?.presentationRevision, 88, 'the next 6-hourly rung is never raised');
+    assert.equal(h.dispatchesFor(stale.id).length, 0);
   } finally {
     h.cleanup();
   }
@@ -386,31 +392,32 @@ async function testLateRegistrationCatchupAndDismissal(): Promise<void> {
 
     const runtimeDispatches = h.dispatchesFor(runtime.id);
     assert.equal(runtimeDispatches.filter((item) => item.deviceId === 'tablet').length, 1);
-    assert.equal(runtimeDispatches.filter((item) => item.deviceId === 'tablet')[0]!.stage, '24h');
+    assert.equal(runtimeDispatches.filter((item) => item.deviceId === 'tablet')[0]!.stage, '2h',
+      'a late device joins the one alert; no later stage exists to catch up on');
+    assert.equal(h.store.getEvent(runtime.id)?.presentationStage, '2h');
 
     const stage2h = h.store.listDeliveries().filter((item) => item.eventId === runtime.id && item.stage === '2h');
-    assert.equal(stage2h.every((item) => item.state === 'superseded'), true, 'older stage should be superseded after restart');
-
-    const stage24h = h.store.listDeliveries().filter((item) => item.eventId === runtime.id && item.stage === '24h');
-    assert.equal(stage24h.length, 2);
+    assert.equal(stage2h.length, 2);
+    assert.equal(stage2h.some((item) => item.state === 'superseded'), false,
+      'the only stage is never superseded by a later one');
 
     h.devices = ['phone'];
     h.dispatches = [];
     const permission = await h.addEvent({ kind: 'permission-required', dedupeKey: 'perm-dismiss' });
-    h.setFailure('phone', false);
+    h.setFailure('phone', true);
     await h.tick();
-    const immediate = h.dispatchesFor(permission.id).length;
-    assert.equal(immediate, 1);
+    assert.equal(h.dispatchesFor(permission.id).length, 1);
     await h.store.dismiss(permission.id, 'phone');
-    h.advance(15 * MINUTE);
+    h.setFailure('phone', false);
+    h.advance(5 * MINUTE);
     await h.tick();
-    assert.equal(h.dispatchesFor(permission.id).length, immediate, 'dismissal suppresses future delivery for matching device');
+    assert.equal(h.dispatchesFor(permission.id).length, 1, 'dismissal cancels a pending retry for that device');
   } finally {
     h.cleanup();
   }
 }
 
-async function testRetryFlowAndFutureStageResume(): Promise<void> {
+async function testRetryFlowThenNothing(): Promise<void> {
   const h = new Harness();
   try {
     h.setFailure('mobile', true);
@@ -463,9 +470,10 @@ async function testRetryFlowAndFutureStageResume(): Promise<void> {
     h.now = runtime.createdAt + 12 * HOUR;
     await h.tick();
     await policy.reconcileRuntimeStatus(pendingRuntime(h.now));
-    assert.equal(h.dispatchesFor(runtime.id).length, 5, 'next regular stage resumes reminders');
-    assert.equal(h.store.getEvent(runtime.id)?.presentationStage, '12h',
-      'delivery retries never reset or replace the ordinary reminder stage');
+    assert.equal(h.dispatchesFor(runtime.id).length, 4,
+      'an alert whose retries are exhausted is not raised again later');
+    assert.equal(h.store.getEvent(runtime.id)?.presentationStage, '2h',
+      'delivery retries never reset or replace the presentation stage');
   } finally {
     h.cleanup();
   }
@@ -669,7 +677,7 @@ async function testHealthEscalationBefore2hDispatchesCustomStage(): Promise<void
   }
 }
 
-async function testHealthEscalationAfterCadenceRungDispatchesCustomStage(): Promise<void> {
+async function testHealthEscalationAfterTheAlertDispatchesOnce(): Promise<void> {
   const h = new Harness();
   try {
     const health = await h.addEvent({
@@ -685,7 +693,7 @@ async function testHealthEscalationAfterCadenceRungDispatchesCustomStage(): Prom
     await h.tick();
     assert.deepEqual(
       h.dispatchesFor(health.id).map((item) => item.stage),
-      ['immediate', '2h', '12h'],
+      ['immediate'],
     );
 
     h.advance(1 * HOUR);
@@ -712,12 +720,14 @@ async function testHealthEscalationAfterCadenceRungDispatchesCustomStage(): Prom
       'the same escalation stage must not dispatch twice',
     );
 
-    h.advance(11 * HOUR);
-    await h.tick();
+    for (const step of [11 * HOUR, 24 * HOUR, 24 * HOUR]) {
+      h.advance(step);
+      await h.tick();
+    }
     assert.equal(
-      assertLastStage(h.dispatchesFor(health.id)),
-      '24h',
-      'the regular cadence must resume at the first boundary after escalation',
+      h.dispatchesFor(health.id).length,
+      dispatchCount,
+      'nothing follows an escalation on a timer either',
     );
   } finally {
     h.cleanup();
@@ -727,9 +737,10 @@ async function testHealthEscalationAfterCadenceRungDispatchesCustomStage(): Prom
 await testRuntimePollsNeverResetCadence();
 await testConcurrentRuntimePollCannotRegressSchedulerAdvance();
 await testResolvedOrSupersededRuntimeReservationNeverDispatches();
-await testCadenceMatrix();
+await testEveryKindAlertsOnce();
+await testStageFromAnOlderBrokerIsNeverAdvanced();
 await testLateRegistrationCatchupAndDismissal();
-await testRetryFlowAndFutureStageResume();
+await testRetryFlowThenNothing();
 await testResolutionCancelsReminders();
 await testResolvedCompletionPresentsOnce();
 await testFallbackTimerUnref();
@@ -737,6 +748,6 @@ await testDueReservationsEnterCoalescerConcurrently();
 await testIgnoreReservationsForUnregisteredDevices();
 await testBrokerHealthStageContractDoesNotReAdvance();
 await testHealthEscalationBefore2hDispatchesCustomStage();
-await testHealthEscalationAfterCadenceRungDispatchesCustomStage();
+await testHealthEscalationAfterTheAlertDispatchesOnce();
 
-console.log('PASS broker attention reminders (14 groups)');
+console.log('PASS broker attention reminders (15 groups)');

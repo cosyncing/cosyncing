@@ -4087,6 +4087,300 @@ try {
     await conn.close();
   }
 
+  // ── 12b. A driven turn pairs `running` with its terminal ──────────────────
+  //
+  // The broker raises "turn finished" / "turn failed" only when a LIVE
+  // `running` run-summary is followed by a terminal one under the SAME key.
+  // This connection announces `running` only for a turn it can prove it
+  // submitted and watched run: the turn names a prompt this connection
+  // submitted, and the evidence arrived on the stream the prompt was
+  // submitted on with no break since. The frames below follow a real host's
+  // order: `turn.started` (newer hosts name the prompt on it) before the POST
+  // answers, then `turn.ended`, the idle edge, and only then the prompt's own
+  // terminal — so a turn that ran closes under its turn number.
+
+  type RunSummaryRow = Extract<AgentMessage, { type: 'run-summary' }>;
+  const runRowsOf = (rows: AgentMessage[], key: string): RunSummaryRow[] =>
+    rows.filter((row): row is RunSummaryRow => row.type === 'run-summary' && row.key === key);
+  const runningRowsIn = (rows: AgentMessage[]): RunSummaryRow[] =>
+    rows.filter((row): row is RunSummaryRow => row.type === 'run-summary' && row.status === 'running');
+  /** Exactly one `running` then exactly one terminal under `key`; rows arrive in order, so [0] precedes [1]. */
+  const pairedAs = (rows: AgentMessage[], key: string, terminal: RunSummaryRow['status']): boolean => {
+    const list = runRowsOf(rows, key);
+    return list.length === 2 && list[0]!.status === 'running' && list[1]!.status === terminal;
+  };
+  const describeRuns = (rows: AgentMessage[]): string => JSON.stringify(
+    rows.filter((row): row is RunSummaryRow => row.type === 'run-summary').map((row) => `${row.key}=${row.status}`));
+
+  {
+    // A NEWER host: `turn.started` names the prompt, and outruns the POST.
+    const { conn, rows } = await drivenSession();
+    const socket = sockets.at(-1)!;
+    const submit = gate();
+    promptAnswer = ok({ prompt_id: 'prompt_pair_new', user_message_id: 'msg_pair_new', status: 'running', content: [], created_at: 'x' });
+    holdPrompt = submit.hold;
+    const sending = conn.sendPrompt({ text: 'pair me' });
+    await settle();
+    socket.deliver(frame('turn.started', { turnId: 31, promptId: 'prompt_pair_new', origin: { kind: 'user' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    check('nothing is announced while the POST has not yet named the prompt',
+      runningRowsIn(rows).length === 0, describeRuns(rows));
+    submit.release();
+    await sending;
+    await settle();
+    const started = runRowsOf(rows, 'run-summary:kimi:31');
+    check('a driven turn is announced running at its start, under the turn number its turn.ended closes',
+      started.length === 1 && started[0]?.status === 'running' && started[0].turnId === '31'
+        && started[0].source === 'kimi-events',
+      describeRuns(rows));
+
+    messages = [assistantRow('msg_pair_new_reply', 'paired reply'), userRow('msg_pair_new', 'pair me'), ...messages];
+    socket.deliver(frame('turn.ended', { turnId: 31, reason: 'completed' }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    socket.deliver(frame('prompt.completed', { promptId: 'prompt_pair_new', finishedAt: 'x', reason: 'completed' }));
+    await settle();
+    await settle();
+    check('the driven turn yields running then ONE done under the same key',
+      pairedAs(rows, 'run-summary:kimi:31', 'done'), describeRuns(rows));
+    check('the prompt\'s own terminal adds no second run and no second running',
+      runRowsOf(rows, 'run-summary:kimi:prompt_pair_new').length === 0 && runningRowsIn(rows).length === 1,
+      describeRuns(rows));
+
+    // The start frame delivered AGAIN after the terminal (a duplicate on the
+    // same stream) must not re-open the run: a second `running` would let the
+    // next terminal under this key notify a second time.
+    socket.deliver(frame('turn.started', { turnId: 31, promptId: 'prompt_pair_new', origin: { kind: 'user' } }));
+    socket.deliver(frame('turn.ended', { turnId: 31, reason: 'completed' }));
+    await settle();
+    check('a start frame arriving after the terminal announces no second running',
+      runningRowsIn(rows).length === 1 && runRowsOf(rows, 'run-summary:kimi:31').length === 2,
+      describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // A QUEUED prompt whose turn starts after the POST answered, and FAILS.
+    const { conn, rows } = await drivenSession();
+    const socket = sockets.at(-1)!;
+    promptAnswer = ok({ prompt_id: 'prompt_pair_fail', user_message_id: 'msg_pair_fail', status: 'queued', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'this one fails' });
+    await settle();
+    check('a queued prompt announces nothing before its turn starts',
+      runningRowsIn(rows).length === 0, describeRuns(rows));
+    socket.deliver(frame('turn.started', { turnId: 32, promptId: 'prompt_pair_fail', origin: { kind: 'user' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    check('its start announces the run as soon as it arrives',
+      runRowsOf(rows, 'run-summary:kimi:32').map((row) => row.status).join(',') === 'running', describeRuns(rows));
+    socket.deliver(frame('turn.ended', { turnId: 32, reason: 'failed', error: { message: 'the provider refused' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    socket.deliver(frame('prompt.completed', { promptId: 'prompt_pair_fail', finishedAt: 'x', reason: 'failed' }));
+    await settle();
+    await settle();
+    check('a failed driven turn pairs running with an error terminal under one key',
+      pairedAs(rows, 'run-summary:kimi:32', 'error') && runningRowsIn(rows).length === 1, describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // An OLDER host: `turn.started` carries the turn number only. The prompt is
+    // named by its terminal, which a real host writes right after `turn.ended`,
+    // so the run is announced immediately before its terminal instead.
+    const { conn, rows } = await drivenSession();
+    const socket = sockets.at(-1)!;
+    promptAnswer = ok({ prompt_id: 'prompt_pair_old', user_message_id: 'msg_pair_old', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'older host' });
+    socket.deliver(frame('turn.started', { turnId: 33, origin: { kind: 'user' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    check('a start that names no prompt announces nothing',
+      runningRowsIn(rows).length === 0, describeRuns(rows));
+    messages = [assistantRow('msg_pair_old_reply', 'older reply'), userRow('msg_pair_old', 'older host'), ...messages];
+    socket.deliver(frame('turn.ended', { turnId: 33, reason: 'completed' }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    socket.deliver(frame('prompt.completed', { promptId: 'prompt_pair_old', finishedAt: 'x', reason: 'completed' }));
+    await settle();
+    await settle();
+    const list = runRowsOf(rows, 'run-summary:kimi:33');
+    check('the run is announced immediately before its terminal, under the terminal\'s key',
+      pairedAs(rows, 'run-summary:kimi:33', 'done')
+        && rows.indexOf(list[1]!) === rows.indexOf(list[0]!) + 1
+        && list[1]?.userMessageKey === 'kimi:msg_pair_old:0',
+      describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // A turn closed by its PROMPT terminal (no `turn.ended` came first) pairs
+    // under the prompt id, done and cancelled alike.
+    const { conn, rows } = await drivenSession();
+    const socket = sockets.at(-1)!;
+    promptAnswer = ok({ prompt_id: 'prompt_pair_closed', user_message_id: 'msg_pair_closed', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'closed by the prompt' });
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    socket.deliver(frame('prompt.completed', { promptId: 'prompt_pair_closed', finishedAt: 'x', reason: 'completed' }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    await settle();
+    await settle();
+    check('a prompt-closed driven turn pairs running then done under the prompt id',
+      pairedAs(rows, 'run-summary:kimi:prompt_pair_closed', 'done'), describeRuns(rows));
+
+    promptAnswer = ok({ prompt_id: 'prompt_pair_abort', user_message_id: 'msg_pair_abort', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'stopped by the user' });
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    socket.deliver(frame('prompt.aborted', { promptId: 'prompt_pair_abort', abortedAt: 'x' }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    await settle();
+    await settle();
+    check('an aborted driven turn pairs running then cancelled, which clears without notifying',
+      pairedAs(rows, 'run-summary:kimi:prompt_pair_abort', 'cancelled'), describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // NOT OURS: a turn naming a prompt this connection never submitted — the
+    // attach-time replay of the session's earlier turns, or a terminal user's
+    // turn — is announced by nothing, whatever frames it arrives with.
+    const { conn, rows } = await drivenSession();
+    const socket = sockets.at(-1)!;
+    socket.deliver(frame('turn.started', { turnId: 40, promptId: 'prompt_from_elsewhere', origin: { kind: 'user' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    socket.deliver(frame('turn.ended', { turnId: 40, reason: 'completed' }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    socket.deliver(frame('prompt.completed', { promptId: 'prompt_from_elsewhere', finishedAt: 'x', reason: 'completed' }));
+    await settle();
+    await settle();
+    check('a turn naming a prompt submitted elsewhere is never announced running',
+      runningRowsIn(rows).length === 0, describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // BACKFILL: the prompt IS ours, but the stream broke before any of its
+    // turn was seen, and the reconnect's replay delivers the whole turn at
+    // once. Nothing proves it was watched live, so the catch-up terminal stays
+    // silent — the footer may still land, the `running` must not.
+    const { conn, rows } = await drivenSession();
+    const first = sockets.at(-1)!;
+    promptAnswer = ok({ prompt_id: 'prompt_pair_backfill', user_message_id: 'msg_pair_backfill', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'ran while the stream was down' });
+    await settle();
+    first.fire('close', {});
+    await settle();
+    intervalHandler?.();
+    const replacement = await replacementSocket(first);
+    replacement.deliver(frame('turn.started', { turnId: 41, promptId: 'prompt_pair_backfill', origin: { kind: 'user' } }));
+    replacement.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    replacement.deliver(frame('turn.ended', { turnId: 41, reason: 'completed' }));
+    replacement.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    replacement.deliver(frame('prompt.completed', { promptId: 'prompt_pair_backfill', finishedAt: 'x', reason: 'completed' }));
+    await walkedAfterReconnect(conn);
+    await settle();
+    check('a driven turn seen only through the reconnect replay is never announced running',
+      runningRowsIn(rows).length === 0
+        && runRowsOf(rows, 'run-summary:kimi:41').every((row) => row.status !== 'running'),
+      describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // AN ANNOUNCED RUN ALWAYS GETS ITS TERMINAL. Nothing opened a footer for
+    // this turn — no busy edge, no echo walked — yet it was announced, so its
+    // own `turn.ended` must still close it. Dropping that ending would leave
+    // the broker's observation (and the hub's active run key) open for the
+    // life of the connection. An EMPTY history on purpose: `drivenSession`
+    // seeds an opener from its history rows, and that stale opener would be
+    // what closed the turn.
+    const adapter = makeAdapter();
+    await adapter.createSession({ directory: WORKSPACE });
+    messages = [];
+    const conn = await adapter.attach(CREATED_ID, 'live') as KimiDriveConnection;
+    const rows: AgentMessage[] = [];
+    conn.subscribe((message) => rows.push(message));
+    await conn.getHistory();
+    await settle();
+    const socket = sockets.at(-1)!;
+    promptAnswer = ok({ prompt_id: 'prompt_pair_noopen', user_message_id: 'msg_pair_noopen', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'no opener held' });
+    socket.deliver(frame('turn.started', { turnId: 42, promptId: 'prompt_pair_noopen', origin: { kind: 'user' } }));
+    await settle();
+    socket.deliver(frame('turn.ended', { turnId: 42, reason: 'completed' }));
+    await settle();
+    await settle();
+    check('an announced turn whose ending finds no opener still closes under its key',
+      pairedAs(rows, 'run-summary:kimi:42', 'done'), describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // A `turn.ended` whose reason this reader does not close on (`blocked`):
+    // the prompt's own terminal closes the announced run instead. The prompt's
+    // close keeps its footer under the prompt id and announces nothing.
+    const { conn, rows } = await drivenSession();
+    const socket = sockets.at(-1)!;
+    promptAnswer = ok({ prompt_id: 'prompt_pair_blocked', user_message_id: 'msg_pair_blocked', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'blocked mid-turn' });
+    socket.deliver(frame('turn.started', { turnId: 43, promptId: 'prompt_pair_blocked', origin: { kind: 'user' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    socket.deliver(frame('turn.ended', { turnId: 43, reason: 'blocked' }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    socket.deliver(frame('prompt.completed', { promptId: 'prompt_pair_blocked', finishedAt: 'x', reason: 'blocked' }));
+    await settle();
+    await settle();
+    check('an announced turn left open by its turn.ended is closed by its prompt\'s terminal',
+      pairedAs(rows, 'run-summary:kimi:43', 'done')
+        && runRowsOf(rows, 'run-summary:kimi:prompt_pair_blocked').map((row) => row.status).join(',') === 'done'
+        && runningRowsIn(rows).length === 1,
+      describeRuns(rows));
+
+    // Its `turn.ended` never delivered at all, and the prompt says it FAILED:
+    // the announced run closes as an error, not as the prompt close's `done`.
+    promptAnswer = ok({ prompt_id: 'prompt_pair_lost_end', user_message_id: 'msg_pair_lost_end', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'its turn.ended is lost' });
+    socket.deliver(frame('turn.started', { turnId: 45, promptId: 'prompt_pair_lost_end', origin: { kind: 'user' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    socket.deliver(frame('prompt.completed', { promptId: 'prompt_pair_lost_end', finishedAt: 'x', reason: 'failed' }));
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }));
+    await settle();
+    await settle();
+    check('a failed prompt terminal closes its announced run as an error',
+      pairedAs(rows, 'run-summary:kimi:45', 'error') && runningRowsIn(rows).length === 2,
+      describeRuns(rows));
+    await conn.close();
+  }
+
+  {
+    // A NEW JOURNAL INCARNATION (the server restarted) ended the announced
+    // run with it, and may reuse its turn number: the run is retired
+    // `cancelled` — dropped without an event — and a new incarnation's turn
+    // under the same number announces nothing.
+    const { conn, rows } = await drivenSession();
+    const socket = sockets.at(-1)!;
+    promptAnswer = ok({ prompt_id: 'prompt_pair_epoch', user_message_id: 'msg_pair_epoch', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'killed by a restart' });
+    socket.deliver(frame('turn.started', { turnId: 44, promptId: 'prompt_pair_epoch', origin: { kind: 'user' } }));
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    socket.deliver({ ...frame('event.session.work_changed', { busy: false, pending_interaction: 'none' }), epoch: 'ep_restarted' });
+    await settle();
+    await settle();
+    check('an epoch change retires an announced run as cancelled under its key',
+      pairedAs(rows, 'run-summary:kimi:44', 'cancelled'), describeRuns(rows));
+    socket.deliver({ ...frame('turn.started', { turnId: 44, promptId: 'prompt_after_restart', origin: { kind: 'user' } }), epoch: 'ep_restarted' });
+    socket.deliver({ ...frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }), epoch: 'ep_restarted' });
+    socket.deliver({ ...frame('turn.ended', { turnId: 44, reason: 'completed' }), epoch: 'ep_restarted' });
+    await settle();
+    await settle();
+    check('the new incarnation\'s frames announce no second running under the retired key',
+      runningRowsIn(rows).length === 1, describeRuns(rows));
+    await conn.close();
+  }
+
   // ── 13. A single-answer question cannot be answered twice over ───────────
 
   {

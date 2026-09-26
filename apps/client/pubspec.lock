@@ -447,13 +447,12 @@ packages:
     source: hosted
     version: "1.0.0"
   flutter_local_notifications_windows:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
-      name: flutter_local_notifications_windows
-      sha256: "6f43bdd03b171b7a90f22647506fea33e2bb12294b7c7c7a3d690e960a382945"
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.1.1"
+      path: "../../packages/dart/flutter_local_notifications_windows"
+      relative: true
+    source: path
+    version: "3.1.1+cosyncing.1"
   flutter_localizations:
     dependency: "direct main"
     description: flutter

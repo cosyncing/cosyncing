@@ -173,6 +173,55 @@ void main() {
     });
   });
 
+  group('revision 27 presentation fields', () {
+    Map<String, dynamic> base() => {
+      'id': 'e1',
+      'cursor': 3,
+      'revision': 1,
+      'presentationRevision': 1,
+      'kind': 'run-finished',
+      'state': 'active',
+      'severity': 'informational',
+      'dedupeKey': 'run-finished:k',
+      'createdAt': 1,
+      'updatedAt': 1,
+      'title': 'Turn finished',
+      'action': {'kind': 'open-attention-inbox'},
+    };
+
+    test('read from the served event and survive a local round trip', () {
+      final served = AttentionEventView.fromJson({
+        ...base(),
+        'notificationType': 'turn_finished',
+        'collapseKey': 'session-outcome:claude:s1',
+        'seenAt': 42,
+      });
+      final stored = AttentionEventView.fromJson(served.toJson());
+      for (final event in [served, stored]) {
+        expect(event.notificationType, 'turn_finished');
+        expect(event.collapseKey, 'session-outcome:claude:s1');
+        expect(event.seenAt, 42);
+      }
+    });
+
+    test(
+      'are absent from an older broker, and blank text counts as absent',
+      () {
+        final older = AttentionEvent.fromJson(base());
+        expect(older.notificationType, isNull);
+        expect(older.collapseKey, isNull);
+        expect(older.seenAt, isNull);
+        final blank = AttentionEvent.fromJson({
+          ...base(),
+          'notificationType': ' ',
+          'collapseKey': '',
+        });
+        expect(blank.notificationType, isNull);
+        expect(blank.collapseKey, isNull);
+      },
+    );
+  });
+
   group('AttentionEventView', () {
     test('parses read/dismiss cursor fields', () {
       final view = AttentionEventView.fromJson({

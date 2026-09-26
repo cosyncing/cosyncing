@@ -419,6 +419,28 @@ export class ReasonixObserveConnection implements SessionConnection {
     _snapshot?: StableReasonixSnapshot,
   ): void {}
 
+  /**
+   * Live-only frames Drive may emit immediately before one appended record's
+   * own frames. Called only by the primed append tail, never by replay, the
+   * initial snapshot publish, or a rewrite reload; Observe adds nothing.
+   */
+  protected appendedRecordPrefix(
+    _lineIndex: number,
+    _display: ReasonixDisplayEntry | undefined,
+    _messages: readonly AgentMessage[],
+    _snapshot: StableReasonixSnapshot,
+  ): readonly AgentMessage[] {
+    return [];
+  }
+
+  /** Called after a drain has published a snapshot and advanced the tail cursor past it. */
+  protected afterTailPublish(_read: ReasonixTranscriptRead): void {}
+
+  /** Whether the tail cursor is past this line, so the tail will never emit it again. */
+  protected tailHasPublished(lineIndex: number): boolean {
+    return this.primed && lineIndex < this.recordCount;
+  }
+
   /** Drive reconciles pending durable echoes before replay appends its remaining queue. */
   protected onHistorySnapshot(
     _records: readonly import('./mapping.ts').ReasonixTranscriptRecord[],
@@ -650,6 +672,7 @@ export class ReasonixObserveConnection implements SessionConnection {
             for (const issue of read.issues) this.emit({ type: 'notice', message: `Reasonix history: ${issue}.` });
           }
           this.setTailCursor(read, identity);
+          this.afterTailPublish(read);
           continue;
         }
 
@@ -668,10 +691,12 @@ export class ReasonixObserveConnection implements SessionConnection {
           });
           this.onTailRecord(record, lineIndex, display, messages, snapshot);
           this.applyRecordCorrelation(read, identity, record, lineIndex, display, messages);
+          for (const message of this.appendedRecordPrefix(lineIndex, display, messages, snapshot)) this.emit(message);
           for (const message of messages) this.emit(message);
         }
         for (const issue of read.issues) this.emit({ type: 'notice', message: `Reasonix history: ${issue}.` });
         this.setTailCursor(read, identity);
+        this.afterTailPublish(read);
       } while (this.drainAgain && !this.closed);
     } catch (error) {
       this.trace?.({ op: 'observe', detail: `tail drain failed: ${error instanceof Error ? error.message : String(error)}` });

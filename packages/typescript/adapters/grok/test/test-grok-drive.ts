@@ -40,6 +40,48 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
+type RunSummary = Extract<AgentMessage, { type: 'run-summary' }>;
+const runSummaries = (messages: readonly AgentMessage[]): RunSummary[] =>
+  messages.filter((message): message is RunSummary => message.type === 'run-summary');
+const terminalRuns = (messages: readonly AgentMessage[]): RunSummary[] =>
+  runSummaries(messages).filter((message) => message.status !== 'running');
+const runningRuns = (messages: readonly AgentMessage[]): RunSummary[] =>
+  runSummaries(messages).filter((message) => message.status === 'running');
+
+/** What the broker's attention policy makes of a live stream (attention-policy.ts,
+ *  `handleRunSummary`): a `done` or `error` notifies only when a `running` under the SAME key
+ *  arrived first and is still open; `cancelled` clears; anything else is silent. */
+function runNotifications(messages: readonly AgentMessage[]): RunSummary[] {
+  const open = new Set<string>();
+  const fired: RunSummary[] = [];
+  for (const message of runSummaries(messages)) {
+    if (message.status === 'running') {
+      open.add(message.key);
+      continue;
+    }
+    if (!open.delete(message.key)) continue;
+    if (message.status === 'done' || message.status === 'error') fired.push(message);
+  }
+  return fired;
+}
+
+/** The one pairing a driven turn owes the live stream: its single `running` comes before
+ *  EVERY terminal the turn published, under the key of the turn's first terminal, anchored to
+ *  the same turn and prompt, and no key is ever reopened after its terminal. */
+function pairedFirstTerminal(messages: readonly AgentMessage[], key: string): boolean {
+  const summaries = runSummaries(messages);
+  const running = summaries.filter((message) => message.status === 'running');
+  const runningIndex = summaries.findIndex((message) => message.status === 'running');
+  const firstTerminal = summaries.find((message) => message.status !== 'running');
+  const pairedTerminal = summaries.find((message) => message.status !== 'running' && message.key === key);
+  return running.length === 1
+    && running[0]?.key === key
+    && firstTerminal?.key === key
+    && summaries.findIndex((message) => message.status !== 'running') > runningIndex
+    && running[0]?.turnId === pairedTerminal?.turnId
+    && running[0]?.userMessageKey === pairedTerminal?.userMessageKey;
+}
+
 class FakeTransport implements GrokAcpTransport {
   alive = true;
   prompts: Array<{ sessionId: string; prompt: Array<{ type: string; text?: string }> }> = [];
@@ -893,8 +935,7 @@ try {
       /free usage exhausted/u,
     );
     const rejectedTurnId = `grok:${rejectedSession.id}:turn:${rejectedPromptId}`;
-    const rejectedSummaries = rejectedLive.filter((message): message is Extract<AgentMessage, { type: 'run-summary' }> =>
-      message.type === 'run-summary');
+    const rejectedSummaries = terminalRuns(rejectedLive);
     const rejectedPromptRow = rejectedLive.filter((message): message is Extract<AgentMessage, { type: 'user-message' }> =>
       message.type === 'user-message' && message.queued !== true).at(-1);
     check('a turn Grok rejected still reports the terminal state its log recorded',
@@ -904,6 +945,12 @@ try {
         && rejectedSummaries[0].userMessageKey === rejectedPromptRow?.key
         && rejectedPromptRow?.turnId === rejectedTurnId,
       JSON.stringify({ rejectedSummaries, rejectedPromptRow }));
+    check('a rejected driven Grok turn opens its native terminal with one running frame and notifies once as failed',
+      rejectedSummaries[0] !== undefined
+        && pairedFirstTerminal(rejectedLive, rejectedSummaries[0].key)
+        && runNotifications(rejectedLive).length === 1
+        && runNotifications(rejectedLive)[0]?.status === 'error',
+      JSON.stringify(runSummaries(rejectedLive)));
     check('a rejected Grok turn keeps its writer',
       rejectedConnection.driving && !rejectedTransport.closes.includes(true));
     await rejectedConnection.close();
@@ -1135,12 +1182,18 @@ try {
       storedSummaries.length === 1
         && storedSummaries[0]?.status === 'done'
         && fallbackTerminal.length === 1
-        && fallbackLive.filter((message) => message.type === 'run-summary'
-          && message.key === storedSummaries[0]?.key).length === 1
+        && terminalRuns(fallbackLive).filter((message) => message.key === storedSummaries[0]?.key).length === 1
         && fallbackObserverLive.some((message) => message.type === 'history-reset')
         && fallbackObserverHistory.filter((message) => message.type === 'run-summary'
           && message.key === storedSummaries[0]?.key).length === 1,
       JSON.stringify({ storedSummaries, fallbackTerminal, fallbackObserverLive, fallbackObserverHistory }));
+    const fallbackKey = storedSummaries[0]?.key ?? '';
+    check('a driven Grok turn closed by the ACP fallback opens that :acp-terminal key with one running frame first',
+      fallbackKey.endsWith(':acp-terminal')
+        && pairedFirstTerminal(fallbackLive, fallbackKey)
+        && runNotifications(fallbackLive).length === 1
+        && runNotifications(fallbackLive)[0]?.key === fallbackKey,
+      JSON.stringify(runSummaries(fallbackLive)));
 
     fallbackSummaryTree.append({
       timestamp: '2026-08-23T10:04:02.000Z',
@@ -1155,6 +1208,14 @@ try {
         },
       },
     });
+    await (fallbackConnection as unknown as { drain(): Promise<void> }).drain();
+    const lateNativeLive = terminalRuns(fallbackLive).filter((message) =>
+      message.key.includes('fallback-native-complete'));
+    check('the late native terminal after an ACP fallback is published without reopening the settled turn',
+      lateNativeLive.length === 1
+        && runningRuns(fallbackLive).length === 1
+        && runNotifications(fallbackLive).length === 1,
+      JSON.stringify(runSummaries(fallbackLive)));
     const nativeLateHistory = await fallbackConnection.getHistory();
     check('an id-less late native Grok completion replaces its exact causal fallback',
       !nativeLateHistory.some((message) => message.type === 'run-summary'
@@ -1239,8 +1300,7 @@ try {
     const usageLive: AgentMessage[] = [];
     usageConnection.subscribe((message) => usageLive.push(message));
     await usageConnection.sendPrompt({ text: 'usage prompt', clientMessageId: 'usage-client' });
-    const usageLiveSummaries = usageLive.filter((message): message is Extract<AgentMessage, { type: 'run-summary' }> =>
-      message.type === 'run-summary');
+    const usageLiveSummaries = terminalRuns(usageLive);
     const usageLiveUsers = usageLive.filter((message): message is Extract<AgentMessage, { type: 'user-message' }> =>
       message.type === 'user-message' && message.queued !== true);
     const usageTurnId = `grok:${usageSession.id}:turn:${usagePromptId}`;
@@ -1256,6 +1316,13 @@ try {
         && usageLiveSummaries[0].tokens?.output === 67
         && usageLiveSummaries[0].tokens?.cacheRead === 128,
       JSON.stringify(usageLiveSummaries));
+    check('a driven Grok turn opens its native :summary key with one running frame before the terminal',
+      usageLiveSummaries[0] !== undefined
+        && usageLiveSummaries[0].key.endsWith(':summary')
+        && pairedFirstTerminal(usageLive, usageLiveSummaries[0].key)
+        && runNotifications(usageLive).length === 1
+        && runNotifications(usageLive)[0]?.status === 'done',
+      JSON.stringify(runSummaries(usageLive)));
     const usagePromptKey = usageLiveUsers.at(-1)?.key;
     check('the summary names the key its prompt was emitted under, not the native one',
       typeof usagePromptKey === 'string'
@@ -1456,7 +1523,10 @@ try {
         },
       },
     );
+    const delayedLive: AgentMessage[] = [];
+    delayedConnection.subscribe((message) => delayedLive.push(message));
     await delayedConnection.sendPrompt({ text: 'turn a', clientMessageId: 'delayed-client-a' });
+    const delayedLiveA = delayedLive.length;
     turn = 'b';
     await delayedConnection.sendPrompt({ text: 'turn b', clientMessageId: 'delayed-client-b' });
     const delayedHistory = await delayedConnection.getHistory();
@@ -1480,9 +1550,373 @@ try {
           && message.userMessageKey === undefined
           && !delayedFallbacks.some((fallback) => fallback.turnId === message.turnId)),
       JSON.stringify({ delayedStored, delayedFallbacks }));
+    const liveTurnA = delayedLive.slice(0, delayedLiveA);
+    // The delayed id-less terminal belongs to turn a; if a drain wins the race it is published,
+    // unpaired, inside turn b's slice.
+    const liveTurnB = delayedLive.slice(delayedLiveA).filter((message) =>
+      !(message.type === 'run-summary' && message.key.includes('delayed-a-native-terminal')));
+    check('each of two serial driven Grok turns gets exactly one pairing, under its own terminal key',
+      delayedStored.length === 2
+        && pairedFirstTerminal(liveTurnA, delayedStored[0]!.key)
+        && pairedFirstTerminal(liveTurnB, delayedStored[1]!.key)
+        && delayedStored[0]!.key !== delayedStored[1]!.key
+        && runNotifications(delayedLive).map((message) => message.key).join('|')
+          === delayedStored.map((summary) => summary.key).join('|'),
+      JSON.stringify(runSummaries(delayedLive)));
     await delayedConnection.close();
   } finally {
     delayedIdlessTree.cleanup();
+  }
+
+  // The broker notifies "turn finished" only for a live `running` followed by a terminal under the
+  // same key. A driven turn's native terminal can reach the stream three ways before the settle read
+  // does: ACP's own `turn_completed` notification, a tail drain of the durable line, and then the
+  // settle itself. The pairing has to open the key once, ahead of every copy.
+  const raceTree = buildGrokFixtureTree();
+  try {
+    const raceSession = (await discoverGrokStore({ root: raceTree.root }))[0]!;
+    const raceTransport = new FakeTransport();
+    const raceConnection = await GrokDriveConnection.fromTransport(
+      raceSession,
+      driveInfo(raceSession.id, raceSession.cwd),
+      raceTransport,
+      { replayCorrelations: new GrokReplayCorrelationRegistry() },
+    );
+    const raceInternal = raceConnection as unknown as InternalDrive & { drain(): Promise<void> };
+    const racePromptId = 'race-prompt-5f1d';
+    raceTransport.onPrompt = async (params) => {
+      const rows = [
+        {
+          timestamp: '2026-08-23T10:07:00.000Z',
+          method: 'session/update',
+          params: {
+            sessionId: raceSession.id,
+            _meta: { eventId: 'race-user' },
+            update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: params.prompt[0]?.text } },
+          },
+        },
+        {
+          timestamp: '2026-08-23T10:07:01.000Z',
+          method: 'session/update',
+          params: {
+            sessionId: raceSession.id,
+            _meta: { eventId: 'race-answer', promptId: racePromptId },
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'race answer' } },
+          },
+        },
+        {
+          timestamp: '2026-08-23T10:07:02.000Z',
+          method: '_x.ai/session/update',
+          params: {
+            sessionId: raceSession.id,
+            _meta: { eventId: 'race-terminal' },
+            update: {
+              sessionUpdate: 'turn_completed',
+              prompt_id: racePromptId,
+              stop_reason: 'end_turn',
+              usage: { inputTokens: 9, outputTokens: 3 },
+            },
+          },
+        },
+      ];
+      for (const row of rows) {
+        raceInternal.acceptUpdate(row.method, row.params as AcpSessionUpdateParams);
+        raceTree.append(row);
+      }
+      await raceInternal.drain();
+      return { stopReason: 'end_turn' };
+    };
+    const raceLive: AgentMessage[] = [];
+    raceConnection.subscribe((message) => raceLive.push(message));
+    await raceConnection.sendPrompt({ text: 'race prompt', clientMessageId: 'race-client' });
+    const raceKey = `grok:${raceSession.id}:event:race-terminal:summary`;
+    const raceTerminals = terminalRuns(raceLive);
+    check('a driven Grok terminal delivered by ACP, the tail drain and the settle read gets one running, ahead of all three',
+      raceTerminals.length === 3
+        && raceTerminals.every((message) => message.key === raceKey && message.status === 'done')
+        && pairedFirstTerminal(raceLive, raceKey)
+        && runNotifications(raceLive).length === 1
+        && runNotifications(raceLive)[0]?.turnId === `grok:${raceSession.id}:turn:${racePromptId}`,
+      JSON.stringify(runSummaries(raceLive)));
+    const raceHistory = await raceConnection.getHistory();
+    check('history never carries the live-only running frame',
+      runningRuns(raceHistory).length === 0 && terminalRuns(raceHistory).some((message) => message.key === raceKey),
+      JSON.stringify(runSummaries(raceHistory)));
+
+    // A second driven turn on the same connection gets its own single pairing.
+    const secondStart = raceLive.length;
+    raceTransport.onPrompt = async (params) => {
+      raceTree.append({
+        timestamp: '2026-08-23T10:07:10.000Z',
+        method: 'session/update',
+        params: {
+          sessionId: raceSession.id,
+          _meta: { eventId: 'race-second-user' },
+          update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: params.prompt[0]?.text } },
+        },
+      });
+      raceTree.append({
+        timestamp: '2026-08-23T10:07:11.000Z',
+        method: '_x.ai/session/update',
+        params: {
+          sessionId: raceSession.id,
+          _meta: { eventId: 'race-second-terminal' },
+          update: { sessionUpdate: 'turn_completed', prompt_id: 'race-second-prompt', stop_reason: 'end_turn' },
+        },
+      });
+      return { stopReason: 'end_turn' };
+    };
+    await raceConnection.sendPrompt({ text: 'second race prompt', clientMessageId: 'race-client-2' });
+    const secondKey = `grok:${raceSession.id}:event:race-second-terminal:summary`;
+    check('the next driven turn opens only its own key, and the settled key is never reopened',
+      pairedFirstTerminal(raceLive.slice(secondStart), secondKey)
+        && runningRuns(raceLive).filter((message) => message.key === raceKey).length === 1
+        && runNotifications(raceLive).map((message) => message.key).join('|') === `${raceKey}|${secondKey}`,
+      JSON.stringify(runSummaries(raceLive)));
+
+    // A later turn whose terminal reuses an already-published event id lands on a key whose
+    // terminal the stream has already seen. Reopening it would make the broker treat a stale key
+    // as a fresh run, so that turn stays unpaired.
+    raceTransport.onPrompt = async (params) => {
+      raceTree.append({
+        timestamp: '2026-08-23T10:07:20.000Z',
+        method: 'session/update',
+        params: {
+          sessionId: raceSession.id,
+          _meta: { eventId: 'race-third-user' },
+          update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: params.prompt[0]?.text } },
+        },
+      });
+      raceTree.append({
+        timestamp: '2026-08-23T10:07:21.000Z',
+        method: '_x.ai/session/update',
+        params: {
+          sessionId: raceSession.id,
+          _meta: { eventId: 'race-terminal' },
+          update: { sessionUpdate: 'turn_completed', prompt_id: 'race-third-prompt', stop_reason: 'end_turn' },
+        },
+      });
+      return { stopReason: 'end_turn' };
+    };
+    const thirdStart = raceLive.length;
+    await raceConnection.sendPrompt({ text: 'third race prompt', clientMessageId: 'race-client-3' });
+    check('a terminal key already published live is never reopened by a later running',
+      terminalRuns(raceLive.slice(thirdStart)).some((message) => message.key === raceKey)
+        && runningRuns(raceLive.slice(thirdStart)).length === 0
+        && runningRuns(raceLive).filter((message) => message.key === raceKey).length === 1,
+      JSON.stringify(runSummaries(raceLive.slice(thirdStart))));
+    await raceConnection.close();
+  } finally {
+    raceTree.cleanup();
+  }
+
+  // ACP can deliver `turn_completed` before Grok's durable line lands. The settle read then proves
+  // the turn but finds no native terminal, so the drive also publishes its `:acp-terminal`
+  // fallback. The running must still open the FIRST of the two -- the live native one ACP bound to
+  // this prompt -- and the durable copy that lands later must not reopen it.
+  const liveFirstTree = buildGrokFixtureTree();
+  try {
+    const liveFirstSession = (await discoverGrokStore({ root: liveFirstTree.root }))[0]!;
+    const liveFirstTransport = new FakeTransport();
+    const liveFirstConnection = await GrokDriveConnection.fromTransport(
+      liveFirstSession,
+      driveInfo(liveFirstSession.id, liveFirstSession.cwd),
+      liveFirstTransport,
+      { replayCorrelations: new GrokReplayCorrelationRegistry() },
+    );
+    const liveFirstInternal = liveFirstConnection as unknown as InternalDrive & { drain(): Promise<void> };
+    const liveFirstPromptId = 'live-first-prompt-2c77';
+    const liveFirstTerminalRow = {
+      timestamp: '2026-08-23T10:08:02.000Z',
+      method: '_x.ai/session/update',
+      params: {
+        sessionId: liveFirstSession.id,
+        _meta: { eventId: 'live-first-terminal' },
+        update: { sessionUpdate: 'turn_completed', prompt_id: liveFirstPromptId, stop_reason: 'end_turn' },
+      },
+    };
+    liveFirstTransport.onPrompt = async (params) => {
+      const rows = [
+        {
+          timestamp: '2026-08-23T10:08:00.000Z',
+          method: 'session/update',
+          params: {
+            sessionId: liveFirstSession.id,
+            _meta: { eventId: 'live-first-user' },
+            update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: params.prompt[0]?.text } },
+          },
+        },
+        {
+          timestamp: '2026-08-23T10:08:01.000Z',
+          method: 'session/update',
+          params: {
+            sessionId: liveFirstSession.id,
+            _meta: { eventId: 'live-first-answer', promptId: liveFirstPromptId },
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'live first answer' } },
+          },
+        },
+      ];
+      for (const row of rows) {
+        liveFirstInternal.acceptUpdate(row.method, row.params as AcpSessionUpdateParams);
+        liveFirstTree.append(row);
+      }
+      liveFirstInternal.acceptUpdate(liveFirstTerminalRow.method, liveFirstTerminalRow.params as AcpSessionUpdateParams);
+      return { stopReason: 'end_turn' };
+    };
+    const liveFirstLive: AgentMessage[] = [];
+    liveFirstConnection.subscribe((message) => liveFirstLive.push(message));
+    await liveFirstConnection.sendPrompt({ text: 'live first prompt', clientMessageId: 'live-first-client' });
+    const liveFirstKey = `grok:${liveFirstSession.id}:event:live-first-terminal:summary`;
+    const liveFirstFallback = terminalRuns(liveFirstLive).find((message) => message.key.endsWith(':acp-terminal'));
+    liveFirstTree.append(liveFirstTerminalRow);
+    await liveFirstInternal.drain();
+    check('a live native terminal that beats its durable line is the one the running opens, not the later fallback',
+      liveFirstFallback !== undefined
+        && terminalRuns(liveFirstLive).filter((message) => message.key === liveFirstKey).length === 2
+        && pairedFirstTerminal(liveFirstLive, liveFirstKey)
+        && runNotifications(liveFirstLive).map((message) => message.key).join('|') === liveFirstKey,
+      JSON.stringify(runSummaries(liveFirstLive)));
+    await liveFirstConnection.close();
+  } finally {
+    liveFirstTree.cleanup();
+  }
+
+  // Nothing this connection did not start and watch run may open a run. A terminal that reaches an
+  // idle drive (tail catch-up or a stray ACP frame), an Observe tail, or an unprimed first drain
+  // is published as it always was, and stays silent.
+  const catchUpTree = buildGrokFixtureTree();
+  try {
+    const catchUpSession = (await discoverGrokStore({ root: catchUpTree.root }))[0]!;
+    const catchUpTransport = new FakeTransport();
+    const catchUpConnection = await GrokDriveConnection.fromTransport(
+      catchUpSession,
+      driveInfo(catchUpSession.id, catchUpSession.cwd),
+      catchUpTransport,
+    );
+    const catchUpInternal = catchUpConnection as unknown as InternalDrive & { drain(): Promise<void> };
+    const catchUpLive: AgentMessage[] = [];
+    catchUpConnection.subscribe((message) => catchUpLive.push(message));
+    catchUpTree.append({
+      timestamp: '2026-08-23T10:09:00.000Z',
+      method: '_x.ai/session/update',
+      params: {
+        sessionId: catchUpSession.id,
+        _meta: { eventId: 'catch-up-terminal' },
+        update: { sessionUpdate: 'turn_completed', prompt_id: 'catch-up-prompt', stop_reason: 'end_turn' },
+      },
+    });
+    await catchUpInternal.drain();
+    catchUpInternal.acceptUpdate('_x.ai/session/update', {
+      sessionId: catchUpSession.id,
+      _meta: { eventId: 'stray-live-terminal' },
+      update: { sessionUpdate: 'turn_completed', prompt_id: 'stray-prompt', stop_reason: 'end_turn' },
+    } as AcpSessionUpdateParams);
+    check('a terminal reaching an idle drive by catch-up or a stray ACP frame never opens a run',
+      terminalRuns(catchUpLive).some((message) => message.key.includes('catch-up-terminal'))
+        && terminalRuns(catchUpLive).some((message) => message.key.includes('stray-live-terminal'))
+        && runningRuns(catchUpLive).length === 0
+        && runNotifications(catchUpLive).length === 0
+        && catchUpConnection.driving,
+      JSON.stringify(runSummaries(catchUpLive)));
+    await catchUpConnection.close();
+
+    const observeOnlyInfo = { ...driveInfo(catchUpSession.id, catchUpSession.cwd), attachMode: 'observe' as const };
+    const primedObserver = new GrokObserveConnection({ session: catchUpSession, info: structuredClone(observeOnlyInfo) });
+    await primedObserver.getHistory();
+    const primedObserverLive: AgentMessage[] = [];
+    primedObserver.subscribe((message) => primedObserverLive.push(message));
+    const unprimedObserver = new GrokObserveConnection({ session: catchUpSession, info: structuredClone(observeOnlyInfo) });
+    const unprimedObserverLive: AgentMessage[] = [];
+    unprimedObserver.subscribe((message) => unprimedObserverLive.push(message));
+    catchUpTree.append({
+      timestamp: '2026-08-23T10:09:10.000Z',
+      method: 'session/update',
+      params: {
+        sessionId: catchUpSession.id,
+        _meta: { eventId: 'terminal-typed-user' },
+        update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'typed in the Grok terminal' } },
+      },
+    });
+    catchUpTree.append({
+      timestamp: '2026-08-23T10:09:11.000Z',
+      method: '_x.ai/session/update',
+      params: {
+        sessionId: catchUpSession.id,
+        _meta: { eventId: 'terminal-typed-terminal' },
+        update: { sessionUpdate: 'turn_completed', prompt_id: 'terminal-typed-prompt', stop_reason: 'end_turn' },
+      },
+    });
+    await (primedObserver as unknown as { drain(): Promise<void> }).drain();
+    await (unprimedObserver as unknown as { drain(): Promise<void> }).drain();
+    check('Observe tails and an unprimed first drain publish no running for a turn they only read',
+      terminalRuns(primedObserverLive).some((message) => message.key.includes('terminal-typed-terminal'))
+        && runningRuns(primedObserverLive).length === 0
+        && runSummaries(unprimedObserverLive).length === 0,
+      JSON.stringify({ primed: runSummaries(primedObserverLive), unprimed: runSummaries(unprimedObserverLive) }));
+    await primedObserver.close();
+    await unprimedObserver.close();
+  } finally {
+    catchUpTree.cleanup();
+  }
+
+  // A terminal held for the owned turn describes the history it was read from. When that history is
+  // rewritten mid-turn, the reader reloads without it, the turn is no longer provable, and neither
+  // the stale terminal nor a running may follow the reset.
+  const heldRewriteTree = buildGrokFixtureTree();
+  try {
+    const heldRewriteSession = (await discoverGrokStore({ root: heldRewriteTree.root }))[0]!;
+    const heldRewriteTransport = new FakeTransport();
+    const heldRewriteConnection = await GrokDriveConnection.fromTransport(
+      heldRewriteSession,
+      driveInfo(heldRewriteSession.id, heldRewriteSession.cwd),
+      heldRewriteTransport,
+    );
+    const heldRewriteInternal = heldRewriteConnection as unknown as { drain(): Promise<void> };
+    heldRewriteTransport.onPrompt = async (params) => {
+      heldRewriteTree.append({
+        timestamp: '2026-08-23T10:10:00.000Z',
+        method: 'session/update',
+        params: {
+          sessionId: heldRewriteSession.id,
+          _meta: { eventId: 'held-rewrite-user' },
+          update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: params.prompt[0]?.text } },
+        },
+      });
+      heldRewriteTree.append({
+        timestamp: '2026-08-23T10:10:01.000Z',
+        method: '_x.ai/session/update',
+        params: {
+          sessionId: heldRewriteSession.id,
+          _meta: { eventId: 'held-rewrite-terminal' },
+          update: { sessionUpdate: 'turn_completed', prompt_id: 'held-rewrite-prompt', stop_reason: 'end_turn' },
+        },
+      });
+      await heldRewriteInternal.drain();
+      const rewritten = structuredClone(heldRewriteTree.rows);
+      const opening = rewritten[0]?.params as { update?: { content?: { text?: string } } } | undefined;
+      if (opening?.update?.content) opening.update.content.text = 'rewritten opening prompt';
+      heldRewriteTree.writeRows(rewritten);
+      await heldRewriteInternal.drain();
+      return { stopReason: 'end_turn' };
+    };
+    const heldRewriteLive: AgentMessage[] = [];
+    heldRewriteConnection.subscribe((message) => heldRewriteLive.push(message));
+    let heldRewriteRejected = false;
+    try {
+      await heldRewriteConnection.sendPrompt({ text: 'held across a rewrite', clientMessageId: 'held-rewrite-client' });
+    } catch { heldRewriteRejected = true; }
+    const resetIndex = heldRewriteLive.findIndex((message) => message.type === 'history-reset');
+    check('a mid-turn history rewrite drops the held terminal and opens no run',
+      heldRewriteRejected
+        && resetIndex >= 0
+        && !heldRewriteConnection.driving
+        && runningRuns(heldRewriteLive).length === 0
+        && runSummaries(heldRewriteLive.slice(resetIndex)).length === 0,
+      JSON.stringify(heldRewriteLive.map((message) => message.type === 'run-summary'
+        ? `${message.type}:${message.status}:${message.key}` : message.type)));
+    await heldRewriteConnection.close();
+  } finally {
+    heldRewriteTree.cleanup();
   }
 
   const stopTree = buildGrokFixtureTree();

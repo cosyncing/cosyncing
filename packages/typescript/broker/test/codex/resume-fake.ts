@@ -1642,10 +1642,10 @@ for await (const chunk of Bun.stdin.stream()) {
         && m.turnId === 'native-completion'), 15000);
       await Promise.all(attentionWork);
       await waitFor(() => attention.store.findByDedupeKey(
-        'run-finished:codex:native-session:native-completion',
+        'run-finished:codex:native-session:codex:run:native-completion',
       ) !== undefined, 15000);
       const event = attention.store.findByDedupeKey(
-        'run-finished:codex:native-session:native-completion',
+        'run-finished:codex:native-session:codex:run:native-completion',
       );
       const feed = await attention.getEvents({
         after: 0,

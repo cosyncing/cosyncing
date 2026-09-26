@@ -239,7 +239,7 @@
     },
     {
       "id": "broker.sync-degraded",
-      "description": "Real control loss emits and recovers degradation without false positives."
+      "description": "Real control loss and recovery raise no attention event, and sync-degraded rows an older broker left active are resolved once on start."
     },
     {
       "id": "broker.live-session-coherence",
@@ -292,6 +292,62 @@
     {
       "id": "broker.notifications-bulk-dismiss",
       "description": "Notification bulk clear remains bounded, durable, and revision-safe."
+    },
+    {
+      "id": "broker.attention-policy",
+      "description": "Attention policy turns live permission, question, run, and goal evidence into durable events, keeps event text content-free, drops unfinished evidence on observation loss, and reconciles runtime-update occurrences across restart."
+    },
+    {
+      "id": "broker.attention-store",
+      "description": "The attention store keeps cursors, revisions, and per-client read and dismiss state durable and deduplicated."
+    },
+    {
+      "id": "broker.attention-service",
+      "description": "The attention service long-polls without missing a cursor wake, isolates clients, preserves native message order, validates input, and reports store health."
+    },
+    {
+      "id": "broker.attention-reminders",
+      "description": "Every attention event alerts once: no stage follows the first on a timer, a stage an older broker stored is never advanced, and delivery retries stop once an event resolves or is dismissed."
+    },
+    {
+      "id": "broker.attention-retention",
+      "description": "Resolved attention events and delivery records are pruned by explicit retention and count limits."
+    },
+    {
+      "id": "broker.attention-pending-withdrawn",
+      "description": "A request the session's own connection drops from its pending list without a resolution frame resolves its attention event; a raced read, a connection that can omit open requests, and a fresh connection never withdraw one."
+    },
+    {
+      "id": "broker.attention-notification-fields",
+      "description": "Served attention events carry the notification type and slot the client's mapping gives for every shared case; the first read or dismissal marks an event seen for all clients without re-presenting it or reopening a dismissal, a later alert stage or reopening makes it unseen, and a background-origin run never notifies."
+    },
+    {
+      "id": "broker.push-wake",
+      "description": "A wake registration is owned by a principal and dropped when ownerless; peer registrations need stable ids, are bounded, idempotent and generation-checked, and a peer's revocation removes only its own; global and write-rate limits refuse with 429 rather than evicting; the token is redacted in listings; an opaque wake carries no caller-controlled reason or payload, and its dispatch times out instead of hanging."
+    },
+    {
+      "id": "broker.wake-coalescer",
+      "description": "Wakes per device coalesce: the leading wake is sent at once and a burst adds at most one trailing wake, devices coalesce independently, a trailing wake is revalidated so a revoked peer is never woken, and stopping cancels pending wakes and settles every waiter without throwing to callers."
+    },
+    {
+      "id": "broker.web-push",
+      "description": "A Web Push is RFC 8291 aes128gcm (byte-exact against Appendix A) under an RFC 8292 ES256 VAPID token for the endpoint origin, signed by one persistent 0600 broker key that a corrupt file never silently replaces. Only https endpoints on the known push services (plus operator-listed hosts) with a valid P-256 key and 16-byte auth register, and no route shows the endpoint path, keys, or client context. A delivery carries only the registration's type title, a 48-grapheme session title, the collapse-key tag, the stage, the action, and the client context; it is skipped for a resolved, unpresented, device-read, or seen-before-reminder event and for any alert raised before the registration, revokes on 404/410 (logging the service's bounded reason without the endpoint path), completes on other refusals, and retries through the scheduler on 429, 5xx, and network failure, while apns and fcm keep the opaque wake."
+    },
+    {
+      "id": "broker.attention-broker",
+      "description": "The broker attention, health, and quota routes require authentication, long-poll correctly, and never disclose local paths; anonymous liveness carries no health status."
+    },
+    {
+      "id": "broker.attention-health-corruption",
+      "description": "A corrupt attention store is quarantined, reported as degraded to authenticated callers only, and recovers across restart."
+    },
+    {
+      "id": "broker.broker-health-attention",
+      "description": "Broker-health attention episodes reconcile from durable observations after restart."
+    },
+    {
+      "id": "broker.security-attention",
+      "description": "Repeated authentication failures raise one thresholded, windowed, content-free, rate-limited attention event."
     },
     {
       "id": "broker.fork-agent-owned",
@@ -364,6 +420,10 @@
     {
       "id": "broker.claude-transcript",
       "description": "Claude transcript replay and live delivery share exact identities."
+    },
+    {
+      "id": "broker.claude-runtime",
+      "description": "Claude's runtime tracker opens each live turn with one running run-summary and closes it under the same key, with runtime, usage and cost; history turns fence without fabricated completion times, and a background continuation opens and closes as its own run."
     },
     {
       "id": "broker.claude-driven-queue",
@@ -794,6 +854,14 @@
       "description": "The service-worker cache model passes deterministic mutation tests."
     },
     {
+      "id": "browser.notification-click",
+      "description": "The service-worker notification-click router passes deterministic mutation tests."
+    },
+    {
+      "id": "browser.web-push-notification",
+      "description": "The service-worker Web Push handler shows each push under the app's own tag and alert, and passes deterministic mutation tests."
+    },
+    {
       "id": "browser.update-handoff",
       "description": "A verified web update hands every open tab over automatically, or defers silently."
     },
@@ -841,6 +909,8 @@
         "dart-broker-crypto-test",
         "web-browser",
         "web-cache",
+        "web-notification-click",
+        "web-push-notification",
         "web-update-handoff",
         "source-stability"
       ]
@@ -1328,6 +1398,20 @@
         "broker.drive-restore",
         "broker.request-resolution",
         "broker.notifications-bulk-dismiss",
+        "broker.attention-policy",
+        "broker.attention-store",
+        "broker.attention-service",
+        "broker.attention-reminders",
+        "broker.attention-retention",
+        "broker.attention-pending-withdrawn",
+        "broker.attention-notification-fields",
+        "broker.web-push",
+        "broker.push-wake",
+        "broker.wake-coalescer",
+        "broker.attention-broker",
+        "broker.attention-health-corruption",
+        "broker.broker-health-attention",
+        "broker.security-attention",
         "broker.fork-agent-owned",
         "broker.draft-sync",
         "broker.draft-durability",
@@ -1341,6 +1425,7 @@
         "broker.codex-rollout",
         "broker.claude-transcript",
         "broker.claude-driven-queue",
+        "broker.claude-runtime",
         "broker.claude-roster-subagents",
         "broker.claude-recency",
         "broker.opencode-identity",
@@ -1522,6 +1607,20 @@
             "opencode-retry-detail",
             "request-resolution-hygiene",
             "attention-bulk-dismiss",
+            "attention-policy",
+            "attention-store",
+            "attention-service",
+            "attention-reminders",
+            "attention-retention",
+            "attention-pending-withdrawn",
+            "attention-notification-fields",
+            "web-push",
+            "push-wake",
+            "wake-coalescer",
+            "attention-broker",
+            "attention-health-corruption",
+            "broker-health-attention",
+            "security-attention",
             "draft-sync-fanout",
             "draft-durability",
             "protocol-journal",
@@ -1535,6 +1634,7 @@
             "claude-transcript-mapping",
             "claude-artifacts",
             "claude-driven-queue",
+            "claude-runtime",
             "claude-roster-subagents",
             "claude-recency",
             "control-boundaries",
@@ -2222,6 +2322,178 @@
           ]
         },
         {
+          "id": "attention-policy",
+          "claimId": "broker.attention-policy",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-policy"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-policy.ts"
+          ]
+        },
+        {
+          "id": "attention-store",
+          "claimId": "broker.attention-store",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-store"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-store.ts"
+          ]
+        },
+        {
+          "id": "attention-service",
+          "claimId": "broker.attention-service",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-service"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-service.ts"
+          ]
+        },
+        {
+          "id": "attention-reminders",
+          "claimId": "broker.attention-reminders",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-reminders"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-reminders.ts"
+          ]
+        },
+        {
+          "id": "attention-retention",
+          "claimId": "broker.attention-retention",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-retention"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-retention.ts"
+          ]
+        },
+        {
+          "id": "attention-pending-withdrawn",
+          "claimId": "broker.attention-pending-withdrawn",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-pending-withdrawn"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-pending-withdrawn.ts"
+          ]
+        },
+        {
+          "id": "attention-notification-fields",
+          "claimId": "broker.attention-notification-fields",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-notification-fields"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-notification-fields.ts",
+            "contracts/fixtures/attention-notification-types.json"
+          ]
+        },
+        {
+          "id": "push-wake",
+          "claimId": "broker.push-wake",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-push-wake"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/src/transport/push-wake.ts",
+            "packages/typescript/broker/test/broker/test-push-wake.ts"
+          ]
+        },
+        {
+          "id": "wake-coalescer",
+          "claimId": "broker.wake-coalescer",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-wake-coalescer"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-wake-coalescer.ts"
+          ]
+        },
+        {
+          "id": "web-push",
+          "claimId": "broker.web-push",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-web-push"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/src/transport/web-push.ts",
+            "packages/typescript/broker/src/transport/web-push-subscription.ts",
+            "packages/typescript/broker/test/broker/test-web-push.ts"
+          ]
+        },
+        {
+          "id": "attention-broker",
+          "claimId": "broker.attention-broker",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-broker"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-broker.ts"
+          ]
+        },
+        {
+          "id": "attention-health-corruption",
+          "claimId": "broker.attention-health-corruption",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-attention-health-corruption"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-attention-health-corruption.ts"
+          ]
+        },
+        {
+          "id": "broker-health-attention",
+          "claimId": "broker.broker-health-attention",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-broker-health-attention"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-broker-health-attention.ts"
+          ]
+        },
+        {
+          "id": "security-attention",
+          "claimId": "broker.security-attention",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-security-attention"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-security-attention.ts"
+          ]
+        },
+        {
           "id": "fork-agent-owned",
           "claimId": "broker.fork-agent-owned",
           "command": [
@@ -2404,6 +2676,18 @@
           ],
           "sourceOwners": [
             "packages/typescript/adapters/claude/test/test-claude-jsonl.ts"
+          ]
+        },
+        {
+          "id": "claude-runtime",
+          "claimId": "broker.claude-runtime",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-runtime"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-runtime.ts"
           ]
         },
         {
@@ -3848,6 +4132,70 @@
       "platformExclusions": [],
       "sourceOwners": [
         "scripts/client/tests/test-web-static-cache.ts"
+      ]
+    },
+    {
+      "id": "web-notification-click",
+      "releaseDomain": "web runtime",
+      "claimIds": [
+        "browser.notification-click"
+      ],
+      "command": [
+        "bun",
+        "run",
+        "test:web-notification-click"
+      ],
+      "focusedDiagnostics": [
+        [
+          "bun",
+          "run",
+          "test:web-notification-click"
+        ]
+      ],
+      "dependencies": [],
+      "expectedArtifacts": [
+        {
+          "path": "output/check/logs/web-notification-click.log",
+          "kind": "log"
+        }
+      ],
+      "timeoutClass": "short",
+      "resourceClass": "standard",
+      "platformExclusions": [],
+      "sourceOwners": [
+        "scripts/client/tests/test-web-notification-click.ts"
+      ]
+    },
+    {
+      "id": "web-push-notification",
+      "releaseDomain": "web runtime",
+      "claimIds": [
+        "browser.web-push-notification"
+      ],
+      "command": [
+        "bun",
+        "run",
+        "test:web-push-notification"
+      ],
+      "focusedDiagnostics": [
+        [
+          "bun",
+          "run",
+          "test:web-push-notification"
+        ]
+      ],
+      "dependencies": [],
+      "expectedArtifacts": [
+        {
+          "path": "output/check/logs/web-push-notification.log",
+          "kind": "log"
+        }
+      ],
+      "timeoutClass": "short",
+      "resourceClass": "standard",
+      "platformExclusions": [],
+      "sourceOwners": [
+        "scripts/client/tests/test-web-push-notification.ts"
       ]
     },
     {

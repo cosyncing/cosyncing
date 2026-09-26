@@ -2965,7 +2965,8 @@ void main() {
     });
 
     test(
-      'invokes notification hook for actionable live events and ignores replay/history',
+      'records actionable live events without posting local notifications '
+      '(the durable attention feed owns delivery)',
       () async {
         final localConnection = FakeSessionDetailConnection();
         final fakeSink = CollectingNotificationSink();
@@ -2994,129 +2995,19 @@ void main() {
           )
           ..emitEvent(
             const MessageWireEvent(
-              seq: 0,
-              message: AgentMessage(
-                type: AgentMessageType.permissionRequest,
-                raw: {'type': 'permission-request'},
-              ),
-            ),
-          )
-          ..emitEvent(
-            const MessageWireEvent(
               seq: 2,
               message: AgentMessage(
                 type: AgentMessageType.modelOutput,
                 raw: {'type': 'model-output'},
               ),
             ),
-          )
-          ..emitEvent(
-            const NoticeWireEvent(message: 'status update'),
-          )
-          ..emitEvent(
-            const HistoryWireEvent(
-              messages: [
-                AgentMessage(
-                  type: AgentMessageType.userMessage,
-                  raw: {'type': 'user-message'},
-                ),
-              ],
-              reset: true,
-            ),
           );
         await Future<void>.delayed(Duration.zero);
 
         final state = localContainer.read(sessionDetailControllerProvider(key));
-        expect(state.events, hasLength(5));
-        expect(fakeSink.requests, hasLength(1));
-        expect(
-          fakeSink.requests.single.category,
-          BrokerNotificationCategory.actionRequired,
-        );
-      },
-    );
-
-    test(
-      'does not block event recording when notification sink throws',
-      () async {
-        final localConnection = FakeSessionDetailConnection();
-        final failingSink = CollectingNotificationSink(
-          shouldThrowOnShow: true,
-        );
-        final localContainer = buildControllerContainerWithNotificationHooks(
-          key: key,
-          connection: localConnection,
-          picker: FakeControllerAttachmentPicker(),
-          sink: failingSink,
-        );
-        addTearDown(localContainer.dispose);
-        keepSessionDetailAlive(localContainer, key);
-
-        await localContainer
-            .read(sessionDetailControllerProvider(key).notifier)
-            .attach();
-
-        localConnection.emitEvent(
-          const MessageWireEvent(
-            seq: 3,
-            message: AgentMessage(
-              type: AgentMessageType.permissionRequest,
-              raw: {'type': 'permission-request'},
-            ),
-          ),
-        );
-        await Future<void>.delayed(Duration.zero);
-
-        final state = localContainer.read(sessionDetailControllerProvider(key));
-        expect(state.events, hasLength(1));
-        expect(state.eventSummaries, ['message: permission-request']);
-        expect(failingSink.requests, hasLength(1));
-        expect(
-          failingSink.requests.single.title,
-          'Session requires your response',
-        );
-      },
-    );
-
-    test(
-      'suppresses legacy live notifications while durable feed delivery is '
-      'active',
-      () async {
-        final localConnection = FakeSessionDetailConnection();
-        final fakeSink = CollectingNotificationSink();
-        final localContainer = buildControllerContainerWithNotificationHooks(
-          key: key,
-          connection: localConnection,
-          picker: FakeControllerAttachmentPicker(),
-          sink: fakeSink,
-        );
-        addTearDown(localContainer.dispose);
-        localContainer
-            .read(attentionFeedDeliveryActiveProvider.notifier)
-            .state = const {
-          'local',
-        };
-        keepSessionDetailAlive(localContainer, key);
-
-        await localContainer
-            .read(sessionDetailControllerProvider(key).notifier)
-            .attach();
-        localConnection.emitEvent(
-          const MessageWireEvent(
-            seq: 1,
-            message: AgentMessage(
-              type: AgentMessageType.permissionRequest,
-              raw: {'type': 'permission-request'},
-            ),
-          ),
-        );
-        await Future<void>.delayed(Duration.zero);
-
-        expect(
-          localContainer.read(sessionDetailControllerProvider(key)).events,
-          hasLength(1),
-        );
+        expect(state.events, hasLength(2));
         expect(fakeSink.requests, isEmpty);
+        expect(fakeSink.cleared, isEmpty);
       },
     );
   });

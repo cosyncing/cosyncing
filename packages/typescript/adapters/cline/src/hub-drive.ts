@@ -488,6 +488,25 @@ export class ClineHubDriveConnection implements SessionConnection {
         };
         this.recordOwnership(settled.messages, settled.identity, terminalSummary);
         this.publishPromptCorrelation(correlation);
+        // The broker raises "turn finished" / "turn failed" only for a run key it saw `running`
+        // on this live stream first, so a terminal alone notified nobody. The key and the turn id
+        // both name the settled native user row, which is known only now. An earlier frame would
+        // need a provisional key and turn id, and the policy stamps its event with the running
+        // frame's turn id, so the notification would point at a turn no row carries; a turn that
+        // then never settles (Stop, demotion) would also leave that run open. So it goes out
+        // once, here, for a turn this connection ran and settled itself: its own run.start
+        // reply, or its own run.started before the terminal event. History and the shared
+        // registry keep terminal rows only, so no reload or replacement connection sees it. It
+        // precedes the history-reset so the resync replaces it with the durable terminal.
+        if (this.activeTurn) {
+          this.emit({
+            type: 'run-summary',
+            key: terminalSummary.key,
+            turnId: terminalSummary.turnId,
+            status: 'running',
+            source: 'cline',
+          });
+        }
         this.emit({ type: 'history-reset' });
         this.emit(terminalSummary);
         if (finishReason === 'failed' || finishReason === 'error') {

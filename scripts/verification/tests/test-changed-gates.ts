@@ -26,7 +26,7 @@ function checkCompleteFallback(path: string): void {
   }
 }
 
-const app = ['client', 'web-browser', 'web-cache', 'web-update-handoff'];
+const app = ['client', 'web-browser', 'web-cache', 'web-notification-click', 'web-push-notification', 'web-update-handoff'];
 const client = [
   'dart-broker-client-dependencies',
   'dart-broker-client-analyze',

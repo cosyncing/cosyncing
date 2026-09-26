@@ -1028,6 +1028,77 @@ void main() {
         },
       );
 
+      test('registers a browser Web Push subscription', () async {
+        dioAdapter.onPost(
+          'http://127.0.0.1:7734/api/push/wake-tokens',
+          data: {
+            'platform': 'webpush',
+            'token': '',
+            'deviceId': 'feed-client-1',
+            'subscription': {
+              'endpoint': 'https://fcm.googleapis.com/fcm/send/abc',
+              'keys': {'p256dh': 'BPUB', 'auth': 'AUTH'},
+            },
+            'presentation': {
+              'turn_finished': {'title': 'Turn finished'},
+              'question': {'title': 'Question', 'typeOnly': true},
+              'turn_failed': {'title': 'Turn failed', 'silent': true},
+            },
+            'context': '{"brokerProfileId":"p1"}',
+          },
+          (server) => server.reply(201, {
+            'ok': true,
+            'registration': {
+              'deviceId': 'feed-client-1',
+              'platform': 'webpush',
+              'tokenPreview': 'https://fcm.googleapis.com',
+              'presentationTypes': ['question', 'turn_finished'],
+              'createdAt': '2026-09-23T00:00:00.000Z',
+              'updatedAt': '2026-09-23T00:00:00.000Z',
+            },
+          }),
+        );
+
+        final response = await client.registerWakeToken(
+          const PushWakeTokenRegistrationRequest.webPush(
+            deviceId: 'feed-client-1',
+            subscription: WebPushSubscription(
+              endpoint: 'https://fcm.googleapis.com/fcm/send/abc',
+              p256dh: 'BPUB',
+              auth: 'AUTH',
+            ),
+            presentation: {
+              'turn_finished': WebPushPresentation(title: 'Turn finished'),
+              'question': WebPushPresentation(
+                title: 'Question',
+                typeOnly: true,
+              ),
+              'turn_failed': WebPushPresentation(
+                title: 'Turn failed',
+                silent: true,
+              ),
+            },
+            context: '{"brokerProfileId":"p1"}',
+          ),
+        );
+        expect(response.registration.platform, 'webpush');
+        expect(response.registration.presentationTypes, [
+          'question',
+          'turn_finished',
+        ]);
+      });
+
+      test("reads the broker's Web Push key", () async {
+        dioAdapter.onGet(
+          'http://127.0.0.1:7734/api/push/web-push-key',
+          (server) => server.reply(200, {'ok': true, 'publicKey': 'BKEY'}),
+        );
+
+        final response = await client.getWebPushKey();
+        expect(response.ok, isTrue);
+        expect(response.publicKey, 'BKEY');
+      });
+
       test(
         'sends only required wake-token fields when optionals omitted',
         () async {

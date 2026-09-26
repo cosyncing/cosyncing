@@ -11,6 +11,58 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- Notifications are now configurable per type, in three families: Sessions
+  (permission requests, questions, finished and failed turns, finished goals,
+  failed scheduled messages), Security (security alerts, new devices), and
+  Server (server problems, runtime updates, usage running low). On Android each
+  type is its own notification channel in system settings; on other platforms
+  Settings has a switch, a sound option, and an "event type only" option per
+  type. Runtime updates and usage are off by default. The Server no longer
+  raises "Session sync degraded", which fired on every ordinary session exit;
+  ones left by an earlier version are resolved when the Server starts.
+- A notification's title is its event type and its body is the truncated
+  session title. A newer turn outcome replaces the session's previous
+  notification instead of stacking.
+- Each notification is now sent once. An unanswered permission request or
+  question used to alert again after 15 minutes, 1 hour and 7 hours, then every
+  6 hours for as long as it stayed open, and a pending runtime update or server
+  problem every day, so a few forgotten requests could alert every few minutes
+  between them. An open request stays in the inbox until it is answered, and a
+  server problem that gets worse still alerts. This needs a Server from this
+  release.
+- Opening a session, or tapping its notification, marks its finished and failed
+  turns read and clears their notifications. A permission request or question
+  answered anywhere, including in the agent's terminal, clears its
+  notification.
+- Reading or dismissing a notification's event on one device now clears that
+  notification on your other devices, and a Claude session continuing on its
+  own after a background task no longer notifies "Turn finished". Both need a
+  Server and clients from this release.
+- In a browser, notifications now arrive with every Cosyncing tab closed. The
+  web app registers with the Server that serves it, which sends each
+  notification through the browser's push service, end-to-end encrypted to the
+  browser and carrying only what the notification shows. It needs a Server from
+  this release, and follows the same per-type choices; other paired Servers
+  still notify only while a tab is open.
+- A first-run card offers system notifications once a Server is paired, and
+  turning them on asks for OS permission in the same tap. Settings shows the
+  permission state with guidance when it is refused, sends a test notification,
+  and reports what the operating system did with the last one. A permission
+  request or question the system refused to show before notifications were
+  allowed is shown once they are; finished turns stay in the inbox.
+- On macOS and Windows, closing the window now keeps Cosyncing running so
+  notifications still arrive: in the Dock on macOS (quit with Command-Q) and in
+  the notification area on Windows (quit from its icon's menu). Starting
+  Cosyncing again on Windows shows the copy already running instead of opening
+  a second one. Settings → Notifications has a switch to quit on close instead.
+- On Android, Settings → Notifications has a "Stay connected in the
+  background" switch, off by default. While it and notifications are on,
+  Cosyncing keeps running after you leave it or swipe it away, so notifications
+  arrive without a push service. Android shows a silent notification while it
+  runs, and it uses more battery.
+
 ### Fixed
 
 - The macOS shell installers no longer stop with an `unbound variable` error
@@ -24,6 +76,51 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   it is treated as a broker in another environment, so the Windows install is offered the
   next port and the WSL broker keeps running. A broker setup cannot place still has to be
   stopped explicitly.
+- Finished and failed turns of Cline, Grok, Reasonix and Kimi sessions sent
+  from Cosyncing now notify. These integrations reported a turn only when it
+  ended, which the Server never counts as a turn it saw run, so they never
+  raised "Turn finished".
+- A session named in Cosyncing, when it was created or renamed where the agent
+  has no rename of its own, now notifies under that name instead of the
+  agent's own title.
+- A Kilo turn that called tools notified "Turn finished" after every tool-calling
+  step while the agent kept working. Only the step that ends the turn notifies now.
+- After a Server token was pasted on the connect screen or in Settings, notifications
+  stayed silent until the page was reloaded or the app restarted: the notification feed
+  kept using the Server entry from before the token, so every request it made was refused.
+- A device asking a Server with a token the Server refused (a browser tab opened before
+  the token was saved in another tab, or a device whose token was revoked) asked again
+  every minute for as long as it ran, and the Server raised "Repeated broker
+  authentication failures" every hour. It now asks again only when the app returns to
+  the foreground, and a token saved in another tab is picked up then.
+- Android release builds shipped without the notification icon, so every
+  notification failed to post. The icon is now kept, and the Android build
+  fails if it is missing.
+- Quiet notification types on macOS now show a banner instead of arriving
+  silently in Notification Center.
+- Windows notifications now leave Action Center once they are read or
+  answered, and a newer one replaces the previous one instead of stacking.
+  Toasts left by an earlier client are cleared once on the first start.
+  Windows toasts show the Cosyncing logo, clicking one brings the window to
+  the front, and clicking one after Cosyncing has quit starts it and opens
+  that event. Settings reports "Denied" when notifications are turned off for
+  Cosyncing in Windows settings, instead of claiming they were shown.
+- Browser notifications now work under the app's `/cosy/` address. Clicking one
+  focuses the Cosyncing tab and opens its event, or opens Cosyncing on that
+  event when no tab is open. Notifications clear when their event is read or
+  answered. A tab restored in the background now gets system notifications
+  instead of in-app banners nobody sees, and several open tabs no longer
+  notify twice for one event. A page served without HTTPS says so instead of
+  reporting "Denied".
+- Notifications now work on a device whose system language is not one
+  Cosyncing ships (English, Chinese, Japanese, Korean, or Spanish) when no
+  language is chosen in Settings. The notification service failed to start
+  there, so nothing was notified and the notification inbox stopped updating.
+  It now uses the first shipped language in the system's list, or English, as
+  the rest of the app already did.
+- Every Codex goal now notifies when it finishes. Previously only the first
+  goal in a session did, because Codex gives each goal in a thread the same
+  key. A Codex turn that runs again after it finished also notifies again.
 
 ## 0.5.13 — 2026-09-23
 

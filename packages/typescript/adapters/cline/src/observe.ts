@@ -123,6 +123,8 @@ class ClineMemoryHistoryReader implements HistorySnapshotPageReader {
 }
 
 export class ClineObserveConnection implements SessionConnection {
+  /** {@link getPending} answers an empty list when the task file is missing or unreadable. */
+  readonly pendingListMayOmitOpenRequests = true;
   readonly info: SessionInfo;
   private readonly session: ClineStoredSession;
   private readonly trace?: ClineObserveOptions['trace'];

@@ -276,6 +276,7 @@ final class AttentionInboxActions {
     _invalidate();
 
     final notificationIds = <String>{};
+    final currentByScope = <String, List<AttentionEventView>>{};
     for (final snapshot in locallyDismissed) {
       final entry =
           entriesBySnapshot[_snapshotKey(
@@ -284,10 +285,13 @@ final class AttentionInboxActions {
             snapshot.revision,
           )];
       if (entry == null) continue;
+      final current = currentByScope[snapshot.brokerProfileId] ??=
+          await _currentEvents(snapshot.brokerProfileId);
       notificationIds.addAll(
-        attentionNotificationIdsForEvent(
+        attentionNotificationIdsToClear(
           brokerProfileId: entry.profile.id,
           event: entry.event,
+          current: current,
         ),
       );
     }
@@ -383,16 +387,26 @@ final class AttentionInboxActions {
     // been disabled. A notification shown before the setting changed must
     // still disappear when its inbox event is read or dismissed. The event-id
     // alias also removes a permission/question notification left by a client
-    // version from before the cold-start identity handoff.
-    final ids = attentionNotificationIdsForEvent(
-      brokerProfileId: entry.profile.id,
-      event: entry.event,
-    );
+    // version from before the cold-start identity handoff. A slot a newer
+    // event has taken since (a later turn, a reminder) is left alone.
     try {
+      final ids = attentionNotificationIdsToClear(
+        brokerProfileId: entry.profile.id,
+        event: entry.event,
+        current: await _currentEvents(_attentionScopeKey(entry.profile)),
+      );
       await ref.read(sessionLocalNotificationSinkProvider).clearMany(ids);
     } on Object {
       // Local read/dismiss state is authoritative. Platform cleanup remains
       // best effort and does not block durable mutation or broker retry.
+    }
+  }
+
+  Future<List<AttentionEventView>> _currentEvents(String scopeKey) async {
+    try {
+      return await ref.read(attentionRepositoryProvider).loadEvents(scopeKey);
+    } on Object {
+      return const [];
     }
   }
 }

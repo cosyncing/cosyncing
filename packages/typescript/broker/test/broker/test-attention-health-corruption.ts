@@ -18,11 +18,12 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
-async function waitHealth(base: string): Promise<any> {
+// Health status is reported to an authenticated caller only; anonymous liveness carries none.
+async function waitHealth(base: string, token: string): Promise<any> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${base}/api/health`);
+      const response = await fetch(`${base}/api/health`, { headers: { 'x-cosyncing-token': token } });
       if (response.ok) return response.json();
     } catch {
       /* retry */
@@ -48,7 +49,7 @@ async function start(home: string, port: number, token: string) {
     stderr: 'ignore',
   });
   const base = `http://127.0.0.1:${port}`;
-  const publicHealth = await waitHealth(base);
+  const publicHealth = await waitHealth(base, token);
   return { broker, base, publicHealth };
 }
 
@@ -64,6 +65,9 @@ try {
   try {
     assert.equal(first.publicHealth.ok, true, 'public liveness must remain true after quarantine');
     assert.equal(first.publicHealth.healthStatus, 'degraded');
+    const anonymous = await (await fetch(`${first.base}/api/health`)).json() as any;
+    assert.equal(anonymous.ok, true, 'anonymous liveness stays true');
+    assert.equal(anonymous.healthStatus, undefined, 'anonymous liveness does not disclose health status');
     assert(readdirSync(home).some((name) => name.startsWith('attention-events.json.') && name.endsWith('.corrupt')),
       'the corrupt source bytes must remain quarantined');
 

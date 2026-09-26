@@ -543,5 +543,7 @@ final class _PageNotificationSink implements BrokerNotificationSink {
   Future<void> clearAll() async {}
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {}
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async => BrokerNotificationDeliveryResult.shown;
 }

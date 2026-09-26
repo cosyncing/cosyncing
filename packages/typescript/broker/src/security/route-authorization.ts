@@ -71,6 +71,9 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/push/wake', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/push/wake-tokens', methods: ['GET', 'POST'], policy: OBSERVE },
   { route: '/api/push/wake-tokens/{id}', methods: ['DELETE'], policy: OBSERVE },
+  // Public by nature (it is the applicationServerKey every subscription embeds), but only useful to a
+  // principal that may register, so it carries the registration route's authority.
+  { route: '/api/push/web-push-key', methods: ['GET'], policy: OBSERVE },
   // A scheduled send is a prompt with a clock on it, so it carries the authority of the prompt and
   // not more: `drive` already lets a peer create a session and send it anything right now, and
   // deferring the same text grants nothing further. Reading the queue is narrower still — an

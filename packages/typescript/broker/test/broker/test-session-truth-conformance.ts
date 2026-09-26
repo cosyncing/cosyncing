@@ -1834,7 +1834,7 @@ try {
   // Phase `adapters` — cross-adapter opt-in manifest, FAIL CLOSED.
   //
   // The lane matrix (native-identity, terminal-authority, history-live-chronology, replacement,
-  // hub-authority) is only as strong as its coverage per production adapter. The manifest
+  // hub-authority, turn-attention) is only as strong as its coverage per production adapter. The manifest
   // (packages/typescript/broker/test/session-truth-conformance.json) is the reviewed opt-in record: every
   // adapter class the production broker registers must resolve every lane with real-suite coverage
   // or a dated, reasoned exclusion. Every check here fails CLOSED — a silently removed adapter, a
@@ -1844,7 +1844,11 @@ try {
   console.log('── Phase adapters: cross-adapter conformance manifest (fail-closed) ──');
   const adaptersPhaseStart = failures;
   {
-    const CONFORMANCE_LANES = ['native-identity', 'terminal-authority', 'history-live-chronology', 'replacement', 'hub-authority'];
+    // `turn-attention`: a turn the adapter runs live opens with one live `running` run-summary and
+    // closes with one terminal under the same key, and a turn that finished before the connection saw
+    // it (priming, replay, catch-up) opens nothing, so the broker raises exactly one Turn finished or
+    // Turn failed per live turn and none on attach.
+    const CONFORMANCE_LANES = ['native-identity', 'terminal-authority', 'history-live-chronology', 'replacement', 'hub-authority', 'turn-attention'];
 
     // The production roster, scraped from runtime.ts rather than restated: a drift between this
     // regex and the real registration call shape must fail, never match zero and pass. An

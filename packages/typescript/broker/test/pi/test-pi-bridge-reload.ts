@@ -21,12 +21,17 @@
  *   3. new/resume/fork tear down immediately and pass their reason through to the `ended` frame.
  *   4. GRACE EXPIRY — bye(reason:'reload') with NO re-hello → after the grace window the phone gets
  *      an `ended` frame and the bridge is gone (a failed reload doesn't leak a pinned dead conn).
+ *   5. TURN ATTENTION — through the REAL extension, a live bridged turn reaches the bridge
+ *      connection's subscribers as one `running` run-summary before one terminal under the same
+ *      key (one outcome each in a real AttentionPolicy), and neither the first hello's backfill nor
+ *      a reload re-hello's backfill of finished turns puts a `running` on the live stream.
  */
 export {};
 import { mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   captureProcessOutput,
+  freshModuleSpecifier,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
   settledProcessOutput,
@@ -309,6 +314,223 @@ try {
     return [keptOnNoop && rotatedOnRewrite,
       `keptOnNoop=${keptOnNoop} rotatedOnRewrite=${rotatedOnRewrite}`];
   });
+
+  // 5 — turn attention. The broker raises "Turn finished"/"Turn failed" only for a LIVE `running`
+  // run-summary followed by a terminal one under the same key, so the pairing is the extension's to
+  // keep. This runs the REAL extension against an in-process stand-in for the broker's hello/events
+  // routes, backed by a real PiBridgeRegistry, and records exactly what the bridge connection's
+  // subscribers (the Hub, in the broker) receive. A reload re-hello carries an authoritative backfill
+  // that already holds the finished turns; replaying them as a live `running` would notify again.
+  {
+    const { PiBridgeRegistry } = await import('../../../pi-engine/src/bridge.ts');
+    const { AttentionPolicy } = await import('../../src/attention/attention-policy.ts');
+    const { AttentionStore } = await import('../../src/attention/attention-store.ts');
+    const bridgeModulePath = resolve(import.meta.dir, '../../../pi-engine/agent-extensions/cosyncing-bridge/index.ts');
+    const root = join(ROOT, 'turn-attention');
+    mkdirSync(root, { recursive: true });
+    const sessionFile = join(root, '2026-09-23T00-00-00-000Z_bridge-attention.jsonl');
+    const bridgeId = enc(sessionFile);
+    const registry = new PiBridgeRegistry(() => undefined, 5_000);
+    const frames: { phase: string; message: any }[] = [];
+    let phase = 'hello';
+    const helloBodies: any[] = [];
+    let polls = 0;
+    let subscribed = false;
+    const fakeBroker = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/pi/bridge/hello') {
+          const body: any = await req.json();
+          helloBodies.push(body);
+          // The broker's hello route in miniature: a re-hello reclaims the same connection, then
+          // the backfill lands. Subscribing before it also watches the first hello's backfill.
+          const conn = registry.hello(bridgeId, {
+            id: bridgeId, tool: 'pi', title: 'bridge attention', cwd: root, status: 'idle', attachMode: 'live',
+          } as any);
+          if (!subscribed) {
+            subscribed = true;
+            conn.subscribe((message) => frames.push({ phase, message }));
+          }
+          conn.ingestHistory(body.history);
+          return Response.json({ ok: true, id: bridgeId });
+        }
+        if (url.pathname === '/pi/bridge/events') {
+          const body: any = await req.json();
+          const conn = registry.get(String(body?.id ?? ''));
+          if (!conn) return new Response('unknown bridge', { status: 404 });
+          for (const ev of body.events ?? []) conn.ingest(ev);
+          return Response.json({ ok: true });
+        }
+        if (url.pathname === '/pi/bridge/commands') {
+          if (!registry.get(url.searchParams.get('id') ?? '')) return new Response('unknown bridge', { status: 404 });
+          polls += 1;
+          await sleep(40); // stand in for the long poll so the loop doesn't spin hot
+          return Response.json({ commands: [] });
+        }
+        if (url.pathname === '/pi/bridge/bye') {
+          const body: any = await req.json();
+          registry.bye(String(body?.id ?? ''), body?.reason);
+        }
+        return Response.json({ ok: true });
+      },
+    });
+    const envKeys = ['COSYNCING_BROKER', 'COSYNCING_BRIDGE_CONFIG', 'COSYNCING_PI_INTEGRATION_FILE', 'COSYNCING_PI_INTEGRATION_TOKEN', 'COSYNCING_NO_BRIDGE'];
+    const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    // Read once at module load: the extension must reach this stand-in and no host config.
+    process.env.COSYNCING_BROKER = `http://127.0.0.1:${fakeBroker.port}`;
+    process.env.COSYNCING_BRIDGE_CONFIG = join(root, 'absent-config.json');
+    process.env.COSYNCING_PI_INTEGRATION_FILE = join(root, 'absent-integration.json');
+    delete process.env.COSYNCING_PI_INTEGRATION_TOKEN;
+    delete process.env.COSYNCING_NO_BRIDGE;
+    const at = Date.parse('2026-09-23T10:00:00.000Z');
+    const userEntry = (id: string, parentId: string | null, text: string, ms: number) => ({
+      type: 'message', id, parentId, timestamp: new Date(ms).toISOString(),
+      message: { role: 'user', content: [{ type: 'text', text }], timestamp: ms },
+    });
+    const assistantMessage = (text: string, failed: boolean) => ({
+      role: 'assistant',
+      stopReason: failed ? 'error' : 'stop',
+      ...(failed ? { error: { message: 'fixture failure' } } : {}),
+      content: [{ type: 'text', text }],
+      usage: { input: 1, output: 1 },
+    });
+    // The session already holds one finished turn when the terminal starts.
+    let entries: any[] = [
+      userEntry('prior-user', null, 'finished before the bridge', at - 60_000),
+      { type: 'message', id: 'prior-assistant', parentId: 'prior-user', timestamp: new Date(at - 58_000).toISOString(), message: assistantMessage('already done', false) },
+    ];
+    const ctx = {
+      cwd: root,
+      sessionManager: {
+        getSessionFile: () => sessionFile,
+        getSessionId: () => 'bridge-attention',
+        getEntries: () => entries,
+      },
+      ui: { setStatus() {} },
+      isIdle: () => true,
+    };
+    // A fresh module instance per extension runtime, as a reload re-instantiates it.
+    const loadExtension = async () => {
+      const handlers = new Map<string, (event: any, c: any) => unknown>();
+      const ext = (await import(freshModuleSpecifier(bridgeModulePath, root))).default;
+      ext({
+        on: (name: string, fn: (event: any, c: any) => unknown) => { handlers.set(name, fn); },
+        registerTool() {},
+        sendMessage() {},
+        getThinkingLevel: () => undefined,
+        setModel: async () => true,
+        setThinkingLevel() {},
+      } as any);
+      return async (name: string, event: any = {}) => { await handlers.get(name)?.(event, ctx); };
+    };
+    const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+      const end = Date.now() + ms;
+      while (Date.now() < end && !pred()) await sleep(25);
+      return pred();
+    };
+    const summariesIn = (name: string) =>
+      frames.filter((f) => f.phase === name && f.message.type === 'run-summary').map((f) => f.message);
+    const statusesByKey = (list: any[]) => {
+      const out = new Map<string, string[]>();
+      for (const m of list) out.set(m.key, [...(out.get(m.key) ?? []), m.status]);
+      return out;
+    };
+    const store = new AttentionStore({ path: join(root, 'attention-events.json') });
+    const policy = new AttentionPolicy(store);
+    const session = { id: bridgeId, tool: 'pi', title: 'bridge attention', status: 'idle', attachMode: 'live' } as any;
+    let delivered = 0;
+    const deliverFrames = async () => {
+      for (const f of frames.slice(delivered)) await policy.handleMessage(session, f.message);
+      delivered = frames.length;
+    };
+    const outcomes = (kind: string, key: string) =>
+      store.listEvents().filter((event) => event.kind === kind && event.dedupeKey === `${kind}:pi:${bridgeId}:${key}`).length;
+    let fire = await loadExtension();
+    try {
+      await test('first bridge hello backfills a finished turn without a live running summary', async () => {
+        await fire('session_start');
+        const linked = await waitUntil(() => polls > 0);
+        await sleep(200); // past the extension's 60ms event batch, so any hello-time relay has landed
+        const backfilled =(helloBodies[0]?.history ?? []).some(
+          (ev: any) => ev.t === 'run-summary' && ev.key === 'pi:run:u0' && ev.status === 'done',
+        );
+        const live = summariesIn('hello');
+        return [linked && backfilled && live.length === 0, `linked=${linked} backfilled=${backfilled} live=${JSON.stringify(live)}`];
+      });
+
+      await test('a live bridged turn is one running then one terminal under one key', async () => {
+        phase = 'live';
+        const turns = [
+          { text: 'bridged done', failed: false, offset: 0 },
+          { text: 'bridged error', failed: true, offset: 10_000 },
+        ];
+        for (const turn of turns) {
+          const start = at + turn.offset;
+          await fire('agent_start', { timestamp: start });
+          await fire('turn_start', { timestamp: start });
+          await fire('message_start', { message: { role: 'user', content: [{ type: 'text', text: turn.text }], timestamp: start } });
+          await fire('message_update', { assistantMessageEvent: { type: 'text_delta', delta: `reply: ${turn.text}` } });
+          await fire('message_end', { timestamp: start + 2_000, message: assistantMessage(`reply: ${turn.text}`, turn.failed) });
+          await fire('agent_end', { timestamp: start + 2_000 });
+        }
+        await waitUntil(() => summariesIn('live').some((m) => m.key === 'pi:run:u2' && m.status !== 'running'));
+        const live = statusesByKey(summariesIn('live'));
+        const ok = live.size === 2
+          && JSON.stringify(live.get('pi:run:u1')) === '["running","done"]'
+          && JSON.stringify(live.get('pi:run:u2')) === '["running","error"]'
+          && summariesIn('live').every((m) => m.source === 'pi-bridge');
+        return [ok, JSON.stringify([...live])];
+      });
+
+      await test('a real AttentionPolicy raises exactly one outcome per live bridged turn', async () => {
+        await deliverFrames();
+        const ok = store.listEvents().length === 2
+          && outcomes('run-finished', 'pi:run:u1') === 1
+          && outcomes('run-failed', 'pi:run:u2') === 1
+          && store.listObservations().length === 0;
+        return [ok, `events=${JSON.stringify(store.listEvents().map((event) => event.dedupeKey))} open=${store.listObservations().length}`];
+      });
+
+      await test('a reload re-hello backfill of the finished turns emits no live running and raises nothing', async () => {
+        phase = 'reload';
+        // What the reloaded runtime's session manager reads back: both turns, persisted.
+        entries = [
+          ...entries,
+          userEntry('live-user-1', 'prior-assistant', 'bridged done', at),
+          { type: 'message', id: 'live-assistant-1', parentId: 'live-user-1', timestamp: new Date(at + 2_000).toISOString(), message: assistantMessage('reply: bridged done', false) },
+          userEntry('live-user-2', 'live-assistant-1', 'bridged error', at + 10_000),
+          { type: 'message', id: 'live-assistant-2', parentId: 'live-user-2', timestamp: new Date(at + 12_000).toISOString(), message: assistantMessage('reply: bridged error', true) },
+        ];
+        await fire('session_shutdown', { reason: 'reload' });
+        fire = await loadExtension();
+        await fire('session_start');
+        const reset = await waitUntil(() => frames.some((f) => f.phase === 'reload' && f.message.type === 'history-reset'));
+        await sleep(200);
+        const backfill = statusesByKey((helloBodies[1]?.history ?? []).filter((ev: any) => ev.t === 'run-summary'));
+        const eventsBefore = store.listEvents().length;
+        const openBefore = store.listObservations().length;
+        await deliverFrames();
+        const live = summariesIn('reload');
+        const ok = reset
+          && helloBodies.length === 2
+          && JSON.stringify(backfill.get('pi:run:u1')) === '["done"]'
+          && JSON.stringify(backfill.get('pi:run:u2')) === '["error"]'
+          && live.length === 0
+          && store.listEvents().length === eventsBefore
+          && store.listObservations().length === openBefore;
+        return [ok, `reset=${reset} hellos=${helloBodies.length} backfill=${JSON.stringify([...backfill])} live=${JSON.stringify(live)} events=${eventsBefore}->${store.listEvents().length} open=${openBefore}->${store.listObservations().length}`];
+      });
+    } finally {
+      await fire('session_shutdown', { reason: 'quit' }).catch(() => undefined);
+      fakeBroker.stop(true);
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
 } finally {
   // Awaiting the exit is the point: signalling and returning left the broker
   // and its children alive past this process, for the lane to reap.

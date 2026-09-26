@@ -5,7 +5,6 @@ import 'dart:ui' as ui;
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
-import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
@@ -434,8 +433,9 @@ String artifactSaveTypeLabel({
   required ui.Locale? appLocale,
   required ui.Locale platformLocale,
 }) {
-  return lookupAppLocalizations(
-    appLocale ?? platformLocale,
+  return resolveAppLocalizations(
+    appLocale,
+    systemLocales: [platformLocale],
   ).artifactKeyLabel;
 }
 

@@ -186,6 +186,9 @@ function summaryOf(info: any, productId: string): AgentMessage | undefined {
     turnId: String(info.id),
     ...(info.parentID ? { userMessageKey: String(info.parentID) } : {}),
     status,
+    // Each step of a turn is its own assistant message; one that ended by calling tools is followed
+    // by the next step, so it is not the turn's outcome.
+    ...(status === 'done' && info?.finish === 'tool-calls' ? { turnContinues: true as const } : {}),
     ...(startedAt ? { startedAt } : {}),
     ...(completedAt ? { completedAt } : {}),
     ...(startedAt && completedAt && completedAt >= startedAt

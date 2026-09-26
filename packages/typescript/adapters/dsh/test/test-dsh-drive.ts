@@ -28,6 +28,8 @@ import {
 } from '../src/drive.ts';
 import { DshSessionConnection } from '../src/observe.ts';
 import { mapDshApproval, mapDshQuestion } from '../src/mapping.ts';
+import { AttentionPolicy } from '../../../broker/src/attention/attention-policy.ts';
+import { AttentionStore } from '../../../broker/src/attention/attention-store.ts';
 
 const FIXTURE = await Bun.file(new URL('./fixtures/dsh-0.1.0-rc.6.json', import.meta.url)).json() as {
   errorSessionNotFound: { body: { result: unknown } };
@@ -200,6 +202,103 @@ function client(
     foreign.clientKey === undefined,
     JSON.stringify(foreign),
   );
+}
+
+// ── 2b. A driven turn pairs `running` with its terminal ────────────────────
+//
+// The broker raises "turn finished" / "turn failed" only when a LIVE `running`
+// run-summary is followed by a terminal one under the SAME key. dsh opens and
+// closes every turn in its own log (`turn/start`, `turn/end`), so the live fold
+// announces the turn at its start and closes it under the same turn key. The
+// frames follow the captured host order: the turn opens before the prompt's
+// `user/message` lands in the log.
+
+{
+  type RunSummaryRow = Extract<AgentMessage, { type: 'run-summary' }>;
+  const runRowsOf = (rows: AgentMessage[], key: string): RunSummaryRow[] =>
+    rows.filter((row): row is RunSummaryRow => row.type === 'run-summary' && row.key === key);
+  const describeRuns = (rows: AgentMessage[]): string => JSON.stringify(
+    rows.filter((row): row is RunSummaryRow => row.type === 'run-summary').map((row) => `${row.key}=${row.status}`));
+  /** Exactly one `running` then exactly one `terminal` under `key`, in delivery order. */
+  const pairedAs = (rows: AgentMessage[], key: string, terminal: RunSummaryRow['status']): boolean => {
+    const list = runRowsOf(rows, key);
+    return list.length === 2 && list[0]!.status === 'running' && list[1]!.status === terminal
+      && rows.indexOf(list[0]!) < rows.indexOf(list[1]!);
+  };
+
+  const { rpc } = client({
+    'session.history': { events: [], hasMore: false },
+    'session.prompt': { accepted: true },
+  }, { newRpcId: () => 'minted-pair-rpc' });
+  const info: SessionInfo = { id: SESSION_ID, tool: 'dsh', title: 't', status: 'idle', attachMode: 'live' };
+  const connection = new DshSessionConnection(info, { rpc });
+  const seen: AgentMessage[] = [];
+  connection.subscribe((message) => seen.push(message));
+  await connection.getHistory();
+
+  const muxEvent = (event: Record<string, unknown>) => connection.handleMuxFrame({
+    stream: 'mux',
+    rpcId: `push-${String(event.seq)}`,
+    frameType: 'session/event',
+    bytes: 0,
+    payload: { type: 'session/event', sessionId: SESSION_ID, event },
+  });
+  const assistant = (seq: number, turn: number, text: string) => muxEvent({
+    type: 'assistant/message',
+    seq,
+    time: 1_000 + seq,
+    data: { turn, step: 1, message: { role: 'assistant', content: [{ type: 'text', text }] } },
+    surfaceOp: 'append',
+  });
+
+  await connection.sendPrompt({ text: 'pair me', clientMessageId: 'broker-pair' });
+  muxEvent({ type: 'turn/start', seq: 60, time: 1_060, data: { turn: 2 } });
+  muxEvent({ type: 'step/start', seq: 61, time: 1_061, data: { turn: 2, step: 1 } });
+  muxEvent({
+    type: 'user/message',
+    seq: 62,
+    time: 1_062,
+    data: { content: [{ type: 'text', text: 'pair me' }], source: { kind: 'user', rpcId: 'minted-pair-rpc' }, id: 'm62' },
+    surfaceOp: 'append',
+  });
+  assistant(63, 2, 'paired reply');
+  muxEvent({ type: 'step/end', seq: 64, time: 1_064, data: { turn: 2, step: 1 } });
+  const doneKey = `dsh:${SESSION_ID}:turn2`;
+  check('a driven turn is announced running live before its end arrives',
+    runRowsOf(seen, doneKey).map((row) => row.status).join(',') === 'running', describeRuns(seen));
+  muxEvent({ type: 'turn/end', seq: 65, time: 1_065, data: { turn: 2, reason: { kind: 'completed' } } });
+  check('a driven turn yields exactly one running then exactly one done under the same key',
+    pairedAs(seen, doneKey, 'done'), describeRuns(seen));
+
+  muxEvent({ type: 'turn/start', seq: 66, time: 1_066, data: { turn: 3 } });
+  assistant(67, 3, 'about to fail');
+  muxEvent({
+    type: 'turn/end',
+    seq: 68,
+    time: 1_068,
+    data: { turn: 3, reason: { kind: 'error', error: { message: 'the provider refused' } } },
+  });
+  const failedKey = `dsh:${SESSION_ID}:turn3`;
+  check('a failed driven turn pairs running with an error terminal under one key',
+    pairedAs(seen, failedKey, 'error'), describeRuns(seen));
+
+  // The broker's own attention policy, fed the subscriber stream in delivery
+  // order exactly as the Hub's live hook feeds it.
+  const attentionRoot = mkdtempSync(join(tmpdir(), 'dsh-drive-attention-'));
+  try {
+    const store = new AttentionStore({ path: join(attentionRoot, 'attention-events.json'), onWarning: () => undefined });
+    const policy = new AttentionPolicy(store);
+    for (const message of seen) await policy.handleMessage(info, message);
+    const runEvents = store.listEvents().filter((event) => event.kind === 'run-finished' || event.kind === 'run-failed');
+    check('the real attention policy raises exactly one turn-finished and one turn-failed for the two live turns',
+      runEvents.length === 2
+        && store.findByDedupeKey(`run-finished:dsh:${SESSION_ID}:${doneKey}`)?.kind === 'run-finished'
+        && store.findByDedupeKey(`run-failed:dsh:${SESSION_ID}:${failedKey}`)?.kind === 'run-failed'
+        && store.listObservations().length === 0,
+      JSON.stringify(runEvents.map((event) => event.dedupeKey)));
+  } finally {
+    rmSync(attentionRoot, { recursive: true, force: true });
+  }
 }
 
 // ── 3. Cancel, create, rename ───────────────────────────────────────────────

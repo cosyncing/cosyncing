@@ -302,6 +302,9 @@ class EndpointResolver {
   String wakeTokenEndpoint(String deviceId) =>
       '$baseUrl/api/push/wake-tokens/${Uri.encodeComponent(deviceId)}';
 
+  /// The broker's VAPID public key for browser Web Push (revision 27).
+  String get webPushKeyEndpoint => '$baseUrl/api/push/web-push-key';
+
   /// One-time transport pairing accept endpoint.
   String transportPairingAcceptEndpoint(String pairingId) =>
       '$baseUrl/api/transport/pairings/${Uri.encodeComponent(pairingId)}/accept';

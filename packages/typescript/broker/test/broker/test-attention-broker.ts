@@ -85,7 +85,10 @@ try {
     body: JSON.stringify({ clientId: 'phone', events: [] }),
   })).status, 401, 'bulk dismissal must be authenticated');
 
-  const health = await (await fetch(`${base}/api/health`)).json();
+  const anonymousHealth = await (await fetch(`${base}/api/health`)).json();
+  assert.equal(anonymousHealth.ok, true);
+  assert.equal(anonymousHealth.healthStatus, undefined, 'anonymous liveness does not disclose health status');
+  const health = await (await fetch(`${base}/api/health`, { headers: auth })).json();
   assert.equal(health.ok, true);
   assert.match(health.healthStatus, /^(healthy|degraded|critical)$/);
   const detail = await (await fetch(`${base}/api/broker/health`, { headers: auth })).json();

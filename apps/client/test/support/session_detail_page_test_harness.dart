@@ -970,6 +970,7 @@ class FakeBrokerClient extends BrokerClient {
 final class InMemorySessionNotificationSettingsStore
     implements SessionNotificationSettingsStore {
   bool value = false;
+  bool permissionPrompted = false;
 
   @override
   Future<bool> getLocalNotificationEnabled() async => value;
@@ -977,6 +978,17 @@ final class InMemorySessionNotificationSettingsStore
   @override
   Future<void> setLocalNotificationEnabled({required bool enabled}) async {
     value = enabled;
+  }
+
+  @override
+  Future<bool?> getLocalNotificationPreference() async => value;
+
+  @override
+  Future<bool> getPermissionPrompted() async => permissionPrompted;
+
+  @override
+  Future<void> setPermissionPrompted() async {
+    permissionPrompted = true;
   }
 }
 

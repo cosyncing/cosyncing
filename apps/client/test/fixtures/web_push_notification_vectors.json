@@ -1,0 +1,64 @@
+{
+  "description": "Vectors the web app (Dart) and its service worker (web/sw.js) must both reproduce, so a Web Push and the app's own notification of one event share one tag and one alert key. The Dart test is attention_web_push_runtime_test.dart; the worker's is scripts/client/tests/test-web-push-notification.ts.",
+  "tags": [
+    {
+      "name": "a session outcome slot",
+      "brokerProfileId": "b7c1a0e2-4f3d-4a8e-9c61-0d2f5e7a9b13",
+      "collapseKey": "session-outcome:claude:3f2a9c1e-77d0-4b8e-a1c2-5e6f7a8b9c0d",
+      "tag": "858590769"
+    },
+    {
+      "name": "a request slot",
+      "brokerProfileId": "b7c1a0e2-4f3d-4a8e-9c61-0d2f5e7a9b13",
+      "collapseKey": "permission-required:codex:019a4b2c-8d1e-7f00-b3a4-c5d6e7f80912:req-17",
+      "tag": "62377687"
+    },
+    {
+      "name": "another profile, same slot",
+      "brokerProfileId": "profile-2",
+      "collapseKey": "session-outcome:claude:3f2a9c1e-77d0-4b8e-a1c2-5e6f7a8b9c0d",
+      "tag": "1958502397"
+    },
+    {
+      "name": "an event-id slot",
+      "brokerProfileId": "p",
+      "collapseKey": "event:evt_01J8Z3X9Q2",
+      "tag": "445329892"
+    },
+    {
+      "name": "surrounding whitespace is trimmed",
+      "brokerProfileId": "  profile-2\t",
+      "collapseKey": " session-outcome:kimi:s-1 \n",
+      "tag": "1036230218"
+    },
+    {
+      "name": "non-ASCII and astral characters",
+      "brokerProfileId": "профиль-中文",
+      "collapseKey": "session-outcome:opencode:会话-😀-é",
+      "tag": "939425168"
+    }
+  ],
+  "alertKeys": [
+    {
+      "name": "the first alert",
+      "eventId": "evt-1",
+      "revision": 1,
+      "stage": "immediate",
+      "alertKey": "evt-1\n1\nimmediate"
+    },
+    {
+      "name": "a reminder",
+      "eventId": "evt-1",
+      "revision": 1,
+      "stage": "15m",
+      "alertKey": "evt-1\n1\n15m"
+    },
+    {
+      "name": "a re-alert",
+      "eventId": "evt-1",
+      "revision": 2,
+      "stage": "immediate",
+      "alertKey": "evt-1\n2\nimmediate"
+    }
+  ]
+}

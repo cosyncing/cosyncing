@@ -1,7 +1,9 @@
 /**
  * omp lifecycle deltas: fake JSON-RPC `omp` binary, no real omp, no model. omp has no fork/clone
  * RPC, owns its title through the native `title` slot + `title_change` entries (set_session_name
- * rejects an empty name), and answers get_available_commands instead of pi's get_commands.
+ * rejects an empty name), and answers get_available_commands instead of pi's get_commands. It also
+ * pins turn attention: each Drive turn pairs one live running with one terminal summary under its
+ * correlation key, and attaching to finished turns replays them without a live running.
  */
 export {};
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -178,6 +180,12 @@ process.stdin.on('data', (chunk) => {
       emit({ type: 'message_start', message: userMessage });
       if (retryPrompt.includes('hold stream open')) {
         emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'still working' } });
+        continue;
+      }
+      if (retryPrompt.includes('attention failed turn')) {
+        emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'cannot finish' } });
+        emit({ type: 'message_end', timestamp: at(1_000), message: { role: 'assistant', stopReason: 'error', error: { message: 'fixture failure' }, usage: { input: 1, output: 0 } } });
+        emit({ type: 'agent_end', timestamp: at(1_000), isTerminal: true });
         continue;
       }
       if (retryPrompt.includes('retry then succeed') || retryPrompt.includes('retry then fail')) {
@@ -513,6 +521,47 @@ try {
       && String(correlatedUsers[0]?.key ?? '').startsWith('u:remote:'),
     JSON.stringify(correlatedUsers),
   );
+  // Turn attention: the broker raises "Turn finished"/"Turn failed" only for a LIVE `running`
+  // run-summary followed by a terminal one under the same key. An OMP Drive turn is keyed by its
+  // exact collab-prompt correlation (`omp:run:u:remote:…`), not the Pi ordinal, so pin the pair on
+  // that key and feed exactly what the subscriber received to a real AttentionPolicy.
+  const attentionStart = liveMessages.length;
+  await conn.sendPrompt({ text: 'attention finished turn', clientMessageId: 'omp-attention-done' });
+  await conn.sendPrompt({ text: 'attention failed turn', clientMessageId: 'omp-attention-failed' });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const attentionFrames = liveMessages.slice(attentionStart);
+  const attentionKey = (clientKey: string) => {
+    const durable = attentionFrames.find((message) =>
+      message.type === 'user-message' && message.clientKey === clientKey && message.queued === false);
+    return durable ? `omp:run:${durable.key}` : `missing:${clientKey}`;
+  };
+  const doneKey = attentionKey('omp-attention-done');
+  const failedKey = attentionKey('omp-attention-failed');
+  const attentionPairs = new Map<string, string[]>();
+  for (const message of attentionFrames) {
+    if (message.type === 'run-summary') attentionPairs.set(message.key, [...(attentionPairs.get(message.key) ?? []), message.status]);
+  }
+  check('each OMP Drive turn reaches subscribers as one live running, then one terminal, under its correlation key',
+    doneKey.startsWith('omp:run:u:remote:')
+      && failedKey.startsWith('omp:run:u:remote:')
+      && attentionPairs.size === 2
+      && JSON.stringify(attentionPairs.get(doneKey)) === '["running","done"]'
+      && JSON.stringify(attentionPairs.get(failedKey)) === '["running","error"]'
+      && attentionFrames.every((message) => message.type !== 'run-summary' || message.source === 'omp-rpc'),
+    JSON.stringify([...attentionPairs]));
+  const { AttentionPolicy } = await import('../../../broker/src/attention/attention-policy.ts');
+  const { AttentionStore } = await import('../../../broker/src/attention/attention-store.ts');
+  const attentionStore = new AttentionStore({ path: join(root, 'attention-events.json') });
+  const attentionPolicy = new AttentionPolicy(attentionStore);
+  for (const message of attentionFrames) await attentionPolicy.handleMessage(conn.info, message);
+  const attentionOutcomes = (kind: string, key: string) => attentionStore.listEvents()
+    .filter((event) => event.kind === kind && event.dedupeKey === `${kind}:omp:${id}:${key}`).length;
+  check('a real AttentionPolicy raises exactly one outcome per OMP Drive turn',
+    attentionStore.listEvents().length === 2
+      && attentionOutcomes('run-finished', doneKey) === 1
+      && attentionOutcomes('run-failed', failedKey) === 1
+      && attentionStore.listObservations().length === 0,
+    JSON.stringify({ events: attentionStore.listEvents().map((event) => event.dedupeKey), open: attentionStore.listObservations().length }));
   const imageStart = liveMessages.length;
   await conn.sendPrompt({
     text: '',
@@ -610,6 +659,60 @@ try {
     JSON.stringify({ asyncFailure, failedCorrelationRows, afterFailureRows }));
   unsubscribe();
   await conn.close();
+
+  // Turn attention catch-up: a session whose correlated OMP turns already ended — as OMP persists
+  // them, a collab-prompt custom_message then the assistant entry — must replay through history
+  // under the same `omp:run:u:remote:…` keys, with no live running on attach in either mode.
+  const catchupFile = join(sessionsRoot, '2026-08-25_catchup.jsonl');
+  const catchupSentAt = Date.parse('2026-08-25T00:30:00.000Z');
+  writeFileSync(catchupFile, [
+    { type: 'title', v: 1, title: 'Catch-up', updatedAt: 1787000000000, pad: '' },
+    { type: 'session', version: 3, id: 'catchup-omp-session', timestamp: '2026-08-25T00:29:00.000Z', cwd },
+    {
+      type: 'custom_message', id: 'catchup-user-1', parentId: null, timestamp: '2026-08-25T00:30:00.500Z',
+      customType: 'collab-prompt', content: 'finished before attach', display: true, attribution: 'user',
+      details: { from: 'cosyncing', messageKey: 'u:remote:catchup-done', clientKey: 'omp-catchup-done', sentAt: catchupSentAt },
+    },
+    {
+      type: 'message', id: 'catchup-assistant-1', parentId: 'catchup-user-1', timestamp: '2026-08-25T00:30:04.000Z',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop', usage: { input: 1, output: 1 } },
+    },
+    {
+      type: 'custom_message', id: 'catchup-user-2', parentId: 'catchup-assistant-1', timestamp: '2026-08-25T00:31:00.500Z',
+      customType: 'collab-prompt', content: 'failed before attach', display: true, attribution: 'user',
+      details: { from: 'cosyncing', messageKey: 'u:remote:catchup-failed', clientKey: 'omp-catchup-failed', sentAt: catchupSentAt + 60_000 },
+    },
+    {
+      type: 'message', id: 'catchup-assistant-2', parentId: 'catchup-user-2', timestamp: '2026-08-25T00:31:02.000Z',
+      message: { role: 'assistant', content: [], stopReason: 'error', error: { message: 'gave up' }, usage: { input: 1, output: 0 } },
+    },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+  const catchupId = Buffer.from(catchupFile, 'utf8').toString('base64url');
+  for (const mode of ['resume', 'observe'] as const) {
+    const again = await adapter.attach(catchupId, mode);
+    try {
+      const frames: any[] = [];
+      again.subscribe((message) => frames.push(message));
+      const history = await again.getHistory();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const eventsBefore = attentionStore.listEvents().length;
+      const openBefore = attentionStore.listObservations().length;
+      for (const message of frames) await attentionPolicy.handleMessage(again.info, message);
+      const replayed = new Map<string, string[]>();
+      for (const message of history) {
+        if (message.type === 'run-summary') replayed.set(message.key, [...(replayed.get(message.key) ?? []), message.status]);
+      }
+      check(`OMP ${mode === 'resume' ? 'Drive' : 'Observe'} attach to finished correlated turns emits no live running and raises nothing`,
+        !frames.some((message) => message.type === 'run-summary')
+          && JSON.stringify(replayed.get('omp:run:u:remote:catchup-done')) === '["done"]'
+          && JSON.stringify(replayed.get('omp:run:u:remote:catchup-failed')) === '["error"]'
+          && attentionStore.listEvents().length === eventsBefore
+          && attentionStore.listObservations().length === openBefore,
+        JSON.stringify({ live: frames.filter((message) => message.type === 'run-summary'), history: [...replayed] }));
+    } finally {
+      await again.close();
+    }
+  }
 } finally {
   if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 }

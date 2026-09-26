@@ -1,6 +1,9 @@
 import 'package:broker_client_flutter/broker_client_flutter.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_presentation_coordinator.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_local_notification_adapter.dart';
 import 'package:cosyncing_client/src/features/settings/controller/session_notification_settings_controller.dart';
+import 'package:cosyncing_client/src/platform/lifecycle/app_lifecycle_monitor.dart';
+import 'package:cosyncing_client/src/platform/notifications/presentation_coordinator.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 export 'package:cosyncing_client/src/features/sessions/detail/session_local_notification_adapter.dart';
@@ -23,14 +26,28 @@ final sessionNotificationLaunchBootstrapProvider = FutureProvider<void>((
 final Provider<BrokerAppLifecycleMonitor>
 sessionNotificationLifecycleMonitorProvider =
     Provider<BrokerAppLifecycleMonitor>((ref) {
-      final monitor = FlutterBrokerAppLifecycleMonitor();
+      // In a browser the document's own visibility and focus, not Flutter's
+      // web engine, which starts every tab as resumed.
+      final monitor = createAppLifecycleMonitor();
       ref.onDispose(monitor.dispose);
       return monitor;
     });
 
-/// Provides the notification sink for session notification hooks.
+/// Keeps this device's app windows (browser tabs) from presenting one
+/// attention event twice.
+final attentionPresentationCoordinatorProvider =
+    Provider<AttentionPresentationCoordinator>((ref) {
+      final coordinator = createPresentationCoordinator(
+        ref.watch(sessionNotificationLifecycleMonitorProvider),
+      );
+      ref.onDispose(coordinator.dispose);
+      return coordinator;
+    });
+
+/// The sink that presents attention notifications.
 ///
-/// Default sink is no-op until local notifications are explicitly enabled.
+/// It is the no-op sink while the master "System notifications" switch is off,
+/// so presentation reports `blocked` and never reaches the OS.
 final sessionNotificationSinkProvider = Provider<BrokerNotificationSink>(
   (ref) {
     final isEnabled = ref
@@ -46,24 +63,11 @@ final sessionNotificationSinkProvider = Provider<BrokerNotificationSink>(
   },
 );
 
-/// Provides a concrete plugin-backed sink for opt-in feature wiring.
+/// The concrete plugin-backed sink, regardless of the master switch.
 ///
-/// J19 ships a concrete adapter, but notification delivery remains opt-in until
-/// a settings/permission UX routes users to enable it.
+/// Clearing always goes through this one: a notification shown before the
+/// switch was turned off must still disappear when its event is read.
 final Provider<BrokerNotificationSink> sessionLocalNotificationSinkProvider =
     Provider<BrokerNotificationSink>(
       (ref) => ref.watch(sessionLocalNotificationAdapterProvider),
     );
-
-/// Provides a stable policy object for deriving session notifications.
-final Provider<BrokerSessionNotificationPolicy>
-sessionNotificationPolicyProvider = Provider<BrokerSessionNotificationPolicy>((
-  ref,
-) {
-  return DefaultBrokerSessionNotificationPolicy(
-    lifecycleMonitor: ref.watch(
-      sessionNotificationLifecycleMonitorProvider,
-    ),
-    sink: ref.watch(sessionNotificationSinkProvider),
-  );
-});

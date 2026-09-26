@@ -1,8 +1,10 @@
 import 'package:broker_client_flutter/broker_client_flutter.dart';
+import 'package:cosyncing_client/src/platform/notifications/web_notification_backend.dart';
+import 'package:cosyncing_client/src/platform/notifications/windows_notification_icon.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // Notification consent, tap recovery, and single-adapter ownership are
-// governed by docs/architecture/client-ui.md
+// governed by docs/architecture/attention.md
 
 /// Last explicit local-notification tap payload awaiting app navigation.
 final sessionNotificationTapPayloadProvider = StateProvider<String?>(
@@ -29,10 +31,14 @@ final sessionNotificationTapHandlerProvider =
 final sessionLocalNotificationAdapterProvider =
     Provider<FlutterLocalNotificationSink>(
       (ref) => FlutterLocalNotificationSink(
+        // Browsers show through the app's own service worker; elsewhere null
+        // selects the flutter_local_notifications backend.
+        backend: createWebNotificationBackend(),
         // The dedicated one-color brand silhouette in
         // android/app/src/main/res/drawable-*/ic_notification.png — never the
         // full-color launcher tile (assets/brand/HANDOVER.md).
         androidDefaultIcon: 'ic_notification',
+        windowsIconPath: windowsNotificationIconPath(),
         onTap: ref.watch(sessionNotificationTapHandlerProvider),
       ),
     );

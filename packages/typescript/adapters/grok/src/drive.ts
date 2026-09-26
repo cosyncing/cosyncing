@@ -94,6 +94,16 @@ interface PendingPrompt {
   terminal: boolean;
 }
 
+type GrokRunSummary = Extract<AgentMessage, { type: 'run-summary' }>;
+
+/** A turn this connection submitted and saw start, from `session/prompt` until its terminal
+ *  is published. `held` keeps, in arrival order, terminal frames the tail drain (`live: false`)
+ *  or ACP (`live: true`) delivered before the settle read proved which one is the turn's. */
+interface OwnedLiveTurn {
+  readonly pendingKey: string;
+  readonly held: Array<{ message: GrokRunSummary; live: boolean }>;
+}
+
 interface PendingPermission {
   message: Extract<AgentMessage, { type: 'permission-request' }>;
   optionIds: Map<PermissionDecision, string>;
@@ -120,6 +130,8 @@ const MAX_NATIVE_PERMISSION_OPTIONS = 64;
 const MAX_PERMISSION_FIELD_CHARS = 512;
 const MAX_AVAILABLE_COMMANDS = 256;
 const MAX_LIVE_STREAM_SLOTS = 512;
+const MAX_HELD_TERMINALS = 64;
+const MAX_PUBLISHED_RUN_KEYS = 512;
 const MAX_MODE_CHARS = 128;
 const ACTIVE_TAIL_SETTLE_ATTEMPTS = 7;
 const ACTIVE_TAIL_SETTLE_MS = 40;
@@ -557,6 +569,9 @@ export class GrokDriveConnection extends GrokObserveConnection {
   private readonly livePromptUserKeys = new Map<string, string>();
   private promptAdmissions = 0;
   private activeTurns = 0;
+  private ownedTurn: OwnedLiveTurn | undefined;
+  /** Run-summary keys already published live, so none is ever reopened by a later `running`. */
+  private readonly publishedRunKeys = new Set<string>();
   private cancelGeneration = 0;
   private closedDrive = false;
   private demoted = false;
@@ -718,6 +733,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
     const admissionCancelGeneration = this.cancelGeneration;
     const run = async () => {
       let nativeStarted = false;
+      let ownedTurn: OwnedLiveTurn | undefined;
       try {
         if (admissionCancelGeneration !== this.cancelGeneration) throw new GrokPromptCancelledBeforeDelivery();
         this.assertWritable('queued prompt delivery');
@@ -760,6 +776,8 @@ export class GrokDriveConnection extends GrokObserveConnection {
         }
         this.activeTurns += 1;
         nativeStarted = true;
+        ownedTurn = { pendingKey: key, held: [] };
+        this.ownedTurn = ownedTurn;
         this.emitLive({ type: 'status', status: 'running' });
         const result = await this.transport.sessionPrompt({
           sessionId: this.session.id,
@@ -781,7 +799,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
         );
         this.publishHistoryBoundary(after, terminalSummary);
         this.republishOwnedPromptTurn(after, pending);
-        if (terminalSummary) this.emitLive(terminalSummary);
+        this.publishOwnedTurnTerminal(ownedTurn, terminalSummary);
         if (result.stopReason === 'refusal') this.emitLive({ type: 'error', message: 'Grok refused the turn.' });
         if (result.stopReason === 'max_tokens') this.emitLive({ type: 'notice', message: 'Grok reached the turn token limit.' });
         if (!this.demoted) this.emitLive({ type: 'status', status: 'idle' });
@@ -808,7 +826,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
             const rejectedSummary = this.nativeTerminalSummary(after, pending);
             this.publishHistoryBoundary(after, rejectedSummary);
             this.republishOwnedPromptTurn(after, pending);
-            if (rejectedSummary) this.emitLive(rejectedSummary);
+            this.publishOwnedTurnTerminal(ownedTurn, rejectedSummary);
           } catch (reconcileError) {
             this.demote(`Grok ACP turn failed and durable ownership could not be re-established: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}.`);
           }
@@ -821,6 +839,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
         throw error;
       } finally {
         if (nativeStarted) this.activeTurns = Math.max(0, this.activeTurns - 1);
+        if (ownedTurn) this.releaseOwnedTurn(ownedTurn);
       }
     };
     const turn = this.turnChain.then(run);
@@ -900,6 +919,12 @@ export class GrokDriveConnection extends GrokObserveConnection {
     return this.settleLiveEchoes(messages);
   }
 
+  protected override publishTailMessage(message: AgentMessage): void {
+    if (this.holdOwnedTerminal(message, false)) return;
+    this.notePublishedRun(message);
+    super.publishTailMessage(message);
+  }
+
   protected override onHistorySnapshot(
     entries: readonly GrokUpdateEntry[],
     messages: readonly AgentMessage[],
@@ -926,6 +951,8 @@ export class GrokDriveConnection extends GrokObserveConnection {
   }
 
   protected override onHistoryRewrite(): void {
+    // Held frames describe the history that was just replaced; the reader reloads without them.
+    this.ownedTurn?.held.splice(0);
     this.claimedEvents.clear();
     this.durablePromptClaims.clear();
     this.correlationInvalidated = true;
@@ -1314,7 +1341,9 @@ export class GrokDriveConnection extends GrokObserveConnection {
       }
       return;
     }
-    for (const message of messages) this.emitLive(message);
+    for (const message of messages) {
+      if (!this.holdOwnedTerminal(message, true)) this.emitLive(message);
+    }
   }
 
   private setClaimedEvent(nativeKey: string, correlation: GrokReplayCorrelation): void {
@@ -1383,9 +1412,75 @@ export class GrokDriveConnection extends GrokObserveConnection {
     }
   }
 
+  /**
+   * Publish a proved owned turn's terminal, preceded once by `running` under the same key.
+   *
+   * The broker notifies "turn finished" only when a live `running` and a later terminal share one
+   * key. Neither Grok terminal key exists when the turn starts: the native `:summary` key is the
+   * future `turn_completed` event id, and the `:acp-terminal` fallback is keyed by a user row the
+   * tail has not claimed yet. So the pairing is emitted here, where the settle walk has proved the
+   * turn this connection submitted, and not on the tail or ACP paths.
+   *
+   * Those paths can deliver the same terminal first: a drain racing the settle read, or ACP's own
+   * `turn_completed`. They were held for this point, and `running` goes before the FIRST of them
+   * that is the turn's: the key the walk proved, or a live frame ACP bound to this prompt, which
+   * the walk misses when the durable line lands after the settle read. Every later terminal is
+   * published unpaired, and a key already published live is never reopened.
+   */
+  private publishOwnedTurnTerminal(
+    turn: OwnedLiveTurn | undefined,
+    terminal: GrokTerminalSummary | undefined,
+  ): void {
+    const owned = turn !== undefined && this.ownedTurn === turn;
+    const frames = owned ? this.takeHeldTerminals(turn) : [];
+    if (terminal) frames.push({ message: terminal, live: false });
+    const first = owned
+      ? frames.find(({ message, live }) => message.key === terminal?.key
+        || (live && message.userMessageKey === turn.pendingKey))
+      : undefined;
+    for (const frame of frames) {
+      if (frame === first && !this.publishedRunKeys.has(frame.message.key)) {
+        this.emitLive(runningSummaryFor(frame.message));
+      }
+      this.emitLive(frame.message);
+    }
+  }
+
+  /** An owned turn that ended without a proved terminal publishes what it held, unpaired. */
+  private releaseOwnedTurn(turn: OwnedLiveTurn): void {
+    if (this.ownedTurn !== turn) return;
+    for (const { message } of this.takeHeldTerminals(turn)) this.emitLive(message);
+  }
+
+  private takeHeldTerminals(turn: OwnedLiveTurn): OwnedLiveTurn['held'] {
+    this.ownedTurn = undefined;
+    return turn.held.splice(0);
+  }
+
+  /** Defer a terminal the tail or ACP delivers while an owned turn is still unsettled. */
+  private holdOwnedTerminal(message: AgentMessage, live: boolean): boolean {
+    const turn = this.ownedTurn;
+    if (!turn || message.type !== 'run-summary' || message.status === 'running'
+      || turn.held.length >= MAX_HELD_TERMINALS) return false;
+    turn.held.push({ message, live });
+    return true;
+  }
+
+  private notePublishedRun(message: AgentMessage): void {
+    if (message.type !== 'run-summary') return;
+    this.publishedRunKeys.delete(message.key);
+    this.publishedRunKeys.add(message.key);
+    while (this.publishedRunKeys.size > MAX_PUBLISHED_RUN_KEYS) {
+      const oldest = this.publishedRunKeys.keys().next().value;
+      if (oldest === undefined) break;
+      this.publishedRunKeys.delete(oldest);
+    }
+  }
+
   private emitLive(message: AgentMessage): void {
     const publish = this.settleLiveDelta(message);
     if (publish === undefined) return;
+    this.notePublishedRun(publish);
     for (const handler of this.liveHandlers) {
       try { handler(publish); } catch (error) {
         this.trace?.({ op: 'observe', detail: `live subscriber threw: ${error instanceof Error ? error.message : String(error)}` });
@@ -1522,4 +1617,16 @@ type GrokStreamedMessage = Extract<AgentMessage, { type: 'model-output' } | { ty
 
 function streamedMessage(message: AgentMessage): GrokStreamedMessage | undefined {
   return message.type === 'model-output' || message.type === 'thinking' ? message : undefined;
+}
+
+/** The `running` half of a terminal's pairing: same key, turn and prompt anchor, no invented timing. */
+function runningSummaryFor(terminal: GrokRunSummary): GrokRunSummary {
+  return {
+    type: 'run-summary',
+    key: terminal.key,
+    turnId: terminal.turnId,
+    ...(terminal.userMessageKey ? { userMessageKey: terminal.userMessageKey } : {}),
+    status: 'running',
+    ...(terminal.source ? { source: terminal.source } : {}),
+  };
 }

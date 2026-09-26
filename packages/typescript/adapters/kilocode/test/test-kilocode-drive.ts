@@ -12,6 +12,8 @@ import {
 import { KiloAdapter } from '../src/implementation.ts';
 import { discoverKiloStore, kiloHistorySourceIdentity, readKiloHistory } from '../src/store.ts';
 import { KILO_MEASURED_VERSIONS, kiloVerifiedInvocation } from '../src/version.ts';
+import { AttentionPolicy } from '../../../broker/src/attention/attention-policy.ts';
+import { AttentionStore } from '../../../broker/src/attention/attention-store.ts';
 import { createKiloDatabase } from './fixtures/database.ts';
 
 let passed = 0;
@@ -809,6 +811,96 @@ try {
       && promptIds.every((id) => /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/u.test(id))
       && promptIds[0]! < promptIds[1]!,
     JSON.stringify(promptIds));
+
+  // The broker raises "turn finished" / "turn failed" only when a LIVE `running` run-summary is
+  // followed by a terminal one under the SAME key. The SSE bus announces the driven prompt's
+  // assistant message before it completes and again once `time.completed` is set; both map to the
+  // assistant id's run key, so the reply opens as `running` and closes under that key.
+  type RunSummaryRow = Extract<AgentMessage, { type: 'run-summary' }>;
+  const runRowsOf = (rows: AgentMessage[], key: string): RunSummaryRow[] =>
+    rows.filter((row): row is RunSummaryRow => row.type === 'run-summary' && row.key === key);
+  const describeRuns = (rows: AgentMessage[]): string => JSON.stringify(
+    rows.filter((row): row is RunSummaryRow => row.type === 'run-summary').map((row) => `${row.key}=${row.status}`));
+  const replyInfo = {
+    id: 'msg_kilo_pair_reply', sessionID: 'ses_child', role: 'assistant', parentID: promptIds[2], time: { created: 10 },
+  };
+  const replyKey = `kilo:run:${replyInfo.id}`;
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: replyInfo } });
+  emit({
+    type: 'message.part.updated',
+    properties: {
+      sessionID: 'ses_child',
+      part: { id: 'prt_kilo_pair_reply', messageID: replyInfo.id, sessionID: 'ses_child', type: 'text', text: 'paired reply' },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  check('a driven Kilo reply is announced running live before it completes',
+    runRowsOf(live, replyKey).map((row) => row.status).join(',') === 'running', describeRuns(live));
+  const completedReply = { ...replyInfo, time: { created: 10, completed: 12 }, finish: 'stop' };
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: completedReply } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const replyRuns = runRowsOf(live, replyKey);
+  check('a driven Kilo reply yields exactly one running then exactly one done under the same key',
+    replyRuns.length === 2 && replyRuns[0]!.status === 'running' && replyRuns[1]!.status === 'done'
+      && live.indexOf(replyRuns[0]!) < live.indexOf(replyRuns[1]!),
+    describeRuns(live));
+  const attentionRoot = mkdtempSync(join(tmpdir(), 'cosyncing-kilo-attention-'));
+  try {
+    // The broker's own attention policy, fed every subscriber frame in delivery order, exactly as
+    // the Hub's live hook feeds it.
+    const attentionStore = new AttentionStore({ path: join(attentionRoot, 'attention-events.json'), onWarning: () => undefined });
+    const attentionPolicy = new AttentionPolicy(attentionStore);
+    for (const message of live) await attentionPolicy.handleMessage(conn.info, message);
+    const runEvents = attentionStore.listEvents()
+      .filter((event) => event.kind === 'run-finished' || event.kind === 'run-failed');
+    check('the real attention policy raises exactly one turn-finished for the driven reply',
+      runEvents.length === 1 && runEvents[0]!.dedupeKey === `run-finished:kilo:ses_child:${replyKey}`,
+      JSON.stringify(runEvents.map((event) => event.dedupeKey)));
+  } finally {
+    rmSync(attentionRoot, { recursive: true, force: true });
+  }
+
+  // A tool-using turn is several assistant messages, one per step, each with its own run key. A
+  // step that ends by calling tools (`finish: 'tool-calls'`) is followed by the next one, so only
+  // the turn's last step may raise "turn finished"; the earlier step closes without an outcome.
+  const toolStep = { id: 'msg_kilo_tool_step', sessionID: 'ses_child', role: 'assistant', parentID: promptIds[2], time: { created: 20 } };
+  const finalStep = { id: 'msg_kilo_final_step', sessionID: 'ses_child', role: 'assistant', parentID: promptIds[2], time: { created: 22 } };
+  const stepsFrom = live.length;
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: toolStep } });
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: { ...toolStep, time: { created: 20, completed: 21 }, finish: 'tool-calls' } } });
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: finalStep } });
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: { ...finalStep, time: { created: 22, completed: 23 }, finish: 'stop' } } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stepRows = live.slice(stepsFrom);
+  const toolTerminal = runRowsOf(stepRows, `kilo:run:${toolStep.id}`).find((row) => row.status === 'done');
+  const finalTerminal = runRowsOf(stepRows, `kilo:run:${finalStep.id}`).find((row) => row.status === 'done');
+  check('a tool-calling step closes as a step of a turn that goes on; the last step closes the turn',
+    toolTerminal?.turnContinues === true && finalTerminal !== undefined && finalTerminal.turnContinues === undefined,
+    describeRuns(stepRows));
+  const stepsRoot = mkdtempSync(join(tmpdir(), 'cosyncing-kilo-steps-'));
+  try {
+    const stepStore = new AttentionStore({ path: join(stepsRoot, 'attention-events.json'), onWarning: () => undefined });
+    const stepPolicy = new AttentionPolicy(stepStore);
+    for (const message of stepRows) await stepPolicy.handleMessage(conn.info, message);
+    const stepEvents = stepStore.listEvents().map((event) => event.dedupeKey);
+    check('a two-step Kilo turn raises exactly one turn-finished, for its last step',
+      stepEvents.length === 1 && stepEvents[0] === `run-finished:kilo:ses_child:kilo:run:${finalStep.id}`,
+      JSON.stringify(stepEvents));
+  } finally {
+    rmSync(stepsRoot, { recursive: true, force: true });
+  }
+
+  // Catch-up stays silent: a turn that finished before this connection saw it — the attach-time
+  // history's errored `assistant-1`, and the reply above once the server has persisted it — reaches
+  // subscribers through history only. A live `running` for either would make attaching notify.
+  childPromptHistory.push({ info: completedReply, parts: [] });
+  const replayAfterReply = await conn.getHistory();
+  check('history replay carries finished Kilo turns without announcing any of them live',
+    replayAfterReply.some((row) => row.type === 'run-summary' && row.key === replyKey && row.status === 'done')
+      && replayAfterReply.some((row) => row.type === 'run-summary' && row.key === 'kilo:run:assistant-1')
+      && runRowsOf(live, 'kilo:run:assistant-1').length === 0
+      && live.filter((row) => row.type === 'run-summary' && row.status === 'running').length === 3,
+    describeRuns(live));
   await conn.runCommand?.('stop');
   check('stop command maps to a bounded native abort request',
     calls.some((call) => call.url.endsWith('/abort') && call.method === 'POST' && call.hasSignal));

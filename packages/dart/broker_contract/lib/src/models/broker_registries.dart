@@ -40,6 +40,7 @@ const List<String> brokerRoutes = <String>[
   '/api/push/wake',
   '/api/push/wake-tokens',
   '/api/push/wake-tokens/{id}',
+  '/api/push/web-push-key',
   '/api/schedules',
   '/api/schedules/{id}',
   '/api/schedules/{id}/actions',

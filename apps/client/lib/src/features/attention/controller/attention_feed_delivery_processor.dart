@@ -1,13 +1,14 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_presentation_coordinator.dart';
+import 'package:cosyncing_client/src/features/attention/data/attention_notification_type_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
-import 'package:cosyncing_client/src/features/attention/view/attention_event_copy.dart';
-import 'package:flutter/foundation.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
+import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 
 /// Matches event metadata for foreground run-failed suppression.
 typedef AttentionFeedRunFailureFocusMatcher =
@@ -26,59 +27,131 @@ typedef AttentionFeedForegroundHandler =
 /// Answers whether this processor still owns its exact attention source.
 typedef AttentionDeliveryAdmission = FutureOr<bool> Function();
 
-/// Stable local-notification id for one durable event presentation.
-String attentionNotificationId({
+/// This device's effective setting for one notification type. On Android the
+/// `enabled` flag comes from the type's system channel.
+typedef AttentionNotificationSettingResolver =
+    Future<AttentionNotificationTypeSetting> Function(
+      AttentionNotificationType type,
+    );
+
+/// Observes every OS presentation attempt (Settings shows the last one).
+typedef AttentionNotificationDeliveryObserver =
+    void Function(
+      AttentionNotificationType type,
+      BrokerNotificationDeliveryResult result,
+    );
+
+/// Platform notification id for the slot [event] occupies, or null when the
+/// event is never an OS notification.
+///
+/// A slot is per request, per session outcome, or per event (see
+/// [attentionNotificationCollapseKey]), so presenting into it replaces what is
+/// there and a reminder re-alerts in place.
+String? attentionNotificationSlotId({
   required String brokerProfileId,
-  required String eventId,
-  String? dedupeKey,
-  int? presentationRevision,
+  required AttentionEvent event,
 }) {
-  final normalizedDedupeKey = dedupeKey?.trim();
-  final baseId = normalizedDedupeKey != null && normalizedDedupeKey.isNotEmpty
-      ? brokerAttentionNotificationId(
-          brokerProfileId: brokerProfileId,
-          dedupeKey: normalizedDedupeKey,
-        )
-      : 'attention:$brokerProfileId:$eventId';
-  final revision = presentationRevision;
-  if (revision != null && revision > 1) {
-    return '$baseId:presentation:$revision';
-  }
-  return baseId;
+  final type = attentionNotificationTypeOf(event);
+  if (type == null) return null;
+  return brokerAttentionNotificationId(
+    brokerProfileId: brokerProfileId,
+    dedupeKey: attentionNotificationCollapseKey(event, type),
+  );
 }
 
-/// Exact current notification identity plus pre-F4b aliases for one event.
+/// Ids a client from before per-type notifications may have used for
+/// [event]: one per presentation revision, keyed by the permission/question
+/// dedupe key or the event id. Bounded to the latest revisions.
+Set<String> legacyAttentionNotificationIds({
+  required String brokerProfileId,
+  required AttentionEvent event,
+  int? presentedRevision,
+}) {
+  final key = event.isPermissionRequired || event.isQuestionRequired
+      ? event.dedupeKey.trim()
+      : '';
+  final bases = {
+    'attention:$brokerProfileId:${event.id}',
+    if (key.isNotEmpty)
+      brokerAttentionNotificationId(
+        brokerProfileId: brokerProfileId,
+        dedupeKey: key,
+      ),
+  };
+  final newest = [
+    event.presentationRevision,
+    presentedRevision ?? 0,
+  ].reduce((a, b) => a > b ? a : b);
+  final oldest = newest - _legacyRevisionWindow + 1;
+  return {
+    for (final base in bases) ...{
+      base,
+      for (
+        var revision = oldest < 2 ? 2 : oldest;
+        revision <= newest;
+        revision++
+      )
+        '$base:presentation:$revision',
+    },
+  };
+}
+
+const _legacyRevisionWindow = 16;
+
+/// Every platform id that may be showing [event]: its current slot plus the
+/// ids an older client used.
 Set<String> attentionNotificationIdsForEvent({
   required String brokerProfileId,
   required AttentionEvent event,
 }) {
-  final dedupeKey = attentionNotificationCoalescingKey(event);
+  final slot = attentionNotificationSlotId(
+    brokerProfileId: brokerProfileId,
+    event: event,
+  );
   return {
-    attentionNotificationId(
+    ?slot,
+    ...legacyAttentionNotificationIds(
       brokerProfileId: brokerProfileId,
-      eventId: event.id,
-      dedupeKey: dedupeKey,
-      presentationRevision: event.presentationRevision,
+      event: event,
     ),
-    attentionNotificationId(
-      brokerProfileId: brokerProfileId,
-      eventId: event.id,
-      dedupeKey: dedupeKey,
-    ),
-    if (dedupeKey != null)
-      attentionNotificationId(
-        brokerProfileId: brokerProfileId,
-        eventId: event.id,
-      ),
   };
 }
 
-/// Broker semantic identity used only where the legacy live policy can
-/// present the same durable event during feed support discovery.
-String? attentionNotificationCoalescingKey(AttentionEvent event) {
-  if (!event.isPermissionRequired && !event.isQuestionRequired) return null;
-  final key = event.dedupeKey.trim();
-  return key.isEmpty ? null : key;
+/// Ids to clear once [event] is read or dismissed: the ids an older client
+/// used for it, plus its slot unless a newer, still-unhandled event has taken
+/// that slot since — a later turn of the same session, or a reminder of the
+/// same request. [current] is the profile's stored events.
+Set<String> attentionNotificationIdsToClear({
+  required String brokerProfileId,
+  required AttentionEventView event,
+  required Iterable<AttentionEventView> current,
+}) {
+  final legacy = legacyAttentionNotificationIds(
+    brokerProfileId: brokerProfileId,
+    event: event,
+  );
+  final type = attentionNotificationTypeOf(event);
+  if (type == null) return legacy;
+  final key = attentionNotificationCollapseKey(event, type);
+  final slot = brokerAttentionNotificationId(
+    brokerProfileId: brokerProfileId,
+    dedupeKey: key,
+  );
+  for (final other in current) {
+    final otherType = attentionNotificationTypeOf(other);
+    if (otherType == null ||
+        attentionNotificationCollapseKey(other, otherType) != key) {
+      continue;
+    }
+    final supersedes = other.id == event.id
+        ? other.presentationRevision > event.presentationRevision
+        : other.createdAt > event.createdAt &&
+              other.readAt == null &&
+              other.dismissedAt == null;
+    // A request's first legacy id is its slot id; leave that too.
+    if (supersedes) return legacy..remove(slot);
+  }
+  return {...legacy, slot};
 }
 
 /// Reconciles persisted attention events into durable mutations and
@@ -94,14 +167,13 @@ class AttentionFeedDeliveryProcessor {
     String? brokerScopeKey,
     this.isCurrentSource = _alwaysCurrent,
     this.focusMatcher = _neverMatched,
+    this.resolveSetting = _defaultSetting,
+    this.onDelivery,
     this.now,
+    this.presentationCoordinator = const SingleWindowPresentationCoordinator(),
     AppLocalizations? localizations,
   }) : brokerScopeKey = brokerScopeKey ?? brokerProfileId,
-       localizations =
-           localizations ??
-           lookupAppLocalizations(
-             ui.PlatformDispatcher.instance.locale,
-           );
+       localizations = localizations ?? resolveAppLocalizations(null);
 
   /// Repository for durable attention state.
   final AttentionRepository repository;
@@ -128,8 +200,26 @@ class AttentionFeedDeliveryProcessor {
   /// Detects whether a failed run belongs to the currently focused session.
   final AttentionFeedRunFailureFocusMatcher focusMatcher;
 
+  /// This device's effective per-type setting.
+  final AttentionNotificationSettingResolver resolveSetting;
+
+  /// Observes OS presentation attempts.
+  final AttentionNotificationDeliveryObserver? onDelivery;
+
   /// Deterministic clock for testability and payload metadata.
   final DateTime Function()? now;
+
+  /// Keeps this device's windows from presenting one event twice.
+  final AttentionPresentationCoordinator presentationCoordinator;
+
+  /// Failed presentation attempts per event revision, bounded so a platform
+  /// that keeps failing cannot pin an event pending forever.
+  final Map<String, int> _failedAttempts = {};
+
+  /// Open requests the OS refused to show because notifications were not
+  /// allowed, kept for this process until shown or resolved. A reminder
+  /// re-presents anything older.
+  final Set<String> _permissionBlockedRequests = {};
 
   /// Locale snapshot used by background OS presentation.
   final AppLocalizations localizations;
@@ -306,69 +396,235 @@ class AttentionFeedDeliveryProcessor {
     }
   }
 
-  Future<void> _reconcilePresentations() async {
-    final states = await repository.loadPendingPresentations(brokerScopeKey);
-    if (!await _isAdmitted()) return;
-    for (final state in states) {
-      if (!await _isAdmitted()) return;
-      await _reconcilePresentation(state: state);
-    }
+  Future<void> _reconcilePresentations() =>
+      presentationCoordinator.exclusive(brokerScopeKey, () async {
+        // Loaded inside the exclusive section, so a window that waited sees
+        // what the previous one presented.
+        final states = await repository.loadPendingPresentations(
+          brokerScopeKey,
+        );
+        if (!await _isAdmitted()) return;
+        for (final state in states) {
+          if (!await _isAdmitted()) return;
+          await _reconcilePresentation(state: state);
+        }
+      });
+
+  /// Presents again the open requests the OS refused while notifications were
+  /// not allowed. Call it once permission is granted: a request still waits for
+  /// its answer, while finished turns stay in the inbox, so a grant never
+  /// releases a burst.
+  Future<void> presentPermissionBlockedRequests() async {
+    if (_permissionBlockedRequests.isEmpty) return;
+    final ids = Set<String>.of(_permissionBlockedRequests);
+    _permissionBlockedRequests.clear();
+    await presentationCoordinator.exclusive(brokerScopeKey, () async {
+      final states = await repository.loadDeliveryStates(brokerScopeKey);
+      for (final state in states) {
+        final event = state.event;
+        if (!ids.contains(event.id) ||
+            event.state != 'active' ||
+            event.dismissedAt != null) {
+          continue;
+        }
+        if (!await _isAdmitted()) return;
+        await _reconcilePresentation(state: state, replay: true);
+      }
+    });
   }
 
   Future<void> _reconcilePresentation({
     required AttentionDeliveryState state,
+    bool replay = false,
   }) async {
     final event = state.event;
     if (event.presentationRevision <= 0) {
       return;
     }
-    if (state.localPresentedRevision >= event.presentationRevision) {
+    if (!replay && state.localPresentedRevision >= event.presentationRevision) {
       return;
     }
 
     if (_shouldSuppressPresentation(state)) {
-      if (!await _isAdmitted()) return;
-      await repository.advancePresentedRevision(
-        brokerProfileId: brokerScopeKey,
-        eventId: event.id,
-        presentedRevision: event.presentationRevision,
-      );
+      await _advance(event);
+      return;
+    }
+
+    final type = attentionNotificationTypeOf(event);
+    // A request answered before this device presented it has nothing left to
+    // ask; clear whatever an earlier revision left on screen instead.
+    if (type != null && type.isRequest && event.state != 'active') {
+      await _clearEvent(state);
+      await _advance(event);
       return;
     }
 
     try {
       if (!await _isAdmitted()) return;
+      final setting = type == null ? null : await resolveSetting(type);
+      if (setting != null && !setting.enabled) {
+        // Off in Settings (or its Android channel): the inbox keeps the row,
+        // and neither a banner nor an OS notification appears.
+        onDelivery?.call(
+          type!,
+          const BrokerNotificationDeliveryResult(
+            BrokerNotificationDeliveryOutcome.blocked,
+            reason: 'type-off',
+          ),
+        );
+        await _advance(event);
+        return;
+      }
       if (_isAppForeground) {
-        if (_shouldSuppressTerminalRunInForeground(event)) {
-          if (!await _isAdmitted()) return;
-          await repository.advancePresentedRevision(
-            brokerProfileId: brokerScopeKey,
-            eventId: event.id,
-            presentedRevision: event.presentationRevision,
-          );
+        if (event.isSyncDegraded ||
+            _shouldSuppressTerminalRunInForeground(event)) {
+          await _advance(event);
           return;
         }
         if (!await _isAdmitted()) return;
         await onForegroundEvent(event);
       } else {
-        final request = _notificationRequest(event: event);
+        if (type == null || setting == null) {
+          // Never an OS notification (scheduled-send success, non-critical
+          // health, sync-degraded, unknown kinds).
+          await _advance(event);
+          return;
+        }
+        if (await presentationCoordinator.anotherWindowInForeground()) {
+          // Another window of this app is in front and shows the event
+          // in-app. Leave it pending for that window.
+          return;
+        }
+        final request = _notificationRequest(
+          event: event,
+          type: type,
+          setting: setting,
+        );
         if (!await _isAdmitted()) return;
         await _clearSupersededNotificationAliases(
           state: state,
           currentId: request.id,
         );
         if (!await _isAdmitted()) return;
-        await notificationSink.show(request);
+        final result = await notificationSink.show(request);
+        onDelivery?.call(type, result);
+        if (type.isRequest && result.isPermissionRefusal) {
+          _permissionBlockedRequests.add(event.id);
+        } else {
+          _permissionBlockedRequests.remove(event.id);
+        }
+        if (result.isRetryable && !_spendFailedAttempt(event)) return;
       }
-      if (!await _isAdmitted()) return;
-      await repository.advancePresentedRevision(
-        brokerProfileId: brokerScopeKey,
-        eventId: event.id,
-        presentedRevision: event.presentationRevision,
-      );
+      await _advance(event);
     } on Object {
       // Keep presentation pending until this method succeeds on a later
       // reconcile.
+    }
+  }
+
+  /// Clears the OS notification of every request in [events] that is no
+  /// longer active (answered anywhere, or its session ended).
+  ///
+  /// Called with each persisted feed page, so an answer given on another
+  /// device, in the agent's terminal, or by the broker's session end removes
+  /// the notification here without the user opening anything.
+  Future<void> clearResolvedRequests(Iterable<AttentionEvent> events) async {
+    final resolved = [
+      for (final event in events)
+        if (event.state != 'active' &&
+            (attentionNotificationTypeOf(event)?.isRequest ?? false))
+          event,
+    ];
+    _permissionBlockedRequests.removeAll(resolved.map((event) => event.id));
+    final ids = <String>{
+      for (final event in resolved)
+        ...attentionNotificationIdsForEvent(
+          brokerProfileId: brokerProfileId,
+          event: event,
+        ),
+    };
+    if (ids.isEmpty || !await _isAdmitted()) return;
+    try {
+      await notificationSink.clearMany(ids);
+    } on Object {
+      // Platform cleanup is best effort; the durable row is already resolved.
+    }
+  }
+
+  /// Clears the OS notification of every event in [events] that another
+  /// client has read or dismissed ([AttentionEvent.seenAt]) and this one has
+  /// not handled, unless a newer event has taken its slot since.
+  ///
+  /// Requests are left alone: they clear when answered, and reading one
+  /// elsewhere does not answer it.
+  Future<void> clearSeenElsewhere(Iterable<AttentionEventView> events) async {
+    final seen = [
+      for (final event in events)
+        if (_seenElsewhere(event)) event,
+    ];
+    if (seen.isEmpty || !await _isAdmitted()) return;
+    final current = await repository.loadEvents(brokerScopeKey);
+    final ids = <String>{
+      for (final event in seen)
+        ...attentionNotificationIdsToClear(
+          brokerProfileId: brokerProfileId,
+          event: event,
+          current: current,
+        ),
+    };
+    if (ids.isEmpty) return;
+    try {
+      await notificationSink.clearMany(ids);
+    } on Object {
+      // Best effort: the event is already handled on the other device.
+    }
+  }
+
+  static bool _seenElsewhere(AttentionEventView event) {
+    final type = attentionNotificationTypeOf(event);
+    return event.seenAt != null &&
+        event.readAt == null &&
+        event.dismissedAt == null &&
+        type != null &&
+        !type.isRequest;
+  }
+
+  Future<void> _advance(AttentionEventView event) async {
+    if (!await _isAdmitted()) return;
+    _failedAttempts.remove(_attemptKey(event));
+    await repository.advancePresentedRevision(
+      brokerProfileId: brokerScopeKey,
+      eventId: event.id,
+      presentedRevision: event.presentationRevision,
+    );
+  }
+
+  /// Records one failed attempt. Returns true once the budget is spent, so
+  /// the caller stops retrying and advances.
+  bool _spendFailedAttempt(AttentionEventView event) {
+    final key = _attemptKey(event);
+    final attempts = (_failedAttempts[key] ?? 0) + 1;
+    _failedAttempts[key] = attempts;
+    return attempts >= maxFailedPresentationAttempts;
+  }
+
+  static String _attemptKey(AttentionEventView event) =>
+      '${event.id}#${event.presentationRevision}';
+
+  /// Failed attempts before a presentation is abandoned.
+  static const maxFailedPresentationAttempts = 3;
+
+  Future<void> _clearEvent(AttentionDeliveryState state) async {
+    if (state.localPresentedRevision <= 0) return;
+    try {
+      await notificationSink.clearMany(
+        attentionNotificationIdsForEvent(
+          brokerProfileId: brokerProfileId,
+          event: state.event,
+        ),
+      );
+    } on Object {
+      // Best effort.
     }
   }
 
@@ -378,6 +634,10 @@ class AttentionFeedDeliveryProcessor {
       return false;
     }
     if (event.dismissedAt != null) {
+      return true;
+    }
+    // Already read or dismissed on another device before this one got to it.
+    if (_seenElsewhere(event)) {
       return true;
     }
     // A successful scheduled send is intentionally a quiet durable inbox row.
@@ -424,34 +684,20 @@ class AttentionFeedDeliveryProcessor {
     required AttentionDeliveryState state,
     required String currentId,
   }) async {
-    final event = state.event;
-    final dedupeKey = attentionNotificationCoalescingKey(event);
-    final aliases = <String>{
-      attentionNotificationId(
-        brokerProfileId: brokerProfileId,
-        eventId: event.id,
-        dedupeKey: dedupeKey,
-      ),
-      if (dedupeKey != null)
-        attentionNotificationId(
-          brokerProfileId: brokerProfileId,
-          eventId: event.id,
-        ),
-      if (state.localPresentedRevision > 0)
-        attentionNotificationId(
-          brokerProfileId: brokerProfileId,
-          eventId: event.id,
-          dedupeKey: dedupeKey,
-          presentationRevision: state.localPresentedRevision,
-        ),
-    }..remove(currentId);
+    // Only an event presented before (possibly by an older client, under a
+    // per-revision id) can have something else on screen.
+    if (state.localPresentedRevision <= 0) return;
+    final aliases = legacyAttentionNotificationIds(
+      brokerProfileId: brokerProfileId,
+      event: state.event,
+      presentedRevision: state.localPresentedRevision,
+    )..remove(currentId);
     if (aliases.isEmpty) return;
     if (!await _isAdmitted()) return;
     try {
       await notificationSink.clearMany(aliases);
     } on Object {
-      // Upgrade/previous-presentation cleanup is best-effort. The
-      // revision-qualified current id still preserves Clear-all isolation.
+      // Upgrade/previous-presentation cleanup is best-effort.
     }
   }
 
@@ -465,14 +711,23 @@ class AttentionFeedDeliveryProcessor {
 
   BrokerNotificationRequest _notificationRequest({
     required AttentionEventView event,
+    required AttentionNotificationType type,
+    required AttentionNotificationTypeSetting setting,
   }) {
-    final mapping = _mappingFor(event);
     return BrokerNotificationRequest(
-      id: _notificationId(event),
-      title: mapping.title,
-      body: mapping.body,
-      category: mapping.category,
-      importance: mapping.importance,
+      id: attentionNotificationSlotId(
+        brokerProfileId: brokerProfileId,
+        event: event,
+      )!,
+      title: attentionNotificationTitle(type, localizations),
+      body: setting.showSessionTitle ? _body(event) : '',
+      channel: attentionNotificationChannel(type, localizations),
+      playSound: setting.sound,
+      threadKey: attentionNotificationThreadKey(event),
+      alertKey: attentionNotificationAlertKey(
+        eventId: event.id,
+        revision: event.presentationRevision,
+      ),
       payload: _notificationPayload(
         eventId: event.id,
         event: event,
@@ -481,13 +736,18 @@ class AttentionFeedDeliveryProcessor {
     );
   }
 
-  String _notificationId(AttentionEventView event) {
-    return attentionNotificationId(
-      brokerProfileId: brokerProfileId,
-      eventId: event.id,
-      dedupeKey: attentionNotificationCoalescingKey(event),
-      presentationRevision: event.presentationRevision,
-    );
+  /// The event's own title: the session title for a session event (an
+  /// untitled session says so), otherwise the broker's event title.
+  String _body(AttentionEventView event) {
+    final sessionId = event.action.sessionId ?? event.sessionId;
+    final isSessionEvent = sessionId != null && sessionId.trim().isNotEmpty;
+    final title = isSessionEvent ? event.sessionTitle?.trim() : event.title;
+    if (title == null || title.trim().isEmpty) {
+      return isSessionEvent
+          ? localizations.foregroundAttentionUntitledSession
+          : '';
+    }
+    return truncateAttentionNotificationText(title);
   }
 
   Map<String, Object?> _notificationPayload({
@@ -509,155 +769,11 @@ class AttentionFeedDeliveryProcessor {
       'actionKind': event.action.kind,
     };
   }
-
-  _AttentionFeedPresentationMapping _mappingFor(AttentionEventView event) {
-    final sessionMapping = _sessionMappingFor(event);
-    if (sessionMapping != null) return sessionMapping;
-    if (event.isPermissionRequired || event.isQuestionRequired) {
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationSessionActionTitle,
-        body: localizations.notificationSessionActionBody,
-        category: BrokerNotificationCategory.actionRequired,
-        importance: BrokerNotificationImportance.high,
-      );
-    }
-    if (event.isRunFailed) {
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationRunFailedTitle,
-        body: localizations.notificationRunFailedBody,
-        category: BrokerNotificationCategory.error,
-        importance: BrokerNotificationImportance.high,
-      );
-    }
-    if (event.isScheduledSendFailed) {
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationScheduledFailedTitle,
-        body: localizations.notificationScheduledFailedBody,
-        category: BrokerNotificationCategory.actionRequired,
-        importance: BrokerNotificationImportance.high,
-      );
-    }
-    if (event.isSecurityAlert) {
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationSecurityTitle,
-        body: localizations.notificationSecurityBody,
-        category: BrokerNotificationCategory.actionRequired,
-        importance: BrokerNotificationImportance.high,
-      );
-    }
-    if (event.isDevicePaired) {
-      // Successful pairing is informational; access loss and auth incidents
-      // use `security-alert`. See
-      // docs/architecture/client-ui.md
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationDevicePairedTitle,
-        body: localizations.notificationDevicePairedBody,
-        category: BrokerNotificationCategory.info,
-        importance: BrokerNotificationImportance.normal,
-      );
-    }
-    if (event.isGoalFinished || event.isRunFinished) {
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationSessionStatusTitle,
-        body: localizations.notificationSessionStatusBody,
-        category: BrokerNotificationCategory.info,
-        importance: BrokerNotificationImportance.normal,
-      );
-    }
-    if (event.isBrokerHealth &&
-        (event.severity == 'action-required' || event.severity == 'critical')) {
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationBrokerHealthTitle,
-        body: localizations.notificationBrokerHealthBody,
-        category: BrokerNotificationCategory.actionRequired,
-        importance: BrokerNotificationImportance.high,
-      );
-    }
-    if (event.isRuntimeUpdateReady ||
-        event.isSyncDegraded ||
-        event.isUsageThreshold ||
-        event.isBrokerHealth) {
-      return _AttentionFeedPresentationMapping(
-        title: localizations.notificationMaintenanceTitle,
-        body: localizations.notificationMaintenanceBody,
-        category: BrokerNotificationCategory.maintenance,
-        importance: BrokerNotificationImportance.normal,
-      );
-    }
-
-    return _AttentionFeedPresentationMapping(
-      title: localizations.notificationGenericTitle,
-      body: localizations.notificationGenericBody,
-      category: BrokerNotificationCategory.info,
-      importance: BrokerNotificationImportance.normal,
-    );
-  }
-
-  _AttentionFeedPresentationMapping? _sessionMappingFor(
-    AttentionEventView event,
-  ) {
-    final sessionId = event.action.sessionId ?? event.sessionId;
-    if (sessionId == null || sessionId.trim().isEmpty) return null;
-    final base = switch (event) {
-      _ when event.isPermissionRequired || event.isQuestionRequired =>
-        const _AttentionFeedPresentationMapping(
-          title: '',
-          body: '',
-          category: BrokerNotificationCategory.actionRequired,
-          importance: BrokerNotificationImportance.high,
-        ),
-      _ when event.isRunFailed => const _AttentionFeedPresentationMapping(
-        title: '',
-        body: '',
-        category: BrokerNotificationCategory.error,
-        importance: BrokerNotificationImportance.high,
-      ),
-      _ when event.isGoalFinished || event.isRunFinished =>
-        const _AttentionFeedPresentationMapping(
-          title: '',
-          body: '',
-          category: BrokerNotificationCategory.info,
-          importance: BrokerNotificationImportance.normal,
-        ),
-      _ when event.isSyncDegraded => const _AttentionFeedPresentationMapping(
-        title: '',
-        body: '',
-        category: BrokerNotificationCategory.maintenance,
-        importance: BrokerNotificationImportance.normal,
-      ),
-      _ => null,
-    };
-    if (base == null) return null;
-    return _AttentionFeedPresentationMapping(
-      title: attentionSessionIdentity(event, localizations),
-      body: attentionSessionEventTitle(event, localizations),
-      category: base.category,
-      importance: base.importance,
-    );
-  }
 }
 
-@immutable
-class _AttentionFeedPresentationMapping {
-  const _AttentionFeedPresentationMapping({
-    required this.title,
-    required this.body,
-    required this.category,
-    required this.importance,
-  });
-
-  /// Notification title.
-  final String title;
-
-  /// Notification body.
-  final String body;
-
-  /// Notification channel/category.
-  final BrokerNotificationCategory category;
-
-  /// Notification importance.
-  final BrokerNotificationImportance importance;
-}
+Future<AttentionNotificationTypeSetting> _defaultSetting(
+  AttentionNotificationType type,
+) async => AttentionNotificationTypeSetting.defaultsFor(type);
 
 bool _neverMatched({
   required String? tool,

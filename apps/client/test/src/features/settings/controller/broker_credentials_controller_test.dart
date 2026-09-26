@@ -119,6 +119,29 @@ void main() {
       },
     );
 
+    // Web Push, the attention feed and remote wake build their clients from
+    // the profile list. A list still caching the tokenless row after a save
+    // built a tokenless client, so registering for Web Push right after
+    // pairing failed with 401 until the page was reloaded.
+    test('save and clear refresh the cached profile list', () async {
+      final profile = remoteProfile();
+      await repository.save(profile);
+      container.read(activeBrokerProfileProvider.notifier).state = profile;
+      final before = await container.read(brokerProfileListProvider.future);
+      expect(before.single.credentialKey, isNull);
+
+      final controller = container.read(
+        brokerCredentialsControllerProvider.notifier,
+      );
+      await controller.saveToken('new-remote-token');
+      final afterSave = await container.read(brokerProfileListProvider.future);
+      expect(afterSave.single.credentialKey, 'broker-token:${profile.id}');
+
+      await controller.clearToken();
+      final afterClear = await container.read(brokerProfileListProvider.future);
+      expect(afterClear.single.credentialKey, isNull);
+    });
+
     test(
       'clear deletes store token and clears profile credential key',
       () async {

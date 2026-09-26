@@ -61,6 +61,7 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
   ),
   '/api/push/wake-tokens': _adopted,
   '/api/push/wake-tokens/{id}': _adopted,
+  '/api/push/web-push-key': _adopted,
   '/api/schedules': _adopted,
   '/api/schedules/{id}': _adopted,
   '/api/schedules/{id}/actions': _adopted,

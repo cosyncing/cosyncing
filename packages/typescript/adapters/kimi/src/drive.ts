@@ -47,6 +47,7 @@ import {
   KimiObserveConnection,
   type KimiObserveOptions,
   type KimiPendingSnapshot,
+  type KimiTurnEnding,
   type KimiWalkKind,
 } from './observe.ts';
 import { KimiReadOnlyHttp } from './server.ts';
@@ -353,6 +354,17 @@ export class KimiDriveConnection extends KimiObserveConnection {
 
   /** `prompt_id`s submitted here that have not seen their terminal event. */
   private readonly pendingPrompts = new Set<string>();
+  /**
+   * EVERY `prompt_id` this connection submitted, with the stream it was
+   * submitted on and the run ref it was paired to, if any. Bounded at
+   * {@link KIMI_PROMPT_MEMORY_LIMIT} like the other prompt memories.
+   *
+   * The proof behind a `running` run-summary (see {@link pairDrivenRun}). Kept
+   * apart from {@link pendingPrompts} because that fence is cleared by an idle
+   * edge, and a real host sends the idle edge BEFORE the prompt's own terminal:
+   * the pairing needs the prompt after its fence is gone.
+   */
+  private readonly drivenPrompts = new Map<string, { mark: number; ref?: string }>();
   /** `user_message_id`s this connection caused, so their echoes are never suspects. */
   private readonly sentUserMessageIds = new Set<string>();
   /**
@@ -677,11 +689,16 @@ export class KimiDriveConnection extends KimiObserveConnection {
     // leave the fence standing over a POST that never happened, holding every
     // transcript walk on this connection until another submit closed it.
     let fenced = false;
+    // The stream this POST leaves on, read in the POST's own frame: the only
+    // frames that can prove the resulting turn ran LIVE arrive on it, with no
+    // break between (see {@link pairDrivenRun}).
+    let dispatchMark = 0;
     let outcome;
     try {
       outcome = await this.withContentWrite((drive) => {
         this.inFlightSubmits += 1;
         fenced = true;
+        dispatchMark = this.streamMark;
         return drive.submitPrompt(this.info.id, body);
       });
     } catch (error) {
@@ -705,6 +722,7 @@ export class KimiDriveConnection extends KimiObserveConnection {
     const data = (outcome.data ?? {}) as { prompt_id?: unknown; user_message_id?: unknown };
     if (typeof data.prompt_id === 'string' && data.prompt_id) {
       boundedAdd(this.pendingPrompts, data.prompt_id, KIMI_PROMPT_MEMORY_LIMIT);
+      this.noteDrivenPrompt(data.prompt_id, dispatchMark);
     }
     if (typeof data.user_message_id === 'string' && data.user_message_id) {
       boundedAdd(this.sentUserMessageIds, data.user_message_id, KIMI_PROMPT_MEMORY_LIMIT);
@@ -1109,6 +1127,75 @@ export class KimiDriveConnection extends KimiObserveConnection {
     if (this.inFlightSubmits > 0 || !this.heldRefresh) return;
     this.heldRefresh = false;
     void this.refresh();
+  }
+
+  // ── Run-start pairing ─────────────────────────────────────────────────────
+  //
+  // The broker notifies "turn finished" only when a live `running` run-summary
+  // is followed by a terminal one under the same key. This connection may
+  // announce `running` for exactly the turns it can PROVE it started and saw
+  // run live: the turn must name a prompt this connection submitted, and the
+  // evidence must have arrived on the stream that prompt was submitted on with
+  // no break in between. Attach priming, the subscribe-time replay, history, a
+  // reconnect's backfill and an epoch change all fail one of the two: none of
+  // them can name a prompt submitted here, or all of them arrive after a
+  // stream break. A catch-up terminal with no live start stays silent.
+
+  /** Record a prompt this connection submitted, and pair a `turn.started` that outran its POST. */
+  private noteDrivenPrompt(promptId: string, dispatchMark: number): void {
+    this.drivenPrompts.delete(promptId);
+    this.drivenPrompts.set(promptId, { mark: dispatchMark });
+    while (this.drivenPrompts.size > KIMI_PROMPT_MEMORY_LIMIT) {
+      const oldest = this.drivenPrompts.keys().next();
+      if (oldest.done) break;
+      this.drivenPrompts.delete(oldest.value);
+    }
+    // A real host starts the turn before it answers the POST, so its
+    // `turn.started` usually arrives while the id is still unknown.
+    const started = this.turnStartNaming(promptId);
+    if (started) this.pairDrivenRun(promptId, started.ref, [started.mark], started.at);
+  }
+
+  /**
+   * Announce a driven prompt's run under `ref`, once per prompt.
+   *
+   * `marks` are the stream marks of the evidence in hand; one must equal the
+   * prompt's dispatch mark, which means the frame arrived on the stream the
+   * prompt was submitted on with nothing lost since, so the turn ran in view.
+   * A prompt pairs with ONE ref: a turn announced under its turn number is not
+   * announced again under its prompt id when a prompt terminal closes it too.
+   * {@link announceRunStart} refuses once the ref's terminal is out, so
+   * evidence that arrives after the ending pairs nothing.
+   */
+  private pairDrivenRun(
+    promptId: string,
+    ref: string,
+    marks: ReadonlyArray<number | undefined>,
+    startedAt: number | undefined,
+  ): void {
+    const prompt = this.drivenPrompts.get(promptId);
+    if (!prompt || prompt.ref !== undefined) return;
+    if (!marks.includes(prompt.mark)) return;
+    if (this.announceRunStart(ref, startedAt)) prompt.ref = ref;
+  }
+
+  /**
+   * Newer hosts name the prompt on `turn.started`, so the run is announced at
+   * its start, under the turn number its `turn.ended` will close.
+   */
+  protected override onTurnStarted(turnRef: string, promptId: string | undefined, at: number): void {
+    if (promptId) this.pairDrivenRun(promptId, turnRef, [this.streamMark], at);
+  }
+
+  /**
+   * The fallback, immediately before the terminal: an older host names the
+   * prompt only on the terminal frames, and a turn that ended before its POST
+   * answered could not be announced at its start. Live here means the turn's
+   * start or its ending arrived on the unbroken submission stream.
+   */
+  protected override beforeRunEnding(ending: KimiTurnEnding): void {
+    if (!ending.promptId) return;
+    this.pairDrivenRun(ending.promptId, ending.ref, [ending.startedMark, ending.closedMark], ending.startedAt);
   }
 
   // ── Completion fencing and run-state repair ───────────────────────────────
