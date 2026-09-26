@@ -206,11 +206,14 @@ final class CollectingNotificationSink implements BrokerNotificationSink {
   bool clearAllCalled = false;
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async {
     requests.add(request);
     if (shouldThrowOnShow) {
       throw StateError('show failed');
     }
+    return BrokerNotificationDeliveryResult.shown;
   }
 
   @override

@@ -9,12 +9,28 @@ import type {
   WakeRegistrationPublic,
 } from '@cosyncing/protocol';
 import { setupStateHome } from '../installation/setup-state.ts';
+import {
+  normalizeWebPushContext,
+  normalizeWebPushPresentation,
+  normalizeWebPushSubscription,
+  webPushEndpointOrigin,
+  WebPushSubscriptionError,
+  type WebPushPresentation,
+  type WebPushSubscription,
+} from './web-push-subscription.ts';
 
 export interface WakeRegistration {
   deviceId: string;
   owner: WakeRegistrationOwner;
   platform: WakePlatform;
+  /** The provider token for `apns`/`fcm`; empty for `webpush`. */
   token: string;
+  /** `webpush` only: where and to whom the broker encrypts. Never returned by a route or logged. */
+  subscription?: WebPushSubscription;
+  /** `webpush` only: the enabled types and their titles. */
+  presentation?: WebPushPresentation;
+  /** `webpush` only: client routing data every push echoes. Never returned by a route. */
+  context?: string;
   label?: string;
   createdAt: string;
   updatedAt: string;
@@ -185,8 +201,10 @@ export class WakePushRegistry {
 
   register(input: WakeRegistrationInput, owner: WakeRegistrationOwner): WakeRegistrationPublic {
     const platform = normalizePlatform(input.platform);
-    const token = String(input.token ?? '').trim();
-    if (!token) throw new WakePushError('BAD_PARAM', 'push token is required');
+    // A Web Push subscription is its own credential, so its token is ignored rather than required.
+    const webPush = platform === 'webpush' ? normalizeWebPushInput(input) : undefined;
+    const token = webPush ? '' : String(input.token ?? '').trim();
+    if (!webPush && !token) throw new WakePushError('BAD_PARAM', 'push token is required');
     if (token.length > 4096) throw new WakePushError('BAD_PARAM', 'push token is too long');
     const requestedDeviceId = normalizeDeviceId(input.deviceId);
     if (owner.kind === 'peer' && !requestedDeviceId) {
@@ -202,7 +220,10 @@ export class WakePushRegistry {
       && registrationOwnerEquals(prior.owner, owner)
       && prior.platform === platform
       && prior.token === token
-      && prior.label === label) {
+      && prior.label === label
+      && JSON.stringify(prior.subscription) === JSON.stringify(webPush?.subscription)
+      && JSON.stringify(prior.presentation) === JSON.stringify(webPush?.presentation)
+      && prior.context === webPush?.context) {
       return publicRegistration(prior);
     }
     if (!prior) {
@@ -223,6 +244,7 @@ export class WakePushRegistry {
       owner,
       platform,
       token,
+      ...(webPush ?? {}),
       ...(label ? { label } : {}),
       createdAt: prior?.createdAt ?? now,
       updatedAt: now,
@@ -275,6 +297,20 @@ export class WakePushRegistry {
     const deleted = this.registrations.delete(id);
     if (deleted) this.save();
     return deleted;
+  }
+
+  /**
+   * Broker-internal removal after the push service reported the subscription gone (404/410). Needs no
+   * principal, and removes the registration only while it still holds that endpoint, so a
+   * re-subscription that raced the failed send survives.
+   */
+  revokeForDispatch(registration: Pick<WakeRegistration, 'deviceId' | 'subscription'>): boolean {
+    const endpoint = registration.subscription?.endpoint;
+    const current = this.registrations.get(registration.deviceId);
+    if (!endpoint || current?.subscription?.endpoint !== endpoint) return false;
+    this.registrations.delete(registration.deviceId);
+    this.save();
+    return true;
   }
 
   revokePeer(peerId: string): number {
@@ -351,6 +387,9 @@ export async function dispatchWakePush(
    *  docs/architecture/client-ui.md */
   opts: { reason?: string; fetch?: typeof fetch; timeoutMs?: number } = {},
 ): Promise<WakePushDispatchResult> {
+  if (registration.platform === 'webpush') {
+    throw new WakePushError('BAD_PARAM', 'a web push registration receives notifications, not opaque wakes');
+  }
   const webhook = process.env.COSYNCING_WAKE_PUSH_WEBHOOK?.trim();
   if (!webhook) throw new WakePushError('PUSH_NOT_CONFIGURED', 'wake push provider is not configured', 501);
   const fetchImpl = opts.fetch ?? fetch;
@@ -382,8 +421,24 @@ export async function dispatchWakePush(
 }
 
 function normalizePlatform(raw: unknown): WakePlatform {
-  if (raw === 'apns' || raw === 'fcm') return raw;
-  throw new WakePushError('BAD_PARAM', 'platform must be apns or fcm');
+  if (raw === 'apns' || raw === 'fcm' || raw === 'webpush') return raw;
+  throw new WakePushError('BAD_PARAM', 'platform must be apns, fcm, or webpush');
+}
+
+function normalizeWebPushInput(
+  input: Pick<WakeRegistrationInput, 'subscription' | 'presentation' | 'context'>,
+): { subscription: WebPushSubscription; presentation: WebPushPresentation; context?: string } {
+  try {
+    const context = normalizeWebPushContext(input.context);
+    return {
+      subscription: normalizeWebPushSubscription(input.subscription),
+      presentation: normalizeWebPushPresentation(input.presentation),
+      ...(context !== undefined ? { context } : {}),
+    };
+  } catch (error) {
+    if (error instanceof WebPushSubscriptionError) throw new WakePushError('BAD_PARAM', error.message);
+    throw error;
+  }
 }
 
 function normalizeDeviceId(raw: unknown): string | undefined {
@@ -401,11 +456,15 @@ function tokenPreview(token: string): string {
 }
 
 function publicRegistration(registration: WakeRegistration): WakeRegistrationPublic {
+  const webPush = registration.platform === 'webpush';
   return {
     deviceId: registration.deviceId,
     platform: registration.platform,
-    tokenPreview: tokenPreview(registration.token),
+    tokenPreview: webPush
+      ? webPushEndpointOrigin(registration.subscription?.endpoint ?? '')
+      : tokenPreview(registration.token),
     ...(registration.label ? { label: registration.label } : {}),
+    ...(webPush ? { presentationTypes: Object.keys(registration.presentation ?? {}) } : {}),
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
   };
@@ -415,13 +474,17 @@ function normalizeStored(raw: any): WakeRegistration | undefined {
   try {
     const platform = normalizePlatform(raw?.platform);
     const deviceId = normalizeDeviceId(raw?.deviceId);
-    const token = typeof raw?.token === 'string' ? raw.token : '';
-    if (!deviceId || !token) return undefined;
+    // A stored subscription is validated again, so one whose host the operator no longer allows is
+    // dropped at startup instead of dispatched.
+    const webPush = platform === 'webpush' ? normalizeWebPushInput(raw) : undefined;
+    const token = webPush ? '' : typeof raw?.token === 'string' ? raw.token : '';
+    if (!deviceId || (!webPush && !token)) return undefined;
     return {
       deviceId,
       owner: normalizeStoredOwner(raw?.owner),
       platform,
       token,
+      ...(webPush ?? {}),
       ...(raw.label ? { label: String(raw.label) } : {}),
       createdAt: String(raw.createdAt ?? new Date(0).toISOString()),
       updatedAt: String(raw.updatedAt ?? new Date(0).toISOString()),

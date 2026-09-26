@@ -236,6 +236,8 @@ export interface ManagedConnAttentionHooks {
   onClientCountChanged?: (info: SessionInfo, count: number) => void;
   /** Owning live evidence vanished without proving the native session ended. */
   onObservationLost?: (info: SessionInfo) => void;
+  /** Requests this connection surfaced that its refreshed pending list no longer holds. */
+  onPendingWithdrawn?: (info: SessionInfo, requestIds: string[]) => void;
   /** Transcript-free live roster metadata/status projection. */
   onSessionInfo?: (info: SessionInfo) => void;
 }
@@ -246,6 +248,7 @@ export interface HubAttentionHooks {
   onLeaseDenied?: (info: SessionInfo) => void;
   onControlTransition?: (transition: SessionControlTransition) => void;
   onObservationLost?: (info: SessionInfo) => void;
+  onPendingWithdrawn?: (info: SessionInfo, requestIds: string[]) => void;
   /** Transcript-free live roster metadata/status projection. */
   onSessionInfo?: (info: SessionInfo) => void;
   maxZeroClientLeases?: number;
@@ -1244,6 +1247,7 @@ export class ManagedConn {
     // with no later transition able to repair it because the folded status and
     // the observed status already agree.
     const blockingBefore = anyBlockingPendingInput(this.pendingInput);
+    const surfacedBefore = [...this.pendingInput.keys()];
     this.pendingInput.clear();
     for (const message of pending) {
       if (message.type === 'user-message' && message.queued === true && message.key) {
@@ -1253,6 +1257,18 @@ export class ManagedConn {
       }
     }
     this.pendingQueuedRevision += 1;
+    // A request answered in the tool's own terminal leaves no resolution frame, only this shorter
+    // list. `pendingInput` is emptied on every connection swap, so everything in it before this
+    // refresh was surfaced by THIS connection, and an omission is this connection withdrawing it:
+    // a fresh connection's partial view of an older owner's requests can never reach here.
+    const withdrawn = surfacedBefore.filter((requestId) => !this.pendingInput.has(requestId));
+    if (withdrawn.length > 0 && conn.pendingListMayOmitOpenRequests !== true) {
+      try {
+        this.attentionHooks.onPendingWithdrawn?.(conn.info, withdrawn);
+      } catch (error) {
+        console.warn('[hub] attention pending observer failed:', error instanceof Error ? error.message : String(error));
+      }
+    }
     // Request ids can stay the same while blocking changes. Only a changed blocking
     // projection needs a status write; pending retention is reconciled separately below.
     if (anyBlockingPendingInput(this.pendingInput) !== blockingBefore) {
@@ -1979,6 +1995,7 @@ export class Hub {
         }
       },
       onObservationLost: (info) => this.attentionHooks.onObservationLost?.(info),
+      onPendingWithdrawn: (info, requestIds) => this.attentionHooks.onPendingWithdrawn?.(info, requestIds),
       onSessionInfo: (info) => this.handleSessionInfo(managed, info),
     }, this.draftStore);
     return managed;

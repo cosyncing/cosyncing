@@ -40,10 +40,27 @@ try {
   assert.equal(store.findByDedupeKey('question-required:codex:session-1:read-only'), undefined,
     'read-only observe placeholders are not actionable');
 
+  await send({
+    type: 'question-request', requestId: 'async', blocking: false,
+    questions: [{ question: 'later?', options: [{ label: 'yes' }] }],
+  });
+  assert.equal(store.findByDedupeKey('question-required:codex:session-1:async'), undefined,
+    'an asynchronous question does not block the agent, so it raises no attention event');
+  await send({ type: 'question-resolved', requestId: 'async' });
+  assert.equal(store.findByDedupeKey('question-required:codex:session-1:async'), undefined,
+    'its resolution has nothing to resolve');
+  await send({
+    type: 'question-request', requestId: 'explicit-blocking', blocking: true,
+    questions: [{ question: 'now?', options: [{ label: 'yes' }] }],
+  });
+  assert.equal(store.findByDedupeKey('question-required:codex:session-1:explicit-blocking')?.state, 'active',
+    'an explicitly blocking question is actionable');
+  await send({ type: 'question-resolved', requestId: 'explicit-blocking' });
+
   await send({ type: 'run-summary', key: 'short', turnId: 'turn-short', status: 'running' });
   now += 3_400;
   await send({ type: 'run-summary', key: 'short', turnId: 'turn-short', status: 'done' });
-  const short = store.findByDedupeKey('run-finished:codex:session-1:turn-short');
+  const short = store.findByDedupeKey('run-finished:codex:session-1:short');
   assert.equal(short?.state, 'resolved',
     'production defaults retain an authoritative 3.4-second completion');
   assert.equal(short?.presentationRevision, 1);
@@ -53,7 +70,7 @@ try {
   await send({ type: 'run-summary', key: 'long', turnId: 'turn-long', status: 'running' });
   now += 60_000;
   await send({ type: 'run-summary', key: 'long', turnId: 'turn-long', status: 'done' });
-  const finished = store.findByDedupeKey('run-finished:codex:session-1:turn-long');
+  const finished = store.findByDedupeKey('run-finished:codex:session-1:long');
   assert.equal(finished?.state, 'resolved');
   assert.equal(finished?.sessionTitle, session.title,
     'run-finished events capture the authoritative session title');
@@ -61,7 +78,7 @@ try {
   await send({ type: 'run-summary', key: 'failed', turnId: 'turn-failed', status: 'running' });
   now += 1;
   await send({ type: 'run-summary', key: 'failed', turnId: 'turn-failed', status: 'error' });
-  const failed = store.findByDedupeKey('run-failed:codex:session-1:turn-failed');
+  const failed = store.findByDedupeKey('run-failed:codex:session-1:failed');
   assert.equal(failed?.state, 'resolved',
     'run failures are not duration gated');
   assert.equal(failed?.sessionTitle, session.title,
@@ -74,6 +91,44 @@ try {
   assert.equal(goal?.sessionTitle, session.title,
     'goal-finished events capture the authoritative session title');
   assert.equal(JSON.stringify(goal).includes('private goal'), false);
+
+  // Codex reopens a closed turn id as a new generation with its own run key. Each generation is its
+  // own completion; a re-read of an already reported generation stays silent.
+  await send({ type: 'run-summary', key: 'codex:run:reused', turnId: 'reused', status: 'running' });
+  await send({ type: 'run-summary', key: 'codex:run:reused', turnId: 'reused', status: 'done' });
+  await send({ type: 'run-summary', key: 'codex:run:reused@g2', turnId: 'reused', status: 'running' });
+  await send({ type: 'run-summary', key: 'codex:run:reused@g2', turnId: 'reused', status: 'done' });
+  const generations = () => store.listEvents().filter((event) => event.turnId === 'reused');
+  assert.deepEqual(generations().map((event) => event.dedupeKey), [
+    'run-finished:codex:session-1:codex:run:reused',
+    'run-finished:codex:session-1:codex:run:reused@g2',
+  ], 'a second generation of a turn id notifies again');
+  const reportedGenerations = generations().map((event) => event.revision);
+  await send({ type: 'run-summary', key: 'codex:run:reused@g2', turnId: 'reused', status: 'running' });
+  await send({ type: 'run-summary', key: 'codex:run:reused@g2', turnId: 'reused', status: 'done' });
+  assert.deepEqual(generations().map((event) => event.revision), reportedGenerations,
+    'a re-read of a reported generation adds nothing');
+
+  // Codex keys every goal in a thread by the thread id; the start time tells the goals apart.
+  await send({ type: 'goal-state', key: 'thread-1', title: 'first', status: 'active', startedAt: 100 });
+  await send({ type: 'goal-state', key: 'thread-1', title: 'first', status: 'active', startedAt: 100, elapsedMs: 5 });
+  await send({ type: 'goal-state', key: 'thread-1', title: 'first', status: 'done', startedAt: 100 });
+  await send({ type: 'goal-state', key: 'thread-1', title: 'second', status: 'active', startedAt: 200 });
+  await send({ type: 'goal-state', key: 'thread-1', title: 'second', status: 'done' });
+  const threadGoals = () => store.listEvents()
+    .filter((event) => event.kind === 'goal-finished' && event.goalKey === 'thread-1')
+    .map((event) => event.dedupeKey);
+  assert.deepEqual(threadGoals(), [
+    'goal-finished:codex:session-1:thread-1:100',
+    'goal-finished:codex:session-1:thread-1:200',
+  ], 'every finished goal in a thread notifies, and a terminal frame without a start time uses the observed one');
+  await send({ type: 'goal-state', key: 'thread-1', title: 'replaced', status: 'active', startedAt: 300 });
+  await send({ type: 'goal-state', key: 'thread-1', title: 'replacement', status: 'active', startedAt: 400 });
+  assert.equal(store.getObservation('goal:codex:session-1:thread-1')?.data.startedAt, 400,
+    'a goal that replaced the active one takes over its observation');
+  await send({ type: 'goal-state', key: 'thread-1', title: 'replacement', status: 'done', startedAt: 400 });
+  assert.deepEqual(threadGoals().slice(2), ['goal-finished:codex:session-1:thread-1:400'],
+    'the replacement notifies once and the goal it replaced never finished');
 
   await send({ type: 'question-request', requestId: 'pending', questions: [{ question: 'x', options: [] }] });
   assert.equal(
@@ -91,18 +146,52 @@ try {
     'session end clears live goal evidence');
   await send({ type: 'run-summary', key: 'ended-run', turnId: 'ended-turn', status: 'error' });
   await send({ type: 'goal-state', key: 'ended-goal', title: 'ended', status: 'done' });
-  assert.equal(store.findByDedupeKey('run-failed:codex:session-1:ended-turn'), undefined,
+  assert.equal(store.findByDedupeKey('run-failed:codex:session-1:ended-run'), undefined,
     'late terminal frames after session end cannot create a notification');
   assert.equal(store.findByDedupeKey('goal-finished:codex:session-1:ended-goal'), undefined,
     'late goal terminal frames after session end cannot create a notification');
 
+  // A connection replacement (drive takeover, reattach, lease eviction) keeps recent evidence, so
+  // the replacement's terminal frame for the same turn still notifies — once.
   await send({ type: 'run-summary', key: 'lost-run', turnId: 'lost-turn', status: 'running' });
   await send({ type: 'goal-state', key: 'lost-goal', title: 'lost', status: 'active' });
+  now += 60_000;
   await policy.handleObservationLost(session);
-  assert.equal(store.getObservation('run:codex:session-1:lost-run'), undefined,
-    'connection replacement/disposal clears incomplete run evidence');
-  assert.equal(store.getObservation('goal:codex:session-1:lost-goal'), undefined,
-    'connection replacement/disposal clears incomplete goal evidence');
+  assert.ok(store.getObservation('run:codex:session-1:lost-run'),
+    'connection replacement keeps recent run evidence');
+  assert.ok(store.getObservation('goal:codex:session-1:lost-goal'),
+    'connection replacement keeps recent goal evidence');
+  // The replacement re-announces the running turn; the original evidence stands.
+  await send({ type: 'run-summary', key: 'lost-run', turnId: 'lost-turn', status: 'running' });
+  await send({ type: 'run-summary', key: 'lost-run', turnId: 'lost-turn', status: 'done' });
+  await send({ type: 'goal-state', key: 'lost-goal', title: 'lost', status: 'done' });
+  assert.equal(store.findByDedupeKey('run-finished:codex:session-1:lost-run')?.state, 'resolved',
+    'the replacement connection reports the completion');
+  assert.equal(store.findByDedupeKey('goal-finished:codex:session-1:lost-goal')?.state, 'resolved',
+    'the replacement connection reports the goal');
+  const lostEvents = store.listEvents().filter((event) => event.turnId === 'lost-turn');
+  // The old owner's late terminal frame for the same turn adds nothing.
+  await send({ type: 'run-summary', key: 'lost-run', turnId: 'lost-turn', status: 'done' });
+  assert.deepEqual(
+    store.listEvents().filter((event) => event.turnId === 'lost-turn').map((event) => event.revision),
+    lostEvents.map((event) => event.revision),
+    'a terminal frame seen by both owners stays one unchanged event',
+  );
+
+  await send({ type: 'run-summary', key: 'stale-run', turnId: 'stale-turn', status: 'running' });
+  await send({ type: 'run-summary', key: 'second-stale-run', turnId: 'second-stale-turn', status: 'running' });
+  now += 25 * 60 * 60_000;
+  await send({ type: 'run-summary', key: 'fresh-run', turnId: 'fresh-turn', status: 'running' });
+  await policy.handleObservationLost(session);
+  assert.equal(store.getObservation('run:codex:session-1:stale-run'), undefined,
+    'evidence older than a day is dropped on loss');
+  assert.equal(store.getObservation('run:codex:session-1:second-stale-run'), undefined,
+    'every day-old observation of the session is dropped together');
+  assert.ok(store.getObservation('run:codex:session-1:fresh-run'), 'fresh evidence stays');
+  await send({ type: 'run-summary', key: 'stale-run', turnId: 'stale-turn', status: 'done' });
+  assert.equal(store.findByDedupeKey('run-finished:codex:session-1:stale-run'), undefined,
+    'a terminal frame for dropped evidence cannot notify');
+  await send({ type: 'run-summary', key: 'fresh-run', turnId: 'fresh-turn', status: 'cancelled' });
 
   const pendingRuntime: AgentRuntimeUpdateStatus = {
     agent: 'codex', displayName: 'Codex', managed: true, state: 'pending', updateAvailable: true,

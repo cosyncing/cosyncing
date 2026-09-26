@@ -32,9 +32,22 @@ met and explicitly approved.
 The project was informed by the MIT-licensed Happy Coder project, credited in
 NOTICE. No third-party research PDFs, papers, screenshots, fonts, archived
 plugins, or predecessor `thirdparty/` trees are distributed from this public
-lineage. `apps/poc-ui/` is first-party retained test tooling, not a vendored
-application.
+lineage. The one adapted package is listed under
+[Copied or adapted material](#copied-or-adapted-material). `apps/poc-ui/` is
+first-party retained test tooling, not a vendored application.
 
 If copied or adapted third-party material is added later, its source, version,
 license, modification status, and required notice must be recorded here before
 merge.
+
+## Copied or adapted material
+
+| Path | Source | Version | License | Modified |
+| --- | --- | --- | --- | --- |
+| `packages/dart/flutter_local_notifications_windows/` | [`flutter_local_notifications_windows`](https://github.com/MaikuB/flutter_local_notifications/tree/master/flutter_local_notifications_windows) (pub.dev) | 3.1.1, forked as `3.1.1+cosyncing.1` | BSD-3-Clause, Copyright 2024 Michael Bui | Yes |
+
+The Windows client uses this fork through `dependency_overrides`. The fork
+keeps upstream's `LICENSE` unchanged, and marks every change `cosyncing:` in
+the source. Its `README-fork.md` lists the changes, the upstream files it left
+out, and how to update it. Flutter bundles the package's `LICENSE` into the
+client's licence notices, so the BSD notice ships with the compiled plugin.

@@ -299,6 +299,11 @@ export class SessionMetadataStore {
     return true;
   }
 
+  /** The title the user gave this session in Cosyncing, if any. */
+  titleOf(tool: string, id: string): string | undefined {
+    return this.index.sessions[sessionKey(tool, id)]?.title || undefined;
+  }
+
   apply(info: SessionInfo): SessionInfo {
     const out: SessionInfo = { ...info };
     const title = this.index.sessions[sessionKey(info.tool, info.id)];

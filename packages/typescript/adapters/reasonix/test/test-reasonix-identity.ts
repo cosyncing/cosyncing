@@ -31,6 +31,25 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<boo
   }
   return predicate();
 }
+type RunSummaryFrame = Extract<AgentMessage, { type: 'run-summary' }>;
+function runSummaries(frames: readonly AgentMessage[], status?: RunSummaryFrame['status']): RunSummaryFrame[] {
+  return frames.filter((frame): frame is RunSummaryFrame => frame.type === 'run-summary'
+    && (status === undefined || frame.status === status));
+}
+/** The broker attention policy's run pairing: live `running`, then a `done`/`error` with its key. */
+function runNotifications(frames: readonly AgentMessage[]): string[] {
+  const observed = new Set<string>();
+  const notified: string[] = [];
+  for (const frame of runSummaries(frames)) {
+    if (frame.status === 'running') {
+      observed.add(frame.key);
+      continue;
+    }
+    if (!observed.delete(frame.key)) continue;
+    if (frame.status === 'done' || frame.status === 'error') notified.push(`${frame.status}:${frame.key}`);
+  }
+  return notified;
+}
 function keys(messages: readonly AgentMessage[]): string[] {
   return messages
     .map((message) => (message as { key?: string }).key)
@@ -305,6 +324,27 @@ try {
         && !createdPending.some((message) => message.type === 'user-message')
         && createAdapter.isDriving(created.id),
       JSON.stringify({ createdLive, createdHistory, pending: createdPending }));
+    // The bounded probe publishes the initial snapshot while session/prompt is
+    // still pending here (rows at 300 ms, ACP return at 700 ms). The snapshot
+    // is catch-up and carries no running; the first turn is paired only once
+    // this connection has seen its own ACP turn return.
+    const createdFooterKey = `reasonix:${created.id}:message:2:summary`;
+    await waitFor(() => runNotifications(createdLive).length > 0);
+    const createdRunning = runSummaries(createdLive, 'running');
+    const createdRunningAt = createdRunning[0] ? createdLive.indexOf(createdRunning[0]) : -1;
+    const createdSnapshotFooterAt = createdLive.findIndex((frame) => frame.type === 'run-summary'
+      && frame.key === createdFooterKey && frame.status === 'done');
+    const createdPairedTerminal = createdLive[createdRunningAt + 1];
+    check('the created initial snapshot carries no running; the returned first turn pairs its footer once after it',
+      createdRunning.length === 1
+        && createdRunning[0]?.key === createdFooterKey
+        && createdSnapshotFooterAt >= 0
+        && createdSnapshotFooterAt < createdRunningAt
+        && createdPairedTerminal?.type === 'run-summary'
+        && createdPairedTerminal.key === createdFooterKey
+        && createdPairedTerminal.status === 'done'
+        && JSON.stringify(runNotifications(createdLive)) === JSON.stringify([`done:${createdFooterKey}`]),
+      JSON.stringify(runSummaries(createdLive)));
     await createdDrive.close();
 
     const streamedCreateId = 'created-streamed';
@@ -404,6 +444,12 @@ try {
         && !inboxPending.some((message) => message.type === 'user-message')
         && inboxOnlyAdapter.isDriving(inboxOnlyInfo.id),
       JSON.stringify({ materializedBeforeWatch, queuedInbox, inboxLive, inboxPending }));
+    await sleep(150);
+    check('a created first turn whose ACP return never arrives publishes its snapshot footer with no running',
+      runSummaries(inboxLive, 'done').some((frame) => frame.key === `reasonix:${inboxOnlyId}:message:2:summary`)
+        && runSummaries(inboxLive, 'running').length === 0
+        && runNotifications(inboxLive).length === 0,
+      JSON.stringify(runSummaries(inboxLive)));
     await inboxOnlyDrive.close();
     await inboxTurn.catch(() => undefined);
 

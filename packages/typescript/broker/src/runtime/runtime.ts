@@ -181,6 +181,7 @@ import {
   WakePushError,
   WakePushRegistry,
 } from '../transport/push-wake.ts';
+import { deliverWebPush, type WebPushDeliveryDependencies, WebPushVapidKeyStore } from '../transport/web-push.ts';
 import { authorizeBrokerRoute } from '../security/route-authorization.ts';
 import { completeAuthorizationProvenanceMigration } from '../security/authorization-provenance-migration.ts';
 import {
@@ -192,6 +193,7 @@ import {
   type MachinePeerConfig,
 } from '../roster/machine-aggregation.ts';
 import { AttentionService } from '../attention/attention-service.ts';
+import { attentionSessionView } from '../attention/attention-notification-type.ts';
 import { AuthFailureAttentionTracker } from '../attention/attention-policy.ts';
 import { BrokerHealthMonitor, type BrokerHealthSnapshot } from './broker-health.ts';
 import { BrokerHealthAttentionReconciler } from '../attention/broker-health-attention.ts';
@@ -1145,7 +1147,7 @@ const draftStore = new SharedDraftStore({
 });
 const hub = new Hub(registry, 15000, artifactStore, {
   onMessage: (info, message) => {
-    void attentionService.handleMessage(info, message).catch((error) =>
+    void attentionService.handleMessage(attentionSessionView(info, (tool, id) => sessionMetadata.titleOf(tool, id)), message).catch((error) =>
       console.error(`${LOG_PREFIX} attention message reconciliation failed for ${info.tool}:${info.id}: ${String(error)}`));
   },
   onSessionEnded: (info) => {
@@ -1153,7 +1155,7 @@ const hub = new Hub(registry, 15000, artifactStore, {
       console.error(`${LOG_PREFIX} attention session-end reconciliation failed for ${info.tool}:${info.id}: ${String(error)}`));
   },
   onControlTransition: (transition) => {
-    console.info(`${LOG_PREFIX} session-control-attention ${JSON.stringify({
+    console.info(`${LOG_PREFIX} session-control-transition ${JSON.stringify({
       source: `${MACHINE}:${transition.tool}:${transition.sessionId}`,
       path: transition.path,
       from: transition.from,
@@ -1161,19 +1163,15 @@ const hub = new Hub(registry, 15000, artifactStore, {
       cause: transition.cause,
       intentional: transition.intentional === true,
       observedAt: transition.observedAt,
-      attentionTransition:
-        (transition.from === 'active' || transition.from === 'available') && transition.to === 'unavailable'
-          ? 'upsert-sync-degraded'
-          : transition.to === 'active' || transition.to === 'available' || transition.to === 'ended'
-            ? 'resolve-sync-degraded'
-            : 'none',
     })}`);
-    void attentionService.handleControlTransition(transition).catch((error) =>
-      console.error(`${LOG_PREFIX} sync-degraded reconciliation failed for ${transition.tool}:${transition.sessionId}: ${String(error)}`));
   },
   onObservationLost: (info) => {
     void attentionService.handleObservationLost(info).catch((error) =>
       console.error(`${LOG_PREFIX} attention observation-loss cleanup failed for ${info.tool}:${info.id}: ${String(error)}`));
+  },
+  onPendingWithdrawn: (info, requestIds) => {
+    void attentionService.handlePendingWithdrawn(info, requestIds).catch((error) =>
+      console.error(`${LOG_PREFIX} attention pending reconciliation failed for ${info.tool}:${info.id}: ${String(error)}`));
   },
   onLeaseDenied: () => {
     // The cap is intentionally not an outage. The warning is already visible in Hub logs; health
@@ -1203,6 +1201,12 @@ wakePush = new WakePushRegistry(setupStateHome(), {
   isPeerGenerationActive: (peerId, authGeneration) =>
     transportPairings.isPeerGenerationActive(peerId, authGeneration),
 });
+const webPushDelivery: WebPushDeliveryDependencies & { vapid: WebPushVapidKeyStore } = {
+  store: attentionService.store,
+  vapid: new WebPushVapidKeyStore(setupStateHome(), { warn: (message) => console.warn(`${LOG_PREFIX} ${message}`) }),
+  revoke: (registration) => wakePush.revokeForDispatch(registration),
+  warn: (message) => console.warn(`${LOG_PREFIX} ${message}`),
+};
 // Complete every revision-17 security-store migration before starting a timer, dispatcher, or
 // HTTP listener. Constructor persistence failures escape module startup, so partial migration can
 // only be retried idempotently and can never advertise a ready contract-17 broker.
@@ -1222,8 +1226,9 @@ brokerHealthAttention = new BrokerHealthAttentionReconciler({
   attentionService,
   machine: MACHINE,
   requestDirectWake: () => {
+    // A web push shows an event, so a bare wake has nothing to show; the event itself is delivered.
     for (const registration of wakePush.listForDispatch()) {
-      void wakeCoalescer.request(registration).catch(() => {});
+      if (registration.platform !== 'webpush') void wakeCoalescer.request(registration).catch(() => {});
     }
   },
 });
@@ -1231,7 +1236,8 @@ attentionScheduler = new AttentionReminderScheduler(attentionService.store, {
   listDeviceIds: () => wakePush.listForDispatch().map((registration) => registration.deviceId),
   dispatchReservation: async (delivery) => {
     const registration = wakePush.getForDispatch(delivery.deviceId);
-    await wakeCoalescer.request(registration);
+    if (registration.platform === 'webpush') await deliverWebPush(delivery, registration, webPushDelivery);
+    else await wakeCoalescer.request(registration);
   },
   onError: (error) =>
     console.warn(`${LOG_PREFIX} attention wake reservation failed: ${error instanceof Error ? error.message : String(error)}`),
@@ -5296,6 +5302,14 @@ server = Bun.serve<WsData>({
       return json({ ok: true, envelopes: out.map(transportEnvelopeJson) });
     }
 
+    if (path === '/api/push/web-push-key' && req.method === 'GET') {
+      try {
+        return json({ ok: true, publicKey: webPushDelivery.vapid.publicKey() });
+      } catch (err) {
+        return wakePushErrorResponse(err);
+      }
+    }
+
     if (path === '/api/push/wake-tokens' && req.method === 'POST') {
       const registrationOwner = principal ? wakeRegistrationOwner(principal) : undefined;
       if (!registrationOwner) return json({ ok: false, error: 'broker principal required' }, 403);
@@ -5306,6 +5320,9 @@ server = Bun.serve<WsData>({
           platform: body?.platform,
           token: String(body?.token ?? ''),
           label: typeof body?.label === 'string' ? body.label : undefined,
+          subscription: body?.subscription,
+          presentation: body?.presentation,
+          context: body?.context,
         }, registrationOwner);
         void attentionScheduler.tick().catch(() => {});
         return json({ ok: true, registration }, 201);

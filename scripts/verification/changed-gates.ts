@@ -12,6 +12,8 @@ const APP_GATES = [
   'client',
   'web-browser',
   'web-cache',
+  'web-notification-click',
+  'web-push-notification',
   'web-update-handoff',
 ] as const;
 

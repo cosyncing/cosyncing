@@ -1,23 +1,31 @@
 import 'package:broker_client_flutter/broker_client_flutter.dart';
+import 'package:cosyncing_client/src/features/attention/controller/notification_system_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/settings/controller/session_notification_settings_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../../../support/notification_test_support.dart';
+
 void main() {
-  late _InMemorySessionNotificationSettingsStore store;
-  late _FakePermissionRequester permissionRequester;
+  late InMemoryNotificationPreferenceStore store;
+  late FakeNotificationBackend backend;
+  late ControllableLifecycleMonitor lifecycle;
   late ProviderContainer container;
 
   setUp(() {
-    store = _InMemorySessionNotificationSettingsStore();
-    permissionRequester = _FakePermissionRequester();
+    store = InMemoryNotificationPreferenceStore();
+    backend = FakeNotificationBackend();
+    lifecycle = ControllableLifecycleMonitor();
     container = ProviderContainer(
       overrides: [
         sessionNotificationSettingsStoreProvider.overrideWithValue(store),
-        sessionNotificationPermissionRequesterProvider.overrideWithValue(
-          permissionRequester.call,
+        sessionLocalNotificationAdapterProvider.overrideWithValue(
+          FlutterLocalNotificationSink(backend: backend, onTap: (_) {}),
+        ),
+        sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+          lifecycle,
         ),
       ],
     );
@@ -27,235 +35,144 @@ void main() {
     container.dispose();
   });
 
+  Future<NotificationPermissionStatus> permission() =>
+      container.read(notificationPermissionControllerProvider.future);
+
   group('SessionNotificationSettingsController', () {
-    test(
-      'permission request reuses the initialized tap-aware adapter',
-      () async {
-        final backend = _RecordingNotificationBackend();
-        final adapter = FlutterLocalNotificationSink(
-          backend: backend,
-          onTap: (_) {},
-        );
-        final sharedContainer = ProviderContainer(
-          overrides: [
-            sessionLocalNotificationAdapterProvider.overrideWithValue(adapter),
-          ],
-        );
-        addTearDown(sharedContainer.dispose);
-
-        await sharedContainer.read(
-          sessionNotificationLaunchBootstrapProvider.future,
-        );
-        await sharedContainer.read(
-          sessionNotificationPermissionRequesterProvider,
-        )();
-
-        expect(backend.initializeCount, 1);
-        expect(backend.permissionRequestCount, 1);
-        expect(backend.initializedWithTapHandler, isTrue);
-      },
-    );
-
-    test('loads disabled as the default when setting is missing', () async {
-      expect(
-        await container.read(
-          sessionNotificationSettingsControllerProvider.future,
-        ),
-        false,
-      );
-    });
-
-    test('persists enabled state and updates controller value', () async {
-      await container
-          .read(sessionNotificationSettingsControllerProvider.notifier)
-          .setEnabled(enabled: true);
-
-      expect(store.value, isTrue);
-      expect(
-        await container.read(
-          sessionNotificationSettingsControllerProvider.future,
-        ),
-        isTrue,
-      );
-    });
-
-    test('can persist disabled state', () async {
-      store.value = true;
-      await container
-          .read(sessionNotificationSettingsControllerProvider.notifier)
-          .setEnabled(enabled: false);
-
-      expect(store.value, isFalse);
+    test('an unset switch reads off, with no recorded choice', () async {
       expect(
         await container.read(
           sessionNotificationSettingsControllerProvider.future,
         ),
         isFalse,
       );
+      expect(
+        await container.read(sessionNotificationPreferenceProvider.future),
+        isNull,
+      );
     });
 
     test(
-      'requesting permission updates state to granted',
+      'turning on prompts for OS permission once, in the same call',
       () async {
-        permissionRequester.nextResult =
-            const FlutterLocalNotificationPermissionRequestResult(
-              outcome: FlutterLocalNotificationPermissionRequestOutcome.granted,
-            );
-
         await container
-            .read(
-              sessionNotificationPermissionRequestControllerProvider.notifier,
-            )
-            .requestPermission();
+            .read(sessionNotificationSettingsControllerProvider.notifier)
+            .setEnabled(enabled: true);
 
-        final result = await container.read(
-          sessionNotificationPermissionRequestControllerProvider.future,
-        );
+        expect(store.preference, isTrue);
+        expect(backend.permissionRequestCount, 1);
+        expect(store.permissionPrompted, isTrue);
+        expect((await permission()).state, NotificationPermissionState.granted);
         expect(
-          result?.outcome,
-          FlutterLocalNotificationPermissionRequestOutcome.granted,
-        );
-        expect(permissionRequester.requests, 1);
-      },
-    );
-
-    test(
-      'surfaces denied permission outcome from request path',
-      () async {
-        permissionRequester.nextResult =
-            const FlutterLocalNotificationPermissionRequestResult(
-              outcome: FlutterLocalNotificationPermissionRequestOutcome.denied,
-            );
-
-        await container
-            .read(
-              sessionNotificationPermissionRequestControllerProvider.notifier,
-            )
-            .requestPermission();
-
-        final result = await container.read(
-          sessionNotificationPermissionRequestControllerProvider.future,
-        );
-        expect(
-          result?.outcome,
-          FlutterLocalNotificationPermissionRequestOutcome.denied,
+          await container.read(sessionNotificationPreferenceProvider.future),
+          isTrue,
         );
       },
     );
 
-    test(
-      'surfaces unsupported permission outcome from request path',
-      () async {
-        permissionRequester
-            .nextResult = const FlutterLocalNotificationPermissionRequestResult(
-          outcome: FlutterLocalNotificationPermissionRequestOutcome.unsupported,
-        );
-
-        await container
-            .read(
-              sessionNotificationPermissionRequestControllerProvider.notifier,
-            )
-            .requestPermission();
-
-        final result = await container.read(
-          sessionNotificationPermissionRequestControllerProvider.future,
-        );
-        expect(
-          result?.outcome,
-          FlutterLocalNotificationPermissionRequestOutcome.unsupported,
-        );
-      },
-    );
-
-    test('surfaces failed permission outcome when request throws', () async {
-      permissionRequester.throwOnRequest = true;
-
+    test('turning off records the choice and never prompts', () async {
+      store.preference = true;
       await container
-          .read(sessionNotificationPermissionRequestControllerProvider.notifier)
-          .requestPermission();
+          .read(sessionNotificationSettingsControllerProvider.notifier)
+          .setEnabled(enabled: false);
 
-      final result = await container.read(
-        sessionNotificationPermissionRequestControllerProvider.future,
-      );
+      expect(store.preference, isFalse);
+      expect(backend.permissionRequestCount, 0);
       expect(
-        result?.outcome,
-        FlutterLocalNotificationPermissionRequestOutcome.failed,
+        await container.read(sessionNotificationPreferenceProvider.future),
+        isFalse,
       );
-      expect(result?.message, isNull);
+    });
+
+    test('the switch stays on when the OS refuses permission', () async {
+      backend.requestResult = const NotificationPermissionStatus(
+        NotificationPermissionState.denied,
+      );
+      await container
+          .read(sessionNotificationSettingsControllerProvider.notifier)
+          .setEnabled(enabled: true);
+
+      expect(store.preference, isTrue);
+      expect((await permission()).state, NotificationPermissionState.denied);
+    });
+
+    test(
+      'the permission request reuses the one initialized tap-aware adapter',
+      () async {
+        await container.read(sessionNotificationLaunchBootstrapProvider.future);
+        await container
+            .read(notificationPermissionControllerProvider.notifier)
+            .request();
+
+        expect(backend.initializeCount, 1);
+        expect(backend.permissionRequestCount, 1);
+        expect(backend.initializedWithTapHandler, isTrue);
+      },
+    );
+  });
+
+  group('NotificationPermissionController', () {
+    test('reads the OS state without prompting', () async {
+      expect(
+        (await permission()).state,
+        NotificationPermissionState.notGranted,
+      );
+      expect(backend.permissionRequestCount, 0);
+    });
+
+    test(
+      '"not enabled" after this device prompted reads as denied',
+      () async {
+        store.permissionPrompted = true;
+
+        expect((await permission()).state, NotificationPermissionState.denied);
+      },
+    );
+
+    test('a granted OS state wins over the prompted flag', () async {
+      store.permissionPrompted = true;
+      backend.permission = NotificationPermissionStatus.granted;
+
+      expect((await permission()).state, NotificationPermissionState.granted);
+    });
+
+    test('re-reads the OS state when the app resumes', () async {
+      expect(
+        (await permission()).state,
+        NotificationPermissionState.notGranted,
+      );
+
+      // The user allowed notifications in system settings meanwhile.
+      backend.permission = NotificationPermissionStatus.granted;
+      lifecycle.emit(BrokerAppLifecycleState.resumed);
+      await pumpEventQueue();
+
+      expect(
+        container.read(notificationPermissionControllerProvider).value?.state,
+        NotificationPermissionState.granted,
+      );
+    });
+
+    test('an initialization failure is an error with its reason', () async {
+      backend.initializeError = StateError('invalid_icon');
+
+      final status = await permission();
+
+      expect(status.state, NotificationPermissionState.error);
+      expect(status.reason, contains('initialization-failed'));
+      expect(status.reason, contains('invalid_icon'));
+    });
+
+    test('platforms without notifications report unsupported', () async {
+      backend.permission = const NotificationPermissionStatus(
+        NotificationPermissionState.unsupported,
+        reason: 'insecure-context',
+      );
+
+      final status = await permission();
+
+      expect(status.state, NotificationPermissionState.unsupported);
+      expect(status.reason, 'insecure-context');
     });
   });
-}
-
-final class _RecordingNotificationBackend
-    implements FlutterLocalNotificationBackend {
-  int initializeCount = 0;
-  int permissionRequestCount = 0;
-  bool initializedWithTapHandler = false;
-
-  @override
-  Future<void> initialize({FlutterLocalNotificationTapHandler? onTap}) async {
-    initializeCount += 1;
-    initializedWithTapHandler = onTap != null;
-  }
-
-  @override
-  Future<String?> getLaunchPayload() async => null;
-
-  @override
-  Future<FlutterLocalNotificationPermissionRequestResult>
-  requestPermission() async {
-    permissionRequestCount += 1;
-    return const FlutterLocalNotificationPermissionRequestResult(
-      outcome: FlutterLocalNotificationPermissionRequestOutcome.granted,
-    );
-  }
-
-  @override
-  Future<void> show({
-    required int id,
-    required String title,
-    required String body,
-    required String? payload,
-    required FlutterLocalNotificationDisplayOptions options,
-  }) async {}
-
-  @override
-  Future<void> clear(int id) async {}
-
-  @override
-  Future<void> clearAll() async {}
-}
-
-final class _FakePermissionRequester {
-  _FakePermissionRequester()
-    : nextResult = const FlutterLocalNotificationPermissionRequestResult(
-        outcome: FlutterLocalNotificationPermissionRequestOutcome.granted,
-      );
-
-  int requests = 0;
-  bool throwOnRequest = false;
-  FlutterLocalNotificationPermissionRequestResult nextResult;
-
-  Future<FlutterLocalNotificationPermissionRequestResult> call() async {
-    requests += 1;
-    if (throwOnRequest) {
-      throw Exception('permission request failed');
-    }
-    return nextResult;
-  }
-}
-
-final class _InMemorySessionNotificationSettingsStore
-    implements SessionNotificationSettingsStore {
-  _InMemorySessionNotificationSettingsStore() : value = false;
-
-  bool value;
-
-  @override
-  Future<bool> getLocalNotificationEnabled() async => value;
-
-  @override
-  Future<void> setLocalNotificationEnabled({required bool enabled}) async {
-    value = enabled;
-  }
 }

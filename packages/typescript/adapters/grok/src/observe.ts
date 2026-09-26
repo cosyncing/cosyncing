@@ -384,6 +384,10 @@ export class GrokObserveConnection implements SessionConnection {
   protected onTailEntry(_entry: GrokUpdateEntry, messages: readonly AgentMessage[]): readonly AgentMessage[] {
     return messages;
   }
+  /** Hand one correlated tail-drained frame to subscribers. */
+  protected publishTailMessage(message: AgentMessage): void {
+    this.emit(message);
+  }
   protected onHistorySnapshot(
     _entries: readonly GrokUpdateEntry[],
     _messages: readonly AgentMessage[],
@@ -614,7 +618,7 @@ export class GrokObserveConnection implements SessionConnection {
           });
           const admitted = this.onTailEntry(entry, messages);
           const uncorrelated = this.applyReplayCorrelations(admitted);
-          for (const message of admitted) this.emit(message);
+          for (const message of admitted) this.publishTailMessage(message);
           this.rememberUncorrelatedUserKeys(uncorrelated.values());
         }
         const usage = grokContextUsage(await readGrokSignals(this.session));

@@ -1726,6 +1726,9 @@ export class ClaudeAdapter implements AgentBackend {
  * tail once its newline lands), and (c) the old double full-read (the constructor no longer slurps).
  */
 export class ClaudeObserveConnection implements SessionConnection {
+  /** {@link getPending} holds at most the card captured at construction; question cards the tail
+   *  streams later are not in it. */
+  readonly pendingListMayOmitOpenRequests = true;
   private readonly historySource = new JsonlHistorySource();
   private historyFlight?: Promise<AgentMessage[]>;
   private readonly handlers = new Set<AgentMessageHandler>();
@@ -2050,6 +2053,9 @@ export class ClaudeObserveConnection implements SessionConnection {
  * re-emit them here in v1 to avoid double-rendering (refinement noted in the bridge impl log).
  */
 export class ClaudeLiveConnection implements SessionConnection {
+  /** {@link getPending} replays permission cards only; the question cards this connection emits are
+   *  not in it. */
+  readonly pendingListMayOmitOpenRequests = true;
   private readonly observe: ClaudeObserveConnection;
   private readonly handlers = new Set<AgentMessageHandler>();
   private sock?: Socket;
@@ -5271,6 +5277,8 @@ export class ClaudeRuntimeTracker {
       // replacing the preceding prompt turn's footer.
       ...(run.lastAssistantKey ? { assistantMessageKey: run.lastAssistantKey } : {}),
       status,
+      // A task-notification wake is Claude continuing on its own, not a turn anyone prompted.
+      ...(run.continuation ? { origin: 'background' as const } : {}),
       ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
       ...(completedAt !== undefined ? { completedAt } : {}),
       ...(totalRuntimeMs !== undefined ? { totalRuntimeMs } : {}),

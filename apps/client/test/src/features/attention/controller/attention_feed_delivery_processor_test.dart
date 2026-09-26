@@ -5,7 +5,10 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/l10n/app_localizations_en.dart';
 import 'package:cosyncing_client/l10n/app_localizations_zh.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_delivery_processor.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_presentation_coordinator.dart';
+import 'package:cosyncing_client/src/features/attention/data/attention_notification_type_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -33,17 +36,44 @@ void main() {
 
   AttentionFeedDeliveryProcessor makeProcessor({
     AppLocalizations? localizations,
+    AttentionNotificationSettingResolver? resolveSetting,
+    AttentionNotificationDeliveryObserver? onDelivery,
+    AttentionFeedForegroundHandler? onForegroundEvent,
+    AttentionPresentationCoordinator? presentationCoordinator,
   }) {
     return AttentionFeedDeliveryProcessor(
       repository: repository,
       brokerProfileId: _profileId,
       lifecycleMonitor: lifecycleMonitor,
       notificationSink: notificationSink,
-      onForegroundEvent: (_) async {},
+      onForegroundEvent: onForegroundEvent ?? (_) async {},
       now: () => DateTime(2026),
-      localizations: localizations,
+      localizations: localizations ?? AppLocalizationsEn(),
+      resolveSetting:
+          resolveSetting ??
+          (type) async => AttentionNotificationTypeSetting.defaultsFor(type),
+      onDelivery: onDelivery,
+      presentationCoordinator:
+          presentationCoordinator ??
+          const SingleWindowPresentationCoordinator(),
     );
   }
+
+  Future<void> persist(List<AttentionEventView> events, {int cursor = 1}) =>
+      repository.persistAttentionEventsPage(
+        brokerProfileId: _profileId,
+        page: AttentionEventsPage(
+          events: events,
+          cursor: cursor,
+          reset: false,
+          hasMore: false,
+        ),
+      );
+
+  Future<int> presentedRevision(String eventId) async =>
+      (await repository.loadDeliveryStates(
+        _profileId,
+      )).singleWhere((row) => row.event.id == eventId).localPresentedRevision;
 
   test(
     'retries failed read and dismiss posts on later reconcile pass',
@@ -258,7 +288,7 @@ void main() {
       );
       final maintenanceEvent = _attentionEvent(
         id: 'evt-maint',
-        kind: 'runtime-update-ready',
+        kind: 'device-paired',
         presentationRevision: 3,
       );
       await repository.persistAttentionEventsPage(
@@ -361,31 +391,23 @@ void main() {
   );
 
   test(
-    'keeps scheduled success quiet and presents scheduled failure as high',
+    'keeps scheduled success quiet and presents scheduled failure',
     () async {
-      await repository.persistAttentionEventsPage(
-        brokerProfileId: _profileId,
-        page: AttentionEventsPage(
-          events: [
-            _attentionEvent(
-              id: 'schedule-sent',
-              kind: 'scheduled-send',
-              state: 'resolved',
-              presentationRevision: 2,
-            ),
-            _attentionEvent(
-              id: 'schedule-failed',
-              kind: 'scheduled-send-failed',
-              state: 'resolved',
-              presentationRevision: 3,
-              severity: 'action-required',
-            ),
-          ],
-          cursor: 2,
-          reset: false,
-          hasMore: false,
+      await persist([
+        _attentionEvent(
+          id: 'schedule-sent',
+          kind: 'scheduled-send',
+          state: 'resolved',
+          presentationRevision: 2,
         ),
-      );
+        _attentionEvent(
+          id: 'schedule-failed',
+          kind: 'scheduled-send-failed',
+          state: 'resolved',
+          presentationRevision: 3,
+          severity: 'action-required',
+        ),
+      ], cursor: 2);
 
       await makeProcessor().reconcile(
         brokerClient: brokerClient,
@@ -394,185 +416,737 @@ void main() {
 
       expect(notificationSink.shownEventIds, ['schedule-failed']);
       final request = notificationSink.requests.single;
-      expect(request.category, BrokerNotificationCategory.actionRequired);
-      expect(request.importance, BrokerNotificationImportance.high);
-      final rows = await repository.loadDeliveryStates(_profileId);
+      expect(request.title, 'Scheduled message failed');
       expect(
-        rows
-            .singleWhere((row) => row.event.id == 'schedule-sent')
-            .localPresentedRevision,
-        2,
+        request.channel.id,
+        AttentionNotificationType.scheduledSendFailed.channelId,
       );
-      expect(
-        rows
-            .singleWhere((row) => row.event.id == 'schedule-failed')
-            .localPresentedRevision,
-        3,
-      );
+      expect(request.playSound, isTrue);
+      expect(await presentedRevision('schedule-sent'), 2);
+      expect(await presentedRevision('schedule-failed'), 3);
     },
   );
 
   test(
-    'coalesces a startup legacy request with its first durable feed event',
+    'the title is the event type and the body the truncated session title',
     () async {
-      const dedupeKey = 'permission-required:codex:session-cold:request-cold';
-      final event = _attentionEvent(
-        id: 'event-cold',
-        kind: 'permission-required',
-        severity: 'action-required',
-        dedupeKey: dedupeKey,
-        tool: 'codex',
-        sessionId: 'session-cold',
-        requestId: 'request-cold',
-      );
-      await repository.persistAttentionEventsPage(
-        brokerProfileId: _profileId,
-        page: AttentionEventsPage(
-          events: [event],
-          cursor: 1,
-          reset: false,
-          hasMore: false,
+      await persist([
+        _attentionEvent(
+          id: 'ready',
+          tool: 'codex',
+          sessionId: 'session-ready',
+          sessionTitle:
+              'Rewrite the whole notification delivery pipeline for every '
+              'platform we ship',
         ),
-      );
-
-      final legacyPolicy = DefaultBrokerSessionNotificationPolicy(
-        lifecycleMonitor: lifecycleMonitor,
-        sink: notificationSink,
-      );
-      await legacyPolicy.maybeNotifyForSessionEvent(
-        tool: 'codex',
-        sessionId: 'session-cold',
-        brokerProfileId: _profileId,
-        event: MessageWireEvent(
-          seq: 9,
-          message: AgentMessage.fromJson(const {
-            'type': 'permission-request',
-            'requestId': 'request-cold',
-          }),
+        _attentionEvent(
+          id: 'failed',
+          kind: 'run-failed',
+          tool: 'claude',
+          sessionId: 'session-failed',
+          sessionTitle: 'Fix login',
         ),
-      );
+        _attentionEvent(
+          id: 'input',
+          kind: 'question-required',
+          tool: 'opencode',
+          sessionId: 'session-input',
+        ),
+        _attentionEvent(id: 'paired', kind: 'device-paired'),
+      ], cursor: 4);
 
       await makeProcessor().reconcile(
         brokerClient: brokerClient,
         clientId: _clientId,
       );
 
-      expect(notificationSink.requests, hasLength(2));
+      final byEvent = {
+        for (final request in notificationSink.requests)
+          request.payload['eventId']: request,
+      };
+      expect(byEvent['ready']!.title, 'Turn finished');
       expect(
-        notificationSink.requests.map((request) => request.id).toSet(),
-        hasLength(1),
+        byEvent['ready']!.body,
+        'Rewrite the whole notification delivery pipelin…',
       );
+      expect(byEvent['ready']!.threadKey, 'codex:session-ready');
       expect(
-        notificationSink.requests.last.id,
-        attentionNotificationId(
-          brokerProfileId: _profileId,
-          eventId: event.id,
-          dedupeKey: dedupeKey,
-          presentationRevision: event.presentationRevision,
-        ),
+        byEvent['ready']!.alertKey,
+        attentionNotificationAlertKey(eventId: 'ready', revision: 1),
+        reason: 'the first alert of revision 1, as a push of it names it',
       );
-      expect(
-        notificationSink.requests.last.payload['attentionDedupeKey'],
-        dedupeKey,
-      );
-      expect(notificationSink.shownEventIds, ['event-cold']);
-      expect(notificationSink.clearedIds, [
-        attentionNotificationId(
-          brokerProfileId: _profileId,
-          eventId: 'event-cold',
-        ),
+      expect(byEvent['ready']!.playSound, isFalse);
+      expect(byEvent['failed']!.title, 'Turn failed');
+      expect(byEvent['failed']!.body, 'Fix login');
+      expect(byEvent['failed']!.playSound, isTrue);
+      expect(byEvent['input']!.title, 'Question');
+      expect(byEvent['input']!.body, 'Untitled session');
+      expect(byEvent['input']!.channel.urgent, isTrue);
+      // Not a session event: the broker's own event title.
+      expect(byEvent['paired']!.title, 'New device paired');
+      expect(byEvent['paired']!.body, 'Event paired');
+    },
+  );
+
+  test('titles follow the locale snapshot', () async {
+    await persist([
+      _attentionEvent(
+        id: 'ready-zh',
+        tool: 'codex',
+        sessionId: 'session-ready-zh',
+        sessionTitle: '构建发布',
+      ),
+    ]);
+
+    await makeProcessor(localizations: AppLocalizationsZh()).reconcile(
+      brokerClient: brokerClient,
+      clientId: _clientId,
+    );
+
+    expect(notificationSink.requests.single.title, '轮次已完成');
+    expect(notificationSink.requests.single.body, '构建发布');
+  });
+
+  test('"event type only" leaves the body empty', () async {
+    await persist([
+      _attentionEvent(
+        id: 'private',
+        tool: 'codex',
+        sessionId: 'session-private',
+        sessionTitle: 'Acquisition due diligence',
+      ),
+    ]);
+
+    await makeProcessor(
+      resolveSetting: (type) async =>
+          AttentionNotificationTypeSetting.defaultsFor(
+            type,
+          ).copyWith(showSessionTitle: false),
+    ).reconcile(brokerClient: brokerClient, clientId: _clientId);
+
+    expect(notificationSink.requests.single.title, 'Turn finished');
+    expect(notificationSink.requests.single.body, isEmpty);
+  });
+
+  test('the per-type sound choice reaches the request', () async {
+    await persist([
+      _attentionEvent(
+        id: 'loud',
+        tool: 'codex',
+        sessionId: 'session-loud',
+      ),
+    ]);
+
+    await makeProcessor(
+      resolveSetting: (type) async =>
+          AttentionNotificationTypeSetting.defaultsFor(
+            type,
+          ).copyWith(sound: true),
+    ).reconcile(brokerClient: brokerClient, clientId: _clientId);
+
+    expect(notificationSink.requests.single.playSound, isTrue);
+  });
+
+  test(
+    'a type switched off neither notifies nor banners, and is reported',
+    () async {
+      lifecycleMonitor.currentState = BrokerAppLifecycleState.resumed;
+      await persist([
+        _attentionEvent(id: 'off', tool: 'codex', sessionId: 'session-off'),
       ]);
+      final banners = <String>[];
+      final deliveries = <(AttentionNotificationType, String?)>[];
+
+      final processor = makeProcessor(
+        resolveSetting: (type) async =>
+            AttentionNotificationTypeSetting.defaultsFor(
+              type,
+            ).copyWith(enabled: type != AttentionNotificationType.turnFinished),
+        onForegroundEvent: (event) async => banners.add(event.id),
+        onDelivery: (type, result) => deliveries.add((type, result.reason)),
+      );
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+      lifecycleMonitor.currentState = BrokerAppLifecycleState.hidden;
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      expect(banners, isEmpty);
+      expect(notificationSink.requests, isEmpty);
+      expect(deliveries, [
+        (AttentionNotificationType.turnFinished, 'type-off'),
+      ]);
+      expect(await presentedRevision('off'), 1);
+    },
+  );
+
+  test('sync-degraded and unknown kinds are never OS notifications', () async {
+    await persist([
+      _attentionEvent(
+        id: 'degraded',
+        kind: 'sync-degraded',
+        tool: 'codex',
+        sessionId: 'session-degraded',
+      ),
+      _attentionEvent(id: 'future', kind: 'kind-from-the-future'),
+      // Default severity is informational.
+      _attentionEvent(id: 'health-info', kind: 'broker-health'),
+      _attentionEvent(
+        id: 'health-critical',
+        kind: 'broker-health',
+        severity: 'critical',
+      ),
+    ], cursor: 4);
+
+    await makeProcessor().reconcile(
+      brokerClient: brokerClient,
+      clientId: _clientId,
+    );
+
+    expect(notificationSink.shownEventIds, ['health-critical']);
+    expect(notificationSink.requests.single.title, 'Server problem');
+    for (final id in ['degraded', 'future', 'health-info']) {
+      expect(await presentedRevision(id), 1, reason: id);
+    }
+  });
+
+  test(
+    'a newer turn outcome replaces the session notification in place',
+    () async {
+      await persist([
+        _attentionEvent(id: 'turn-1', tool: 'codex', sessionId: 'session-a'),
+      ]);
+      final processor = makeProcessor();
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+      await persist([
+        _attentionEvent(
+          id: 'turn-2',
+          kind: 'run-failed',
+          tool: 'codex',
+          sessionId: 'session-a',
+          cursor: 2,
+        ),
+        _attentionEvent(
+          id: 'other-session',
+          tool: 'codex',
+          sessionId: 'session-b',
+          cursor: 3,
+        ),
+      ], cursor: 3);
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      final ids = {
+        for (final request in notificationSink.requests)
+          request.payload['eventId']: request.id,
+      };
+      expect(ids['turn-1'], ids['turn-2']);
+      expect(ids['other-session'], isNot(ids['turn-1']));
+      expect(
+        ids['turn-1'],
+        brokerAttentionNotificationId(
+          brokerProfileId: _profileId,
+          dedupeKey: 'session-outcome:codex:session-a',
+        ),
+      );
     },
   );
 
   test(
-    'session notifications carry localized tool and title identity',
+    'a request reminder re-alerts in its slot and clears older-client ids',
     () async {
-      await repository.persistAttentionEventsPage(
+      const dedupeKey = 'permission-required:codex:session-r:request-r';
+      AttentionEventView request(int revision) => _attentionEvent(
+        id: 'request-r',
+        kind: 'permission-required',
+        severity: 'action-required',
+        dedupeKey: dedupeKey,
+        tool: 'codex',
+        sessionId: 'session-r',
+        requestId: 'request-r',
+        presentationRevision: revision,
+      );
+      await persist([request(1)]);
+      final processor = makeProcessor();
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+      expect(notificationSink.clearedIds, isEmpty);
+
+      await persist([request(2)], cursor: 2);
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      final slot = brokerAttentionNotificationId(
         brokerProfileId: _profileId,
-        page: AttentionEventsPage(
-          events: [
-            _attentionEvent(
-              id: 'ready',
-              tool: 'codex',
-              sessionId: 'session-ready',
-              sessionTitle: 'Build release',
-            ),
-            _attentionEvent(
-              id: 'failed',
-              kind: 'run-failed',
-              tool: 'claude',
-              sessionId: 'session-failed',
-              sessionTitle: 'Fix login',
-            ),
-            _attentionEvent(
-              id: 'input',
-              kind: 'question-required',
-              tool: 'opencode',
-              sessionId: 'session-input',
-              sessionTitle: 'Choose API',
-            ),
-            _attentionEvent(
-              id: 'degraded',
-              kind: 'sync-degraded',
-              tool: 'codex',
-              sessionId: 'session-degraded',
-              sessionTitle: 'Release check',
-            ),
-          ],
-          cursor: 4,
-          reset: false,
-          hasMore: false,
+        dedupeKey: dedupeKey,
+      );
+      expect(notificationSink.requests.map((r) => r.id), [slot, slot]);
+      // An older client stacked `…:presentation:<revision>` ids; clear them.
+      expect(notificationSink.clearedIds, contains('$slot:presentation:2'));
+      expect(notificationSink.clearedIds, isNot(contains(slot)));
+    },
+  );
+
+  group('with other windows of this app', () {
+    test('a background window leaves an event to a foreground one', () async {
+      final coordinator = _ScriptedCoordinator()..otherInForeground = true;
+      await persist([
+        _attentionEvent(id: 'shared', tool: 'codex', sessionId: 'session-x'),
+      ]);
+      final processor = makeProcessor(presentationCoordinator: coordinator);
+
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      expect(notificationSink.requests, isEmpty);
+      // Still pending: the foreground window presents it in-app.
+      expect(await presentedRevision('shared'), 0);
+
+      // That window closed before presenting it.
+      coordinator.otherInForeground = false;
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      expect(notificationSink.requests, hasLength(1));
+      expect(await presentedRevision('shared'), 1);
+    });
+
+    test('a foreground window presents in-app without asking', () async {
+      lifecycleMonitor.currentState = BrokerAppLifecycleState.resumed;
+      final coordinator = _ScriptedCoordinator()..otherInForeground = true;
+      await persist([
+        _attentionEvent(id: 'mine', tool: 'codex', sessionId: 'session-x'),
+      ]);
+      final banners = <String>[];
+      final processor = makeProcessor(
+        presentationCoordinator: coordinator,
+        onForegroundEvent: (event) async => banners.add(event.id),
+      );
+
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      expect(banners, ['mine']);
+      expect(coordinator.foregroundQueries, 0);
+      expect(await presentedRevision('mine'), 1);
+    });
+
+    test('presentation runs inside the exclusive section', () async {
+      final log = <String>[];
+      final coordinator = _ScriptedCoordinator(log: log);
+      notificationSink.onShow = () => log.add('show');
+      await persist([
+        _attentionEvent(id: 'locked', tool: 'codex', sessionId: 'session-x'),
+      ]);
+
+      await makeProcessor(
+        presentationCoordinator: coordinator,
+      ).reconcile(brokerClient: brokerClient, clientId: _clientId);
+
+      expect(log, ['enter $_profileId', 'show', 'exit $_profileId']);
+    });
+
+    test('a window that waited sees what the other one presented', () async {
+      await persist([
+        _attentionEvent(id: 'raced', tool: 'codex', sessionId: 'session-x'),
+      ]);
+      final coordinator = _ScriptedCoordinator(
+        // While this window waits, another presents the event and records it.
+        beforeEnter: () => repository.advancePresentedRevision(
+          brokerProfileId: _profileId,
+          eventId: 'raced',
+          presentedRevision: 1,
         ),
       );
 
-      await makeProcessor(localizations: AppLocalizationsEn()).reconcile(
+      await makeProcessor(
+        presentationCoordinator: coordinator,
+      ).reconcile(brokerClient: brokerClient, clientId: _clientId);
+
+      expect(notificationSink.requests, isEmpty);
+    });
+  });
+
+  test('a blocked presentation advances without retrying', () async {
+    notificationSink.nextResults.add(
+      const BrokerNotificationDeliveryResult(
+        BrokerNotificationDeliveryOutcome.blocked,
+        reason: 'permission-not-granted',
+      ),
+    );
+    await persist([
+      _attentionEvent(id: 'blocked', tool: 'codex', sessionId: 'session-x'),
+    ]);
+    final deliveries = <String?>[];
+    final processor = makeProcessor(
+      onDelivery: (_, result) => deliveries.add(result.reason),
+    );
+
+    await processor.reconcile(brokerClient: brokerClient, clientId: _clientId);
+    await processor.reconcile(brokerClient: brokerClient, clientId: _clientId);
+
+    expect(notificationSink.requests, hasLength(1));
+    expect(deliveries, ['permission-not-granted']);
+    expect(await presentedRevision('blocked'), 1);
+  });
+
+  group('after permission is granted', () {
+    const refused = BrokerNotificationDeliveryResult(
+      BrokerNotificationDeliveryOutcome.blocked,
+      reason: BrokerNotificationDeliveryResult.permissionNotGrantedReason,
+    );
+
+    AttentionEventView request(String id, {String state = 'active'}) =>
+        _attentionEvent(
+          id: id,
+          kind: 'permission-required',
+          state: state,
+          severity: 'action-required',
+          tool: 'codex',
+          sessionId: 'session-$id',
+          requestId: 'request-$id',
+        );
+
+    test('an open request refused before the grant is shown again', () async {
+      notificationSink.nextResults.addAll([refused, refused, refused]);
+      await persist([
+        request('open'),
+        request('answered'),
+        _attentionEvent(id: 'turn', tool: 'codex', sessionId: 'session-t'),
+      ]);
+      final processor = makeProcessor();
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+      expect(notificationSink.requests, hasLength(3));
+      // The second request is answered before permission arrives.
+      await persist([request('answered', state: 'resolved')], cursor: 2);
+
+      await processor.presentPermissionBlockedRequests();
+
+      expect(
+        notificationSink.requests.skip(3).map((r) => r.payload['eventId']),
+        ['open'],
+        reason:
+            'only the still-open request; a finished turn stays in the inbox',
+      );
+      await processor.presentPermissionBlockedRequests();
+      expect(
+        notificationSink.requests,
+        hasLength(4),
+        reason: 'a request shown after the grant is not shown again',
+      );
+    });
+
+    test('a request resolved while refused is forgotten', () async {
+      notificationSink.nextResults.add(refused);
+      await persist([request('gone')]);
+      final processor = makeProcessor();
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+      final page = [request('gone', state: 'resolved')];
+      await persist(page, cursor: 2);
+      await processor.clearResolvedRequests(page);
+      // The broker raises the same request again; it presents on its own.
+      await persist([request('gone')], cursor: 3);
+
+      await processor.presentPermissionBlockedRequests();
+
+      expect(notificationSink.requests, hasLength(1));
+    });
+
+    test(
+      'a request turned off in Settings before the grant stays quiet',
+      () async {
+        notificationSink.nextResults.add(refused);
+        await persist([request('muted')]);
+        var enabled = true;
+        final processor = makeProcessor(
+          resolveSetting: (type) async =>
+              AttentionNotificationTypeSetting.defaultsFor(
+                type,
+              ).copyWith(enabled: enabled),
+        );
+        await processor.reconcile(
+          brokerClient: brokerClient,
+          clientId: _clientId,
+        );
+        enabled = false;
+
+        await processor.presentPermissionBlockedRequests();
+
+        expect(notificationSink.requests, hasLength(1));
+      },
+    );
+
+    test('a request refused for another reason is not replayed', () async {
+      notificationSink.nextResults.add(
+        const BrokerNotificationDeliveryResult(
+          BrokerNotificationDeliveryOutcome.blocked,
+          reason: 'channel-off',
+        ),
+      );
+      await persist([request('channel')]);
+      final processor = makeProcessor();
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      await processor.presentPermissionBlockedRequests();
+
+      expect(notificationSink.requests, hasLength(1));
+    });
+  });
+
+  test(
+    'a failed presentation retries within its budget, then advances',
+    () async {
+      for (
+        var i = 0;
+        i < AttentionFeedDeliveryProcessor.maxFailedPresentationAttempts + 1;
+        i++
+      ) {
+        notificationSink.nextResults.add(
+          const BrokerNotificationDeliveryResult(
+            BrokerNotificationDeliveryOutcome.failed,
+            reason: 'toast failed',
+          ),
+        );
+      }
+      await persist([
+        _attentionEvent(id: 'flaky', tool: 'codex', sessionId: 'session-f'),
+      ]);
+      final processor = makeProcessor();
+
+      for (
+        var i = 1;
+        i < AttentionFeedDeliveryProcessor.maxFailedPresentationAttempts;
+        i++
+      ) {
+        await processor.reconcile(
+          brokerClient: brokerClient,
+          clientId: _clientId,
+        );
+        expect(await presentedRevision('flaky'), 0, reason: 'attempt $i');
+      }
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+      await processor.reconcile(
         brokerClient: brokerClient,
         clientId: _clientId,
       );
 
       expect(
-        notificationSink.requests.map((request) => request.body),
-        containsAll([
-          'Codex: Build release is ready to review.',
-          'Claude: Fix login failed.',
-          'OpenCode: Choose API needs input',
-          'Codex: Release check sync is degraded.',
-        ]),
+        notificationSink.requests,
+        hasLength(AttentionFeedDeliveryProcessor.maxFailedPresentationAttempts),
       );
+      expect(await presentedRevision('flaky'), 1);
+    },
+  );
 
-      final chineseRepository = _InMemoryDeliveryRepository(
-        profileId: _profileId,
-      );
-      await chineseRepository.persistAttentionEventsPage(
-        brokerProfileId: _profileId,
-        page: AttentionEventsPage(
-          events: [
-            _attentionEvent(
-              id: 'ready-zh',
-              tool: 'codex',
-              sessionId: 'session-ready-zh',
-              sessionTitle: '构建发布',
-            ),
-          ],
-          cursor: 1,
-          reset: false,
-          hasMore: false,
+  test('a transient failure that recovers presents once', () async {
+    notificationSink.nextResults.add(
+      const BrokerNotificationDeliveryResult(
+        BrokerNotificationDeliveryOutcome.failed,
+      ),
+    );
+    await persist([
+      _attentionEvent(id: 'recovers', tool: 'codex', sessionId: 'session-r'),
+    ]);
+    final processor = makeProcessor();
+
+    await processor.reconcile(brokerClient: brokerClient, clientId: _clientId);
+    await processor.reconcile(brokerClient: brokerClient, clientId: _clientId);
+    await processor.reconcile(brokerClient: brokerClient, clientId: _clientId);
+
+    expect(notificationSink.requests, hasLength(2));
+    expect(await presentedRevision('recovers'), 1);
+  });
+
+  test(
+    'a request answered before this device presented it is never shown',
+    () async {
+      await persist([
+        _attentionEvent(
+          id: 'answered',
+          kind: 'permission-required',
+          state: 'resolved',
+          severity: 'action-required',
+          tool: 'codex',
+          sessionId: 'session-q',
+          requestId: 'request-q',
         ),
-      );
-      final chineseProcessor = AttentionFeedDeliveryProcessor(
-        repository: chineseRepository,
-        brokerProfileId: _profileId,
-        lifecycleMonitor: lifecycleMonitor,
-        notificationSink: notificationSink,
-        onForegroundEvent: (_) async {},
-        localizations: AppLocalizationsZh(),
-      );
-      await chineseProcessor.reconcile(
+      ]);
+
+      await makeProcessor().reconcile(
         brokerClient: brokerClient,
         clientId: _clientId,
       );
-      expect(notificationSink.requests.last.body, contains('Codex: 构建发布'));
+
+      expect(notificationSink.requests, isEmpty);
+      // Never presented here, so there is nothing of ours to clear.
+      expect(notificationSink.clearedIds, isEmpty);
+      expect(await presentedRevision('answered'), 1);
+    },
+  );
+
+  group('read or dismissed on another device', () {
+    String slotOf(AttentionEventView event) => attentionNotificationSlotId(
+      brokerProfileId: _profileId,
+      event: event,
+    )!;
+
+    AttentionEventView outcome(
+      String id, {
+      int createdAt = 1,
+      Map<String, Object?> extra = const {},
+    }) => _attentionEvent(
+      id: id,
+      tool: 'codex',
+      sessionId: 'session-1',
+      extra: {'createdAt': createdAt, ...extra},
+    );
+
+    test('clears a shown outcome once another device has seen it', () async {
+      await persist([outcome('done')]);
+      final processor = makeProcessor();
+      await processor.reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+      expect(notificationSink.shownEventIds, ['done']);
+
+      final seen = outcome('done', extra: {'seenAt': 50});
+      await persist([seen], cursor: 2);
+      await processor.clearSeenElsewhere([seen]);
+
+      expect(notificationSink.clearedIds, contains(slotOf(seen)));
+    });
+
+    test(
+      'leaves the slot to a newer outcome this device has not handled',
+      () async {
+        final seen = outcome('older', extra: {'seenAt': 50});
+        final newer = outcome('newer', createdAt: 5);
+        await persist([seen, newer]);
+
+        await makeProcessor().clearSeenElsewhere([seen]);
+
+        expect(slotOf(seen), slotOf(newer));
+        expect(notificationSink.clearedIds, isNot(contains(slotOf(seen))));
+      },
+    );
+
+    test('leaves a request to its answer', () async {
+      final request = _attentionEvent(
+        id: 'ask',
+        kind: 'permission-required',
+        severity: 'action-required',
+        dedupeKey: 'permission-required:codex:session-1:ask',
+        tool: 'codex',
+        sessionId: 'session-1',
+        requestId: 'ask',
+        extra: {'seenAt': 50},
+      );
+      await persist([request]);
+
+      await makeProcessor().clearSeenElsewhere([request]);
+
+      expect(notificationSink.clearedIds, isEmpty);
+    });
+
+    test('leaves an event this device handled to its own clear', () async {
+      final read = outcome('mine', extra: {'seenAt': 50, 'readAt': 50});
+      await persist([read]);
+
+      await makeProcessor().clearSeenElsewhere([read]);
+
+      expect(notificationSink.clearedIds, isEmpty);
+    });
+
+    test('never shows an outcome seen elsewhere before it arrived', () async {
+      await persist([
+        outcome('late', extra: {'seenAt': 50}),
+      ]);
+
+      await makeProcessor().reconcile(
+        brokerClient: brokerClient,
+        clientId: _clientId,
+      );
+
+      expect(notificationSink.shownEventIds, isEmpty);
+      expect(await presentedRevision('late'), 1);
+    });
+  });
+
+  test(
+    'clearResolvedRequests clears requests resolved elsewhere, and only them',
+    () async {
+      AttentionEventView requestEvent(String id, String state) =>
+          _attentionEvent(
+            id: id,
+            kind: 'question-required',
+            state: state,
+            severity: 'action-required',
+            dedupeKey: 'question-required:codex:session-$id:$id',
+            tool: 'codex',
+            sessionId: 'session-$id',
+            requestId: id,
+          );
+      final answered = requestEvent('answered', 'resolved');
+      final pending = requestEvent('pending', 'active');
+      final finished = _attentionEvent(
+        id: 'finished',
+        state: 'resolved',
+        tool: 'codex',
+        sessionId: 'session-finished',
+      );
+
+      await makeProcessor().clearResolvedRequests([
+        answered,
+        pending,
+        finished,
+      ]);
+
+      final answeredIds = attentionNotificationIdsForEvent(
+        brokerProfileId: _profileId,
+        event: answered,
+      );
+      expect(notificationSink.clearedIds.toSet(), answeredIds);
+      expect(
+        answeredIds,
+        contains(
+          brokerAttentionNotificationId(
+            brokerProfileId: _profileId,
+            dedupeKey: answered.dedupeKey,
+          ),
+        ),
+      );
     },
   );
 }
@@ -590,6 +1164,7 @@ AttentionEventView _attentionEvent({
   String? sessionId,
   String? sessionTitle,
   String? requestId,
+  Map<String, Object?> extra = const {},
 }) {
   final event = AttentionEventView.fromJson(<String, dynamic>{
     'id': id,
@@ -613,6 +1188,7 @@ AttentionEventView _attentionEvent({
             'sessionId': sessionId,
           }
         : {'kind': 'open-attention-inbox'},
+    ...extra,
   });
   if (!historicalBaseline) {
     return event;
@@ -653,18 +1229,62 @@ extension _HistoricalEventCopy on AttentionEventView {
 
 class _MockBrokerClient extends Mock implements BrokerClient {}
 
+/// Scriptable stand-in for the other windows of this app.
+final class _ScriptedCoordinator implements AttentionPresentationCoordinator {
+  _ScriptedCoordinator({this.log, this.beforeEnter});
+
+  final List<String>? log;
+  final Future<Object?> Function()? beforeEnter;
+  bool otherInForeground = false;
+  int foregroundQueries = 0;
+
+  @override
+  Future<void> exclusive(String scopeKey, Future<void> Function() body) async {
+    await beforeEnter?.call();
+    log?.add('enter $scopeKey');
+    try {
+      await body();
+    } finally {
+      log?.add('exit $scopeKey');
+    }
+  }
+
+  @override
+  Future<bool> anotherWindowInForeground() async {
+    foregroundQueries += 1;
+    return otherInForeground;
+  }
+
+  @override
+  void dispose() {}
+}
+
 class _FailingAwareNotificationSink implements BrokerNotificationSink {
   final List<BrokerNotificationRequest> requests = [];
   final List<String> shownEventIds = [];
   final List<String> clearedIds = [];
 
+  /// Scripted results, consumed one per show; `shown` once empty.
+  final List<BrokerNotificationDeliveryResult> nextResults = [];
+
+  /// Called on every show.
+  void Function()? onShow;
+
   @override
-  Future<void> show(BrokerNotificationRequest request) async {
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async {
+    onShow?.call();
     requests.add(request);
+    final result = nextResults.isEmpty
+        ? BrokerNotificationDeliveryResult.shown
+        : nextResults.removeAt(0);
     final eventId = request.payload['eventId'];
-    if (eventId is String) {
+    if (eventId is String &&
+        result.outcome == BrokerNotificationDeliveryOutcome.shown) {
       shownEventIds.add(eventId);
     }
+    return result;
   }
 
   @override

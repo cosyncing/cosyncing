@@ -7,6 +7,8 @@ import { ClineAdapter } from '../src/implementation.ts';
 import { ClineHubDriveConnection } from '../src/hub-drive.ts';
 import type { ClineTerminalSummary } from '../src/mapping.ts';
 import { Hub } from '../../../broker/src/sessions/hub.ts';
+import { AttentionPolicy } from '../../../broker/src/attention/attention-policy.ts';
+import { AttentionStore } from '../../../broker/src/attention/attention-store.ts';
 import {
   CLINE_HUB_CORE_MINIMUM_VERSION,
   CLINE_HUB_MAX_FRAME_BYTES,
@@ -38,6 +40,21 @@ function check(name: string, condition: unknown, detail = ''): void {
 }
 
 type Listener = (event: any) => void;
+type RunSummary = Extract<AgentMessage, { type: 'run-summary' }>;
+
+function runSummaries(rows: readonly AgentMessage[], key?: string): RunSummary[] {
+  return rows.filter((row): row is RunSummary => row.type === 'run-summary'
+    && (key === undefined || row.key === key));
+}
+
+function hasRunningSummary(rows: readonly AgentMessage[]): boolean {
+  return runSummaries(rows).some((row) => row.status === 'running');
+}
+
+/** The run-summary frames a turn published, as `status@key` in emission order. */
+function runShape(rows: readonly AgentMessage[]): string {
+  return JSON.stringify(runSummaries(rows).map((row) => `${row.status}@${row.key}`));
+}
 
 class FakeHub {
   readonly sessionId = '1787424308272_2eapl';
@@ -56,6 +73,7 @@ class FakeHub {
   private extraUserBlockNext = false;
   private toolResultNext = false;
   private omitNextAssistant = false;
+  private lateUsageNext = false;
   private sessionUpdateMode: 'persist' | 'refuse' | 'lie' = 'persist';
   private rejectNextSessionGet = false;
   private sessionMetadata?: Record<string, any>;
@@ -64,6 +82,7 @@ class FakeHub {
     persistence: 'exact' | 'missing' | 'mismatch';
     terminalBeforeStarted?: boolean;
     commandFails?: boolean;
+    terminal?: 'run.failed' | 'run.aborted';
   };
   private heldNextRunPersistence?: { received: () => void; release: Promise<void> };
   private delayedSessionUpdate?: { received: () => void; release: Promise<void> };
@@ -77,6 +96,7 @@ class FakeHub {
     extraUserBlock?: boolean;
     toolResultTurn?: boolean;
     omitAssistant?: boolean;
+    lateUsage?: boolean;
     trailingAssistantGate?: { received: () => void; release: Promise<void> };
     persistenceGate?: { received: () => void; release: Promise<void> };
   };
@@ -245,6 +265,8 @@ class FakeHub {
       const persistenceGate = this.heldNextRunPersistence;
       const snapshotFailure = this.snapshotFailureNext;
       const toolResultTurn = this.toolResultNext;
+      const lateUsage = this.lateUsageNext;
+      this.lateUsageNext = false;
       this.deferNextRunPersistence = false;
       this.extraUserBlockNext = false;
       this.toolResultNext = false;
@@ -326,7 +348,7 @@ class FakeHub {
           clientId: envelope.clientId,
           runId: `run-${this.runCounter}`,
         });
-        const failed = () => this.event('run.failed', this.sessionId, {
+        const failed = () => this.event(snapshotFailure.terminal ?? 'run.failed', this.sessionId, {
           reason: 'error',
           error: snapshotFailure.text,
           text: snapshotFailure.text,
@@ -363,6 +385,7 @@ class FakeHub {
         extraUserBlock,
         toolResultTurn,
         omitAssistant,
+        lateUsage,
         trailingAssistantGate,
         persistenceGate,
       };
@@ -470,6 +493,21 @@ class FakeHub {
       } else {
         persist();
         replyToRun();
+        if (run.lateUsage) {
+          // Cline writes a turn's usage a beat after the reply the settle proof waits for. Land it
+          // on an appended assistant row inside the Drive's bounded late-usage poll: after the
+          // immediate settle read, before the last re-read at about 400ms.
+          setTimeout(() => {
+            this.messages.push({
+              id: `assistant-usage-${this.runCounter}`,
+              role: 'assistant',
+              modelInfo: { provider: 'openai-compatible', id: 'fixture-model' },
+              content: [{ type: 'text', text: ':usage-tail' }],
+              metrics: { inputTokens: 23, outputTokens: 5 },
+            });
+            this.writeMessages();
+          }, 150);
+        }
         if (run.trailingAssistantGate) {
           run.trailingAssistantGate.received();
           void run.trailingAssistantGate.release.then(() => {
@@ -573,6 +611,7 @@ class FakeHub {
   /** Real Cline persists tool results as `role: 'user'` rows carrying `tool_result` blocks. */
   useToolResultTurnNext(): void { this.toolResultNext = true; }
   omitAssistantFromNextCompletedRun(): void { this.omitNextAssistant = true; }
+  landLateUsageAfterNextReply(): void { this.lateUsageNext = true; }
   holdTrailingAssistantAfterNextReply(): { replySent: Promise<void>; release: () => void } {
     let markReplySent!: () => void;
     let release!: () => void;
@@ -591,6 +630,12 @@ class FakeHub {
 
   failNextRunCommand(text: string, persistence: 'exact' | 'missing' | 'mismatch' = 'exact'): void {
     this.snapshotFailureNext = { text, persistence, commandFails: true };
+  }
+
+  /** A native abort Cosyncing did not request (a native timeout or another stop), reported only
+   *  by the owned run's `run.aborted` event. */
+  abortNextRunSnapshotOnly(text: string): void {
+    this.snapshotFailureNext = { text, persistence: 'exact', terminal: 'run.aborted' };
   }
 
   holdNextCompletedPersistence(): { replySent: Promise<void>; release: () => void } {
@@ -1064,7 +1109,33 @@ try {
   }) as typeof adapter.attach;
   const registry = new AgentRegistry();
   registry.register(adapter);
-  brokerSessionHub = new Hub(registry, 15_000);
+  // The broker's own attention policy, fed the way production feeds it: the Hub's live `onMessage`
+  // hook, serialized, and never a history read. A Cline turn notifies only if this sees `running`
+  // and then a terminal under one key.
+  const attentionStore = new AttentionStore({
+    home: join(fake.root, 'attention'),
+    onWarning: () => undefined,
+  });
+  const attentionPolicy = new AttentionPolicy(attentionStore);
+  const attentionFailures: unknown[] = [];
+  let attentionTail: Promise<void> = Promise.resolve();
+  const drainAttention = async (): Promise<void> => {
+    let tail: Promise<void>;
+    do {
+      tail = attentionTail;
+      await tail;
+    } while (tail !== attentionTail);
+  };
+  const runEvents = (kind: 'run-finished' | 'run-failed', turnId?: string) => attentionStore.listEvents()
+    .filter((event) => event.kind === kind && event.agent === 'cline' && event.sessionId === created.id
+      && (turnId === undefined || event.turnId === turnId));
+  brokerSessionHub = new Hub(registry, 15_000, undefined, {
+    onMessage: (info, message) => {
+      attentionTail = attentionTail
+        .then(() => attentionPolicy.handleMessage(info, message))
+        .catch((error) => { attentionFailures.push(error); });
+    },
+  });
   const owner = await brokerSessionHub.ensure('cline', created.id, 'resume');
   const connection = owner.conn;
   const emptyReloadObserver = await brokerSessionHub.ensure('cline', created.id);
@@ -1119,14 +1190,27 @@ try {
       && row.clientKey === 'client-first' && !row.queued)
       && !history.some((row) => row.type === 'user-message' && row.queued));
   const firstTerminal = storedTerminalSummaries.find((row) => row.status === 'done');
+  // The live stream now carries this key twice, `running` then `done`; the terminal itself is
+  // still published once.
   check('an authoritative completed Hub reply stores and replays one durable Cline run summary',
     firstTerminal !== undefined
       && history.filter((row) => row.type === 'run-summary'
         && row.key === firstTerminal.key
         && row.turnId === firstTerminal.turnId
         && row.status === 'done').length === 1
-      && live.filter((row) => row.type === 'run-summary'
-        && row.key === firstTerminal.key).length === 1);
+      && runSummaries(live, firstTerminal.key).filter((row) => row.status !== 'running').length === 1);
+  // The broker notifies "turn finished" only for a key it saw `running` on the live stream first.
+  // Cline published the terminal alone, so no Cline turn ever notified.
+  const firstRunFrames = runSummaries(live, firstTerminal?.key);
+  check('a driven Hub turn publishes running then its terminal under one key and one turn id',
+    firstTerminal !== undefined
+      && firstRunFrames.length === 2
+      && firstRunFrames[0]?.status === 'running'
+      && firstRunFrames[0].turnId === firstTerminal.turnId
+      && firstRunFrames[1]?.status === 'done'
+      && firstRunFrames[1].turnId === firstTerminal.turnId
+      && runSummaries(live).length === 2,
+    runShape(live));
   const emptyReloadHistory = await emptyReloadObserver.conn.getHistory();
   check('an Observe opened before native settlement resets onto the shared durable prompt key',
     emptyReloadLive.some((row) => row.type === 'history-reset')
@@ -1138,6 +1222,19 @@ try {
       && emptyReloadHistory.filter((row) => row.type === 'run-summary'
         && row.key === firstTerminal?.key
         && row.status === 'done').length === 1);
+  check('running is live-only: the writer history, a reload Observe, and its live stream carry none',
+    !hasRunningSummary(history)
+      && !hasRunningSummary(emptyReloadHistory)
+      && !hasRunningSummary(emptyReloadLive)
+      && !hasRunningSummary(await connection.getHistory()),
+    runShape([...history, ...emptyReloadHistory, ...emptyReloadLive]));
+  await drainAttention();
+  check('the broker attention policy raises exactly one turn-finished event for the driven turn',
+    attentionFailures.length === 0
+      && runEvents('run-finished', firstTerminal?.turnId).length === 1
+      && runEvents('run-finished').length === 1
+      && runEvents('run-failed').length === 0,
+    JSON.stringify(attentionStore.listEvents().map((event) => `${event.kind}:${event.turnId}`)));
   check('a broker-managed Hub session remains present after durable store rediscovery',
     (await adapter.discoverSessions()).some((row) => row.id === created.id));
   // The answer arrives as many deltas, so no single row carries it. Reassemble per key: streamed
@@ -1161,6 +1258,35 @@ try {
   check('streamed answer chunks coalesce into one transcript row per turn',
     answerChunkCount > 1 && answerByKey.size < answerChunkCount,
     JSON.stringify({ chunks: answerChunkCount, keys: answerByKey.size }));
+
+  // Late usage re-publishes the settled terminal under the same key. The policy ignores that second
+  // terminal because the first one closed the observation, so it is harmless, but only while no
+  // second `running` precedes it.
+  const liveBeforeLateUsage = live.length;
+  hub.landLateUsageAfterNextReply();
+  const lateUsageTurn = connection.sendPrompt({ text: 'usage lands after the reply', clientMessageId: 'client-late-usage' });
+  for (let attempt = 0; attempt < 40 && !(await connection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
+    await Bun.sleep(5);
+  }
+  const lateUsagePermission = (await connection.getPending!()).find((row) => row.type === 'permission-request');
+  await connection.respondPermission(lateUsagePermission!.requestId, 'approve');
+  await lateUsageTurn;
+  const lateUsageFrames = runSummaries(live.slice(liveBeforeLateUsage));
+  const lateUsageKey = lateUsageFrames[0]?.key;
+  check('late token usage republishes the terminal under its key with no second running',
+    lateUsageFrames.length === 3
+      && lateUsageFrames[0]?.status === 'running'
+      && lateUsageFrames.every((row) => row.key === lateUsageKey && row.turnId === lateUsageFrames[0]?.turnId)
+      && lateUsageFrames[1]?.status === 'done' && lateUsageFrames[1].tokens === undefined
+      && lateUsageFrames[2]?.status === 'done' && lateUsageFrames[2].tokens?.input === 23
+      && lateUsageFrames[2].tokens?.output === 5
+      && storedTerminalSummaries.filter((row) => row.key === lateUsageKey).length === 1,
+    runShape(live.slice(liveBeforeLateUsage)));
+  await drainAttention();
+  check('a republished terminal adds no second turn-finished event',
+    runEvents('run-finished', lateUsageFrames[0]?.turnId).length === 1
+      && runEvents('run-finished').length === 2,
+    JSON.stringify(attentionStore.listEvents().map((event) => `${event.kind}:${event.turnId}`)));
 
   const nativeRenameSpawnsBefore = fake.ledger().filter((entry) => entry.kind === 'spawn'
     && entry.argv?.[0] === 'history' && entry.argv?.[1] === 'update').length;
@@ -1233,6 +1359,7 @@ try {
       && row.queued === false)
       && (await adapter.discoverSessions()).find((row) => row.id === created.id)?.control?.drive.state === 'driving');
 
+  const liveBeforeSnapshotFailure = live.length;
   hub.failNextRunSnapshotOnly('fixture provider connection refused');
   await connection.sendPrompt({
     text: 'snapshot-only failed prompt',
@@ -1251,7 +1378,20 @@ try {
       && live.some((row) => row.type === 'error'
         && row.message === 'fixture provider connection refused')
       && connection.info.control?.drive.state === 'driving');
+  const snapshotFailureFrames = runSummaries(live.slice(liveBeforeSnapshotFailure));
+  check('an owned run.failed publishes running then an error terminal under one key',
+    snapshotFailureFrames.length === 2
+      && snapshotFailureFrames[0]?.status === 'running'
+      && snapshotFailureFrames[1]?.status === 'error'
+      && snapshotFailureFrames[0].key === snapshotFailureFrames[1].key
+      && snapshotFailureFrames[0].turnId === snapshotFailureFrames[1].turnId,
+    runShape(live.slice(liveBeforeSnapshotFailure)));
+  await drainAttention();
+  check('the broker attention policy raises one turn-failed event for the failed turn',
+    runEvents('run-failed', snapshotFailureFrames[1]?.turnId).length === 1
+      && runEvents('run-finished', snapshotFailureFrames[1]?.turnId).length === 0);
 
+  const liveBeforeCommandFailure = live.length;
   hub.failNextRunCommand('fixture direct provider connection refused');
   await connection.sendPrompt({
     text: 'direct command-failed prompt',
@@ -1270,6 +1410,36 @@ try {
       && live.some((row) => row.type === 'error'
         && row.message === 'fixture direct provider connection refused')
       && connection.info.control?.drive.state === 'driving');
+  // This terminal settles from the run.failed event after run.start itself failed, so the pairing
+  // rests on the owned run.started the Drive saw first.
+  const commandFailureFrames = runSummaries(live.slice(liveBeforeCommandFailure));
+  check('a failed run.start settled by its own run.started and run.failed events still pairs once',
+    commandFailureFrames.length === 2
+      && commandFailureFrames[0]?.status === 'running'
+      && commandFailureFrames[1]?.status === 'error'
+      && commandFailureFrames[0].key === commandFailureFrames[1].key,
+    runShape(live.slice(liveBeforeCommandFailure)));
+
+  const liveBeforeNativeAbort = live.length;
+  hub.abortNextRunSnapshotOnly('fixture native timeout');
+  await connection.sendPrompt({
+    text: 'natively aborted prompt',
+    clientMessageId: 'client-native-abort',
+  });
+  const nativeAbortFrames = runSummaries(live.slice(liveBeforeNativeAbort));
+  check('a native abort Cosyncing did not request pairs running with a cancelled terminal',
+    nativeAbortFrames.length === 2
+      && nativeAbortFrames[0]?.status === 'running'
+      && nativeAbortFrames[1]?.status === 'cancelled'
+      && nativeAbortFrames[0].key === nativeAbortFrames[1].key
+      && connection.info.control?.drive.state === 'driving',
+    runShape(live.slice(liveBeforeNativeAbort)));
+  await drainAttention();
+  check('a cancelled terminal clears its observation and raises no attention event',
+    nativeAbortFrames[1] !== undefined
+      && attentionStore.getObservation(`run:cline:${created.id}:${nativeAbortFrames[1].key}`) === undefined
+      && runEvents('run-finished', nativeAbortFrames[1].turnId).length === 0
+      && runEvents('run-failed', nativeAbortFrames[1].turnId).length === 0);
 
   const observer = await brokerSessionHub.ensure('cline', created.id);
   const offer = brokerSessionHub.sessionDetailFrame(observer, true);
@@ -1313,6 +1483,27 @@ try {
   await restartTailTurn;
   await restartTailGate.replySent;
   await Bun.sleep(125);
+  // Every turn this Hub drove, and nothing else: one event per settled done or error terminal, none
+  // for the cancelled one, no open run observation left behind, and no Observe frame counted.
+  await drainAttention();
+  const drivenTurnIds = (status: ClineTerminalSummary['status']) => storedTerminalSummaries
+    .filter((row) => row.status === status).map((row) => row.turnId).sort();
+  const eventTurnIds = (kind: 'run-finished' | 'run-failed') => runEvents(kind)
+    .map((event) => event.turnId ?? '').sort();
+  check('each Hub-driven Cline turn raises exactly one attention event and leaves no open run',
+    attentionFailures.length === 0
+      && drivenTurnIds('done').length >= 6
+      && JSON.stringify(eventTurnIds('run-finished')) === JSON.stringify(drivenTurnIds('done'))
+      && JSON.stringify(eventTurnIds('run-failed')) === JSON.stringify(drivenTurnIds('error'))
+      && drivenTurnIds('cancelled').length === 1
+      && !attentionStore.listObservations().some((observation) => observation.kind === 'run'),
+    JSON.stringify({
+      finished: eventTurnIds('run-finished'),
+      done: drivenTurnIds('done'),
+      failed: eventTurnIds('run-failed'),
+      error: drivenTurnIds('error'),
+      open: attentionStore.listObservations().map((observation) => observation.key),
+    }));
   await brokerSessionHub.dispose();
   brokerSessionHub = undefined;
   restartTailGate.release();
@@ -1364,6 +1555,9 @@ try {
     firstTerminal !== undefined
       && restartObserveHistory.filter((row) => row.type === 'run-summary'
         && row.key === firstTerminal.key).length === 1);
+  check('a replacement broker replays stored terminals without inventing a running frame',
+    runSummaries(restartObserveHistory).length > 0 && !hasRunningSummary(restartObserveHistory),
+    runShape(restartObserveHistory));
   await restartObserver.close();
   const lateTailReopened = await lateTailReplacement.attach(created.id, 'resume');
   const lateTailRename = await lateTailReplacement.renameSession(
@@ -1374,6 +1568,10 @@ try {
     lateTailReopened.info.control?.drive.state === 'driving'
       && lateTailRename?.title === 'Cline rename after restart tail'
       && boundary?.appendPosition === hub.messages.length);
+  const reopenedHistory = await lateTailReopened.getHistory();
+  check('a resumed writer after restart reads stored terminals but no running frame',
+    runSummaries(reopenedHistory).length > 0 && !hasRunningSummary(reopenedHistory),
+    runShape(reopenedHistory));
   hub.setDurableTitle('Managed Cline renamed');
   await lateTailReopened.close();
 
@@ -1767,6 +1965,8 @@ try {
   hub.restoreMessages(stableMessages);
   boundary = stableBoundary;
   const settleFenceConnection = await resumeAdapter().attach(created.id, 'resume');
+  const settleFenceLive: AgentMessage[] = [];
+  settleFenceConnection.subscribe((message) => settleFenceLive.push(message));
   const heldForeignPersistence = hub.holdNextCompletedPersistence();
   const settleFenceTurn = settleFenceConnection.sendPrompt({
     text: 'foreign run during durable settle',
@@ -1789,11 +1989,15 @@ try {
       && settleFenceConnection.info.attachMode === 'observe'
       && !settleFenceHistory.some((row) => row.type === 'user-message'
         && row.clientKey === 'client-settle-fence'));
+  check('a turn demoted by a foreign run before it settles publishes no run summary at all',
+    runSummaries(settleFenceLive).length === 0, runShape(settleFenceLive));
   await settleFenceConnection.close();
 
   hub.restoreMessages(stableMessages);
   boundary = stableBoundary;
   const stopGapConnection = await resumeAdapter().attach(created.id, 'resume');
+  const stopGapLive: AgentMessage[] = [];
+  stopGapConnection.subscribe((message) => stopGapLive.push(message));
   const heldStopPersistence = hub.holdNextCompletedPersistence();
   const stopGapTurn = stopGapConnection.sendPrompt({
     text: 'Stop during durable settle',
@@ -1821,6 +2025,9 @@ try {
         && row.text === 'Stop during durable settle'
         && row.clientKey === 'client-stop-settle'
         && row.queued === false));
+  // Stop reports no terminal, so an early `running` would stay open with nothing to close it.
+  check('a turn stopped from Cosyncing publishes no running frame',
+    !hasRunningSummary(stopGapLive), runShape(stopGapLive));
   await stopGapConnection.close();
 
   hub.restoreMessages(stableMessages);
@@ -1880,6 +2087,8 @@ try {
   hub.restoreMessages(stableMessages);
   boundary = stableBoundary;
   const assistantGapConnection = await resumeAdapter().attach(created.id, 'resume');
+  const assistantGapLive: AgentMessage[] = [];
+  assistantGapConnection.subscribe((message) => assistantGapLive.push(message));
   hub.omitAssistantFromNextCompletedRun();
   const assistantGapTurn = assistantGapConnection.sendPrompt({
     text: 'completed without durable assistant',
@@ -1896,6 +2105,8 @@ try {
   check('a completed reply without a durable assistant response demotes stale Drive authority',
     assistantGapConnection.info.attachMode === 'observe'
       && assistantGapConnection.info.control?.drive.supported === false);
+  check('a completion the Drive cannot prove publishes no run summary at all',
+    runSummaries(assistantGapLive).length === 0, runShape(assistantGapLive));
   await assistantGapConnection.close();
 
   hub.restoreMessages(stableMessages);
@@ -1935,6 +2146,8 @@ try {
   hub.restoreMessages(stableMessages);
   boundary = stableBoundary;
   const unattributedFailedConnection = await resumeAdapter().attach(created.id, 'resume');
+  const unattributedFailedLive: AgentMessage[] = [];
+  unattributedFailedConnection.subscribe((message) => unattributedFailedLive.push(message));
   hub.failNextRunSnapshotOnly('unattributed terminal failure', 'exact', true);
   await assert.rejects(
     unattributedFailedConnection.sendPrompt({
@@ -1947,6 +2160,8 @@ try {
     unattributedFailedConnection.info.attachMode === 'observe'
       && !(await unattributedFailedConnection.getHistory()).some((row) => row.type === 'user-message'
         && row.clientKey === 'client-failed-unattributed'));
+  check('a terminal event that precedes the owned run.started publishes no run summary at all',
+    runSummaries(unattributedFailedLive).length === 0, runShape(unattributedFailedLive));
   await unattributedFailedConnection.close();
 
   hub.restoreMessages(stableMessages);

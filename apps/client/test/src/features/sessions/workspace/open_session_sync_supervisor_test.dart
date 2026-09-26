@@ -912,9 +912,6 @@ void main() {
       final viewportBeforeHide = container.read(
         sessionViewportRegistryProvider,
       );
-      container.read(attentionFeedDeliveryActiveProvider.notifier).state =
-          const {'p1'};
-
       final intentsBeforeHide = {
         for (final entry in tracker.intents.entries)
           entry.key: entry.value.length,
@@ -945,11 +942,6 @@ void main() {
       expect(
         container.read(sessionViewportRegistryProvider),
         viewportBeforeHide,
-      );
-      expect(
-        container.read(attentionFeedDeliveryActiveProvider),
-        const {'p1'},
-        reason: 'Attention remains the intentional background sync channel',
       );
 
       await tester.pump(const Duration(minutes: 10));

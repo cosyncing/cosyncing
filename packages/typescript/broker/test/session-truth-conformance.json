@@ -5,7 +5,8 @@
     "terminal-authority",
     "history-live-chronology",
     "replacement",
-    "hub-authority"
+    "hub-authority",
+    "turn-attention"
   ],
   "adapters": {
     "CodexAdapter": {
@@ -14,7 +15,8 @@
         "terminal-authority": ["session-truth-conformance"],
         "history-live-chronology": ["session-truth-conformance"],
         "replacement": ["session-truth-conformance"],
-        "hub-authority": ["session-truth-conformance"]
+        "hub-authority": ["session-truth-conformance"],
+        "turn-attention": ["codex-permissions"]
       }
     },
     "ClaudeAdapter": {
@@ -23,7 +25,8 @@
         "terminal-authority": [],
         "history-live-chronology": ["claude-transcript-mapping"],
         "replacement": ["roster-revision"],
-        "hub-authority": ["session-truth-conformance"]
+        "hub-authority": ["session-truth-conformance"],
+        "turn-attention": ["claude-runtime", "claude-driven-queue"]
       },
       "exclusions": {
         "terminal-authority": {
@@ -38,7 +41,8 @@
         "terminal-authority": ["opencode-completion-fence"],
         "history-live-chronology": ["opencode-message-identity"],
         "replacement": [],
-        "hub-authority": ["session-truth-conformance"]
+        "hub-authority": ["session-truth-conformance"],
+        "turn-attention": ["opencode-completion-fence"]
       },
       "exclusions": {
         "replacement": {
@@ -53,7 +57,8 @@
         "terminal-authority": ["pi-bridge-reload"],
         "history-live-chronology": [],
         "replacement": ["pi-bridge-reload"],
-        "hub-authority": ["session-truth-conformance"]
+        "hub-authority": ["session-truth-conformance"],
+        "turn-attention": ["pi-tool-result", "pi-bridge-reload"]
       },
       "exclusions": {
         "history-live-chronology": {
@@ -68,7 +73,8 @@
         "terminal-authority": ["omp-bridge"],
         "history-live-chronology": [],
         "replacement": ["omp-bridge"],
-        "hub-authority": ["session-truth-conformance"]
+        "hub-authority": ["session-truth-conformance"],
+        "turn-attention": ["omp-lifecycle", "omp-bridge"]
       },
       "exclusions": {
         "history-live-chronology": {
@@ -83,7 +89,8 @@
         "terminal-authority": ["reasonix-drive", "reasonix-observe"],
         "history-live-chronology": ["reasonix-identity", "reasonix-observe"],
         "replacement": ["reasonix-identity"],
-        "hub-authority": ["reasonix-cross-client-join", "reasonix-registration-gate"]
+        "hub-authority": ["reasonix-cross-client-join", "reasonix-registration-gate"],
+        "turn-attention": ["reasonix-drive"]
       }
     },
     "GrokAdapter": {
@@ -92,7 +99,8 @@
         "terminal-authority": ["grok-drive", "grok-observe"],
         "history-live-chronology": ["grok-identity", "grok-observe"],
         "replacement": ["grok-drive", "grok-observe"],
-        "hub-authority": ["grok-cross-client-join", "grok-registration-gate"]
+        "hub-authority": ["grok-cross-client-join", "grok-registration-gate"],
+        "turn-attention": ["grok-drive"]
       }
     },
     "ClineAdapter": {
@@ -101,7 +109,8 @@
         "terminal-authority": ["cline-observe", "cline-registration-gate"],
         "history-live-chronology": ["cline-observe"],
         "replacement": ["cline-observe"],
-        "hub-authority": ["cline-registration-gate"]
+        "hub-authority": ["cline-registration-gate"],
+        "turn-attention": ["cline-hub"]
       }
     },
     "KiloAdapter": {
@@ -110,7 +119,8 @@
         "terminal-authority": ["kilocode-observe", "kilocode-registration-gate"],
         "history-live-chronology": ["kilocode-observe"],
         "replacement": ["kilocode-observe"],
-        "hub-authority": ["kilocode-registration-gate"]
+        "hub-authority": ["kilocode-registration-gate"],
+        "turn-attention": ["kilocode-drive", "kilocode-observe"]
       }
     },
     "KimiAdapter": {
@@ -119,7 +129,8 @@
         "terminal-authority": ["kimi-drive"],
         "history-live-chronology": ["kimi-observe", "kimi-attach-priming"],
         "replacement": ["kimi-drive", "kimi-observe"],
-        "hub-authority": ["kimi-attach-priming", "kimi-drive-authority"]
+        "hub-authority": ["kimi-attach-priming", "kimi-drive-authority"],
+        "turn-attention": ["kimi-drive"]
       }
     },
     "DshAdapter": {
@@ -128,7 +139,8 @@
         "terminal-authority": ["dsh-observe", "dsh-attach-priming"],
         "history-live-chronology": ["dsh-observe", "dsh-attach-priming"],
         "replacement": ["dsh-observe", "dsh-attach-priming"],
-        "hub-authority": ["dsh-attach-priming"]
+        "hub-authority": ["dsh-attach-priming"],
+        "turn-attention": ["dsh-drive", "dsh-attach-priming"]
       }
     },
     "AgyAdapter": {
@@ -137,7 +149,14 @@
         "terminal-authority": ["agy-drive", "agy-observe"],
         "history-live-chronology": ["agy-identity", "agy-observe"],
         "replacement": ["agy-identity"],
-        "hub-authority": ["agy-cross-client-join", "agy-registration-gate"]
+        "hub-authority": ["agy-cross-client-join", "agy-registration-gate"],
+        "turn-attention": []
+      },
+      "exclusions": {
+        "turn-attention": {
+          "reason": "Antigravity reports no turn end: its stream and conversation store carry per-step DONE and RUNNING states only, so the adapter emits no run-summary and its sessions raise no Turn finished or Turn failed. Accepted: Antigravity turns notify nothing rather than guess an ending.",
+          "reviewed": "2026-09-23"
+        }
       }
     }
   }

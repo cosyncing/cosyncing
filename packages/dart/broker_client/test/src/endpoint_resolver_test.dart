@@ -232,6 +232,13 @@ void main() {
       );
     });
 
+    test('webPushKeyEndpoint returns the VAPID key path', () {
+      expect(
+        resolver.webPushKeyEndpoint,
+        'http://127.0.0.1:7734/api/push/web-push-key',
+      );
+    });
+
     test('wakeTokenEndpoint encodes deviceId', () {
       expect(
         resolver.wakeTokenEndpoint('device id/1'),

@@ -29,3 +29,9 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   very_good_analysis: ^9.0.0
+
+# Vendored fork: clears an unpackaged app's delivered toasts, reads the per-app
+# toast setting, and registers cold-start activation. See its README-fork.md.
+dependency_overrides:
+  flutter_local_notifications_windows:
+    path: ../flutter_local_notifications_windows

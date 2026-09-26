@@ -567,6 +567,17 @@ class BrokerClient {
     return PushWakeTokenListResponse.fromJson(response);
   }
 
+  /// The broker's VAPID public key, which a browser subscribes to Web Push
+  /// with.
+  ///
+  /// `GET /api/push/web-push-key` (revision 27)
+  Future<WebPushKeyResponse> getWebPushKey() async {
+    final response = await _get<Map<String, dynamic>>(
+      _resolver.webPushKeyEndpoint,
+    );
+    return WebPushKeyResponse.fromJson(response);
+  }
+
   /// Revokes a wake-token registration by [deviceId].
   ///
   /// `DELETE /api/push/wake-tokens/:deviceId`

@@ -451,6 +451,51 @@ interface KimiPendingTurnClose {
    * close is the next turn's opener, never this one's.
    */
   closedAt: number;
+  /** Which terminal family closed the turn; see {@link KimiTurnEnding.source}. */
+  source: 'prompt' | 'turn';
+  /** {@link KimiObserveConnection.streamMark} when the terminal frame arrived. */
+  closedMark: number;
+  /**
+   * The prompt this ending belongs to, when a frame named it: the ref itself
+   * for a prompt-closed ending, or the matching prompt terminal that followed a
+   * turn-closed one on the same stream (see `attributePromptEnding`).
+   */
+  promptId?: string;
+  /** Never keyed by a walk row: the ending's opener was already claimed by another close. */
+  noKeyFill?: true;
+}
+
+/**
+ * One turn ending, as the run-start pairing reads it just before the terminal
+ * `run-summary` is emitted. See {@link KimiObserveConnection.beforeRunEnding}.
+ */
+export interface KimiTurnEnding {
+  /** The terminal ref: the summary's key is `run-summary:kimi:${ref}`. */
+  readonly ref: string;
+  /**
+   * `prompt` for `prompt.completed` / `prompt.aborted` (the ref is a
+   * `promptId`), `turn` for `turn.ended` (the ref is the stringified turn
+   * number). A real host writes `turn.ended` BEFORE the prompt terminal, so a
+   * turn that ran usually closes as `turn`.
+   */
+  readonly source: 'prompt' | 'turn';
+  /** The prompt the ending belongs to, when a frame named it. */
+  readonly promptId?: string;
+  /** {@link KimiObserveConnection.streamMark} when the terminal frame arrived. */
+  readonly closedMark: number;
+  /** {@link KimiObserveConnection.streamMark} when this turn's `turn.started` arrived, if it did. */
+  readonly startedMark?: number;
+  readonly startedAt?: number;
+}
+
+/** A main-agent `turn.started` as it arrived, keyed by its stringified turn number. */
+interface KimiTurnStart {
+  /** The prompt that opened the turn. Newer hosts send it; older ones send only the turn number. */
+  promptId?: string;
+  /** {@link KimiObserveConnection.streamMark} at arrival. */
+  mark: number;
+  /** LOCAL arrival time. */
+  at: number;
 }
 
 /**
@@ -495,6 +540,9 @@ function kimiOverlayIdentity(key: string, revision: number): string {
 }
 
 export class KimiObserveConnection implements SessionConnection {
+  /** {@link getPending} answers an empty list for a read it could not complete, and for an observe
+   *  posture that is not `needs-input`; the drive layer's reconciliation retracts answered cards. */
+  readonly pendingListMayOmitOpenRequests = true;
   private readonly handlers = new Set<AgentMessageHandler>();
   private readonly seen = new Set<string>();
   private readonly pollIntervalMs: number;
@@ -623,12 +671,13 @@ export class KimiObserveConnection implements SessionConnection {
 
   // ── Turn timing (run-summary) ─────────────────────────────────────────────
   //
-  // Kimi has no `turn.started` event, so a turn's opening is reconstructed from
-  // the two signals that do exist: the user-message echo row (which carries the
-  // native `created_at`) and the first busy transition of `work_changed`. The
-  // terminal events — `prompt.completed` / `prompt.aborted` / `turn.ended` —
-  // close it. What closes is emitted as a canonical `run-summary`, keyed to the
-  // turn's user row so the client can attach the footer.
+  // A footer's opening is reconstructed from two signals: the user-message
+  // echo row (which carries the native `created_at`) and the first busy
+  // transition of `work_changed`. `turn.started` is recorded for the run-start
+  // pairing below but does not open a footer. The terminal events —
+  // `prompt.completed` / `prompt.aborted` / `turn.ended` — close it. What
+  // closes is emitted as a canonical `run-summary`, keyed to the turn's user
+  // row so the client can attach the footer.
 
   /**
    * The turn currently open, if this connection has seen one open.
@@ -697,6 +746,28 @@ export class KimiObserveConnection implements SessionConnection {
    * may restart its turn numbering, so a ref from the old one proves nothing.
    */
   private readonly closedTurnRefs = new Set<string>();
+
+  // ── Run-start pairing (the `running` half of a run-summary) ───────────────
+  //
+  // The broker raises "turn finished" only for a `running` summary followed by
+  // a terminal one under the same key, and only from live frames. The base
+  // never announces a run: only the drive layer can PROVE a turn is one it
+  // submitted and watched run (see `KimiDriveConnection.pairDrivenRun`). These
+  // records keep that announcement to one per key, never after the key's
+  // terminal, and make sure every announced run gets a terminal.
+
+  /** Main-agent `turn.started` frames by turn ref, bounded oldest-first. */
+  private readonly turnStarts = new Map<string, KimiTurnStart>();
+  /** Refs announced `running` whose terminal has not been emitted, with the announced start. */
+  private readonly announcedRuns = new Map<string, number | undefined>();
+  /** Refs whose terminal summary this connection emitted, bounded oldest-first. */
+  private readonly endedRuns = new Set<string>();
+  /**
+   * Ordinal of `running` emissions, so each announcement carries a fresh
+   * identity: after an epoch retirement a reused turn number is a new run, and
+   * the seen-set must not swallow its announcement as a repeat of the old one.
+   */
+  private runAnnouncements = 0;
 
   // ── Run-state repair ──────────────────────────────────────────────────────
   /** One repair read in flight at a time; a second request while it runs is dropped. */
@@ -2377,7 +2448,37 @@ export class KimiObserveConnection implements SessionConnection {
         const promptId = typeof payload.promptId === 'string' ? payload.promptId : undefined;
         if (!promptId) return;
         this.onPromptSettled(promptId, type === 'prompt.aborted');
-        this.closeTurnRun(type === 'prompt.aborted' ? 'cancelled' : 'done', promptId);
+        // How the PROMPT says its turn ended, which is what matches it to the
+        // `turn.ended` a real host writes just before it. `prompt.completed`
+        // carries `reason: completed | failed | blocked`; a blocked prompt
+        // (a hook refused it) had no turn of its own, so it matches none.
+        const ending = type === 'prompt.aborted'
+          ? 'cancelled'
+          : payload.reason === 'failed' ? 'error' : payload.reason === 'blocked' ? undefined : 'done';
+        this.closeTurnRun(type === 'prompt.aborted' ? 'cancelled' : 'done', promptId, 'prompt', ending);
+        return;
+      }
+      case 'turn.started': {
+        // The turn's start, with its turn number (the ref its `turn.ended`
+        // closes under) and, on newer hosts, the prompt that opened it. Only
+        // RECORDED here: turn opening is still reconstructed from the busy edge
+        // and the echo row (see `applyRunState`), and whether the start may be
+        // announced as a running run is the drive layer's call.
+        if (!this.isMainAgentFrame(payload)) return;
+        const turnRef = typeof payload.turnId === 'number' || typeof payload.turnId === 'string'
+          ? String(payload.turnId)
+          : undefined;
+        if (!turnRef) return;
+        const promptId = typeof payload.promptId === 'string' && payload.promptId ? payload.promptId : undefined;
+        const at = this.nowImpl();
+        this.turnStarts.delete(turnRef);
+        this.turnStarts.set(turnRef, { ...(promptId ? { promptId } : {}), mark: this.streamMarkValue, at });
+        while (this.turnStarts.size > KIMI_CLOSED_TURN_REF_LIMIT) {
+          const oldest = this.turnStarts.keys().next();
+          if (oldest.done) break;
+          this.turnStarts.delete(oldest.value);
+        }
+        this.onTurnStarted(turnRef, promptId, at);
         return;
       }
       case 'turn.ended': {
@@ -2392,7 +2493,7 @@ export class KimiObserveConnection implements SessionConnection {
             String(payload.turnId ?? 'unknown'),
             mapKimiTurnFailure(payload),
           );
-          if (turnRef) this.closeTurnRun('error', turnRef);
+          if (turnRef) this.closeTurnRun('error', turnRef, 'turn');
           // A FAILED ending is the one this transport cannot be trusted to
           // follow with a busy edge — the turn did not end, it was killed — so
           // the run state is confirmed against the server rather than waited
@@ -2404,8 +2505,8 @@ export class KimiObserveConnection implements SessionConnection {
         // The non-failed endings close the run-summary ONLY. `prompt.completed`
         // / `prompt.aborted` usually arrive for the same turn, and whichever
         // lands first wins; the second finds no open turn and emits nothing.
-        if (turnRef && payload.reason === 'completed') this.closeTurnRun('done', turnRef);
-        if (turnRef && payload.reason === 'cancelled') this.closeTurnRun('cancelled', turnRef);
+        if (turnRef && payload.reason === 'completed') this.closeTurnRun('done', turnRef, 'turn');
+        if (turnRef && payload.reason === 'cancelled') this.closeTurnRun('cancelled', turnRef, 'turn');
         return;
       }
       case 'event.approval.requested': {
@@ -2492,9 +2593,9 @@ export class KimiObserveConnection implements SessionConnection {
     if (status === 'idle' && previous !== 'idle') {
       this.idleSince = this.nowImpl();
     }
-    // A working edge is the ONLY start signal a turn whose echo row has not
-    // been walked yet gets — there is no `turn.started`. What it does to a
-    // HELD opener depends on the gap before it:
+    // A working edge is the ONLY footer-opening signal a turn whose echo row
+    // has not been walked yet gets (`turn.started` opens no footer). What it
+    // does to a HELD opener depends on the gap before it:
     //
     //  - previous === 'idle': the previous turn ENDED, so an opener held from
     //    BEFORE the idle period is stale — seeded from history at attach, or
@@ -2537,6 +2638,67 @@ export class KimiObserveConnection implements SessionConnection {
 
   /** One prompt reached its terminal event. Base does nothing; the drive layer clears its fence. */
   protected onPromptSettled(_promptId: string, _aborted: boolean): void {}
+
+  /**
+   * A main-agent `turn.started` arrived. Base does nothing: an observe
+   * connection cannot tell a live start from one the subscribe replayed, so it
+   * never announces a run (see {@link announceRunStart}).
+   */
+  protected onTurnStarted(_turnRef: string, _promptId: string | undefined, _at: number): void {}
+
+  /**
+   * A turn's terminal summary is about to be emitted. Base does nothing; the
+   * drive layer may announce the run here, immediately before its terminal,
+   * when it could not do so at the turn's start.
+   */
+  protected beforeRunEnding(_ending: KimiTurnEnding): void {}
+
+  /** The `turn.started` that named `promptId`, if one is still remembered. */
+  protected turnStartNaming(promptId: string): { ref: string; mark: number; at: number } | undefined {
+    for (const [ref, start] of this.turnStarts) {
+      if (start.promptId === promptId) return { ref, mark: start.mark, at: start.at };
+    }
+    return undefined;
+  }
+
+  /**
+   * Emit the `running` half of a run-summary pair under the key the turn's
+   * terminal will carry, `run-summary:kimi:${ref}`.
+   *
+   * At most ONCE per ref, and never once the ref's terminal has been emitted:
+   * the broker opens a "turn finished" observation on `running` and raises the
+   * event on the next terminal under that key, so a second `running` after the
+   * terminal would re-open the run and notify for it again. The seen-set check
+   * covers a terminal older than {@link endedRuns} remembers — the terminal
+   * emission would be dropped by the same identity, and a `running` with no
+   * terminal left to follow it is worse than none.
+   *
+   * Only the drive layer calls this, and only for a turn it proved it
+   * submitted and watched run live. Returns whether the frame was emitted.
+   */
+  protected announceRunStart(ref: string, startedAt?: number): boolean {
+    if (this.closed || this.announcedRuns.has(ref) || this.endedRuns.has(ref)) return false;
+    const key = `run-summary:kimi:${ref}`;
+    if (this.seen.has(key)) return false;
+    this.announcedRuns.set(ref, startedAt);
+    while (this.announcedRuns.size > KIMI_CLOSED_TURN_REF_LIMIT) {
+      const oldest = this.announcedRuns.keys().next();
+      if (oldest.done) break;
+      this.announcedRuns.delete(oldest.value);
+    }
+    this.emit(
+      {
+        type: 'run-summary',
+        key,
+        turnId: ref,
+        status: 'running',
+        ...(startedAt !== undefined ? { startedAt } : {}),
+        source: 'kimi-events',
+      },
+      `run-summary-running:kimi:${ref}:${(this.runAnnouncements += 1)}`,
+    );
+    return true;
+  }
 
   /**
    * Fold the turn-opener evidence out of one batch of transcript rows, in
@@ -2590,7 +2752,7 @@ export class KimiObserveConnection implements SessionConnection {
       // dropping the key entirely.
       let claimed = false;
       for (const pending of this.pendingCloses) {
-        if (pending.userMessageKey !== undefined) continue;
+        if (pending.userMessageKey !== undefined || pending.noKeyFill) continue;
         if (sentAt !== undefined && sentAt > pending.closedAt) continue;
         pending.userMessageKey = key;
         if (sentAt !== undefined) pending.startedAt = sentAt;
@@ -2635,19 +2797,59 @@ export class KimiObserveConnection implements SessionConnection {
    * for it. That is the honest miss — the alternative (closing on the idle
    * status) would have to GUESS done/cancelled, and an abort mislabeled done
    * is worse than a missing footer.
+   *
+   * A turn announced `running` ({@link announceRunStart}) is the exception to
+   * "nobody saw it open": its own `turn.ended` closes it with no opener held,
+   * and its prompt's terminal closes it when its `turn.ended` did not. A
+   * duplicate prompt terminal is not wasted either: it names the prompt of the
+   * turn-closed ending it duplicates ({@link attributePromptEnding}).
    */
-  private closeTurnRun(status: 'done' | 'error' | 'cancelled', ref: string): void {
+  private closeTurnRun(
+    status: 'done' | 'error' | 'cancelled',
+    ref: string,
+    source: 'prompt' | 'turn',
+    promptEnding?: 'done' | 'error' | 'cancelled',
+  ): void {
     if (this.closedTurnRefs.has(ref)) return;
     this.rememberClosedTurnRef(ref);
     const turn = this.openTurn;
-    if (!turn) return;
-    this.openTurn = undefined;
+    if (turn) {
+      this.openTurn = undefined;
+      this.queueClose(status, ref, source, turn);
+    } else if (source === 'turn' && this.announcedRuns.has(ref)) {
+      // AN ANNOUNCED RUN ALWAYS GETS ITS TERMINAL. This turn was announced
+      // `running`, so the broker is holding an observation (and the hub an
+      // active run key) that only a terminal under this key clears; dropping
+      // the ending because no opener happened to be held would strand both
+      // for the life of the connection. The announcement's own start stands in
+      // for the missing snapshot.
+      const startedAt = this.announcedRuns.get(ref);
+      this.queueClose(status, ref, source, startedAt !== undefined ? { startedAt } : {});
+    } else if (source === 'prompt') {
+      this.attributePromptEnding(ref, promptEnding);
+    }
+    // The prompt's own account of the ending, so a failed prompt stays `error`.
+    if (source === 'prompt') this.endAnnouncedRunOf(ref, promptEnding ?? status);
+  }
+
+  /** Queue one close against its snapshot and defer its flush past the content walk. See {@link pendingCloses}. */
+  private queueClose(
+    status: 'done' | 'error' | 'cancelled',
+    ref: string,
+    source: 'prompt' | 'turn',
+    turn: { userMessageKey?: string; startedAt?: number },
+    noKeyFill = false,
+  ): void {
     this.pendingCloses.push({
       status,
       ref,
       ...(turn.userMessageKey !== undefined ? { userMessageKey: turn.userMessageKey } : {}),
       ...(turn.startedAt !== undefined ? { startedAt: turn.startedAt } : {}),
       closedAt: this.nowImpl(),
+      source,
+      closedMark: this.streamMarkValue,
+      ...(source === 'prompt' ? { promptId: ref } : {}),
+      ...(noKeyFill ? { noKeyFill: true } : {}),
     });
     // Overflow means closes are outrunning their walks: flush the oldest NOW
     // rather than drop it — an undeferred footer beats none.
@@ -2658,6 +2860,74 @@ export class KimiObserveConnection implements SessionConnection {
       // footer: emit against whatever the close captured and the walk filled.
       () => this.flushRunSummary(),
     );
+  }
+
+  /**
+   * Name the prompt of the turn-closed ending this prompt terminal duplicates.
+   *
+   * A real host writes `turn.ended` and THEN the prompt's own terminal for one
+   * ending, and an older host's `turn.ended` names only the turn number, so
+   * this second frame is the only statement of which prompt the turn ran. The
+   * duplicate path above already treats it as the same ending; recording the
+   * id here is what lets the drive layer recognise its own prompt's turn.
+   * Accepted only when it can be nothing else: the NEWEST queued close, closed
+   * by `turn.ended`, not yet attributed, not contradicted by a `turn.started`
+   * that named another prompt, ending the SAME way, and on the same unbroken
+   * stream — a blocked prompt (`ending` undefined) had no turn at all.
+   */
+  private attributePromptEnding(promptId: string, ending: 'done' | 'error' | 'cancelled' | undefined): void {
+    if (ending === undefined) return;
+    const last = this.pendingCloses.at(-1);
+    if (!last || last.source !== 'turn' || last.promptId !== undefined) return;
+    if (last.status !== ending || last.closedMark !== this.streamMarkValue) return;
+    const named = this.turnStarts.get(last.ref)?.promptId;
+    if (named !== undefined && named !== promptId) return;
+    last.promptId = promptId;
+  }
+
+  /**
+   * A prompt's own terminal ends the announced run of the turn that prompt
+   * started, when that turn's `turn.ended` never closed it: the ending reason
+   * was one this reader does not close on (`blocked`), or the frame was not
+   * delivered. Without this the announced run would never see a terminal.
+   *
+   * The close is keyless and never keyed by the walk: whatever opener the turn
+   * had was already claimed by the prompt's own close queued just before it.
+   */
+  private endAnnouncedRunOf(promptId: string, status: 'done' | 'error' | 'cancelled'): void {
+    for (const [ref, startedAt] of this.announcedRuns) {
+      if (this.turnStarts.get(ref)?.promptId !== promptId) continue;
+      if (this.pendingCloses.some((pending) => pending.ref === ref)) continue;
+      this.rememberClosedTurnRef(ref);
+      this.queueClose(status, ref, 'turn', startedAt !== undefined ? { startedAt } : {}, true);
+    }
+  }
+
+  /**
+   * A new journal incarnation ended every announced run whose terminal is not
+   * already queued: the old incarnation's frames are gone, and its turn numbers
+   * may be reused by the new one. Each is closed `cancelled` — the broker then
+   * drops its observation without an event — under an identity of its own, so
+   * a new incarnation's turn reusing the ref still delivers its own footer.
+   */
+  private retireAnnouncedRuns(): void {
+    for (const [ref, startedAt] of this.announcedRuns) {
+      if (this.pendingCloses.some((pending) => pending.ref === ref)) continue;
+      this.emit(
+        {
+          type: 'run-summary',
+          key: `run-summary:kimi:${ref}`,
+          turnId: ref,
+          status: 'cancelled',
+          ...(startedAt !== undefined ? { startedAt } : {}),
+          source: 'kimi-events',
+        },
+        `run-summary-retired:kimi:${ref}`,
+      );
+    }
+    this.announcedRuns.clear();
+    this.endedRuns.clear();
+    this.turnStarts.clear();
   }
 
   /** Record a terminal event's ref, evicting oldest-first past the bound. See {@link closedTurnRefs}. */
@@ -2681,6 +2951,18 @@ export class KimiObserveConnection implements SessionConnection {
   private flushRunSummary(): void {
     const pending = this.pendingCloses.shift();
     if (!pending || this.closed) return;
+    // The last moment a `running` may precede this terminal. A turn the drive
+    // layer announced at its start is already running and this is a no-op.
+    const start = pending.source === 'turn' ? this.turnStarts.get(pending.ref) : undefined;
+    const promptId = pending.promptId ?? start?.promptId;
+    this.beforeRunEnding({
+      ref: pending.ref,
+      source: pending.source,
+      ...(promptId ? { promptId } : {}),
+      closedMark: pending.closedMark,
+      ...(start ? { startedMark: start.mark } : {}),
+      ...(pending.startedAt !== undefined ? { startedAt: pending.startedAt } : {}),
+    });
     const completedAt = this.nowImpl();
     const totalRuntimeMs = pending.startedAt !== undefined
       ? Math.max(0, completedAt - pending.startedAt)
@@ -2702,6 +2984,14 @@ export class KimiObserveConnection implements SessionConnection {
       },
       `run-summary:kimi:${pending.ref}`,
     );
+    this.announcedRuns.delete(pending.ref);
+    this.endedRuns.delete(pending.ref);
+    this.endedRuns.add(pending.ref);
+    while (this.endedRuns.size > KIMI_CLOSED_TURN_REF_LIMIT) {
+      const oldest = this.endedRuns.keys().next();
+      if (oldest.done) break;
+      this.endedRuns.delete(oldest.value);
+    }
   }
 
   /** Retain a question's native ids, bounded oldest-first. See {@link KIMI_INTERACTION_REGISTRY_LIMIT}. */
@@ -2743,6 +3033,10 @@ export class KimiObserveConnection implements SessionConnection {
       // Turn numbering may restart with the journal, so a terminal-event ref
       // remembered from the old incarnation would falsely dedup the new one's.
       this.closedTurnRefs.clear();
+      // ...and a run announced under an old turn number would be closed by
+      // the new incarnation's turn of the same number, raising "finished" for
+      // a turn nobody proved was ours.
+      this.retireAnnouncedRuns();
       if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0) {
         // The frame is FROM the new incarnation, so its own seq is a current
         // watermark for that journal — adopt it rather than an invented zero,

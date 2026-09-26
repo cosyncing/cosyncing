@@ -1,36 +1,26 @@
-import 'package:broker_client_flutter/broker_client_flutter.dart';
-import 'package:cosyncing_client/src/features/sessions/detail/session_local_notification_adapter.dart';
+import 'package:cosyncing_client/src/features/attention/controller/notification_system_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Persistent preference state for enabling local session notifications.
+/// Persistent master switch for system notifications on this device.
 ///
-/// See `docs/architecture/client-ui.md` for the user-facing
+/// See `docs/architecture/attention.md` for the user-facing
 /// behavior and caveats.
 final sessionNotificationSettingsControllerProvider =
     AsyncNotifierProvider<SessionNotificationSettingsController, bool>(
       SessionNotificationSettingsController.new,
     );
 
-/// Exposes a concrete permission requester function for explicit OS permission
-/// onboarding.
-final sessionNotificationPermissionRequesterProvider =
-    Provider<FlutterLocalNotificationPermissionRequester>(
-      (ref) {
-        return ref
-            .watch(sessionLocalNotificationAdapterProvider)
-            .requestPermission;
-      },
-    );
+/// The explicit master-switch choice, or null when the user has never chosen.
+/// The first-run card is offered exactly while this is null.
+final sessionNotificationPreferenceProvider = FutureProvider<bool?>((ref) {
+  ref.watch(sessionNotificationSettingsControllerProvider);
+  return ref
+      .read(sessionNotificationSettingsStoreProvider)
+      .getLocalNotificationPreference();
+});
 
-/// User-visible status from the last explicit permission request.
-final sessionNotificationPermissionRequestControllerProvider =
-    AsyncNotifierProvider<
-      SessionNotificationPermissionRequestController,
-      FlutterLocalNotificationPermissionRequestResult?
-    >(SessionNotificationPermissionRequestController.new);
-
-/// Notifier for durable local notification preference.
+/// Notifier for the durable master switch.
 class SessionNotificationSettingsController extends AsyncNotifier<bool> {
   @override
   Future<bool> build() {
@@ -39,8 +29,14 @@ class SessionNotificationSettingsController extends AsyncNotifier<bool> {
         .getLocalNotificationEnabled();
   }
 
-  /// Enables or disables local session notifications and persists the value.
+  /// Turns system notifications on or off and persists the choice.
+  ///
+  /// Turning them on asks the OS for permission in the same user gesture, so
+  /// one tap is enough; the permission prompt is never shown otherwise.
   Future<void> setEnabled({required bool enabled}) async {
+    final permission = enabled
+        ? ref.read(notificationPermissionControllerProvider.notifier).request()
+        : null;
     state = const AsyncValue<bool>.loading();
     try {
       await ref
@@ -50,41 +46,12 @@ class SessionNotificationSettingsController extends AsyncNotifier<bool> {
     } on Object catch (error, stack) {
       state = AsyncValue.error(error, stack);
     }
+    await permission;
   }
 
-  /// Flips local notification opt-in.
+  /// Flips the master switch.
   Future<void> toggle() async {
     final current = state.valueOrNull ?? false;
     await setEnabled(enabled: !current);
-  }
-}
-
-/// Controller for explicit OS permission request action in Settings.
-class SessionNotificationPermissionRequestController
-    extends AsyncNotifier<FlutterLocalNotificationPermissionRequestResult?> {
-  @override
-  Future<FlutterLocalNotificationPermissionRequestResult?> build() async {
-    return null;
-  }
-
-  /// Requests OS permission for local notification display.
-  Future<void> requestPermission() async {
-    state =
-        const AsyncValue<
-          FlutterLocalNotificationPermissionRequestResult?
-        >.loading();
-    try {
-      final requester = ref.read(
-        sessionNotificationPermissionRequesterProvider,
-      );
-      final result = await requester();
-      state = AsyncValue.data(result);
-    } on Object catch (_) {
-      state = const AsyncValue.data(
-        FlutterLocalNotificationPermissionRequestResult(
-          outcome: FlutterLocalNotificationPermissionRequestOutcome.failed,
-        ),
-      );
-    }
   }
 }

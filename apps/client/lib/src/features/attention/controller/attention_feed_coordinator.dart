@@ -10,11 +10,20 @@ abstract interface class AttentionFeedRunner {
   /// Stops polling and waits for any in-flight request to retire without
   /// publishing another page.
   Future<void> stop();
+
+  /// Presents again the open requests the OS refused before notifications
+  /// were allowed.
+  Future<void> presentPermissionBlockedRequests();
 }
 
 /// Creates one authenticated runner for a saved broker profile.
 typedef AttentionFeedRunnerFactory =
     Future<AttentionFeedRunner> Function(BrokerProfile profile);
+
+/// The credential a runner for [profile] would authenticate with, compared by
+/// equality only. Never logged or persisted.
+typedef AttentionFeedCredentialReader =
+    Future<Object?> Function(BrokerProfile profile);
 
 /// Reports a profile-scoped worker construction or lifecycle failure.
 typedef AttentionFeedProfileErrorHandler =
@@ -32,6 +41,7 @@ final class AttentionFeedCoordinator {
   AttentionFeedCoordinator({
     required this.settingsStore,
     required this.createRunner,
+    this.credentialOf,
     this.onProfileError,
     this.onSettingsChanged,
   });
@@ -41,6 +51,12 @@ final class AttentionFeedCoordinator {
 
   /// Authenticated worker factory.
   final AttentionFeedRunnerFactory createRunner;
+
+  /// Reads the credential each profile's runner would use. A runner whose
+  /// profile now holds a different credential (a token saved or pasted over
+  /// since it started, here or in another tab) is replaced: its client still
+  /// carries the old one, and the broker refuses every request it makes.
+  final AttentionFeedCredentialReader? credentialOf;
 
   /// Optional diagnostic callback; one bad profile never blocks the others.
   final AttentionFeedProfileErrorHandler? onProfileError;
@@ -74,6 +90,20 @@ final class AttentionFeedCoordinator {
     return operation;
   }
 
+  /// Tells every running worker that OS notification permission was granted.
+  Future<void> notificationPermissionGranted() async {
+    final entries = _runners.entries.toList(growable: false);
+    await Future.wait(
+      entries.map((entry) async {
+        try {
+          await entry.value.runner.presentPermissionBlockedRequests();
+        } on Object catch (error) {
+          onProfileError?.call(entry.key, error);
+        }
+      }),
+    );
+  }
+
   /// Stops every worker and rejects future reconciliation work.
   Future<void> stop() async {
     _disposed = true;
@@ -99,6 +129,10 @@ final class AttentionFeedCoordinator {
     final savedProfiles = {for (final profile in profiles) profile.id: profile};
 
     final desiredIds = savedProfiles.keys.toSet().difference(disabledIds);
+    final credentials = <String, Object?>{
+      for (final profileId in desiredIds)
+        profileId: await _credentialOf(savedProfiles[profileId]!),
+    };
     final obsoleteIds = _runners.keys
         .where((profileId) {
           if (restartExisting || !desiredIds.contains(profileId)) return true;
@@ -106,7 +140,8 @@ final class AttentionFeedCoordinator {
           final owned = _runners[profileId];
           return profile == null ||
               owned == null ||
-              owned.source != RosterSource.ofProfile(profile);
+              owned.source != RosterSource.ofProfile(profile) ||
+              owned.credential != credentials[profileId];
         })
         .toList(growable: false);
     for (final profileId in obsoleteIds) {
@@ -126,12 +161,24 @@ final class AttentionFeedCoordinator {
         }
         _runners[profileId] = _OwnedAttentionFeedRunner(
           source: RosterSource.ofProfile(profile),
+          credential: credentials[profileId],
           runner: runner,
         );
         runner.start();
       } on Object catch (error) {
         onProfileError?.call(profileId, error);
       }
+    }
+  }
+
+  Future<Object?> _credentialOf(BrokerProfile profile) async {
+    final read = credentialOf;
+    if (read == null) return null;
+    try {
+      return await read(profile);
+    } on Object catch (error) {
+      onProfileError?.call(profile.id, error);
+      return null;
     }
   }
 
@@ -150,9 +197,11 @@ final class AttentionFeedCoordinator {
 final class _OwnedAttentionFeedRunner {
   const _OwnedAttentionFeedRunner({
     required this.source,
+    required this.credential,
     required this.runner,
   });
 
   final RosterSource source;
+  final Object? credential;
   final AttentionFeedRunner runner;
 }

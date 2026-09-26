@@ -8,16 +8,13 @@ import type {
   SessionInfo,
 } from '@cosyncing/protocol';
 import { ATTENTION_BULK_DISMISS_MAX } from '@cosyncing/protocol';
+import { withAttentionNotificationFields } from './attention-notification-type.ts';
 import { AttentionPolicy, type AttentionPolicyOptions } from './attention-policy.ts';
 import {
   AttentionStore,
   type AttentionEventUpsertResult,
   type AttentionStoreOptions,
 } from './attention-store.ts';
-import {
-  SyncDegradationTracker,
-  type SessionControlTransition,
-} from './attention-policy.ts';
 
 export interface AttentionServiceOptions {
   store?: AttentionStoreOptions;
@@ -63,7 +60,8 @@ export function normalizeAttentionBulkDismissItems(
 export class AttentionService {
   readonly store: AttentionStore;
   readonly policy: AttentionPolicy;
-  private readonly syncDegradation: SyncDegradationTracker;
+  /** Settles once sync-degraded events left by an older broker are resolved. */
+  readonly legacySyncDegradedRetired: Promise<number>;
   private readonly waiters = new Set<Waiter>();
   private policyMessageTail: Promise<void> = Promise.resolve();
   private disposed = false;
@@ -78,12 +76,7 @@ export class AttentionService {
       },
     });
     this.policy = new AttentionPolicy(this.store, options.policy);
-    this.syncDegradation = new SyncDegradationTracker();
-    this.syncDegradation.restoreActive(
-      this.store.listActive()
-        .filter((event) => event.kind === 'sync-degraded')
-        .map((event) => event.dedupeKey),
-    );
+    this.legacySyncDegradedRetired = this.retireLegacySyncDegraded().catch(() => 0);
   }
 
   async getEvents(input: {
@@ -96,7 +89,10 @@ export class AttentionService {
     const after = input.after;
     const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 100)));
     const waitMs = Math.max(0, Math.min(30_000, Math.floor(input.waitMs ?? 0)));
-    const read = () => this.store.getPage({ after, limit, clientId });
+    const read = (): AttentionEventsPage => {
+      const page = this.store.getPage({ after, limit, clientId });
+      return { ...page, events: page.events.map(withAttentionNotificationFields) };
+    };
     const initial = read();
     if (this.hasResult(initial) || waitMs === 0 || this.disposed) return initial;
 
@@ -163,31 +159,26 @@ export class AttentionService {
     return this.enqueuePolicyMessage(() => this.policy.handleObservationLost(info));
   }
 
+  handlePendingWithdrawn(info: SessionInfo, requestIds: readonly string[]): Promise<void> {
+    return this.enqueuePolicyMessage(() => this.policy.handlePendingWithdrawn(info, requestIds));
+  }
+
   reconcileRuntimeStatus(status: AgentRuntimeUpdateStatus): Promise<void> {
     return this.policy.reconcileRuntimeStatus(status);
   }
 
-  async handleControlTransition(transition: SessionControlTransition): Promise<void> {
-    const change = this.syncDegradation.observe(transition);
-    if (!change) return;
-    if (change.type === 'resolve') {
-      await this.resolveByDedupeKey(change.dedupeKey);
-      return;
-    }
-    await this.upsertEvent({
-      dedupeKey: change.dedupeKey,
-      kind: 'sync-degraded',
-      state: 'active',
-      severity: 'maintenance',
-      agent: change.tool,
-      sessionId: change.sessionId,
-      ...(change.sessionTitle ? { sessionTitle: change.sessionTitle } : {}),
-      title: 'Session sync degraded',
-      summary: 'A previously available remote-control path is unavailable.',
-      action: { kind: 'open-session', tool: change.tool, sessionId: change.sessionId },
-      presentationRevision: 1,
-      presentationStage: 'immediate',
-    });
+  /**
+   * Resolves the sync-degraded events an older broker raised.
+   *
+   * Control-path loss is no longer an attention event: it fired on every
+   * ordinary session exit and told the user nothing they could act on. Rows an
+   * earlier version left active would otherwise keep their reminders forever.
+   * The session's own control state still shows the path's availability.
+   */
+  private async retireLegacySyncDegraded(): Promise<number> {
+    const active = this.store.listActive().filter((event) => event.kind === 'sync-degraded');
+    for (const event of active) await this.store.resolveByDedupeKey(event.dedupeKey);
+    return active.length;
   }
 
   dispose(): void {

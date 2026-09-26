@@ -31,9 +31,9 @@ void main() {
                 'cursor': 1,
                 'revision': 1,
                 'presentationRevision': 1,
-                'kind': 'runtime-update-ready',
+                'kind': 'device-paired',
                 'state': 'active',
-                'severity': 'maintenance',
+                'severity': 'informational',
                 'dedupeKey': 'wake-event',
                 'createdAt': 1,
                 'updatedAt': 1,
@@ -528,9 +528,9 @@ AttentionEventView _jsonEvent({
     'cursor': cursor,
     'revision': revision,
     'presentationRevision': presentationRevision,
-    'kind': 'runtime-update-ready',
+    'kind': 'device-paired',
     'state': 'active',
-    'severity': 'maintenance',
+    'severity': 'informational',
     'dedupeKey': id,
     'createdAt': 1,
     'updatedAt': 2,
@@ -567,8 +567,11 @@ class _CollectingSink implements BrokerNotificationSink {
   final List<BrokerNotificationRequest> requests = [];
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async {
     requests.add(request);
+    return BrokerNotificationDeliveryResult.shown;
   }
 
   @override

@@ -1,3 +1,6 @@
+import 'dart:ui' as ui;
+
+import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,6 +14,27 @@ const List<Locale> kSupportedLocales = <Locale>[
   Locale('ko'),
   Locale('es'),
 ];
+
+/// The app's strings outside the widget tree: for [selected], or when the user
+/// follows the system (null), for the first of [systemLocales] the app ships;
+/// English when it ships none of them. This is the choice the widget tree's
+/// own locale resolution makes. `lookupAppLocalizations` throws for any other
+/// language, so a background worker must not hand it a system locale directly.
+AppLocalizations resolveAppLocalizations(
+  Locale? selected, {
+  Iterable<Locale>? systemLocales,
+}) {
+  final candidates = [
+    ?selected,
+    ...systemLocales ?? ui.PlatformDispatcher.instance.locales,
+  ];
+  for (final candidate in candidates) {
+    if (AppLocalizations.delegate.isSupported(candidate)) {
+      return lookupAppLocalizations(candidate);
+    }
+  }
+  return lookupAppLocalizations(kSupportedLocales.first);
+}
 
 /// Durable UI locale selection. `null` means "follow the system locale".
 final localeControllerProvider =

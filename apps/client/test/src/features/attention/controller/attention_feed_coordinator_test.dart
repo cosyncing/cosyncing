@@ -30,6 +30,32 @@ void main() {
       await coordinator.stop();
     });
 
+    test('a permission grant reaches every running worker', () async {
+      final settings = _MemorySettingsStore(disabled: {'off'});
+      final runners = <String, _FakeRunner>{};
+      final coordinator = AttentionFeedCoordinator(
+        settingsStore: settings,
+        createRunner: (profile) async =>
+            runners.putIfAbsent(profile.id, _FakeRunner.new),
+      );
+      await coordinator.reconcile(
+        notificationsEnabled: true,
+        profiles: [_profile('one'), _profile('two'), _profile('off')],
+        activeProfileId: 'one',
+      );
+
+      await coordinator.notificationPermissionGranted();
+
+      expect(
+        {
+          for (final entry in runners.entries)
+            entry.key: entry.value.permissionGrantCalls,
+        },
+        {'one': 1, 'two': 1},
+      );
+      await coordinator.stop();
+    });
+
     test('never starts a profile whose feed was explicitly disabled', () async {
       final settings = _MemorySettingsStore(disabled: {'one'});
       final runners = <String, _FakeRunner>{};
@@ -185,6 +211,55 @@ void main() {
       await coordinator.stop();
     });
 
+    // The runner's client carries the credential it was built with. A token
+    // saved or pasted over later (the key stays the same) left the runner
+    // asking without it, refused once a minute for as long as the app ran.
+    test(
+      "replaces a runner when its profile's credential changes, and only then",
+      () async {
+        final settings = _MemorySettingsStore();
+        final runners = <_FakeRunner>[];
+        var credential = 'none';
+        final coordinator = AttentionFeedCoordinator(
+          settingsStore: settings,
+          createRunner: (profile) async {
+            final runner = _FakeRunner();
+            runners.add(runner);
+            return runner;
+          },
+          credentialOf: (profile) async => credential,
+        );
+        Future<void> reconcile() => coordinator.reconcile(
+          notificationsEnabled: true,
+          profiles: [_profile('one')],
+          activeProfileId: 'one',
+        );
+
+        await reconcile();
+        await reconcile();
+        expect(
+          runners,
+          hasLength(1),
+          reason: 'an unchanged credential keeps the runner',
+        );
+
+        credential = 'token-a';
+        await reconcile();
+        expect(runners, hasLength(2));
+        expect(runners.first.stopCalls, 1);
+        expect(runners.last.startCalls, 1);
+
+        credential = 'token-b';
+        await reconcile();
+        expect(
+          runners,
+          hasLength(3),
+          reason: 'a token pasted over the old one',
+        );
+        await coordinator.stop();
+      },
+    );
+
     test('failed runner creation does not block healthy profiles', () async {
       final settings = _MemorySettingsStore();
       final errors = <String>[];
@@ -227,12 +302,17 @@ BrokerProfile _profileAt(String id, String endpoint) => BrokerProfile(
 final class _FakeRunner implements AttentionFeedRunner {
   int startCalls = 0;
   int stopCalls = 0;
+  int permissionGrantCalls = 0;
 
   @override
   void start() => startCalls += 1;
 
   @override
   Future<void> stop() async => stopCalls += 1;
+
+  @override
+  Future<void> presentPermissionBlockedRequests() async =>
+      permissionGrantCalls += 1;
 }
 
 final class _MemorySettingsStore implements AttentionFeedSettingsStore {

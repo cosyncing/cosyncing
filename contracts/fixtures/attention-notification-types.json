@@ -1,0 +1,294 @@
+{
+  "$comment": "Hand-written cases for the attention notification type and slot mapping. The broker (packages/typescript/broker/src/attention/attention-notification-type.ts) and the Flutter client (apps/client/lib/src/features/attention/model/attention_notification_type.dart) both test against every case, so the two mappings cannot drift. Only fields the mapping reads are given.",
+  "cases": [
+    {
+      "name": "a permission request collapses on its own dedupe key",
+      "event": {
+        "id": "evt-1",
+        "kind": "permission-required",
+        "severity": "action-required",
+        "dedupeKey": "permission-required:claude:s1:req-1",
+        "action": {
+          "kind": "open-session",
+          "tool": "claude",
+          "sessionId": "s1"
+        }
+      },
+      "notificationType": "permission_request",
+      "collapseKey": "permission-required:claude:s1:req-1"
+    },
+    {
+      "name": "a question collapses on its own dedupe key",
+      "event": {
+        "id": "evt-2",
+        "kind": "question-required",
+        "severity": "action-required",
+        "dedupeKey": "question-required:codex:s2:q-1",
+        "action": {
+          "kind": "open-session",
+          "tool": "codex",
+          "sessionId": "s2"
+        }
+      },
+      "notificationType": "question",
+      "collapseKey": "question-required:codex:s2:q-1"
+    },
+    {
+      "name": "a finished turn collapses per session",
+      "event": {
+        "id": "evt-3",
+        "kind": "run-finished",
+        "severity": "informational",
+        "dedupeKey": "run-finished:claude:s1:claude:s1:run:u3",
+        "action": {
+          "kind": "open-session",
+          "tool": "claude",
+          "sessionId": "s1"
+        }
+      },
+      "notificationType": "turn_finished",
+      "collapseKey": "session-outcome:claude:s1"
+    },
+    {
+      "name": "a finished goal shares its session's outcome slot",
+      "event": {
+        "id": "evt-4",
+        "kind": "goal-finished",
+        "severity": "informational",
+        "dedupeKey": "goal-finished:codex:s2:goal-a:1700000000",
+        "action": {
+          "kind": "open-session",
+          "tool": "codex",
+          "sessionId": "s2"
+        }
+      },
+      "notificationType": "goal_finished",
+      "collapseKey": "session-outcome:codex:s2"
+    },
+    {
+      "name": "a failed turn falls back to the event's agent and session",
+      "event": {
+        "id": "evt-5",
+        "kind": "run-failed",
+        "severity": "action-required",
+        "dedupeKey": "run-failed:opencode:s3:k",
+        "action": {
+          "kind": "open-attention-inbox"
+        },
+        "agent": "opencode",
+        "sessionId": "s3"
+      },
+      "notificationType": "turn_failed",
+      "collapseKey": "session-outcome:opencode:s3"
+    },
+    {
+      "name": "the action's tool and session win over the event fields",
+      "event": {
+        "id": "evt-6",
+        "kind": "run-finished",
+        "severity": "informational",
+        "dedupeKey": "run-finished:x",
+        "action": {
+          "kind": "open-session",
+          "tool": "kimi",
+          "sessionId": "s4"
+        },
+        "agent": "codex",
+        "sessionId": "other"
+      },
+      "notificationType": "turn_finished",
+      "collapseKey": "session-outcome:kimi:s4"
+    },
+    {
+      "name": "a session outcome without a session uses its dedupe key",
+      "event": {
+        "id": "evt-7",
+        "kind": "run-finished",
+        "severity": "informational",
+        "dedupeKey": "run-finished:orphan",
+        "action": {
+          "kind": "open-attention-inbox"
+        }
+      },
+      "notificationType": "turn_finished",
+      "collapseKey": "run-finished:orphan"
+    },
+    {
+      "name": "surrounding whitespace in the tool and session is ignored",
+      "event": {
+        "id": "evt-8",
+        "kind": "run-finished",
+        "severity": "informational",
+        "dedupeKey": "run-finished:ws",
+        "action": {
+          "kind": "open-session",
+          "tool": "  grok ",
+          "sessionId": " s5  "
+        }
+      },
+      "notificationType": "turn_finished",
+      "collapseKey": "session-outcome:grok:s5"
+    },
+    {
+      "name": "a failed scheduled message does not collapse per session",
+      "event": {
+        "id": "evt-9",
+        "kind": "scheduled-send-failed",
+        "severity": "action-required",
+        "dedupeKey": "scheduled-send-failed:sch-1",
+        "action": {
+          "kind": "open-session",
+          "tool": "claude",
+          "sessionId": "s1"
+        }
+      },
+      "notificationType": "scheduled_send_failed",
+      "collapseKey": "scheduled-send-failed:sch-1"
+    },
+    {
+      "name": "a successful scheduled message is never a notification",
+      "event": {
+        "id": "evt-10",
+        "kind": "scheduled-send",
+        "severity": "informational",
+        "dedupeKey": "scheduled-send:sch-2",
+        "action": {
+          "kind": "open-session",
+          "tool": "claude",
+          "sessionId": "s1"
+        }
+      },
+      "notificationType": null,
+      "collapseKey": null
+    },
+    {
+      "name": "a security alert",
+      "event": {
+        "id": "evt-11",
+        "kind": "security-alert",
+        "severity": "action-required",
+        "dedupeKey": "security-alert:rate-1",
+        "action": {
+          "kind": "open-broker-health"
+        }
+      },
+      "notificationType": "security_alert",
+      "collapseKey": "security-alert:rate-1"
+    },
+    {
+      "name": "a paired device",
+      "event": {
+        "id": "evt-12",
+        "kind": "device-paired",
+        "severity": "informational",
+        "dedupeKey": "device-paired:peer-1",
+        "action": {
+          "kind": "open-attention-inbox"
+        }
+      },
+      "notificationType": "device_paired",
+      "collapseKey": "device-paired:peer-1"
+    },
+    {
+      "name": "broker health that needs action is a server problem",
+      "event": {
+        "id": "evt-13",
+        "kind": "broker-health",
+        "severity": "action-required",
+        "dedupeKey": "broker-health:episode-1",
+        "action": {
+          "kind": "open-broker-health"
+        }
+      },
+      "notificationType": "server_problem",
+      "collapseKey": "broker-health:episode-1"
+    },
+    {
+      "name": "broker health in maintenance is not a notification",
+      "event": {
+        "id": "evt-14",
+        "kind": "broker-health",
+        "severity": "maintenance",
+        "dedupeKey": "broker-health:episode-2",
+        "action": {
+          "kind": "open-broker-health"
+        }
+      },
+      "notificationType": null,
+      "collapseKey": null
+    },
+    {
+      "name": "informational broker health is not a notification",
+      "event": {
+        "id": "evt-15",
+        "kind": "broker-health",
+        "severity": "informational",
+        "dedupeKey": "broker-health:episode-3",
+        "action": {
+          "kind": "open-broker-health"
+        }
+      },
+      "notificationType": null,
+      "collapseKey": null
+    },
+    {
+      "name": "a runtime update",
+      "event": {
+        "id": "evt-16",
+        "kind": "runtime-update-ready",
+        "severity": "maintenance",
+        "dedupeKey": "runtime-update-ready:codex:occurrence:o1",
+        "action": {
+          "kind": "open-runtime-settings",
+          "agent": "codex"
+        }
+      },
+      "notificationType": "runtime_update",
+      "collapseKey": "runtime-update-ready:codex:occurrence:o1"
+    },
+    {
+      "name": "usage running low",
+      "event": {
+        "id": "evt-17",
+        "kind": "usage-threshold",
+        "severity": "maintenance",
+        "dedupeKey": "usage-threshold:claude:5h:80",
+        "action": {
+          "kind": "open-quota-settings"
+        }
+      },
+      "notificationType": "usage_quota",
+      "collapseKey": "usage-threshold:claude:5h:80"
+    },
+    {
+      "name": "sync degraded is no longer a notification",
+      "event": {
+        "id": "evt-18",
+        "kind": "sync-degraded",
+        "severity": "maintenance",
+        "dedupeKey": "sync-degraded:claude:s1",
+        "action": {
+          "kind": "open-session",
+          "tool": "claude",
+          "sessionId": "s1"
+        }
+      },
+      "notificationType": null,
+      "collapseKey": null
+    },
+    {
+      "name": "an unknown kind is never a notification",
+      "event": {
+        "id": "evt-19",
+        "kind": "future-kind",
+        "severity": "action-required",
+        "dedupeKey": "future-kind:1",
+        "action": {
+          "kind": "open-attention-inbox"
+        }
+      },
+      "notificationType": null,
+      "collapseKey": null
+    }
+  ]
+}

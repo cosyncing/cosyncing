@@ -1599,10 +1599,6 @@
   "@settingsSectionBrokerCredentials": {
     "description": "Title of the Broker Credentials section on the Settings root."
   },
-  "settingsSectionSessionNotifications": "Session Notifications",
-  "@settingsSectionSessionNotifications": {
-    "description": "Title of the Session Notifications section on the Settings root."
-  },
   "settingsSectionAttentionDelivery": "Notification delivery",
   "@settingsSectionAttentionDelivery": {
     "description": "Title of the Attention Delivery section on the Settings root."
@@ -2239,10 +2235,6 @@
   "@settingsNotificationPermissionUnsupported": {
     "description": "OS notification permission request outcome: unsupported on this platform."
   },
-  "settingsNotificationPermissionFailed": "Failed",
-  "@settingsNotificationPermissionFailed": {
-    "description": "OS notification permission request outcome: failed, with no further detail available."
-  },
   "settingsNotificationPermissionFailedWithMessage": "Failed: {message}",
   "@settingsNotificationPermissionFailedWithMessage": {
     "description": "OS notification permission request outcome: failed, with a detail message.",
@@ -2252,22 +2244,6 @@
         "example": "channel not configured"
       }
     }
-  },
-  "settingsLocalNotificationsDescription": "Receive local notifications for actionable background session events. Permission prompts and platform support are still handled by the operating system.",
-  "@settingsLocalNotificationsDescription": {
-    "description": "Explanatory text above the local session notifications toggle."
-  },
-  "settingsEnableLocalNotifications": "Enable local session notifications",
-  "@settingsEnableLocalNotifications": {
-    "description": "Title of the local session notifications toggle."
-  },
-  "settingsCheckingPermission": "Checking permission…",
-  "@settingsCheckingPermission": {
-    "description": "Busy label on the OS permission request button while the request is in flight."
-  },
-  "settingsRequestOsPermission": "Request OS permission",
-  "@settingsRequestOsPermission": {
-    "description": "Label of the OS notification permission request button."
   },
   "settingsNotificationPermissionStatus": "Notification permission: {status}",
   "@settingsNotificationPermissionStatus": {
@@ -3604,24 +3580,6 @@
   "foregroundAttentionBrokerHealth": "Server health update",
   "foregroundAttentionScheduledSend": "Scheduled message sent",
   "foregroundAttentionScheduledSendFailed": "Scheduled message failed",
-  "notificationSessionActionTitle": "Session action required",
-  "notificationSessionActionBody": "A session needs your response to continue.",
-  "notificationRunFailedTitle": "Session run failed",
-  "notificationRunFailedBody": "A session run failed. Open the session to inspect details.",
-  "notificationScheduledFailedTitle": "Scheduled message failed",
-  "notificationScheduledFailedBody": "A scheduled message was not sent. Open it to inspect details.",
-  "notificationSecurityTitle": "Server security alert",
-  "notificationSecurityBody": "A device-access or authentication incident was recorded.",
-  "notificationDevicePairedTitle": "Device paired",
-  "notificationDevicePairedBody": "A device was connected to this Server.",
-  "notificationSessionStatusTitle": "Session status update",
-  "notificationSessionStatusBody": "A session event is ready to review.",
-  "notificationBrokerHealthTitle": "Server health needs attention",
-  "notificationBrokerHealthBody": "Server storage reported a critical health incident.",
-  "notificationMaintenanceTitle": "Maintenance update",
-  "notificationMaintenanceBody": "A maintenance event needs review.",
-  "notificationGenericTitle": "Notification update",
-  "notificationGenericBody": "A new notification is available.",
   "attentionPageTitle": "Notifications",
   "attentionPageBackToSessions": "Back to Sessions",
   "attentionPageRefresh": "Refresh inbox",
@@ -5795,5 +5753,347 @@
   "sessionsEmptyWindowAction": "Show all sessions",
   "@sessionsEmptyWindowAction": {
     "description": "Widens the roster query window to all time from the empty state."
+  },
+  "notificationTypeTitlePermissionRequest": "Permission request",
+  "@notificationTypeTitlePermissionRequest": {
+    "description": "System notification title: an agent is waiting for permission."
+  },
+  "notificationTypeTitleQuestion": "Question",
+  "@notificationTypeTitleQuestion": {
+    "description": "System notification title: an agent asked a question."
+  },
+  "notificationTypeTitleTurnFinished": "Turn finished",
+  "@notificationTypeTitleTurnFinished": {
+    "description": "System notification title: a session turn finished."
+  },
+  "notificationTypeTitleGoalFinished": "Goal finished",
+  "@notificationTypeTitleGoalFinished": {
+    "description": "System notification title: a session goal finished."
+  },
+  "notificationTypeTitleTurnFailed": "Turn failed",
+  "@notificationTypeTitleTurnFailed": {
+    "description": "System notification title: a session turn ended with an error."
+  },
+  "notificationTypeTitleScheduledSendFailed": "Scheduled message failed",
+  "@notificationTypeTitleScheduledSendFailed": {
+    "description": "System notification title: a scheduled message was not sent."
+  },
+  "notificationTypeTitleSecurityAlert": "Security alert",
+  "@notificationTypeTitleSecurityAlert": {
+    "description": "System notification title: a device-access or authentication incident."
+  },
+  "notificationTypeTitleDevicePaired": "New device paired",
+  "@notificationTypeTitleDevicePaired": {
+    "description": "System notification title: another device was paired."
+  },
+  "notificationTypeTitleServerProblem": "Server problem",
+  "@notificationTypeTitleServerProblem": {
+    "description": "System notification title: the server reported a critical health problem."
+  },
+  "notificationTypeTitleRuntimeUpdate": "Runtime update",
+  "@notificationTypeTitleRuntimeUpdate": {
+    "description": "System notification title: a managed agent runtime has an update or needs a restart."
+  },
+  "notificationTypeTitleUsageQuota": "Usage running low",
+  "@notificationTypeTitleUsageQuota": {
+    "description": "System notification title: usage quota is running low."
+  },
+  "notificationTypeNamePermissionRequests": "Permission requests",
+  "@notificationTypeNamePermissionRequests": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameQuestions": "Questions",
+  "@notificationTypeNameQuestions": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameTurnFinished": "Finished turns",
+  "@notificationTypeNameTurnFinished": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameGoalFinished": "Finished goals",
+  "@notificationTypeNameGoalFinished": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameTurnFailed": "Failed turns",
+  "@notificationTypeNameTurnFailed": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameScheduledSendFailed": "Failed scheduled messages",
+  "@notificationTypeNameScheduledSendFailed": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameSecurityAlerts": "Security alerts",
+  "@notificationTypeNameSecurityAlerts": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameDevicePaired": "New devices",
+  "@notificationTypeNameDevicePaired": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameServerProblems": "Server problems",
+  "@notificationTypeNameServerProblems": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameRuntimeUpdates": "Runtime updates",
+  "@notificationTypeNameRuntimeUpdates": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeNameUsageQuota": "Usage quota",
+  "@notificationTypeNameUsageQuota": {
+    "description": "Notification type name in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionPermissionRequests": "An agent is waiting for your permission.",
+  "@notificationTypeDescriptionPermissionRequests": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionQuestions": "An agent asked you a question.",
+  "@notificationTypeDescriptionQuestions": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionTurnFinished": "A session finished its turn and is ready to review.",
+  "@notificationTypeDescriptionTurnFinished": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionGoalFinished": "A session reached its goal.",
+  "@notificationTypeDescriptionGoalFinished": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionTurnFailed": "A session turn ended with an error.",
+  "@notificationTypeDescriptionTurnFailed": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionScheduledSendFailed": "A scheduled message could not be sent.",
+  "@notificationTypeDescriptionScheduledSendFailed": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionSecurityAlerts": "Repeated authentication failures, or a device lost access.",
+  "@notificationTypeDescriptionSecurityAlerts": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionDevicePaired": "Another device was paired with a server.",
+  "@notificationTypeDescriptionDevicePaired": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionServerProblems": "A server needs attention to keep working.",
+  "@notificationTypeDescriptionServerProblems": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionRuntimeUpdates": "A managed agent runtime has an update or needs a restart.",
+  "@notificationTypeDescriptionRuntimeUpdates": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationTypeDescriptionUsageQuota": "Your agent usage quota is running low.",
+  "@notificationTypeDescriptionUsageQuota": {
+    "description": "Explains a notification type in Settings and in Android notification settings."
+  },
+  "notificationFamilySessions": "Sessions",
+  "@notificationFamilySessions": {
+    "description": "Notification family heading in Settings and Android channel-group name."
+  },
+  "notificationFamilySecurity": "Security",
+  "@notificationFamilySecurity": {
+    "description": "Notification family heading in Settings and Android channel-group name."
+  },
+  "notificationFamilyServer": "Server",
+  "@notificationFamilyServer": {
+    "description": "Notification family heading in Settings and Android channel-group name."
+  },
+  "notificationTestTitle": "Test notification",
+  "@notificationTestTitle": {
+    "description": "Title of the test notification sent from Settings."
+  },
+  "notificationTestBody": "Notifications from Cosyncing work on this device.",
+  "@notificationTestBody": {
+    "description": "Body of the test notification sent from Settings."
+  },
+  "settingsSystemNotificationsTitle": "System notifications",
+  "@settingsSystemNotificationsTitle": {
+    "description": "Master switch for system notifications on this device."
+  },
+  "settingsSystemNotificationsSubtitle": "Show notifications outside the app when an agent needs you or finishes.",
+  "@settingsSystemNotificationsSubtitle": {
+    "description": "Explains the system notifications master switch."
+  },
+  "settingsNotificationPermissionNotRequested": "Not requested yet",
+  "@settingsNotificationPermissionNotRequested": {
+    "description": "Permission status: the OS prompt has not been shown yet."
+  },
+  "settingsNotificationPermissionErrorWithReason": "Unavailable: {reason}",
+  "@settingsNotificationPermissionErrorWithReason": {
+    "description": "Permission status when reading or requesting permission failed.",
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "initialization-failed"
+      }
+    }
+  },
+  "settingsNotificationInsecureContext": "This page is not served over HTTPS, so the browser blocks notifications. Open Cosyncing through its HTTPS address.",
+  "@settingsNotificationInsecureContext": {
+    "description": "Shown on web when the page is not served over HTTPS."
+  },
+  "settingsNotificationNoApi": "This browser cannot show notifications. On iPhone or iPad, add Cosyncing to the Home Screen first.",
+  "@settingsNotificationNoApi": {
+    "description": "Shown on web when the browser has no notification support."
+  },
+  "settingsNotificationManagedOff": "Notifications are turned off for this device by its administrator or system policy.",
+  "@settingsNotificationManagedOff": {
+    "description": "Help shown when Windows notifications are disabled by group policy or the app manifest."
+  },
+  "settingsNotificationDeniedHelp": "Notifications are blocked for Cosyncing. Turn them on in system settings.",
+  "@settingsNotificationDeniedHelp": {
+    "description": "Shown when the OS or browser blocks notifications for the app."
+  },
+  "settingsNotificationDeniedHelpWeb": "Notifications are blocked for this site. Allow them in the browser's site settings.",
+  "@settingsNotificationDeniedHelpWeb": {
+    "description": "Shown on web when the browser blocks notifications for the site."
+  },
+  "settingsNotificationOpenSystemSettings": "Open system settings",
+  "@settingsNotificationOpenSystemSettings": {
+    "description": "Opens the OS notification settings for Cosyncing."
+  },
+  "settingsNotificationAllow": "Allow notifications",
+  "@settingsNotificationAllow": {
+    "description": "Shows the OS notification permission prompt."
+  },
+  "settingsNotificationSendTest": "Send test notification",
+  "@settingsNotificationSendTest": {
+    "description": "Sends a test notification through the OS."
+  },
+  "settingsNotificationLastDelivery": "Last notification: {status}",
+  "@settingsNotificationLastDelivery": {
+    "description": "Diagnostics: the outcome of the most recent notification.",
+    "placeholders": {
+      "status": {
+        "type": "String",
+        "example": "Shown"
+      }
+    }
+  },
+  "settingsNotificationDeliveryShown": "Shown",
+  "@settingsNotificationDeliveryShown": {
+    "description": "Diagnostics: the OS showed the notification."
+  },
+  "settingsNotificationDeliveryBlocked": "Blocked ({reason})",
+  "@settingsNotificationDeliveryBlocked": {
+    "description": "Diagnostics: notifications are off for the app or this type.",
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "channel-off"
+      }
+    }
+  },
+  "settingsNotificationDeliveryUnavailable": "Unavailable ({reason})",
+  "@settingsNotificationDeliveryUnavailable": {
+    "description": "Diagnostics: this platform or context cannot show notifications.",
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "insecure-context"
+      }
+    }
+  },
+  "settingsNotificationDeliveryFailed": "Failed ({reason})",
+  "@settingsNotificationDeliveryFailed": {
+    "description": "Diagnostics: presenting the notification failed.",
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "invalid_icon"
+      }
+    }
+  },
+  "settingsNotificationTypesTitle": "Notification types",
+  "@settingsNotificationTypesTitle": {
+    "description": "Heading of the per-type notification list."
+  },
+  "settingsNotificationTypesHint": "Choose which notifications this device shows.",
+  "@settingsNotificationTypesHint": {
+    "description": "Explains the per-type list on platforms without per-type system settings."
+  },
+  "settingsNotificationTypesAndroidHint": "Each type is an Android notification category. Tap one to change its sound, pop-up, and lock-screen behavior.",
+  "@settingsNotificationTypesAndroidHint": {
+    "description": "Explains the per-type list on Android, where each type is a system notification category."
+  },
+  "settingsNotificationTypeOn": "On",
+  "@settingsNotificationTypeOn": {
+    "description": "Android channel state: on with sound."
+  },
+  "settingsNotificationTypeSilent": "On, silent",
+  "@settingsNotificationTypeSilent": {
+    "description": "Android channel state: on without sound."
+  },
+  "settingsNotificationTypeOff": "Off",
+  "@settingsNotificationTypeOff": {
+    "description": "Android channel state: off."
+  },
+  "settingsNotificationTypeSound": "Sound",
+  "@settingsNotificationTypeSound": {
+    "description": "Per-type switch: play a sound."
+  },
+  "settingsNotificationTypeShowTitle": "Show session title",
+  "@settingsNotificationTypeShowTitle": {
+    "description": "Per-type switch: include the session title in the notification."
+  },
+  "settingsNotificationTypeShowTitleSubtitle": "When off, only the notification type is shown.",
+  "@settingsNotificationTypeShowTitleSubtitle": {
+    "description": "Explains the show-session-title switch."
+  },
+  "notificationOnboardingTitle": "Get notified when an agent needs you",
+  "@notificationOnboardingTitle": {
+    "description": "First-run card offering system notifications."
+  },
+  "notificationOnboardingBody": "Cosyncing can alert you to permission requests, questions, and finished turns while you are away from the app.",
+  "@notificationOnboardingBody": {
+    "description": "First-run card body offering system notifications."
+  },
+  "notificationOnboardingEnable": "Turn on",
+  "@notificationOnboardingEnable": {
+    "description": "First-run card: turn system notifications on (shows the OS prompt)."
+  },
+  "notificationOnboardingDismiss": "Not now",
+  "@notificationOnboardingDismiss": {
+    "description": "First-run card: decline system notifications for now."
+  },
+  "desktopKeepRunningTitle": "Keep running when closed",
+  "@desktopKeepRunningTitle": {
+    "description": "Settings switch: closing the desktop window keeps the app running so notifications still arrive."
+  },
+  "desktopKeepRunningSubtitleWindows": "Closing the window leaves Cosyncing in the notification area, so notifications still arrive. Quit from its icon’s menu.",
+  "@desktopKeepRunningSubtitleWindows": {
+    "description": "Windows: what the keep-running switch does, and how to quit."
+  },
+  "desktopKeepRunningSubtitleMacos": "Closing the window leaves Cosyncing in the Dock, so notifications still arrive. Quit with Command-Q.",
+  "@desktopKeepRunningSubtitleMacos": {
+    "description": "macOS: what the keep-running switch does, and how to quit."
+  },
+  "desktopTrayOpen": "Open Cosyncing",
+  "@desktopTrayOpen": {
+    "description": "Windows notification-area menu item that shows the window."
+  },
+  "desktopTrayQuit": "Quit Cosyncing",
+  "@desktopTrayQuit": {
+    "description": "Windows notification-area menu item that exits the app."
+  },
+  "androidBackgroundConnectionTitle": "Stay connected in the background",
+  "@androidBackgroundConnectionTitle": {
+    "description": "Android notification setting that keeps the app running after the user leaves it."
+  },
+  "androidBackgroundConnectionSubtitle": "Keeps Cosyncing running after you leave it, so notifications arrive on time. Android shows a silent notification while it runs, and it uses more battery.",
+  "@androidBackgroundConnectionSubtitle": {
+    "description": "Explains the background connection and its cost."
+  },
+  "androidBackgroundConnectionChannelName": "Background connection",
+  "@androidBackgroundConnectionChannelName": {
+    "description": "Android notification channel name for the ongoing background-connection notification."
+  },
+  "androidBackgroundConnectionNotificationTitle": "Staying connected for notifications",
+  "@androidBackgroundConnectionNotificationTitle": {
+    "description": "Title of the ongoing Android notification shown while the background connection runs."
+  },
+  "androidBackgroundConnectionNotificationText": "Turn this off in Settings → Notifications.",
+  "@androidBackgroundConnectionNotificationText": {
+    "description": "Body of the ongoing background-connection notification: where to turn it off."
   }
 }

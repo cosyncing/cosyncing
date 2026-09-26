@@ -756,7 +756,8 @@ function Assert-ClientNotRunning {
     if ($candidatePath -and $candidatePath.StartsWith($ClientRoot,
         [StringComparison]::OrdinalIgnoreCase)) {
       Fail ("the desktop client is running from $ClientRoot and Windows cannot replace it while it " +
-        'is open; close it and run this installer again')
+        'is open; quit it (from its icon in the notification area if its window is closed) and run ' +
+        'this installer again')
     }
   }
 }

@@ -1,5 +1,8 @@
 /* Cosyncing static-asset service worker (N3 part B).
  *
+ * It also routes clicks on the app's notifications; that section is at the end
+ * of this file and touches no cache.
+ *
  * SOURCE OF TRUTH. `flutter build web` copies this file verbatim into
  * build/web/, and `scripts/client/build-web-cache.ts` then replaces the three
  * __COSYNCING_*__ placeholders below with the manifest computed from the real
@@ -518,3 +521,279 @@ async function respondWithAsset(request) {
   await cache.put(request.url, responseFor(verified));
   return responseFor(verified);
 }
+
+/*
+ * Notification clicks
+ * -------------------
+ * The app shows its notifications through this registration (see
+ * `web_notification_backend_web.dart`), so their clicks land here. Each carries
+ * `data.payload`, the same opaque string a native tap delivers.
+ *
+ * A click goes to an app window under this scope: the focused one, else a
+ * visible one, else the most recent. It is focused and handed the payload. With
+ * no app window, the app opens with the payload in `?attention=`, which the page
+ * reads once and strips.
+ *
+ * `waitUntil` is registered synchronously and covers the whole routine: focus()
+ * and openWindow() are only allowed while the click's activation lasts.
+ */
+
+/** Mirrors `webNotificationClickMessageType` in web_notification_protocol.dart. */
+const NOTIFICATION_CLICK_MESSAGE = 'cosyncing-notification-click';
+
+/** Mirrors `webNotificationLaunchParameter` in web_notification_protocol.dart. */
+const NOTIFICATION_LAUNCH_PARAMETER = 'attention';
+
+/**
+ * Whether a window shows the app. Every extension-less path under the scope is
+ * a navigation the shell answers; a URL naming a file (an asset opened in its
+ * own tab) is not the app.
+ */
+function isAppWindow(client) {
+  if (!client || client.type !== 'window') return false;
+  let url;
+  try {
+    url = new URL(client.url);
+  } catch (error) {
+    return false;
+  }
+  if (url.origin !== SCOPE_URL.origin) return false;
+  if (!url.pathname.startsWith(SCOPE_URL.pathname)) return false;
+  const rest = url.pathname.slice(SCOPE_URL.pathname.length);
+  if (rest === '' || rest === 'index.html') return true;
+  const last = rest.split('/').pop();
+  return !last.includes('.');
+}
+
+/** The focused app window, else a visible one, else the most recent. */
+function notificationTarget(clientList) {
+  const windows = clientList.filter(isAppWindow);
+  // matchAll lists windows most recently focused first; a stable sort keeps
+  // that order within each rank.
+  const rank = (client) =>
+    (client.focused ? 2 : 0) + (client.visibilityState === 'visible' ? 1 : 0);
+  windows.sort((a, b) => rank(b) - rank(a));
+  return windows[0] || null;
+}
+
+async function routeNotificationClick(notification) {
+  const data = notification && notification.data;
+  const payload = data && typeof data.payload === 'string' ? data.payload : '';
+  try {
+    notification.close();
+  } catch (error) {
+    // Already closed by the platform.
+  }
+  const clientList = await self.clients.matchAll({
+    type: 'window',
+    includeUncontrolled: true,
+  });
+  const target = notificationTarget(clientList);
+  if (target) {
+    try {
+      await target.focus();
+    } catch (error) {
+      // Focus refused (no activation left); the window still navigates.
+    }
+    target.postMessage({ type: NOTIFICATION_CLICK_MESSAGE, payload });
+    return;
+  }
+  const url = new URL(SCOPE_URL.href);
+  if (payload) url.searchParams.set(NOTIFICATION_LAUNCH_PARAMETER, payload);
+  await self.clients.openWindow(url.href);
+}
+
+self.addEventListener('notificationclick', (event) => {
+  event.waitUntil(
+    routeNotificationClick(event.notification).catch((error) => {
+      console.warn('cosyncing: notification click not routed', error);
+    }),
+  );
+});
+
+/*
+ * Web Push
+ * --------
+ * With every app tab closed, a notification reaches this browser only as a Web
+ * Push from the Server that serves the app. The broker encrypts the payload to
+ * this browser's subscription; it names the event, the notification type's
+ * title in the user's language, the body (the truncated session title, or
+ * nothing for "event type only"), the slot the event occupies, and the
+ * registration's `context`, which names the broker profile.
+ *
+ * A push is shown under the same tag as the app's own notification of that
+ * slot (`attentionNotificationSlotId`, then `derivePlatformNotificationId`), so
+ * a push and the app's feed-driven presentation of one event are one
+ * notification. Both write the alert they raise into `data.alertKey`: showing
+ * the alert that is already on screen replaces it without a second sound, and
+ * a new event or a reminder alerts again.
+ *
+ * A focused, visible app window presents the event itself through its feed.
+ * Chromium browsers let a visible site skip a push's notification, so there the
+ * push shows nothing. Firefox and Safari count or revoke a subscription whose
+ * pushes show nothing, so there it is always shown.
+ *
+ * `scripts/client/tests/test-web-push-notification.ts` drives this handler.
+ */
+
+/** Payload version this worker reads. */
+const WEB_PUSH_PAYLOAD_VERSION = 1;
+
+/**
+ * Types that stay until the user acts. Mirrors the urgent channels in
+ * `attention_notification_type.dart` (a Dart test compares the two).
+ */
+const URGENT_NOTIFICATION_TYPES = ['permission_request', 'question', 'security_alert', 'server_problem'];
+
+/** First delivery stage; later ones are reminders. Mirrors `attentionNotificationFirstStage`. */
+const FIRST_NOTIFICATION_STAGE = 'immediate';
+
+/** Jenkins one-at-a-time over UTF-16 code units, as the app computes it, in 32 bits. */
+function jenkins32(value) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index++) {
+    hash = (hash + value.charCodeAt(index)) >>> 0;
+    hash = (hash + (hash << 10)) >>> 0;
+    hash = (hash ^ (hash >>> 6)) >>> 0;
+  }
+  hash = (hash + (hash << 3)) >>> 0;
+  hash = (hash ^ (hash >>> 11)) >>> 0;
+  hash = (hash + (hash << 15)) >>> 0;
+  return hash;
+}
+
+/**
+ * The tag the app shows [collapseKey]'s slot under for [profileId]: the
+ * platform id of `brokerAttentionNotificationId`.
+ */
+function notificationTagOf(profileId, collapseKey) {
+  const slot =
+    'attention-dedupe:' +
+    jenkins32(`profile=${profileId.trim()}\ndedupe=${collapseKey.trim()}`)
+      .toString(16)
+      .padStart(8, '0');
+  return String(jenkins32(slot) & 0x7fffffff);
+}
+
+/** Mirrors `attentionNotificationAlertKey`. */
+function alertKeyOf(eventId, revision, stage) {
+  return `${eventId}\n${revision}\n${stage}`;
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+/** The payload of a push, or null when it is not one this worker can show. */
+function webPushPayloadOf(data) {
+  if (!data) return null;
+  let payload;
+  try {
+    payload = data.json();
+  } catch (error) {
+    return null;
+  }
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.v !== WEB_PUSH_PAYLOAD_VERSION) return null;
+  if (!nonEmptyString(payload.eventId) || !nonEmptyString(payload.title)) return null;
+  return payload;
+}
+
+/** The broker profile the registration's `context` names, or null. */
+function webPushRouteOf(payload) {
+  if (typeof payload.context !== 'string') return null;
+  let context;
+  try {
+    context = JSON.parse(payload.context);
+  } catch (error) {
+    return null;
+  }
+  const profileId = context && nonEmptyString(context.brokerProfileId);
+  const scopeKey = context && nonEmptyString(context.brokerScopeKey);
+  return profileId && scopeKey ? { profileId, scopeKey } : null;
+}
+
+/**
+ * The tap payload the app's own notification of this event carries (see
+ * `_notificationPayload` in `attention_feed_delivery_processor.dart`), with its
+ * keys sorted as the app serializes them.
+ */
+function webPushTapPayloadOf(payload, route) {
+  if (!route) return '';
+  const action = payload.action && typeof payload.action === 'object' ? payload.action : {};
+  const fields = {
+    actionKind: nonEmptyString(action.kind),
+    brokerProfileId: route.profileId,
+    brokerScopeKey: route.scopeKey,
+    eventId: payload.eventId,
+    kind: 'attention-event',
+    sessionId: nonEmptyString(action.sessionId),
+    tool: nonEmptyString(action.tool),
+  };
+  return JSON.stringify(fields);
+}
+
+/** The notification a push shows: its tag, options, and the alert it raises. */
+function webPushNotificationOf(payload) {
+  const route = webPushRouteOf(payload);
+  const collapseKey = nonEmptyString(payload.tag) || `event:${payload.eventId}`;
+  // Without a profile the app's tag is unknown; the push still collapses with
+  // other pushes of its slot.
+  const tag = route ? notificationTagOf(route.profileId, collapseKey) : `push:${collapseKey}`;
+  const revision = Number.isInteger(payload.revision) ? payload.revision : 0;
+  const stage = nonEmptyString(payload.stage) || FIRST_NOTIFICATION_STAGE;
+  const alertKey = alertKeyOf(payload.eventId, revision, stage);
+  return {
+    tag,
+    alertKey,
+    options: {
+      body: typeof payload.body === 'string' ? payload.body : '',
+      tag,
+      data: { payload: webPushTapPayloadOf(payload, route), alertKey },
+      icon: new URL('icons/pwa-icon-192.png', SCOPE_URL).href,
+      badge: new URL('icons/pwa-monochrome-192.png', SCOPE_URL).href,
+      silent: payload.silent === true,
+      requireInteraction: URGENT_NOTIFICATION_TYPES.includes(payload.type),
+      timestamp: Date.now(),
+    },
+  };
+}
+
+/** Whether this browser exempts a visible site from showing a push. */
+function visibleSiteMayStaySilent() {
+  // `userAgentData` exists only in Chromium, whose push service requires no
+  // notification while one of the site's tabs is visible.
+  return Boolean(self.navigator && 'userAgentData' in self.navigator);
+}
+
+async function presentWebPush(payload) {
+  const notification = webPushNotificationOf(payload);
+  if (visibleSiteMayStaySilent()) {
+    const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const presenting = clientList.some(
+      (client) => isAppWindow(client) && client.focused && client.visibilityState === 'visible',
+    );
+    if (presenting) return;
+  }
+  let repeat = false;
+  try {
+    const shown = await self.registration.getNotifications({ tag: notification.tag });
+    repeat = shown.some((item) => item.data && item.data.alertKey === notification.alertKey);
+  } catch (error) {
+    // Unknown: alert.
+  }
+  await self.registration.showNotification(payload.title, {
+    ...notification.options,
+    renotify: !repeat,
+  });
+}
+
+self.addEventListener('push', (event) => {
+  const payload = webPushPayloadOf(event.data);
+  if (!payload) return;
+  event.waitUntil(
+    presentWebPush(payload).catch((error) => {
+      console.warn('cosyncing: push not shown', error);
+    }),
+  );
+});

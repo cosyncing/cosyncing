@@ -25,6 +25,7 @@ import type {
 import { CONTEXT_INJECTION_EVENT, boundContextBody } from '@cosyncing/adapter-api';
 import {
   mapReasonixInterruptedTail,
+  mapReasonixRecord,
   reasonixMessageKey,
   type ReasonixDisplayEntry,
   type ReasonixTranscriptRecord,
@@ -586,6 +587,63 @@ interface PendingPrompt {
   row: AgentMessage;
 }
 
+type RunSummary = Extract<AgentMessage, { type: 'run-summary' }>;
+
+/**
+ * One native turn this connection delivered over ACP. The broker's attention
+ * policy notifies only for a live `running` run-summary followed by a terminal
+ * with the same key, and Reasonix never reports a running turn by that key:
+ * v1.25.2 stamps `workDurationMs` on EVERY committed assistant row, tool steps
+ * included (upstream `internal/agent/run_loop.go`), so a tool turn writes one
+ * `done` footer per model step and the step that ends the turn is known only
+ * once `session/prompt` returns. The pairing is therefore made after that
+ * return, on the turn's last footer, and only for a turn whose durable user
+ * row this connection claimed as its own echo.
+ */
+interface DrivenTurn {
+  /** The claimed durable user row's display index. */
+  userIndex?: number;
+  /** `session/prompt` returned a stop reason other than `cancelled`. */
+  resolved: boolean;
+}
+
+type DrivenTurnClosing =
+  | { state: 'found'; lineIndex: number; summary: RunSummary }
+  /** The next user-authored turn began without a footer for this one. */
+  | { state: 'sealed' }
+  /** No footer yet, and nothing proves one cannot still arrive. */
+  | { state: 'open' };
+
+/**
+ * The footer that closes the turn opened by the user row at `userIndex`: the
+ * last assistant row that maps to a `done` run-summary before the next
+ * user-authored row. Reasonix's own retry and steer rows carry
+ * `starts_turn: false` and stay inside the turn.
+ */
+function drivenTurnClosing(sessionId: string, read: ReasonixTranscriptRead, userIndex: number): DrivenTurnClosing {
+  const displayByIndex = new Map(read.displayEntries.map((entry) => [entry.index, entry]));
+  if (read.records[userIndex]?.role !== 'user' || displayByIndex.get(userIndex)?.index !== userIndex) {
+    return { state: 'open' };
+  }
+  let found: DrivenTurnClosing | undefined;
+  for (let lineIndex = userIndex + 1; lineIndex < read.records.length; lineIndex += 1) {
+    const record = read.records[lineIndex];
+    if (!record) continue;
+    const display = displayByIndex.get(lineIndex);
+    if (record.role === 'user' && display?.startsTurn !== false) return found ?? { state: 'sealed' };
+    if (record.role !== 'assistant') continue;
+    const summary = mapReasonixRecord(record, { sessionId, lineIndex, display })
+      .find((message): message is RunSummary => message.type === 'run-summary' && message.status === 'done');
+    if (summary) found = { state: 'found', lineIndex, summary };
+  }
+  return found ?? { state: 'open' };
+}
+
+/** The live `running` frame that opens the attention observation for a terminal footer. */
+function runningFor(terminal: RunSummary): RunSummary {
+  return { type: 'run-summary', key: terminal.key, turnId: terminal.turnId, status: 'running', source: 'reasonix' };
+}
+
 interface PendingPermission {
   message: AgentMessage;
   optionIds: Map<PermissionDecision, string>;
@@ -821,6 +879,8 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
   private inFlightNativeTurns = 0;
   private readonly terminalAssistantIndexes = new Set<number>();
   private readonly assistantStreamIndexes = new Set<number>();
+  /** Delivered turns awaiting their `running` + terminal pairing, by queued prompt key. */
+  private readonly drivenTurns = new Map<string, DrivenTurn>();
   private deferredNativeIdle = false;
   private closedDrive = false;
   private transportClosing?: Promise<void>;
@@ -1129,6 +1189,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
         if (assistantIndex !== undefined) this.awaitingAssistantIndexes.add(assistantIndex);
         this.inFlightNativeTurns += 1;
         nativeStarted = true;
+        this.trackDrivenTurn(key);
         if (admitted.materializesCreate) this.startPendingCreateProbe();
         const result = await this.transport.sessionPrompt({
           sessionId: this.session.id,
@@ -1174,11 +1235,13 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
             `Reasonix reported ${result.stopReason} before its durable transcript proved whether the prompt was stored.`,
           );
         }
+        this.resolveDrivenTurn(key, result.stopReason, snapshot);
         if (result.stopReason === 'refusal') this.emitLive({ type: 'error', message: 'Reasonix refused the turn.' });
         if (result.stopReason === 'error') this.emitLive({ type: 'error', message: 'Reasonix ended the turn with an error.' });
         if (result.stopReason === 'max_tokens') this.emitLive({ type: 'notice', message: 'Reasonix reached the turn token limit.' });
       } catch (error) {
         if (error instanceof ReasonixPromptCancelledBeforeDelivery) {
+          this.drivenTurns.delete(key);
           const refusedIndex = this.pendingPrompts.findIndex((entry) => entry.key === key);
           const refused = refusedIndex < 0 ? undefined : this.pendingPrompts[refusedIndex];
           if (refusedIndex >= 0) this.pendingPrompts.splice(refusedIndex, 1);
@@ -1193,6 +1256,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
           if (refusedIndex >= 0) this.pendingPrompts.splice(refusedIndex, 1);
           this.emitHistoryReset();
         }
+        this.drivenTurns.delete(key);
         this.demote(`Reasonix ACP turn failed: ${error instanceof Error ? error.message : String(error)}.`);
         throw error;
       } finally {
@@ -1296,6 +1360,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     this.awaitingAssistantIndexes.clear();
     this.terminalAssistantIndexes.clear();
     this.assistantStreamIndexes.clear();
+    this.drivenTurns.clear();
     this.durableRebaseAfterIndex = undefined;
     this.deferredNativeIdle = false;
     try { if (this.transport.alive) this.transport.sessionCancel(this.session.id); } catch { /* close below is authoritative */ }
@@ -1328,6 +1393,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     this.awaitingAssistantIndexes.clear();
     this.terminalAssistantIndexes.clear();
     this.assistantStreamIndexes.clear();
+    this.drivenTurns.clear();
     this.durableRebaseAfterIndex = undefined;
     this.deferredNativeIdle = false;
     try {
@@ -1500,6 +1566,83 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     }
   }
 
+  /**
+   * Preferred order: the ACP turn has already returned when the tail appends
+   * its closing row, so `running` is emitted immediately before that row's own
+   * `done` and no terminal is sent twice. Replay, the created session's
+   * initial snapshot, and catch-up never reach this hook.
+   */
+  protected override appendedRecordPrefix(
+    lineIndex: number,
+    _display: ReasonixDisplayEntry | undefined,
+    messages: readonly AgentMessage[],
+    snapshot: StableReasonixSnapshot,
+  ): readonly AgentMessage[] {
+    if (this.demoted || this.closedDrive || this.drivenTurns.size === 0) return [];
+    const terminal = messages.find((message): message is RunSummary =>
+      message.type === 'run-summary' && message.status === 'done');
+    if (!terminal) return [];
+    for (const [key, turn] of this.drivenTurns) {
+      if (!turn.resolved || turn.userIndex === undefined || turn.userIndex >= lineIndex) continue;
+      const closing = drivenTurnClosing(this.session.id, snapshot.read, turn.userIndex);
+      if (closing.state !== 'found' || closing.lineIndex !== lineIndex) continue;
+      this.drivenTurns.delete(key);
+      return [runningFor(terminal)];
+    }
+    return [];
+  }
+
+  protected override afterTailPublish(read: ReasonixTranscriptRead): void {
+    this.pairPublishedDrivenTurns(read);
+  }
+
+  private trackDrivenTurn(key: string): void {
+    this.drivenTurns.delete(key);
+    this.drivenTurns.set(key, { resolved: false });
+    while (this.drivenTurns.size > MAX_PENDING_PROMPTS) {
+      const oldest = this.drivenTurns.keys().next().value;
+      if (oldest === undefined) break;
+      this.drivenTurns.delete(oldest);
+    }
+  }
+
+  /** A user Stop is not a finished turn: `cancelled` clears the observation and must not notify. */
+  private resolveDrivenTurn(key: string, stopReason: string | undefined, read: ReasonixTranscriptRead): void {
+    const turn = this.drivenTurns.get(key);
+    if (!turn) return;
+    if (this.demoted || this.closedDrive || stopReason === 'cancelled') {
+      this.drivenTurns.delete(key);
+      return;
+    }
+    turn.resolved = true;
+    this.pairPublishedDrivenTurns(read);
+  }
+
+  /**
+   * Fallback order: the tail (or the created session's initial snapshot) had
+   * already published the closing row before the turn was both resolved and
+   * claimed. That row's `done` went out with no observation to close, so it
+   * was silent; re-send the same frame, unchanged, right after `running`.
+   * History and the transcript key the footer identically either way.
+   */
+  private pairPublishedDrivenTurns(read: ReasonixTranscriptRead): void {
+    if (this.demoted || this.closedDrive) return;
+    for (const [key, turn] of [...this.drivenTurns]) {
+      if (!turn.resolved || turn.userIndex === undefined) continue;
+      const closing = drivenTurnClosing(this.session.id, read, turn.userIndex);
+      if (closing.state === 'sealed') {
+        // The turn wrote no footer (a refusal or an error before any model
+        // output) and the next turn has begun: nothing can close it.
+        this.drivenTurns.delete(key);
+        continue;
+      }
+      if (closing.state !== 'found' || !this.tailHasPublished(closing.lineIndex)) continue;
+      this.drivenTurns.delete(key);
+      this.emitLive(runningFor(closing.summary));
+      this.emitLive(closing.summary);
+    }
+  }
+
   protected override ownsLiveWriter(): boolean {
     // A native turn we started IS us writing, whether or not its assistant index is known yet.
     // Without the in-flight count, the first post-create turn read its own `working` posture — and
@@ -1598,6 +1741,9 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
         pending.assistantIndex = display.index + 1;
         this.nextNativeIndex = Math.max(this.nextNativeIndex ?? 0, display.index + 2);
       }
+      // The claimed echo is the proof that this row, and the turn it opens, is ours.
+      const drivenTurn = this.drivenTurns.get(pending.key);
+      if (drivenTurn && display) drivenTurn.userIndex = display.index;
       const correlation = {
         key: pending.key,
         displayIndex: display!.index,

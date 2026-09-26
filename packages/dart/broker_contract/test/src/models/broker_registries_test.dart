@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(58));
+      expect(brokerRoutes, hasLength(59));
     });
 
     test('contains the aggregated usage-report route', () {

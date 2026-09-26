@@ -144,12 +144,33 @@ export interface AttentionEvent {
   title: string;
   summary?: string;
   action: AttentionAction;
+  /**
+   * The notification type a client presents this event as (`turn_finished`, `permission_request`,
+   * …), stamped by the broker when the event is served. Absent when the event is never an OS
+   * notification. Revision 27 adds it; an older broker omits it and the client maps the kind
+   * itself.
+   */
+  notificationType?: string;
+  /**
+   * The notification slot the event occupies: `session-outcome:<tool>:<sessionId>` for a session's
+   * turn and goal outcomes, else the dedupe key. A notification shown into an occupied slot replaces
+   * the one there. Served with {@link notificationType}; revision 27.
+   */
+  collapseKey?: string;
+  /**
+   * When any client first read or dismissed the event. Set once and never cleared. Setting it moves
+   * the event's cursor but not its revision, so every other client's next page carries it without
+   * reopening a dismissal. A client clears its own notification for the event when it sees this.
+   * Revision 27.
+   */
+  seenAt?: number;
 }
 
 /** Input to the broker store. Identity, revisions, cursor, and update time are store-owned. */
 export type AttentionEventUpsert = Omit<
   AttentionEvent,
   'id' | 'cursor' | 'revision' | 'createdAt' | 'updatedAt' | 'resolvedAt' | 'presentationRevision'
+  | 'notificationType' | 'collapseKey' | 'seenAt'
 > & {
   id?: string;
   createdAt?: number;
@@ -1010,6 +1031,18 @@ export type AgentMessage =
       userMessageKey?: string;
       assistantMessageKey?: string;
       status: 'running' | 'done' | 'error' | 'cancelled';
+      /**
+       * Who opened the run. `user` (the default when absent) is a turn someone prompted;
+       * `background` is one the tool opened itself, such as Claude continuing after a background
+       * task reported. Only `user` runs raise "turn finished" or "turn failed". Revision 27.
+       */
+      origin?: 'user' | 'background';
+      /**
+       * Set on a `done` terminal that ends one step of a turn which goes on: a tool-calling step
+       * after which the agent keeps working in a new run. The broker closes the run without raising
+       * "turn finished"; the turn's last step raises it. Revision 27.
+       */
+      turnContinues?: true;
       startedAt?: number;
       completedAt?: number;
       agentRuntimeMs?: number;
@@ -1373,6 +1406,7 @@ export const BROKER_ROUTES = [
   '/api/push/wake',
   '/api/push/wake-tokens',
   '/api/push/wake-tokens/{id}',
+  '/api/push/web-push-key',
   '/api/schedules',
   '/api/schedules/{id}',
   '/api/schedules/{id}/actions',
@@ -1767,8 +1801,28 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * The overlap arithmetic moves with the number -- 23 is now the newest revision
  * inside the window, so a revision-23-or-later client has to ship before a
  * revision-24 broker does.
+ *
+ * Revision 27 is the notification contract. A served attention event carries
+ * `notificationType` and `collapseKey`, derived when the event is served and
+ * never stored, so every client presents one event as one type in one slot; and
+ * `seenAt`, set when any client first reads or dismisses it, which moves the
+ * event's cursor but not its revision, so every other client clears its
+ * notification without reopening a dismissal. `run-summary` gains `origin`, so a
+ * run the tool opened itself never notifies, and `turnContinues` marks a
+ * step that does not end its turn, so a tool-calling step never notifies
+ * "turn finished" while the agent works on. Wake registration gains the
+ * `webpush` platform (a browser subscription, the presented types and an opaque
+ * context), and `GET /api/push/web-push-key` serves the broker's VAPID key, so a
+ * browser with no tab open receives an end-to-end encrypted notification. The
+ * route moves the surface hash. Every field is optional and an older client never
+ * calls the route: it maps the kind itself, ignores what it does not read and
+ * presents as it did, so the minimum client revision stays at 17.
+ *
+ * The overlap arithmetic moves with the number -- 26 is now the newest revision
+ * inside the window, so a revision-26-or-later client has to ship before a
+ * revision-27 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 26 as const;
+export const BROKER_CONTRACT_REVISION = 27 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -2100,22 +2154,83 @@ export interface UploadCompleteResult {
   expiresAt: number;
 }
 
-export type WakePlatform = 'apns' | 'fcm';
+/** `webpush` is revision 27: a browser Push API subscription the broker sends to directly. */
+export type WakePlatform = 'apns' | 'fcm' | 'webpush';
+
+/** A browser `PushSubscription` as `toJSON()` gives it. Keys are base64url. */
+export interface WebPushSubscriptionInput {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+/** How one notification type is shown by a Web Push: its localized title, whether the body is left
+ *  empty (`typeOnly`), and whether it plays no sound (`silent`). */
+export interface WebPushTypePresentation {
+  title: string;
+  typeOnly?: boolean;
+  silent?: boolean;
+}
 
 export interface WakeRegistrationInput {
   deviceId?: string;
   platform: WakePlatform;
-  token: string;
+  /** The provider token for `apns` and `fcm`. Unused for `webpush`, whose subscription is the
+   *  credential. */
+  token?: string;
   label?: string;
+  /** Required for `webpush`. The endpoint must be an `https:` URL on a known push service. */
+  subscription?: WebPushSubscriptionInput;
+  /** `webpush` only: the enabled notification types by id, with their localized titles. A type
+   *  missing here is never pushed. Revision 27. */
+  presentation?: Record<string, WebPushTypePresentation>;
+  /** `webpush` only: opaque client-local routing data (at most 512 characters) that every push to
+   *  this registration echoes verbatim as `context`. Never listed back. Revision 27. */
+  context?: string;
 }
 
 export interface WakeRegistrationPublic {
   deviceId: string;
   platform: WakePlatform;
+  /** A redacted token, or for `webpush` the endpoint's origin (never its path, which is a
+   *  capability). */
   tokenPreview: string;
   label?: string;
+  /** `webpush` only: the type ids the registration presents, without their titles. Revision 27. */
+  presentationTypes?: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** The JSON a Web Push carries, end-to-end encrypted to the browser (RFC 8291). Revision 27. */
+export interface WebPushNotificationPayload {
+  v: 1;
+  eventId: string;
+  /** The event's `presentationRevision`. With {@link eventId} and {@link stage} it names one alert, so
+   *  a repeat of the same alert replaces silently and a re-alert sounds. */
+  revision: number;
+  /** The notification type id. */
+  type: string;
+  /** The registration's localized title for {@link type}. */
+  title: string;
+  /** The session title (or, for an event outside a session, the event title), cut to 48 grapheme
+   *  clusters; empty for a `typeOnly` type or an untitled session. */
+  body: string;
+  /** The event's collapse key, used as the notification tag. */
+  tag: string;
+  /** The delivery stage: `immediate`, or the delayed or escalated alert being sent. Each stage alerts once. */
+  stage: string;
+  action: { kind: string; tool?: string; sessionId?: string };
+  /** Present, and true, only when the registration's type is `silent`. */
+  silent?: true;
+  /** The registration's `context`, verbatim. */
+  context?: string;
+}
+
+/** `GET /api/push/web-push-key`: the broker's VAPID public key, a base64url uncompressed P-256
+ *  point, which a browser passes to `pushManager.subscribe` as `applicationServerKey`. Revision 27. */
+export interface WebPushKeyResponse {
+  ok: true;
+  publicKey: string;
 }
 
 export type WakePushErrorCode = 'BAD_PARAM' | 'PUSH_TOKEN_NOT_FOUND' | 'PUSH_NOT_CONFIGURED' | 'PUSH_DELIVERY_FAILED';
@@ -2723,6 +2838,12 @@ export interface SessionConnection {
    *  joining an already-blocked session sees the box (not just the needs-input badge). The UI dedupes
    *  by requestId, so this is idempotent across reattach/resync. */
   getPending?(): Promise<AgentMessage[]> | AgentMessage[];
+  /** True when a successful {@link getPending} can leave out a request that is still open, for
+   *  example by answering an empty list for a read it could not complete. The broker still rebuilds
+   *  its cards from the list, but never takes an omission as the request having been answered, so
+   *  the request's attention event stays active. Leave it unset when every open request this
+   *  connection surfaced is in the list until it is answered or withdrawn. */
+  readonly pendingListMayOmitOpenRequests?: boolean;
   /** Run a slash command (built-in action → its endpoint; otherwise a turn-starting command). Mutating.
    *  May return a {@link CommandResult} with a `notice` for requester-facing feedback. */
   runCommand?(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void>;

@@ -611,8 +611,11 @@ final class _CollectingNotificationSink implements BrokerNotificationSink {
   final List<BrokerNotificationRequest> shown = [];
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async {
     shown.add(request);
+    return BrokerNotificationDeliveryResult.shown;
   }
 
   @override

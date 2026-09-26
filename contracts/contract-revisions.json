@@ -157,6 +157,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "Codex command overlays use the codex.background-running-snapshot event with payload.keys to reconcile retained running identities after incremental reconnect, eviction, or broker restart. Reconciliation removes only missing running Codex command cards and preserves completed results until dismissal. The event is a derived overlay outside transcript cursors. Codex command overlays are sent only to revision-26-or-later clients; older clients retain existing Codex functionality. No general Codex version floor or client minimum changes."
+    },
+    {
+      "revision": 27,
+      "surfaceHash": "fnv1a32:63d88dbb",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Notifications. A served attention event carries `notificationType` and `collapseKey`, derived when it is served and never stored, so every client presents one event as one type in one slot; and `seenAt`, set once when any client first reads or dismisses the event. Setting it moves the event's cursor but not its revision, so every other client's next page carries it and clears that client's notification without reopening a dismissal; a delayed or escalated alert, or a reopen, clears it again. `run-summary` gains `origin` (`user` or `background`), and only `user` runs raise turn outcomes, so a run the tool opened itself (a Claude continuation after a background task) never notifies; and `turnContinues`, which marks a step that does not end its turn, so a tool-calling step closes its run silently and only the turn's last step raises \"turn finished\". Wake registration gains the `webpush` platform with a browser subscription, the presented types with their localized titles and choices, and an opaque client context; `GET /api/push/web-push-key` serves the broker's VAPID public key. For such a registration the broker sends the event itself, RFC 8291 encrypted to the browser under RFC 8292 VAPID, carrying no more than the notification shows. The new route moves the surface hash. Every field is optional and an older client never calls the route: it maps the kind itself, ignores fields it does not read and presents as before, so the minimum client revision stays at 17."
     }
   ]
 }

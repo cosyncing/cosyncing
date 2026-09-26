@@ -270,7 +270,7 @@ try {
       'live assistant telemetry creates a running summary before idle',
     );
     assert.equal(
-      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:${assistantId}`),
+      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:opencode:run:${assistantId}`),
       undefined,
       'Attention emits no run-finished before idle',
     );
@@ -316,7 +316,7 @@ try {
       'authoritative idle reaches the client before terminal footer data',
     );
     assert.equal(
-      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:${assistantId}`)?.state,
+      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:opencode:run:${assistantId}`)?.state,
       'resolved',
       'Attention consumes the corrected post-idle terminal summary',
     );
@@ -335,7 +335,7 @@ try {
     assert.equal(terminals(live).length, 1, 'duplicate completion and idle events stay idempotent');
     assert.equal(
       attentionStore.listEvents().filter((event) =>
-        event.dedupeKey === `run-finished:opencode:${id}:${assistantId}`).length,
+        event.dedupeKey === `run-finished:opencode:${id}:opencode:run:${assistantId}`).length,
       1,
       'duplicate completion and idle produce exactly one Attention event',
     );
@@ -416,7 +416,7 @@ try {
     await drainAttention();
     assert.equal(terminals(live)[0]?.status, 'done');
     assert.equal(
-      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:${assistantId}`)?.state,
+      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:opencode:run:${assistantId}`)?.state,
       'resolved',
       'the subsequent authoritative idle finalizes and notifies exactly once',
     );
@@ -638,7 +638,7 @@ try {
     assert.equal(terminals(live)[0]?.status, 'done');
     assert.equal(terminals(live)[0]?.completedAt, undefined);
     assert.equal(
-      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:${assistantId}`)?.state,
+      attentionStore.findByDedupeKey(`run-finished:opencode:${id}:opencode:run:${assistantId}`)?.state,
       'resolved',
       'idle immediately closes the observed run even before final message telemetry',
     );
@@ -687,7 +687,7 @@ try {
     );
     assert.equal(
       attentionStore.listEvents().filter((event) =>
-        event.dedupeKey === `run-finished:opencode:${id}:${assistantId}`).length,
+        event.dedupeKey === `run-finished:opencode:${id}:opencode:run:${assistantId}`).length,
       1,
       'terminal enrichment does not duplicate Attention',
     );
@@ -727,7 +727,7 @@ try {
     await drainAttention();
     assert.equal(terminals(live).length, 0, 'message error is not a terminal summary before session error');
     assert.equal(
-      attentionStore.findByDedupeKey(`run-failed:opencode:${id}:msg_error_a`),
+      attentionStore.findByDedupeKey(`run-failed:opencode:${id}:opencode:run:msg_error_a`),
       undefined,
       'Attention emits no run-failed from message-level error alone',
     );
@@ -737,7 +737,7 @@ try {
     assert.equal(terminals(live)[0]?.status, 'error');
     assert.equal(terminals(live)[0]?.completedAt, completedAt);
     assert.equal(
-      attentionStore.findByDedupeKey(`run-failed:opencode:${id}:msg_error_a`)?.state,
+      attentionStore.findByDedupeKey(`run-failed:opencode:${id}:opencode:run:msg_error_a`)?.state,
       'resolved',
       'Attention emits run-failed only after native session error',
     );
@@ -770,7 +770,7 @@ try {
     assert.equal(terminals(live)[0]?.status, 'error');
     assert.equal(terminals(live)[0]?.completedAt, undefined);
     assert.equal(
-      attentionStore.findByDedupeKey('run-failed:opencode:ses_error_first:msg_error_first_a')?.state,
+      attentionStore.findByDedupeKey('run-failed:opencode:ses_error_first:opencode:run:msg_error_first_a')?.state,
       'resolved',
       'session.error immediately emits the failed Attention outcome',
     );
@@ -828,7 +828,7 @@ try {
     );
     assert.equal(
       attentionStore.listEvents().filter((event) =>
-        event.dedupeKey === 'run-failed:opencode:ses_error_first:msg_error_first_a').length,
+        event.dedupeKey === 'run-failed:opencode:ses_error_first:opencode:run:msg_error_first_a').length,
       1,
       'late error enrichment does not duplicate run-failed Attention',
     );

@@ -10,7 +10,9 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_worker.dart';
+import 'package:cosyncing_client/src/features/attention/data/attention_notification_type_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
 import 'package:dio/dio.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +35,72 @@ void main() {
   }
 
   group('AttentionFeedWorker', () {
+    // A 401 does not heal by asking again. Retrying on the transient backoff
+    // (capped at a minute) kept a tab opened before its token was saved
+    // failing all night, and the Server raised its repeated-authentication
+    // alert every hour.
+    test(
+      'a refused credential is re-read, not retried, until the app returns to the foreground',
+      () async {
+        final lifecycle = _EmittingLifecycleMonitor();
+        addTearDown(lifecycle.dispose);
+        var requests = 0;
+        when(
+          () => brokerClient.getAttentionEvents(
+            clientId: _clientId,
+            after: any(named: 'after'),
+            limit: any(named: 'limit'),
+            waitMs: any(named: 'waitMs'),
+            cancelToken: any(named: 'cancelToken'),
+          ),
+        ).thenAnswer((_) async {
+          requests += 1;
+          throw const BrokerException(message: 'unauthorized', statusCode: 401);
+        });
+        final waits = <Duration>[];
+        var rereads = 0;
+        final worker = AttentionFeedWorker(
+          brokerClient: brokerClient,
+          repository: repository,
+          brokerProfileId: _brokerProfileId,
+          clientId: _clientId,
+          lifecycleMonitor: lifecycle,
+          notificationSink: _CollectingNotificationSink(),
+          onForegroundEvent: (_) async {},
+          onUnauthorized: () => rereads += 1,
+          // The long wait never elapses here: only the foreground or a stop
+          // may end it.
+          // A timer, not a microtask, so a regression that retries in a loop
+          // fails these expectations instead of starving the test's timers.
+          sleep: (duration) {
+            waits.add(duration);
+            return duration == defaultAttentionFeedUnauthorizedRetryDelay
+                ? Completer<void>().future
+                : Future<void>.delayed(Duration.zero);
+          },
+        );
+        addTearDown(worker.stop);
+
+        worker.start();
+        for (var turn = 0; turn < 20; turn++) {
+          await advanceToProcess();
+        }
+        expect(requests, 1, reason: 'no retry while the app stays away');
+        expect(rereads, 1, reason: 'the saved credential is re-read');
+        expect(waits, [defaultAttentionFeedUnauthorizedRetryDelay]);
+
+        lifecycle.emit(BrokerAppLifecycleState.resumed);
+        for (var turn = 0; turn < 20; turn++) {
+          await advanceToProcess();
+        }
+        expect(requests, 2, reason: 'the foreground asks once more');
+        expect(rereads, 2);
+
+        await worker.stop();
+        expect(requests, 2);
+      },
+    );
+
     test(
       'presents only after persistence and presentation revision checks',
       () async {
@@ -524,7 +592,7 @@ void main() {
             ),
             _attentionEvent(
               id: 'evt-maint',
-              kind: 'runtime-update-ready',
+              kind: 'device-paired',
               actionTool: 'tool-y',
               actionSessionId: 'session-4',
               cursor: 2,
@@ -828,25 +896,20 @@ void main() {
     );
 
     test(
-      'keeps metadata generic and distinguishes maintenance from critical broker health',
+      'presents typed events under the default per-type settings',
       () async {
-        final lifecycle = _StubLifecycleMonitor(
-          currentState: BrokerAppLifecycleState.hidden,
-        );
         final sink = _CollectingNotificationSink();
-
         _stubGetAttentionEvents(
           client: brokerClient,
           outcomes: [
             AttentionEventsPage(
               events: [
                 _attentionEvent(
-                  id: 'evt-maint',
+                  id: 'evt-runtime',
                   kind: 'runtime-update-ready',
                   actionTool: 'tool-b',
                   actionSessionId: 'session-7',
                   summary: 'full prompt text that should not be copied',
-                  presentationRevision: 9,
                 ),
                 _attentionEvent(
                   id: 'evt-health-critical',
@@ -856,163 +919,30 @@ void main() {
                   actionSessionId: 'none',
                   actionKind: 'open-broker-health',
                 ),
-              ],
-              cursor: 1,
-              reset: false,
-              hasMore: false,
-            ),
-          ],
-        );
-
-        final worker = AttentionFeedWorker(
-          brokerClient: brokerClient,
-          repository: repository,
-          brokerProfileId: _brokerProfileId,
-          clientId: _clientId,
-          lifecycleMonitor: lifecycle,
-          notificationSink: sink,
-          onForegroundEvent: (_) async {},
-          sleep: (_) async {},
-        );
-
-        worker.start();
-        await advanceToProcess();
-        await worker.stop();
-
-        expect(sink.shown, hasLength(2));
-        final maintenance = sink.shown.singleWhere(
-          (request) => request.payload['eventId'] == 'evt-maint',
-        );
-        expect(
-          maintenance.category,
-          BrokerNotificationCategory.maintenance,
-        );
-        expect(maintenance.importance, BrokerNotificationImportance.normal);
-        expect(maintenance.body, isNot(contains('prompt')));
-        expect(maintenance.payload['summary'], isNull);
-        final critical = sink.shown.singleWhere(
-          (request) => request.payload['eventId'] == 'evt-health-critical',
-        );
-        expect(
-          critical.category,
-          BrokerNotificationCategory.actionRequired,
-        );
-        expect(critical.importance, BrokerNotificationImportance.high);
-      },
-    );
-
-    test(
-      'maps unknown attention kinds to generic info/normal background notifications',
-      () async {
-        final lifecycle = _StubLifecycleMonitor(
-          currentState: BrokerAppLifecycleState.hidden,
-        );
-        final sink = _CollectingNotificationSink();
-
-        _stubGetAttentionEvents(
-          client: brokerClient,
-          outcomes: [
-            AttentionEventsPage(
-              events: [
                 _attentionEvent(
                   id: 'evt-unknown',
                   kind: 'future-kind',
                   actionTool: 'tool-c',
                   actionSessionId: 'session-2',
                 ),
-              ],
-              cursor: 1,
-              reset: false,
-              hasMore: false,
-            ),
-          ],
-        );
-
-        final worker = AttentionFeedWorker(
-          brokerClient: brokerClient,
-          repository: repository,
-          brokerProfileId: _brokerProfileId,
-          clientId: _clientId,
-          lifecycleMonitor: lifecycle,
-          notificationSink: sink,
-          onForegroundEvent: (_) async {},
-          sleep: (_) async {},
-        );
-
-        worker.start();
-        await advanceToProcess();
-        await worker.stop();
-
-        expect(sink.shown.single.category, BrokerNotificationCategory.info);
-        expect(
-          sink.shown.single.importance,
-          BrokerNotificationImportance.normal,
-        );
-        expect(sink.shown.single.title, isNotEmpty);
-      },
-    );
-
-    test(
-      'maps security alerts to high security notifications',
-      () async {
-        final sink = _CollectingNotificationSink();
-        _stubGetAttentionEvents(
-          client: brokerClient,
-          outcomes: [
-            AttentionEventsPage(
-              events: [
                 _attentionEvent(
                   id: 'evt-security',
                   kind: 'security-alert',
                   actionTool: 'broker',
                   actionSessionId: 'none',
                 ),
-              ],
-              cursor: 1,
-              reset: false,
-              hasMore: false,
-            ),
-          ],
-        );
-        final worker = AttentionFeedWorker(
-          brokerClient: brokerClient,
-          repository: repository,
-          brokerProfileId: _brokerProfileId,
-          clientId: _clientId,
-          lifecycleMonitor: _StubLifecycleMonitor(
-            currentState: BrokerAppLifecycleState.hidden,
-          ),
-          notificationSink: sink,
-          onForegroundEvent: (_) async {},
-          sleep: (_) async {},
-        );
-
-        worker.start();
-        await advanceToProcess();
-        await worker.stop();
-
-        expect(
-          sink.shown.single.category,
-          BrokerNotificationCategory.actionRequired,
-        );
-        expect(sink.shown.single.importance, BrokerNotificationImportance.high);
-      },
-    );
-
-    test(
-      'maps successful pairing to a normal informational notification',
-      () async {
-        final sink = _CollectingNotificationSink();
-        _stubGetAttentionEvents(
-          client: brokerClient,
-          outcomes: [
-            AttentionEventsPage(
-              events: [
                 _attentionEvent(
                   id: 'evt-paired',
                   kind: 'device-paired',
                   actionTool: 'broker',
                   actionSessionId: 'none',
+                ),
+                _attentionEvent(
+                  id: 'evt-turn',
+                  kind: 'run-finished',
+                  actionTool: 'codex',
+                  actionSessionId: 'session-9',
+                  summary: 'full prompt text that should not be copied',
                 ),
               ],
               cursor: 1,
@@ -1038,11 +968,197 @@ void main() {
         await advanceToProcess();
         await worker.stop();
 
-        expect(sink.shown.single.category, BrokerNotificationCategory.info);
-        expect(
-          sink.shown.single.importance,
-          BrokerNotificationImportance.normal,
+        final byEvent = {
+          for (final request in sink.shown) request.payload['eventId']: request,
+        };
+        // Runtime updates are off until the user turns them on; unknown
+        // kinds never notify.
+        expect(byEvent.keys.toSet(), {
+          'evt-health-critical',
+          'evt-security',
+          'evt-paired',
+          'evt-turn',
+        });
+        expect(byEvent['evt-health-critical']!.channel.urgent, isTrue);
+        expect(byEvent['evt-security']!.channel.urgent, isTrue);
+        expect(byEvent['evt-security']!.playSound, isTrue);
+        expect(byEvent['evt-paired']!.channel.urgent, isFalse);
+        expect(byEvent['evt-paired']!.playSound, isFalse);
+        final turn = byEvent['evt-turn']!;
+        expect(turn.body, isNot(contains('prompt')));
+        expect(turn.payload['summary'], isNull);
+      },
+    );
+
+    test('forwards the per-type resolver and reports each delivery', () async {
+      final sink = _CollectingNotificationSink();
+      final deliveries = <(AttentionNotificationType, String?)>[];
+      _stubGetAttentionEvents(
+        client: brokerClient,
+        outcomes: [
+          AttentionEventsPage(
+            events: [
+              _attentionEvent(
+                id: 'evt-security',
+                kind: 'security-alert',
+                actionTool: 'broker',
+                actionSessionId: 'none',
+              ),
+              _attentionEvent(
+                id: 'evt-paired',
+                kind: 'device-paired',
+                actionTool: 'broker',
+                actionSessionId: 'none',
+              ),
+            ],
+            cursor: 1,
+            reset: false,
+            hasMore: false,
+          ),
+        ],
+      );
+      final worker = AttentionFeedWorker(
+        brokerClient: brokerClient,
+        repository: repository,
+        brokerProfileId: _brokerProfileId,
+        clientId: _clientId,
+        lifecycleMonitor: _StubLifecycleMonitor(
+          currentState: BrokerAppLifecycleState.hidden,
+        ),
+        notificationSink: sink,
+        onForegroundEvent: (_) async {},
+        sleep: (_) async {},
+        resolveSetting: (type) async =>
+            AttentionNotificationTypeSetting.defaultsFor(
+              type,
+            ).copyWith(enabled: type != AttentionNotificationType.devicePaired),
+        onDelivery: (type, result) => deliveries.add((type, result.reason)),
+      );
+
+      worker.start();
+      await advanceToProcess();
+      await worker.stop();
+
+      expect(sink.shown.map((request) => request.payload['eventId']), [
+        'evt-security',
+      ]);
+      expect(
+        deliveries,
+        unorderedEquals([
+          (AttentionNotificationType.securityAlert, null),
+          (AttentionNotificationType.devicePaired, 'type-off'),
+        ]),
+      );
+    });
+
+    test(
+      'a request resolved elsewhere loses its notification when its page lands',
+      () async {
+        final sink = _CollectingNotificationSink();
+        AttentionEventView question({
+          required String state,
+          required int revision,
+          required int cursor,
+        }) => _attentionEvent(
+          id: 'evt-question',
+          kind: 'question-required',
+          severity: 'action-required',
+          actionTool: 'codex',
+          actionSessionId: 'session-q',
+          state: state,
+          revision: revision,
+          cursor: cursor,
         );
+        _stubGetAttentionEvents(
+          client: brokerClient,
+          outcomes: [
+            AttentionEventsPage(
+              events: [question(state: 'active', revision: 1, cursor: 1)],
+              cursor: 1,
+              reset: false,
+              hasMore: false,
+            ),
+            AttentionEventsPage(
+              events: [question(state: 'resolved', revision: 2, cursor: 2)],
+              cursor: 2,
+              reset: false,
+              hasMore: false,
+            ),
+          ],
+        );
+        final worker = AttentionFeedWorker(
+          brokerClient: brokerClient,
+          repository: repository,
+          brokerProfileId: _brokerProfileId,
+          clientId: _clientId,
+          lifecycleMonitor: _StubLifecycleMonitor(
+            currentState: BrokerAppLifecycleState.hidden,
+          ),
+          notificationSink: sink,
+          onForegroundEvent: (_) async {},
+          sleep: (_) async {},
+        );
+
+        worker.start();
+        await advanceToProcess();
+        await advanceToProcess();
+        await worker.stop();
+
+        final shownId = sink.shown.single.id;
+        expect(sink.cleared, contains(shownId));
+      },
+    );
+
+    test(
+      'an outcome read on another device loses its notification when its page lands',
+      () async {
+        final sink = _CollectingNotificationSink();
+        AttentionEventView finished({required int cursor, int? seenAt}) =>
+            _attentionEvent(
+              id: 'evt-finished',
+              kind: 'run-finished',
+              actionTool: 'codex',
+              actionSessionId: 'session-f',
+              cursor: cursor,
+              seenAt: seenAt,
+            );
+        _stubGetAttentionEvents(
+          client: brokerClient,
+          outcomes: [
+            AttentionEventsPage(
+              events: [finished(cursor: 1)],
+              cursor: 1,
+              reset: false,
+              hasMore: false,
+            ),
+            AttentionEventsPage(
+              events: [finished(seenAt: 99, cursor: 2)],
+              cursor: 2,
+              reset: false,
+              hasMore: false,
+            ),
+          ],
+        );
+        final worker = AttentionFeedWorker(
+          brokerClient: brokerClient,
+          repository: repository,
+          brokerProfileId: _brokerProfileId,
+          clientId: _clientId,
+          lifecycleMonitor: _StubLifecycleMonitor(
+            currentState: BrokerAppLifecycleState.hidden,
+          ),
+          notificationSink: sink,
+          onForegroundEvent: (_) async {},
+          sleep: (_) async {},
+        );
+
+        worker.start();
+        await advanceToProcess();
+        await advanceToProcess();
+        await worker.stop();
+
+        final shownId = sink.shown.single.id;
+        expect(sink.cleared, contains(shownId));
       },
     );
 
@@ -1494,6 +1610,7 @@ AttentionEventView _attentionEvent({
   String state = 'active',
   String severity = 'informational',
   int revision = 1,
+  int? seenAt,
 }) {
   return AttentionEventView.fromJson(<String, dynamic>{
     'id': id,
@@ -1514,24 +1631,33 @@ AttentionEventView _attentionEvent({
       'sessionId': actionSessionId,
       if (actionAgent != null) 'agent': actionAgent,
     },
+    'seenAt': ?seenAt,
   });
 }
 
 class _CollectingNotificationSink implements BrokerNotificationSink {
   final List<BrokerNotificationRequest> shown = [];
+  final List<String> cleared = [];
   void Function(BrokerNotificationRequest request)? onShow;
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async {
     shown.add(request);
     onShow?.call(request);
+    return BrokerNotificationDeliveryResult.shown;
   }
 
   @override
-  Future<void> clear(String id) async {}
+  Future<void> clear(String id) async {
+    cleared.add(id);
+  }
 
   @override
-  Future<void> clearMany(Iterable<String> ids) async {}
+  Future<void> clearMany(Iterable<String> ids) async {
+    cleared.addAll(ids);
+  }
 
   @override
   Future<void> clearAll() async {}
@@ -1544,13 +1670,34 @@ final class _FailingNotificationSink extends _CollectingNotificationSink {
   final Set<String> failingEventIds;
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async {
     final eventId = request.payload['eventId'];
     if (eventId is String && failingEventIds.contains(eventId)) {
       throw StateError('simulated sink failure');
     }
-    await super.show(request);
+    return super.show(request);
   }
+}
+
+class _EmittingLifecycleMonitor implements BrokerAppLifecycleMonitor {
+  final StreamController<BrokerAppLifecycleState> _changes =
+      StreamController<BrokerAppLifecycleState>.broadcast();
+
+  @override
+  BrokerAppLifecycleState currentState = BrokerAppLifecycleState.hidden;
+
+  @override
+  Stream<BrokerAppLifecycleState> get stateChanges => _changes.stream;
+
+  void emit(BrokerAppLifecycleState state) {
+    currentState = state;
+    _changes.add(state);
+  }
+
+  @override
+  void dispose() => unawaited(_changes.close());
 }
 
 class _StubLifecycleMonitor implements BrokerAppLifecycleMonitor {

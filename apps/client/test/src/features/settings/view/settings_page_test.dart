@@ -4,8 +4,12 @@ import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_remote_wake_runtime.dart';
+import 'package:cosyncing_client/src/features/attention/controller/push_token_provider.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_feed_settings_store.dart';
+import 'package:cosyncing_client/src/features/attention/data/attention_notification_type_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/data/remote_wake_settings_store.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/broker_profile_repository.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/credential_store.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
@@ -14,9 +18,9 @@ import 'package:cosyncing_client/src/features/connection/controller/broker_gate_
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
-import 'package:cosyncing_client/src/features/settings/controller/session_notification_settings_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:cosyncing_client/src/features/settings/view/agents_settings_page.dart';
@@ -25,38 +29,50 @@ import 'package:cosyncing_client/src/features/settings/view/general_settings_pag
 import 'package:cosyncing_client/src/features/settings/view/notification_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
 import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
+import 'package:cosyncing_client/src/platform/android/android_background_connection.dart';
+import 'package:cosyncing_client/src/platform/desktop/desktop_keep_running.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../../../support/in_memory_read_aloud_preferences_store.dart';
 import '../../../../support/in_memory_session_display_preferences_store.dart';
+import '../../../../support/notification_test_support.dart';
 
 void main() {
   group('SettingsPage', () {
     late _SpyCredentialStore store;
     late _InMemoryBrokerProfileRepository repository;
-    late _InMemorySessionNotificationSettingsStore notificationSettingsStore;
-    late _FakePermissionRequester permissionRequester;
+    late InMemoryNotificationPreferenceStore notificationSettingsStore;
+    late FakeNotificationBackend notificationBackend;
+    late InMemoryNotificationTypeSettingsStore notificationTypeStore;
     late _FakeManagedRuntimeApi managedRuntimeApi;
     late _MemoryAttentionFeedSettingsStore attentionFeedSettingsStore;
     late _MemoryRemoteWakeSettingsStore remoteWakeSettingsStore;
     late _MemoryBrokerIdentityStore brokerIdentityStore;
+    late _MemoryDesktopKeepRunningStore desktopKeepRunningStore;
+    late _MemoryAndroidBackgroundConnectionStore
+    androidBackgroundConnectionStore;
 
     setUp(() {
       store = _SpyCredentialStore();
       repository = _InMemoryBrokerProfileRepository();
-      notificationSettingsStore = _InMemorySessionNotificationSettingsStore();
-      permissionRequester = _FakePermissionRequester();
+      notificationSettingsStore = InMemoryNotificationPreferenceStore();
+      notificationBackend = FakeNotificationBackend();
+      notificationTypeStore = InMemoryNotificationTypeSettingsStore();
       managedRuntimeApi = _FakeManagedRuntimeApi();
       attentionFeedSettingsStore = _MemoryAttentionFeedSettingsStore();
       remoteWakeSettingsStore = _MemoryRemoteWakeSettingsStore();
       brokerIdentityStore = _MemoryBrokerIdentityStore();
+      desktopKeepRunningStore = _MemoryDesktopKeepRunningStore();
+      androidBackgroundConnectionStore =
+          _MemoryAndroidBackgroundConnectionStore();
     });
 
     // Settings is a hub of categories; every control below lives on the
@@ -73,6 +89,7 @@ void main() {
       TargetPlatform platform = TargetPlatform.linux,
       bool clientUpdateAvailable = false,
       ManagedRuntimeApi Function(BrokerProfile?)? managedRuntimeApiForProfile,
+      PushTokenProvider? pushTokenProvider,
     }) {
       final overrides = <Override>[
         // The connection gate renders nothing while connected. Pin it so tests
@@ -85,9 +102,17 @@ void main() {
         sessionNotificationSettingsStoreProvider.overrideWithValue(
           notificationSettingsStore,
         ),
-        sessionNotificationPermissionRequesterProvider.overrideWithValue(
-          permissionRequester.call,
+        sessionLocalNotificationAdapterProvider.overrideWithValue(
+          FlutterLocalNotificationSink(backend: notificationBackend),
         ),
+        attentionNotificationTypeSettingsStoreProvider.overrideWithValue(
+          notificationTypeStore,
+        ),
+        sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+          ControllableLifecycleMonitor(),
+        ),
+        if (pushTokenProvider != null)
+          pushTokenProviderProvider.overrideWithValue(pushTokenProvider),
         managedRuntimeApiProvider.overrideWith((ref) {
           final resolver = managedRuntimeApiForProfile;
           if (resolver == null) return managedRuntimeApi;
@@ -112,6 +137,12 @@ void main() {
         ),
         readAloudPreferencesStoreProvider.overrideWithValue(
           InMemoryReadAloudPreferencesStore(),
+        ),
+        desktopKeepRunningStoreProvider.overrideWithValue(
+          desktopKeepRunningStore,
+        ),
+        androidBackgroundConnectionStoreProvider.overrideWithValue(
+          androidBackgroundConnectionStore,
         ),
       ];
 
@@ -314,6 +345,7 @@ void main() {
         buildSubject(
           home: const NotificationSettingsPage(),
           activeProfile: profile,
+          pushTokenProvider: _StubPushTokenProvider(),
         ),
       );
       await tester.pumpAndSettle();
@@ -756,7 +788,244 @@ void main() {
       );
     });
 
-    testWidgets('persists notification setting from the settings toggle', (
+    testWidgets(
+      'turning notifications on persists and asks the OS in the same tap',
+      (tester) async {
+        await tester.pumpWidget(
+          buildSubject(home: const NotificationSettingsPage()),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const Key('settings-local-session-notifications')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(notificationSettingsStore.preference, isTrue);
+        final switchTile = tester.widget<SwitchListTile>(
+          find.byKey(const Key('settings-local-session-notifications')),
+        );
+        expect(switchTile.value, isTrue);
+        expect(notificationBackend.permissionRequestCount, 1);
+        expect(find.text('Notification permission: Granted'), findsOneWidget);
+      },
+    );
+
+    group('keep running when closed', () {
+      tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      for (final (platform, subtitle) in [
+        (TargetPlatform.windows, 'notification area'),
+        (TargetPlatform.macOS, 'Dock'),
+      ]) {
+        testWidgets('on ${platform.name}: shown, on, and persisted', (
+          tester,
+        ) async {
+          debugDefaultTargetPlatformOverride = platform;
+          await tester.pumpWidget(
+            buildSubject(home: const NotificationSettingsPage()),
+          );
+          await tester.pumpAndSettle();
+          final tile = find.byKey(const Key('settings-desktop-keep-running'));
+
+          expect(
+            tester.widget<SwitchListTile>(tile).value,
+            isTrue,
+            reason: 'on until the user turns it off',
+          );
+          expect(
+            find.descendant(
+              of: tile,
+              matching: find.textContaining(subtitle),
+            ),
+            findsOneWidget,
+          );
+          await tester.tap(tile);
+          await tester.pumpAndSettle();
+          expect(desktopKeepRunningStore.value, isFalse);
+          expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+          debugDefaultTargetPlatformOverride = null;
+        });
+      }
+
+      testWidgets('absent where closing the window quits', (tester) async {
+        for (final platform in [
+          TargetPlatform.linux,
+          TargetPlatform.android,
+        ]) {
+          debugDefaultTargetPlatformOverride = platform;
+          await tester.pumpWidget(
+            buildSubject(home: const NotificationSettingsPage()),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const Key('settings-desktop-keep-running')),
+            findsNothing,
+          );
+        }
+        debugDefaultTargetPlatformOverride = null;
+      });
+    });
+
+    group('stay connected in the background', () {
+      tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      testWidgets('on Android: off until turned on, and persisted', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        notificationSettingsStore = InMemoryNotificationPreferenceStore(
+          preference: true,
+        );
+        await tester.pumpWidget(
+          buildSubject(home: const NotificationSettingsPage()),
+        );
+        await tester.pumpAndSettle();
+        final tile = find.byKey(
+          const Key('settings-android-background-connection'),
+        );
+
+        expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+        await tester.ensureVisible(tile);
+        await tester.tap(tile);
+        await tester.pumpAndSettle();
+        expect(androidBackgroundConnectionStore.value, isTrue);
+        expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      testWidgets('greyed out and shown off while notifications are off', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        notificationSettingsStore = InMemoryNotificationPreferenceStore(
+          preference: false,
+        );
+        androidBackgroundConnectionStore.value = true;
+        await tester.pumpWidget(
+          buildSubject(home: const NotificationSettingsPage()),
+        );
+        await tester.pumpAndSettle();
+        final tile = tester.widget<SwitchListTile>(
+          find.byKey(const Key('settings-android-background-connection')),
+        );
+
+        expect(tile.value, isFalse);
+        expect(tile.onChanged, isNull);
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      testWidgets('absent off Android', (tester) async {
+        for (final platform in [
+          TargetPlatform.windows,
+          TargetPlatform.macOS,
+          TargetPlatform.linux,
+        ]) {
+          debugDefaultTargetPlatformOverride = platform;
+          await tester.pumpWidget(
+            buildSubject(home: const NotificationSettingsPage()),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const Key('settings-android-background-connection')),
+            findsNothing,
+          );
+        }
+        debugDefaultTargetPlatformOverride = null;
+      });
+    });
+
+    testWidgets('offers the OS prompt while permission is not requested', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSubject(home: const NotificationSettingsPage()),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Notification permission: Not requested yet'),
+        findsOneWidget,
+      );
+      await tester.tap(
+        find.byKey(const Key('settings-request-os-notification-permission')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(notificationBackend.permissionRequestCount, 1);
+      expect(find.text('Notification permission: Granted'), findsOneWidget);
+      expect(
+        find.byKey(const Key('settings-request-os-notification-permission')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a refused prompt reads as denied with system-settings help', (
+      tester,
+    ) async {
+      notificationBackend.requestResult = const NotificationPermissionStatus(
+        NotificationPermissionState.notGranted,
+      );
+      await tester.pumpWidget(
+        buildSubject(
+          home: const NotificationSettingsPage(),
+          platform: TargetPlatform.android,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const Key('settings-request-os-notification-permission')),
+      );
+      await tester.pumpAndSettle();
+
+      // Android reports only "not enabled"; after a prompt that is a denial.
+      expect(find.text('Notification permission: Denied'), findsOneWidget);
+      expect(
+        find.text(
+          'Notifications are blocked for Cosyncing. Turn them on in system '
+          'settings.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('settings-request-os-notification-permission')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('an insecure browser context explains itself', (tester) async {
+      notificationBackend.permission = const NotificationPermissionStatus(
+        NotificationPermissionState.unsupported,
+        reason: 'insecure-context',
+      );
+      await tester.pumpWidget(
+        buildSubject(home: const NotificationSettingsPage()),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Notification permission: Unsupported'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('not served over HTTPS'), findsOneWidget);
+    });
+
+    testWidgets('an initialization failure shows its reason', (tester) async {
+      notificationBackend.initializeError = StateError('invalid_icon');
+      await tester.pumpWidget(
+        buildSubject(home: const NotificationSettingsPage()),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Notification permission: Unavailable:'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('invalid_icon'), findsOneWidget);
+    });
+
+    testWidgets('the test notification reports what the OS did', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -765,105 +1034,79 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.tap(
-        find.byKey(const Key('settings-local-session-notifications')),
+        find.byKey(const Key('settings-send-test-notification')),
       );
       await tester.pumpAndSettle();
-
-      expect(notificationSettingsStore.value, isTrue);
-      final switchTile = tester.widget<SwitchListTile>(
-        find.byKey(const Key('settings-local-session-notifications')),
-      );
-      expect(switchTile.value, isTrue);
-      expect(permissionRequester.requests, 0);
-    });
-
-    testWidgets('shows granted permission request state', (tester) async {
-      permissionRequester.nextResult =
-          const FlutterLocalNotificationPermissionRequestResult(
-            outcome: FlutterLocalNotificationPermissionRequestOutcome.granted,
-          );
-
-      await tester.pumpWidget(
-        buildSubject(home: const NotificationSettingsPage()),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(
-        find.byKey(
-          const Key('settings-request-os-notification-permission'),
-        ),
-      );
-      await tester.pumpAndSettle();
-
+      expect(notificationBackend.shown, isEmpty);
       expect(
-        find.text('Notification permission: Granted'),
+        find.text('Last notification: Blocked (permission-not-granted)'),
         findsOneWidget,
       );
+
+      notificationBackend.permission = NotificationPermissionStatus.granted;
+      await tester.tap(
+        find.byKey(const Key('settings-send-test-notification')),
+      );
+      await tester.pumpAndSettle();
+      expect(notificationBackend.shown, hasLength(1));
+      expect(find.text('Last notification: Shown'), findsOneWidget);
     });
 
-    testWidgets('shows denied permission request state', (tester) async {
-      permissionRequester.nextResult =
-          const FlutterLocalNotificationPermissionRequestResult(
-            outcome: FlutterLocalNotificationPermissionRequestOutcome.denied,
-          );
-
+    testWidgets('lists every notification type, grouped by family', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         buildSubject(home: const NotificationSettingsPage()),
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(
-        find.byKey(
-          const Key('settings-request-os-notification-permission'),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Notification permission: Denied'), findsOneWidget);
+      for (final family in ['Sessions', 'Security', 'Server']) {
+        expect(find.text(family), findsOneWidget, reason: family);
+      }
+      for (final type in AttentionNotificationType.values) {
+        expect(
+          find.byKey(Key('settings-notification-type-${type.id}')),
+          findsOneWidget,
+          reason: type.id,
+        );
+      }
     });
 
-    testWidgets('shows unsupported permission request state', (tester) async {
-      permissionRequester
-          .nextResult = const FlutterLocalNotificationPermissionRequestResult(
-        outcome: FlutterLocalNotificationPermissionRequestOutcome.unsupported,
-      );
+    testWidgets(
+      'a type switch persists the choice where the app owns per-type settings',
+      (tester) async {
+        await tester.pumpWidget(
+          buildSubject(home: const NotificationSettingsPage()),
+        );
+        await tester.pumpAndSettle();
+        final row = find.byKey(
+          const Key('settings-notification-type-turn_finished'),
+        );
+        await tester.scrollUntilVisible(
+          row,
+          200,
+          scrollable: find
+              .descendant(
+                of: find.byType(ListView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        await tester.pumpAndSettle();
 
-      await tester.pumpWidget(
-        buildSubject(home: const NotificationSettingsPage()),
-      );
-      await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(of: row, matching: find.byType(Switch)),
+        );
+        await tester.pumpAndSettle();
 
-      await tester.tap(
-        find.byKey(
-          const Key('settings-request-os-notification-permission'),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Notification permission: Unsupported'), findsOneWidget);
-    });
-
-    testWidgets('shows failed permission request state', (tester) async {
-      permissionRequester.throwOnRequest = true;
-
-      await tester.pumpWidget(
-        buildSubject(home: const NotificationSettingsPage()),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(
-        find.byKey(
-          const Key('settings-request-os-notification-permission'),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.text('Notification permission: Failed'),
-        findsOneWidget,
-      );
-      expect(find.textContaining('permission request failed'), findsNothing);
-    });
+        expect(
+          notificationTypeStore
+              .values[AttentionNotificationType.turnFinished]
+              ?.enabled,
+          isFalse,
+        );
+      },
+    );
 
     // A loopback broker still requires a token once one is provisioned, so it
     // gets the same credential controls as any other host. Previously this
@@ -1861,6 +2104,27 @@ final class _MemoryAttentionFeedSettingsStore
   }
 }
 
+final class _MemoryDesktopKeepRunningStore implements DesktopKeepRunningStore {
+  bool? value;
+
+  @override
+  Future<bool> get() async => value ?? true;
+
+  @override
+  Future<void> set({required bool enabled}) async => value = enabled;
+}
+
+final class _MemoryAndroidBackgroundConnectionStore
+    implements AndroidBackgroundConnectionStore {
+  bool? value;
+
+  @override
+  Future<bool> get() async => value ?? false;
+
+  @override
+  Future<void> set({required bool enabled}) async => value = enabled;
+}
+
 final class _MemoryRemoteWakeSettingsStore implements RemoteWakeSettingsStore {
   bool enabled = false;
 
@@ -1873,21 +2137,18 @@ final class _MemoryRemoteWakeSettingsStore implements RemoteWakeSettingsStore {
   }
 }
 
-final class _FakePermissionRequester {
-  int requests = 0;
-  bool throwOnRequest = false;
-  FlutterLocalNotificationPermissionRequestResult nextResult =
-      const FlutterLocalNotificationPermissionRequestResult(
-        outcome: FlutterLocalNotificationPermissionRequestOutcome.granted,
-      );
+final class _StubPushTokenProvider implements PushTokenProvider {
+  @override
+  PushTokenPlatform get platform => PushTokenPlatform.fcm;
 
-  Future<FlutterLocalNotificationPermissionRequestResult> call() async {
-    requests += 1;
-    if (throwOnRequest) {
-      throw Exception('permission request failed');
-    }
-    return nextResult;
-  }
+  @override
+  Future<String?> currentToken() async => null;
+
+  @override
+  Stream<String?> tokenChanges() => const Stream<String?>.empty();
+
+  @override
+  void dispose() {}
 }
 
 final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
@@ -2096,21 +2357,6 @@ final class _MemoryBrokerIdentityStore implements BrokerIdentityStore {
     HelloWireEvent hello,
   ) async {
     _hello[brokerScopeKey] = hello;
-  }
-}
-
-final class _InMemorySessionNotificationSettingsStore
-    implements SessionNotificationSettingsStore {
-  _InMemorySessionNotificationSettingsStore() : value = false;
-
-  bool value;
-
-  @override
-  Future<bool> getLocalNotificationEnabled() async => value;
-
-  @override
-  Future<void> setLocalNotificationEnabled({required bool enabled}) async {
-    value = enabled;
   }
 }
 

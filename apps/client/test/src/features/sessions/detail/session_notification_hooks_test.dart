@@ -60,6 +60,7 @@ final class _InMemorySessionNotificationSettingsStore
   _InMemorySessionNotificationSettingsStore() : value = false;
 
   bool value;
+  bool permissionPrompted = false;
 
   @override
   Future<bool> getLocalNotificationEnabled() async => value;
@@ -68,14 +69,28 @@ final class _InMemorySessionNotificationSettingsStore
   Future<void> setLocalNotificationEnabled({required bool enabled}) async {
     value = enabled;
   }
+
+  @override
+  Future<bool?> getLocalNotificationPreference() async => value;
+
+  @override
+  Future<bool> getPermissionPrompted() async => permissionPrompted;
+
+  @override
+  Future<void> setPermissionPrompted() async {
+    permissionPrompted = true;
+  }
 }
 
 final class _CollectingNotificationSink implements BrokerNotificationSink {
   final List<BrokerNotificationRequest> shown = <BrokerNotificationRequest>[];
 
   @override
-  Future<void> show(BrokerNotificationRequest request) async {
+  Future<BrokerNotificationDeliveryResult> show(
+    BrokerNotificationRequest request,
+  ) async {
     shown.add(request);
+    return BrokerNotificationDeliveryResult.shown;
   }
 
   @override

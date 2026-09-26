@@ -75,6 +75,12 @@ class TestDriveConnection extends ReasonixDriveConnection {
     (this as unknown as { pendingCreate?: ReasonixDriveOpenOptions['pendingCreate'] }).pendingCreate = undefined;
   }
 
+  /** A delivered turn whose ACP return and durable user-row claim have both happened. */
+  seedResolvedDrivenTurnForTest(key: string, userIndex: number): void {
+    (this as unknown as { drivenTurns?: Map<string, { userIndex?: number; resolved: boolean }> })
+      .drivenTurns?.set(key, { userIndex, resolved: true });
+  }
+
   askPermission(params: AcpRequestPermissionParams) {
     return this.requestPermission(params);
   }
@@ -93,6 +99,30 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<boo
     await sleep(25);
   }
   return predicate();
+}
+
+type RunSummaryFrame = Extract<AgentMessage, { type: 'run-summary' }>;
+function runSummaries(frames: readonly AgentMessage[], status?: RunSummaryFrame['status']): RunSummaryFrame[] {
+  return frames.filter((frame): frame is RunSummaryFrame => frame.type === 'run-summary'
+    && (status === undefined || frame.status === status));
+}
+/**
+ * The broker attention policy's run rule (`handleRunSummary`), reduced to its
+ * pairing: a live `running` opens an observation by key, the next terminal with
+ * that key closes it, and only `done` or `error` notifies.
+ */
+function runNotifications(frames: readonly AgentMessage[]): string[] {
+  const observed = new Set<string>();
+  const notified: string[] = [];
+  for (const frame of runSummaries(frames)) {
+    if (frame.status === 'running') {
+      observed.add(frame.key);
+      continue;
+    }
+    if (!observed.delete(frame.key)) continue;
+    if (frame.status === 'done' || frame.status === 'error') notified.push(`${frame.status}:${frame.key}`);
+  }
+  return notified;
 }
 
 class FakeTransport implements ReasonixAcpTransport {
@@ -165,7 +195,7 @@ const info: SessionInfo = {
   attachMode: 'resume',
 };
 
-function writeDurableRows(rows: ReasonixTranscriptRecord[], revision: number): {
+function writeDurableRows(rows: ReasonixTranscriptRecord[], revision: number, authoredTurns?: readonly number[]): {
   entries: ReasonixDisplayEntry[];
   byteLength: number;
 } {
@@ -178,7 +208,7 @@ function writeDurableRows(rows: ReasonixTranscriptRecord[], revision: number): {
       offset: byteLength,
       length: Buffer.byteLength(`${line}\n`),
       role,
-      authoredTurn: Math.floor(index / 2),
+      authoredTurn: authoredTurns?.[index] ?? Math.floor(index / 2),
       ...(role === 'user' ? { startsTurn: true } : {}),
     };
     byteLength += Buffer.byteLength(`${line}\n`);
@@ -939,7 +969,194 @@ try {
         && message.text === 'durable native error'
         && message.clientKey === 'native-error-client'),
     JSON.stringify({ terminalErrorSeen, terminalErrorHistory }));
+  // The mapper stamps every durable footer `done`, and history must keep
+  // agreeing with live by key, so a failed turn cannot carry an `error` footer.
+  // It still notifies once rather than staying silent.
+  const terminalErrorKey = `reasonix:${id}:message:3:summary`;
+  await waitFor(() => runNotifications(terminalErrorSeen).length > 0);
+  check('an ACP error stop still pairs its durable footer once, as done, because history maps that row done',
+    runSummaries(terminalErrorSeen, 'running').length === 1
+      && JSON.stringify(runNotifications(terminalErrorSeen)) === JSON.stringify([`done:${terminalErrorKey}`])
+      && !runSummaries(terminalErrorSeen).some((frame) => frame.status === 'error'),
+    JSON.stringify(runSummaries(terminalErrorSeen)));
   await terminalError.close();
+  writeDurableRows(initial, 8);
+
+  // A Reasonix tool turn persists one assistant row per model step, and v1.25.2
+  // stamps `workDurationMs` on every one (upstream internal/agent/run_loop.go),
+  // so the mapper writes a `done` footer per step. Only the last closes the
+  // turn, and only a live `running` with that footer's key lets the broker
+  // notify.
+  const toolTurnRows = (
+    prompt: string,
+    final: string,
+  ): ReasonixTranscriptRecord[] => [
+    ...initial,
+    { role: 'user', content: prompt, raw_content: prompt, createdAt: 60 },
+    {
+      role: 'assistant',
+      content: 'checking the workspace',
+      workDurationMs: 4,
+      tool_calls: [{ id: 'call-step', name: 'bash', arguments: '{"command":"ls"}' }],
+    },
+    { role: 'tool', name: 'bash', tool_call_id: 'call-step', content: 'README.md' },
+    { role: 'assistant', content: final, workDurationMs: 9 },
+  ];
+  const toolTurnAuthored = [0, 0, 1, 1, 1, 1];
+  const stepKey = `reasonix:${id}:message:3:summary`;
+  const finalKey = `reasonix:${id}:message:5:summary`;
+  const hasFrame = (frames: readonly AgentMessage[], key: string, status: RunSummaryFrame['status']) =>
+    runSummaries(frames, status).some((frame) => frame.key === key);
+
+  // Preferred order: the ACP turn has returned before the tail appends its rows.
+  writeDurableRows(initial, 60);
+  let appendedAlive = true;
+  const appendedTransport: ReasonixAcpTransport = {
+    get alive() { return appendedAlive; },
+    async sessionPrompt() { return { stopReason: 'end_turn' }; },
+    sessionCancel() {},
+    async close() { appendedAlive = false; },
+  };
+  const appended = new TestDriveConnection(session, info, appendedTransport);
+  const appendedLive: AgentMessage[] = [];
+  appended.subscribe((message) => appendedLive.push(message));
+  await appended.getHistory();
+  await appended.sendPrompt({ text: 'tool turn appended after return' });
+  const runningBeforeRows = runSummaries(appendedLive, 'running').length;
+  writeDurableRows(toolTurnRows('tool turn appended after return', 'appended final answer'), 61, toolTurnAuthored);
+  await waitFor(() => hasFrame(appendedLive, finalKey, 'done'));
+  const appendedRunning = runSummaries(appendedLive, 'running');
+  const appendedFinal = runSummaries(appendedLive, 'done').filter((frame) => frame.key === finalKey);
+  check('a driven tool turn opens one running on the footer that closes it, just before that footer',
+    runningBeforeRows === 0
+      && appendedRunning.length === 1
+      && appendedRunning[0]?.key === finalKey
+      && appendedRunning[0].turnId === appendedFinal[0]?.turnId
+      && appendedFinal.length === 1
+      && appendedLive.indexOf(appendedRunning[0]!) < appendedLive.indexOf(appendedFinal[0]!)
+      && hasFrame(appendedLive, stepKey, 'done')
+      && JSON.stringify(runNotifications(appendedLive)) === JSON.stringify([`done:${finalKey}`]),
+    JSON.stringify(runSummaries(appendedLive)));
+  // A same-content sidecar write wakes the watcher; neither it nor a replay is a live turn.
+  writeFileSync(eventIndexPath, readFileSync(eventIndexPath));
+  await sleep(250);
+  await appended.getHistory();
+  check('no second running follows the paired terminal on a later drain or replay',
+    runSummaries(appendedLive, 'running').length === 1
+      && runNotifications(appendedLive).length === 1,
+    JSON.stringify(runSummaries(appendedLive)));
+  await appended.close();
+
+  // Fallback order: the tail published the closing footer before the ACP return.
+  writeDurableRows(initial, 62);
+  let publishedAlive = true;
+  const publishedLive: AgentMessage[] = [];
+  const publishedTransport: ReasonixAcpTransport = {
+    get alive() { return publishedAlive; },
+    async sessionPrompt(params) {
+      writeDurableRows(toolTurnRows(params.prompt[0]?.text ?? '', 'published final answer'), 63, toolTurnAuthored);
+      await waitFor(() => hasFrame(publishedLive, finalKey, 'done'));
+      return { stopReason: 'end_turn' };
+    },
+    sessionCancel() {},
+    async close() { publishedAlive = false; },
+  };
+  const published = new TestDriveConnection(session, info, publishedTransport);
+  published.subscribe((message) => publishedLive.push(message));
+  await published.getHistory();
+  await published.sendPrompt({ text: 'tool turn published before return' });
+  const publishedRunning = runSummaries(publishedLive, 'running');
+  const runningAt = publishedRunning[0] ? publishedLive.indexOf(publishedRunning[0]) : -1;
+  const tailFinalAt = publishedLive.findIndex((frame) => frame.type === 'run-summary'
+    && frame.key === finalKey && frame.status === 'done');
+  const resent = publishedLive[runningAt + 1];
+  check('a closing footer published before the ACP return is re-sent once, unchanged, right after running',
+    publishedRunning.length === 1
+      && publishedRunning[0]?.key === finalKey
+      && tailFinalAt >= 0
+      && tailFinalAt < runningAt
+      && resent?.type === 'run-summary'
+      && resent.key === finalKey
+      && resent.status === 'done'
+      && JSON.stringify(resent) === JSON.stringify(publishedLive[tailFinalAt])
+      && JSON.stringify(runNotifications(publishedLive)) === JSON.stringify([`done:${finalKey}`]),
+    JSON.stringify(runSummaries(publishedLive)));
+  writeFileSync(eventIndexPath, readFileSync(eventIndexPath));
+  await sleep(250);
+  await published.getHistory();
+  check('the re-sent pairing is not repeated by a later drain or replay',
+    runSummaries(publishedLive, 'running').length === 1
+      && runNotifications(publishedLive).length === 1,
+    JSON.stringify(runSummaries(publishedLive)));
+  await published.close();
+
+  // A user Stop mid tool turn leaves a durable step footer, which is not a finished turn.
+  writeDurableRows(initial, 64);
+  let stoppedAlive = true;
+  const stoppedLive: AgentMessage[] = [];
+  const stoppedTransport: ReasonixAcpTransport = {
+    get alive() { return stoppedAlive; },
+    async sessionPrompt(params) {
+      const prompt = params.prompt[0]?.text ?? '';
+      writeDurableRows([
+        ...toolTurnRows(prompt, 'unused').slice(0, 4),
+        {
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: 'call-step',
+          content: 'interrupted',
+          tool_execution: { state: 'cancelled' },
+        },
+      ], 65, [0, 0, 1, 1, 1]);
+      await waitFor(() => hasFrame(stoppedLive, stepKey, 'done'));
+      return { stopReason: 'cancelled' };
+    },
+    sessionCancel() {},
+    async close() { stoppedAlive = false; },
+  };
+  const stopped = new TestDriveConnection(session, info, stoppedTransport);
+  stopped.subscribe((message) => stoppedLive.push(message));
+  await stopped.getHistory();
+  await stopped.sendPrompt({ text: 'tool turn stopped by the user' });
+  await sleep(200);
+  check('a cancelled tool turn raises no running, so its durable step footer cannot notify',
+    stopped.driving
+      && hasFrame(stoppedLive, stepKey, 'done')
+      && runSummaries(stoppedLive, 'running').length === 0
+      && runNotifications(stoppedLive).length === 0,
+    JSON.stringify(runSummaries(stoppedLive)));
+  await stopped.close();
+
+  // Race order for a created session: its initial snapshot publishes only after
+  // the first turn has returned and been claimed. The snapshot is catch-up and
+  // must carry no running; the pairing follows it.
+  const lateSnapshotRows: ReasonixTranscriptRecord[] = toolTurnRows('created turn returned first', 'late final')
+    .slice(initial.length);
+  const lateFinalKey = `reasonix:${id}:message:3:summary`;
+  const lateSnapshot = new TestDriveConnection(session, info, new FakeTransport(), {
+    pendingCreate: { cwd: root, discover: async () => ({ ...session }) },
+  });
+  lateSnapshot.seedResolvedDrivenTurnForTest('queued:reasonix:late-snapshot.1', 0);
+  const lateSnapshotLive: AgentMessage[] = [];
+  lateSnapshot.subscribe((message) => lateSnapshotLive.push(message));
+  writeDurableRows(lateSnapshotRows, 66, [0, 0, 0, 0]);
+  await waitFor(() => runNotifications(lateSnapshotLive).length > 0);
+  const lateRunning = runSummaries(lateSnapshotLive, 'running');
+  const lateRunningAt = lateRunning[0] ? lateSnapshotLive.indexOf(lateRunning[0]) : -1;
+  const lateSnapshotFooterAt = lateSnapshotLive.findIndex((frame) => frame.type === 'run-summary'
+    && frame.key === lateFinalKey && frame.status === 'done');
+  const latePaired = lateSnapshotLive[lateRunningAt + 1];
+  check('a created initial snapshot published after its turn returned still carries no running; the pair follows it',
+    lateRunning.length === 1
+      && lateRunning[0]?.key === lateFinalKey
+      && lateSnapshotFooterAt >= 0
+      && lateSnapshotFooterAt < lateRunningAt
+      && latePaired?.type === 'run-summary'
+      && latePaired.key === lateFinalKey
+      && latePaired.status === 'done'
+      && JSON.stringify(runNotifications(lateSnapshotLive)) === JSON.stringify([`done:${lateFinalKey}`]),
+    JSON.stringify(runSummaries(lateSnapshotLive)));
+  await lateSnapshot.close();
   writeDurableRows(initial, 8);
 
   for (const stopReason of [undefined, 'future_stop']) {
@@ -1372,6 +1589,14 @@ try {
         && message.clientKey === 'after-cancelled'),
     JSON.stringify({ pending: cancelledThenNext.getPending(), live: cancelledThenNextLive,
       cancelledFirstReplay, replay: cancelledThenNextReplay }));
+  const nextTurnKey = `reasonix:${id}:message:5:summary`;
+  await waitFor(() => runNotifications(cancelledThenNextLive).length > 0);
+  check('a cancelled turn raises no running while the next driven turn pairs its footer once',
+    runSummaries(cancelledThenNextLive, 'running').length === 1
+      && runSummaries(cancelledThenNextLive, 'running')[0]?.key === nextTurnKey
+      && runSummaries(cancelledThenNextLive, 'cancelled').length > 0
+      && JSON.stringify(runNotifications(cancelledThenNextLive)) === JSON.stringify([`done:${nextTurnKey}`]),
+    JSON.stringify(runSummaries(cancelledThenNextLive)));
   await cancelledThenNext.close();
 
   for (const terminalReason of ['end_turn', 'refusal'] as const) {

@@ -911,6 +911,22 @@ try {
         && summaries()[11]?.userMessageKey === 'kimi:msg_turn_h_user:0'
         && summaries()[11]?.startedAt === t6 + 30_000,
       JSON.stringify(summaries()[11]));
+
+    // NO `running` FROM AN OBSERVER. The broker notifies on a running summary
+    // followed by a terminal one, and an observe connection cannot tell a live
+    // start from one its subscribe replayed — so even a start that names its
+    // prompt, followed by that turn's whole ending, announces nothing here.
+    turnSocket!.deliver(turnEnvelope('turn.started', 1000, { turnId: 90, promptId: 'p-observed' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 1001, { busy: true }));
+    turnSocket!.deliver(turnEnvelope('turn.ended', 1002, { turnId: 90, reason: 'completed' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 1003, { busy: false, pending_interaction: 'none' }));
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 1004, { promptId: 'p-observed', reason: 'completed' }));
+    await Bun.sleep(80);
+    check('an observe connection announces no running run-summary, even for a start naming its prompt',
+      summaries().length === 13
+        && summaries()[12]?.turnId === '90' && summaries()[12]?.status === 'done'
+        && !summaries().some((summary) => summary.status === 'running'),
+      JSON.stringify(summaries().slice(12)));
     await turnConn.close();
   }
 

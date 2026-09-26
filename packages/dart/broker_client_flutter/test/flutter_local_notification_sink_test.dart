@@ -3,34 +3,72 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  group('FlutterLocalNotificationSink', () {
-    final request = BrokerNotificationRequest(
-      id: 'session-notification:example-1',
-      title: 'Session requires input',
-      body: 'A permission prompt is waiting.',
-      category: BrokerNotificationCategory.actionRequired,
-      importance: BrokerNotificationImportance.normal,
-      payload: {'tool': 'claude', 'sessionId': 'session-1'},
-      createdAt: DateTime(2026, 7, 2, 12, 0),
-    );
+  const quietChannel = BrokerNotificationChannel(
+    id: 'cosy.v2.turnFinished',
+    name: 'Turn finished',
+    description: 'An agent finished its turn.',
+    groupId: 'cosy.v2.sessions',
+    defaultEnabled: true,
+    defaultSound: false,
+    urgent: false,
+  );
+  const urgentChannel = BrokerNotificationChannel(
+    id: 'cosy.v2.permissionRequest',
+    name: 'Permission request',
+    description: 'An agent is waiting for approval.',
+    groupId: 'cosy.v2.sessions',
+    defaultEnabled: true,
+    defaultSound: true,
+    urgent: true,
+  );
+  const offByDefaultChannel = BrokerNotificationChannel(
+    id: 'cosy.v2.usageQuota',
+    name: 'Usage quota',
+    description: 'A usage limit is close.',
+    groupId: 'cosy.v2.server',
+    defaultEnabled: false,
+    defaultSound: false,
+    urgent: false,
+  );
 
+  BrokerNotificationRequest requestFor(
+    BrokerNotificationChannel channel, {
+    String id = 'attention-dedupe:00000001',
+    bool? playSound,
+    String? threadKey,
+  }) => BrokerNotificationRequest(
+    id: id,
+    title: 'Turn finished',
+    body: 'Fix the login bug',
+    channel: channel,
+    playSound: playSound ?? channel.defaultSound,
+    threadKey: threadKey,
+    payload: const {'tool': 'claude', 'sessionId': 'session-1'},
+    createdAt: DateTime(2026, 9, 23, 12),
+  );
+
+  final request = requestFor(quietChannel);
+
+  group('FlutterLocalNotificationSink lifecycle', () {
     test('initializes lazily and idempotently', () async {
-      final backend = _FakeLocalNotificationBackend();
+      final backend = _FakeBackend();
       final sink = FlutterLocalNotificationSink(backend: backend);
 
       expect(backend.initializeCalls, 0);
 
       await sink.show(request);
       await sink.show(request);
+      await sink.permissionStatus();
+      await sink.requestPermission();
       expect(backend.initializeCalls, 1);
 
-      await sink.clear('session-notification:example-1');
+      await sink.clear('attention-dedupe:00000001');
       await sink.clearAll();
       expect(backend.initializeCalls, 1);
     });
 
     test('forwards cold-launch payload from app-launch details once', () async {
-      final backend = _FakeLocalNotificationBackend(
+      final backend = _FakeBackend(
         launchPayload: '{"kind":"attention-event","eventId":"event-1"}',
       );
       final tapped = <String?>[];
@@ -42,7 +80,6 @@ void main() {
       await sink.show(request);
       await sink.show(request);
 
-      expect(backend.initializeCalls, 1);
       expect(backend.getLaunchPayloadCalls, 1);
       expect(tapped, ['{"kind":"attention-event","eventId":"event-1"}']);
     });
@@ -50,7 +87,7 @@ void main() {
     test(
       'recovers cold-launch payload without showing a notification',
       () async {
-        final backend = _FakeLocalNotificationBackend(
+        final backend = _FakeBackend(
           launchPayload: '{"kind":"attention-event","eventId":"cold"}',
         );
         final tapped = <String?>[];
@@ -61,17 +98,15 @@ void main() {
 
         await sink.initialize();
 
-        expect(backend.initializeCalls, 1);
-        expect(backend.getLaunchPayloadCalls, 1);
         expect(tapped, ['{"kind":"attention-event","eventId":"cold"}']);
-        expect(backend.showCalls, isEmpty);
+        expect(backend.shown, isEmpty);
       },
     );
 
     test(
       'forwards explicit platform taps without interpreting payload',
       () async {
-        final backend = _FakeLocalNotificationBackend();
+        final backend = _FakeBackend();
         final tapped = <String?>[];
         final sink = FlutterLocalNotificationSink(
           backend: backend,
@@ -85,16 +120,261 @@ void main() {
       },
     );
 
-    test('maps deterministic IDs to stable platform ids', () async {
+    test(
+      'retries initialization after a failure instead of caching it',
+      () async {
+        final backend = _FakeBackend()..initializeError = StateError('icon');
+        final sink = FlutterLocalNotificationSink(backend: backend);
+
+        final first = await sink.show(request);
+        backend.initializeError = null;
+        final second = await sink.show(request);
+
+        expect(first.outcome, BrokerNotificationDeliveryOutcome.failed);
+        expect(first.reason, startsWith('initialization-failed'));
+        expect(second.outcome, BrokerNotificationDeliveryOutcome.shown);
+        expect(backend.initializeCalls, 2);
+      },
+    );
+  });
+
+  group('FlutterLocalNotificationSink permission', () {
+    test('reads permission without prompting', () async {
+      final backend = _FakeBackend(
+        permission: const NotificationPermissionStatus(
+          NotificationPermissionState.notGranted,
+        ),
+      );
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      final status = await sink.permissionStatus();
+
+      expect(status.state, NotificationPermissionState.notGranted);
+      expect(backend.requestPermissionCalls, 0);
+    });
+
+    test('returns the prompt result', () async {
+      final backend = _FakeBackend(
+        requestResult: const NotificationPermissionStatus(
+          NotificationPermissionState.denied,
+        ),
+      );
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      final status = await sink.requestPermission();
+
+      expect(status.state, NotificationPermissionState.denied);
+      expect(backend.requestPermissionCalls, 1);
+    });
+
+    test('a throwing backend reads as an error, never throws', () async {
+      final backend = _FakeBackend()..permissionError = StateError('boom');
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      final read = await sink.permissionStatus();
+      final requested = await sink.requestPermission();
+
+      expect(read.state, NotificationPermissionState.error);
+      expect(read.reason, contains('boom'));
+      expect(requested.state, NotificationPermissionState.error);
+    });
+
+    test(
+      'an initialization failure reads as an error with its reason',
+      () async {
+        final backend = _FakeBackend()
+          ..initializeError = PlatformExceptionLike('invalid_icon');
+        final sink = FlutterLocalNotificationSink(backend: backend);
+
+        final status = await sink.permissionStatus();
+
+        expect(status.state, NotificationPermissionState.error);
+        expect(status.reason, 'initialization-failed: invalid_icon');
+      },
+    );
+  });
+
+  group('FlutterLocalNotificationSink show', () {
+    test('never prompts for permission', () async {
+      final backend = _FakeBackend(
+        permission: const NotificationPermissionStatus(
+          NotificationPermissionState.notGranted,
+        ),
+      );
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      await sink.show(request);
+
+      expect(backend.requestPermissionCalls, 0);
+    });
+
+    test('reports each permission state as its own outcome', () async {
+      Future<BrokerNotificationDeliveryResult> showWith(
+        NotificationPermissionStatus permission,
+      ) => FlutterLocalNotificationSink(
+        backend: _FakeBackend(permission: permission),
+      ).show(request);
+
+      final granted = await showWith(NotificationPermissionStatus.granted);
+      final notGranted = await showWith(
+        const NotificationPermissionStatus(
+          NotificationPermissionState.notGranted,
+        ),
+      );
+      final denied = await showWith(
+        const NotificationPermissionStatus(NotificationPermissionState.denied),
+      );
+      final unsupported = await showWith(
+        const NotificationPermissionStatus(
+          NotificationPermissionState.unsupported,
+          reason: 'insecure-context',
+        ),
+      );
+      final error = await showWith(
+        const NotificationPermissionStatus(
+          NotificationPermissionState.error,
+          reason: 'bad',
+        ),
+      );
+
+      expect(granted.outcome, BrokerNotificationDeliveryOutcome.shown);
+      expect(notGranted.outcome, BrokerNotificationDeliveryOutcome.blocked);
+      expect(notGranted.reason, 'permission-not-granted');
+      expect(denied.outcome, BrokerNotificationDeliveryOutcome.blocked);
+      expect(
+        unsupported.outcome,
+        BrokerNotificationDeliveryOutcome.unavailable,
+      );
+      expect(unsupported.reason, 'insecure-context');
+      expect(error.outcome, BrokerNotificationDeliveryOutcome.failed);
+      expect(error.reason, 'bad');
+    });
+
+    test('an Android channel the user turned off reports blocked', () async {
+      final backend = _FakeBackend(managesChannels: true)
+        ..channels = {
+          quietChannel.id: const NotificationChannelState(
+            enabled: false,
+            sound: false,
+          ),
+        };
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      final result = await sink.show(request);
+
+      expect(result.outcome, BrokerNotificationDeliveryOutcome.blocked);
+      expect(result.reason, 'channel-off');
+      expect(backend.shown, isEmpty);
+    });
+
+    test(
+      'channel state is ignored where the app owns per-type settings',
+      () async {
+        final backend = _FakeBackend()
+          ..channels = {
+            quietChannel.id: const NotificationChannelState(
+              enabled: false,
+              sound: false,
+            ),
+          };
+        final sink = FlutterLocalNotificationSink(backend: backend);
+
+        final result = await sink.show(request);
+
+        expect(result.outcome, BrokerNotificationDeliveryOutcome.shown);
+      },
+    );
+
+    test('a platform failure reports failed instead of throwing', () async {
+      final backend = _FakeBackend()..showError = StateError('toast failed');
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      final result = await sink.show(request);
+
+      expect(result.outcome, BrokerNotificationDeliveryOutcome.failed);
+      expect(result.reason, contains('toast failed'));
+      expect(result.isRetryable, isTrue);
+    });
+
+    test('forwards the stable id, text, and sorted payload', () async {
+      final backend = _FakeBackend();
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      await sink.show(request);
+
+      final call = backend.shown.single;
+      expect(
+        call.id,
+        FlutterLocalNotificationSink.derivePlatformNotificationId(request.id),
+      );
+      expect(call.title, 'Turn finished');
+      expect(call.body, 'Fix the login bug');
+      expect(call.payload, '{"sessionId":"session-1","tool":"claude"}');
+      expect(call.request, same(request));
+    });
+  });
+
+  group('FlutterLocalNotificationSink channels', () {
+    test(
+      'forwards groups, channels, and obsolete ids once initialized',
+      () async {
+        final backend = _FakeBackend(managesChannels: true);
+        final sink = FlutterLocalNotificationSink(backend: backend);
+        const group = BrokerNotificationChannelGroup(
+          id: 'cosy.v2.sessions',
+          name: 'Sessions',
+        );
+
+        await sink.configureChannels(
+          groups: const [group],
+          channels: const [quietChannel, urgentChannel],
+          obsoleteChannelIds: const {'cosyncing_session_info'},
+        );
+
+        expect(backend.initializeCalls, 1);
+        expect(backend.configuredGroups, [group]);
+        expect(backend.configuredChannels, [quietChannel, urgentChannel]);
+        expect(backend.deletedChannelIds, {'cosyncing_session_info'});
+        expect(sink.systemManagesChannels, isTrue);
+      },
+    );
+
+    test('channel configuration failures are swallowed', () async {
+      final backend = _FakeBackend(managesChannels: true)
+        ..configureError = StateError('no channel api');
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      await sink.configureChannels(groups: const [], channels: const []);
+
+      expect(await sink.channelStates(), isEmpty);
+    });
+
+    test('channel reads wait for pending configuration', () async {
+      final backend = _FakeBackend(managesChannels: true);
+      final sink = FlutterLocalNotificationSink(backend: backend);
+
+      final configured = sink.configureChannels(
+        groups: const [],
+        channels: const [quietChannel],
+      );
+      final states = await sink.channelStates();
+      await configured;
+
+      expect(states.keys, [quietChannel.id]);
+    });
+  });
+
+  group('FlutterLocalNotificationSink clearing', () {
+    test('maps deterministic ids to stable positive platform ids', () {
       final first = FlutterLocalNotificationSink.derivePlatformNotificationId(
-        'session-notification:example-1',
+        'attention-dedupe:1',
       );
       final same = FlutterLocalNotificationSink.derivePlatformNotificationId(
-        'session-notification:example-1',
+        'attention-dedupe:1',
       );
       final different =
           FlutterLocalNotificationSink.derivePlatformNotificationId(
-            'session-notification:example-2',
+            'attention-dedupe:2',
           );
 
       expect(first, same);
@@ -103,44 +383,32 @@ void main() {
       expect(first, lessThanOrEqualTo(0x7fffffff));
     });
 
-    test(
-      'serializes payload deterministically before plugin dispatch',
-      () async {
-        final payloadString = FlutterLocalNotificationSink.serializePayload({
+    test('serializes payload deterministically', () {
+      expect(
+        FlutterLocalNotificationSink.serializePayload({
           'z': 9,
           'a': '1',
           'm': true,
-        });
-        expect(payloadString, '{"a":"1","m":true,"z":9}');
-      },
-    );
+        }),
+        '{"a":"1","m":true,"z":9}',
+      );
+      expect(FlutterLocalNotificationSink.serializePayload(const {}), isNull);
+    });
 
-    test(
-      'forwards selective clear, clearMany, and clearAll to backend',
-      () async {
-        final backend = _FakeLocalNotificationBackend();
-        final sink = FlutterLocalNotificationSink(backend: backend);
+    test('forwards selective clear, clearMany, and clearAll', () async {
+      final backend = _FakeBackend();
+      final sink = FlutterLocalNotificationSink(backend: backend);
 
-        await sink.clear('session-notification:example-1');
-        await sink.clearMany([
-          'session-notification:example-2',
-          'session-notification:example-3',
-          'session-notification:example-2',
-        ]);
-        await sink.clearAll();
+      await sink.clear('id-1');
+      await sink.clearMany(['id-2', 'id-3', 'id-2']);
+      await sink.clearAll();
 
-        expect(backend.clearCalls.toSet(), {
-          for (final id in [
-            'session-notification:example-1',
-            'session-notification:example-2',
-            'session-notification:example-3',
-          ])
-            FlutterLocalNotificationSink.derivePlatformNotificationId(id),
-        });
-        expect(backend.clearAllCalls, 1);
-        expect(backend.initializeCalls, 1);
-      },
-    );
+      expect(backend.clearCalls.toSet(), {
+        for (final id in ['id-1', 'id-2', 'id-3'])
+          FlutterLocalNotificationSink.derivePlatformNotificationId(id),
+      });
+      expect(backend.clearAllCalls, 1);
+    });
 
     test(
       'clearMany attempts later ids before rethrowing the first error',
@@ -150,204 +418,154 @@ void main() {
           for (final id in ids)
             FlutterLocalNotificationSink.derivePlatformNotificationId(id),
         ];
-        final backend = _FakeLocalNotificationBackend(
-          failingClearIds: {platformIds[1]},
-        );
+        final backend = _FakeBackend(failingClearIds: {platformIds[1]});
         final sink = FlutterLocalNotificationSink(backend: backend);
 
         await expectLater(sink.clearMany(ids), throwsA(isA<StateError>()));
 
         expect(backend.clearCalls, platformIds);
-        expect(backend.clearAllCalls, 0);
       },
     );
+  });
 
-    test('forwards mapped display options and payload to backend', () async {
-      final backend = _FakeLocalNotificationBackend();
-      final sink = FlutterLocalNotificationSink(backend: backend);
-
-      await sink.show(request);
-
-      final call = backend.showCalls.single;
-      expect(call.options.androidChannelId, 'cosyncing_session_action');
-      expect(call.options.androidChannelName, 'Session Action Requests');
-      expect(call.options.androidImportance, Importance.defaultImportance);
-      expect(call.options.playSound, isFalse);
-      expect(call.options.enableVibration, isFalse);
-      expect(call.payload, '{"sessionId":"session-1","tool":"claude"}');
-    });
-
-    test(
-      'requests permission via backend and returns backend outcome',
-      () async {
-        final backend = _FakeLocalNotificationBackend(
-          permissionRequestResult:
-              const FlutterLocalNotificationPermissionRequestResult(
-                outcome:
-                    FlutterLocalNotificationPermissionRequestOutcome.denied,
-              ),
-        );
-        final sink = FlutterLocalNotificationSink(backend: backend);
-
-        final result = await sink.requestPermission();
-
-        expect(
-          result.outcome,
-          FlutterLocalNotificationPermissionRequestOutcome.denied,
-        );
-        expect(backend.requestPermissionCalls, 1);
-        expect(backend.initializeCalls, 1);
-      },
-    );
-
-    test(
-      'permission request shares lazy initialization with show path',
-      () async {
-        final backend = _FakeLocalNotificationBackend();
-        final sink = FlutterLocalNotificationSink(backend: backend);
-
-        await sink.requestPermission();
-        await sink.show(request);
-
-        expect(backend.initializeCalls, 1);
-        expect(backend.requestPermissionCalls, 1);
-        expect(backend.showCalls, hasLength(1));
-      },
-    );
-
-    test('exposes explicit request outcomes from backend mapping', () async {
-      final outcomes = <FlutterLocalNotificationPermissionRequestOutcome>[
-        FlutterLocalNotificationPermissionRequestOutcome.granted,
-        FlutterLocalNotificationPermissionRequestOutcome.unsupported,
-        FlutterLocalNotificationPermissionRequestOutcome.failed,
-      ];
-
-      for (final outcome in outcomes) {
-        final backend = _FakeLocalNotificationBackend(
-          permissionRequestResult:
-              FlutterLocalNotificationPermissionRequestResult(
-                outcome: outcome,
-                message:
-                    outcome ==
-                        FlutterLocalNotificationPermissionRequestOutcome.failed
-                    ? 'failure'
-                    : null,
-              ),
-        );
-        final sink = FlutterLocalNotificationSink(backend: backend);
-
-        final result = await sink.requestPermission();
-
-        expect(result.outcome, outcome);
-      }
-    });
-
-    test('does not request permissions from show path', () async {
-      final backend = _FakeLocalNotificationBackend();
-      final sink = FlutterLocalNotificationSink(backend: backend);
-
-      await sink.show(request);
-
-      expect(backend.requestPermissionCalls, 0);
-    });
-
-    test(
-      'maps broker importance/category into deterministic delivery options',
-      () {
-        final options = FlutterLocalNotificationSink.displayOptionsFor(
-          importance: BrokerNotificationImportance.high,
-          category: BrokerNotificationCategory.error,
-        );
-
-        expect(options.androidChannelId, 'cosyncing_session_error');
-        expect(options.androidImportance, Importance.high);
-        expect(options.playSound, isTrue);
-        expect(options.enableVibration, isTrue);
-      },
-    );
-
-    test('maps delivery intent on every supported notification platform', () {
-      final options = FlutterLocalNotificationSink.displayOptionsFor(
-        importance: BrokerNotificationImportance.high,
-        category: BrokerNotificationCategory.actionRequired,
-      );
-
+  group('FlutterLocalNotificationSink platform mapping', () {
+    test('an urgent type interrupts on every platform', () {
       final details = FlutterLocalNotificationSink.notificationDetailsFor(
-        options,
+        requestFor(urgentChannel, threadKey: 'claude:session-1'),
       );
 
+      expect(details.android?.channelId, urgentChannel.id);
       expect(details.android?.importance, Importance.high);
+      expect(details.android?.priority, Priority.high);
+      expect(details.android?.groupKey, 'claude:session-1');
+      expect(details.android?.visibility, NotificationVisibility.private);
       expect(details.iOS?.presentBanner, isTrue);
-      expect(details.iOS?.presentList, isTrue);
       expect(details.iOS?.presentSound, isTrue);
-      expect(details.macOS?.presentSound, isTrue);
+      expect(details.macOS?.interruptionLevel, InterruptionLevel.active);
+      expect(details.macOS?.threadIdentifier, 'claude:session-1');
       expect(details.linux?.urgency, LinuxNotificationUrgency.critical);
-      expect(details.linux?.resident, isTrue);
       expect(details.windows?.duration, WindowsNotificationDuration.long);
       expect(details.windows?.audio?.isSilent, isFalse);
       expect(details.web?.requireInteraction, isTrue);
       expect(details.web?.isSilent, isFalse);
     });
 
-    test(
-      'maps quiet informational notifications without platform defaults',
-      () {
-        final options = FlutterLocalNotificationSink.displayOptionsFor(
-          importance: BrokerNotificationImportance.low,
-          category: BrokerNotificationCategory.info,
-        );
+    test('a quiet type still shows a banner, silently', () {
+      final details = FlutterLocalNotificationSink.notificationDetailsFor(
+        request,
+      );
 
-        final details = FlutterLocalNotificationSink.notificationDetailsFor(
-          options,
-        );
+      // `passive` would file it into Notification Center with no banner.
+      expect(details.macOS?.interruptionLevel, InterruptionLevel.active);
+      expect(details.macOS?.presentBanner, isTrue);
+      expect(details.macOS?.presentSound, isFalse);
+      // Heads-up needs HIGH; quiet is the channel's sound, not importance.
+      expect(details.android?.importance, Importance.high);
+      expect(details.android?.playSound, isFalse);
+      expect(details.linux?.urgency, LinuxNotificationUrgency.normal);
+      expect(details.linux?.suppressSound, isTrue);
+      expect(details.windows?.audio?.isSilent, isTrue);
+      expect(details.windows?.duration, WindowsNotificationDuration.short);
+      expect(details.web?.isSilent, isTrue);
+      expect(details.web?.requireInteraction, isFalse);
+    });
 
-        expect(details.iOS?.presentSound, isFalse);
-        expect(details.linux?.urgency, LinuxNotificationUrgency.low);
-        expect(details.linux?.suppressSound, isTrue);
-        expect(details.windows?.audio?.isSilent, isTrue);
-        expect(details.web?.isSilent, isTrue);
-        expect(details.web?.requireInteraction, isFalse);
-      },
-    );
+    test('the per-presentation sound choice overrides the type default', () {
+      final details = FlutterLocalNotificationSink.notificationDetailsFor(
+        requestFor(urgentChannel, playSound: false),
+      );
+
+      expect(details.macOS?.presentSound, isFalse);
+      expect(details.windows?.audio?.isSilent, isTrue);
+      expect(details.web?.isSilent, isTrue);
+    });
+
+    test('maps the Windows per-app toast setting', () {
+      NotificationPermissionStatus read(WindowsNotificationSetting? setting) =>
+          FlutterLocalNotificationSink.windowsPermissionFor(setting);
+
+      expect(
+        read(WindowsNotificationSetting.enabled).state,
+        NotificationPermissionState.granted,
+      );
+      expect(read(null).state, NotificationPermissionState.granted);
+      for (final off in [
+        WindowsNotificationSetting.disabledForApplication,
+        WindowsNotificationSetting.disabledForUser,
+      ]) {
+        expect(read(off).state, NotificationPermissionState.denied);
+      }
+      expect(
+        read(WindowsNotificationSetting.disabledByGroupPolicy).reason,
+        'group-policy',
+      );
+      expect(
+        read(WindowsNotificationSetting.disabledByManifest).state,
+        NotificationPermissionState.unsupported,
+      );
+    });
+
+    test('an off-by-default Android channel is created blocked', () {
+      expect(
+        FlutterLocalNotificationSink.androidImportanceFor(offByDefaultChannel),
+        Importance.none,
+      );
+      expect(
+        FlutterLocalNotificationSink.androidImportanceFor(quietChannel),
+        Importance.high,
+      );
+    });
   });
 }
 
-final class _FakeLocalNotificationBackend
-    implements FlutterLocalNotificationBackend {
-  int initializeCalls = 0;
-  int requestPermissionCalls = 0;
-  int getLaunchPayloadCalls = 0;
-  final FlutterLocalNotificationPermissionRequestResult permissionRequestResult;
+/// Stands in for a platform exception whose `toString` is its code.
+final class PlatformExceptionLike implements Exception {
+  PlatformExceptionLike(this.code);
+
+  final String code;
+
+  @override
+  String toString() => code;
+}
+
+final class _FakeBackend implements FlutterLocalNotificationBackend {
+  _FakeBackend({
+    this.permission = NotificationPermissionStatus.granted,
+    this.requestResult = NotificationPermissionStatus.granted,
+    this.managesChannels = false,
+    this.launchPayload,
+    this.failingClearIds = const {},
+  });
+
+  NotificationPermissionStatus permission;
+  final NotificationPermissionStatus requestResult;
+  final bool managesChannels;
   final String? launchPayload;
   final Set<int> failingClearIds;
 
-  final List<_FakeShowCall> showCalls = [];
+  Object? initializeError;
+  Object? permissionError;
+  Object? showError;
+  Object? configureError;
+  Map<String, NotificationChannelState> channels = {};
+
+  int initializeCalls = 0;
+  int requestPermissionCalls = 0;
+  int getLaunchPayloadCalls = 0;
+  FlutterLocalNotificationTapHandler? tapHandler;
+  final List<_ShowCall> shown = [];
   final List<int> clearCalls = [];
   int clearAllCalls = 0;
-
-  _FakeLocalNotificationBackend({
-    FlutterLocalNotificationPermissionRequestResult? permissionRequestResult,
-    this.launchPayload,
-    this.failingClearIds = const {},
-  }) : permissionRequestResult =
-           permissionRequestResult ??
-           const FlutterLocalNotificationPermissionRequestResult(
-             outcome: FlutterLocalNotificationPermissionRequestOutcome.granted,
-           );
+  List<BrokerNotificationChannelGroup> configuredGroups = const [];
+  List<BrokerNotificationChannel> configuredChannels = const [];
+  Set<String> deletedChannelIds = const {};
 
   @override
   Future<void> initialize({FlutterLocalNotificationTapHandler? onTap}) async {
     initializeCalls += 1;
     tapHandler = onTap;
-  }
-
-  FlutterLocalNotificationTapHandler? tapHandler;
-
-  @override
-  Future<FlutterLocalNotificationPermissionRequestResult>
-  requestPermission() async {
-    requestPermissionCalls += 1;
-    return permissionRequestResult;
+    final error = initializeError;
+    if (error != null) throw error;
   }
 
   @override
@@ -357,20 +575,67 @@ final class _FakeLocalNotificationBackend
   }
 
   @override
+  Future<NotificationPermissionStatus> permissionStatus() async {
+    final error = permissionError;
+    if (error != null) throw error;
+    return permission;
+  }
+
+  @override
+  Future<NotificationPermissionStatus> requestPermission() async {
+    requestPermissionCalls += 1;
+    final error = permissionError;
+    if (error != null) throw error;
+    permission = requestResult;
+    return requestResult;
+  }
+
+  @override
+  bool get systemManagesChannels => managesChannels;
+
+  @override
+  Future<void> configureChannels({
+    required List<BrokerNotificationChannelGroup> groups,
+    required List<BrokerNotificationChannel> channels,
+    required Set<String> obsoleteChannelIds,
+  }) async {
+    final error = configureError;
+    if (error != null) throw error;
+    configuredGroups = groups;
+    configuredChannels = channels;
+    deletedChannelIds = obsoleteChannelIds;
+    for (final channel in channels) {
+      this.channels[channel.id] = NotificationChannelState(
+        enabled: channel.defaultEnabled,
+        sound: channel.defaultSound,
+      );
+    }
+  }
+
+  @override
+  Future<Map<String, NotificationChannelState>> channelStates() async {
+    final error = configureError;
+    if (error != null) throw error;
+    return managesChannels ? Map.of(channels) : const {};
+  }
+
+  @override
   Future<void> show({
     required int id,
     required String title,
     required String body,
     required String? payload,
-    required FlutterLocalNotificationDisplayOptions options,
+    required BrokerNotificationRequest request,
   }) async {
-    showCalls.add(
-      _FakeShowCall(
+    final error = showError;
+    if (error != null) throw error;
+    shown.add(
+      _ShowCall(
         id: id,
         title: title,
         body: body,
         payload: payload,
-        options: options,
+        request: request,
       ),
     );
   }
@@ -389,18 +654,18 @@ final class _FakeLocalNotificationBackend
   }
 }
 
-final class _FakeShowCall {
-  const _FakeShowCall({
+final class _ShowCall {
+  const _ShowCall({
     required this.id,
     required this.title,
     required this.body,
     required this.payload,
-    required this.options,
+    required this.request,
   });
 
   final int id;
   final String title;
   final String body;
   final String? payload;
-  final FlutterLocalNotificationDisplayOptions options;
+  final BrokerNotificationRequest request;
 }

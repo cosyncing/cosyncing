@@ -27,9 +27,15 @@
  *   6. QUIT ends cleanly — `{kind:'ended', reason:'quit'}`, later events 404, status goes false.
  *   7. GRACE EXPIRY — bye(reason:'reload') with NO re-hello → after the grace window the phone
  *      gets an `ended` frame and the bridge is gone.
+ *   8. TURN ATTENTION — the omp-stamped extension asset, driven by broker-queued app prompts,
+ *      delivers each collab-prompt turn to the bridge connection's subscribers as one `running`
+ *      run-summary before one terminal under its `omp:run:u:remote:…` key (one outcome each in a
+ *      real AttentionPolicy), and a reload re-hello's backfill of those finished turns puts no
+ *      `running` on the live stream.
  */
 export {};
-import { chmodSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   BROKER_CONTRACT_REVISION,
@@ -542,6 +548,227 @@ process.exit(73);
     await futureBroker.exited;
     await settledProcessOutput(futureOutput);
     rmSync(futureRoot, { recursive: true, force: true });
+  }
+}
+
+// 8 — turn attention through omp's OWN bridge asset. The broker raises "Turn finished"/"Turn
+// failed" only for a LIVE `running` run-summary followed by a terminal one under the same key. The
+// shipped omp asset (routes, `omp:run:` keys and `omp-bridge` sources rewritten, native version
+// attested from `@oh-my-pi/pi-utils/dirs`) runs against an in-process stand-in for the
+// `/omp/bridge/*` routes backed by a real omp-dialect PiBridgeRegistry. App prompts are minted by
+// the bridge connection itself, so each turn is keyed by its durable collab-prompt correlation.
+{
+  const { OMP_BRIDGE_EMBEDDED_SOURCE } = await import('../../../adapters/omp/src/bridge-asset.ts');
+  const { OMP_DIALECT } = await import('../../../adapters/omp/src/dialect.ts');
+  const { PiBridgeRegistry } = await import('../../../pi-engine/src/bridge.ts');
+  const { AttentionPolicy } = await import('../../src/attention/attention-policy.ts');
+  const { AttentionStore } = await import('../../src/attention/attention-store.ts');
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-omp-bridge-attention-'));
+  const extensionDir = join(root, 'extension');
+  // The asset imports its version from the native package that loads it; stand one in.
+  const nativeUtils = join(extensionDir, 'node_modules', '@oh-my-pi', 'pi-utils');
+  mkdirSync(nativeUtils, { recursive: true });
+  writeFileSync(join(nativeUtils, 'package.json'), JSON.stringify({ name: '@oh-my-pi/pi-utils', version: '17.4.2', type: 'module' }));
+  writeFileSync(join(nativeUtils, 'dirs.js'), "export const VERSION = '17.4.2';\n");
+  const sessionFile = join(root, '2026-09-23T00-00-00-000Z_omp-attention.jsonl');
+  const bridgeId = Buffer.from(sessionFile, 'utf8').toString('base64url');
+  const registry = new PiBridgeRegistry(() => undefined, 5_000, OMP_DIALECT);
+  const frames: { phase: string; message: any }[] = [];
+  let phase = 'live';
+  const helloBodies: any[] = [];
+  const queuedCommands: any[] = [];
+  let polls = 0;
+  let subscribed = false;
+  const fakeBroker = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === '/omp/bridge/hello') {
+        const body: any = await req.json();
+        helloBodies.push(body);
+        // The broker's hello route in miniature: a re-hello reclaims the same connection, then the
+        // backfill lands.
+        const conn = registry.hello(bridgeId, {
+          id: bridgeId, tool: 'omp', title: 'omp attention', cwd: root, status: 'idle', attachMode: 'live',
+        } as any);
+        if (!subscribed) {
+          subscribed = true;
+          conn.subscribe((message) => frames.push({ phase, message }));
+        }
+        conn.ingestHistory(body.history);
+        return Response.json({ ok: true, id: bridgeId });
+      }
+      if (url.pathname === '/omp/bridge/events') {
+        const body: any = await req.json();
+        const conn = registry.get(String(body?.id ?? ''));
+        if (!conn) return new Response('unknown bridge', { status: 404 });
+        for (const ev of body.events ?? []) conn.ingest(ev);
+        return Response.json({ ok: true });
+      }
+      if (url.pathname === '/omp/bridge/commands') {
+        if (!registry.get(url.searchParams.get('id') ?? '')) return new Response('unknown bridge', { status: 404 });
+        polls += 1;
+        await sleep(40); // stand in for the long poll so the loop doesn't spin hot
+        return Response.json({ commands: queuedCommands.splice(0) });
+      }
+      if (url.pathname === '/omp/bridge/bye') {
+        const body: any = await req.json();
+        registry.bye(String(body?.id ?? ''), body?.reason);
+      }
+      return Response.json({ ok: true });
+    },
+  });
+  const envKeys = ['COSYNCING_BROKER', 'COSYNCING_BRIDGE_CONFIG', 'COSYNCING_OMP_INTEGRATION_FILE', 'COSYNCING_OMP_INTEGRATION_TOKEN', 'COSYNCING_NO_BRIDGE'];
+  const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  // Read once at module load: the asset must reach this stand-in and no host config.
+  process.env.COSYNCING_BROKER = `http://127.0.0.1:${fakeBroker.port}`;
+  process.env.COSYNCING_BRIDGE_CONFIG = join(root, 'absent-config.json');
+  process.env.COSYNCING_OMP_INTEGRATION_FILE = join(root, 'absent-integration.json');
+  delete process.env.COSYNCING_OMP_INTEGRATION_TOKEN;
+  delete process.env.COSYNCING_NO_BRIDGE;
+  let entries: any[] = [];
+  const ctx = {
+    cwd: root,
+    sessionManager: {
+      getSessionFile: () => sessionFile,
+      getSessionId: () => 'omp-attention',
+      getEntries: () => entries,
+    },
+    ui: { setStatus() {} },
+    isIdle: () => true,
+  };
+  // What native omp persists for an app prompt, and the assistant entry closing its turn.
+  const persisted: any[] = [];
+  let instances = 0;
+  // A fresh module instance per extension runtime, as a reload re-instantiates it. The fake host
+  // plays each injected collab-prompt as one omp turn; `error` in the text fails the turn.
+  const loadExtension = async () => {
+    const handlers = new Map<string, (event: any, c: any) => unknown>();
+    const modulePath = join(extensionDir, `index-${++instances}.ts`);
+    writeFileSync(modulePath, OMP_BRIDGE_EMBEDDED_SOURCE);
+    const fire = async (name: string, event: any = {}) => { await handlers.get(name)?.(event, ctx); };
+    const ext = (await import(modulePath)).default;
+    ext({
+      on: (name: string, fn: (event: any, c: any) => unknown) => { handlers.set(name, fn); },
+      registerTool() {},
+      sendMessage(message: any) {
+        const start = Number(message?.details?.sentAt) || Date.now();
+        const failed = String(message?.content ?? '').includes('error');
+        const assistant = {
+          role: 'assistant',
+          stopReason: failed ? 'error' : 'stop',
+          ...(failed ? { error: { message: 'fixture failure' } } : {}),
+          content: [{ type: 'text', text: `reply: ${message?.content}` }],
+          usage: { input: 1, output: 1 },
+        };
+        const userId = `omp-user-${persisted.length}`;
+        persisted.push(
+          { type: 'custom_message', id: userId, parentId: persisted.at(-1)?.id ?? null, timestamp: new Date(start).toISOString(), ...message },
+          { type: 'message', id: `omp-assistant-${persisted.length}`, parentId: userId, timestamp: new Date(start + 2_000).toISOString(), message: assistant },
+        );
+        setTimeout(() => void (async () => {
+          await fire('agent_start', { timestamp: start });
+          await fire('turn_start', { timestamp: start });
+          await fire('message_start', { message: { role: 'custom', ...message, timestamp: start } });
+          await fire('message_update', { assistantMessageEvent: { type: 'text_delta', delta: assistant.content[0]!.text } });
+          await fire('message_end', { timestamp: start + 2_000, message: assistant });
+          // OMP's ExtensionAPI marks a nonterminal attempt with willContinue.
+          await fire('agent_end', { timestamp: start + 2_000, willContinue: false });
+        })(), 0);
+      },
+      getThinkingLevel: () => undefined,
+      setModel: async () => true,
+      setThinkingLevel() {},
+    } as any);
+    return fire;
+  };
+  const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !pred()) await sleep(25);
+    return pred();
+  };
+  const summariesIn = (name: string) =>
+    frames.filter((f) => f.phase === name && f.message.type === 'run-summary').map((f) => f.message);
+  const statusesByKey = (list: any[]) => {
+    const out = new Map<string, string[]>();
+    for (const m of list) out.set(m.key, [...(out.get(m.key) ?? []), m.status]);
+    return out;
+  };
+  const store = new AttentionStore({ path: join(root, 'attention-events.json') });
+  const policy = new AttentionPolicy(store);
+  const session = { id: bridgeId, tool: 'omp', title: 'omp attention', status: 'idle', attachMode: 'live' } as any;
+  let delivered = 0;
+  const deliverFrames = async () => {
+    for (const f of frames.slice(delivered)) await policy.handleMessage(session, f.message);
+    delivered = frames.length;
+  };
+  const outcomes = (kind: string, key: string) =>
+    store.listEvents().filter((event) => event.kind === kind && event.dedupeKey === `${kind}:omp:${bridgeId}:${key}`).length;
+  const turnKeys: string[] = [];
+  let fire = await loadExtension();
+  try {
+    await test('an app-driven omp bridge turn is one running then one terminal under its correlation key', async () => {
+      await fire('session_start');
+      const linked = await waitUntil(() => polls > 0);
+      const conn = registry.get(bridgeId)!;
+      for (const text of ['omp bridged done', 'omp bridged error']) {
+        await conn.sendPrompt({ text, clientMessageId: `ca.omp.${text.replaceAll(' ', '-')}` });
+        const commands = await conn.takeCommands();
+        turnKeys.push(`omp:run:${commands.find((c) => c.kind === 'prompt')?.messageKey}`);
+        queuedCommands.push(...commands);
+        await waitUntil(() => summariesIn('live').some((m) => m.key === turnKeys.at(-1) && m.status !== 'running'));
+      }
+      const live = statusesByKey(summariesIn('live'));
+      const ok = linked
+        && helloBodies[0]?.nativeVersion === '17.4.2'
+        && turnKeys.every((key) => key.startsWith('omp:run:u:remote:'))
+        && live.size === 2
+        && JSON.stringify(live.get(turnKeys[0]!)) === '["running","done"]'
+        && JSON.stringify(live.get(turnKeys[1]!)) === '["running","error"]'
+        && summariesIn('live').every((m) => m.source === 'omp-bridge');
+      return [ok, `linked=${linked} nativeVersion=${helloBodies[0]?.nativeVersion} pairs=${JSON.stringify([...live])}`];
+    });
+
+    await test('a real AttentionPolicy raises exactly one outcome per live omp bridge turn', async () => {
+      await deliverFrames();
+      const ok = store.listEvents().length === 2
+        && outcomes('run-finished', turnKeys[0]!) === 1
+        && outcomes('run-failed', turnKeys[1]!) === 1
+        && store.listObservations().length === 0;
+      return [ok, `events=${JSON.stringify(store.listEvents().map((event) => event.dedupeKey))} open=${store.listObservations().length}`];
+    });
+
+    await test('an omp reload re-hello backfill of the finished turns emits no live running and raises nothing', async () => {
+      phase = 'reload';
+      entries = [...persisted];
+      await fire('session_shutdown', { reason: 'reload' });
+      fire = await loadExtension();
+      await fire('session_start');
+      const reset = await waitUntil(() => frames.some((f) => f.phase === 'reload' && f.message.type === 'history-reset'));
+      await sleep(200);
+      const backfill = statusesByKey((helloBodies[1]?.history ?? []).filter((ev: any) => ev.t === 'run-summary'));
+      const eventsBefore = store.listEvents().length;
+      const openBefore = store.listObservations().length;
+      await deliverFrames();
+      const live = summariesIn('reload');
+      const ok = reset
+        && helloBodies.length === 2
+        && JSON.stringify(backfill.get(turnKeys[0]!)) === '["done"]'
+        && JSON.stringify(backfill.get(turnKeys[1]!)) === '["error"]'
+        && live.length === 0
+        && store.listEvents().length === eventsBefore
+        && store.listObservations().length === openBefore;
+      return [ok, `reset=${reset} hellos=${helloBodies.length} backfill=${JSON.stringify([...backfill])} live=${JSON.stringify(live)} events=${eventsBefore}->${store.listEvents().length} open=${openBefore}->${store.listObservations().length}`];
+    });
+  } finally {
+    await fire('session_shutdown', { reason: 'quit' }).catch(() => undefined);
+    fakeBroker.stop(true);
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
   }
 }
 

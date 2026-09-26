@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "292ed0f466e38b7df8231a95458432dd4baed35b",
+  "acceptedBase": "0ecf965342431efc9873d0c078239e61f716c731",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -18,6 +18,16 @@
     "broker.artifact-session-isolation",
     "broker.artifact-store-health",
     "broker.attach-identity",
+    "broker.attention-broker",
+    "broker.attention-health-corruption",
+    "broker.attention-notification-fields",
+    "broker.attention-pending-withdrawn",
+    "broker.attention-policy",
+    "broker.attention-reminders",
+    "broker.attention-retention",
+    "broker.attention-service",
+    "broker.attention-store",
+    "broker.broker-health-attention",
     "broker.capabilities",
     "broker.claude-artifacts",
     "broker.claude-cross-client-join",
@@ -26,6 +36,7 @@
     "broker.claude-hooks-surface",
     "broker.claude-recency",
     "broker.claude-roster-subagents",
+    "broker.claude-runtime",
     "broker.claude-transcript",
     "broker.cli-package-boundary",
     "broker.cline-diagnostics",
@@ -117,6 +128,7 @@
     "broker.pi-tool-result",
     "broker.prompt-attachment-intake",
     "broker.protocol-journal",
+    "broker.push-wake",
     "broker.reasonix-cross-client-join",
     "broker.reasonix-drive",
     "broker.reasonix-identity",
@@ -133,6 +145,7 @@
     "broker.roster-stale-reconcile",
     "broker.roster-sweep-cache",
     "broker.roster-window",
+    "broker.security-attention",
     "broker.service-lifecycle",
     "broker.session-truth-conformance",
     "broker.state-security",
@@ -143,14 +156,18 @@
     "broker.transactional-setup",
     "broker.typecheck",
     "broker.update-contract",
+    "broker.wake-coalescer",
     "broker.web-origin",
+    "broker.web-push",
     "broker.windows-lane",
     "broker.workspace-file-api",
     "browser.artifact-session-isolation",
     "browser.cache-model",
     "browser.client-platform",
+    "browser.notification-click",
     "browser.startup-cache",
     "browser.update-handoff",
+    "browser.web-push-notification",
     "ci.workflow-policy",
     "client.complete",
     "contract.current",
@@ -182,7 +199,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:f4d4e2549efb565a2d093aac1ebd93352bfd88e14ed9f748caa532629b05f50c"
+      "fingerprint": "sha256:3488f6d2ba2f88c3a77372ea35b85f1c6d7b8c19722cdf55617cd0abe683a52c"
     },
     {
       "id": "capabilities",
@@ -293,6 +310,14 @@
       "fingerprint": "sha256:53ed338b729136b190e2f04bb7512503901022dccc0a6418905060b89c95dcd7"
     },
     {
+      "id": "web-notification-click",
+      "fingerprint": "sha256:65b31faff56ff38f883852fe36a14bd0f461cf8d4b82092982dc2bba01e60eaa"
+    },
+    {
+      "id": "web-push-notification",
+      "fingerprint": "sha256:d8fef537222610149231e9b5fd60799d18433e8c82f7e1a890f3f51e5628523c"
+    },
+    {
       "id": "web-update-handoff",
       "fingerprint": "sha256:5cfc8e57421bca1892a74f64d07a990aa9cd2b05e62eddef2251e08ba91a1fc8"
     },
@@ -375,8 +400,48 @@
       "fingerprint": "sha256:523a4e5857b100eac432f09dfe05b3702aefa5f1da2e234a09f50c7342a59413"
     },
     {
+      "id": "attention-broker",
+      "fingerprint": "sha256:dffd651f6b6d8cf18e1dec12ce49c1b69b3e33d73f14fcc5c3777c38906b671b"
+    },
+    {
       "id": "attention-bulk-dismiss",
       "fingerprint": "sha256:d322c0936555398f2e0102865a54ac0206f8ebba5506f85f90c22711c3a9dbd1"
+    },
+    {
+      "id": "attention-health-corruption",
+      "fingerprint": "sha256:a8351e8f6000ec09b2f400688c7f1f9c1c112c0777fd1777cbaf2e9be9584cd5"
+    },
+    {
+      "id": "attention-notification-fields",
+      "fingerprint": "sha256:b3079a270055f9d5dcf4c57ae0077df08bd81fb54a26dae2cf493d716a43f444"
+    },
+    {
+      "id": "attention-pending-withdrawn",
+      "fingerprint": "sha256:b57e5e5a0e4447a6ee224bb372cfd251bd648a187d4686b5934d9181867e1ea3"
+    },
+    {
+      "id": "attention-policy",
+      "fingerprint": "sha256:df7e41928dedf07fbbe0eebd50cce32db8f9b0526a3e9bb94fa764b065bc7d3b"
+    },
+    {
+      "id": "attention-reminders",
+      "fingerprint": "sha256:4fab4d4e188c262a867b5ef9b615b2f1e328b370d16a473e22916d64c41593f9"
+    },
+    {
+      "id": "attention-retention",
+      "fingerprint": "sha256:e27abc16a8ca110b6c28e5e01fba7eae46eaccc1c5ee454fe97efbd9e6fe2f78"
+    },
+    {
+      "id": "attention-service",
+      "fingerprint": "sha256:1cc6828676c2c44a93eeba820b612c24b06b5de3adea7e1b44c8299d2241992f"
+    },
+    {
+      "id": "attention-store",
+      "fingerprint": "sha256:0dc6d16c52591a12a1285d347e0d4b02948ffde4342ad5e130f2fb9584b1647e"
+    },
+    {
+      "id": "broker-health-attention",
+      "fingerprint": "sha256:3248a174082281d4af8b6b63ddcf988828613b838a2189dce567bbd3b1e8285f"
     },
     {
       "id": "broker-roster-stale-reconcile",
@@ -425,6 +490,10 @@
     {
       "id": "claude-roster-subagents",
       "fingerprint": "sha256:6216ab4d0d3858909179d0477701b15d4a618e377a2c6a860f1253cd8fdac96d"
+    },
+    {
+      "id": "claude-runtime",
+      "fingerprint": "sha256:4e72c64c681ab6a53f45c81a04851cb31abf0c5cb050e433e60b6509adade66e"
     },
     {
       "id": "claude-transcript-mapping",
@@ -791,6 +860,10 @@
       "fingerprint": "sha256:97283933adc93a54e0e070fd51db9e44423b8ccd263b1be678ffb9ff55c30ba7"
     },
     {
+      "id": "push-wake",
+      "fingerprint": "sha256:83085d315dd511349f1179e6dcb714d73978211021daafc99ab196a84a406fef"
+    },
+    {
       "id": "real-evidence-schema",
       "fingerprint": "sha256:b8f7bdad71ab1348c47db9af54adf59d630783a7255eae8ead3e0d1a9fed601a"
     },
@@ -863,6 +936,10 @@
       "fingerprint": "sha256:c50e2cdcabf65fc1a01572da85a5320ccd7f8069c87b6d51d9c9ccde4c8eaab5"
     },
     {
+      "id": "security-attention",
+      "fingerprint": "sha256:335e3a3f25fbd91854eeb3ecad72ce0cde3c64f4c06c1d9be752cb213f789c34"
+    },
+    {
       "id": "session-truth-conformance",
       "fingerprint": "sha256:382925fca8e830757bb2041befd11cd07704b08cc30a4d1e4158bf80de62ed32"
     },
@@ -899,8 +976,16 @@
       "fingerprint": "sha256:32613ccca59c2b0ea614104858903782db2596154600bbbf464488c7a0ddd5f5"
     },
     {
+      "id": "wake-coalescer",
+      "fingerprint": "sha256:9bcfd1f151118190212c44e3129f9b783376c8c1a6f997a16d321eff47607aef"
+    },
+    {
       "id": "web-origin",
       "fingerprint": "sha256:7463e5f2ea580ac9daf2279e96cfe3b94147f08bb7c44116caaf50a42f22a1df"
+    },
+    {
+      "id": "web-push",
+      "fingerprint": "sha256:75c599ef5c148db9053aac5add1ef99a639e69569f1e87198da7cdd7071b93c3"
     },
     {
       "id": "windows-dacl",

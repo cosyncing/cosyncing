@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release builds shrink resources, and the notification small icon is referenced
+  only by name from Dart (AndroidInitializationSettings('ic_notification')), so
+  the shrinker cannot see it is used. Without this file it was stripped from
+  every release APK and notifications failed to initialize (invalid_icon).
+  scripts/client/build-android.ts asserts the icon survives in the built APK.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_notification" />

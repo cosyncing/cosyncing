@@ -10,6 +10,7 @@ import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterActivity
@@ -20,11 +21,64 @@ import java.security.MessageDigest
 
 class MainActivity : FlutterActivity() {
     private val updateChannel = "com.cosyncing.client/android_update"
+    private val notificationsChannel = "com.cosyncing.client/notifications"
     private val installAction = "com.cosyncing.client.APK_INSTALL_RESULT"
+    private val backgroundConnectionChannel = "com.cosyncing.client/background_connection"
     private var installReceiver: BroadcastReceiver? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val reattaching = RetainedEngine.engine != null
+        super.onCreate(savedInstanceState)
+        if (reattaching && savedInstanceState == null) forwardNotificationTap()
+    }
+
+    /**
+     * Attaches a new activity to the app that kept running in the background
+     * rather than starting a second one beside it.
+     */
+    override fun provideFlutterEngine(context: Context): FlutterEngine? = RetainedEngine.engine
+
+    /** The engine outlives this activity while the background connection runs. */
+    override fun shouldDestroyEngineWithHost(): Boolean = !BackgroundConnectionService.isRunning
+
+    /**
+     * A notification tapped after this activity was closed starts a new one.
+     * The notification plugin reads a launch tap only when the app starts, and
+     * the retained app started long ago, so hand it the tap as it would get
+     * one while the activity was open.
+     */
+    private fun forwardNotificationTap() {
+        val launch = intent ?: return
+        if (launch.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        if (launch.action != "SELECT_NOTIFICATION" && launch.action != "SELECT_FOREGROUND_NOTIFICATION") return
+        flutterEngine?.activityControlSurface?.onNewIntent(launch)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        RetainedEngine.hold(flutterEngine)
+        // Bound to the application, not this activity: the app can switch the
+        // connection off while no activity is open.
+        val application = applicationContext
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, backgroundConnectionChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> result.success(
+                        BackgroundConnectionService.start(
+                            application,
+                            channelName = call.argument<String>("channelName") ?: "",
+                            groupName = call.argument<String>("groupName") ?: "",
+                            title = call.argument<String>("title") ?: "",
+                            text = call.argument<String>("text") ?: "",
+                        ),
+                    )
+                    "stop" -> {
+                        BackgroundConnectionService.stop(application)
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -33,6 +87,51 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, notificationsChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "openSettings" -> openNotificationSettings(call, result)
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /**
+     * Opens this app's notification page, or one channel's page when a channel
+     * id is given. Each notification type is a channel, so this is where the
+     * user changes its sound, pop-up, and lock-screen behavior.
+     */
+    private fun openNotificationSettings(call: MethodCall, result: MethodChannel.Result) {
+        val channelId = call.argument<String>("channelId")
+        val intent = when {
+            channelId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ->
+                Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                    .putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ->
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            else ->
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        }
+        try {
+            startActivity(intent)
+            result.success(true)
+        } catch (_: Exception) {
+            result.success(false)
+        }
+    }
+
+    /**
+     * Drops the handlers that hold this activity. The engine may outlive it,
+     * and the next activity registers its own.
+     */
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannel)
+            .setMethodCallHandler(null)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, notificationsChannel)
+            .setMethodCallHandler(null)
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 
     override fun onDestroy() {

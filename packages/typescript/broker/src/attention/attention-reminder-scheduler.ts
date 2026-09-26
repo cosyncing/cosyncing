@@ -18,7 +18,8 @@ const FALLBACK_TICK_MS = 60_000;
 const RETRY_DELAYS_MS = [5 * MINUTE, 30 * MINUTE, 2 * HOUR];
 // Initial attempt plus all three documented retries (5m, 30m, 2h).
 const MAX_RETRY_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
-const RESOLVED_ONE_SHOT_KINDS = new Set([
+/** Kinds born resolved that still deliver once. Every other resolved event is never dispatched. */
+export const RESOLVED_ONE_SHOT_KINDS: ReadonlySet<string> = new Set([
   'goal-finished',
   'run-finished',
   'run-failed',
@@ -96,28 +97,16 @@ function stageIndex(kind: string, stage?: string): number {
   }
 }
 
+/**
+ * The rung an event of this age has reached. Every event is presented once: an unanswered request
+ * or an unchanged condition never alerts again on a timer. A runtime update waits two hours before
+ * its one alert, so an update applied meanwhile never notifies. The later rungs that older brokers
+ * stored ('15m', '7h', '24h', ...) still parse, so an event already past its first rung stays
+ * where it is and is never re-presented.
+ */
 function dueIndex(kind: string, ageMs: number): number {
-  switch (kind) {
-    case 'permission-required':
-    case 'question-required':
-      if (ageMs < 15 * MINUTE) return 1;
-      if (ageMs < 60 * MINUTE) return 2;
-      if (ageMs < 7 * HOUR) return 3;
-      return 4 + Math.floor((ageMs - 7 * HOUR) / (6 * HOUR));
-    case 'runtime-update-ready':
-      if (ageMs < 2 * HOUR) return 0;
-      if (ageMs < 12 * HOUR) return 2;
-      if (ageMs < 24 * HOUR) return 3;
-      return 4 + Math.floor((ageMs - 24 * HOUR) / (24 * HOUR));
-    case 'broker-health':
-    case 'sync-degraded':
-      if (ageMs < 2 * HOUR) return 1;
-      if (ageMs < 12 * HOUR) return 2;
-      if (ageMs < 24 * HOUR) return 3;
-      return 4 + Math.floor((ageMs - 24 * HOUR) / (24 * HOUR));
-    default:
-      return 1;
-  }
+  if (kind === 'runtime-update-ready') return ageMs < 2 * HOUR ? 0 : 2;
+  return 1;
 }
 
 /**
@@ -171,31 +160,23 @@ function stageFromIndex(kind: string, index: number): string {
 
 function nextStageAgeMs(kind: string, currentIndex: number): number | undefined {
   const nextIndex = currentIndex + 1;
-  switch (kind) {
-    case 'permission-required':
-    case 'question-required': {
-      if (nextIndex <= 1) return 0;
-      if (nextIndex === 2) return 15 * MINUTE;
-      if (nextIndex === 3) return 60 * MINUTE;
-      return 7 * HOUR + 6 * HOUR * (nextIndex - 4);
-    }
-    case 'runtime-update-ready': {
-      if (nextIndex <= 2) return 2 * HOUR;
-      if (nextIndex === 3) return 12 * HOUR;
-      if (nextIndex === 4) return 24 * HOUR;
-      return 24 * HOUR + 24 * HOUR * (nextIndex - 4);
-    }
-    case 'broker-health':
-    case 'sync-degraded': {
-      if (nextIndex <= 1) return 0;
-      if (nextIndex === 2) return 2 * HOUR;
-      if (nextIndex === 3) return 12 * HOUR;
-      if (nextIndex === 4) return 24 * HOUR;
-      return 24 * HOUR + 24 * HOUR * (nextIndex - 4);
-    }
-    default:
-      return undefined;
-  }
+  if (kind === 'runtime-update-ready') return nextIndex <= 2 ? 2 * HOUR : undefined;
+  return nextIndex <= 1 ? 0 : undefined;
+}
+
+/**
+ * When a stage's alert was raised (epoch ms), or undefined for a stage this broker cannot place.
+ * A device that registered after it was never meant to receive it: its open app already lists the
+ * event. Covers the stages older brokers stored, so an event that reached a later rung before an
+ * upgrade is not replayed to a device that registers after it.
+ */
+export function presentationStageStartedAt(event: { createdAt: number }, stage: string): number | undefined {
+  if (stage === 'immediate') return event.createdAt;
+  const health = /^health-(\d+)$/.exec(stage);
+  if (health) return Number(health[1]);
+  const offset = /^([1-9]\d*)([mh])$/.exec(stage);
+  if (!offset) return undefined;
+  return event.createdAt + Number(offset[1]) * (offset[2] === 'm' ? MINUTE : HOUR);
 }
 
 function nextRetryDelay(attempts: number): number | undefined {

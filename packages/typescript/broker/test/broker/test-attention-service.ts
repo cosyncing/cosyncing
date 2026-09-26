@@ -66,7 +66,7 @@ try {
   });
   await Promise.all([running, completed]);
   const nativeCompletion = service.store.findByDedupeKey(
-    'run-finished:codex:native-session:native-turn',
+    'run-finished:codex:native-session:codex:run:native-turn',
   );
   assert.equal(nativeCompletion?.state, 'resolved');
   assert.equal(nativeCompletion?.presentationRevision, 1);
@@ -79,7 +79,7 @@ try {
   });
   assert.equal(
     service.store.listEvents().filter((event) =>
-      event.dedupeKey === 'run-finished:codex:native-session:native-turn').length,
+      event.dedupeKey === 'run-finished:codex:native-session:codex:run:native-turn').length,
     1,
     'replaying the short terminal summary cannot duplicate its durable event',
   );

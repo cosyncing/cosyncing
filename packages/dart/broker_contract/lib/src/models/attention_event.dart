@@ -233,6 +233,25 @@ class AttentionEvent {
   /// Raw JSON payload for forward-compatible fields.
   final Map<String, dynamic> raw;
 
+  /// The notification type the broker says this event presents as
+  /// (`turn_finished`, `permission_request`, …), or null from a broker older
+  /// than contract revision 27 and for events that are never notifications.
+  String? get notificationType => _rawText('notificationType');
+
+  /// The notification slot the broker assigned: a notification shown into an
+  /// occupied slot replaces the one there. Null from an older broker.
+  String? get collapseKey => _rawText('collapseKey');
+
+  /// Epoch millis when any client first read or dismissed this event, so this
+  /// client can clear its own notification for it. Null until then, and from
+  /// an older broker.
+  int? get seenAt => (raw['seenAt'] as num?)?.toInt();
+
+  String? _rawText(String key) {
+    final value = raw[key];
+    return value is String && value.trim().isNotEmpty ? value : null;
+  }
+
   /// `kind == 'permission-required'`.
   bool get isPermissionRequired => kind == 'permission-required';
 

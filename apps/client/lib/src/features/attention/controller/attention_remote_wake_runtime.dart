@@ -1,13 +1,12 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:broker_client/broker_client.dart';
-import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_delivery_settings_controller.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_delivery_processor.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_profile_sync_gate.dart';
+import 'package:cosyncing_client/src/features/attention/controller/notification_system_controller.dart';
 import 'package:cosyncing_client/src/features/attention/controller/push_token_coordinator.dart';
 import 'package:cosyncing_client/src/features/attention/controller/push_token_provider.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_feed_settings_store.dart';
@@ -240,13 +239,19 @@ Future<void> _refetchEnabledProfiles(Ref ref) async {
           brokerScopeKey: RosterSource.ofProfile(profile).storageKey,
           lifecycleMonitor: lifecycleMonitor,
           notificationSink: notificationSink,
-          localizations: lookupAppLocalizations(
-            ref.read(localeControllerProvider).valueOrNull ??
-                ui.PlatformDispatcher.instance.locale,
+          localizations: resolveAppLocalizations(
+            ref.read(localeControllerProvider).valueOrNull,
           ),
           onForegroundEvent: attentionForegroundHandler(ref, profile),
           isCurrentSource: isCurrentSource,
           focusMatcher: attentionRunFailureFocusMatcher(ref, profile),
+          resolveSetting: ref.read(
+            attentionNotificationSettingResolverProvider,
+          ),
+          onDelivery: ref.read(attentionNotificationDeliveryRecorderProvider),
+          presentationCoordinator: ref.read(
+            attentionPresentationCoordinatorProvider,
+          ),
         ),
   );
   ref.read(attentionInboxRevisionProvider.notifier).state += 1;

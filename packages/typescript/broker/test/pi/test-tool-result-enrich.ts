@@ -11,6 +11,10 @@
  *      so the in-session extension uses Pi's streaming-safe injection path.
  *   5. Pi bridge approval wire: permission requests map to canonical cards and app decisions queue
  *      back to the extension as permission commands.
+ *   6. Turn attention pairing on a Drive (RPC) connection: each driven turn reaches subscribers as
+ *      exactly one live `running` run-summary before exactly one terminal under the same key, a
+ *      real AttentionPolicy raises one outcome per turn, and attaching to the finished session
+ *      (Drive or Observe) replays those turns without a live `running`.
  *
  * Pure + self-contained: the unit half imports the helpers directly; the wire half starts its OWN
  * broker on a free port and simulates the extension over /pi/bridge/* + a phone WebSocket — no real
@@ -19,10 +23,10 @@
  *   bun run packages/typescript/broker/test/pi/test-tool-result-enrich.ts      (exit 0 = all pass)
  */
 export {};
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { summarizeDiff, splitUnifiedDiffFiles } from '../../../adapter-api/src/index.ts';
+import { summarizeDiff, splitUnifiedDiffFiles, type AgentMessage } from '../../../adapter-api/src/index.ts';
 import { enrichPiToolResult, piToolDisplayClass } from '../../../adapters/pi/src/index.ts';
 import { PiBridgeConnection, PiBridgeRegistry } from '../../../adapters/pi/src/bridge.ts';
 import {
@@ -914,6 +918,201 @@ try {
     check('bridge extension: approve-session honored, exact-input scoped, registration-lived', false, String(err));
   } finally {
     globalThis.fetch = originalFetch;
+  }
+}
+
+// ── 9. Turn attention pairing on a Drive (RPC) connection ─────────────────────
+// The broker raises "Turn finished"/"Turn failed" only for a LIVE `running` run-summary followed by
+// a terminal one under the same key. So each turn this connection drives must reach its subscribers
+// as exactly that pair, and attaching to a session whose turns already ended must replay them as
+// history only: a live `running` there would notify for an old turn. The engine runs against a fake
+// RPC Pi (readiness is stubbed — the engine is under test, not the host's Node qualification), and
+// exactly what the subscribers received is fed to a real AttentionPolicy.
+{
+  const { PiEngineAdapter, PI_DIALECT, resolvePiDialectRuntime } = await import('../../../adapters/pi/src/index.ts');
+  const { AttentionPolicy } = await import('../../src/attention/attention-policy.ts');
+  const { AttentionStore } = await import('../../src/attention/attention-store.ts');
+  const root = join(brokerFixtureRoot, 'turn-attention');
+  const cwd = join(root, 'work');
+  const fakePi = join(root, 'pi');
+  const sessionFile = join(root, 'sessions', '2026-09-23T00-00-00-000Z_attention.jsonl');
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(join(root, 'sessions'), { recursive: true });
+  // One turn finished before any connection saw it.
+  writeFileSync(sessionFile, [
+    { type: 'session', version: 3, id: 'attention', timestamp: '2026-09-23T09:00:00.000Z', cwd },
+    { type: 'message', id: 'prior-user', parentId: null, timestamp: '2026-09-23T09:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'finished before attach' }], timestamp: Date.parse('2026-09-23T09:00:01.000Z') } },
+    { type: 'message', id: 'prior-assistant', parentId: 'prior-user', timestamp: '2026-09-23T09:00:03.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'already done' }] } },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+  // Persists each prompt's entries the way Pi does, so a later attach finds the finished turns.
+  // `degraded` omits the user message_start and assistant message_end, the engine's fallback path.
+  writeFileSync(fakePi, `#!/usr/bin/env bun
+import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+const file = args[args.indexOf('--session') + 1];
+const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+let parentId = 'prior-assistant';
+let seq = 0;
+let clock = Date.parse('2026-09-23T10:00:00.000Z');
+const persist = (message, at) => {
+  const id = 'rpc-' + (++seq);
+  appendFileSync(file, JSON.stringify({ type: 'message', id, parentId, timestamp: new Date(at).toISOString(), message }) + '\\n');
+  parentId = id;
+};
+let buffered = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffered += chunk;
+  const lines = buffered.split('\\n');
+  buffered = lines.pop() ?? '';
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const req = JSON.parse(line);
+    if (req.type === 'get_state') {
+      send({ type: 'response', id: req.id, command: 'get_state', success: true, data: { model: { provider: 'fake', id: 'attention', name: 'Attention' }, thinkingLevel: 'off', sessionFile: file } });
+    } else if (req.type === 'get_session_stats') {
+      send({ type: 'response', id: req.id, command: 'get_session_stats', success: true, data: { contextUsage: { tokens: 10, contextWindow: 1000 } } });
+    } else if (req.type === 'prompt') {
+      send({ type: 'response', id: req.id, command: 'prompt', success: true });
+      const text = String(req.message ?? '');
+      const at = (clock += 10000);
+      const degraded = text.includes('degraded');
+      const failed = text.includes('error');
+      const user = { role: 'user', content: [{ type: 'text', text }], timestamp: at };
+      const assistant = {
+        role: 'assistant',
+        stopReason: failed ? 'error' : 'stop',
+        ...(failed ? { error: { message: 'fixture failure' } } : {}),
+        content: [{ type: 'text', text: 'reply: ' + text }],
+        usage: { input: 1, output: 1 },
+        timestamp: at,
+      };
+      persist(user, at);
+      send({ type: 'agent_start', timestamp: at });
+      send({ type: 'turn_start', timestamp: at });
+      if (!degraded) send({ type: 'message_start', timestamp: at, message: user });
+      send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'reply: ' + text } });
+      if (!degraded) send({ type: 'message_end', timestamp: at + 2000, message: assistant });
+      persist(assistant, at + 2000);
+      send({ type: 'agent_end', timestamp: at + 2000 });
+    } else {
+      send({ type: 'response', id: req.id, command: req.type, success: req.type === 'abort' });
+    }
+  }
+});
+process.stdin.resume();
+`);
+  chmodSync(fakePi, 0o755);
+  const runtime = resolvePiDialectRuntime(PI_DIALECT, { HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent') }, {
+    hooks: {
+      readiness: () => ({ ready: true, executable: fakePi, message: 'fixture Pi', detailCode: 'ready' }),
+      diagnose: async () => { throw new Error('not exercised'); },
+    },
+    bridgeAsset: { source: '', sha256: '' },
+  });
+  const adapter = new PiEngineAdapter(runtime, { brokerUrl: 'http://127.0.0.1:1' });
+  const sessionId = Buffer.from(sessionFile, 'utf8').toString('base64url');
+  const store = new AttentionStore({ path: join(root, 'attention-events.json') });
+  const policy = new AttentionPolicy(store);
+  const summaries = (frames: AgentMessage[]) =>
+    frames.filter((m): m is Extract<AgentMessage, { type: 'run-summary' }> => m.type === 'run-summary');
+  // key → statuses, in the order the subscriber received them.
+  const pairs = (frames: AgentMessage[]) => {
+    const out = new Map<string, string[]>();
+    for (const m of summaries(frames)) out.set(m.key, [...(out.get(m.key) ?? []), m.status]);
+    return out;
+  };
+  const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !pred()) await sleep(25);
+    return pred();
+  };
+  const deliver = async (info: any, frames: AgentMessage[]) => {
+    for (const m of frames) await policy.handleMessage(info, m);
+  };
+  const drive = await adapter.attach(sessionId, 'resume');
+  try {
+    const attachFrames: AgentMessage[] = [];
+    const turnFrames: AgentMessage[] = [];
+    let sink = attachFrames;
+    drive.subscribe((m) => sink.push(m));
+    const attachHistory = await drive.getHistory();
+    await sleep(150);
+    check(
+      'Drive attach to a finished turn replays it as history only, never as a live running summary',
+      summaries(attachFrames).length === 0
+        && summaries(attachHistory).some((m) => m.key === 'pi:run:u0' && m.status === 'done'),
+      JSON.stringify({ live: summaries(attachFrames), history: summaries(attachHistory) }),
+    );
+
+    sink = turnFrames;
+    const turns = [
+      { text: 'attention done', key: 'pi:run:u1', terminal: 'done' },
+      { text: 'attention error', key: 'pi:run:u2', terminal: 'error' },
+      { text: 'attention degraded', key: 'pi:run:u3', terminal: 'done' },
+    ];
+    for (const turn of turns) {
+      await drive.sendPrompt({ text: turn.text });
+      await waitUntil(() => summaries(turnFrames).some((m) => m.key === turn.key && m.status !== 'running'));
+    }
+    const live = pairs(turnFrames);
+    const livePair = (key: string, terminal: string) =>
+      JSON.stringify(live.get(key)) === JSON.stringify(['running', terminal]);
+    check(
+      'each driven Pi turn reaches subscribers as one live running, then one terminal, under one key',
+      live.size === 3 && livePair('pi:run:u1', 'done') && livePair('pi:run:u2', 'error')
+        && summaries(turnFrames).every((m) => m.source === 'pi-rpc'),
+      JSON.stringify([...live]),
+    );
+    check(
+      'a degraded RPC stream (no user start, no assistant end) still pairs its fallback running',
+      livePair('pi:run:u3', 'done'),
+      JSON.stringify(live.get('pi:run:u3')),
+    );
+
+    await deliver(drive.info, [...attachFrames, ...turnFrames]);
+    const events = store.listEvents();
+    const outcome = (kind: string, key: string) =>
+      events.filter((event) => event.kind === kind && event.dedupeKey === `${kind}:pi:${sessionId}:${key}`).length;
+    check(
+      'a real AttentionPolicy raises exactly one outcome per driven Pi turn',
+      events.length === 3
+        && outcome('run-finished', 'pi:run:u1') === 1
+        && outcome('run-failed', 'pi:run:u2') === 1
+        && outcome('run-finished', 'pi:run:u3') === 1
+        && store.listObservations().length === 0,
+      JSON.stringify({ events: events.map((event) => event.dedupeKey), open: store.listObservations().map((o) => o.key) }),
+    );
+  } finally {
+    await drive.close();
+  }
+
+  // Catch-up: the three turns are finished and persisted. Attaching again, in either mode, must
+  // deliver them through history under the SAME keys and put no running summary on the live stream.
+  for (const mode of ['resume', 'observe'] as const) {
+    const again = await adapter.attach(sessionId, mode);
+    try {
+      const frames: AgentMessage[] = [];
+      again.subscribe((m) => frames.push(m));
+      const history = await again.getHistory();
+      await sleep(300);
+      const replayed = pairs(history);
+      const eventsBefore = store.listEvents().length;
+      const openBefore = store.listObservations().length;
+      await deliver(again.info, frames);
+      check(
+        `${mode === 'resume' ? 'Drive' : 'Observe'} re-attach to finished Pi turns emits no live running and raises nothing`,
+        summaries(frames).length === 0
+          && JSON.stringify(replayed.get('pi:run:u1')) === '["done"]'
+          && JSON.stringify(replayed.get('pi:run:u2')) === '["error"]'
+          && JSON.stringify(replayed.get('pi:run:u3')) === '["done"]'
+          && store.listEvents().length === eventsBefore
+          && store.listObservations().length === openBefore,
+        JSON.stringify({ live: summaries(frames), history: [...replayed] }),
+      );
+    } finally {
+      await again.close();
+    }
   }
 }
 

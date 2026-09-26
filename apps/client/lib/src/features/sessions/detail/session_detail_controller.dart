@@ -6,7 +6,6 @@ import 'dart:developer' as developer;
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
-import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
@@ -21,7 +20,6 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_detail_con
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_drive_intent_store.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_local_maintenance.dart';
-import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
@@ -1922,7 +1920,6 @@ class SessionDetailController
         unawaited(_handleSharedDraftEvent(event));
       }
       unawaited(_handleOutboxReceipt(event));
-      _notifyForLiveEvent(event);
     });
   }
 
@@ -2232,30 +2229,6 @@ class SessionDetailController
       case _:
         return;
     }
-  }
-
-  void _notifyForLiveEvent(WireEvent event) {
-    // Notification routing is PROFILE identity, not broker-bound storage: the
-    // attention feed registers its workers per profile id, and suppression
-    // must match whatever key those workers registered under.
-    final brokerProfileId = _connectionSource?.profileId;
-    if (brokerProfileId != null &&
-        ref
-            .read(attentionFeedDeliveryActiveProvider)
-            .contains(brokerProfileId)) {
-      return;
-    }
-    unawaited(
-      ref
-          .read(sessionNotificationPolicyProvider)
-          .maybeNotifyForSessionEvent(
-            tool: arg.tool,
-            sessionId: arg.sessionId,
-            event: event,
-            brokerProfileId: brokerProfileId,
-          )
-          .catchError((error, stack) {}),
-    );
   }
 
   /// Sends a user prompt through the active session connection.

@@ -1886,6 +1886,7 @@ class _InMemoryRemoteWakeSettingsStore implements RemoteWakeSettingsStore {
 final class _InMemorySessionNotificationSettingsStore
     implements SessionNotificationSettingsStore {
   bool value = false;
+  bool permissionPrompted = false;
 
   @override
   Future<bool> getLocalNotificationEnabled() async => value;
@@ -1893,6 +1894,17 @@ final class _InMemorySessionNotificationSettingsStore
   @override
   Future<void> setLocalNotificationEnabled({required bool enabled}) async {
     value = enabled;
+  }
+
+  @override
+  Future<bool?> getLocalNotificationPreference() async => value;
+
+  @override
+  Future<bool> getPermissionPrompted() async => permissionPrompted;
+
+  @override
+  Future<void> setPermissionPrompted() async {
+    permissionPrompted = true;
   }
 }
 
