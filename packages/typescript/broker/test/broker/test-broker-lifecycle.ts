@@ -30,6 +30,7 @@ import type {
   SetupHttpProbe,
 } from '../../../adapter-api/src/index.ts';
 import {
+  collectBrokerReadiness,
   collectLifecycleStatus,
   createLifecycleSystemdProvider,
   inspectRepair,
@@ -911,6 +912,115 @@ try {
         && recorded[0]?.args.join(' ')
           === '-n 10000 /fixture/.cosyncing/logs/broker.out.log /fixture/.cosyncing/logs/broker.err.log',
       `${recorded[0]?.executable} ${recorded[0]?.args.join(' ')}`);
+  }
+
+  // The installer's pairing handoff asks one question: is THIS broker answering on its own loopback port.
+  // It used to ask it of the whole status report, which also reads the session roster -- and a roster read
+  // whose 4s TTL has lapsed (nearly always on a broker in use) opens a whole-roster sweep. The probe was
+  // therefore making the broker busier at the moment it asked whether the broker was busy, and it sampled
+  // the endpoint exactly once. Measured on an installed broker with ~4,900 sessions: the trivial
+  // /api/health route took 6-8s about once a minute while discovery ran, and the first sweep after a
+  // service start took 22.6s. Inside either window, one sample reported a healthy broker as not ready and
+  // the install skipped the handoff -- which is a client on "Connect this device" after a success.
+  {
+    const m = machine({ service: true }); cleanup.push(m.root);
+    const reading = (paths: string[], probe?: (url: string) => SetupHttpProbe | Promise<SetupHttpProbe>) => ({
+      ...m.context,
+      async fetchJson(url: string, headers?: Readonly<Record<string, string>>, timeoutMs?: number,
+        maxBytes?: number): Promise<SetupHttpProbe> {
+        paths.push(new URL(url).pathname);
+        if (probe) return probe(url);
+        return m.context.fetchJson(url, headers, timeoutMs, maxBytes);
+      },
+    });
+    const bound = { delayMs: 1, timeoutMs: 5_000 };
+
+    const readinessPaths: string[] = [];
+    const ready = await collectBrokerReadiness({ ...baseOptions(m), context: reading(readinessPaths), ...bound });
+    check('readiness answers the loopback question and reads no roster to answer it',
+      ready.ok && ready.listener.ready === true
+        && ready.listener.url === m.config.broker.internalUrl
+        && ready.detailCodes.length === 0
+        && readinessPaths.length === 1 && readinessPaths[0] === '/api/health',
+      readinessPaths.join(','));
+    // The contrast is the defect: the report this replaced reads the roster, so the installer's readiness
+    // probe was contributing the very load that made readiness hard to observe.
+    const statusPaths: string[] = [];
+    await collectLifecycleStatus({ ...baseOptions(m), context: reading(statusPaths) });
+    check('the status report that readiness replaced really did read the roster',
+      statusPaths.includes('/api/sessions'), statusPaths.join(','));
+
+    // Two missed samples and then an answer is the measured shape of a broker mid-sweep. It used to be a
+    // skipped handoff; now it is a ready broker.
+    let samples = 0;
+    const stalled = await collectBrokerReadiness({
+      ...baseOptions(m),
+      context: reading([], () => {
+        samples += 1;
+        return samples <= 2 ? { status: 'unreachable' } : {
+          status: 'ok', statusCode: 200,
+          json: { ok: true, product: 'cosyncing', machine: m.config.broker.machineLabel },
+        };
+      }),
+      ...bound,
+    });
+    check('a broker that stalls and then answers is ready rather than a skipped handoff',
+      stalled.ok && samples >= 3, `samples=${samples}`);
+
+    // Waiting is for a broker that has not answered, not for one that has answered as something else.
+    // That answer cannot change by being asked again, and the operator would only watch a wait.
+    let foreignSamples = 0;
+    const foreignStartedAt = Date.now();
+    const foreign = await collectBrokerReadiness({
+      ...baseOptions(m),
+      context: reading([], () => {
+        foreignSamples += 1;
+        return { status: 'ok', statusCode: 200, json: { ok: true, product: 'other', machine: 'elsewhere' } };
+      }),
+      ...bound,
+    });
+    check('a foreign service is a verdict on the first sample, not something to wait out',
+      !foreign.ok && foreign.detailCodes.includes('internal-endpoint-identity-mismatch')
+        && foreignSamples === 1 && Date.now() - foreignStartedAt < bound.timeoutMs / 2,
+      `samples=${foreignSamples} detail=${foreign.detailCodes.join(',')} ms=${Date.now() - foreignStartedAt}`);
+
+    // This broker, refusing this machine's credential. `/api/health` answers an unauthenticated request
+    // with `{ok, product, version}` and withholds the machine label, so the payload names our product and
+    // proves nothing about who we are. Calling that a foreign service is the mistake with a customer in it:
+    // it tells the operator to go and stop their own broker. It is also the one identity answer that can
+    // clear by itself -- a service restarted moments after its token was written -- so it is waited out
+    // inside the deadline rather than answered on the first sample.
+    let unauthenticatedSamples = 0;
+    const unauthenticated = await collectBrokerReadiness({
+      ...baseOptions(m),
+      context: reading([], () => {
+        unauthenticatedSamples += 1;
+        return { status: 'ok', statusCode: 200,
+          json: { ok: true, product: 'cosyncing', version: '1.2.3' } };
+      }),
+      delayMs: 1, timeoutMs: 40,
+    });
+    check('a broker that will not take the local credential names the credential, not a foreign service',
+      !unauthenticated.ok && !unauthenticated.listener.ready
+        && unauthenticated.detailCodes.includes('internal-endpoint-unauthenticated')
+        && !unauthenticated.detailCodes.includes('internal-endpoint-identity-mismatch')
+        && unauthenticatedSamples >= 2,
+      `samples=${unauthenticatedSamples} detail=${unauthenticated.detailCodes.join(',')}`);
+
+    // Without the local credential the machine label is unreadable, so identity cannot be confirmed at all.
+    // Asking anyway returns a public payload with no label, which reads as a foreign service and sends the
+    // operator hunting for a process that does not exist.
+    chmodSync(join(m.home, 'secrets', 'broker-token'), 0o644);
+    const unprovenPaths: string[] = [];
+    const unproven = await collectBrokerReadiness({
+      ...baseOptions(m), context: reading(unprovenPaths), ...bound,
+    });
+    check('an unreadable local credential names itself and probes nothing rather than claiming a foreigner',
+      !unproven.ok && unprovenPaths.length === 0
+        && unproven.detailCodes.some((code) => code.includes('token'))
+        && !unproven.detailCodes.includes('internal-endpoint-identity-mismatch'),
+      `paths=${unprovenPaths.join(',')} detail=${unproven.detailCodes.join(',')}`);
+    chmodSync(join(m.home, 'secrets', 'broker-token'), 0o600);
   }
 
   // Legacy repair: exact marker confirmation, unrelated-setting preservation, scoped credential URL, token rotation.

@@ -95,13 +95,28 @@ it continues:
    plan-and-confirm prompt still asks and you still answer it. It never passes `--yes` or
    `--accept-managed-runtime-ownership` for you. With no terminal attached — CI, a container, a remote
    command — it prints the `setup` command and stops.
-3. **Hands the client a pairing.** It reads the listener URL from `status --json`, asks for an offer with
-   `pair --json`, and writes it to `$COSYNCING_HOME/client-pairing.json`, owner-only. The client reads
-   that file once on its next launch, imports it, and deletes it. The offer is one-use and expires in
-   five minutes, so a file left behind by a client that never started is a dead offer.
-   Pairing uses the local listener's readiness even if `status` reports an unrelated
-   agent-list or service-status failure; `pair` still verifies the broker and owner credential.
-4. **Launches the client.**
+3. **Hands the client a pairing.** It asks `status --json --readiness` whether this broker is answering on
+   its own loopback port, and waits a bounded time for the answer. It does not read the session roster to
+   decide: that read opens a whole-roster sweep on a broker in use, which makes a busy broker harder to see
+   rather than easier. Once the listener is ready it asks for one offer with `pair --json` and writes it to
+   `$COSYNCING_HOME/client-pairing.json`, owner-only. The client reads that file once on its next launch,
+   imports it, and deletes it. The offer is one-use and expires in five minutes, so a file left behind by a
+   client that never started is a dead offer. An offer is created once and only once: a request whose answer
+   was lost is reported rather than repeated, because a second offer would leave two identities for one
+   device. If that happens, no handoff file is written; wait five minutes for any unused offer to expire
+   before creating another. Pairing needs only the local listener, so an unrelated agent-list or
+   service-status failure does not skip it; `pair` still verifies the broker and the owner credential.
+4. **Launches the client, then asks the broker whether the pairing took.** The offer file cannot answer
+   that, because the client deletes it before it authenticates, so a vanished file says no more about a
+   paired client than about one that never started. The installer reads the offer back with
+   `pair --status <id>` and prints one of `Desktop client: the broker accepted peer <device>`,
+   `not paired yet`, or `acceptance could not be confirmed`. The first of those is what the broker
+   recorded, which is not the same fact as the client having stored the credential that record made
+   possible: the client saves it afterwards, in its own process, so check the window shows connected.
+   Every handoff step also leaves one bounded line in
+   `$COSYNCING_HOME/logs/pairing-handoff.log`, naming no credential, so the question stays answerable
+   after the terminal has closed. One line per step, and only after that step's own work is on disk: an
+   offer whose reply could not be used is recorded as that failure rather than as an offer created.
 
 Two hosts get no client and are told so, and the install still succeeds as a server install: Linux
 arm64, for which no client is built, and a Linux machine with neither `DISPLAY` nor `WAYLAND_DISPLAY`
@@ -109,7 +124,9 @@ set, where a GUI is a package nothing can start.
 
 ### If the Linux desktop client opens without authentication
 
-Read the installer's `Pairing handoff:` line. A running desktop app skips the startup
+Read the installer's `Pairing handoff:` line, and the `Desktop client:` line after it. The log at
+`$COSYNCING_HOME/logs/pairing-handoff.log` holds the same three steps -- readiness, offer, acceptance --
+each with its exit code and the CLI's own detail code. A running desktop app skips the startup
 handoff; quit it before rerunning the installer. Foreground setup does not start a
 broker, so start it before pairing. A fresh handoff expires after five minutes.
 

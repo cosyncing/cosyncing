@@ -174,6 +174,94 @@ function Invoke-Native {
   return [pscustomobject] @{ ExitCode = $exitCode; StdOut = $stdout; StdErr = $stderr }
 }
 
+<#
+Read what the broker said about one pairing offer and turn it into the single line the operator gets.
+
+Pure, because the part worth testing is the three-way answer. The offer file cannot supply it: the client
+erases that file BEFORE it asks for its credential, so a missing file is exactly as consistent with "the
+client never started" as with "the client is paired", and reporting the third case as either of the first
+two is how a one-use offer gets burned and an operator is told something untrue.
+#>
+function Get-HandoffOutcome {
+  param(
+    [string] $Json,
+    [string] $ClientLaunch,
+    [string] $BunBin,
+    [string] $Application
+  )
+  $state = 'unverifiable'
+  $peerId = ''
+  try {
+    $report = $Json | ConvertFrom-Json
+    if (Get-JsonProperty -Object $report -Name 'ok') {
+      $reported = [string] (Get-JsonProperty -Object $report -Name 'state')
+      $candidate = [string] (Get-JsonProperty -Object $report -Name 'peerId')
+      if ($reported -eq 'accepted' -and $candidate) { $state = 'accepted'; $peerId = $candidate }
+      elseif ($reported -eq 'pending' -or $reported -eq 'expired' -or $reported -eq 'not-found') { $state = $reported }
+    }
+  } catch { $state = 'unverifiable' }
+  $message = switch ($state) {
+    # What the broker witnessed, and nothing beyond it. The peer is recorded when the client asks for its
+    # credential; the client then has to store that credential and make itself use it, both of which happen
+    # after this answer in a process this installer cannot see. "Paired" here is how an install ends up
+    # reporting success above a window that still says "Connect this device".
+    'accepted' { "Desktop client: the broker accepted peer $peerId. Check that it shows connected." }
+    'pending' { "Desktop client: not paired yet. Open $ClientLaunch within five minutes; the offer is still waiting." }
+    'expired' { 'Desktop client: the pairing offer expired before anything accepted it. Pair by hand.' }
+    'not-found' { 'Desktop client: the broker no longer holds that pairing offer. Pair by hand.' }
+    default { "Desktop client: pairing was issued, but acceptance could not be confirmed. Check with: & '$BunBin' '$Application' devices list" }
+  }
+  return [pscustomobject] @{ State = $state; Message = $message }
+}
+
+<#
+One bounded line per pairing-handoff step, in the state home.
+
+The console scrollback is the only place the old installer left its reasoning, and a one-liner install is
+exactly the situation where the operator is not looking at it when the problem is noticed. $WORK-equivalent
+temp files are deleted by this script's own cleanup, which is where a log meant to outlive the run must not
+go. Only the step, the exit code, and the CLI's own detail code are written: the pairing QR is a one-use
+credential and the broker token is a credential, so no captured stdout is ever passed here. A log that
+cannot be written is worth nothing, so every failure inside is swallowed.
+#>
+function Add-HandoffLog {
+  param(
+    [string] $Path,
+    [string] $Step,
+    [int] $ExitCode,
+    [string] $Detail
+  )
+  try {
+    $directory = Split-Path -Parent $Path
+    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
+      New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    # Interpolated rather than formatted with -f: an installer log is not worth betting on how a given
+    # PowerShell parses an operator at the end of a line.
+    $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHHmmssZ')
+    Add-Content -LiteralPath $Path -Encoding UTF8 -Value "$stamp step=$Step exit=$ExitCode detail=$Detail"
+  } catch { }
+}
+
+<#
+The CLI's own reason, reduced to its detail code.
+
+`Invoke-Native` captures stderr for diagnosis and never decides on it, and this keeps that promise: the
+code goes into the log and the operator's one line, and nothing in the installer changes behaviour because
+of it. The charset filter is what keeps a URL, a query, or an accidental credential out of the log.
+#>
+function Get-NativeErrorDetail {
+  param([string] $StdErr)
+  foreach ($line in ($StdErr -split "`r?`n")) {
+    if ($line.StartsWith('[error] ')) {
+      $code = $line.Substring(8).Split(':')[0].Trim()
+      if ($code -match '^[A-Za-z0-9_.-]{1,64}$') { return $code }
+      return 'no-detail-code'
+    }
+  }
+  return 'no-detail-code'
+}
+
 # ---------------------------------------------------------------------------------------------------
 # Owner-only files and directories, as the product defines them.
 # ---------------------------------------------------------------------------------------------------
@@ -1582,7 +1670,15 @@ try {
 
   $pairingPath = Join-Path $stateHome 'client-pairing.json'
   $handoffSkip = ''
+  $handoffOfferUnverified = $false
   $listenerUrl = ''
+  # Read before the report is, because the branch that names a readiness failure runs after the parse and
+  # has to be able to say which port it means without reading a variable the parse may never have set.
+  $listenerPort = ''
+  $pairingId = ''
+  $handoffLogPath = Join-Path (Join-Path $stateHome 'logs') 'pairing-handoff.log'
+  # How long to wait, after the client has been started, for the broker to report the offer redeemed.
+  $handoffConfirmSeconds = 20
   # No client on this host, so no offer is created. Writing one would burn a one-use pairing that expires
   # in five minutes and that nothing here can redeem, and leave it on disk looking like a credential.
   if (-not $clientLaunch) {
@@ -1590,59 +1686,149 @@ try {
     Write-Output "  & '$bunBin' '$application' pair"
     exit 0
   }
-  $status = Invoke-Native -FilePath $bunBin -ArgumentList @($application, 'status', '--json')
-  # The overall status includes agent and service checks; pairing needs a ready
-  # local listener. The pair command independently verifies identity and owner auth.
+  # `status --readiness` answers one question -- is THIS broker on its own loopback port -- and waits a
+  # bounded time for it. The full `status --json` was the wrong probe here twice over: it also reads the
+  # session roster, which on a broker whose 4s roster TTL has lapsed opens a whole-roster sweep, so the
+  # probe made the broker busier while asking whether it was busy; and it sampled the endpoint exactly
+  # once, so a single multi-second stall during discovery skipped the handoff of an install that had just
+  # succeeded.
+  $readiness = Invoke-Native -FilePath $bunBin -ArgumentList @($application, 'status', '--json', '--readiness')
   try {
-    $statusDocument = $status.StdOut | ConvertFrom-Json
-    $listener = Get-JsonProperty -Object $statusDocument -Name 'listener'
+    $readinessDocument = $readiness.StdOut | ConvertFrom-Json
+    # An empty answer is not a report that says "not ready": it is a report this script could not read. The
+    # shell installer's JSON parser throws on it, and the two installers have to leave the same word in the
+    # log for the same thing happening.
+    if ($null -eq $readinessDocument) { throw 'status --readiness returned no document' }
+    $readinessDetail = ((Get-JsonProperty -Object $readinessDocument -Name 'detailCodes') -join ',')
+    # Same words as the shell installer for the same document, because one operator asks the question once
+    # and may be reading either host's log. 'none' would answer "which detail" with nothing.
+    if (-not $readinessDetail) {
+      if (Get-JsonProperty -Object $readinessDocument -Name 'ok') {
+        $readinessDetail = 'ready'
+      } else {
+        $readinessDetail = 'not-ready'
+      }
+    }
+    $listener = Get-JsonProperty -Object $readinessDocument -Name 'listener'
     $listenerUrl = [string] (Get-JsonProperty -Object $listener -Name 'url')
+    $listenerPort = [string] (Get-JsonProperty -Object $listener -Name 'port')
     $listenerUri = [uri] $listenerUrl
     $listenerReady = Get-JsonProperty -Object $listener -Name 'ready'
-    if ((Get-JsonProperty -Object $statusDocument -Name 'product') -cne 'cosyncing' -or
+    if ((Get-JsonProperty -Object $readinessDocument -Name 'product') -cne 'cosyncing' -or
         $listenerReady -isnot [bool] -or -not $listenerReady -or
         $listenerUri.Scheme -cne 'http' -or $listenerUri.Host -cne '127.0.0.1' -or
         $listenerUri.UserInfo) {
       $listenerUrl = ''
     }
   } catch {
+    $readinessDetail = 'unreadable'
     $listenerUrl = ''
   }
+  Add-HandoffLog -Path $handoffLogPath -Step 'readiness' -ExitCode $readiness.ExitCode -Detail $readinessDetail
   if (-not $listenerUrl) {
-    $handoffSkip = 'the broker did not report a ready local listener; check cosy status'
+    # "Nothing answered" and "something else answered" are different sentences, and only the first is
+    # worth waiting out. Neither is inferred from an exit code: the CLI reports which half failed.
+    if ($readinessDetail -like '*internal-endpoint-identity-mismatch*') {
+      $handoffSkip = 'the local endpoint answered as something other than this broker'
+    } elseif ($readinessDetail -like '*internal-endpoint-unauthenticated*') {
+      # A cosyncing endpoint that answered WITHOUT authenticating this installation's token. Not the branch
+      # above -- that responder named a different product -- and not proof of local ownership either: the
+      # machine label is withheld from every caller the responder will not authenticate, so another
+      # cosyncing installation answers identically to a token it does not recognize, and one reached behind
+      # a port relay or in a second state home looks exactly like this. The hint therefore points at the
+      # listener rather than at setup: setup repairs this machine's credential and changes nothing about
+      # whoever else is answering on that port. The wording matches the shell installer because an operator
+      # asks this question once and may be reading either host.
+      $portPhrase = if ($listenerPort) { "on port $listenerPort" } else { 'on the configured port' }
+      $listenerProbe = 'Get-NetTCPConnection -State Listen'
+      if ($listenerPort) {
+        $listenerProbe = "Get-NetTCPConnection -LocalPort $listenerPort | Select-Object -Expand OwningProcess"
+      }
+      $handoffSkip = "a cosyncing endpoint $portPhrase did not accept this installation's credential" +
+        " (find out what owns it: $listenerProbe)"
+    } else {
+      $handoffSkip = "the local listener did not report ready (detail: $readinessDetail)"
+    }
   }
   if (-not $handoffSkip) {
     $offer = Invoke-Native -FilePath $bunBin `
       -ArgumentList @($application, 'pair', '--json', '--broker-url', $listenerUrl)
     if ($offer.ExitCode -ne 0) {
-      $handoffSkip = 'the broker did not issue a pairing offer'
+      # A lost ANSWER to this POST is not a lost offer, and the CLI says so with its own detail code
+      # (`pairing-create-unverified`). Nothing here retries it: a second offer for a client that is merely
+      # slow burns the first one and can leave two peer identities for one device.
+      $offerDetail = Get-NativeErrorDetail -StdErr $offer.StdErr
+      Add-HandoffLog -Path $handoffLogPath -Step 'offer' -ExitCode $offer.ExitCode -Detail $offerDetail
+      if ($offerDetail -eq 'pairing-create-unverified') {
+        # The POST may have arrived. The lost answer left no file for this client, but it does not prove
+        # the broker made no offer; do not guide the operator into immediately creating a second one.
+        $handoffOfferUnverified = $true
+      } else {
+        $handoffSkip = "the broker did not issue a pairing offer (detail: $offerDetail)"
+      }
     } else {
+      # The whole reply is validated BEFORE any of it is written, and the step is logged only once the file
+      # has landed. The command's exit status used to answer for this step on its own: a broker that returned
+      # 200 with something unusable left no offer line in the log at all, while a reply that parsed but could
+      # not be published still left its pairing id set -- so the confirmation below went and asked the broker
+      # about an offer no client ever held, and reported it as merely waiting.
+      $offerDetail = 'offer-reply-unreadable'
       $parsed = $null
       try { $parsed = $offer.StdOut | ConvertFrom-Json } catch { $parsed = $null }
-      $qr = [string] (Get-JsonProperty -Object $parsed -Name 'qr')
-      $brokerUrl = [string] (Get-JsonProperty -Object $parsed -Name 'brokerUrl')
-      $expiresAt = [string] (Get-JsonProperty -Object $parsed -Name 'expiresAt')
-      if (-not $qr -or -not $brokerUrl -or -not $expiresAt) {
-        $handoffSkip = 'the pairing offer could not be read'
-      } else {
-        # ConvertTo-Json rather than hand-built text: the QR payload is opaque and must reach the client
-        # byte for byte, and a serializer is the thing that gets its escaping right. Newlines normalised
-        # to LF and no byte-order mark, so a handoff file is the same bytes on every host.
-        $document = ([pscustomobject] @{
-          schemaVersion = 1
-          qr = $qr
-          brokerUrl = $brokerUrl
-          expiresAt = $expiresAt
-        } | ConvertTo-Json) -replace "`r`n", "`n"
-        $stagedPairing = New-StagingPath -Parent $stateHome -Prefix '.client-pairing.'
-        [IO.File]::WriteAllText($stagedPairing, "$document`n", (New-Object Text.UTF8Encoding $false))
-        Set-OwnerOnlySecurity -Path $stagedPairing -Kind 'file'
-        Move-Item -LiteralPath $stagedPairing -Destination $pairingPath -Force
+      if ($null -ne $parsed) {
+        $offerDetail = 'offer-reply-invalid'
+        $candidateId = [string] (Get-JsonProperty -Object $parsed -Name 'pairingId')
+        $qr = [string] (Get-JsonProperty -Object $parsed -Name 'qr')
+        $brokerUrl = [string] (Get-JsonProperty -Object $parsed -Name 'brokerUrl')
+        $expiresAt = [string] (Get-JsonProperty -Object $parsed -Name 'expiresAt')
+        $expires = [DateTime]::MinValue
+        # The id is what the confirmation step asks the broker about and the QR is what the client redeems,
+        # so a reply without both is not a handoff. An expiry the client cannot parse is a file it discards.
+        if ($candidateId -match '^pair_[A-Za-z0-9_-]{20,32}$' -and $qr -and $brokerUrl -and
+            [DateTime]::TryParse($expiresAt, [ref] $expires)) {
+          # Declared here so the catch below can see it whether or not staging ever got as far as naming a
+          # path: under StrictMode an unassigned variable is a terminating error of its own.
+          $stagedPairing = $null
+          try {
+            # ConvertTo-Json rather than hand-built text: the QR payload is opaque and must reach the client
+            # byte for byte, and a serializer is the thing that gets its escaping right. Newlines normalised
+            # to LF and no byte-order mark, so a handoff file is the same bytes on every host.
+            $document = ([pscustomobject] @{
+              schemaVersion = 1
+              qr = $qr
+              brokerUrl = $brokerUrl
+              expiresAt = $expiresAt
+            } | ConvertTo-Json) -replace "`r`n", "`n"
+            $stagedPairing = New-StagingPath -Parent $stateHome -Prefix '.client-pairing.'
+            [IO.File]::WriteAllText($stagedPairing, "$document`n", (New-Object Text.UTF8Encoding $false))
+            Set-OwnerOnlySecurity -Path $stagedPairing -Kind 'file'
+            Move-Item -LiteralPath $stagedPairing -Destination $pairingPath -Force
+            # Kept only now. It names the offer the confirmation step asks about, and asking is only worth
+            # doing once there is something on disk that the client can read.
+            $pairingId = $candidateId
+            $offerDetail = 'created'
+          } catch {
+            $offerDetail = 'offer-file-unwritable'
+            if ($stagedPairing -and (Test-Path -LiteralPath $stagedPairing)) {
+              Remove-Item -LiteralPath $stagedPairing -Force -ErrorAction SilentlyContinue
+            }
+          }
+        }
+      }
+      # One outcome per step, and this is the only line the offer step writes.
+      if ($offerDetail -eq 'created') {
+        Add-HandoffLog -Path $handoffLogPath -Step 'offer' -ExitCode 0 -Detail 'created'
         Write-Output "Pairing handoff: $pairingPath (one-use, expires in five minutes)"
+      } else {
+        Add-HandoffLog -Path $handoffLogPath -Step 'offer' -ExitCode 1 -Detail $offerDetail
+        $handoffSkip = "the pairing offer could not be published (detail: $offerDetail)"
       }
     }
   }
-  if ($handoffSkip) {
+  if ($handoffOfferUnverified) {
+    Write-Output 'Pairing handoff: unverified - the broker did not answer the offer request. No handoff file was written. An unused offer may exist; wait five minutes before creating another with:'
+    Write-Output "  & '$bunBin' '$application' pair"
+  } elseif ($handoffSkip) {
     Write-Output "Pairing handoff: skipped - $handoffSkip. Pair by hand with:"
     Write-Output "  & '$bunBin' '$application' pair"
   }
@@ -1652,6 +1838,17 @@ try {
     Write-Output "Launched $clientLaunch"
   } catch {
     Write-Output "Could not launch $clientLaunch; start it from $CLIENT_ROOT."
+  }
+
+  # Did it work? Asked of the broker, not of the offer file -- see Get-HandoffOutcome for why the file
+  # cannot answer this. The three answers stay three: accepted, still waiting, and could not verify.
+  if ($pairingId) {
+    $acceptance = Invoke-Native -FilePath $bunBin -ArgumentList @(
+      $application, 'pair', '--status', $pairingId, '--json', '--timeout', "$handoffConfirmSeconds")
+    $outcome = Get-HandoffOutcome -Json $acceptance.StdOut -ClientLaunch $clientLaunch `
+      -BunBin $bunBin -Application $application
+    Add-HandoffLog -Path $handoffLogPath -Step 'acceptance' -ExitCode $acceptance.ExitCode -Detail $outcome.State
+    Write-Output $outcome.Message
   }
 } catch {
   # A refusal should LOOK like one. The running-client message in particular reads as ordinary progress

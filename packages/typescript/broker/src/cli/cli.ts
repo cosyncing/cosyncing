@@ -4,6 +4,10 @@ import { BUILD_INFO, type BuildInfo } from '../runtime/build-info.ts';
 import { exitAfterDiagnostics } from '../runtime/fatal-start.ts';
 import { currentApplicationIdentity, type ApplicationIdentity } from '../runtime/application-identity.ts';
 import { inspectInstallState, type InstallStateInspection } from '../installation/install-state.ts';
+// Type-only, so the seam below names the command's real options instead of restating them. The restated
+// copy had already fallen behind: it could not see the pairing-report fields, which meant a test double for
+// `pair` could not cover the installer's acceptance call at all. The implementation stays lazily imported.
+import type { PairCommandOptions } from './operator-commands.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import {
   cliMessages,
@@ -60,15 +64,7 @@ export interface CliDependencies {
     replaceLegacyPiBridge: boolean;
     upgradeLegacyAgentSkill: boolean;
   }) => Promise<{ exitCode: number }>;
-  runPair?: (options: {
-    json: boolean;
-    wait: boolean;
-    brokerUrl?: string;
-    clientLabel?: string;
-    invocation: string;
-    stdout: CliWriter;
-    stderr: CliWriter;
-  }) => Promise<{ exitCode: number }>;
+  runPair?: (options: PairCommandOptions) => Promise<{ exitCode: number }>;
   runDevicesList?: (options: {
     json: boolean;
     invocation: string;
@@ -86,6 +82,9 @@ export interface CliDependencies {
   }) => Promise<{ exitCode: number }>;
   runStatus?: (options: {
     json: boolean;
+    /** Report only "is this broker answering on loopback", with a bounded wait. */
+    readiness?: boolean;
+    timeoutMs?: number;
     invocation: string;
     stdout: CliWriter;
     stderr: CliWriter;
@@ -174,9 +173,10 @@ Usage:
   ${brokerUsage}
   ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
   ${command} pair [--broker-url <client-reachable-url>] [--label <device>] [--wait] [--json]
+  ${command} pair --status <pairing-id> [--timeout <seconds>] [--json]
   ${command} devices list [--json]
   ${command} devices revoke <id> [--yes] [--json]
-  ${command} status [--json]
+  ${command} status [--json] [--readiness]
   ${command} start | stop | restart
   ${command} logs [--lines <count>] [--follow] [--json]
   ${command} repair [--yes] [--accept-legacy-integrations] [--json]
@@ -310,15 +310,7 @@ async function defaultRunSetup(options: {
   });
 }
 
-async function defaultRunPair(options: {
-  json: boolean;
-  wait: boolean;
-  brokerUrl?: string;
-  clientLabel?: string;
-  invocation: string;
-  stdout: CliWriter;
-  stderr: CliWriter;
-}): Promise<{ exitCode: number }> {
+async function defaultRunPair(options: PairCommandOptions): Promise<{ exitCode: number }> {
   const { runPairCommand } = await import('./operator-commands.ts');
   return runPairCommand(options);
 }
@@ -386,12 +378,28 @@ function writeCommandResult<T extends { exitCode: number; summary?: string }>(
 
 async function defaultRunStatus(options: {
   json: boolean;
+  readiness?: boolean;
+  timeoutMs?: number;
   invocation: string;
   stdout: CliWriter;
   stderr: CliWriter;
   buildInfo: Readonly<BuildInfo>;
 }): Promise<{ exitCode: number }> {
   const lifecycle = await import('../installation/broker-lifecycle.ts');
+  if (options.readiness) {
+    const readiness = await lifecycle.collectBrokerReadiness({
+      buildInfo: options.buildInfo,
+      ...applicationLaunchInputs(options.buildInfo),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    });
+    if (options.json) options.stdout.write(`${JSON.stringify(readiness, null, 2)}\n`);
+    else {
+      (readiness.ok ? options.stdout : options.stderr).write(readiness.ok
+        ? `Broker listener is ready at ${readiness.listener.url}\n`
+        : `Broker listener is not ready (${readiness.detailCodes.join(', ') || 'unknown'}).\n`);
+    }
+    return { exitCode: readiness.ok ? 0 : 1 };
+  }
   const report = await lifecycle.collectLifecycleStatus({
     buildInfo: options.buildInfo,
     ...applicationLaunchInputs(options.buildInfo),
@@ -746,10 +754,32 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     let wait = false;
     let brokerUrl: string | undefined;
     let clientLabel: string | undefined;
+    let statusPairingId: string | undefined;
+    let statusTimeoutSeconds: number | undefined;
     for (let index = 0; index < args.length; index += 1) {
       const arg = args[index]!;
       if (arg === '--json' && !json) { json = true; continue; }
       if (arg === '--wait' && !wait) { wait = true; continue; }
+      if (arg === '--status' && statusPairingId === undefined) {
+        const value = args[index + 1]?.trim();
+        if (!value || value.startsWith('--')) {
+          stderr.write(`${command} pair: --status requires the pairing id from a previous pair --json\n`);
+          return 2;
+        }
+        statusPairingId = value;
+        index += 1;
+        continue;
+      }
+      if (arg === '--timeout' && statusTimeoutSeconds === undefined) {
+        const value = args[index + 1]?.trim();
+        if (!value || !/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 120) {
+          stderr.write(`${command} pair: --timeout accepts a whole number of seconds from 1 to 120\n`);
+          return 2;
+        }
+        statusTimeoutSeconds = Number(value);
+        index += 1;
+        continue;
+      }
       if (arg === '--broker-url' && brokerUrl === undefined) {
         const value = args[index + 1]?.trim();
         if (!value || value.startsWith('--')) {
@@ -773,7 +803,16 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       stderr.write(`${command} pair: unknown or duplicate option ${JSON.stringify(arg)}\n`);
       return 2;
     }
-    if (json && !brokerUrl) {
+    if (statusPairingId) {
+      // Reporting an existing offer is a read. It takes nothing that could create one.
+      if (wait || brokerUrl || clientLabel) {
+        stderr.write(`${command} pair: --status reports an existing pairing offer and takes no --wait, --broker-url, or --label\n`);
+        return 2;
+      }
+    } else if (statusTimeoutSeconds !== undefined) {
+      stderr.write(`${command} pair: --timeout applies to --status\n`);
+      return 2;
+    } else if (json && !brokerUrl) {
       stderr.write(`${command} pair: --json requires --broker-url to preserve the schemaVersion 1 output contract\n`);
       return 2;
     }
@@ -782,6 +821,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       wait,
       ...(brokerUrl ? { brokerUrl } : {}),
       ...(clientLabel ? { clientLabel } : {}),
+      ...(statusPairingId ? { statusPairingId } : {}),
+      ...(statusTimeoutSeconds === undefined ? {} : { statusTimeoutSeconds }),
       invocation: command,
       stdout,
       stderr,
@@ -831,12 +872,27 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   }
 
   if (requested === 'status') {
-    if (args.length > 1 || (args.length === 1 && args[0] !== '--json')) {
-      stderr.write(`${command} status: accepts only --json\n`);
+    let json = false;
+    let readiness = false;
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index]!;
+      if (arg === '--json' && !json) { json = true; continue; }
+      if (arg === '--readiness' && !readiness) { readiness = true; continue; }
+      stderr.write(`${command} status: unknown or duplicate option ${JSON.stringify(arg)}\n`);
+      return 2;
+    }
+    if (readiness && !json) {
+      stderr.write(`${command} status: --readiness is a machine-readable readiness document; add --json\n`);
       return 2;
     }
     return (await (dependencies.runStatus ?? ((options) => defaultRunStatus({ ...options, buildInfo })))(
-      { json: args[0] === '--json', invocation: command, stdout, stderr },
+      {
+        json,
+        ...(readiness ? { readiness: true } : {}),
+        invocation: command,
+        stdout,
+        stderr,
+      },
     )).exitCode;
   }
 

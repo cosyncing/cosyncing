@@ -176,6 +176,75 @@ process.env.COSYNCING_HOME = pureCliHome;
       && compatibleJsonPair.code === 0
       && pairCalls === 1);
 
+  // The installer's pairing handoff is a shell script calling these two commands, so the argument surface
+  // IS its contract. `status --readiness` exists because the full report reads the session roster, which
+  // re-opens a whole-roster sweep on a broker whose 4s TTL has lapsed: the probe used to add the very load
+  // that made the broker look unready, and one missed sample skipped the handoff. `pair --status` exists
+  // because the client deletes the offer file before it asks for its credential, so only the broker can
+  // say whether a pairing id was redeemed -- and asking again with `pair` would mint a second offer.
+  {
+    // One record per call: a single mutable "last seen" would be overwritten by the very next invocation,
+    // which is the difference being asserted here.
+    const seen: Array<{ json: boolean; readiness: boolean }> = [];
+    const captureStatus: CliDependencies = {
+      runStatus: async (options) => {
+        seen.push({ json: options.json, readiness: options.readiness === true });
+        return { exitCode: 0 };
+      },
+    };
+    const readiness = await callCli(['status', '--json', '--readiness'], captureStatus);
+    const plainStatus = await callCli(['status', '--json'], captureStatus);
+    const readinessWithoutJson = await callCli(['status', '--readiness'], captureStatus);
+    const duplicateFlag = await callCli(['status', '--json', '--json', '--readiness'], captureStatus);
+    const unknownFlag = await callCli(['status', '--verbose'], captureStatus);
+    check('status --json --readiness asks the readiness question and plain status never does',
+      readiness.code === 0 && plainStatus.code === 0
+        && seen.length === 2
+        && seen[0]?.json === true && seen[0]?.readiness === true
+        && seen[1]?.json === true && seen[1]?.readiness === false,
+      JSON.stringify(seen));
+    check('status --readiness without --json is refused rather than rendered as a guess',
+      readinessWithoutJson.code === 2
+        && readinessWithoutJson.stderr.includes('add --json'),
+      readinessWithoutJson.stderr.trim());
+    check('status still rejects a duplicated or unknown flag instead of reading through it',
+      duplicateFlag.code === 2 && unknownFlag.code === 2, `${duplicateFlag.code}/${unknownFlag.code}`);
+
+    let reported: { id?: string; seconds?: number } = {};
+    const capturePair: CliDependencies = {
+      runPair: async (options) => {
+        reported = { id: options.statusPairingId, seconds: options.statusTimeoutSeconds };
+        return { exitCode: 0, detailCode: 'pairing-accepted' };
+      },
+    };
+    const statusOfPair = await callCli(
+      ['pair', '--status', 'pair_fixturepairingid00000', '--json', '--timeout', '30'], capturePair);
+    const statusWaits = await callCli(
+      ['pair', '--status', 'pair_fixturepairingid00000', '--wait'], capturePair);
+    const statusWithUrl = await callCli(
+      ['pair', '--status', 'pair_fixturepairingid00000', '--broker-url', 'https://broker.example.com'],
+      capturePair);
+    const orphanTimeout = await callCli(['pair', '--timeout', '30'], capturePair);
+    const outOfRangeTimeout = await callCli(
+      ['pair', '--status', 'pair_fixturepairingid00000', '--timeout', '121'], capturePair);
+    const missingId = await callCli(['pair', '--status', '--json'], capturePair);
+    check('pair --status carries the pairing id and its bound to the report path',
+      statusOfPair.code === 0
+        && reported.id === 'pair_fixturepairingid00000' && reported.seconds === 30,
+      JSON.stringify(reported));
+    check('pair --status cannot also wait, name a URL, or label a device: it creates nothing',
+      statusWaits.code === 2 && statusWaits.stderr.includes('takes no --wait')
+        && statusWithUrl.code === 2 && orphanTimeout.code === 2
+        && outOfRangeTimeout.code === 2 && missingId.code === 2,
+      `${statusWaits.code}/${statusWithUrl.code}/${orphanTimeout.code}/${outOfRangeTimeout.code}/${missingId.code}`);
+    const usage = await callCli(['--help']);
+    check('the published usage names both handoff commands',
+      usage.stdout.includes('status [--json] [--readiness]')
+        && usage.stdout.includes('pair --status <pairing-id> [--timeout <seconds>] [--json]'),
+      usage.stdout.split('\n').filter((line) => line.includes('pair') || line.includes('status'))
+        .join(' | '));
+  }
+
   let setupCalls = 0;
   const missingOwnershipAck = await callCli(['setup', '--yes'], {
     runSetup: async () => { setupCalls += 1; return { exitCode: 0 }; },
