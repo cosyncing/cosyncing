@@ -1007,20 +1007,23 @@ try {
         && unauthenticatedSamples >= 2,
       `samples=${unauthenticatedSamples} detail=${unauthenticated.detailCodes.join(',')}`);
 
-    // Without the local credential the machine label is unreadable, so identity cannot be confirmed at all.
-    // Asking anyway returns a public payload with no label, which reads as a foreign service and sends the
-    // operator hunting for a process that does not exist.
-    chmodSync(join(m.home, 'secrets', 'broker-token'), 0o644);
+    // Without a valid local credential the machine label is unavailable, so identity cannot be confirmed.
+    // A malformed token is portable across POSIX and Windows; chmod does not make a Windows file unreadable.
+    // Asking anyway returns a public payload with no label and sends the operator hunting for a process
+    // that does not exist.
+    const tokenPath = join(m.home, 'secrets', 'broker-token');
+    const originalToken = readFileSync(tokenPath);
+    writeFileSync(tokenPath, 'invalid-token\n');
     const unprovenPaths: string[] = [];
     const unproven = await collectBrokerReadiness({
       ...baseOptions(m), context: reading(unprovenPaths), ...bound,
     });
-    check('an unreadable local credential names itself and probes nothing rather than claiming a foreigner',
+    check('an invalid local credential names itself and probes nothing rather than claiming a foreigner',
       !unproven.ok && unprovenPaths.length === 0
-        && unproven.detailCodes.some((code) => code.includes('token'))
+        && unproven.detailCodes.includes('broker-token-malformed')
         && !unproven.detailCodes.includes('internal-endpoint-identity-mismatch'),
       `paths=${unprovenPaths.join(',')} detail=${unproven.detailCodes.join(',')}`);
-    chmodSync(join(m.home, 'secrets', 'broker-token'), 0o600);
+    writeFileSync(tokenPath, originalToken);
   }
 
   // Legacy repair: exact marker confirmation, unrelated-setting preservation, scoped credential URL, token rotation.
