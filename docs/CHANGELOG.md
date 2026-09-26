@@ -127,6 +127,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Two commands for operators and scripts ask the two questions that were being
+  conflated. `cosy status --json --readiness` answers only "is this broker
+  answering on its own loopback port", and waits a bounded time for the answer;
+  `cosy pair --status <pairing-id> [--timeout <seconds>]` asks the broker what
+  became of one pairing offer and creates nothing, reporting `accepted`,
+  `pending`, `expired`, `not-found`, or `unverifiable`.
 - Shell commands an agent runs in the background now appear as a live card in
   the session, alongside goals, plans and subagent activity. The card shows the
   command, how long it has been running and the latest lines of its output, and
@@ -163,6 +169,31 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- The one-line installer's pairing handoff no longer depends on one lucky
+  sample. It used to probe the full `status --json` report, which also reads the
+  session roster; on a broker in daily use that read opens a whole-roster sweep,
+  so the readiness check added to the very load that made the broker look
+  unready, and a single multi-second stall could skip the handoff of an install
+  that had just succeeded. The client then sat on "Connect this device" while the
+  terminal reported a finished install. Readiness is now its own roster-free
+  command that waits, `pair` waits out a busy identity read instead of reporting
+  the broker absent, an unanswered offer request is named rather than retried as
+  though no offer had been created, and after launching the client the installer
+  asks the broker whether that specific offer was accepted instead of guessing
+  from an offer file the client deletes before it authenticates. It now says
+  `the broker accepted peer <device>`, `not paired yet`, or `acceptance could not
+  be confirmed`, and leaves the same bounded record in
+  `$COSYNCING_HOME/logs/pairing-handoff.log` without the pairing payload. The
+  first of those is the broker's own record and not a claim about the client,
+  which saves its credential afterwards in its own process. A reply that could
+  not be used, and an offer this machine had nowhere to write, are each recorded
+  as that failure instead of as an offer created. An offer whose confirmation
+  went silent is reported as unverified rather than as still waiting. An endpoint
+  that answers as cosyncing without accepting this installation's credential is
+  reported as a credential fault on that endpoint rather than as a foreign
+  service, and without a claim about whose broker answered: a second installation
+  behind a port relay says exactly the same thing, so the guidance points at the
+  listener that owns the port instead of at `setup`.
 - An expanded live-state card now shows its real state. The card in the session
   band reported "Running" with a running icon whatever the underlying work was
   doing, and its elapsed time kept climbing after the work had finished, so a

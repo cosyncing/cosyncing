@@ -165,10 +165,22 @@ const identity = ${JSON.stringify({
 })};
 if (command === 'version' && args[0] === '--json') console.log(JSON.stringify(identity, null, 2));
 else if (command === 'setup') console.log('fixture setup completed');
+// The pairing gate asks readiness, not the full status report, and this fixture answers the question that
+// was actually asked. A fixture that only ever answered the old shape would let the gate regress to a
+// command this product no longer calls.
+else if (command === 'status' && args[0] === '--json' && args[1] === '--readiness') console.log(
+  JSON.stringify({schemaVersion: 1, product: 'cosyncing', ok: true, detailCodes: [],
+    listener: {host: '127.0.0.1', port: 7734, url: 'http://127.0.0.1:7734', scope: 'loopback',
+      ready: true}}));
 else if (command === 'status') console.log(JSON.stringify({schemaVersion: 2, product: 'cosyncing',
   listener: {host: '127.0.0.1', port: 7734, url: 'http://127.0.0.1:7734', ready: true}}));
+// The installer asks the broker, not the offer file, whether the client paired. The id here is shaped like
+// a real one because the installer validates it, and an id that failed that check would skip this whole
+// step -- which is precisely the step that regressed.
+else if (command === 'pair' && args[0] === '--status') console.log(JSON.stringify({schemaVersion: 1,
+  ok: true, pairingId: args[1], state: 'accepted', peerId: 'fixture-peer'}));
 else if (command === 'pair' && args[0] === '--json' && args[1] === '--broker-url') {
-  console.log(JSON.stringify({schemaVersion: 1, pairingId: 'fixture-pairing',
+  console.log(JSON.stringify({schemaVersion: 1, pairingId: 'pair_fixturepairingid00000',
     qr: 'https://pair.example/v3#fixture', expiresAt: '2026-07-17T00:05:00.000Z',
     brokerUrl: args[2], advertisedUrl: args[2], tokenScope: 'observe-drive-files-v1'}));
 } else process.exit(2);
@@ -1409,12 +1421,26 @@ try {
   const handoffDocument = existsSync(handoffFile)
     ? JSON.parse(readFileSync(handoffFile, 'utf8'))
     : null;
-  check('with a terminal the all-in-one runs setup and launches the client it installed',
+  check('with a terminal the all-in-one runs setup, launches the client, and confirms the pairing',
     handoff.exitCode === 0
       && handoff.stdout.includes('Running setup. It shows its plan and asks before changing anything.')
       && handoff.stdout.includes('fixture setup completed')
-      && handoff.stdout.includes(`Started ${join(handoffHome, '.cosyncing', 'client', 'cosyncing')}`),
+      && handoff.stdout.includes(`Started ${join(handoffHome, '.cosyncing', 'client', 'cosyncing')}`)
+      // Asked of the broker after the launch. This is the line whose absence let a one-liner install look
+      // finished while the client sat on "Connect this device". It states what the broker answered, and not
+      // that the client finished saving the credential that answer made possible.
+      && handoff.stdout.includes('Desktop client: the broker accepted peer fixture-peer'),
     `${handoff.exitCode}: ${handoff.stdout.trim().split('\n').slice(-4).join(' | ')} ${handoff.stderr.trim().slice(0, 200)}`);
+  // The scrollback is gone by the time anyone asks what happened, and this run's temp files are deleted by
+  // the exit trap, so the log in the state home is the only surviving account of the handoff.
+  const handoffLogPath = join(handoffHome, '.cosyncing', 'logs', 'pairing-handoff.log');
+  const handoffLog = existsSync(handoffLogPath) ? readFileSync(handoffLogPath, 'utf8') : '';
+  check('the all-in-one leaves a bounded handoff record that names no credential',
+    ['step=readiness exit=0 detail=ready', 'step=offer exit=0 detail=created',
+      'step=acceptance exit=0 detail=accepted fixture-peer']
+      .every((entry) => handoffLog.includes(entry))
+      && !handoffLog.includes('https://pair.example') && !handoffLog.includes('pair_fixturepairingid00000'),
+    handoffLog.trim() || 'no pairing-handoff.log');
   // A host with no client and a terminal to run setup on. The broker install and setup are the point
   // there; an offer written for a client that does not exist would be a one-use credential on disk that
   // nothing can redeem.

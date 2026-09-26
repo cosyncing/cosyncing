@@ -604,21 +604,41 @@ function agentSkillOwnedStale(
     && receipt.ownership.installedSha256 === target.actualSha256;
 }
 
+/**
+ * Who is answering on this port.
+ *
+ * `unauthenticated` and `identity-mismatch` are two faults, not one. A service that names a different product
+ * is a foreigner. A service that names OUR product and omits `machine` is this broker refusing the credential
+ * the command read from disk: `/api/health` answers an unauthenticated request with `{ok, product, version}`
+ * and withholds the machine label, the commit, and the build fingerprint. Calling the second a foreign
+ * service sends the operator to stop a process that is theirs, which is the opposite of the repair for a
+ * rotated or stale local token.
+ */
+type EndpointIdentity
+  = 'ready'
+  | 'unreachable'
+  | 'unconfigured'
+  | 'identity-mismatch'
+  /** Answered as this product, but did not accept the credential sent with the request. */
+  | 'unauthenticated';
+
 async function endpointIdentity(
   context: SetupDiagnosisContext,
   url: string | undefined,
   machine: string | undefined,
   headers?: Readonly<Record<string, string>>,
-): Promise<'ready' | 'unreachable' | 'unconfigured' | 'identity-mismatch'> {
+): Promise<EndpointIdentity> {
   if (!url || !machine) return 'unconfigured';
   const response = await context.fetchJson(new URL('/api/health', url).toString(), headers);
   if (response.status !== 'ok') return 'unreachable';
   const body = response.json && typeof response.json === 'object' && !Array.isArray(response.json)
     ? response.json as Record<string, unknown>
     : {};
-  return body.ok === true && body.product === PRODUCT_IDENTITY.productName && body.machine === machine
-    ? 'ready'
-    : 'identity-mismatch';
+  if (body.ok !== true || body.product !== PRODUCT_IDENTITY.productName) return 'identity-mismatch';
+  // A MISSING label is "it did not know us". A label that is present and different is an answer about
+  // identity, and that one is the foreign service.
+  if (body.machine === undefined || body.machine === null) return 'unauthenticated';
+  return body.machine === machine ? 'ready' : 'identity-mismatch';
 }
 
 /**
@@ -629,6 +649,17 @@ async function endpointIdentity(
  * that is about to be perfectly healthy. Single-shot sampling there is what let a normally-booting service
  * fail repair's verification and take a rollback with it. `unconfigured` short-circuits — no URL or machine
  * label is a state no amount of waiting changes.
+ *
+ * A service that answers AS SOMETHING ELSE is treated two ways, by caller. Waiting is right for a broker
+ * mid-restart that has not finished binding, and wrong for an installer deciding whether to hand over a
+ * pairing: there the second answer is the same foreign service, arriving after the operator has watched a
+ * dead port. `retryIdentityMismatch` is the switch; a caller that reports readiness to a human turns it off.
+ *
+ * `unauthenticated` is NOT covered by that switch. A service that names another product has told us what it
+ * is and will say the same thing again; a broker that has not accepted our credential may be one that was
+ * restarted with a freshly written token a moment ago, which is a state the same restart window that makes
+ * `unreachable` worth waiting out produces. It is waited out, within the same deadline, and reported under
+ * its own code if the window does not clear.
  */
 async function awaitEndpointIdentity(options: {
   context: SetupDiagnosisContext;
@@ -638,13 +669,18 @@ async function awaitEndpointIdentity(options: {
   attempts?: number;
   delayMs?: number;
   timeoutMs?: number;
-}): Promise<'ready' | 'unreachable' | 'unconfigured' | 'identity-mismatch'> {
+  retryIdentityMismatch?: boolean;
+}): Promise<EndpointIdentity> {
   const attempts = Math.max(1, options.attempts ?? 30);
   const delayMs = Math.max(1, options.delayMs ?? 250);
   const deadline = Date.now() + Math.max(1, options.timeoutMs ?? SERVICE_TRANSITION_TIMEOUT_MS);
   let identity = await endpointIdentity(options.context, options.url, options.machine, options.headers);
   for (let index = 1; index < attempts && identity !== 'ready'; index += 1) {
-    if (identity === 'unconfigured' || Date.now() >= deadline) return identity;
+    if (identity === 'unconfigured'
+      || (identity === 'identity-mismatch' && options.retryIdentityMismatch === false)
+      || Date.now() >= deadline) {
+      return identity;
+    }
     await Bun.sleep(delayMs);
     identity = await endpointIdentity(options.context, options.url, options.machine, options.headers);
   }
@@ -837,6 +873,94 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
     agentsRead,
     sessions,
     updates,
+    detailCodes,
+  };
+}
+
+/**
+ * How long {@link collectBrokerReadiness} waits for this broker's own identity to appear on its own port.
+ *
+ * The full status report samples the endpoint ONCE with the shared 3s probe budget. That is right for a
+ * command describing a moment and wrong for the installer's pairing handoff, where one "no" costs the
+ * operator a manual pairing and the screen that asks for it. Measured on an installed broker with ~4,900
+ * sessions: the trivial `/api/health` route still takes 6-8s about once a minute while discovery runs, and
+ * the first sweep after a service start measured 22.6s. Those are windows in which a single-shot probe
+ * reports a healthy broker as not ready.
+ */
+const READINESS_DEADLINE_MS = 30_000;
+const READINESS_PROBE_DELAY_MS = 1_000;
+
+export interface BrokerReadinessReport {
+  schemaVersion: 1;
+  product: string;
+  ok: boolean;
+  /** The same loopback listener `status --json` publishes, so a handoff gate cannot drift from it. */
+  listener: {
+    host: '127.0.0.1';
+    port: number;
+    url: string;
+    scope: 'loopback';
+    ready: boolean;
+  };
+  detailCodes: string[];
+}
+
+/**
+ * "Is THIS broker answering on loopback", and nothing else.
+ *
+ * `status --json` also reads the agent roster, the session roster, the update feed, the service manager,
+ * and the receipt-owned agent skills. The session read is the expensive one: it re-opens whole-roster
+ * discovery whenever the 4s TTL has lapsed, which on an installed broker is nearly always, so the command
+ * that asked for readiness helped cause the very load that made readiness hard to observe. This path reads
+ * two files and probes one endpoint, and it waits, because the installer's pairing handoff is the one place
+ * where a wrong "not ready" is not recoverable without a human.
+ */
+export async function collectBrokerReadiness(
+  options: LifecycleBaseOptions & { timeoutMs?: number; delayMs?: number },
+): Promise<BrokerReadinessReport> {
+  const home = options.home ?? setupStateHome();
+  const context = options.context ?? createSetupDiagnosisContext();
+  const configInspection = inspectBrokerConfig(home);
+  const config = configInspection.status === 'ok' ? configInspection.config : undefined;
+  const detailCodes: string[] = [];
+  if (!config) detailCodes.push('broker-config-invalid');
+  // The local credential is what makes the machine label readable. Without it the endpoint still answers,
+  // but with a public payload that carries no label, and "no label" would come back from the probe as an
+  // identity mismatch -- a foreign service -- when the truth is that this command cannot confirm identity
+  // at all. So it names what is missing and asks nothing, rather than sending the operator to look for a
+  // process that is not there. A credential that IS readable but is not accepted comes back from the probe
+  // as `unauthenticated`, which is the same claim made about the endpoint that answered rather than about a
+  // file this command could not open.
+  const tokenInspection = inspectBrokerToken(brokerTokenPath(home));
+  if (tokenInspection.status !== 'ok') detailCodes.push(tokenInspection.detailCode);
+  const deadlineMs = Math.max(1, options.timeoutMs ?? READINESS_DEADLINE_MS);
+  const delayMs = Math.max(1, options.delayMs ?? READINESS_PROBE_DELAY_MS);
+  const verdict = config && tokenInspection.status === 'ok'
+    ? await awaitEndpointIdentity({
+      context,
+      url: config.broker.internalUrl,
+      machine: config.broker.machineLabel,
+      headers: { [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(tokenInspection.path) },
+      attempts: Math.ceil(deadlineMs / delayMs) + 1,
+      delayMs,
+      timeoutMs: deadlineMs,
+      // Something answering as another product is a verdict on the first sample. Waiting 30s on it would
+      // cost the operator half a minute to be told what was already known.
+      retryIdentityMismatch: false,
+    })
+    : undefined;
+  if (verdict !== undefined && verdict !== 'ready') detailCodes.push(`internal-endpoint-${verdict}`);
+  return {
+    schemaVersion: 1,
+    product: PRODUCT_IDENTITY.productName,
+    ok: verdict === 'ready',
+    listener: {
+      host: '127.0.0.1',
+      port: config?.broker.port ?? 7734,
+      url: config?.broker.internalUrl ?? 'http://127.0.0.1:7734',
+      scope: 'loopback',
+      ready: verdict === 'ready',
+    },
     detailCodes,
   };
 }

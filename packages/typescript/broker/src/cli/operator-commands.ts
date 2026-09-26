@@ -22,9 +22,24 @@ import {
   PairingBrokerUrlError,
   pairingBrokerUrlUsesUnprotectedHttp,
 } from '../transport/pairing-url.ts';
+import { PAIRING_ID_PATTERN } from '../transport/transport-pairing.ts';
 
 const RESPONSE_LIMIT = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 4_000;
+/**
+ * How long a pairing command waits for THIS broker's identity on its own port.
+ *
+ * Reading the health endpoint is safe to repeat, and repeating it is what stops `pair` from reporting a
+ * broker that is merely busy as one that is absent: measured on an installed broker, that trivial route
+ * still takes 6-8s about once a minute while roster discovery runs. It is not an invitation to wait out a
+ * foreign service — an answer that identifies itself as something else is a verdict, returned on the first
+ * probe.
+ */
+const PAIR_IDENTITY_DEADLINE_MS = 10_000;
+const PAIR_IDENTITY_RETRY_MS = 500;
+/** How often the acceptance watcher asks, and how long it asks for when the caller does not say. */
+const PAIRING_POLL_MS = 1_000;
+export const PAIR_STATUS_DEFAULT_TIMEOUT_SECONDS = 20;
 
 export interface OperatorWriter {
   write(text: string): void;
@@ -40,6 +55,10 @@ export interface PairCommandOptions {
   wait: boolean;
   brokerUrl?: string;
   clientLabel?: string;
+  /** Report what became of one previously created offer instead of creating a new one. */
+  statusPairingId?: string;
+  /** Bound for `statusPairingId`, in seconds. */
+  statusTimeoutSeconds?: number;
   home?: string;
   invocation: string;
   stdout: OperatorWriter;
@@ -79,6 +98,13 @@ export interface OperatorCommandDependencies {
   columns?: () => number | undefined;
   confirmRevoke?: (peerId: string) => Promise<boolean>;
   confirmAnother?: (paired: number) => Promise<boolean>;
+  /**
+   * Host family, for guidance that names a command the operator can actually run.
+   *
+   * Injectable because the alternative is a test that asserts whichever command this machine happens to
+   * have, which is no test at all. Defaults to the real platform.
+   */
+  platform?: string;
 }
 
 interface LocalBrokerAccess {
@@ -98,6 +124,14 @@ class OperatorCommandError extends Error {
     readonly detailCode: string,
     message: string,
     readonly kind: 'configuration' | 'input' | 'unreachable' | 'response' = 'response',
+    /**
+     * The repair to print instead of the one derived from `kind`.
+     *
+     * `kind` groups faults that share a generic next step, and some faults know a better one: a credential
+     * fault on an endpoint whose owner is unknown has to send the operator to the listener, while every
+     * other configuration fault correctly sends them to `setup`.
+     */
+    readonly guidance?: string,
   ) {
     super(message);
     this.name = 'OperatorCommandError';
@@ -108,6 +142,29 @@ function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+/** The port a local endpoint fault is about, from the config the command already read. */
+function endpointPort(access: LocalBrokerAccess): number {
+  try {
+    return Number(new URL(access.config.broker.internalUrl).port) || access.config.broker.port;
+  } catch {
+    return access.config.broker.port;
+  }
+}
+
+/**
+ * How to ask a host who owns one of its ports.
+ *
+ * The credential fault's repair is a question about the listener, so the guidance has to name a command, and
+ * it has to name one the operator actually has: `ss` is absent on Windows, where the equivalent query is a
+ * cmdlet. Worth getting right because an unauthenticated answer is exactly what a port relay produces --
+ * the process on the other side of that port is not the one the operator is standing next to.
+ */
+function listenerOwnerProbe(port: number, platform: string): string {
+  return platform === 'win32'
+    ? `Get-NetTCPConnection -LocalPort ${port} | Select-Object -Expand OwningProcess`
+    : `ss -ltnp | grep :${port}`;
 }
 
 function localAccess(home: string): LocalBrokerAccess {
@@ -157,9 +214,21 @@ async function request(
   access: LocalBrokerAccess,
   path: string,
   init: RequestInit = {},
-  authenticated = true,
-  baseUrl = access.config.broker.internalUrl,
+  options: {
+    authenticated?: boolean;
+    baseUrl?: string;
+    /**
+     * Whether a lost answer may be read as "nothing happened". True for reads. False for the offer POST,
+     * whose request may have reached the broker even though its reply did not reach us: a one-use offer
+     * that went unredeemed is recoverable, a second POST that mints a second identity for the same client
+     * is not.
+     */
+    retrySafe?: boolean;
+  } = {},
 ): Promise<ApiResult> {
+  const authenticated = options.authenticated ?? true;
+  const baseUrl = options.baseUrl ?? access.config.broker.internalUrl;
+  const retrySafe = options.retrySafe ?? true;
   const fetcher = dependencies.fetch ?? fetch;
   const headers = new Headers(init.headers);
   headers.set('accept', 'application/json');
@@ -174,6 +243,14 @@ async function request(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
+    if (!retrySafe) {
+      throw new OperatorCommandError(
+        'pairing-create-unverified',
+        'The broker did not answer the pairing-offer request, so the offer may or may not exist. '
+        + 'Do not create another: run `devices list` and, if the client is absent, issue one new offer.',
+        'response',
+      );
+    }
     throw new OperatorCommandError(
       'broker-unreachable',
       `The broker at ${baseUrl} is not reachable.`,
@@ -183,8 +260,40 @@ async function request(
   return { status: response.status, ok: response.ok, json: await boundedJson(response) };
 }
 
-function assertBrokerHealth(result: ApiResult, access: LocalBrokerAccess): void {
+/**
+ * Confirm the endpoint is THIS broker, and name the right fault when it is not.
+ *
+ * A missing `machine` label is not an identity clash. `/api/health` answers a request it did not authenticate
+ * with `{ok, product, version}` alone, so a payload that names our product and carries no label proves one
+ * thing and only one thing: THIS credential was not accepted. It does not prove whose broker answered.
+ * Another cosyncing installation -- one reached through a WSL port relay, a second container, a second
+ * state home on a shared port -- returns that same public body, and `machine` is withheld from every
+ * caller the responder will not authenticate. So the fault is named as a credential fault, in words that
+ * belong to the endpoint that answered rather than to the installation asking, and the repair offered is to
+ * look at the listener rather than to rewrite the token: `setup` fixes our own broker's credential and
+ * changes nothing about anybody else's, and a WSL relay is precisely where the two are not the same process.
+ *
+ * What it is definitely NOT is `identity-mismatch`: a service that names a different product has told us
+ * it is not cosyncing at all, which is a different investigation entirely.
+ */
+function assertBrokerHealth(
+  result: ApiResult,
+  access: LocalBrokerAccess,
+  platform: string,
+): void {
   const body = object(result.json);
+  if (result.ok && body?.ok === true && body.product === PRODUCT_IDENTITY.productName
+      && (body.machine === undefined || body.machine === null)) {
+    const port = endpointPort(access);
+    throw new OperatorCommandError(
+      'local-broker-credential-unauthenticated',
+      `A cosyncing endpoint on port ${port} did not accept this installation's credential, `
+      + 'so it is not proven to be this broker. Another cosyncing installation answers the same way to a '
+      + 'token it does not recognize.',
+      'configuration',
+      `Find out what owns port ${port} before rerunning setup: ${listenerOwnerProbe(port, platform)}`,
+    );
+  }
   if (!result.ok || body?.ok !== true || body.product !== PRODUCT_IDENTITY.productName
       || body.machine !== access.config.broker.machineLabel) {
     throw new OperatorCommandError(
@@ -198,7 +307,25 @@ async function verifyLocalBroker(
   dependencies: OperatorCommandDependencies,
   access: LocalBrokerAccess,
 ): Promise<void> {
-  assertBrokerHealth(await request(dependencies, access, '/api/health'), access);
+  const now = dependencies.now ?? Date.now;
+  const sleep = dependencies.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
+  const deadline = now() + PAIR_IDENTITY_DEADLINE_MS;
+  for (;;) {
+    try {
+      assertBrokerHealth(await request(dependencies, access, '/api/health'), access,
+        dependencies.platform ?? process.platform);
+      return;
+    } catch (error) {
+      // Two answers are worth asking twice: an endpoint that never answered, and one declining the local
+      // credential, which is what a just-restarted service does with a token written moments earlier.
+      // `local-broker-identity-mismatch` is not in that set -- something DID answer and named itself, and
+      // repeating that question only delays the real answer.
+      const retryable = error instanceof OperatorCommandError
+        && (error.kind === 'unreachable' || error.detailCode === 'local-broker-credential-unauthenticated');
+      if (!retryable || now() >= deadline) throw error;
+    }
+    await sleep(PAIR_IDENTITY_RETRY_MS);
+  }
 }
 
 function pairingPayload(qr: string, pairingId: string, brokerUrl: string | undefined): QrPairingPayloadV3 {
@@ -251,15 +378,20 @@ async function reportFailure(
   const failure = error instanceof OperatorCommandError
     ? error
     : new OperatorCommandError('operator-command-failed', error instanceof Error ? error.message : String(error));
-  let guidance = '';
-  if (failure.kind === 'configuration') {
-    guidance = `Run: ${options.invocation} setup`;
-  } else if (failure.kind === 'input') {
-    guidance = `Example: ${options.invocation} pair --broker-url https://cosy.example.com`;
-  } else if (failure.kind === 'unreachable') {
-    guidance = await stoppedGuidance(options.home, options.invocation);
-  } else {
-    guidance = `Run: ${options.invocation} doctor`;
+  // An error that knows its own repair prints that; everything else takes the repair implied by its kind.
+  // The distinction exists because `setup` is the wrong advice to give twice: it rewrites this machine's
+  // configuration, which does nothing about an endpoint owned by somebody else or a service that is stopped.
+  let guidance = failure.guidance ?? '';
+  if (!guidance) {
+    if (failure.kind === 'configuration') {
+      guidance = `Run: ${options.invocation} setup`;
+    } else if (failure.kind === 'input') {
+      guidance = `Example: ${options.invocation} pair --broker-url https://cosy.example.com`;
+    } else if (failure.kind === 'unreachable') {
+      guidance = await stoppedGuidance(options.home, options.invocation);
+    } else {
+      guidance = `Run: ${options.invocation} doctor`;
+    }
   }
   options.stderr.write(`[error] ${failure.detailCode}: ${failure.message}\n${guidance}\n`);
   return { exitCode: 1, detailCode: failure.detailCode };
@@ -343,13 +475,14 @@ async function createPairingOffer(
   clientLabel: string | undefined,
   brokerUrl: string | undefined,
 ): Promise<PairingOffer> {
+  // Never retried, and never wrapped in a retry by a caller: see the `retrySafe` argument.
   const created = await request(dependencies, access, '/api/transport/pairings', {
     method: 'POST',
     body: JSON.stringify({
       ...(clientLabel ? { clientLabel } : {}),
       ...(brokerUrl ? { brokerUrl } : {}),
     }),
-  });
+  }, { retrySafe: false });
   const body = object(created.json);
   if (!created.ok || created.status !== 201 || body?.ok !== true
       || typeof body.pairingId !== 'string' || typeof body.qr !== 'string'
@@ -365,38 +498,153 @@ async function createPairingOffer(
   return { pairingId: body.pairingId, qr: body.qr, expiresAt: body.expiresAt, expiration };
 }
 
+/**
+ * What became of an offer. `unverifiable` is its own answer on purpose: it means the broker never said,
+ * which is a different claim from "still pending" and must never be reported as either one.
+ */
+type PairingWaitOutcome
+  = { state: 'accepted'; peerId: string }
+  | { state: 'pending' }
+  | { state: 'expired' }
+  | { state: 'not-found' }
+  | { state: 'unverifiable'; detailCode: string };
+
+/**
+ * Ask one offer what it became, until it settles or the deadline passes.
+ *
+ * Every request here is a read of the broker's own record, so a probe that does not answer costs the next
+ * probe and nothing else. The two ways to stop early are both terminal: the offer was redeemed, or the
+ * endpoint is answering in a shape this command cannot read.
+ * At the deadline the answer is the LAST one rather than the best one: an offer seen pending before the
+ * broker went quiet is not an offer anyone can still wait for.
+ */
+async function waitForPairingState(
+  dependencies: OperatorCommandDependencies,
+  access: LocalBrokerAccess,
+  pairingId: string,
+  deadline: number,
+): Promise<PairingWaitOutcome> {
+  const now = dependencies.now ?? Date.now;
+  const sleep = dependencies.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
+  // Whether the LAST probe said "pending" -- not whether the broker EVER said it. A broker that answered
+  // once and then went quiet for the rest of the deadline has not been observed to still hold the offer,
+  // and the verdict at the deadline can only come from the last thing the broker actually said. Silence
+  // there is `unverifiable`, which is also the more honest instruction: "keep waiting" and "go and check"
+  // are different things to do.
+  let lastAnswerWasPending = false;
+  let lastDetailCode = 'pairing-status-unavailable';
+  for (;;) {
+    try {
+      const status = await request(
+        dependencies,
+        access,
+        `/api/transport/pairings/${encodeURIComponent(pairingId)}`,
+      );
+      const statusBody = object(status.json);
+      if (status.ok && statusBody?.state === 'accepted' && typeof statusBody.peerId === 'string') {
+        return { state: 'accepted', peerId: statusBody.peerId };
+      }
+      if (status.status === 404) return { state: 'not-found' };
+      if (status.ok && statusBody?.state === 'expired') return { state: 'expired' };
+      if (status.ok && statusBody?.state === 'pending') lastAnswerWasPending = true;
+      else if (status.ok) {
+        return {
+          state: 'unverifiable',
+          detailCode: typeof statusBody?.code === 'string' ? statusBody.code : 'pairing-status-invalid',
+        };
+      } else {
+        lastAnswerWasPending = false;
+        lastDetailCode = typeof statusBody?.code === 'string' ? statusBody.code : 'pairing-status-unavailable';
+      }
+    } catch (error) {
+      lastAnswerWasPending = false;
+      if (error instanceof OperatorCommandError) lastDetailCode = error.detailCode;
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) {
+      return lastAnswerWasPending ? { state: 'pending' } : { state: 'unverifiable', detailCode: lastDetailCode };
+    }
+    await sleep(Math.min(PAIRING_POLL_MS, Math.max(50, remaining)));
+  }
+}
+
 /** Polls one offer until it is accepted, or throws once it expires or disappears. */
 async function awaitPairingAcceptance(
   dependencies: OperatorCommandDependencies,
   access: LocalBrokerAccess,
   offer: PairingOffer,
 ): Promise<string> {
-  const now = dependencies.now ?? Date.now;
-  const sleep = dependencies.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
-  while (now() < offer.expiration) {
-    const status = await request(
-      dependencies,
-      access,
-      `/api/transport/pairings/${encodeURIComponent(offer.pairingId)}`,
+  const outcome = await waitForPairingState(dependencies, access, offer.pairingId, offer.expiration);
+  if (outcome.state === 'accepted') return outcome.peerId;
+  if (outcome.state === 'not-found') {
+    throw new OperatorCommandError(
+      'PAIRING_NOT_FOUND',
+      'The pairing offer disappeared; generate a new QR and review connected devices.',
     );
-    const statusBody = object(status.json);
-    if (status.ok && statusBody?.state === 'accepted' && typeof statusBody.peerId === 'string') {
-      return statusBody.peerId;
-    }
-    if (statusBody?.state === 'expired' || status.status === 404) {
-      throw new OperatorCommandError(
-        statusBody?.state === 'expired' ? 'PAIRING_EXPIRED' : 'PAIRING_NOT_FOUND',
-        statusBody?.state === 'expired'
-          ? 'The pairing QR expired; generate a new one.'
-          : 'The pairing offer disappeared; generate a new QR and review connected devices.',
-      );
-    }
-    if (!status.ok || statusBody?.state !== 'pending') {
-      throw new OperatorCommandError('pairing-status-invalid', 'The broker returned an invalid pairing status.');
-    }
-    await sleep(Math.min(1_000, Math.max(50, offer.expiration - now())));
+  }
+  if (outcome.state === 'unverifiable') {
+    throw new OperatorCommandError(
+      outcome.detailCode,
+      'The broker could not confirm whether the pairing offer was accepted.',
+    );
   }
   throw new OperatorCommandError('PAIRING_EXPIRED', 'The pairing QR expired; generate a new one.');
+}
+
+/**
+ * `pair --status <pairing-id>`: ask the broker what became of one offer, and create nothing.
+ *
+ * Nothing else can answer this for the installer's handoff. The client erases the offer file BEFORE it
+ * asks for the credential, so a vanished file is exactly as consistent with "the client never started" as
+ * with "the client is paired". The broker is the only witness, and the three answers have to stay three:
+ * accepted, still pending, and could not verify. Reporting the third as either of the first two is how a
+ * one-use offer gets burned twice.
+ *
+ * `ok` means the broker answered authoritatively about this offer; `state` carries the verdict. Exit code
+ * follows `ok`, so a caller that only checks the exit code still cannot mistake silence for success.
+ */
+async function reportPairingState(
+  dependencies: OperatorCommandDependencies,
+  access: LocalBrokerAccess,
+  pairingId: string,
+  timeoutSeconds: number,
+  output: { json: boolean; stdout: OperatorWriter; stderr: OperatorWriter },
+): Promise<OperatorCommandResult> {
+  if (!PAIRING_ID_PATTERN.test(pairingId)) {
+    throw new OperatorCommandError('pairing-id-invalid', 'The pairing id is invalid.', 'input');
+  }
+  await verifyLocalBroker(dependencies, access);
+  const now = dependencies.now ?? Date.now;
+  const outcome = await waitForPairingState(
+    dependencies,
+    access,
+    pairingId,
+    now() + Math.max(1, timeoutSeconds) * 1_000,
+  );
+  const ok = outcome.state !== 'unverifiable';
+  const detailCode = outcome.state === 'accepted' ? 'pairing-accepted'
+    : outcome.state === 'pending' ? 'pairing-pending'
+      : outcome.state === 'expired' ? 'pairing-expired'
+        : outcome.state === 'not-found' ? 'pairing-not-found'
+          : outcome.detailCode;
+  if (output.json) {
+    output.stdout.write(`${JSON.stringify({
+      schemaVersion: 1,
+      ok,
+      pairingId,
+      state: outcome.state,
+      ...(outcome.state === 'accepted' ? { peerId: outcome.peerId } : {}),
+    }, null, 2)}\n`);
+  } else {
+    const line = outcome.state === 'accepted'
+      ? `Pairing ${pairingId}: accepted as peer ${terminalSafeText(outcome.peerId)}.`
+      : outcome.state === 'pending' ? `Pairing ${pairingId}: not accepted yet.`
+        : outcome.state === 'expired' ? `Pairing ${pairingId}: expired without being accepted.`
+          : outcome.state === 'not-found' ? `Pairing ${pairingId}: this broker has no record of it.`
+            : `Pairing ${pairingId}: the broker could not confirm it (${outcome.detailCode}).`;
+    (ok ? output.stdout : output.stderr).write(`${line}\n`);
+  }
+  return { exitCode: ok ? 0 : 1, detailCode };
 }
 
 export async function runPairCommand(
@@ -414,6 +662,18 @@ export async function runPairCommand(
   };
   try {
     const access = localAccess(home);
+    // Reporting an offer is a read, so it runs before the URL and creation path entirely: nothing below
+    // this branch may POST, and a second offer for a client that is merely slow is the failure this
+    // command exists to prevent.
+    if (options.statusPairingId) {
+      return await reportPairingState(
+        dependencies,
+        access,
+        options.statusPairingId,
+        options.statusTimeoutSeconds ?? PAIR_STATUS_DEFAULT_TIMEOUT_SECONDS,
+        { json: options.json, stdout: options.stdout, stderr: options.stderr },
+      );
+    }
     let brokerUrl: string | undefined;
     try {
       brokerUrl = normalizePairingBrokerUrl(options.brokerUrl);

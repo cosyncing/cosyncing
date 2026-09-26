@@ -20,7 +20,14 @@ import {
 } from '../../src/runtime/broker-instance.ts';
 import { PairingHttpError, tokenHash, TransportPairingRegistry } from '../../src/transport/transport-pairing.ts';
 import { WakePushRegistry } from '../../src/transport/push-wake.ts';
-import { terminalSafeText } from '../../src/cli/operator-commands.ts';
+import {
+  runPairCommand,
+  terminalSafeText,
+  type PairCommandOptions,
+} from '../../src/cli/operator-commands.ts';
+import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
+import { ensureInstallationCredentials } from '../../src/security/credentials.ts';
+import { committedInstallState, writeInstallState } from '../../src/installation/install-state.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-'));
 
@@ -353,6 +360,267 @@ try {
     );
   } finally {
     rmSync(markerFailureHome, { recursive: true, force: true });
+  }
+
+  // `pair` is the command the installer's one-liner handoff runs, and its answer decides whether a fresh
+  // install opens paired or opens "Connect this device". Two properties matter more here than its output:
+  // a broker that is merely busy must not be reported as absent, and a one-use offer must never be minted
+  // twice for one client. Both were measured on an installed broker where /api/health stalls for seconds
+  // about once a minute while roster discovery runs.
+  {
+    const pairHome = mkdtempSync(join(tmpdir(), 'cosyncing-pair-command-'));
+    try {
+      const pairConfig = defaultBrokerConfig();
+      pairConfig.broker.machineLabel = 'pair-fixture-machine';
+      writeBrokerConfig(pairConfig, pairHome);
+      ensureInstallationCredentials({ home: pairHome, internalUrl: pairConfig.broker.internalUrl });
+      writeInstallState(committedInstallState(), pairHome);
+      const brokerUrl = pairConfig.broker.internalUrl;
+      const offer = registry.createOffer({ brokerUrl });
+      const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
+        status, headers: { 'content-type': 'application/json' },
+      });
+      const health = (): Response => json({ ok: true, product: 'cosyncing', machine: 'pair-fixture-machine' });
+      const created = (): Response => json({
+        ok: true,
+        pairingId: offer.pairingId,
+        qr: offer.qr,
+        expiresAt: new Date(Date.parse('2026-08-22T12:05:00Z')).toISOString(),
+        brokerPeerId: 'peer_broker',
+      }, 201);
+      // Quiet by default; a case that needs to read what the command printed passes its own writer.
+      const options = (extra: Partial<PairCommandOptions> = {}): PairCommandOptions => ({
+        json: true,
+        wait: false,
+        brokerUrl,
+        home: pairHome,
+        invocation: 'cosyncing',
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+        ...extra,
+      });
+
+      // A broker that goes quiet twice and then answers is a busy broker. One missed sample used to end
+      // this command with "not reachable", and the installer turned that into a skipped handoff.
+      const busyCalls: string[] = [];
+      let busyHealth = 0;
+      const busy = await runPairCommand(options(), {
+        sleep: async () => {},
+        fetch: async (input, init) => {
+          const path = new URL(String(input)).pathname;
+          busyCalls.push(`${init?.method ?? 'GET'} ${path}`);
+          if (path !== '/api/health') return created();
+          busyHealth += 1;
+          if (busyHealth < 3) throw new Error('ECONNREFUSED');
+          return health();
+        },
+      });
+      assert.equal(busy.exitCode, 0, 'a busy broker must not be reported as an absent one');
+      assert.equal(busyHealth, 3, 'the identity read is retried until it answers');
+      assert.equal(busyCalls.filter((call) => call.startsWith('POST')).length, 1,
+        'waiting out the identity read must not create a second offer');
+
+      // Something answering as another product named itself on the first probe. Asking again only delays
+      // the answer, and offering pairing through a foreign socket is not a fallback.
+      const foreignCalls: string[] = [];
+      const foreign = await runPairCommand(options(), {
+        sleep: async () => {},
+        fetch: async (input, init) => {
+          foreignCalls.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+          return json({ ok: true, product: 'other-product', machine: 'somewhere-else' });
+        },
+      });
+      assert.equal(foreign.exitCode, 1);
+      assert.equal(foreign.detailCode, 'local-broker-identity-mismatch');
+      assert.equal(foreignCalls.length, 1, 'a service that identified itself is not waited out');
+      assert.equal(foreignCalls.filter((call) => call.startsWith('POST')).length, 0);
+
+      // A cosyncing endpoint that answers WITHOUT taking our credential. `/api/health` replies to a request
+      // it did not authenticate with `{ok, product, version}` and withholds the machine label, and reading
+      // that as a foreign service sends the operator to stop the wrong process. It is not proof of local
+      // ownership either -- another cosyncing installation answers the same way to a token it does not
+      // recognise -- and it is a state that can clear on its own, because a broker restarted moments after
+      // its token was written answers like this too. So it is waited out, then named for what it is.
+      let unauthElapsed = 0;
+      const unauthCalls: string[] = [];
+      const unauthWritten: string[] = [];
+      const unauthenticated = await runPairCommand(options({
+        stderr: { write: (text: string) => { unauthWritten.push(text); } },
+      }), {
+        platform: 'linux',
+        now: () => unauthElapsed,
+        sleep: async (milliseconds) => { unauthElapsed += milliseconds; },
+        fetch: async (input, init) => {
+          unauthCalls.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+          return json({ ok: true, product: 'cosyncing', version: '0.0.0' });
+        },
+      });
+      assert.equal(unauthenticated.exitCode, 1);
+      assert.equal(unauthenticated.detailCode, 'local-broker-credential-unauthenticated',
+        'a broker that answers as itself without our credential is not a foreign service');
+      assert.ok(unauthCalls.length > 1, 'a credential it has not taken yet gets the deadline, not one probe');
+      assert.ok(unauthElapsed >= 10_000, `the identity deadline was honoured: ${unauthElapsed}ms`);
+      assert.equal(unauthCalls.filter((call) => call.startsWith('POST')).length, 0,
+        'no offer is minted through an endpoint that will not authenticate us');
+      // What the operator is TOLD is the other half of this fault. A withheld machine label proves the
+      // credential was not accepted and nothing else -- a second installation behind a WSL port relay
+      // answers identically -- so the sentence belongs to the endpoint that answered rather than to the
+      // installation asking. The repair cannot be `setup` either: that rewrites this machine's token, which
+      // is not the thing known to be wrong, and it walks past the one question worth asking, which owns
+      // the port.
+      const unauthText = unauthWritten.join('');
+      assert.ok(unauthText.includes('A cosyncing endpoint on port 7734'),
+        `the fault names the endpoint by its port: ${unauthText}`);
+      assert.ok(unauthText.includes("did not accept this installation's credential"),
+        `the fault names the credential: ${unauthText}`);
+      assert.equal(/local broker/i.test(unauthText), false,
+        `an unauthenticated answer proves nothing about who owns the endpoint: ${unauthText}`);
+      assert.equal(unauthText.includes('Run: cosyncing setup'), false,
+        `setup is not the repair for an endpoint whose owner is unknown: ${unauthText}`);
+      assert.ok(unauthText.includes('ss -ltnp | grep :7734'),
+        `the guidance names a listener probe: ${unauthText}`);
+      // A probe the operator can run, on their host. Windows has no `ss`.
+      let unauthWindowsElapsed = 0;
+      const unauthWindowsWritten: string[] = [];
+      const unauthWindows = await runPairCommand(options({
+        stderr: { write: (text: string) => { unauthWindowsWritten.push(text); } },
+      }), {
+        platform: 'win32',
+        now: () => unauthWindowsElapsed,
+        sleep: async (milliseconds) => { unauthWindowsElapsed += milliseconds; },
+        fetch: async () => json({ ok: true, product: 'cosyncing', version: '0.0.0' }),
+      });
+      assert.equal(unauthWindows.detailCode, 'local-broker-credential-unauthenticated');
+      const unauthWindowsText = unauthWindowsWritten.join('');
+      assert.ok(unauthWindowsText.includes('Get-NetTCPConnection -LocalPort 7734'),
+        `the Windows guidance names a cmdlet: ${unauthWindowsText}`);
+      assert.equal(unauthWindowsText.includes('ss -ltnp'), false,
+        `a command the operator does not have is not guidance: ${unauthWindowsText}`);
+
+      // A broker answering with SOMEONE ELSE'S machine label has answered the identity question, and
+      // asking it again only holds the installer over a port that is not its own.
+      const labelCalls: string[] = [];
+      const mislabelled = await runPairCommand(options(), {
+        sleep: async () => {},
+        fetch: async (input, init) => {
+          labelCalls.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+          return json({ ok: true, product: 'cosyncing', machine: 'some-other-machine' });
+        },
+      });
+      assert.equal(mislabelled.detailCode, 'local-broker-identity-mismatch');
+      assert.equal(labelCalls.length, 1, 'a label that is present and different is a verdict');
+
+      // A POST whose ANSWER was lost is not a POST that did not happen. The offer may be sitting on the
+      // broker right now, and a second one mints a second identity for one device.
+      const lostCalls: string[] = [];
+      const lost = await runPairCommand(options(), {
+        sleep: async () => {},
+        fetch: async (input, init) => {
+          const method = init?.method ?? 'GET';
+          lostCalls.push(`${method} ${new URL(String(input)).pathname}`);
+          if (method === 'POST') throw new Error('socket closed before the response');
+          return health();
+        },
+      });
+      assert.equal(lost.detailCode, 'pairing-create-unverified');
+      assert.equal(lostCalls.filter((call) => call.startsWith('POST')).length, 1,
+        'an unanswered offer request is never retried as though it had not been sent');
+
+      // Did the client pair? The offer file cannot answer -- the client deletes it BEFORE asking for its
+      // credential -- so the broker is the only witness, and its three answers stay three.
+      const clock = { now: 0 };
+      const watcher = {
+        now: () => clock.now,
+        sleep: async (milliseconds: number) => { clock.now += milliseconds; },
+      };
+      // `read` counts the reads of the OFFER, not of the endpoint: every case here settles identity first,
+      // and a case that answers differently over time is asking about the broker's record, not its health.
+      const askAbout = async (respond: (read: number) => Response): Promise<{
+        result: { exitCode: number; detailCode: string }; stdout: string; calls: string[];
+      }> => {
+        clock.now = 0;
+        const calls: string[] = [];
+        const lines: string[] = [];
+        let reads = 0;
+        const result = await runPairCommand(options({
+          statusPairingId: offer.pairingId,
+          statusTimeoutSeconds: 2,
+          stdout: { write: (text) => { lines.push(text); } },
+        }), {
+          ...watcher,
+          fetch: async (input, init) => {
+            const path = new URL(String(input)).pathname;
+            calls.push(`${init?.method ?? 'GET'} ${path}`);
+            // Identity is settled before any read of an offer, so the fixture keeps answering that route
+            // correctly and lets each case decide only what the pairing read says.
+            if (path === '/api/health') return health();
+            reads += 1;
+            return respond(reads);
+          },
+        });
+        return { result, stdout: lines.join(''), calls };
+      };
+
+      // A 2xx that is not a pairing document is its own case. The broker answered, so this is not the
+      // silence below; the answer is unusable, so it is not "pending" either.
+      const malformed = await askAbout(() => health());
+      assert.equal(malformed.result.exitCode, 1, 'an unusable answer is not a success');
+      assert.ok(malformed.stdout.includes('"state": "unverifiable"'), malformed.stdout);
+      assert.ok(!malformed.stdout.includes('"state": "pending"'), malformed.stdout);
+
+      const paired = await askAbout(() => json({
+        ok: true, state: 'accepted', peerId: 'peer_paired', pairingId: offer.pairingId,
+      }));
+      assert.equal(paired.result.exitCode, 0);
+      assert.equal(paired.result.detailCode, 'pairing-accepted');
+      assert.ok(paired.stdout.includes('"state": "accepted"'), paired.stdout);
+      assert.ok(paired.stdout.includes('peer_paired'), paired.stdout);
+      assert.equal(paired.calls.filter((call) => call.startsWith('POST')).length, 0,
+        'reporting an offer must never create one');
+
+      const waiting = await askAbout(() => json({ ok: true, state: 'pending', pairingId: offer.pairingId }));
+      assert.equal(waiting.result.exitCode, 0);
+      assert.equal(waiting.result.detailCode, 'pairing-pending');
+      assert.ok(waiting.stdout.includes('"state": "pending"'), waiting.stdout);
+      assert.ok(waiting.calls.filter((call) => call.includes('/api/transport/pairings')).length > 1,
+        'a pending offer is polled until the deadline, not once');
+
+      const gone = await askAbout(() => json({ ok: false, code: 'not-found' }, 404));
+      assert.equal(gone.result.detailCode, 'pairing-not-found');
+      assert.ok(gone.stdout.includes('"state": "not-found"'), gone.stdout);
+
+      // Pending, and then nothing. The answer at the deadline has to be the LAST one: an offer the broker
+      // stopped reporting on is not an offer anybody can still be told to wait for, and a one-use offer
+      // whose outcome is unknown is exactly the case a wrong "pending" turns into a second pairing.
+      const quiet = await askAbout((read) => {
+        if (read === 1) return json({ ok: true, state: 'pending', pairingId: offer.pairingId });
+        throw new Error('the broker stopped answering');
+      });
+      assert.equal(quiet.result.exitCode, 1, 'silence after an earlier pending is not still pending');
+      assert.equal(quiet.result.detailCode, 'broker-unreachable');
+      assert.ok(quiet.stdout.includes('"state": "unverifiable"'), quiet.stdout);
+      assert.ok(!quiet.stdout.includes('"state": "pending"'), quiet.stdout);
+      assert.ok(quiet.calls.filter((call) => call.includes('/api/transport/pairings')).length > 1,
+        'the pending answer is followed up rather than kept');
+
+      // The silence case. Reporting it as pending would tell the operator to wait for a pairing that may
+      // already have happened, and reporting it as accepted would be a lie about a one-use credential.
+      const silent = await askAbout(() => { throw new Error('broker stopped answering'); });
+      assert.equal(silent.result.exitCode, 1, 'no answer must never exit as success');
+      assert.equal(silent.result.detailCode, 'broker-unreachable');
+      assert.ok(silent.stdout.includes('"ok": false'), silent.stdout);
+      assert.ok(silent.stdout.includes('"state": "unverifiable"'), silent.stdout);
+      assert.ok(!silent.stdout.includes('"state": "pending"'), silent.stdout);
+
+      // A malformed id is refused before anything is asked of the network: an id is not a probe target.
+      const badId = await runPairCommand(options({ statusPairingId: 'pair_short' }), {
+        fetch: async () => { throw new Error('must not be called'); },
+      });
+      assert.equal(badId.exitCode, 1);
+      assert.equal(badId.detailCode, 'pairing-id-invalid');
+    } finally {
+      rmSync(pairHome, { recursive: true, force: true });
+    }
   }
 
   console.log('PASS pairing, revision-17 migration, and failure-atomic persistence contracts');
