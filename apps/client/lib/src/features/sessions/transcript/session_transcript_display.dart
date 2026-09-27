@@ -130,6 +130,10 @@ List<SessionTranscriptDisplayEntry> buildSessionTranscriptDisplayEntries({
     final run = <ToolTranscriptDisplayEntry>[first.entry];
     index = first.nextIndex;
     while (index < messages.length && _isToolMessage(messages[index])) {
+      if (isInternalBookkeepingMessage(messages[index])) {
+        index += 1;
+        continue;
+      }
       if (pairing.isClaimedResult(index)) {
         index += 1;
         continue;
@@ -220,6 +224,10 @@ const _internalEventNames = <String>{
 /// from the canonical list (see `SessionTelemetry.applyMessage`), which this
 /// function never sees.
 bool isInternalBookkeepingMessage(AgentMessage message) {
+  if (message.type == AgentMessageType.toolResult &&
+      message.raw['pending'] == true) {
+    return true;
+  }
   if (message.type == AgentMessageType.metadataUpdate) return true;
   if (message.type != AgentMessageType.event) return false;
   final name = message.eventName;
@@ -261,7 +269,10 @@ final class _ToolPairing {
     final resultIndicesByCallId = <String, List<int>>{};
     for (var index = 0; index < messages.length; index++) {
       final message = messages[index];
-      if (message.type != AgentMessageType.toolResult) continue;
+      if (message.type != AgentMessageType.toolResult ||
+          message.raw['pending'] == true) {
+        continue;
+      }
       final callId = message.toolCallId;
       if (callId == null || callId.isEmpty) continue;
       resultIndicesByCallId.putIfAbsent(callId, () => <int>[]).add(index);

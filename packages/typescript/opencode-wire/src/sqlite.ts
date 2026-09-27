@@ -208,13 +208,33 @@ function runSummary(
   };
 }
 
+/** One read of a session's stored history, and how much of it the store may still rewrite. */
+export interface OpenCodeSqliteHistoryRows {
+  messages: AgentMessage[];
+  /**
+   * How many leading rows belong to messages the store has finished writing. The store writes a
+   * message in place until it completes: a text part grows, a tool part moves from running to its
+   * result, and an assistant message gains its completion time, run summary and final token
+   * reading. The newest user message is also still open, since its parts are written after it.
+   * Rows from here on can change on the next read; rows before it cannot without a rewrite.
+   */
+  settledRows: number;
+}
+
+/** Whether the store may still rewrite [message] (see {@link OpenCodeSqliteHistoryRows.settledRows}). */
+function openStoredMessage(message: any, parts: readonly any[], newest: boolean): boolean {
+  if (message.role === 'user') return newest;
+  return nativeTimeMs(message.time?.completed) === undefined
+    || parts.some((part) => part?.type === 'tool' && !['completed', 'error'].includes(String(part?.state?.status ?? '')));
+}
+
 export function readOpenCodeSqliteHistory(
   database: Database,
   sessionId: string,
   options: Pick<OpenCodeSqliteOptions,
     'productId' | 'mapPart' | 'maxMessageBytes' | 'maxHistoryBytes' | 'maxRawRecordBytes' | 'maxRawHistoryBytes'
     | 'maxIdentityBytes' | 'strictStorageTypes' | 'validMessageRoles' | 'validateMessage' | 'validatePart'> = {},
-): AgentMessage[] | undefined {
+): OpenCodeSqliteHistoryRows | undefined {
   const productId = options.productId ?? 'opencode';
   const mapPart = options.mapPart ?? ((part: unknown) => mapOpenCodePart(part, { historical: true, productId }));
   if (options.strictStorageTypes) {
@@ -295,6 +315,7 @@ export function readOpenCodeSqliteHistory(
   }
   const out: AgentMessage[] = [];
   let historyBytes = 0;
+  let settledRows: number | undefined;
   const append = (...rows: AgentMessage[]): boolean => {
     for (const row of rows) {
       const bytes = Buffer.byteLength(JSON.stringify(row), 'utf8');
@@ -310,7 +331,7 @@ export function readOpenCodeSqliteHistory(
   const durableUserKeys = new Set<string>();
   const canonicalUserKeys = new Set<string>();
   const canonicalUserTimes = new Map<string, number>();
-  for (const row of messages) {
+  for (const [index, row] of messages.entries()) {
     const data = jsonRecord(row.data);
     if (!data || (options.validMessageRoles && !options.validMessageRoles.includes(data.role))
       || (options.validateMessage && !options.validateMessage(data))) return undefined;
@@ -320,6 +341,9 @@ export function readOpenCodeSqliteHistory(
       sessionID: row.session_id,
     };
     const parts = partsByMessage.get(String(row.id)) ?? [];
+    if (settledRows === undefined && openStoredMessage(message, parts, index === messages.length - 1)) {
+      settledRows = out.length;
+    }
     if (message.role === 'user') {
       durableUserKeys.add(message.id);
       const text = parts.filter((part) => part?.type === 'text')
@@ -364,7 +388,7 @@ export function readOpenCodeSqliteHistory(
       cacheRead: message.tokens.cache?.read, cacheWrite: message.tokens.cache?.write, cost: message.cost,
     })) return undefined;
   }
-  return out;
+  return { messages: out, settledRows: settledRows ?? out.length };
 }
 
 function activeTool(part: any): boolean {

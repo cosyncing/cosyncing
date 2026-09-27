@@ -72,6 +72,17 @@ import {
 /** Debounce on the fs watch, mirroring claude's 80 ms. */
 const TAIL_DEBOUNCE_MS = 80;
 
+/** One inbox settlement as history places it (see {@link AgyObserveConnection.placeInbox}). */
+interface AgyInboxEntry {
+  /** When the host wrote it (epoch ms), or NaN when the file records no usable time. */
+  at: number;
+  /** The transcript step whose tool call the settlement reports on, when the file names it. */
+  stepIndex?: number;
+  rows: AgentMessage[];
+  /** The task this settlement proves ended, for the ledger. */
+  settles?: { taskId: string; outcome: 'done' | 'cancelled'; title: string };
+}
+
 export interface AgyObserveOptions {
   roots: AgyRoots;
   conversationId: string;
@@ -211,8 +222,7 @@ export class AgyObserveConnection implements SessionConnection {
             'Antigravity kept no JSONL transcript for this conversation, so its history cannot be replayed here. '
             + 'The conversation itself is intact in the CLI — resume it in a terminal to read it.',
         },
-        ...this.settlementMessages(),
-        ...this.taskListMessages(),
+        ...this.placeInbox(this.readInbox()),
         ...this.extraHistoryRows(),
       ];
     }
@@ -237,13 +247,20 @@ export class AgyObserveConnection implements SessionConnection {
             'Antigravity’s transcript for this conversation could not be read safely, so its history is not shown. '
             + `The file at the expected path was refused (${read}).`,
         },
-        ...this.settlementMessages(),
-        ...this.taskListMessages(),
+        ...this.placeInbox(this.readInbox()),
         ...this.extraHistoryRows(),
       ];
     }
     const { bytes, boundary, size, truncated } = read;
     const out: AgentMessage[] = [];
+    // Each settlement goes where it happened: before the first step written after it, or after the
+    // step it reports on when the file records no usable time. History then only grows at its end
+    // as the conversation goes on, which is what lets a client's cursor survive the next step; at
+    // the end of the transcript, every later step moved all of them.
+    const inbox = this.readInbox();
+    const timed = inbox.filter((entry) => Number.isFinite(entry.at));
+    const untimed = inbox.filter((entry) => !Number.isFinite(entry.at));
+    let nextTimed = 0;
     // Byte offsets are tracked line by line: they are the drive path's clock-free
     // fence for deciding whether a `USER_INPUT` line delivers a prompt we sent.
     // Framed from RAW BYTES through the same framer as the tail, so the two paths
@@ -263,11 +280,23 @@ export class AgyObserveConnection implements SessionConnection {
       if (!step) continue;
       if (this.state.seenSteps.has(step.step_index)) continue;
       this.state.seenSteps.add(step.step_index);
+      const createdAt = Date.parse(step.created_at);
+      while (nextTimed < timed.length && timed[nextTimed]!.at < createdAt) out.push(...this.placeInbox([timed[nextTimed++]!]));
       const mapped = this.withTruncationFallback(step);
-      this.taskReferences.push(...collectAgyTaskReferences(step));
+      const tasks = collectAgyTaskReferences(step);
+      this.taskReferences.push(...tasks);
       this.onStepAdmitted(step, mapped, 'replay');
       out.push(...mapped);
+      // The panel is restated where the ledger changed, as the tail does, never moved to the end.
+      if (tasks.length > 0) out.push(...this.taskListMessages());
+      const reported = untimed.filter((entry) => entry.stepIndex === step.step_index);
+      if (reported.length > 0) {
+        out.push(...this.placeInbox(reported));
+        for (const entry of reported) untimed.splice(untimed.indexOf(entry), 1);
+      }
     }
+    // Settlements written after every replayed step, or naming none of them, follow the transcript.
+    out.push(...this.placeInbox([...timed.slice(nextTimed), ...untimed]));
 
     // A capped replay stops mid-conversation, which looks exactly like a
     // conversation that ended. Say that it did not. The remainder is not lost:
@@ -293,7 +322,7 @@ export class AgyObserveConnection implements SessionConnection {
     // everything past the cap.
     if (this.watcher) this.scheduleDrain(0);
 
-    return [...out, ...this.settlementMessages(), ...this.taskListMessages(), ...this.extraHistoryRows()];
+    return [...out, ...this.extraHistoryRows()];
   }
 
   protected emit(message: AgentMessage): void {
@@ -510,14 +539,14 @@ export class AgyObserveConnection implements SessionConnection {
   }
 
   /**
-   * Finished background tasks, as self-contained tool blocks.
+   * Finished background tasks, as self-contained tool blocks, oldest first.
    *
    * These are durable: a settled task leaves its inbox file behind permanently,
    * so unlike claude's finished subagents (reflection §9, still open there) an
    * agy background task still renders after it completes.
    */
-  private settlementMessages(): AgentMessage[] {
-    const out: AgentMessage[] = [];
+  private readInbox(): AgyInboxEntry[] {
+    const out: AgyInboxEntry[] = [];
     // One budget for the whole pass, shared by every task log it reads.
     const budget = { remaining: AGY_TASK_LOG_BUDGET_BYTES };
     for (const file of listAgySettlementFiles(this.roots, this.conversationId, this.trace)) {
@@ -538,6 +567,10 @@ export class AgyObserveConnection implements SessionConnection {
         continue;
       }
       const source = classifyAgySettlementSender(settlement.sender);
+      const placement = {
+        at: Date.parse(settlement.timestamp),
+        ...(settlement.stepIndex !== undefined ? { stepIndex: settlement.stepIndex } : {}),
+      };
       // A TASK settlement records an ending, which the ledger needs. A SUBAGENT
       // settlement records a child conversation, which discovery needs (see the
       // adapter's lineage scan). Both are durable tool blocks. `system` notices
@@ -545,18 +578,36 @@ export class AgyObserveConnection implements SessionConnection {
       // background task named "system", and dropping one would erase a host
       // message the user should read — so they render as stated notices.
       if (source.category === 'system' || source.category === 'unknown') {
-        out.push(mapAgyUnmappedSettlement(settlement));
+        out.push({ ...placement, rows: [mapAgyUnmappedSettlement(settlement)] });
         continue;
       }
       let log: AgyTaskLog | undefined;
+      let settles: AgyInboxEntry['settles'];
       if (source.category === 'task') {
-        this.settledTasks.set(source.taskId, {
+        settles = {
+          taskId: source.taskId,
           outcome: agySettlementOutcome(settlement.messageTitle),
           title: settlement.messageTitle,
-        });
+        };
         log = this.readTaskLog(source.conversationId, source.taskId, budget);
       }
-      out.push(...mapAgySettlement(settlement, this.conversationId, log));
+      out.push({ ...placement, rows: mapAgySettlement(settlement, this.conversationId, log), ...(settles ? { settles } : {}) });
+    }
+    // Read in file order (the task-log budget is spent in that order), placed in time order.
+    return out.sort((left, right) => (Number.isFinite(left.at) ? left.at : Infinity) - (Number.isFinite(right.at) ? right.at : Infinity));
+  }
+
+  /**
+   * The rows of [entries], in order. A task settlement proves its task ended, so the panel is
+   * restated after it: the ledger changed there.
+   */
+  private placeInbox(entries: readonly AgyInboxEntry[]): AgentMessage[] {
+    const out: AgentMessage[] = [];
+    for (const entry of entries) {
+      out.push(...entry.rows);
+      if (!entry.settles) continue;
+      this.settledTasks.set(entry.settles.taskId, { outcome: entry.settles.outcome, title: entry.settles.title });
+      out.push(...this.taskListMessages());
     }
     return out;
   }
@@ -606,11 +657,11 @@ export class AgyObserveConnection implements SessionConnection {
   }
 
   /**
-   * The background-task panel, or nothing.
+   * The background-task panel as the ledger stands now, or nothing.
    *
-   * Built AFTER the settlements are read, because a settlement is the only
-   * positive proof that a task ended — fold it first and every task reports as
-   * still in progress.
+   * A settlement is the only positive proof that a task ended, so a panel
+   * restated before a task's settlement reports it in progress, and the one
+   * restated after it reports its outcome.
    */
   private taskListMessages(): AgentMessage[] {
     const ledger = foldAgyTaskLedger(this.taskReferences, this.settledTasks);

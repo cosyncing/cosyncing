@@ -189,6 +189,19 @@ async function openClient(
  *  capture completes. The cold-attach race test needs a subscribed socket whose first
  *  capture is still in flight; waiting for the history frame (as openClient does) would
  *  put every later action after the race window it exists to occupy. */
+/**
+ * The window one attach delivered: its frame, then the rows sent right after it. While a turn runs
+ * the frame ends at the running-turn hold, and the rows it held (such as the newest text row) follow
+ * it with the other rows kept out of the cursor space.
+ */
+function windowAfterAttach(client: SocketClient): any[] {
+  const at = client.frames.findIndex((frame) => frame.kind === 'history');
+  return [
+    ...(client.attach.messages as any[]),
+    ...client.frames.slice(at + 1).filter((frame) => frame.kind === 'message').map((frame) => frame.message),
+  ];
+}
+
 async function openClientDeferred(
   wsBase: string,
   id: string,
@@ -639,9 +652,17 @@ try {
   // or every refresh doubles the transcript.
   const refreshed = await openClient(broker.wsBase, bigId);
   clients.push(refreshed.ws);
-  const refreshedAssistant = (refreshed.attach.messages as any[]).find((message) =>
-    message?.type === 'model-output'
-    && String(message?.text ?? '').includes('h1d live assistant text'));
+  // The turn is still running, so the frame ends at the running-turn hold and its newest text row
+  // follows it with the other rows kept out of the cursor space: the refreshed window is the frame
+  // plus the rows sent right after it.
+  const isStreamedAssistant = (message: any) => message?.type === 'model-output'
+    && String(message?.text ?? '').includes('h1d live assistant text');
+  const deliveredAfterAttach = () => windowAfterAttach(refreshed);
+  await waitFor(
+    () => deliveredAfterAttach().some(isStreamedAssistant),
+    'the refreshed window must include the streamed assistant text',
+  );
+  const refreshedAssistant = deliveredAfterAttach().find(isStreamedAssistant);
   assert(refreshedAssistant, 'the refreshed window must include the streamed assistant text');
   assert.equal(
     refreshedAssistant.key,
@@ -649,9 +670,7 @@ try {
     'live delivery and a later history read must agree on one identity per row',
   );
   assert.equal(
-    (refreshed.attach.messages as any[])
-      .filter((message) => message?.type === 'model-output'
-        && String(message?.text ?? '').includes('h1d live assistant text')).length,
+    deliveredAfterAttach().filter(isStreamedAssistant).length,
     1,
     'the streamed row must appear exactly once after a refresh',
   );
@@ -760,9 +779,13 @@ try {
   );
   const raceRefresh = await openClient(broker.wsBase, raceId);
   clients.push(raceRefresh.ws);
-  const refreshRows = (raceRefresh.attach.messages as any[]).filter((message) =>
-    message?.type === 'model-output'
-    && String(message?.text ?? '').includes('h1e '));
+  const isRaceRow = (message: any) => message?.type === 'model-output'
+    && String(message?.text ?? '').includes('h1e ');
+  await waitFor(
+    () => windowAfterAttach(raceRefresh).filter(isRaceRow).length >= 2,
+    'both raced rows in the refreshed window',
+  );
+  const refreshRows = windowAfterAttach(raceRefresh).filter(isRaceRow);
   for (const text of ['h1e mid-capture row', 'h1e post-adoption row']) {
     const copies = refreshRows.filter((message) => String(message.text).includes(text));
     assert.equal(copies.length, 1, `${text} must appear exactly once after a refresh`);
@@ -783,6 +806,82 @@ try {
     `the post-adoption live row must keep one identity across live and a refresh `
       + `(${postAdoptionLive.message.key} vs ${refreshPostKey})`,
   );
+
+  // ------------------ H1d: the indexed attach bound measures what this socket receives
+  // This socket attaches in reference mode, where an oversized diff travels as a small `diffRef`.
+  // The compact index resolves the diff whole, so a bound measured on the stored shape would cut
+  // the frame at that row even though almost nothing of it is sent.
+  const diffRollout = join(
+    day,
+    'rollout-2026-07-28T00-00-03-00000000-0000-4000-8000-0000000001c7.jsonl',
+  );
+  const lockfile = [
+    'diff --git a/bun.lock b/bun.lock',
+    '--- a/bun.lock',
+    '+++ b/bun.lock',
+    '@@ -1,1 +1,30000 @@',
+    ...Array.from({ length: 30_000 }, (_, index) => `+dependency-${index} 1.0.${index}`),
+  ].join('\n');
+  const diffUserRow = (index: number) => `${JSON.stringify({
+    timestamp: '2026-07-28T00:00:03.000Z',
+    type: 'event_msg',
+    payload: { type: 'user_message', message: `h1d diff row ${index}` },
+  })}\n`;
+  const diffFd = openSync(diffRollout, 'w');
+  try {
+    writeSync(diffFd, `${JSON.stringify({
+      timestamp: '2026-07-28T00:00:03.000Z',
+      type: 'session_meta',
+      payload: { id: '00000000-0000-4000-8000-0000000001c7', cwd: '/tmp' },
+    })}\n`);
+    for (let index = 0; index < 60; index += 1) writeSync(diffFd, diffUserRow(index));
+    writeSync(diffFd, `${JSON.stringify({
+      timestamp: '2026-07-28T00:00:03.000Z',
+      type: 'response_item',
+      payload: { type: 'function_call', name: 'apply_patch', call_id: 'h1d-lock', arguments: '{}' },
+    })}\n`);
+    writeSync(diffFd, `${JSON.stringify({
+      timestamp: '2026-07-28T00:00:03.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'patch_apply_end',
+        call_id: 'h1d-lock',
+        success: true,
+        changes: { 'bun.lock': { type: 'update', unified_diff: lockfile } },
+      },
+    })}\n`);
+    writeSync(diffFd, `${JSON.stringify({
+      timestamp: '2026-07-28T00:00:03.000Z',
+      type: 'response_item',
+      payload: { type: 'function_call_output', call_id: 'h1d-lock', output: 'Success' },
+    })}\n`);
+    for (let index = 60; index < 90; index += 1) writeSync(diffFd, diffUserRow(index));
+  } finally {
+    closeSync(diffFd);
+  }
+  const diffClient = await openClient(
+    broker.wsBase,
+    Buffer.from(diffRollout, 'utf8').toString('base64url'),
+  );
+  clients.push(diffClient.ws);
+  const referencedDiff = diffClient.attach.messages.find((message: any) =>
+    message.type === 'tool-result' && message.callId === 'h1d-lock');
+  assert.equal(
+    typeof referencedDiff?.diffRef?.fetchUrl,
+    'string',
+    'the indexed attach delivers the oversized diff as a reference',
+  );
+  assert.equal(
+    diffClient.attach.truncated,
+    undefined,
+    'a reference-mode indexed attach is not cut at a diff it receives as a reference',
+  );
+  assert.equal(
+    diffClient.attach.messages.filter((message: any) => message.type === 'user-message').length,
+    90,
+    'every row of the fitting history reaches the reference-mode socket',
+  );
+  diffClient.ws.close();
 
   console.log(JSON.stringify({
     sourceBytes: statSync(rollout).size,

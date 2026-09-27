@@ -233,6 +233,11 @@ function newDrive(
       replayed.length === 1, `${replayed.length} rows`);
     check('the replayed row keeps the SAME key it was minted under',
       (replayed[0] as { key?: string }).key === minted?.key, String((replayed[0] as { key?: string }).key));
+    // Replayed, it is undelivered whatever the session was doing when it was sent. Unqueued, it
+    // counted toward the cursor a client resumes from, so the first step written before its
+    // delivering line broke that cursor.
+    check('the replayed row is flagged queued: it has not been delivered yet',
+      (replayed[0] as { queued?: boolean }).queued === true, JSON.stringify(replayed[0]));
 
     // A second prompt while the turn is still running is the queued case.
     await h.connection.sendPrompt({ text: 'second prompt' });

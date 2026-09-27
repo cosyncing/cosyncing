@@ -141,7 +141,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        tester.widget<ListView>(list).scrollCacheExtent,
+        tester.widget<ScrollView>(list).scrollCacheExtent,
         const ScrollCacheExtent.viewport(2),
       );
       final selectionOwner = find.byKey(

@@ -171,8 +171,8 @@ void main() {
   });
 
   group('brokerClientMessageKinds', () {
-    test('has 14 entries', () {
-      expect(brokerClientMessageKinds, hasLength(14));
+    test('has 15 entries', () {
+      expect(brokerClientMessageKinds, hasLength(15));
     });
 
     test('includes handoff, ack, and nack', () {
@@ -180,6 +180,10 @@ void main() {
         brokerClientMessageKinds,
         containsAll(<String>['handoff', 'ack', 'nack']),
       );
+    });
+
+    test('includes the revision-28 history refresh', () {
+      expect(brokerClientMessageKinds, contains('history-refresh'));
     });
   });
 

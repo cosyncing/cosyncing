@@ -10,10 +10,12 @@
  * are a later increment — see docs/protocol/adapter-support.md
  *
  * Mapping is DOUBLE-FREE by design: the same content appears as both an `event_msg/*` (the UI event)
- * and a `response_item/*` (the model's turn item). We take TEXT/reasoning/user from `event_msg`, tool
- * calls/results from `response_item/{function_call,function_call_output}`, and correlate the rich
- * `event_msg/{patch_apply_end,exec_command_end}` detail onto the matching tool-result by `call_id`
- * (enrichment, never a second bubble). Keys are the rollout LINE INDEX, so a history copy and a
+ * and a `response_item/*` (the model's turn item). We take TEXT/user from `event_msg`, reasoning from
+ * `response_item/reasoning` (the one form every rollout writes, and the one carrying the item's
+ * native id), tool calls/results from `response_item/{function_call,function_call_output}` (and, for
+ * a call the model did not issue itself, from its `event_msg/item_completed`), and
+ * correlate the rich `event_msg/{patch_apply_end,exec_command_end}` detail onto the matching
+ * tool-result by `call_id` (enrichment, never a second bubble). Keys are the rollout LINE INDEX, so a history copy and a
  * live-tailed copy of the same line dedupe in the app (the observe attach-window race is harmless).
  *
  * Resume uses a broker-owned `codex app-server --stdio` JSONL process. The live app-server stream is
@@ -43,6 +45,7 @@ import {
   type FSWatcher,
 } from 'node:fs';
 import { join, basename, dirname, extname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createJsonlSplitter,
   PRODUCT_IDENTITY,
@@ -5390,7 +5393,7 @@ class CodexResumeConnection implements SessionConnection {
       return;
     }
     if (item.type === 'reasoning') {
-      const text = [...(item.summary ?? []), ...(item.content ?? [])].filter(Boolean).join('\n').trim();
+      const text = codexReasoningText(item.summary, item.content);
       if (text) this.emit({ type: 'thinking', text, key: codexItemTextKey(turnId, String(item.id ?? 'unknown'), 'r') });
       return;
     }
@@ -6252,6 +6255,10 @@ const CODEX_TURN_USER_KEY_LIMIT = 64;
 /** Per-turn item ids kept for idempotent re-delivery of a live userMessage. */
 const CODEX_TURN_RECENT_ITEM_LIMIT = 32;
 
+/** How many recent model-issued call ids a read remembers. A call's `item_completed` record lands
+ *  at most 694 other calls after it in local rollouts (p99.9: 66). */
+const CODEX_MODEL_CALL_ID_LIMIT = 4_096;
+
 /**
  * Per-turn prompt bookkeeping. One shape of comment covers both maps below.
  *
@@ -6369,6 +6376,27 @@ class CodexRuntimeTracker {
   private activeTurnId: string | undefined;
   /** Bounded turn-local evidence for a reason-aware interruption marker. */
   private automaticApprovalDenials = 0;
+  /** Call ids of the tool calls the model issued as response items, newest last, so the
+   *  `item_completed` record Codex also writes for such a call adds no second row. Bounded by
+   *  {@link CODEX_MODEL_CALL_ID_LIMIT}: that record follows its call closely. */
+  private readonly modelCallIds = new Set<string>();
+
+  /** Remember one model-issued call id. */
+  recordModelCall(callId: string): void {
+    if (!callId) return;
+    this.modelCallIds.delete(callId);
+    this.modelCallIds.add(callId);
+    while (this.modelCallIds.size > CODEX_MODEL_CALL_ID_LIMIT) {
+      const oldest = this.modelCallIds.values().next().value;
+      if (oldest === undefined) break;
+      this.modelCallIds.delete(oldest);
+    }
+  }
+
+  /** Whether this read already mapped a model-issued call with this id. */
+  isModelCall(callId: string): boolean {
+    return this.modelCallIds.has(callId);
+  }
 
   /** Apply one exact rollout transition. A stale, duplicate, or id-less terminal cannot retire the
    * current turn. The return value lets mapping suppress a second footer/status transition too. */
@@ -6881,7 +6909,22 @@ export function mapLine(
           }
           return [];
         }
-        if (item?.type !== 'UserMessage') return [];
+        // A second exception: a tool call the MODEL did not issue as a response item — a nested
+        // call made inside a code-mode `exec` cell (`exec-<uuid>` ids) or a user shell command
+        // (bare uuid ids). This record is its only durable form, while the app-server streams it
+        // live as an item like any other, so history rebuilds exactly the rows that live stream
+        // produced (see {@link codexRolloutToolItem}). A call the model DID issue already has its
+        // rows from `response_item/{function_call,custom_tool_call}`, written before this record
+        // (measured locally: 21,999 of 21,999 such pairs, at most 694 other calls apart).
+        if (item?.type !== 'UserMessage') {
+          const id = typeof item?.id === 'string' ? item.id : '';
+          if (!id || runtime.isModelCall(id) || id.startsWith('call_')) return [];
+          const converted = codexRolloutToolItem(item);
+          if (!converted) return [];
+          const call = codexToolCallFromItem(converted.started, String(p.turn_id ?? runtime.currentTurnId ?? ''));
+          const result = codexToolResultFromItem(converted.completed);
+          return [...(call ? [call] : []), ...(result ? [result] : [])];
+        }
         const text = userInputText(item.content);
         if (!text) return [];
         // The legacy form of this same prompt already produced its row (dual-format rollout).
@@ -6922,10 +6965,15 @@ export function mapLine(
         runtime.expectLegacyAssistantPair(text);
         return [{ type: 'model-output', text, final: true, key: textKey }];
       }
-      case 'agent_reasoning': {
-        const txt = reasoningText(p);
-        return txt ? [{ type: 'thinking', text: txt, key }] : [];
-      }
+      case 'agent_reasoning':
+        // One such event is written per summary part of a reasoning item, BEFORE the item's own
+        // `response_item/reasoning`, and every part it carries is restated there (measured on
+        // 95 local rollouts: 11,832 events, each one's text among the next reasoning item's
+        // summary parts, and each item preceded by exactly as many events as it has parts). The
+        // item is the one form every rollout writes, and it maps to ONE row per reasoning item,
+        // as the live `item/completed` path does; mapping these events too would split one
+        // reasoning into several rows and show it twice.
+        return [];
       case 'task_started': {
         const turnId = rolloutTurnId(p, lineIndex);
         return [{ type: 'status', status: 'running' }, runtime.start(turnId, ts)];
@@ -7007,6 +7055,9 @@ export function mapLine(
     }
   }
   if (ln.type === 'response_item') {
+    if ((p.type === 'function_call' || p.type === 'custom_tool_call') && p.call_id != null) {
+      runtime.recordModelCall(String(p.call_id));
+    }
     switch (p.type) {
       case 'message': {
         if (p.role !== 'assistant' || duplicateLegacyAssistantPair) return [];
@@ -7086,11 +7137,45 @@ export function mapLine(
           durationMs: e.durationMs,
         }];
       }
+      case 'reasoning': {
+        // The durable form of a reasoning item. Its summary parts (`summary_text`) and raw
+        // content parts (`reasoning_text`) are the same strings the live app-server delivers as
+        // the completed item's `summary` and `content`, and its `id` and metadata `turn_id` are
+        // the item id and turn the live notification carries (measured locally: on 77,004
+        // items the rollout's own `item_completed` record of the item matches this one on id,
+        // turn and both text arrays). Rebuilding the live key here keeps one reasoning ONE row
+        // across live, history, reconnect and paging. An item without an id (older rollouts)
+        // keeps the line-index key: a mismatch costs a duplicate, never a lost reasoning.
+        // Encrypted-only items carry no text and render nothing, live or here.
+        const text = codexReasoningText(p.summary, p.content);
+        if (!text) return [];
+        const nativeId = typeof p.id === 'string' ? p.id : '';
+        const turnId = codexReasoningTurnId(p) ?? runtime.currentTurnId;
+        const decided = nativeId && turnId ? codexItemTextKey(turnId, nativeId, 'r') : key;
+        const reasoningKey = published ? published.adopt(lineIndex, decided) : decided;
+        return [{ type: 'thinking', text, key: reasoningKey }];
+      }
       default:
-        return []; // reasoning → covered by event_msg/agent_reasoning
+        return [];
     }
   }
   return [];
+}
+
+/** The text one reasoning item renders: its summary parts, then its raw content parts, joined by
+ *  newlines. The live `item/completed` item carries both as string arrays; the rollout's
+ *  `response_item/reasoning` carries the same strings as `{type, text}` parts. One function builds
+ *  both, so a live row and its history copy can never differ. */
+function codexReasoningText(summary: unknown, content: unknown): string {
+  const parts = (value: unknown): string[] => (Array.isArray(value) ? value : [])
+    .map((part: any) => (typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : ''));
+  return [...parts(summary), ...parts(content)].filter(Boolean).join('\n').trim();
+}
+
+/** The turn a rollout reasoning item names for itself, when it does. */
+function codexReasoningTurnId(p: any): string | undefined {
+  const turnId = p?.internal_chat_message_metadata_passthrough?.turn_id ?? p?.metadata?.turn_id;
+  return typeof turnId === 'string' && turnId ? turnId : undefined;
 }
 
 /** A `spawn_agent` function_call_output → a running subagent bar. Output is `{agent_id, nickname}`
@@ -7527,6 +7612,249 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
 function fileChangeTitle(item: any): string | undefined {
   const path = item?.changes?.[0]?.path;
   return path ? `Edited ${basename(String(path))}` : undefined;
+}
+
+/**
+ * The item the app-server streams for one rollout `item_completed` tool record, in the two states
+ * the live connection maps: as `item/started` delivers it (its tool-call row) and as
+ * `item/completed` delivers it (its tool-result row).
+ *
+ * The rollout keeps Codex's internal form of the item, and the app-server converts that same item
+ * to its wire form before streaming it. Each rule below was read off the real app-server (0.157.1)
+ * streaming items whose rollout records were then compared field by field:
+ * - the argv becomes one shell-quoted string (see {@link codexShellJoin});
+ * - `file://` locations become paths;
+ * - snake_case enum values become camelCase;
+ * - a `read` action's path is resolved against the command's working directory;
+ * - durations truncate to whole milliseconds, and an empty command output becomes none;
+ * - file changes are sorted by path, and a move's destination is appended to its diff;
+ * - an MCP result drops `isError`.
+ * Mapping the rows from this item with the live mappers is what makes a saved row the same row the
+ * client already holds. A web search item keeps the protocol's pass-through shape; a nested web
+ * search needs a hosted provider, so it was not streamed during that comparison. Returns undefined
+ * for items the live connection renders nothing for.
+ */
+export function codexRolloutToolItem(item: any): { started: any; completed: any } | undefined {
+  const id = String(item?.id ?? '');
+  switch (item?.type) {
+    case 'CommandExecution': {
+      const cwd = codexRolloutPath(item.cwd);
+      const completed = {
+        type: 'commandExecution',
+        id,
+        pluginId: item.plugin_id ?? null,
+        scriptPath: item.script_path == null ? null : codexRolloutPath(item.script_path),
+        command: Array.isArray(item.command)
+          ? codexShellJoin(item.command.map((word: unknown) => String(word)))
+          : String(item.command ?? ''),
+        cwd,
+        processId: item.process_id == null ? null : String(item.process_id),
+        source: codexCamelCase(item.source),
+        status: codexCamelCase(item.status),
+        commandActions: (Array.isArray(item.parsed_cmd) ? item.parsed_cmd : [])
+          .map((action: any) => codexCommandAction(action, cwd)),
+        // An empty output is streamed as no output at all.
+        aggregatedOutput: typeof item.aggregated_output === 'string' && item.aggregated_output
+          ? item.aggregated_output
+          : null,
+        exitCode: typeof item.exit_code === 'number' ? item.exit_code : null,
+        durationMs: codexRolloutDurationMs(item.duration),
+      };
+      return {
+        started: { ...completed, status: 'inProgress', aggregatedOutput: null, exitCode: null, durationMs: null },
+        completed,
+      };
+    }
+    case 'FileChange': {
+      const source = item.changes && typeof item.changes === 'object' ? item.changes : {};
+      const changes = Object.entries(source)
+        .map(([path, change]: [string, any]) => {
+          const livePath = codexRolloutPath(path);
+          if (change?.type !== 'update') {
+            return { path: livePath, kind: { type: String(change?.type ?? '') }, diff: String(change?.content ?? '') };
+          }
+          const movePath = change.move_path == null ? null : codexRolloutPath(change.move_path);
+          return {
+            path: livePath,
+            kind: { type: 'update', move_path: movePath },
+            diff: `${String(change.unified_diff ?? '')}${movePath ? `\n\nMoved to: ${movePath}` : ''}`,
+          };
+        })
+        // Byte order of the UTF-8 path, which is the order the app-server streams them in.
+        .sort((a, b) => Buffer.compare(Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8')));
+      const completed = { type: 'fileChange', id, changes, status: codexCamelCase(item.status) };
+      return { started: { ...completed, status: 'inProgress' }, completed };
+    }
+    case 'ImageView': {
+      const completed = { type: 'imageView', id, path: codexRolloutPath(item.path) };
+      return { started: completed, completed };
+    }
+    case 'McpToolCall': {
+      const result = item.result && typeof item.result === 'object'
+        ? {
+            content: Array.isArray(item.result.content) ? item.result.content : [],
+            structuredContent: item.result.structuredContent ?? null,
+            _meta: item.result._meta ?? null,
+          }
+        : null;
+      const completed = {
+        type: 'mcpToolCall',
+        id,
+        server: String(item.server ?? ''),
+        tool: String(item.tool ?? ''),
+        status: codexCamelCase(item.status),
+        arguments: item.arguments ?? null,
+        appContext: typeof item.connectorId === 'string'
+          ? {
+              connectorId: item.connectorId,
+              linkId: item.linkId ?? null,
+              resourceUri: item.resourceUri ?? null,
+              appName: item.appName ?? null,
+              actionName: item.actionName ?? null,
+            }
+          : null,
+        mcpAppUi: null,
+        pluginId: item.plugin_id ?? null,
+        readOnlyHint: typeof item.readOnlyHint === 'boolean' ? item.readOnlyHint : null,
+        result,
+        error: item.error ?? null,
+        durationMs: codexRolloutDurationMs(item.duration),
+      };
+      return {
+        started: { ...completed, status: 'inProgress', result: null, error: null, durationMs: null },
+        completed,
+      };
+    }
+    case 'Extension': {
+      // `web.search` is streamed as a web search item; `clock.sleep` as a sleep item, which the
+      // live connection renders nothing for.
+      if (item.kind !== 'web.search') return undefined;
+      const completed = {
+        type: 'webSearch',
+        id,
+        query: String(item.query ?? ''),
+        action: item.action ?? null,
+        results: Array.isArray(item.results) ? item.results : null,
+      };
+      return { started: { ...completed, action: null, results: null }, completed };
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** One rollout `parsed_cmd` entry as the wire's command action. Only a read's path is resolved. */
+function codexCommandAction(action: any, cwd: string): Record<string, unknown> {
+  const command = String(action?.cmd ?? '');
+  switch (action?.type) {
+    case 'read': {
+      const path = action.path == null ? '' : String(action.path);
+      return { type: 'read', command, name: String(action.name ?? ''), path: cwd && path ? resolve(cwd, path) : path };
+    }
+    case 'list_files':
+      return { type: 'listFiles', command, path: action.path ?? null };
+    case 'search':
+      return { type: 'search', command, query: action.query ?? null, path: action.path ?? null };
+    default:
+      return { type: 'unknown', command };
+  }
+}
+
+/** A rollout location: `file://` URLs become the platform path, anything else is kept. */
+function codexRolloutPath(value: unknown): string {
+  const text = String(value ?? '');
+  if (!text.startsWith('file:')) return text;
+  try {
+    return fileURLToPath(text);
+  } catch {
+    return text;
+  }
+}
+
+/** A rollout `{secs, nanos}` duration in whole milliseconds, truncated as the wire does. */
+function codexRolloutDurationMs(duration: any): number | null {
+  if (!duration || typeof duration !== 'object') return null;
+  const secs = Number(duration.secs ?? 0);
+  const nanos = Number(duration.nanos ?? 0);
+  if (!Number.isFinite(secs) || !Number.isFinite(nanos) || secs < 0 || nanos < 0) return null;
+  return secs * 1000 + Math.floor(nanos / 1_000_000);
+}
+
+/** `unified_exec_startup` → `unifiedExecStartup`. */
+function codexCamelCase(value: unknown): string {
+  return String(value ?? '').replace(/_([a-z0-9])/g, (_, letter: string) => letter.toUpperCase());
+}
+
+const SHELL_UNQUOTED = 1;
+const SHELL_SINGLE = 2;
+const SHELL_DOUBLE = 4;
+
+/**
+ * Join an argv into the one command string the app-server streams: each word quoted by the rules
+ * of the `shlex` crate Codex uses, joined by spaces. A word is split into chunks that are each left
+ * bare, single-quoted or double-quoted, whichever the chunk's characters allow. A word containing
+ * NUL cannot be quoted, and is joined unquoted.
+ */
+function codexShellJoin(words: readonly string[]): string {
+  if (words.some((word) => word.includes('\0'))) return words.join(' ');
+  return words.map(codexShellQuote).join(' ');
+}
+
+function codexShellQuote(word: string): string {
+  if (word === '') return "''";
+  let out = '';
+  let rest = word;
+  while (rest.length > 0) {
+    const [prefix, strategy] = codexShellQuotingStrategy(rest);
+    // Every chunk carries at least one character, so the loop always ends.
+    const length = Math.max(1, prefix);
+    const chunk = rest.slice(0, length);
+    rest = rest.slice(length);
+    if (strategy === SHELL_UNQUOTED) out += chunk;
+    else if (strategy === SHELL_SINGLE) out += `'${chunk}'`;
+    else out += `"${chunk.replace(/["\\]/g, '\\$&')}"`;
+  }
+  return out;
+}
+
+/** The longest prefix one quoting style can carry, and the best style for it. */
+function codexShellQuotingStrategy(text: string): [number, number] {
+  let allowed = SHELL_UNQUOTED | SHELL_SINGLE | SHELL_DOUBLE;
+  let index = 0;
+  // `^` may only follow an opening single quote (a Bash history-expansion workaround).
+  if (text.charCodeAt(0) === 0x5e) {
+    allowed = SHELL_SINGLE;
+    index = 1;
+  }
+  for (; index < text.length; index += 1) {
+    const c = text.charCodeAt(index);
+    let next = allowed;
+    if (c >= 0x80) {
+      next &= ~SHELL_UNQUOTED;
+    } else {
+      if (!codexShellBareOk(c)) next &= ~SHELL_UNQUOTED;
+      // ' ^ \ cannot sit inside single quotes; ` $ ! ^ cannot sit inside double quotes.
+      if (c === 0x27 || c === 0x5e || c === 0x5c) next &= ~SHELL_SINGLE;
+      if (c === 0x60 || c === 0x24 || c === 0x21 || c === 0x5e) next &= ~SHELL_DOUBLE;
+    }
+    if (next === 0) break;
+    allowed = next;
+  }
+  const strategy = allowed & SHELL_UNQUOTED
+    ? SHELL_UNQUOTED
+    : allowed & SHELL_SINGLE
+      ? SHELL_SINGLE
+      : SHELL_DOUBLE;
+  return [index, strategy];
+}
+
+/** ASCII characters a shell word may carry bare: letters, digits and `+ - . / : @ ] _`. */
+function codexShellBareOk(c: number): boolean {
+  return (c >= 0x30 && c <= 0x39)
+    || (c >= 0x41 && c <= 0x5a)
+    || (c >= 0x61 && c <= 0x7a)
+    || c === 0x2b || c === 0x2d || c === 0x2e || c === 0x2f
+    || c === 0x3a || c === 0x40 || c === 0x5d || c === 0x5f;
 }
 
 function userInputText(content: unknown): string {
@@ -8041,15 +8369,6 @@ function timestampToMs(v: unknown): number | undefined {
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────
-
-function reasoningText(p: any): string {
-  const c = p?.content;
-  if (typeof c === 'string') return c;
-  if (Array.isArray(c)) return c.map((x: any) => (typeof x === 'string' ? x : x?.text ?? '')).join('').trim();
-  if (typeof p?.summary === 'string') return p.summary;
-  if (Array.isArray(p?.summary)) return p.summary.map((x: any) => (typeof x === 'string' ? x : x?.text ?? '')).join('').trim();
-  return '';
-}
 
 function parseArgs(args: unknown): unknown {
   if (typeof args !== 'string') return args;

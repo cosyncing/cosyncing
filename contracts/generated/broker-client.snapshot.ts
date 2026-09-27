@@ -846,6 +846,9 @@ export type AgentMessage =
       type: 'tool-call';
       callId: string;
       toolName: string;
+      /** Native mutable part with a reserved result row. Cursor identity is the slot identity;
+       * changes to its payload arrive as keyed updates without inserting history rows. */
+      historySlot?: boolean;
       title?: string;
       args?: unknown;
       /** Adapter-derived display policy; absent keeps the conservative collapsed/ungrouped fallback. */
@@ -857,6 +860,14 @@ export type AgentMessage =
       type: 'tool-result';
       callId: string;
       toolName: string;
+      /** Paired with a historySlot call; present from the moment the native part exists. */
+      historySlot?: boolean;
+      /** A reserved result position, not a completed result. Revision-28 clients retain it for
+       * paging but do not render it. Older clients receive only actual results. */
+      pending?: boolean;
+      /** Backward-page cursor immediately after a reserved result. A revision-28 client can
+       * reload this single row after reconnect to learn a completion it missed while offline. */
+      reloadCursor?: string;
       /** Same adapter-derived semantic class as the matching tool-call. */
       toolClass?: ToolDisplayClass;
       /** Same normalized family as the matching tool-call, now carrying result
@@ -1608,6 +1619,7 @@ export const BROKER_CLIENT_MESSAGE_KINDS = [
   'prompt',
   'draft',
   'history-page',
+  'history-refresh',
   'plan-action',
   'artifact-interaction',
   'file',
@@ -1821,8 +1833,77 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * The overlap arithmetic moves with the number -- 26 is now the newest revision
  * inside the window, so a revision-26-or-later client has to ship before a
  * revision-27 broker does.
+ *
+ * Revision 28 lets a client that bounds its in-memory transcript release rows
+ * and get them back through the broker's own boundaries instead of asking the
+ * reader to reconnect. A `history` frame gains the optional `endCursor`: the
+ * backward paging cursor at the boundary after the frame's newest row, in the
+ * same canonical encoding every `olderCursor` and page cursor uses, so a
+ * released frame reloads exactly through ordinary backward paging and closes
+ * its gap by cursor equality. The frame's reconnect `cursor` already names the
+ * same boundary, but in an encoding the paging route rejects, and a client
+ * must never translate one opaque cursor into another.
+ *
+ * It also adds the `history-refresh` client message: from the reconnect
+ * `cursor` of the client's last frame, the broker answers with one incremental
+ * `history` frame (`reset` false) holding a bounded prefix of the durable rows
+ * persisted since, with the `cursor` and `endCursor` after them and the
+ * request's `clientMessageId`, or with a nack carrying that id. The prefix
+ * never replaces what the client holds, and it is never sent across a history
+ * reset or resync that happened while it was read.
+ *
+ * Every boundary a frame or page names counts transcript rows only, so it
+ * survives the history growing. The rows that end a history while they
+ * describe its current pending or running state (a queued prompt, an open
+ * request, the summary of a run not yet finished, a token reading, a session
+ * metadata value) are outside every boundary until a transcript row follows
+ * them; they arrive after the frame, like the activity overlays. A run summary
+ * counts by its identity alone, so rewriting it in place as its run goes on or
+ * finishes moves no boundary. While a turn runs, every attach, reconnect,
+ * resync and refresh frame, and every newer page that reaches the end of the
+ * history, stops before the newest row of streamed text, the tool calls just
+ * before it, which the turn may still rewrite; those rows follow the frame.
+ * OpenCode and Kilo reserve a result row beside each call from its first write.
+ * These `historySlot` rows count by tool identity; completion updates the same
+ * position. A reserved result has `pending: true` and is hidden by the client.
+ * Its opaque `reloadCursor` reloads that single position through ordinary older
+ * paging after reconnect, recovering completion missed while disconnected.
+ * Completed outputs stay within the ordinary frame budget. A
+ * session that has streamed a live row keyed differently from the same row in
+ * its history refuses a refresh with the existing `NOT_SUPPORTED` code, since a
+ * restated row would show twice; its paging is unaffected.
+ *
+ * A `history-page`
+ * request gains an optional `direction` (`older`, the default, or `newer`)
+ * and, for a newer page, an optional `until` cursor: a newer page walks
+ * forward over the same rows a backward page does, and its `cursor` names the
+ * boundary after them (`until` verbatim when the walk reached it). The reply
+ * echoes `direction: "newer"`, because a broker that ignores the field answers
+ * with an older page. A `history` frame carries `newerHistory: true` exactly
+ * where it carries `endCursor`.
+ *
+ * Presence is the capability for both: the broker emits them only where
+ * paging can serve them (an authoritative native history frame of a session
+ * whose history has a source identity and can be paged, to a connection
+ * paging has not refused), never on a bounded-tail fallback or an
+ * unavailable-history frame. Attach and resync frames are also bounded by the
+ * client's decoded-size estimate, measured on the frame as the connection
+ * receives it; backward pages stay bounded by count only, and the bounded-tail
+ * fallback keeps its own 4 MiB bound. The new client message kind moves the
+ * surface hash; no route, frame kind, message type or error code changes. The
+ * minimum client revision stays at 17: an older client sends neither request,
+ * ignores both fields and keeps its earlier retention behavior.
+ *
+ * The overlap arithmetic moves with the number -- 27 is now the newest revision
+ * inside the window, so a revision-27-or-later client has to ship before a
+ * revision-28 broker does. The window binds both ways: a revision-28 client is
+ * read-only against a revision-26 broker exactly as a revision-26 client is
+ * against a revision-28 broker. The newest published peers are at revision 26,
+ * so revision 27 has to ship first, or in the same release as revision 28;
+ * revisions 27 and 28 ship together, with the overlap left at one, and a
+ * revision-26 peer is read-only against a revision-28 one until it updates.
  */
-export const BROKER_CONTRACT_REVISION = 27 as const;
+export const BROKER_CONTRACT_REVISION = 28 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -2752,6 +2833,9 @@ export function decodeSessionInfo(value: unknown): SessionInfo | undefined {
  */
 export interface SessionConnection {
   readonly info: SessionInfo;
+  /** History reserves mutable tool result positions. Clients before revision 28 cannot
+   *  reload missed completions in those positions and need a fresh attach snapshot. */
+  readonly historyUsesToolSlots?: boolean;
   /** Attached product clients, independent of the broker's persistent message subscription.
    * Optional adapter lifecycle hook; zero suspends client-only observation work. */
   setClientCount?(count: number): void;
@@ -2804,6 +2888,16 @@ export interface SessionConnection {
     | HistorySnapshotCapture
     | HistorySnapshotRefusal
     | undefined;
+  /**
+   * True when a row this connection streams live is keyed differently from the same row in
+   * {@link getHistory} (for example streamed text keyed by a live turn counter, while history keys
+   * it by the native entry id). A client merges rows by key, so an incremental history frame that
+   * restates such a row shows it twice. The broker therefore refuses a `history-refresh` on this
+   * connection with `NOT_SUPPORTED`; attach, reconnect and paging are unchanged. Omitted means a
+   * live row and its history row share one key. The broker reads it for every request, so a
+   * connection that can key most rows as history does may turn it on once it streams one it cannot.
+   */
+  readonly liveRowsRekeyedInHistory?: boolean;
   /** Subscribe to live messages; returns an unsubscribe fn. */
   subscribe(handler: AgentMessageHandler): Unsubscribe;
   /** Mutating input. The broker may call this only when `info.control` proves Drive ownership or

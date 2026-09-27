@@ -67,6 +67,9 @@ ProviderContainer buildControllerContainer(
   SessionTranscriptRepository? transcriptRepository,
   AppDatabase? appDatabase,
   bool enableCrossWindowDraftObservation = false,
+  Duration? historyPageTimeout,
+  Duration? historyRefreshTimeout,
+  Duration? historyCursorRecoveryBackoff,
 }) {
   return buildControllerContainerWithNotificationHooks(
     key: key,
@@ -78,6 +81,9 @@ ProviderContainer buildControllerContainer(
     transcriptRepository: transcriptRepository,
     appDatabase: appDatabase,
     enableCrossWindowDraftObservation: enableCrossWindowDraftObservation,
+    historyPageTimeout: historyPageTimeout,
+    historyRefreshTimeout: historyRefreshTimeout,
+    historyCursorRecoveryBackoff: historyCursorRecoveryBackoff,
   );
 }
 
@@ -104,6 +110,10 @@ ProviderContainer buildControllerContainerWithNotificationHooks({
   // observable Drift database, matching the browser shared-worker topology.
   AppDatabase? appDatabase,
   bool enableCrossWindowDraftObservation = false,
+  // How long a history page or boundary refresh may go unanswered.
+  Duration? historyPageTimeout,
+  Duration? historyRefreshTimeout,
+  Duration? historyCursorRecoveryBackoff,
 }) {
   // DR1: a real in-memory Drift database backs the draft repository and the
   // bounded maintenance runner, so durable draft behavior is exercised
@@ -166,6 +176,16 @@ ProviderContainer buildControllerContainerWithNotificationHooks({
       if (enableCrossWindowDraftObservation)
         sessionDraftCrossWindowObservationEnabledProvider.overrideWithValue(
           true,
+        ),
+      if (historyPageTimeout != null)
+        sessionHistoryPageTimeoutProvider.overrideWithValue(historyPageTimeout),
+      if (historyRefreshTimeout != null)
+        sessionHistoryRefreshTimeoutProvider.overrideWithValue(
+          historyRefreshTimeout,
+        ),
+      if (historyCursorRecoveryBackoff != null)
+        sessionHistoryCursorRecoveryBackoffProvider.overrideWithValue(
+          historyCursorRecoveryBackoff,
         ),
     ],
   );

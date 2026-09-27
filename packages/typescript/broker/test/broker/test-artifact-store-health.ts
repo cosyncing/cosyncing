@@ -97,3 +97,61 @@ try {
 }
 
 console.log('PASS artifact store backs up and reports corrupt indexes');
+
+// A size preview stores nothing, and builds exactly the shape a delivery would. A history frame's
+// decoded-size bound measures rows it may then trim away, so measuring must never write a blob or
+// commit the index (whose failure would otherwise abort the attach), and its size must be the size
+// the client then receives.
+const previewRoot = mkdtempSync(join(tmpdir(), 'cosyncing-artifact-preview-'));
+try {
+  const results: ArtifactStorePersistenceResult[] = [];
+  const store = new ArtifactStore('http://broker.invalid', previewRoot, {
+    onPersistenceResult: (result) => results.push(result),
+  });
+  const blobs = (): string[] => {
+    const dir = join(previewRoot, 'artifacts', 'blobs');
+    // Blobs live at `<2-char prefix>/<hash>`; the prefix directories are not blobs.
+    return existsSync(dir)
+      ? readdirSync(dir, { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile()).map((entry) => entry.name)
+      : [];
+  };
+  const indexPath = join(previewRoot, 'artifacts', 'index.json');
+  const indexBefore = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : undefined;
+  const body = Array.from({ length: 5_000 }, (_, index) => `+line ${index}`).join('\n');
+  const artifact = {
+    type: 'file-artifact' as const,
+    path: 'preview.txt',
+    name: 'preview.txt',
+    mimeType: 'text/plain',
+    url: `data:text/plain;base64,${Buffer.from('preview bytes').toString('base64')}`,
+  };
+  const session = { tool: 'claude', id: 'preview-session' };
+
+  const previewedDiff = store.previewDiff('claude', 'preview-session', 'preview-session:call', body);
+  const previewedArtifact = store.previewReference(session, artifact);
+  assert(blobs().length === 0, `a preview must store no blob: ${blobs().join(',')}`);
+  assert(results.length === 0, 'a preview must not commit the index');
+  assert(
+    (existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : undefined) === indexBefore,
+    'a preview must leave the index file untouched',
+  );
+
+  const stashed = store.stashDiff('claude', 'preview-session', 'preview-session:call', body);
+  const delivered = store.toReference(session, artifact);
+  assert(blobs().length === 2, 'delivery stores what the references point at');
+  assert(
+    previewedDiff.contentHash === stashed.contentHash
+      && previewedDiff.byteSize === stashed.byteSize
+      && previewedDiff.fetchUrl.length === stashed.fetchUrl.length
+      && new URL(previewedDiff.fetchUrl, 'http://x').pathname === new URL(stashed.fetchUrl, 'http://x').pathname,
+    'a previewed diff reference has the delivered reference shape',
+  );
+  const shape = (message: unknown): string => JSON.stringify(message, (key, value) =>
+    key === 'fetchUrl' && typeof value === 'string' ? new URL(value, 'http://x').pathname : value);
+  assert(shape(previewedArtifact) === shape(delivered), 'a previewed artifact has the delivered shape');
+} finally {
+  rmSync(previewRoot, { recursive: true, force: true });
+}
+
+console.log('PASS artifact store previews references without storing them');

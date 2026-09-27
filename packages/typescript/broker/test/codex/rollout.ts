@@ -18,7 +18,8 @@ import { appendFileSync, chmodSync, closeSync, existsSync, ftruncateSync, linkSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isolatedBrokerFixtureEnvironment } from '../helpers/isolated-broker-fixture.ts';
-import { historySourceStillContainsSnapshot } from '../../src/sessions/history-page-cache.ts';
+import { historySourceStillContainsSnapshot, IndexedHistoryPageCacheBuilder } from '../../src/sessions/history-page-cache.ts';
+import { backwardHistoryCursor, cursorDurableHistory } from '../../src/sessions/history-delta.ts';
 import type { AgentMessage, HistorySnapshotSink } from '../../../adapter-api/src/index.ts';
 import { CANONICAL_MESSAGE_TYPES, isHistorySnapshotRefusal, isOwnershipConflictError } from '../../../adapter-api/src/index.ts';
 import { mergeCodexNativeRunEvidence, readCodexNativeRunEvidence } from '../../../adapters/codex/src/run-state-repair.ts';
@@ -39,7 +40,7 @@ async function capture(conn: any): Promise<{ sink: CollectingSink; outcome: unkn
   const sink = new CollectingSink();
   return { sink, outcome: await conn.captureHistorySnapshot?.(sink) };
 }
-import { CodexAdapter, captureFileHistoryInto, codexAttachMode, inferRolloutStatus, inferRolloutStatusResult, codexSessionOrigin, mapRollout, rolloutHasExactTerminalTurn } from '../../../adapters/codex/src/index.ts';
+import { CodexAdapter, captureFileHistoryInto, codexAttachMode, codexRolloutToolItem, inferRolloutStatus, inferRolloutStatusResult, codexSessionOrigin, mapRollout, rolloutHasExactTerminalTurn } from '../../../adapters/codex/src/index.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 // Mirrors codexLiveSyncEnabled(): sync is ON BY DEFAULT (issues-part2) — an unset env means enabled;
@@ -71,8 +72,9 @@ function check(name: string, ok: boolean, detail = ''): void {
     { timestamp: '2026-06-18T10:00:00.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'hello' } },
     { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] } }, // must SKIP
     { timestamp: '2026-06-18T10:00:02.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } },
-    { type: 'event_msg', payload: { type: 'agent_reasoning', content: 'thinking through it' } },
-    { type: 'response_item', payload: { type: 'reasoning', summary: [] } }, // must SKIP
+    // The shapes a real rollout writes: one `{type, text}` event per summary part, then the item.
+    { type: 'event_msg', payload: { type: 'agent_reasoning', text: 'thinking through it' } }, // must SKIP
+    { type: 'response_item', payload: { type: 'reasoning', id: 'rs_t1', summary: [{ type: 'summary_text', text: 'thinking through it' }], content: null, encrypted_content: 'opaque', internal_chat_message_metadata_passthrough: { turn_id: 't1' } } },
     { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'c1', arguments: '{"command":"ls"}' } },
     { type: 'event_msg', payload: { type: 'exec_command_end', call_id: 'c1', exit_code: 2, duration: { secs: 1, nanos: 250_000_000 } } }, // enrich only
     { type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: 'boom' } },
@@ -89,14 +91,20 @@ function check(name: string, ok: boolean, detail = ''): void {
 
   // 13 emitted: user, status(running/idle), run-summary(running/done), thinking, tool-call×2,
   // tool-result×2, model-output, token-count, metadata-update/runtimeTotals.
-  // The 2 response_item/message + 1 response_item/reasoning are dropped → no doubles.
+  // The 2 response_item/message + 1 event_msg/agent_reasoning are dropped → no doubles.
   check('double-free plus runtime: exactly 13 messages (no event_msg/response_item duplication)', out.length === 13, `got ${out.length}`);
   check(
     'user-message once with native sentAt',
     of('user-message').length === 1 && (of('user-message')[0] as any).text === 'hello' && (of('user-message')[0] as any).sentAt === Date.parse('2026-06-18T10:00:00.000Z'),
     JSON.stringify(of('user-message')),
   );
-  check('thinking once (not doubled by response_item/reasoning)', of('thinking').length === 1, `count=${of('thinking').length}`);
+  check(
+    'thinking once, from the reasoning item, under the live key (not doubled by its agent_reasoning event)',
+    of('thinking').length === 1
+      && (of('thinking')[0] as any).key === 'codex:t1:rs_t1:r'
+      && (of('thinking')[0] as any).text === 'thinking through it',
+    JSON.stringify(of('thinking')),
+  );
   check('model-output once (not doubled by response_item/message)', of('model-output').length === 1 && (of('model-output')[0] as any).text === 'Done.', `count=${of('model-output').length}`);
   check('tool-call×2 with names', of('tool-call').length === 2 && (of('tool-call')[0] as any).toolName === 'exec_command' && (of('tool-call')[1] as any).toolName === 'apply_patch', JSON.stringify(of('tool-call').map((m: any) => m.toolName)));
   check('tool-call display classes are adapter-owned (execute/edit)', (of('tool-call')[0] as any).toolClass === 'execute' && (of('tool-call')[1] as any).toolClass === 'edit', JSON.stringify(of('tool-call')));
@@ -137,6 +145,528 @@ function check(name: string, ok: boolean, detail = ''): void {
   const bad = out.map((m) => m.type).filter((t) => !(CANONICAL_MESSAGE_TYPES as readonly string[]).includes(t));
   check('all emitted types are canonical', bad.length === 0, bad.join(',') || 'ok');
 }
+// ── Reasoning: one row per reasoning item, from the item, under the key the live path uses ───────
+// Rollouts carry reasoning in up to three forms: `event_msg/agent_reasoning` (one `{type, text}`
+// event per summary part, older builds only), `event_msg/item_completed` with a `Reasoning` item
+// (newer builds), and `response_item/reasoning` (every build). History used to read only the first,
+// and read it wrong, so no rollout ever showed reasoning. The shapes below are the ones real
+// rollouts write (inner parts `summary_text` / `reasoning_text`); the content is invented.
+{
+  const summary = (...texts: string[]) => texts.map((text) => ({ type: 'summary_text', text }));
+  const raw = (...texts: string[]) => texts.map((text) => ({ type: 'reasoning_text', text }));
+  const completed = (turn: string, id: string, summaryText: string[], rawContent: string[]) => ({
+    type: 'event_msg',
+    payload: {
+      type: 'item_completed',
+      thread_id: 'thread-r',
+      turn_id: turn,
+      started_at_ms: 1_700_000_000_000,
+      completed_at_ms: 1_700_000_000_500,
+      item: { type: 'Reasoning', id, summary_text: summaryText, raw_content: rawContent },
+    },
+  });
+  const lines: any[] = [
+    { type: 'session_meta', payload: { id: 'thread-r', cwd: '/tmp/r' } },
+    { timestamp: '2026-09-01T10:00:00.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'first prompt' } },
+    { timestamp: '2026-09-01T10:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-old' } },
+    // Older build: an event per summary part, then the item — with no id.
+    { type: 'event_msg', payload: { type: 'agent_reasoning', text: 'Old part one.' } },
+    { type: 'event_msg', payload: { type: 'agent_reasoning', text: 'Old part two.' } },
+    { type: 'response_item', payload: { type: 'reasoning', summary: summary('Old part one.', 'Old part two.'), content: null, encrypted_content: 'opaque-1' } },
+    // Older build whose item carries an id but no turn metadata: the open turn names it.
+    { type: 'event_msg', payload: { type: 'agent_reasoning', text: 'Old identified part.' } },
+    { type: 'response_item', payload: { type: 'reasoning', id: 'rs_old_2', summary: summary('Old identified part.'), encrypted_content: 'opaque-2' } },
+    { type: 'event_msg', payload: { type: 'agent_message', message: 'first answer' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_old', content: [{ type: 'output_text', text: 'first answer' }] } },
+    { timestamp: '2026-09-01T10:00:05.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-old' } },
+    { timestamp: '2026-09-01T10:01:00.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-new' } },
+    // Newer build: the completed item, then the response item, both naming id and turn.
+    completed('turn-new', 'rs_new_1', [], ['New raw step.', 'New raw step two.']),
+    { type: 'response_item', payload: { type: 'reasoning', id: 'rs_new_1', summary: [], content: raw('New raw step.', 'New raw step two.'), encrypted_content: null, internal_chat_message_metadata_passthrough: { turn_id: 'turn-new' } } },
+    // Encrypted only: nothing to render, live or here.
+    completed('turn-new', 'rs_new_2', [], []),
+    { type: 'response_item', payload: { type: 'reasoning', id: 'rs_new_2', summary: [], encrypted_content: 'opaque-3', internal_chat_message_metadata_passthrough: { turn_id: 'turn-new' } } },
+    completed('turn-new', 'rs_new_3', ['New summary.'], []),
+    { type: 'response_item', payload: { type: 'reasoning', id: 'rs_new_3', summary: summary('New summary.'), content: null, encrypted_content: null, internal_chat_message_metadata_passthrough: { turn_id: 'turn-new' } } },
+    // The `metadata` spelling some builds write.
+    { type: 'response_item', payload: { type: 'reasoning', id: 'rs_new_4', summary: summary('Metadata spelling.'), encrypted_content: 'opaque-4', metadata: { turn_id: 'turn-new' } } },
+    { type: 'event_msg', payload: { type: 'agent_message', message: 'second answer' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_new', content: [{ type: 'output_text', text: 'second answer' }] } },
+    { timestamp: '2026-09-01T10:01:09.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-new' } },
+  ];
+  const expected = [
+    { key: 'c5', text: 'Old part one.\nOld part two.' },
+    { key: 'codex:turn-old:rs_old_2:r', text: 'Old identified part.' },
+    { key: 'codex:turn-new:rs_new_1:r', text: 'New raw step.\nNew raw step two.' },
+    { key: 'codex:turn-new:rs_new_3:r', text: 'New summary.' },
+    { key: 'codex:turn-new:rs_new_4:r', text: 'Metadata spelling.' },
+  ];
+  const thinkingOf = (rows: AgentMessage[]) => rows
+    .filter((m) => m.type === 'thinking')
+    .map((m: any) => ({ key: m.key, text: m.text }));
+  const mapped = mapRollout(lines);
+  check(
+    'reasoning: one row per reasoning item with text, in order, under the live key (line key when the item has no id)',
+    JSON.stringify(thinkingOf(mapped)) === JSON.stringify(expected),
+    JSON.stringify(thinkingOf(mapped)),
+  );
+  check(
+    'reasoning: agent_reasoning events and item_completed records add no row of their own',
+    thinkingOf(mapRollout(lines.filter((line) => line.type !== 'response_item' || line.payload?.type !== 'reasoning'))).length === 0,
+    JSON.stringify(thinkingOf(mapRollout(lines.filter((line) => line.type !== 'response_item' || line.payload?.type !== 'reasoning')))),
+  );
+  check(
+    'reasoning: no two rows share a key',
+    new Set(mapped.filter((m) => m.type === 'thinking').map((m: any) => m.key)).size === expected.length,
+    JSON.stringify(thinkingOf(mapped).map((row) => row.key)),
+  );
+  // A read that starts inside a turn (no `task_started` seen) still keys an item by the turn it
+  // names for itself: the id and that turn are the pair the live notification carries.
+  const midTurn = mapRollout(lines.slice(12));
+  check(
+    'reasoning: an item read without its turn opening keys itself by its own turn',
+    JSON.stringify(thinkingOf(midTurn)) === JSON.stringify(expected.slice(2)),
+    JSON.stringify(thinkingOf(midTurn)),
+  );
+
+  // The indexed attach and native pages rebuild each row from its own record: the same keys and
+  // text as the full read, and every older cursor issued before reasoning rows existed fails
+  // closed once it names a boundary past one (a changed prefix), never a shifted page.
+  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-reasoning-'));
+  const path = join(dir, 'rollout-reasoning.jsonl');
+  const filler = Array.from({ length: 30 }, (_, index) => [
+    { type: 'event_msg', payload: { type: 'agent_message', message: `filler ${index}` } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: `msg_f${index}`, content: [{ type: 'output_text', text: `filler ${index}` }] } },
+  ]).flat();
+  const fileLines = [...lines.slice(0, -1), ...filler, lines.at(-1)];
+  try {
+    writeFileSync(path, `${fileLines.map((line) => JSON.stringify(line)).join('\n')}\n`);
+    const builder = new IndexedHistoryPageCacheBuilder();
+    const sink: HistorySnapshotSink = {
+      acceptsLocations: true,
+      accept: (message: AgentMessage, location?: number) => builder.accept(message, location),
+    };
+    const captured = await captureFileHistoryInto(path, sink);
+    const cache = captured && !('refusal' in captured) && captured.reader
+      ? builder.finish(captured.identity, captured.reader)
+      : undefined;
+    const paged: AgentMessage[] = [];
+    let attachOk = false;
+    if (cache) {
+      const attach = await cache.loadAttach(undefined, 8);
+      if (!('kind' in attach)) {
+        attachOk = attach.messages.length > 0 && Boolean(attach.olderCursor);
+        paged.push(...attach.messages);
+        let cursor = attach.olderCursor;
+        while (cursor) {
+          const page = await cache.loadPage(cursor, 5);
+          if ('kind' in page || page.gap) break;
+          paged.unshift(...page.messages);
+          cursor = page.cursor;
+        }
+      }
+    }
+    check(
+      'reasoning: the indexed attach and native pages return the same reasoning rows as a full read',
+      attachOk && JSON.stringify(thinkingOf(paged)) === JSON.stringify(expected),
+      JSON.stringify(thinkingOf(paged)),
+    );
+
+    const full = mapRollout(fileLines);
+    const withoutReasoning = cursorDurableHistory(full.filter((m) => m.type !== 'thinking')).durable;
+    const firstReasoning = cursorDurableHistory(full).durable.findIndex((m) => m.type === 'thinking');
+    const outcomes: string[] = [];
+    let misplaced = 0;
+    if (cache) {
+      for (let boundary = 1; boundary <= withoutReasoning.length; boundary += 1) {
+        const stale = backwardHistoryCursor(withoutReasoning, boundary);
+        const page = await cache.loadPage(stale, 5);
+        if ('kind' in page) {
+          outcomes.push(`${boundary}:${page.kind}`);
+          continue;
+        }
+        if (page.gap) {
+          if (boundary <= firstReasoning) misplaced += 1;
+          outcomes.push(`${boundary}:${page.gap.code}`);
+          continue;
+        }
+        // Accepted: only where the prefix before it is unchanged.
+        if (boundary > firstReasoning) misplaced += 1;
+      }
+    }
+    const refusedCodes = new Set(outcomes.map((outcome) => outcome.split(':')[1]));
+    check(
+      'reasoning: a cursor issued before reasoning rows existed is refused past the first one and honoured before it',
+      Boolean(cache)
+        && firstReasoning > 0
+        && misplaced === 0
+        && outcomes.length === withoutReasoning.length - firstReasoning
+        && [...refusedCodes].every((code) => code === 'HISTORY_CURSOR_DIVERGED' || code === 'HISTORY_CURSOR_GONE'),
+      `first=${firstReasoning} misplaced=${misplaced} refused=${outcomes.length}/${withoutReasoning.length} codes=${[...refusedCodes].join(',')}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+// Observe tails the same rollout live: a reasoning item tailed after the attach must keep the key a
+// later history read of the settled file gives it — including an item with an id but no turn
+// metadata, whose turn opened BEFORE the attach.
+await (async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-reasoning-tail-'));
+  const path = join(dir, 'rollout-2026-09-01T00-00-00-00000000-0000-4000-8000-0000000000r1.jsonl');
+  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+  writeFileSync(
+    path,
+    line({ type: 'session_meta', payload: { id: '00000000-0000-4000-8000-0000000000r1', cwd: dir } })
+      + line({ type: 'event_msg', payload: { type: 'user_message', message: 'prompt' } })
+      + line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-tail' } }),
+  );
+  const messages: any[] = [];
+  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
+  const unsubscribe = conn.subscribe((m: any) => messages.push(m));
+  const tailed = () => messages.filter((m) => m.type === 'thinking').map((m) => ({ key: m.key, text: m.text }));
+  try {
+    appendFileSync(
+      path,
+      line({ type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'turn-tail', started_at_ms: 1, completed_at_ms: 2, item: { type: 'Reasoning', id: 'rs_tail_1', summary_text: ['Tailed summary.'], raw_content: [] } } })
+        + line({ type: 'response_item', payload: { type: 'reasoning', id: 'rs_tail_1', summary: [{ type: 'summary_text', text: 'Tailed summary.' }], content: null, encrypted_content: null, internal_chat_message_metadata_passthrough: { turn_id: 'turn-tail' } } })
+        + line({ type: 'response_item', payload: { type: 'reasoning', id: 'rs_tail_2', summary: [{ type: 'summary_text', text: 'No turn metadata.' }], encrypted_content: 'opaque' } }),
+    );
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && tailed().length < 2) await new Promise((r) => setTimeout(r, 25));
+    const history = ((await conn.getHistory()) as any[])
+      .filter((m) => m.type === 'thinking')
+      .map((m) => ({ key: m.key, text: m.text }));
+    check(
+      'reasoning: a tailed reasoning item and the later history read of it share one key',
+      tailed().length === 2
+        && tailed()[0]?.key === 'codex:turn-tail:rs_tail_1:r'
+        && JSON.stringify(history) === JSON.stringify(tailed()),
+      `tail=${JSON.stringify(tailed())} history=${JSON.stringify(history)}`,
+    );
+  } finally {
+    unsubscribe();
+    await conn.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+// ── Tool calls the model did not issue: history rebuilds the rows the live stream produced ───────
+// A nested call made inside a code-mode `exec` cell (`exec-<uuid>` ids) and a user shell command
+// (bare uuid ids) are written ONLY as `event_msg/item_completed`. The app-server streams each one as
+// an item, started then completed, which the live connection maps to a tool-call and a tool-result
+// under callId = the item id. Each triple below is one item from the real app-server (0.157.1): its
+// rollout record, then the started and the completed item it streamed. The content was invented for
+// the capture and the working directory is rewritten to /work/proj.
+const APP_SERVER_TOOL_ITEMS: Array<[any, any, any]> = [
+  [
+    {"type": "CommandExecution", "id": "f2f435b6-4091-4c0b-a29f-5b1cc649a388", "command": ["/bin/bash", "-lc", "printf 'shell out\\n'"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "printf 'shell out\\n'"}], "source": "user_shell", "status": "completed", "stdout": "shell out\n", "stderr": "", "aggregated_output": "shell out\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 8153766}, "formatted_output": "shell out\n"},
+    {"type": "commandExecution", "id": "f2f435b6-4091-4c0b-a29f-5b1cc649a388", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"printf 'shell out\\\\n'\"", "cwd": "/work/proj", "processId": null, "source": "userShell", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "printf 'shell out\\n'"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "f2f435b6-4091-4c0b-a29f-5b1cc649a388", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"printf 'shell out\\\\n'\"", "cwd": "/work/proj", "processId": null, "source": "userShell", "status": "completed", "commandActions": [{"type": "unknown", "command": "printf 'shell out\\n'"}], "aggregatedOutput": "shell out\n", "exitCode": 0, "durationMs": 8},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-c07db339-435a-4268-86ca-c6c6de654033", "process_id": "2866", "command": ["/bin/bash", "-lc", "echo 'it''s' \"$X\""], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "echo 'it''s' \"$X\""}], "source": "unified_exec_startup", "status": "completed", "stdout": "its \n", "stderr": "", "aggregated_output": "its \n", "exit_code": 0, "duration": {"secs": 0, "nanos": 27070}, "formatted_output": "its \n"},
+    {"type": "commandExecution", "id": "exec-c07db339-435a-4268-86ca-c6c6de654033", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"echo 'it''s' \\\"\"'$X\"'", "cwd": "/work/proj", "processId": "2866", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "echo 'it''s' \"$X\""}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-c07db339-435a-4268-86ca-c6c6de654033", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"echo 'it''s' \\\"\"'$X\"'", "cwd": "/work/proj", "processId": "2866", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "echo 'it''s' \"$X\""}], "aggregatedOutput": "its \n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-363e271c-0bd4-4667-ab5a-ed7f1ac6d8b7", "process_id": "24554", "command": ["/bin/bash", "-lc", "echo `date +%s` !x ^y"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "echo `date +%s` !x ^y"}], "source": "unified_exec_startup", "status": "completed", "stdout": "1790447730 !x ^y\n", "stderr": "", "aggregated_output": "1790447730 !x ^y\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 22270}, "formatted_output": "1790447730 !x ^y\n"},
+    {"type": "commandExecution", "id": "exec-363e271c-0bd4-4667-ab5a-ed7f1ac6d8b7", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'echo `date +%s` !x ''^y'", "cwd": "/work/proj", "processId": "24554", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "echo `date +%s` !x ^y"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-363e271c-0bd4-4667-ab5a-ed7f1ac6d8b7", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'echo `date +%s` !x ''^y'", "cwd": "/work/proj", "processId": "24554", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "echo `date +%s` !x ^y"}], "aggregatedOutput": "1790447730 !x ^y\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-a6c3867e-a437-4785-816e-cd2b4c33a40f", "process_id": "87402", "command": ["/bin/bash", "-lc", "^leading caret"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "^leading caret"}], "source": "unified_exec_startup", "status": "failed", "stdout": "/bin/bash: line 1: ^leading: command not found\n", "stderr": "", "aggregated_output": "/bin/bash: line 1: ^leading: command not found\n", "exit_code": 127, "duration": {"secs": 0, "nanos": 27730}, "formatted_output": "/bin/bash: line 1: ^leading: command not found\n"},
+    {"type": "commandExecution", "id": "exec-a6c3867e-a437-4785-816e-cd2b4c33a40f", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc '^leading caret'", "cwd": "/work/proj", "processId": "87402", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "^leading caret"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-a6c3867e-a437-4785-816e-cd2b4c33a40f", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc '^leading caret'", "cwd": "/work/proj", "processId": "87402", "source": "unifiedExecStartup", "status": "failed", "commandActions": [{"type": "unknown", "command": "^leading caret"}], "aggregatedOutput": "/bin/bash: line 1: ^leading: command not found\n", "exitCode": 127, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-8d1a7c1d-a0f0-4958-aa4a-380d61ebc781", "process_id": "99168", "command": ["/bin/bash", "-lc", "echo café ☕ ünï"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "echo café ☕ ünï"}], "source": "unified_exec_startup", "status": "completed", "stdout": "café ☕ ünï\n", "stderr": "", "aggregated_output": "café ☕ ünï\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 21421}, "formatted_output": "café ☕ ünï\n"},
+    {"type": "commandExecution", "id": "exec-8d1a7c1d-a0f0-4958-aa4a-380d61ebc781", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'echo café ☕ ünï'", "cwd": "/work/proj", "processId": "99168", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "echo café ☕ ünï"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-8d1a7c1d-a0f0-4958-aa4a-380d61ebc781", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'echo café ☕ ünï'", "cwd": "/work/proj", "processId": "99168", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "echo café ☕ ünï"}], "aggregatedOutput": "café ☕ ünï\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-3affb845-7f7d-45fe-ac31-8d2ed0c3f629", "process_id": "25235", "command": ["/bin/bash", "-lc", "printf \"tab\\there\"; printf \"\\n\""], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "printf \"tab\\there\"; printf \"\\n\""}], "source": "unified_exec_startup", "status": "completed", "stdout": "tab\there\n", "stderr": "", "aggregated_output": "tab\there\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 28200}, "formatted_output": "tab\there\n"},
+    {"type": "commandExecution", "id": "exec-3affb845-7f7d-45fe-ac31-8d2ed0c3f629", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"printf \\\"tab\\\\there\\\"; printf \\\"\\\\n\\\"\"", "cwd": "/work/proj", "processId": "25235", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "printf \"tab\\there\"; printf \"\\n\""}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-3affb845-7f7d-45fe-ac31-8d2ed0c3f629", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"printf \\\"tab\\\\there\\\"; printf \\\"\\\\n\\\"\"", "cwd": "/work/proj", "processId": "25235", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "printf \"tab\\there\"; printf \"\\n\""}], "aggregatedOutput": "tab\there\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-a91216d2-b567-4d28-931a-ec635c35fc04", "process_id": "82296", "command": ["/bin/bash", "-lc", "plainword"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "plainword"}], "source": "unified_exec_startup", "status": "failed", "stdout": "/bin/bash: line 1: plainword: command not found\n", "stderr": "", "aggregated_output": "/bin/bash: line 1: plainword: command not found\n", "exit_code": 127, "duration": {"secs": 0, "nanos": 19050}, "formatted_output": "/bin/bash: line 1: plainword: command not found\n"},
+    {"type": "commandExecution", "id": "exec-a91216d2-b567-4d28-931a-ec635c35fc04", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc plainword", "cwd": "/work/proj", "processId": "82296", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "plainword"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-a91216d2-b567-4d28-931a-ec635c35fc04", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc plainword", "cwd": "/work/proj", "processId": "82296", "source": "unifiedExecStartup", "status": "failed", "commandActions": [{"type": "unknown", "command": "plainword"}], "aggregatedOutput": "/bin/bash: line 1: plainword: command not found\n", "exitCode": 127, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-7549260e-b80f-4e10-859f-fb7d1413d3b8", "process_id": "68441", "command": ["/bin/bash", "-lc", "sleep 0.3006"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "sleep 0.3006"}], "source": "unified_exec_startup", "status": "completed", "stdout": "", "stderr": "", "aggregated_output": "", "exit_code": 0, "duration": {"secs": 0, "nanos": 153530850}, "formatted_output": ""},
+    {"type": "commandExecution", "id": "exec-7549260e-b80f-4e10-859f-fb7d1413d3b8", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'sleep 0.3006'", "cwd": "/work/proj", "processId": "68441", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "sleep 0.3006"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-7549260e-b80f-4e10-859f-fb7d1413d3b8", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'sleep 0.3006'", "cwd": "/work/proj", "processId": "68441", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "sleep 0.3006"}], "aggregatedOutput": null, "exitCode": 0, "durationMs": 153},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-da090ad6-8573-4e62-a156-24651f4db879", "process_id": "16131", "command": ["/bin/bash", "-lc", "ls sub"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "list_files", "cmd": "ls sub", "path": "sub"}], "source": "unified_exec_startup", "status": "completed", "stdout": "", "stderr": "", "aggregated_output": "", "exit_code": 0, "duration": {"secs": 0, "nanos": 39941}, "formatted_output": ""},
+    {"type": "commandExecution", "id": "exec-da090ad6-8573-4e62-a156-24651f4db879", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'ls sub'", "cwd": "/work/proj", "processId": "16131", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "listFiles", "command": "ls sub", "path": "sub"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-da090ad6-8573-4e62-a156-24651f4db879", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'ls sub'", "cwd": "/work/proj", "processId": "16131", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "listFiles", "command": "ls sub", "path": "sub"}], "aggregatedOutput": null, "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-a4f6c175-0082-48bb-839a-3286ec2c37c2", "process_id": "71413", "command": ["/bin/bash", "-lc", "rg -n old a.txt"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "search", "cmd": "rg -n old a.txt", "query": "old", "path": "a.txt"}], "source": "unified_exec_startup", "status": "completed", "stdout": "1:old\n", "stderr": "", "aggregated_output": "1:old\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 22860}, "formatted_output": "1:old\n"},
+    {"type": "commandExecution", "id": "exec-a4f6c175-0082-48bb-839a-3286ec2c37c2", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'rg -n old a.txt'", "cwd": "/work/proj", "processId": "71413", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "search", "command": "rg -n old a.txt", "query": "old", "path": "a.txt"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-a4f6c175-0082-48bb-839a-3286ec2c37c2", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'rg -n old a.txt'", "cwd": "/work/proj", "processId": "71413", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "search", "command": "rg -n old a.txt", "query": "old", "path": "a.txt"}], "aggregatedOutput": "1:old\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-ac2b4ae7-638a-4b55-bf7b-a3fd74541ce1", "process_id": "73473", "command": ["/bin/bash", "-lc", "pwd"], "cwd": "file:///work/proj/d%C3%ADr-%C3%BCn%C3%AF%2520pct", "parsed_cmd": [{"type": "unknown", "cmd": "pwd"}], "source": "unified_exec_startup", "status": "completed", "stdout": "/work/proj/dír-ünï%20pct\n", "stderr": "", "aggregated_output": "/work/proj/dír-ünï%20pct\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 26411}, "formatted_output": "/work/proj/dír-ünï%20pct\n"},
+    {"type": "commandExecution", "id": "exec-ac2b4ae7-638a-4b55-bf7b-a3fd74541ce1", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc pwd", "cwd": "/work/proj/dír-ünï%20pct", "processId": "73473", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "pwd"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-ac2b4ae7-638a-4b55-bf7b-a3fd74541ce1", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc pwd", "cwd": "/work/proj/dír-ünï%20pct", "processId": "73473", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "pwd"}], "aggregatedOutput": "/work/proj/dír-ünï%20pct\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-30ec4462-13d0-44a4-b72d-d21a0cb6fba6", "process_id": "77039", "command": ["/bin/bash", "-c", "echo nologin"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "echo nologin"}], "source": "unified_exec_startup", "status": "completed", "stdout": "nologin\n", "stderr": "", "aggregated_output": "nologin\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 18590}, "formatted_output": "nologin\n"},
+    {"type": "commandExecution", "id": "exec-30ec4462-13d0-44a4-b72d-d21a0cb6fba6", "pluginId": null, "scriptPath": null, "command": "/bin/bash -c 'echo nologin'", "cwd": "/work/proj", "processId": "77039", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "echo nologin"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-30ec4462-13d0-44a4-b72d-d21a0cb6fba6", "pluginId": null, "scriptPath": null, "command": "/bin/bash -c 'echo nologin'", "cwd": "/work/proj", "processId": "77039", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "echo nologin"}], "aggregatedOutput": "nologin\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-b0d6b3a9-d22e-4c4e-bcd0-848436adcf32", "process_id": "36815", "command": ["/usr/bin/sh", "-lc", "echo sh"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "echo sh"}], "source": "unified_exec_startup", "status": "completed", "stdout": "sh\n", "stderr": "", "aggregated_output": "sh\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 18721}, "formatted_output": "sh\n"},
+    {"type": "commandExecution", "id": "exec-b0d6b3a9-d22e-4c4e-bcd0-848436adcf32", "pluginId": null, "scriptPath": null, "command": "/usr/bin/sh -lc 'echo sh'", "cwd": "/work/proj", "processId": "36815", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "echo sh"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-b0d6b3a9-d22e-4c4e-bcd0-848436adcf32", "pluginId": null, "scriptPath": null, "command": "/usr/bin/sh -lc 'echo sh'", "cwd": "/work/proj", "processId": "36815", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "unknown", "command": "echo sh"}], "aggregatedOutput": "sh\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "FileChange", "id": "exec-df20ff01-890b-4fe4-8e78-419a64fcdc2f", "changes": {"/work/proj/a.txt": {"type": "update", "unified_diff": "@@ -1,2 +1,2 @@\n-old\n+new\n line2\n", "move_path": null}, "/work/proj/mv-src.txt": {"type": "update", "unified_diff": "@@ -1 +1 @@\n-one\n+two\n", "move_path": "/work/proj/mv-dst.txt"}, "/work/proj/alpha.txt": {"type": "add", "content": "a\n"}, "/work/proj/zeta.txt": {"type": "add", "content": "z\n"}, "/work/proj/mid dir/mu.txt": {"type": "add", "content": "m\n"}, "/work/proj/gone.txt": {"type": "delete", "content": "bye\n"}}, "status": "completed", "stdout": "Success. Updated the following files:\nA zeta.txt\nA alpha.txt\nA mid dir/mu.txt\nM a.txt\nM mv-dst.txt\nD gone.txt\n", "stderr": ""},
+    {"type": "fileChange", "id": "exec-df20ff01-890b-4fe4-8e78-419a64fcdc2f", "changes": [{"path": "/work/proj/a.txt", "kind": {"type": "update", "move_path": null}, "diff": "@@ -1,2 +1,2 @@\n-old\n+new\n line2\n"}, {"path": "/work/proj/alpha.txt", "kind": {"type": "add"}, "diff": "a\n"}, {"path": "/work/proj/gone.txt", "kind": {"type": "delete"}, "diff": "bye\n"}, {"path": "/work/proj/mid dir/mu.txt", "kind": {"type": "add"}, "diff": "m\n"}, {"path": "/work/proj/mv-src.txt", "kind": {"type": "update", "move_path": "/work/proj/mv-dst.txt"}, "diff": "@@ -1 +1 @@\n-one\n+two\n\n\nMoved to: /work/proj/mv-dst.txt"}, {"path": "/work/proj/zeta.txt", "kind": {"type": "add"}, "diff": "z\n"}], "status": "inProgress"},
+    {"type": "fileChange", "id": "exec-df20ff01-890b-4fe4-8e78-419a64fcdc2f", "changes": [{"path": "/work/proj/a.txt", "kind": {"type": "update", "move_path": null}, "diff": "@@ -1,2 +1,2 @@\n-old\n+new\n line2\n"}, {"path": "/work/proj/alpha.txt", "kind": {"type": "add"}, "diff": "a\n"}, {"path": "/work/proj/gone.txt", "kind": {"type": "delete"}, "diff": "bye\n"}, {"path": "/work/proj/mid dir/mu.txt", "kind": {"type": "add"}, "diff": "m\n"}, {"path": "/work/proj/mv-src.txt", "kind": {"type": "update", "move_path": "/work/proj/mv-dst.txt"}, "diff": "@@ -1 +1 @@\n-one\n+two\n\n\nMoved to: /work/proj/mv-dst.txt"}, {"path": "/work/proj/zeta.txt", "kind": {"type": "add"}, "diff": "z\n"}], "status": "completed"},
+  ],
+  [
+    {"type": "ImageView", "id": "exec-293474d2-3d3b-4762-b8c1-ccf048b24c84", "path": "file:///work/proj/pic%20dir/shot%20%C3%A9.png"},
+    {"type": "imageView", "id": "exec-293474d2-3d3b-4762-b8c1-ccf048b24c84", "path": "/work/proj/pic dir/shot é.png"},
+    {"type": "imageView", "id": "exec-293474d2-3d3b-4762-b8c1-ccf048b24c84", "path": "/work/proj/pic dir/shot é.png"},
+  ],
+  [
+    {"type": "CommandExecution", "id": "f8b963f9-777d-4f05-b4a0-5b33902aa2db", "command": ["/bin/bash", "-lc", "echo $SHELL_X; exit 4"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "echo $SHELL_X; exit 4"}], "source": "user_shell", "status": "failed", "stdout": "\n", "stderr": "", "aggregated_output": "\n", "exit_code": 4, "duration": {"secs": 0, "nanos": 8547511}, "formatted_output": "\n"},
+    {"type": "commandExecution", "id": "f8b963f9-777d-4f05-b4a0-5b33902aa2db", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'echo $SHELL_X; exit 4'", "cwd": "/work/proj", "processId": null, "source": "userShell", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "echo $SHELL_X; exit 4"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "f8b963f9-777d-4f05-b4a0-5b33902aa2db", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'echo $SHELL_X; exit 4'", "cwd": "/work/proj", "processId": null, "source": "userShell", "status": "failed", "commandActions": [{"type": "unknown", "command": "echo $SHELL_X; exit 4"}], "aggregatedOutput": "\n", "exitCode": 4, "durationMs": 8},
+  ],
+  [
+    {"type": "FileChange", "id": "exec-e00f2d5d-5928-42fd-9461-295747da2a0b", "changes": {"/work/proj/😀.txt": {"type": "add", "content": "x\n"}, "/work/proj/.txt": {"type": "add", "content": "x\n"}, "/work/proj/q/r.txt": {"type": "add", "content": "x\n"}, "/work/proj/é.txt": {"type": "add", "content": "x\n"}, "/work/proj/q/a-b.txt": {"type": "add", "content": "x\n"}, "/work/proj/q-r.txt": {"type": "add", "content": "x\n"}, "/work/proj/sub/m1.txt": {"type": "update", "unified_diff": "@@ -1 +1 @@\n-one\n+two\n", "move_path": "/work/proj/sub/m2.txt"}, "/work/proj/q r.txt": {"type": "add", "content": "x\n"}, "/work/proj/z.txt": {"type": "add", "content": "x\n"}, "/work/proj/q/a/b.txt": {"type": "add", "content": "x\n"}, "/work/proj/Q.txt": {"type": "add", "content": "x\n"}, "/work/proj/q.txt": {"type": "add", "content": "x\n"}}, "status": "completed", "stdout": "Success. Updated the following files:\nA q-r.txt\nA q/r.txt\nA q.txt\nA Q.txt\nA é.txt\nA z.txt\nA q r.txt\nA q/a-b.txt\nA q/a/b.txt\nA 😀.txt\nA .txt\nM sub/m2.txt\n", "stderr": ""},
+    {"type": "fileChange", "id": "exec-e00f2d5d-5928-42fd-9461-295747da2a0b", "changes": [{"path": "/work/proj/Q.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q r.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q-r.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q/a-b.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q/a/b.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q/r.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/sub/m1.txt", "kind": {"type": "update", "move_path": "/work/proj/sub/m2.txt"}, "diff": "@@ -1 +1 @@\n-one\n+two\n\n\nMoved to: /work/proj/sub/m2.txt"}, {"path": "/work/proj/z.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/é.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/😀.txt", "kind": {"type": "add"}, "diff": "x\n"}], "status": "inProgress"},
+    {"type": "fileChange", "id": "exec-e00f2d5d-5928-42fd-9461-295747da2a0b", "changes": [{"path": "/work/proj/Q.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q r.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q-r.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q/a-b.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q/a/b.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/q/r.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/sub/m1.txt", "kind": {"type": "update", "move_path": "/work/proj/sub/m2.txt"}, "diff": "@@ -1 +1 @@\n-one\n+two\n\n\nMoved to: /work/proj/sub/m2.txt"}, {"path": "/work/proj/z.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/é.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/.txt", "kind": {"type": "add"}, "diff": "x\n"}, {"path": "/work/proj/😀.txt", "kind": {"type": "add"}, "diff": "x\n"}], "status": "completed"},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-05dbc9fb-e054-41c2-97aa-18fe5a2a804c", "process_id": "31641", "command": ["/bin/bash", "-lc", "cat ./a.txt"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "read", "cmd": "cat ./a.txt", "name": "a.txt", "path": "./a.txt"}], "source": "unified_exec_startup", "status": "completed", "stdout": "old\n", "stderr": "", "aggregated_output": "old\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 31451}, "formatted_output": "old\n"},
+    {"type": "commandExecution", "id": "exec-05dbc9fb-e054-41c2-97aa-18fe5a2a804c", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'cat ./a.txt'", "cwd": "/work/proj", "processId": "31641", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "read", "command": "cat ./a.txt", "name": "a.txt", "path": "/work/proj/a.txt"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-05dbc9fb-e054-41c2-97aa-18fe5a2a804c", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'cat ./a.txt'", "cwd": "/work/proj", "processId": "31641", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "read", "command": "cat ./a.txt", "name": "a.txt", "path": "/work/proj/a.txt"}], "aggregatedOutput": "old\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-0c6998da-ce43-4029-827e-5eb9e2df3c5e", "process_id": "86436", "command": ["/bin/bash", "-lc", "cat sub/../a.txt"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "read", "cmd": "cat sub/../a.txt", "name": "a.txt", "path": "sub/../a.txt"}], "source": "unified_exec_startup", "status": "completed", "stdout": "old\n", "stderr": "", "aggregated_output": "old\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 24001}, "formatted_output": "old\n"},
+    {"type": "commandExecution", "id": "exec-0c6998da-ce43-4029-827e-5eb9e2df3c5e", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'cat sub/../a.txt'", "cwd": "/work/proj", "processId": "86436", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "read", "command": "cat sub/../a.txt", "name": "a.txt", "path": "/work/proj/a.txt"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-0c6998da-ce43-4029-827e-5eb9e2df3c5e", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'cat sub/../a.txt'", "cwd": "/work/proj", "processId": "86436", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "read", "command": "cat sub/../a.txt", "name": "a.txt", "path": "/work/proj/a.txt"}], "aggregatedOutput": "old\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "CommandExecution", "id": "exec-9ceaedf0-a8c5-459a-a7c5-4ca468c5226a", "process_id": "44046", "command": ["/bin/bash", "-lc", "cat a.txt"], "cwd": "file:///work/proj/sub", "parsed_cmd": [{"type": "read", "cmd": "cat a.txt", "name": "a.txt", "path": "a.txt"}], "source": "unified_exec_startup", "status": "completed", "stdout": "sub a\n", "stderr": "", "aggregated_output": "sub a\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 19860}, "formatted_output": "sub a\n"},
+    {"type": "commandExecution", "id": "exec-9ceaedf0-a8c5-459a-a7c5-4ca468c5226a", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'cat a.txt'", "cwd": "/work/proj/sub", "processId": "44046", "source": "unifiedExecStartup", "status": "inProgress", "commandActions": [{"type": "read", "command": "cat a.txt", "name": "a.txt", "path": "/work/proj/sub/a.txt"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
+    {"type": "commandExecution", "id": "exec-9ceaedf0-a8c5-459a-a7c5-4ca468c5226a", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc 'cat a.txt'", "cwd": "/work/proj/sub", "processId": "44046", "source": "unifiedExecStartup", "status": "completed", "commandActions": [{"type": "read", "command": "cat a.txt", "name": "a.txt", "path": "/work/proj/sub/a.txt"}], "aggregatedOutput": "sub a\n", "exitCode": 0, "durationMs": 0},
+  ],
+  [
+    {"type": "McpToolCall", "id": "exec-ac6157df-19bd-42cc-a7c9-22cc44df13c4", "server": "fake", "tool": "lookup", "arguments": {"query": "alpha", "topn": 2}, "status": "completed", "result": {"content": [{"type": "text", "text": "found alpha"}], "structuredContent": {"hits": [{"title": "one"}], "total": 1}, "isError": false}, "duration": {"secs": 0, "nanos": 1113078}},
+    {"type": "mcpToolCall", "id": "exec-ac6157df-19bd-42cc-a7c9-22cc44df13c4", "server": "fake", "tool": "lookup", "status": "inProgress", "arguments": {"query": "alpha", "topn": 2}, "appContext": null, "mcpAppUi": null, "pluginId": null, "readOnlyHint": null, "result": null, "error": null, "durationMs": null},
+    {"type": "mcpToolCall", "id": "exec-ac6157df-19bd-42cc-a7c9-22cc44df13c4", "server": "fake", "tool": "lookup", "status": "completed", "arguments": {"query": "alpha", "topn": 2}, "appContext": null, "mcpAppUi": null, "pluginId": null, "readOnlyHint": null, "result": {"content": [{"type": "text", "text": "found alpha"}], "structuredContent": {"hits": [{"title": "one"}], "total": 1}, "_meta": null}, "error": null, "durationMs": 1},
+  ],
+  [
+    {"type": "McpToolCall", "id": "exec-934a0235-d025-4829-a043-a7bdeec28c7c", "server": "fake", "tool": "flaky", "arguments": {}, "status": "failed", "result": {"content": [{"type": "text", "text": "tool said no"}], "isError": true}, "duration": {"secs": 0, "nanos": 671251}},
+    {"type": "mcpToolCall", "id": "exec-934a0235-d025-4829-a043-a7bdeec28c7c", "server": "fake", "tool": "flaky", "status": "inProgress", "arguments": {}, "appContext": null, "mcpAppUi": null, "pluginId": null, "readOnlyHint": null, "result": null, "error": null, "durationMs": null},
+    {"type": "mcpToolCall", "id": "exec-934a0235-d025-4829-a043-a7bdeec28c7c", "server": "fake", "tool": "flaky", "status": "failed", "arguments": {}, "appContext": null, "mcpAppUi": null, "pluginId": null, "readOnlyHint": null, "result": {"content": [{"type": "text", "text": "tool said no"}], "structuredContent": null, "_meta": null}, "error": null, "durationMs": 0},
+  ],
+  [
+    {"type": "McpToolCall", "id": "exec-722638a2-9760-43ed-9003-6f3fb3cf6aca", "server": "fake", "tool": "broken", "arguments": {}, "status": "failed", "error": {"message": "tool call error: tool call failed for `fake/broken`\n\nCaused by:\n    Mcp error: -32000: protocol failure"}, "duration": {"secs": 0, "nanos": 629511}},
+    {"type": "mcpToolCall", "id": "exec-722638a2-9760-43ed-9003-6f3fb3cf6aca", "server": "fake", "tool": "broken", "status": "inProgress", "arguments": {}, "appContext": null, "mcpAppUi": null, "pluginId": null, "readOnlyHint": null, "result": null, "error": null, "durationMs": null},
+    {"type": "mcpToolCall", "id": "exec-722638a2-9760-43ed-9003-6f3fb3cf6aca", "server": "fake", "tool": "broken", "status": "failed", "arguments": {}, "appContext": null, "mcpAppUi": null, "pluginId": null, "readOnlyHint": null, "result": null, "error": {"message": "tool call error: tool call failed for `fake/broken`\n\nCaused by:\n    Mcp error: -32000: protocol failure"}, "durationMs": 0},
+  ],
+];
+{
+  const canon = (value: unknown): string => JSON.stringify(value, (_key, v) => (
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]))
+      : v
+  ));
+  const mismatched = APP_SERVER_TOOL_ITEMS.filter(([record, started, completed]) => {
+    const converted = codexRolloutToolItem(record);
+    return !converted || canon(converted.started) !== canon(started) || canon(converted.completed) !== canon(completed);
+  });
+  check(
+    'tool items: each rollout record converts to exactly the started and completed items the app-server streamed',
+    APP_SERVER_TOOL_ITEMS.length === 23 && mismatched.length === 0,
+    mismatched.map(([record, , completed]) => {
+      const converted = codexRolloutToolItem(record);
+      return `${record.id}: expected ${canon(completed).slice(0, 300)} got ${canon(converted?.completed).slice(0, 300)}`;
+    }).join(' | '),
+  );
+
+  const turn = '01a0defd-e83e-78a3-82d8-30487a0277bc';
+  const done = (item: any) => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: turn, started_at_ms: 1, completed_at_ms: 2, item } });
+  const lines: any[] = [
+    { type: 'session_meta', payload: { id: 'thread-tools', cwd: '/work/proj' } },
+    { timestamp: '2026-09-26T10:00:00.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'go' } },
+    { timestamp: '2026-09-26T10:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: turn } },
+    // A model-issued call: its item_completed record repeats it and must add nothing.
+    { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'call_model1', arguments: JSON.stringify({ cmd: 'ls' }) } },
+    done({ ...APP_SERVER_TOOL_ITEMS[0]![0], id: 'call_model1', source: 'unified_exec_startup' }),
+    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'call_model1', output: 'a\n' } },
+    // The same for a provider whose call ids do not start with `call_`.
+    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'fc-other-1', input: '*** Begin Patch\n*** End Patch\n', status: 'completed' } },
+    done({ ...APP_SERVER_TOOL_ITEMS[16]![0], id: 'fc-other-1' }),
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'fc-other-1', output: 'ok' } },
+    // A code-mode cell and the nested calls it made.
+    { type: 'response_item', payload: { type: 'custom_tool_call', status: 'completed', call_id: 'call_cell1', name: 'exec', input: 'await tools.exec_command({ cmd: "ls" })' } },
+    ...APP_SERVER_TOOL_ITEMS.map(([record]) => done(record)),
+    done({ type: 'Extension', id: 'exec-5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e', kind: 'web.search', query: 'weather', action: { type: 'search', query: 'weather', queries: ['weather'] }, results: [{ type: 'page', ref_id: 'r1', title: 'Weather', url: 'https://example.com/', domain: 'example.com', snippet: 'sunny' }] }),
+    done({ type: 'Extension', id: 'exec-6e6e6e6e-6e6e-4e6e-8e6e-6e6e6e6e6e6e', kind: 'clock.sleep', durationMs: 100 }),
+    done({ type: 'SubAgentActivity', id: '7e7e7e7e-7e7e-4e7e-8e7e-7e7e7e7e7e7e', kind: 'started', agent_path: 'a', agent_thread_id: 'b' }),
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call_cell1', output: [{ type: 'input_text', text: 'Script completed' }] } },
+    { timestamp: '2026-09-26T10:00:09.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: turn } },
+  ];
+  const nestedIds = [
+    ...APP_SERVER_TOOL_ITEMS.map(([record]) => String(record.id)),
+    'exec-5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e',
+  ];
+  const tools = (rows: AgentMessage[]) => rows
+    .filter((m) => m.type === 'tool-call' || m.type === 'tool-result')
+    .map((m: any) => `${m.type}:${m.callId}`);
+  const mapped = mapRollout(lines);
+  const rows = tools(mapped);
+  check(
+    'tool items: each nested or user shell item yields one tool-call then one tool-result under its own id, in rollout order',
+    JSON.stringify(rows) === JSON.stringify([
+      'tool-call:call_model1', 'tool-result:call_model1',
+      'tool-call:fc-other-1', 'tool-result:fc-other-1',
+      'tool-call:call_cell1',
+      ...nestedIds.flatMap((id) => [`tool-call:${id}`, `tool-result:${id}`]),
+      'tool-result:call_cell1',
+    ]),
+    JSON.stringify(rows),
+  );
+  const byId = (id: string, type: string) => mapped.find((m: any) => m.callId === id && m.type === type) as any;
+  const quoted = byId(APP_SERVER_TOOL_ITEMS[1]![0].id, 'tool-call');
+  const moved = byId(APP_SERVER_TOOL_ITEMS[16]![0].id, 'tool-result');
+  const mcp = byId(APP_SERVER_TOOL_ITEMS[20]![0].id, 'tool-result');
+  const search = byId('exec-5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e', 'tool-result');
+  check(
+    'tool items: the rows carry what the live rows carry (quoted command, decoded paths, sorted changes, MCP result)',
+    quoted?.title === APP_SERVER_TOOL_ITEMS[1]![2].command
+      && quoted?.args?.cwd === '/work/proj'
+      && Array.isArray(moved?.fileChanges) && moved.fileChanges.length >= 2
+      && moved.fileChanges.map((c: any) => c.path).join('|') === [...moved.fileChanges.map((c: any) => c.path)].sort((a: string, b: string) => Buffer.compare(Buffer.from(a), Buffer.from(b))).join('|')
+      && mcp?.result?.isError === undefined && mcp?.toolName === 'fake.lookup'
+      && search?.toolName === 'web_search',
+    JSON.stringify({ title: quoted?.title, cwd: quoted?.args?.cwd, moved: moved?.fileChanges?.map((c: any) => c.path), mcp: mcp?.result, search: search?.toolName }),
+  );
+  // A read that starts after a model-issued call (an attach boundary between the two records)
+  // still adds nothing for its `item_completed` record.
+  const split = tools(mapRollout(lines.slice(4)));
+  check(
+    'tool items: a read starting between a model call and its item_completed adds no row for that call',
+    split.filter((row) => row.endsWith(':call_model1')).join(',') === 'tool-result:call_model1',
+    JSON.stringify(split.filter((row) => row.endsWith(':call_model1'))),
+  );
+
+  // The indexed attach and native pages rebuild each row from its record alone: the same rows as a
+  // full read. A cursor issued before these rows existed is refused past the first one.
+  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-tool-items-'));
+  const path = join(dir, 'rollout-tool-items.jsonl');
+  const filler = Array.from({ length: 20 }, (_, index) => [
+    { type: 'event_msg', payload: { type: 'agent_message', message: `filler ${index}` } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: `msg_t${index}`, content: [{ type: 'output_text', text: `filler ${index}` }] } },
+  ]).flat();
+  const fileLines = [...lines.slice(0, 3), ...filler, ...lines.slice(3)];
+  try {
+    writeFileSync(path, `${fileLines.map((line) => JSON.stringify(line)).join('\n')}\n`);
+    const builder = new IndexedHistoryPageCacheBuilder();
+    const sink: HistorySnapshotSink = {
+      acceptsLocations: true,
+      accept: (message: AgentMessage, location?: number) => builder.accept(message, location),
+    };
+    const captured = await captureFileHistoryInto(path, sink);
+    const cache = captured && !('refusal' in captured) && captured.reader
+      ? builder.finish(captured.identity, captured.reader)
+      : undefined;
+    const paged: AgentMessage[] = [];
+    if (cache) {
+      const attach = await cache.loadAttach(undefined, 10);
+      if (!('kind' in attach)) {
+        paged.push(...attach.messages);
+        let cursor = attach.olderCursor;
+        while (cursor) {
+          const page = await cache.loadPage(cursor, 7);
+          if ('kind' in page || page.gap) break;
+          paged.unshift(...page.messages);
+          cursor = page.cursor;
+        }
+      }
+    }
+    const full = mapRollout(fileLines).filter((m) => m.type === 'tool-call' || m.type === 'tool-result');
+    const pagedTools = paged.filter((m) => m.type === 'tool-call' || m.type === 'tool-result');
+    check(
+      'tool items: the indexed attach and native pages return the same tool rows as a full read',
+      pagedTools.length === full.length && canon(pagedTools) === canon(full),
+      `paged=${pagedTools.length} full=${full.length}`,
+    );
+
+    const isNew = (m: any) => (m.type === 'tool-call' || m.type === 'tool-result') && nestedIds.includes(m.callId);
+    const before = cursorDurableHistory(mapRollout(fileLines).filter((m) => !isNew(m))).durable;
+    const firstNew = cursorDurableHistory(mapRollout(fileLines)).durable.findIndex(isNew);
+    let misplaced = 0;
+    let refused = 0;
+    const codes = new Set<string>();
+    if (cache) {
+      for (let boundary = 1; boundary <= before.length; boundary += 1) {
+        const page = await cache.loadPage(backwardHistoryCursor(before, boundary), 5);
+        const gap = 'kind' in page ? page.kind : page.gap?.code;
+        if (gap) {
+          refused += 1;
+          codes.add(gap);
+          if (boundary <= firstNew) misplaced += 1;
+        } else if (boundary > firstNew) {
+          misplaced += 1;
+        }
+      }
+    }
+    check(
+      'tool items: a cursor issued before these rows existed is refused past the first one and honoured before it',
+      Boolean(cache) && firstNew > 0 && misplaced === 0 && refused === before.length - firstNew
+        && [...codes].every((code) => code === 'HISTORY_CURSOR_DIVERGED' || code === 'HISTORY_CURSOR_GONE'),
+      `first=${firstNew} misplaced=${misplaced} refused=${refused}/${before.length} codes=${[...codes].join(',')}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+// Observe tails the rollout live: a nested call tailed after the attach carries the rows a later
+// history read of the settled file gives it.
+await (async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-tool-items-tail-'));
+  const path = join(dir, 'rollout-2026-09-26T00-00-00-00000000-0000-4000-8000-0000000000e1.jsonl');
+  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+  writeFileSync(
+    path,
+    line({ type: 'session_meta', payload: { id: '00000000-0000-4000-8000-0000000000e1', cwd: dir } })
+      + line({ type: 'event_msg', payload: { type: 'user_message', message: 'prompt' } })
+      + line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-tool-tail' } })
+      + line({ type: 'response_item', payload: { type: 'custom_tool_call', status: 'completed', call_id: 'call_cell_tail', name: 'exec', input: 'x' } }),
+  );
+  const messages: any[] = [];
+  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
+  const unsubscribe = conn.subscribe((m: any) => messages.push(m));
+  const tailed = () => messages.filter((m) => (m.type === 'tool-call' || m.type === 'tool-result') && m.callId !== 'call_cell_tail');
+  try {
+    const [record] = APP_SERVER_TOOL_ITEMS[16]!;
+    appendFileSync(path, line({ type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'turn-tool-tail', started_at_ms: 1, completed_at_ms: 2, item: record } }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && tailed().length < 2) await new Promise((r) => setTimeout(r, 25));
+    const history = ((await conn.getHistory()) as any[])
+      .filter((m) => (m.type === 'tool-call' || m.type === 'tool-result') && m.callId !== 'call_cell_tail');
+    check(
+      'tool items: a tailed nested call and the later history read of it are the same rows',
+      tailed().length === 2 && tailed()[0]?.callId === record.id
+        && JSON.stringify(history) === JSON.stringify(tailed()),
+      `tail=${JSON.stringify(tailed().map((m) => `${m.type}:${m.callId}`))} history=${JSON.stringify(history.map((m) => `${m.type}:${m.callId}`))}`,
+    );
+  } finally {
+    unsubscribe();
+    await conn.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
 // ── H1b: history messages and their identity come from ONE captured rollout prefix ─────────────
 // The broker used to read `getHistory()` and `getHistorySourceIdentity()` separately and then pair
 // them. A Codex rollout appends WHILE it is being indexed, so that pairing failed routinely and the

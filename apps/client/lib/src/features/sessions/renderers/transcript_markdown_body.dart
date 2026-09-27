@@ -25,7 +25,16 @@ TranscriptLinkOpener? transcriptLinkOpener;
 /// http(s) links are the one interactive exception: they render as a
 /// [WidgetSpan] wrapping a tappable [Text], which keeps the render layer free
 /// of any gesture-recognizer or launcher dependency.
-class _MarkdownBody extends StatelessWidget {
+///
+/// A row rebuilds far more often than its text changes: every live update
+/// rebuilds the rows on screen, and a streaming reply only ever grows at its
+/// end. The body therefore keeps what it built. The same text returns the
+/// same widgets, which the framework does not rebuild or lay out again; a
+/// text that changed rebuilds only the blocks from the first one that
+/// differs, so a streaming reply lays out only its growing end. Parsing goes
+/// through [transcriptRenderCache], so a row coming back into view finds its
+/// blocks already parsed.
+class _MarkdownBody extends StatefulWidget {
   const _MarkdownBody({required this.source});
 
   /// Key namespace for fenced code sections, so tests can target them.
@@ -35,43 +44,123 @@ class _MarkdownBody extends StatelessWidget {
   final String source;
 
   @override
+  State<_MarkdownBody> createState() => _MarkdownBodyState();
+}
+
+class _MarkdownBodyState extends State<_MarkdownBody> {
+  ThemeData? _theme;
+  String? _source;
+  List<MarkdownBlock> _blocks = const [];
+
+  /// One widget per block of [_blocks], built for [_theme].
+  List<Widget> _blockWidgets = const [];
+  Widget? _built;
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final source = widget.source;
+    final work = debugTranscriptRenderWork;
+    final previous = _built;
+    final sameTheme = _sameLook(theme, _theme);
+    if (previous != null &&
+        sameTheme &&
+        (identical(source, _source) || source == _source)) {
+      work?.markdownBodyReuses += 1;
+      return previous;
+    }
     final baseStyle = theme.textTheme.bodyMedium ?? const TextStyle();
-    final blocks = parseTranscriptMarkdown(source);
-
-    if (blocks.isEmpty) {
-      // Whitespace-only bodies still occupy their slot without markup.
-      return Text(source, style: baseStyle);
+    final stopwatch = work == null ? null : (Stopwatch()..start());
+    // Text this body has already shown once is changing (a reply streaming
+    // in); keeping each version would only push out text that is not.
+    final parsed = transcriptRenderCache.markdown(
+      source,
+      keep: _source == null,
+    );
+    final blocks = parsed.blocks;
+    if (work != null) {
+      if (parsed.hit) {
+        work.markdownCacheHits += 1;
+      } else {
+        work
+          ..markdownParses += 1
+          ..markdownParsedUnits += source.length
+          ..markdownParseMicros += stopwatch!.elapsedMicroseconds;
+      }
     }
 
-    final children = <Widget>[];
-    var codeBlockIndex = 0;
-    for (var i = 0; i < blocks.length; i++) {
-      if (i > 0) {
-        children.add(SizedBox(height: _spacingBefore(blocks[i])));
+    // The blocks before the first that differs are the widgets built last
+    // time, code block numbering included.
+    var kept = 0;
+    if (sameTheme) {
+      final limit = blocks.length < _blocks.length
+          ? blocks.length
+          : _blocks.length;
+      while (kept < limit &&
+          sameTranscriptMarkdownBlock(_blocks[kept], blocks[kept])) {
+        kept++;
       }
+    }
+    work?.markdownBlocksReused += kept;
+    final blockWidgets = <Widget>[..._blockWidgets.take(kept)];
+    var codeBlockIndex = 0;
+    for (var i = 0; i < kept; i++) {
+      if (blocks[i] is MarkdownCodeBlock) codeBlockIndex++;
+    }
+    for (var i = kept; i < blocks.length; i++) {
       final block = blocks[i];
       if (block is MarkdownCodeBlock) {
-        children.add(
+        blockWidgets.add(
           _MonospaceDetailSection(
             sourceId: '$codeBlockIndex',
-            keyPrefix: codeBlockKeyPrefix,
+            keyPrefix: _MarkdownBody.codeBlockKeyPrefix,
             text: block.code,
             codeLanguage: block.language,
+            // An unclosed fence is a block still streaming in.
+            cacheHighlight: block.closed,
           ),
         );
         codeBlockIndex++;
         continue;
       }
-      children.add(_buildBlock(context, theme, baseStyle, block));
+      blockWidgets.add(_buildBlock(context, theme, baseStyle, block));
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: children,
-    );
+    final Widget built;
+    if (blocks.isEmpty) {
+      // Whitespace-only bodies still occupy their slot without markup.
+      built = Text(source, style: baseStyle);
+    } else {
+      final children = <Widget>[];
+      for (var i = 0; i < blocks.length; i++) {
+        if (i > 0) {
+          children.add(SizedBox(height: _spacingBefore(blocks[i])));
+        }
+        children.add(blockWidgets[i]);
+      }
+      built = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      );
+    }
+    _theme = theme;
+    _source = source;
+    _blocks = blocks;
+    _blockWidgets = blockWidgets;
+    _built = built;
+    return built;
   }
+
+  /// Whether blocks built under [previous] still look right under [theme]:
+  /// these are all the body reads from it. An equal theme is often a new
+  /// copy (`Theme.of` localizes through a small cache), so identity alone
+  /// would rebuild every block whenever that cache turned over.
+  static bool _sameLook(ThemeData theme, ThemeData? previous) =>
+      previous != null &&
+      (identical(theme, previous) ||
+          (theme.colorScheme == previous.colorScheme &&
+              theme.textTheme.bodyMedium == previous.textTheme.bodyMedium &&
+              theme.textTheme.titleSmall == previous.textTheme.titleSmall));
 
   double _spacingBefore(MarkdownBlock block) {
     return switch (block) {

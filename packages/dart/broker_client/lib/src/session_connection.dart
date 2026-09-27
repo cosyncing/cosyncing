@@ -143,7 +143,6 @@ class SessionConnection {
 
   // --- Session projection ---
   SessionInfo? _sessionInfo;
-  final List<AgentMessage> _messages = [];
   List<SlashCommand> _commands = [];
   List<ModelOption> _models = [];
   List<AgentOption> _agents = [];
@@ -155,6 +154,18 @@ class SessionConnection {
   HistoryGap? _lastHistoryGap;
   HelloWireEvent? _hello;
   int _clientMessageCounter = 0;
+
+  /// `history-refresh` requests awaiting their frame (contract revision 28),
+  /// with the reconnect cursor each was sent from. Only such an answer may
+  /// move [_cursor]; see [_onMessage]. Every new socket starts empty, so an
+  /// entry always belongs to the current one.
+  final Map<String, String> _pendingRefreshes = {};
+
+  /// Newer `history-page` requests awaiting their page. Their answers never
+  /// move [_olderCursor], which names the page before the oldest one.
+  final Set<String> _pendingNewerPages = <String>{};
+
+  static const int _maxPendingHistoryRequests = 64;
 
   // --- Public API ---
 
@@ -169,9 +180,6 @@ class SessionConnection {
 
   /// The session info from the `session` frame.
   SessionInfo? get sessionInfo => _sessionInfo;
-
-  /// All messages received so far (history + live).
-  List<AgentMessage> get messages => List.unmodifiable(_messages);
 
   /// Available slash commands.
   List<SlashCommand> get commands => List.unmodifiable(_commands);
@@ -240,6 +248,8 @@ class SessionConnection {
     _reconnectTimer = null;
 
     final gen = ++_generation;
+    _pendingRefreshes.clear();
+    _pendingNewerPages.clear();
     _reconnectEnabled = true;
     _bootstrapProjectionSeen = false;
     _backoffMultiplier = 1;
@@ -366,6 +376,76 @@ class SessionConnection {
         cursor: pageCursor,
         limit: limit,
         clientMessageId: id,
+      ),
+    );
+    return id;
+  }
+
+  /// Requests the page NEWER than [cursor] (contract revision 28), stopping at
+  /// [until] when given, and returns its correlation id.
+  ///
+  /// Send only where a history frame carried `newerHistory`: a broker without
+  /// the capability ignores the direction and answers with an older page,
+  /// which the answer's missing direction exposes.
+  String requestNewerHistoryPage({
+    required String cursor,
+    String? until,
+    int? limit,
+    String? clientMessageId,
+  }) {
+    final pageCursor = cursor.trim();
+    if (pageCursor.isEmpty) {
+      throw ArgumentError.value(cursor, 'cursor', 'Must not be empty.');
+    }
+    final id = _resolveClientMessageId(clientMessageId);
+    _pendingNewerPages.add(id);
+    while (_pendingNewerPages.length > _maxPendingHistoryRequests) {
+      _pendingNewerPages.remove(_pendingNewerPages.first);
+    }
+    _sendFrame(
+      OutboundFrame.historyPage(
+        cursor: pageCursor,
+        limit: limit,
+        newer: true,
+        until: until,
+        clientMessageId: id,
+      ),
+    );
+    return id;
+  }
+
+  /// Requests one incremental history frame from [cursor] (contract revision
+  /// 28): the rows persisted since, with the boundaries after them.
+  ///
+  /// [cursor] must be this connection's current reconnect cursor, and the
+  /// socket must be open; otherwise nothing is sent and null is returned. The
+  /// answer is delivered only while [cursor] is still current, so a frame read
+  /// from a position this connection has moved past can never move the
+  /// reconnect cursor over rows the session view never received. Send only
+  /// where a history frame carried `newerHistory`.
+  String? requestHistoryRefresh({
+    required String cursor,
+    int? limit,
+    String? clientMessageId,
+  }) {
+    final current = _cursor;
+    final adapter = _adapter;
+    if (current == null ||
+        current != cursor ||
+        adapter == null ||
+        !adapter.isConnected) {
+      return null;
+    }
+    final id = _resolveClientMessageId(clientMessageId);
+    _pendingRefreshes[id] = current;
+    while (_pendingRefreshes.length > _maxPendingHistoryRequests) {
+      _pendingRefreshes.remove(_pendingRefreshes.keys.first);
+    }
+    _sendFrame(
+      OutboundFrame.historyRefresh(
+        cursor: current,
+        clientMessageId: id,
+        limit: limit,
       ),
     );
     return id;
@@ -558,6 +638,19 @@ class SessionConnection {
     await connect();
   }
 
+  /// Closes the socket and attaches again as it was: the same control mode,
+  /// drive-attach reason and owner revision, the read-only latch, and the
+  /// history cursor as the ticket — what a dropped socket's reconnect sends.
+  /// A broker that no longer has that position answers with a capped reset
+  /// whose positions are valid.
+  Future<void> restartAttach() async {
+    if (_disposed) return;
+    // As for [reattach]: the new attach must not inherit the old failure.
+    _lastConnectionError = null;
+    await close();
+    await connect();
+  }
+
   /// Raises the read-only latch without touching the socket, so the NEXT
   /// (re)connect declares it. Used before the first connect, which is what
   /// keeps a session this client cannot reason about from ever having a
@@ -745,6 +838,24 @@ class SessionConnection {
     }
 
     final event = WireEvent.fromJson(json);
+    if (event is HistoryWireEvent && event.clientMessageId != null) {
+      // A refresh answer (contract revision 28) is an increment from the
+      // cursor it was requested at. One nobody is waiting for, or one from a
+      // cursor this connection has since moved past, would carry the reconnect
+      // cursor over rows the session view never received: drop it whole.
+      final requestedFrom = _pendingRefreshes.remove(event.clientMessageId);
+      if (requestedFrom == null || requestedFrom != _cursor || event.reset) {
+        return;
+      }
+    } else if (event is HistoryWireEvent && event.reset) {
+      // A reset replaces the history every earlier refresh was asked of, so
+      // none of them can be answered any more, even one whose cursor the
+      // reset happens to restore (a revert of exactly the refreshed rows).
+      _pendingRefreshes.clear();
+    } else if (event is NackWireEvent && event.clientMessageId != null) {
+      _pendingRefreshes.remove(event.clientMessageId);
+      _pendingNewerPages.remove(event.clientMessageId);
+    }
     _updateState(event);
     if (!_eventController.isClosed) {
       _eventController.add(event);
@@ -768,16 +879,18 @@ class SessionConnection {
             final reason => reason,
           };
         }
-      case HistoryWireEvent(
-        :final messages,
-        :final reset,
-        :final cursor,
-      ):
+      case HistoryWireEvent(:final cursor, :final clientMessageId)
+          when clientMessageId != null:
+        // A refresh answer [_onMessage] accepted: it advances the reconnect
+        // position only. It issues no attach ticket, and it restates no
+        // paging start or reconnect gap to replace.
+        if (cursor != null) _cursor = cursor;
+      case HistoryWireEvent(:final reset, :final cursor):
+        // The transport forwards transcript rows to [events] and keeps only
+        // scalar paging state. The session view's bounded history window is
+        // the single owner of decoded rows; a second unbounded copy here grew
+        // with every live frame and every repeated page.
         _bootstrapProjectionSeen = true;
-        if (reset) {
-          _messages.clear();
-        }
-        _messages.addAll(messages);
         if (cursor != null) {
           _cursor = cursor;
         }
@@ -791,16 +904,16 @@ class SessionConnection {
           _hasEarlier = event.hasEarlier && event.olderCursor != null;
         }
         _lastHistoryGap = event.gap;
-      case HistoryPageWireEvent(
-        :final messages,
-        :final cursor,
-        :final hasMore,
-      ):
-        _messages.insertAll(0, messages);
+      case HistoryPageWireEvent(:final clientMessageId)
+          when _pendingNewerPages.remove(clientMessageId):
+        // A newer page moves no older boundary, whatever it answered.
+        break;
+      case HistoryPageWireEvent(:final cursor, :final hasMore):
         _olderCursor = cursor;
         _hasEarlier = hasMore && cursor != null;
-      case MessageWireEvent(:final message):
-        _messages.add(message);
+      case MessageWireEvent():
+        // Live rows go to [events] only; see the history case above.
+        break;
       case CommandsWireEvent(:final commands):
         _commands = commands;
       case OptionsWireEvent(
@@ -898,6 +1011,8 @@ class SessionConnection {
       // Bump generation so events from any prior adapter
       // are suppressed by the gen check in _onMessage.
       final reconnectGen = ++_generation;
+      _pendingRefreshes.clear();
+      _pendingNewerPages.clear();
       _bootstrapProjectionSeen = false;
 
       WebSocketAdapter? attemptAdapter;

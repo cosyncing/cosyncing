@@ -1221,6 +1221,7 @@ function classifyOpenCodeProbeError(err: unknown): OpenCodeSessionProbe {
 }
 
 class OpenCodeObserveConnection implements SessionConnection {
+  readonly historyUsesToolSlots = true;
   private readonly handlers = new Set<AgentMessageHandler>();
   private watchers: FSWatcher[] = [];
   private resyncTimer?: ReturnType<typeof setTimeout>;
@@ -1485,6 +1486,7 @@ function nativeMessageId(): string {
 }
 
 class OpenCodeConnection implements SessionConnection {
+  readonly historyUsesToolSlots = true;
   private readonly handlers = new Set<AgentMessageHandler>();
   private readonly abort = new AbortController();
   private closed = false;

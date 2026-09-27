@@ -200,6 +200,7 @@ function summaryOf(info: any, productId: string): AgentMessage | undefined {
 
 /** Provider-neutral live HTTP/SSE session connection for OpenCode-lineage servers. */
 export class OpenCodeLiveConnection implements SessionConnection {
+  readonly historyUsesToolSlots = true;
   readonly info: SessionInfo;
   readonly ready: Promise<void>;
   private resolveReady!: () => void;

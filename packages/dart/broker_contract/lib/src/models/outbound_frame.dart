@@ -413,20 +413,49 @@ abstract final class OutboundFrame {
     if (baseRevision != null) 'baseRevision': baseRevision,
   };
 
-  /// Requests one chronological page before the current attach tail/page.
+  /// Requests one chronological page before the current attach tail/page, or
+  /// with [newer] (contract revision 28, only where a history frame carried
+  /// `newerHistory`) the page after [cursor], stopping at [until] when given.
   static Map<String, dynamic> historyPage({
     required String cursor,
     int? limit,
+    bool newer = false,
+    String? until,
     String? clientMessageId,
   }) {
     if (limit != null && (limit < 1 || limit > 500)) {
       throw RangeError.range(limit, 1, 500, 'limit');
     }
+    if (until != null && !newer) {
+      throw ArgumentError.value(until, 'until', 'applies only to newer pages');
+    }
     return {
       'kind': 'history-page',
       'cursor': cursor,
       if (limit != null) 'limit': limit,
+      if (newer) 'direction': 'newer',
+      if (until != null) 'until': until,
       if (clientMessageId != null) 'clientMessageId': clientMessageId,
+    };
+  }
+
+  /// Requests one incremental history frame from the reconnect [cursor] of
+  /// the last frame (contract revision 28, only where a history frame carried
+  /// `newerHistory`): the rows persisted since, bounded, with the boundaries
+  /// after them.
+  static Map<String, dynamic> historyRefresh({
+    required String cursor,
+    required String clientMessageId,
+    int? limit,
+  }) {
+    if (limit != null && (limit < 1 || limit > 500)) {
+      throw RangeError.range(limit, 1, 500, 'limit');
+    }
+    return {
+      'kind': 'history-refresh',
+      'cursor': cursor,
+      if (limit != null) 'limit': limit,
+      'clientMessageId': clientMessageId,
     };
   }
 

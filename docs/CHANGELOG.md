@@ -62,6 +62,21 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   Cosyncing keeps running after you leave it or swipe it away, so notifications
   arrive without a push service. Android shows a silent notification while it
   runs, and it uses more battery.
+- A fling now loads the earlier or unloaded messages it reaches, as a drag
+  does, instead of stopping at the edge of what is loaded.
+- While newer messages load below you, the loading row says "Loading newer
+  messages…", in all five languages.
+- Earlier and newer messages now load ahead of you according to how fast you
+  scroll and how quickly the Server has been answering, from one to three
+  screens before you reach them. They used to load after every short scroll,
+  up to five pages ahead, and kept loading while you held still. Nothing more
+  loads once you stop. A fling loads at most two pages beyond where you last
+  scrolled yourself. After loading in one direction, turning around waits for
+  half a screen before loading in the other. A page that timed out or could
+  not be sent is asked for again after 0.5, 1, 2 and 4 seconds while you are
+  still near it. A page the Server refuses, including for a resource limit,
+  waits for you to retry it. In a Linux profile build, a fling through a long
+  session asked for up to 20 pages at once and now asks for at most one.
 
 ### Fixed
 
@@ -121,6 +136,158 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Every Codex goal now notifies when it finishes. Previously only the first
   goal in a session did, because Codex gives each goal in a thread the same
   key. A Codex turn that runs again after it finished also notifies again.
+- Scrolling up through a long session no longer loses your place. The session
+  view kept only the newest 100 transcript rows, so once the 101st new row
+  arrived the row you were reading could leave memory and earlier history was
+  replaced with a "reconnect to recover" marker. It now holds up to 500 rows
+  and about 4 MiB of decoded content. When it must drop rows, it first drops
+  whole pages far from where you are reading and leaves a "Load earlier" marker
+  that restores exactly those rows. The row you are reading is kept. Rows no
+  reload can return, such as approval cards the agent never saves, stay beside
+  that marker and return to their place when the page reloads. Only when the
+  window is full of them do they give way, and a notice then says that rows
+  that were never saved were released and cannot be restored. An approval or
+  question card still waiting for an answer does not give way to the budget: the
+  window keeps the newest such cards, up to 16 and a quarter of its decoded
+  budget (always at least the newest one), so you can still answer them. A card
+  answered or withdrawn while this device was disconnected, which the Server no
+  longer sends after the reconnect, shows "No longer waiting for an answer." with
+  its controls off and no longer counts toward those 16, until the agent sends it
+  again or its answer arrives. Rows that
+  arrived live since the last history frame have no reload boundary until the
+  broker names one (see the next entry). With an older broker, up to 400 of them
+  are kept, and only beyond that do the oldest still need a reconnect. A single
+  row with an extremely long body shows a flagged, readable prefix instead of
+  crowding out the rest of the transcript.
+- With a current broker, ordinary use no longer leaves gaps that need a
+  reconnect: long live output while you read far back, repeated reconnects,
+  and scrolling back and forth through a long session. The client asks the
+  broker to name reload boundaries for rows it received live after 50 rows,
+  about 1 MiB, or the end of a turn, so those rows can be dropped and reloaded
+  like any other page (broker contract revision 28). It asks once per boundary,
+  and when an answer names none for them (the agent has not saved them yet), it
+  waits for as many rows again before asking. A live update to a row held
+  further back, such as a tool call becoming its result or a plan being updated,
+  changes that row where it is instead of adding a copy, and a saved row with no
+  key, such as an error card, is shown once. A reconnect that cannot replay
+  everything saved while the socket was down keeps the pages you have already
+  read. The rows in between load as you scroll toward them from either side.
+  Scrolling down toward dropped rows now loads them too, starting with the rows
+  next to the ones you are reading. Jumping to the latest rows is still the
+  explicit control. Rows that were never saved, such as approval cards or a
+  prompt not yet written to history, keep their place through all of this,
+  after the saved row they followed, including one shown right after an error
+  card. An approval's answer stays below its request after a queued prompt is
+  taken. A resync that replaces the transcript drops the approval cards it does
+  not restate, and says so. The client uses this only where the broker offers it.
+  Older brokers keep the previous behaviour. A Cline session driven through its
+  Hub also keeps it once it has streamed a row its saved history keys
+  differently: a reply from another client, text after a tool the model runs
+  itself, or output after Drive was demoted. A refused history read no longer
+  shows a "send failed" error or clears a retry notice. A position the broker
+  no longer has, for example after the session was rewound, stops only the
+  range it bounds, which says it cannot load and offers no Retry; every other
+  range still loads.
+- When the broker no longer has the position the transcript would reconnect
+  from (the session was rewound or rewritten), the client attaches again at
+  once instead of leaving the newest rows without reload boundaries until the
+  next reconnect. It does this at most once per connection and at most once
+  every two minutes.
+- A boundary refresh the broker never answers no longer stops the client asking
+  for boundaries for later live rows: after 30 seconds it asks again once more
+  rows arrive or the turn ends, and still accepts the late answer if it comes.
+- An error card or another saved row without a key is no longer shown twice
+  after the broker resyncs the session while you are reading further back.
+- Reattach and resync now send the same size of history frame as "Load
+  earlier" asks for: at most 100 rows. A resync used to send 500. Attach and
+  resync frames also carry at most 2 MiB of decoded content, measured on the
+  frame each connection actually receives. "Load earlier" pages are bounded by
+  row count only. When the broker cannot index a session's history, it still
+  sends the newest rows, up to 4 MiB. A history frame now names the boundary
+  after its newest row whenever the broker can page back from it (broker
+  contract revision 28). The client can then drop rows from that frame and
+  reload them later without a reconnect. Boundaries count only transcript rows.
+  The state an agent restates at the end of every read (a queued prompt, an open
+  approval, an unfinished run's summary, a token reading) stays out of them
+  until a transcript row follows it, and is sent after the frame instead, so an
+  idle session keeps its boundaries after a prompt. Rows dropped from a frame
+  without the boundary need a reconnect to recover, as before: that includes
+  frames from older brokers and the unindexed fallback. The same revision adds a
+  `history-refresh` request, which the broker answers with the rows saved since
+  the client's reconnect cursor and the boundaries after them, and forward
+  paging through a `history-page` with `direction: "newer"`. A history frame
+  advertises both with `newerHistory: true`. While a turn runs, every attach,
+  reconnect, resync and refresh frame, and every forward page that reaches the
+  newest rows, stops before the newest reply and the tool calls before it,
+  which the agent may still rewrite, and sends those rows after the frame.
+  OpenCode and Kilo reserve each tool's result position as soon as it starts,
+  so parallel tools finishing out of order keep every history boundary valid,
+  even after hundreds of later rows. Completed tool outputs stay within the
+  frame's size limit. Unfinished result positions are hidden and reloaded after
+  reconnect to recover completions missed while offline. A
+  forward page that would come back empty without reaching the end is refused
+  as a changed source, which the client retries after a pause. A run's
+  summary counts by its identity, so an OpenCode or Kilo turn of several steps,
+  which rewrites each step's summary when the turn ends, keeps every boundary
+  named during it. Refreshes of an unchanged history share one read, and forward
+  paging works while the agent is still writing the session. An OpenCode
+  session saves many writes under one revision, so a history the broker read
+  earlier could be missing rows it had since received live: a refresh then came
+  back empty, and a boundary another client had been given was refused as gone.
+  The broker now reads the session again in those cases. Older clients never
+  send either request and are unaffected.
+- A finished OpenCode or Kilo tool call no longer stays on screen as running
+  after its page reloads: saved history now keeps the call beside its result,
+  as the live view shows it.
+- Pi, OMP and Cline (Hub) sessions no longer show streamed replies, reasoning or
+  sent prompts twice after reconnecting, and refreshing their history is no
+  longer refused: live rows now carry the same identity as the saved
+  transcript.
+- Commands, file edits, image views, MCP calls and web searches that Codex runs
+  inside a code-mode step, and shell commands you run yourself in a Codex
+  session, now stay in the session history after a reload or reconnect, shown
+  as they appeared live, instead of disappearing once the live view is gone.
+  After upgrading, a reopened code-mode Codex session reloads its history once.
+- Watching a Kilo Code session no longer reloads its whole history on every
+  read once a turn has written anything, and paging and refresh keep working
+  for it. A Kilo Code session driven from the app is no longer switched to
+  watch-only when a step finishes during a turn.
+- Reconnecting to an Antigravity session no longer reloads its whole history
+  after every new step. Finished background tasks now appear where they
+  finished, and a prompt still waiting to be delivered shows as queued.
+- Reasonix tool calls no longer disappear from a session's history after a
+  reload; each call shows next to its result, as it did live.
+- Codex reasoning now appears in session history and when you reconnect, in
+  both older and newer Codex rollout formats. It is shown once per reasoning
+  step, and no longer disappears or is flagged as never saved once the live view
+  is gone. After upgrading, a reopened Codex session reloads its history once.
+- A client that reopens a large cached transcript now reattaches with a fresh
+  history frame rather than resuming onto rows whose boundaries it no longer
+  holds. A cached transcript that was trimmed to fit the local cache no longer
+  offers a "Load earlier" cursor that would have skipped the trimmed rows.
+- Reading back through a long session no longer moves what you are reading.
+  The message on screen stays where it is when earlier or newer messages load
+  above or below it, when distant messages are unloaded to keep memory
+  bounded, when a message above it grows (a tool result arriving, a tool
+  opened), while a reply streams in at the end, and when the window is resized
+  or the text size changes.
+- Loading history no longer interrupts scrolling: a drag keeps following your
+  finger and a fling keeps its speed while a page of messages arrives.
+- Selecting text by dragging against the top of the transcript while earlier
+  messages load now selects and copies every message in between. The
+  selection could lose its start or leave messages out of the copy.
+- Following a reply as it streams in no longer drops most frames. Every
+  chunk rebuilt the reply from scratch and laid out all of its text again,
+  and a thinking row you had opened while it streamed closed on the next
+  chunk. The reply now keeps its row and only its growing end is laid out
+  again. Formatted text and highlighted code are kept for messages that come
+  back into view, within a fixed memory budget. In a Linux profile build,
+  frames drawn within 16.7 ms rose from 15% to 99.6% while following a
+  streaming reply, and from 81% to 99.3% while reading far back during one.
+  In a web profile build without a GPU, the median frame while following a
+  reply fell from 60 ms to 20 ms.
+- Selecting text while a message with a link was being updated, for example
+  while a reply streamed in, no longer fails with an error.
 
 ## 0.5.13 — 2026-09-23
 

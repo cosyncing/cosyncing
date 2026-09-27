@@ -413,6 +413,9 @@ extension _SessionDetailMessaging on SessionDetailController {
   void _clearHistoryPageTracking() {
     _historyPageRequestId = null;
     _historyPageCursorInFlight = null;
+    _historyPageLimitInFlight = null;
+    _historyPageNewer = false;
+    _historyPageUntilInFlight = null;
     _historyPageTimeout?.cancel();
     _historyPageTimeout = null;
   }
@@ -444,10 +447,8 @@ extension _SessionDetailMessaging on SessionDetailController {
     String? cursor,
   }) async {
     if (state.historyPageLoading) return false;
-    if (isTerminalHistoryPageErrorCode(state.historyPageErrorCode)) {
-      return false;
-    }
     final requestedCursor = cursor ?? state.olderHistoryCursor;
+    if (state.historyPagingBlockedAt(requestedCursor)) return false;
     final pageConnection = _connection;
     if (requestedCursor == null || requestedCursor.trim().isEmpty) return false;
     if (_historyPageCursorInFlight == requestedCursor) return false;
@@ -465,9 +466,21 @@ extension _SessionDetailMessaging on SessionDetailController {
       );
       return false;
     }
-    final clientMessageId = _nextClientMessageId();
+    // A released range reloads with exactly its own row count, so the page
+    // lands on the range's older boundary and joins its neighbour by cursor.
+    final releasedRows = state.activeTranscriptWindow.reloadLimitFor(
+      requestedCursor,
+    );
+    // The route accepts 1..500; a request outside it would throw before it is
+    // sent and fail every retry the same way.
+    final requested = releasedRows != null && releasedRows < limit
+        ? releasedRows
+        : limit;
+    final pageLimit = requested < 1 ? 1 : requested;
+    final clientMessageId = _nextHistoryNavigationId();
     _historyPageRequestId = clientMessageId;
     _historyPageCursorInFlight = requestedCursor;
+    _historyPageLimitInFlight = pageLimit;
     _startHistoryPageTimeout(clientMessageId);
     state = state.copyWith(
       historyPageLoading: true,
@@ -476,7 +489,7 @@ extension _SessionDetailMessaging on SessionDetailController {
     try {
       await historyConnection.requestHistoryPage(
         cursor: requestedCursor,
-        limit: limit,
+        limit: pageLimit,
         clientMessageId: clientMessageId,
       );
       return true;

@@ -152,6 +152,7 @@ String localizedFailureLead(AppLocalizations l10n, FailureLead lead) {
     FailureLead.historyPageMemoryBudget =>
       l10n.failureNoticeHistoryPageMemoryBudget,
     FailureLead.historyPageMalformed => l10n.failureNoticeHistoryPageMalformed,
+    FailureLead.historyPageDiverged => l10n.failureNoticeHistoryPageDiverged,
     FailureLead.commandModelArgument => l10n.failureNoticeCommandModelArgument,
     FailureLead.modelsRequireServer => l10n.failureNoticeModelsRequireServer,
     FailureLead.serverUnhealthy => l10n.failureNoticeServerUnhealthy,

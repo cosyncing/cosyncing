@@ -246,6 +246,7 @@ const List<String> brokerClientMessageKinds = <String>[
   'prompt',
   'draft',
   'history-page',
+  'history-refresh',
   'plan-action',
   'artifact-interaction',
   'file',

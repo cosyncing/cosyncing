@@ -12,9 +12,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 ///
 /// A capped snapshot must never silently pretend completeness: when messages
 /// are dropped, the persisted [SessionTranscriptSnapshot.truncation] carries
-/// the honest `shown`/`total`, so hydration still surfaces the history-scope
-/// notice and keeps `hasEarlier`/`olderCursor` for a broker-cursor
-/// "Load earlier".
+/// the honest `shown`/`total`, and the snapshot is marked
+/// [SessionTranscriptSnapshot.headReleased]. The broker's older cursor names
+/// the boundary before the DROPPED rows, so paging from it would skip them;
+/// hydration presents the range as needing a reconnect instead.
 const int maxPersistedTranscriptMessages = 500;
 
 /// Maximum transcript rows retained per broker profile.
@@ -35,9 +36,9 @@ const int maxRetainedTranscriptSessions = 100;
 ///
 /// This is a HARD limit: a single message larger than the budget is omitted
 /// entirely rather than retained as a guaranteed overflow. The stored snapshot
-/// then honestly reports `shown: 0` against the real total, and the retained
-/// `olderCursor`/`hasEarlier` still drive "Load earlier" — the agent transcript
-/// remains authoritative for anything the cache cannot hold.
+/// then honestly reports `shown: 0` against the real total and is marked
+/// [SessionTranscriptSnapshot.headReleased] — the agent transcript remains
+/// authoritative for anything the cache cannot hold.
 const int maxPersistedTranscriptBytesPerSession = 4 * 1024 * 1024;
 
 /// Maximum serialized transcript bytes retained per broker profile (DR1).
@@ -73,6 +74,7 @@ final class SessionTranscriptSnapshot {
     required this.updatedAt,
     this.cursor,
     this.olderCursor,
+    this.headReleased = false,
     this.gap,
     this.truncation,
   });
@@ -97,6 +99,11 @@ final class SessionTranscriptSnapshot {
 
   /// Whether [olderCursor] addresses another page.
   final bool hasEarlier;
+
+  /// Earlier rows exist that no stored cursor reaches: the rows before
+  /// [messages] were released locally (by the window or by this store's own
+  /// caps). Stored as a row with earlier history but no older cursor.
+  final bool headReleased;
 
   /// Honest broker cursor-gap metadata.
   final HistoryGap? gap;
@@ -173,6 +180,7 @@ final class DriftSessionTranscriptRepository
       cursor: row.cursor,
       olderCursor: row.olderCursor,
       hasEarlier: row.hasEarlier && row.olderCursor != null,
+      headReleased: row.hasEarlier && row.olderCursor == null,
       gap: _decodeOptionalMap(row.gapJson, HistoryGap.fromJson),
       truncation: _decodeOptionalMap(
         row.truncationJson,
@@ -210,16 +218,22 @@ final class DriftSessionTranscriptRepository
     // the messages and honest paging state. The cost is one full tail fetch on
     // reopen for a truncated session; the alternative is silently missing
     // messages.
+    //
+    // The same truncation also voids the older cursor: it names the boundary
+    // before the dropped rows, so paging from it would skip exactly them. A
+    // truncated snapshot is stored as released at its head (earlier history,
+    // no cursor), and hydration shows that range as needing a reconnect.
     final locallyTruncated = encoded.shown < snapshot.messages.length;
+    final headReleased = locallyTruncated || snapshot.headReleased;
     final companion = SessionTranscriptRowsCompanion.insert(
       brokerProfileId: bounded.brokerProfileId,
       tool: bounded.sessionKey.tool,
       sessionId: bounded.sessionKey.sessionId,
       messagesJson: encoded.messagesJson,
       cursor: Value(locallyTruncated ? null : bounded.cursor),
-      olderCursor: Value(bounded.olderCursor),
+      olderCursor: Value(headReleased ? null : bounded.olderCursor),
       hasEarlier: Value(
-        bounded.hasEarlier && bounded.olderCursor != null,
+        headReleased || (bounded.hasEarlier && bounded.olderCursor != null),
       ),
       gapJson: Value(
         bounded.gap == null ? null : jsonEncode(bounded.gap!.toJson()),
@@ -324,11 +338,8 @@ final class DriftSessionTranscriptRepository
   /// Caps a snapshot to [maxPersistedTranscriptMessages] most-recent messages.
   ///
   /// Dropping the oldest messages would silently under-represent the session,
-  /// so a capped snapshot records an honest [HistoryTruncation]. Hydration
-  /// then surfaces `shown`/`total`, and the retained broker
-  /// `olderCursor`/`hasEarlier` still drive "Load earlier". The reconnect
-  /// cursor represents the newest message and is unaffected by dropping older
-  /// ones.
+  /// so a capped snapshot records an honest [HistoryTruncation], and [upsert]
+  /// stores it as released at its head.
   SessionTranscriptSnapshot _boundForPersistence(
     SessionTranscriptSnapshot snapshot,
   ) {
@@ -345,6 +356,7 @@ final class DriftSessionTranscriptRepository
       cursor: snapshot.cursor,
       olderCursor: snapshot.olderCursor,
       hasEarlier: snapshot.hasEarlier,
+      headReleased: snapshot.headReleased,
       gap: snapshot.gap,
       truncation: HistoryTruncation(
         shown: maxPersistedTranscriptMessages,

@@ -472,6 +472,10 @@ enum FailureLead {
   /// Notice: the broker returned an unparseable history page.
   historyPageMalformed,
 
+  /// Notice: the history position a page was asked from no longer matches
+  /// the session's history.
+  historyPageDiverged,
+
   /// Notice: model must not be passed as a command argument.
   commandModelArgument,
 

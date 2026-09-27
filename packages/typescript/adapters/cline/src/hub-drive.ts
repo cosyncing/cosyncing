@@ -20,7 +20,7 @@ import {
   parseClineHubMessages,
   sameClineHubHistoryIdentity,
 } from './hub.ts';
-import { clineMessageKey, clineTurnId, clineTurnTokens, clineUserText, mapClineTranscript } from './mapping.ts';
+import { boundedText, clineMessageKey, clineTurnId, clineTurnTokens, clineUserText, mapClineTranscript } from './mapping.ts';
 import type { ClineMapTrace, ClineTerminalSummary } from './mapping.ts';
 import {
   CLINE_MAX_PROMPT_CORRELATIONS,
@@ -199,8 +199,128 @@ function isAssistantOnlyAppend(
     && after.slice(before.length).every((message) => isTurnInternalRow(message));
 }
 
+function modelToolActivityCount(message: ClineNativeMessage): number {
+  const activities = record(message.metadata)?.modelToolActivities;
+  return Array.isArray(activities) ? activities.length : 0;
+}
+
+/**
+ * Gives the answer and reasoning rows of each turn this Drive ran the keys it streamed them under:
+ * `<prompt key>:assistant|reasoning:<segment>`, where the segment counts the tools started earlier
+ * in the turn. Cline starts the tools a message asks for only after that message has streamed and
+ * persisted, one `tool.started` per tool call it holds, skipped and rejected calls included. So all
+ * the text of one message shares a segment, and blocks sharing a key form one row, joined in order
+ * as their deltas were, and bounded again as one body. A tool the model runs itself starts
+ * mid-stream and is kept only in the message's `metadata.modelToolActivities`: it counts toward
+ * later messages, but text in its own message may have streamed on either side of it, which
+ * `unpositioned` reports.
+ */
+function keyOwnedTurnRows(
+  sessionId: string,
+  messages: readonly ClineNativeMessage[],
+  rows: readonly AgentMessage[],
+  promptKey: (nativeUserId: string) => string | undefined,
+): { rows: AgentMessage[]; unpositioned: boolean } {
+  const owned = new Map<string, { anchor: string; segment: number }>();
+  let unpositioned = false;
+  let anchor: string | undefined;
+  let segment = 0;
+  for (const message of messages) {
+    if (message.role === 'user' && !isNativeToolResultCarrier(message)) {
+      anchor = promptKey(message.id);
+      segment = 0;
+      continue;
+    }
+    if (!anchor || message.role !== 'assistant') continue;
+    owned.set(message.id, { anchor, segment });
+    const modelTools = modelToolActivityCount(message);
+    if (modelTools > 0 && message.content.some((block) =>
+      (block.type === 'text' && block.text) || (block.type === 'thinking' && block.thinking))) {
+      unpositioned = true;
+    }
+    segment += message.content.filter((block) => block.type === 'tool_use').length + modelTools;
+  }
+  const prefix = clineMessageKey(sessionId, '');
+  const out: AgentMessage[] = [];
+  const joined = new Map<string, Extract<AgentMessage, { type: 'model-output' | 'thinking' }>>();
+  for (const row of rows) {
+    if ((row.type !== 'model-output' && row.type !== 'thinking') || !row.key?.startsWith(prefix)) {
+      out.push(row);
+      continue;
+    }
+    const tail = row.key.slice(prefix.length);
+    const end = tail.indexOf(':block:');
+    const turn = end > 0 ? owned.get(tail.slice(0, end)) : undefined;
+    if (!turn) {
+      out.push(row);
+      continue;
+    }
+    const key = `${turn.anchor}:${row.type === 'model-output' ? 'assistant' : 'reasoning'}:${turn.segment}`;
+    const held = joined.get(key);
+    if (!held) {
+      const keyed = { ...row, key };
+      joined.set(key, keyed);
+      out.push(keyed);
+      continue;
+    }
+    // A cut block already fills the bound, so the joined body is cut whenever one of its parts was.
+    const body = boundedText((held.text ?? '') + (row.text ?? ''));
+    held.text = body?.text ?? '';
+    if (body?.truncated) held.bodyTruncated = true;
+    if (held.type === 'model-output') {
+      // The last block decides: an earlier message is settled by the one after it.
+      if (row.type === 'model-output' && row.final) held.final = true;
+      else delete held.final;
+    }
+  }
+  return { rows: out, unpositioned };
+}
+
+/**
+ * Puts each stored terminal summary after the last row of its turn, before the next prompt. Kept
+ * at the end instead, every settled turn's summaries moved behind the new turn's rows, so no cursor
+ * into the earlier history survived a turn. A summary whose turn has no row here goes at the end.
+ */
+function placeTurnSummaries(
+  rows: readonly AgentMessage[],
+  summaries: readonly ClineTerminalSummary[],
+): AgentMessage[] {
+  const byTurn = new Map<string, ClineTerminalSummary[]>();
+  for (const summary of summaries) {
+    const turnId = summary.turnId ?? '';
+    byTurn.set(turnId, [...(byTurn.get(turnId) ?? []), summary]);
+  }
+  const out: AgentMessage[] = [];
+  let turn: string | undefined;
+  const closeTurn = () => {
+    if (turn === undefined) return;
+    out.push(...(byTurn.get(turn) ?? []));
+    byTurn.delete(turn);
+  };
+  for (const row of rows) {
+    if (row.type === 'user-message' && row.turnId !== undefined && row.turnId !== turn) {
+      closeTurn();
+      turn = row.turnId;
+    }
+    out.push(row);
+  }
+  closeTurn();
+  for (const rest of byTurn.values()) out.push(...rest);
+  return out;
+}
+
 export class ClineHubDriveConnection implements SessionConnection {
   readonly info: SessionInfo;
+  /** An owned turn's rows stream under the keys `getHistory` gives the same text (see
+   *  {@link keyOwnedTurnRows}). Some streamed rows cannot have them (see {@link liveDeltaKey}): a
+   *  delta no owned turn anchors, such as a foreign run's, keyed by its event id; text after a tool
+   *  the model ran mid-stream, which the persisted message does not position; and a delta after
+   *  demotion. Once this connection has streamed one, a refresh restating its history copy would
+   *  show it twice. */
+  get liveRowsRekeyedInHistory(): true | undefined {
+    return this.unkeyedLiveRows ? true : undefined;
+  }
+  private unkeyedLiveRows = false;
   private readonly handlers = new Set<AgentMessageHandler>();
   private readonly pendingPrompts: PendingPrompt[] = [];
   private readonly pendingPermissions = new Map<string, PendingPermission>();
@@ -212,7 +332,9 @@ export class ClineHubDriveConnection implements SessionConnection {
   private turnChain: Promise<void> = Promise.resolve();
   private turnGeneration = 0;
   private activeTurn = false;
-  private liveTurn: { anchor: string; segment: number } | undefined;
+  /** `toolInIteration` says whether a tool has started since the Hub last reported a new
+   *  iteration of this turn. */
+  private liveTurn: { anchor: string; segment: number; toolInIteration?: boolean } | undefined;
   private stopping = false;
   private nativeMutation = false;
   private initialized = false;
@@ -317,9 +439,15 @@ export class ClineHubDriveConnection implements SessionConnection {
    *  on — only a per-event id, so anchor them to the prompt's client key, which already identifies
    *  this turn's user row and is what `claimUserCorrelation` maps onto the settled native id.
    *  Falls back to the event id when no broker-owned turn is running: a foreign app client's run
-   *  has no prompt key here, and inventing one would merge unrelated turns into a single row. */
+   *  has no prompt key here, and inventing one would merge unrelated turns into a single row.
+   *
+   *  The segment counts the tools started so far in the turn, which is how history keys the same
+   *  text. History cannot place three kinds of delta: text after a tool started in the same
+   *  iteration (it follows a tool the model ran mid-stream), an event-id row, and anything after
+   *  demotion, which drops the correlations that history keys owned turns by. */
   private liveDeltaKey(kind: 'assistant' | 'reasoning', eventId: string | undefined): string | undefined {
     const live = this.liveTurn;
+    if (!live || live.toolInIteration === true || this.demoted) this.unkeyedLiveRows = true;
     return live ? `${live.anchor}:${kind}:${live.segment}` : eventId;
   }
 
@@ -338,8 +466,8 @@ export class ClineHubDriveConnection implements SessionConnection {
     }
     this.reconcilePendingEchoes(messages, identity);
     this.reconcileClaims(messages);
-    const mapped = mapClineTranscript(this.info.id, messages, this.options.trace);
-    for (const message of mapped) {
+    const native = mapClineTranscript(this.info.id, messages, this.options.trace);
+    for (const message of native) {
       if (message.type !== 'user-message' || !message.key) continue;
       const nativeId = this.nativeIdFromMappedKey(message.key);
       const correlation = nativeId ? this.claimedUserCorrelations.get(nativeId) : undefined;
@@ -349,6 +477,14 @@ export class ClineHubDriveConnection implements SessionConnection {
         message.queued = false;
       }
     }
+    const owned = keyOwnedTurnRows(
+      this.info.id,
+      messages,
+      native,
+      (nativeId) => this.claimedUserCorrelations.get(nativeId)?.key,
+    );
+    if (owned.unpositioned) this.unkeyedLiveRows = true;
+    const mapped = owned.rows;
     const nativeSummaryKeys = new Set(mapped
       .filter((message) => message.type === 'run-summary')
       .map((message) => message.key));
@@ -360,11 +496,10 @@ export class ClineHubDriveConnection implements SessionConnection {
       true,
     ).rows;
     return [
-      ...mapped,
-      ...terminalSummaries
+      ...placeTurnSummaries(mapped, terminalSummaries
         .filter((summary) => !nativeSummaryKeys.has(summary.key)
           && !nativeSummaryTurnIds.has(summary.turnId))
-        .map((summary) => ({ ...summary })),
+        .map((summary) => ({ ...summary }))),
       ...this.pendingPrompts.map((entry) => entry.row),
     ];
   }
@@ -1017,13 +1152,24 @@ export class ClineHubDriveConnection implements SessionConnection {
       if (text !== undefined) this.emit({ type: 'thinking', delta: text, key: this.liveDeltaKey('reasoning', event.eventId) });
       return;
     }
+    if (event.event === 'iteration.started') {
+      // One model call. The tools it asks for start after its message has streamed, so a tool
+      // started while its text is still streaming is one the model ran itself.
+      if (this.liveTurn) this.liveTurn.toolInIteration = false;
+      return;
+    }
     if (event.event === 'tool.started') {
       const callId = field(payload.toolCallId, 512) ?? event.eventId ?? `cline-tool:${Date.now()}`;
       const toolName = field(payload.toolName, 512) ?? 'Cline tool';
       this.emit({ type: 'tool-call', callId, toolName, title: toolName, args: payload.input });
       // Answer text resumed after a tool call belongs in its own row, below the tool, not appended
       // to the text that preceded it.
-      if (this.liveTurn) this.liveTurn.segment += 1;
+      if (this.liveTurn) {
+        this.liveTurn.segment += 1;
+        // Only a new iteration clears it. A Hub that reports no iterations cannot tell a tool the
+        // model ran mid-stream from one its message asked for, so text after either is unplaced.
+        this.liveTurn.toolInIteration = true;
+      }
       return;
     }
     if (event.event === 'tool.finished') {

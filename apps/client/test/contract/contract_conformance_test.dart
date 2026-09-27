@@ -441,6 +441,8 @@ void main() {
         OutboundFrame.ack(attachTicket: 't-1'),
         OutboundFrame.nack(attachTicket: 't-2'),
         OutboundFrame.historyPage(cursor: 'older:1'),
+        OutboundFrame.historyPage(cursor: 'older:1', newer: true, until: 'e'),
+        OutboundFrame.historyRefresh(cursor: 'c', clientMessageId: 'r-1'),
         OutboundFrame.draft('draft'),
         OutboundFrame.planAction(
           const PlanActionRequest(

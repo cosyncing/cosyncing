@@ -397,7 +397,10 @@ extension _SessionDetailSessionActions on SessionDetailController {
         state.events,
         MessageWireEvent(seq: 0, message: message),
       ),
-      transcriptWindow: state.activeTranscriptWindow.applyLiveMessage(message),
+      transcriptWindow: state.activeTranscriptWindow.applyLiveMessage(
+        message,
+        protectedKey: _historyViewportAnchorKey,
+      ),
     );
   }
 

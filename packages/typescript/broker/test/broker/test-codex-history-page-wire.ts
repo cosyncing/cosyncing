@@ -140,11 +140,12 @@ async function requestPage(
   client: SocketClient,
   cursor: string,
   requestId: string,
+  limit = PAGE_MESSAGES,
 ): Promise<any> {
   client.ws.send(JSON.stringify({
     kind: 'history-page',
     cursor,
-    limit: PAGE_MESSAGES,
+    limit,
     clientMessageId: requestId,
   }));
   return waitFor(
@@ -241,6 +242,23 @@ try {
     'bounded initial attach must not call full getHistory()',
   );
   assert.equal(historyReads(broker).length, 1);
+
+  // The indexed attach names its end boundary in the paging encoding. Pages carry only
+  // backward-pageable rows, so a client that releases the attach reloads it with a limit equal to
+  // the attach's pageable row count and lands on the attach's own older boundary.
+  assert.equal(typeof first.attach.endCursor, 'string', 'the indexed attach carries its end boundary');
+  const unpageable = new Set(['task-list-state', 'goal-state', 'metadata-update', 'agent-activity', 'history-reset']);
+  const pageable = first.attach.messages.filter((message: any) => !unpageable.has(message?.type));
+  const endPage = await requestPage(first, String(first.attach.endCursor), 'attach-end-cursor', pageable.length);
+  assert.equal(endPage.kind, 'history-page');
+  assert.equal(endPage.messages.length, pageable.length);
+  assert.deepEqual(
+    endPage.messages.map((message: any) => message?.key ?? message?.text ?? message?.type),
+    pageable.map((message: any) => message?.key ?? message?.text ?? message?.type),
+    'the end-boundary page reloads exactly the attach rows',
+  );
+  assert.equal(endPage.cursor, first.attach.olderCursor, 'the reload reconnects by cursor equality');
+  assert.equal(historyReads(broker).length, 1, 'the end-boundary page reuses the compact index');
 
   let cursor = String(first.attach.olderCursor);
   for (let pageIndex = 0; pageIndex < 3; pageIndex += 1) {

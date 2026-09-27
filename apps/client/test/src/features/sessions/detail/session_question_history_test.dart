@@ -37,9 +37,19 @@ TranscriptHistoryWindow initialWindow() => TranscriptHistoryWindow.fromHistory(
   ),
 );
 
-TranscriptHistoryWindow evictTail(TranscriptHistoryWindow initial) {
+/// The reader keeps the card on screen: live growth may release anything
+/// but the page holding it.
+final String? readingCard = stableTranscriptMessageKey(
+  question(readOnly: false),
+);
+
+TranscriptHistoryWindow evictTail(
+  TranscriptHistoryWindow initial, {
+  String? reading,
+}) {
   var window = initial;
-  for (var i = 0; i < kRetainedTranscriptTailMessages; i++) {
+  // Enough live rows to push everything unprotected out of the budget.
+  for (var i = 0; i < kMaxActiveTranscriptMessages; i++) {
     window = window.applyLiveMessage(
       AgentMessage.fromJson({
         'type': 'model-output',
@@ -47,6 +57,7 @@ TranscriptHistoryWindow evictTail(TranscriptHistoryWindow initial) {
         'text': 'Still working: $i',
         'final': true,
       }),
+      protectedKey: reading,
     );
   }
   return window;
@@ -88,16 +99,15 @@ void expectReadOnly(TranscriptHistoryWindow window, {required bool readOnly}) {
 
 void main() {
   test(
-    'unanswered async card stays actionable after tail eviction and paging',
+    'unanswered async card is never evicted, and stays actionable through '
+    'paging',
     () {
       final live = initialWindow().applyLiveMessage(question(readOnly: false));
       final evicted = evictTail(live);
-      expect(
-        evicted.canonicalMessages.where(
-          (m) => m.type == AgentMessageType.questionRequest,
-        ),
-        isEmpty,
-      );
+      // Live growth releases the rows after it instead: it is the only place
+      // the reader can answer it.
+      expectReadOnly(evicted, readOnly: false);
+      expect(evicted.pages.last.headReleased, isTrue);
       expectReadOnly(pageQuestion(evicted), readOnly: false);
       // Immutable prior snapshots do not acquire the newer live authority.
       expectReadOnly(initialWindow(), readOnly: true);
@@ -125,7 +135,7 @@ void main() {
       readOnly: true,
     ); // Prime the production page/run caches.
     window = window.applyLiveMessage(question(readOnly: false));
-    window = evictTail(window);
+    window = evictTail(window, reading: readingCard);
     expectReadOnly(window, readOnly: false);
   });
 
@@ -136,7 +146,10 @@ void main() {
       ),
     );
     expectReadOnly(window, readOnly: false);
-    window = evictTail(window.applyLiveMessage(resolution()));
+    window = evictTail(
+      window.applyLiveMessage(resolution(), protectedKey: readingCard),
+      reading: readingCard,
+    );
     expectReadOnly(window, readOnly: true);
     expect(window.resolvedRequestDecisions.containsKey(requestId), isTrue);
     // A duplicate live item cannot reopen a settled card.

@@ -405,8 +405,10 @@ void main() {
         'recovery inside a full bounded tail evicts from the front and keeps '
         'the final response after every tool row',
         () {
+          // The filler plus three turn rows fill the open tail's allowance.
+          const fillerRows = kMaxOpenTranscriptTailMessages - 3;
           final filler = [
-            for (var index = 0; index < 97; index++)
+            for (var index = 0; index < fillerRows; index++)
               _model('g$index', 'filler $index'),
           ];
           var window = TranscriptHistoryWindow.fromHistory(
@@ -418,12 +420,12 @@ void main() {
               hasEarlier: true,
             ),
           );
-          // 99 retained rows; the live final response fills the tail to the
-          // 100-row cap before the tool rows are recovered.
+          // One row short of the allowance; the live final response fills the
+          // tail to its count cap before the tool rows are recovered.
           window = window.applyLiveMessage(_model('f1', 'final response'));
           expect(
             window.messageCount,
-            kRetainedTranscriptTailMessages,
+            kMaxOpenTranscriptTailMessages,
             reason: 'setup: the retained tail sits exactly at the cap',
           );
 
@@ -436,13 +438,13 @@ void main() {
 
           expect(
             window.messageCount,
-            lessThanOrEqualTo(kRetainedTranscriptTailMessages),
+            lessThanOrEqualTo(kMaxOpenTranscriptTailMessages),
           );
           expect(
             window.estimatedBytes,
             lessThanOrEqualTo(kMaxActiveTranscriptDecodedBytes),
           );
-          expect(window.tailPrefixEvicted, isTrue);
+          expect(window.leadingEdgeReleased, isTrue);
           expect(
             window.leadingGap?.kind,
             TranscriptHistoryGapKind.reconnectRequired,
@@ -451,7 +453,7 @@ void main() {
           _expectAuthoritativeChronology(
             window,
             prefixKeys: [
-              for (var index = 4; index < 97; index++)
+              for (var index = 4; index < fillerRows; index++)
                 'model-output:key:g$index',
             ],
           );

@@ -19,6 +19,7 @@ import type {
 } from '@cosyncing/adapter-api';
 import {
   readKiloHistory,
+  kiloHistoryContinuation,
   kiloHistorySourceIdentity,
   refreshKiloStoredSession,
   type KiloHistorySnapshot,
@@ -60,11 +61,8 @@ class EncodedHistoryReader implements HistorySnapshotPageReader {
   }
 }
 
-function prefixMatches(previous: readonly string[], current: readonly string[]): boolean {
-  return current.length >= previous.length && previous.every((encoding, index) => current[index] === encoding);
-}
-
 export class KiloObserveConnection implements SessionConnection {
+  readonly historyUsesToolSlots = true;
   readonly info: SessionInfo;
   private readonly session: KiloStoredSession;
   private readonly watchFactory: typeof watch;
@@ -73,6 +71,8 @@ export class KiloObserveConnection implements SessionConnection {
   private watcher?: FSWatcher;
   private pending?: ReturnType<typeof setTimeout>;
   private encodings: string[] = [];
+  /** How many leading rows of {@link encodings} belong to messages Kilo had finished writing. */
+  private settledRows = 0;
   private revision?: string;
   private sourceIdentity?: string;
   private primed = false;
@@ -94,7 +94,7 @@ export class KiloObserveConnection implements SessionConnection {
     await this.refreshInfo();
     const snapshot = await readKiloHistory(this.session);
     if (!snapshot) throw new Error('Kilo SQLite snapshot is unavailable or unsupported.');
-    if (this.sourceReplaced(snapshot) || (this.primed && !prefixMatches(this.encodings, snapshot.encodings))) {
+    if (this.sourceReplaced(snapshot) || (this.primed && this.continuation(snapshot) === undefined)) {
       this.invalidatePaging();
     }
     this.setCursor(snapshot);
@@ -115,7 +115,7 @@ export class KiloObserveConnection implements SessionConnection {
     await this.refreshInfo();
     const snapshot = await readKiloHistory(this.session);
     if (!snapshot) return undefined;
-    if (this.sourceReplaced(snapshot) || (this.primed && !prefixMatches(this.encodings, snapshot.encodings))) {
+    if (this.sourceReplaced(snapshot) || (this.primed && this.continuation(snapshot) === undefined)) {
       this.invalidatePaging();
       this.setCursor(snapshot);
       return undefined;
@@ -159,9 +159,15 @@ export class KiloObserveConnection implements SessionConnection {
     return kiloHistorySourceIdentity(this.session, snapshot);
   }
 
+  /** Where [snapshot] takes over from the last read, or undefined when it rewrote that read. */
+  private continuation(snapshot: KiloHistorySnapshot): number | undefined {
+    return kiloHistoryContinuation({ encodings: this.encodings, settledRows: this.settledRows }, snapshot);
+  }
+
   private setCursor(snapshot: KiloHistorySnapshot): void {
     this.primed = true;
     this.encodings = [...snapshot.encodings];
+    this.settledRows = snapshot.settledRows;
     this.revision = snapshot.revision;
     this.sourceIdentity = snapshot.sourceIdentity;
   }
@@ -275,16 +281,27 @@ export class KiloObserveConnection implements SessionConnection {
         }
         this.snapshotFailures = 0;
         if (!this.primed) { this.setCursor(snapshot); continue; }
-        if (this.sourceReplaced(snapshot) || !prefixMatches(this.encodings, snapshot.encodings)) {
+        const from = this.sourceReplaced(snapshot) ? undefined : this.continuation(snapshot);
+        if (from === undefined) {
           this.invalidatePaging();
           this.setCursor(snapshot);
           continue;
         }
-        for (let index = this.encodings.length; index < snapshot.messages.length; index += 1) {
+        // Rows from `from` on belong to messages Kilo was still writing at the last read. Each one
+        // that is new or rewritten since reaches subscribers once, under the key it already had.
+        const unchanged = new Map<string, number>();
+        for (const encoding of this.encodings.slice(from)) unchanged.set(encoding, (unchanged.get(encoding) ?? 0) + 1);
+        for (let index = from; index < snapshot.messages.length; index += 1) {
+          const encoding = snapshot.encodings[index]!;
+          const remaining = unchanged.get(encoding) ?? 0;
+          if (remaining > 0) {
+            unchanged.set(encoding, remaining - 1);
+            continue;
+          }
           const message = snapshot.messages[index];
           if (message) this.emit(message);
         }
-        if (snapshot.revision !== this.revision) this.setCursor(snapshot);
+        this.setCursor(snapshot);
       } while (this.drainAgain && !this.closed);
     } finally {
       this.draining = false;

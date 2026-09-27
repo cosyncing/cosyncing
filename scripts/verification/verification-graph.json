@@ -378,6 +378,10 @@
       "description": "WebSocket paging reuses immutable snapshots across clients and restart."
     },
     {
+      "id": "broker.history-append-stability",
+      "description": "Every adapter's appended history still resolves the cursors its earlier reads issued."
+    },
+    {
       "id": "broker.resync-serialization",
       "description": "Resync snapshots are authoritative resets serialized with live delivery."
     },
@@ -1419,6 +1423,7 @@
         "broker.protocol-journal",
         "broker.history-cache",
         "broker.history-paging",
+        "broker.history-append-stability",
         "broker.resync-serialization",
         "broker.attach-identity",
         "broker.restart-identity",
@@ -1625,6 +1630,8 @@
             "draft-durability",
             "protocol-journal",
             "history-paging-wire",
+            "history-cap",
+            "history-append-stability",
             "history-refusal-tail",
             "history-refusal-wire",
             "history-capture-liveness",
@@ -2581,6 +2588,30 @@
           ]
         },
         {
+          "id": "history-cap",
+          "claimId": "broker.history-cache",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-history-cap"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-history-cap.ts"
+          ]
+        },
+        {
+          "id": "history-append-stability",
+          "claimId": "broker.history-append-stability",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-history-append-stability"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/broker/test-history-append-stability.ts"
+          ]
+        },
+        {
           "id": "history-refusal-tail",
           "claimId": "broker.history-cache",
           "command": [
@@ -2918,7 +2949,9 @@
             "test:pi-tool-result"
           ],
           "sourceOwners": [
-            "packages/typescript/broker/test/pi/test-tool-result-enrich.ts"
+            "packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+            "packages/typescript/broker/test/helpers/live-history-key-audit.ts",
+            "packages/typescript/broker/test/helpers/pi-rpc-turn-fixture.ts"
           ]
         },
         {
@@ -3019,7 +3052,9 @@
           ],
           "sourceOwners": [
             "packages/typescript/adapters/omp/test/test-omp-lifecycle.ts",
-            "packages/typescript/adapters/omp/src/implementation.ts"
+            "packages/typescript/adapters/omp/src/implementation.ts",
+            "packages/typescript/broker/test/helpers/live-history-key-audit.ts",
+            "packages/typescript/broker/test/helpers/pi-rpc-turn-fixture.ts"
           ]
         },
         {
@@ -3816,7 +3851,8 @@
             "packages/typescript/adapters/cline/src/hub-drive.ts",
             "packages/typescript/adapters/cline/src/implementation.ts",
             "packages/typescript/adapters/cline/src/version.ts",
-            "packages/typescript/adapters/cline/test/test-cline-hub.ts"
+            "packages/typescript/adapters/cline/test/test-cline-hub.ts",
+            "packages/typescript/broker/test/helpers/live-history-key-audit.ts"
           ]
         },
         {

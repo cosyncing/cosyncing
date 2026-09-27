@@ -4,6 +4,25 @@ import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_m
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('reserved results stay hidden and leave lookup tools running', () {
+    final entries = buildSessionTranscriptDisplayEntries(
+      messages: [
+        for (final id in ['a', 'b']) ...[
+          _toolCall(id, ToolDisplayClass.lookup),
+          _message('tool-result', {
+            'callId': id,
+            'historySlot': true,
+            'pending': true,
+          }),
+        ],
+      ],
+      mode: ToolDisplayMode.responsive,
+    );
+    final group = entries.single as LookupGroupTranscriptDisplayEntry;
+    expect(group.tools.map((tool) => tool.callId), ['a', 'b']);
+    expect(group.tools.every((tool) => tool.result == null), isTrue);
+  });
+
   group('lookup grouping', () {
     test('groups two consecutive lookup calls and their results', () {
       final entries = buildSessionTranscriptDisplayEntries(

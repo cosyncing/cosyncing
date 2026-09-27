@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "0ecf965342431efc9873d0c078239e61f716c731",
+  "acceptedBase": "25e418c253e59a6f294524fc592e2cba249b21d0",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -84,6 +84,7 @@
     "broker.grok-observe",
     "broker.grok-registration-gate",
     "broker.grok-store",
+    "broker.history-append-stability",
     "broker.history-cache",
     "broker.history-paging",
     "broker.inbox-retention",
@@ -199,7 +200,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:3488f6d2ba2f88c3a77372ea35b85f1c6d7b8c19722cdf55617cd0abe683a52c"
+      "fingerprint": "sha256:e6754179eb46134d06989b4feb06a0dbd3004fa7c821d0fa964874b9f473283c"
     },
     {
       "id": "capabilities",
@@ -513,7 +514,7 @@
     },
     {
       "id": "cline-hub",
-      "fingerprint": "sha256:de6da822babd1d0c4654dea99a7ee2439fdbdaca67569024ee97e550c70e8b99"
+      "fingerprint": "sha256:c7ed570359a1136e28fb69c71009be01cada81655fbd4b8ecf736086e1c8b27a"
     },
     {
       "id": "cline-mapping",
@@ -676,6 +677,14 @@
       "fingerprint": "sha256:abbe59574b2a36b5e72f9ea6cf6f5f7419ff845f922531561ee221469abad5c3"
     },
     {
+      "id": "history-append-stability",
+      "fingerprint": "sha256:a823338163eb8c586a13b5ac97607f1b446fd98cc8d7a7ae9eac1569e273ff1e"
+    },
+    {
+      "id": "history-cap",
+      "fingerprint": "sha256:39d30a523edfbc9bd1c45a940820d732834ec7358b55ed25fac2ba6c665ef4ec"
+    },
+    {
       "id": "history-capture-liveness",
       "fingerprint": "sha256:63f9112cdfbe86f018929103b40f90eb53717382be9aaa0208d525cf95d6fbcd"
     },
@@ -801,7 +810,7 @@
     },
     {
       "id": "omp-lifecycle",
-      "fingerprint": "sha256:ff888c868e813bf8bc8bdeed15548335e6334caec6bed87975c56a9e316314f6"
+      "fingerprint": "sha256:846b7ea71f4a0d9178f365fcf4236f8748b69343d00438dbb912592a3425a6fd"
     },
     {
       "id": "omp-protocol-parity",
@@ -853,7 +862,7 @@
     },
     {
       "id": "pi-tool-result",
-      "fingerprint": "sha256:4cf7a3e677ff01c2012e3fafcfaa96981dbed03ffac526710ca814dcb33b3d41"
+      "fingerprint": "sha256:cee19a3e60a66e485ce7bd2fd1cfd03d936609099ec6db0f8ed042d9ce88d13e"
     },
     {
       "id": "protocol-journal",

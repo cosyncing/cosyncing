@@ -150,6 +150,18 @@ try {
     live.some((row) => row.type === 'model-output' && row.delta === 'fixture answer')
       && history.filter((row) => row.type === 'model-output' && row.text === 'fixture answer').length === 1
       && !history.some((row) => row.type === 'model-output' && row.text === 'fixture '));
+  {
+    // History re-keys the durable answer to the live turn's key, so a restating history frame
+    // merges into the streamed row: the connection keeps the broker's history refresh.
+    const liveKeys = [...new Set(live.filter((row) => row.type === 'model-output').map((row) => row.key))];
+    const durableKeys = history
+      .filter((row) => row.type === 'model-output' && row.text === 'fixture answer')
+      .map((row) => (row as { key?: string }).key);
+    check('an ACP answer keeps one key live and in history, so a history refresh stays offered',
+      liveKeys.length === 1 && durableKeys.length === 1 && liveKeys[0] === durableKeys[0]
+        && conn.liveRowsRekeyedInHistory !== true,
+      JSON.stringify({ liveKeys, durableKeys }));
+  }
   check('live ACP tool, token, and context updates reach the generic client surfaces',
     live.some((row) => row.type === 'tool-call' && row.callId === 'tool-1')
       && live.some((row) => row.type === 'tool-result' && row.callId === 'tool-1' && row.isError === false)

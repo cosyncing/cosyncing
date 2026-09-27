@@ -46,7 +46,8 @@ function boundedString(value: unknown, maxChars = MAX_TOOL_FIELD_CHARS): string 
   return typeof value === 'string' && value.length > 0 && value.length <= maxChars ? value : undefined;
 }
 
-function boundedText(value: unknown): { text: string; truncated?: true } | undefined {
+/** A text body cut to the size a history row may carry, and whether it was cut. */
+export function boundedText(value: unknown): { text: string; truncated?: true } | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
   const bytes = Buffer.from(value, 'utf8');
   if (bytes.length <= MAX_TEXT_BYTES) return { text: value };

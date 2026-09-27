@@ -272,9 +272,13 @@ try {
     ]);
     const p = await attach(id);
     await sleep(400);
-    const replayContext = p.frames.find(
-      (f) => f.kind === 'history',
-    )?.messages?.find((m: any) => m.type === 'metadata-update' && m.key === 'contextUsage');
+    // A history that ends in session state delivers it right after the frame rather than inside
+    // it (it is the session's current value, outside the history cursor); either way the attach
+    // carries it before any live event.
+    const isContext = (m: any) => m?.type === 'metadata-update' && m?.key === 'contextUsage';
+    const attachFrames = p.frames.length;
+    const replayContext = p.frames.find((f) => f.kind === 'history')?.messages?.find(isContext)
+      ?? p.frames.find((f) => f.kind === 'message' && isContext(f.message))?.message;
     await events(id, [
       { t: 'delta', kind: 'text', key: 't1:t', delta: 'OMPPRE' },
       { t: 'run', key: 'omp:run:turn-7', turnId: 'turn-7', status: 'done' },
@@ -286,7 +290,8 @@ try {
       3000,
     );
     const liveContext = await p.waitFrame(
-      (f) => f.kind === 'message' && f.message?.type === 'metadata-update' && f.message?.key === 'contextUsage',
+      (f) => f.kind === 'message' && f.message?.type === 'metadata-update' && f.message?.key === 'contextUsage'
+        && p.frames.indexOf(f) >= attachFrames,
       3000,
     );
     const noPiNamespace = !p.frames.some((f) => String(f.message?.key ?? '').startsWith('pi:run:'));

@@ -158,6 +158,7 @@ const Map<String, BrokerContractAdoption> brokerClientMessageAdoption = {
   'prompt': _adopted,
   'draft': _adopted,
   'history-page': _adopted,
+  'history-refresh': _adopted,
   'plan-action': _adopted,
   'artifact-interaction': BrokerContractAdoption(
     BrokerContractAdoptionDisposition.deferred,

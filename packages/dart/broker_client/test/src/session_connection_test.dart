@@ -29,6 +29,15 @@ final class _ImmediateFrameWebSocketAdapter extends FakeWebSocketAdapter {
   }
 }
 
+/// A socket that reports itself not open while the connection still holds
+/// it (a handshake in flight, or a close not yet reported).
+final class _ClosingWebSocketAdapter extends FakeWebSocketAdapter {
+  bool open = true;
+
+  @override
+  bool get isConnected => open && super.isConnected;
+}
+
 final class _ImmediateEndedWebSocketAdapter extends FakeWebSocketAdapter {
   @override
   Future<void> connect() async {
@@ -756,7 +765,7 @@ void main() {
       });
 
       test(
-        'emits HistoryWireEvent and populates messages',
+        'emits HistoryWireEvent with its messages',
         () async {
           await connection.connect();
           await flush();
@@ -773,7 +782,10 @@ void main() {
 
           expect(receivedEvents, hasLength(1));
           expect(receivedEvents.first, isA<HistoryWireEvent>());
-          expect(connection.messages, hasLength(2));
+          expect(
+            (receivedEvents.first as HistoryWireEvent).messages,
+            hasLength(2),
+          );
           expect(connection.cursor, 'cursor-abc');
         },
       );
@@ -811,7 +823,7 @@ void main() {
         },
       );
 
-      test('reset history replaces previously projected messages', () async {
+      test('reset history reaches listeners as a replacement', () async {
         await connection.connect();
         await flush();
 
@@ -836,10 +848,9 @@ void main() {
           });
         await flush();
 
-        expect(
-          connection.messages.map((message) => message.id),
-          ['replacement'],
-        );
+        final reset = receivedEvents.whereType<HistoryWireEvent>().last;
+        expect(reset.reset, isTrue);
+        expect(reset.messages.map((message) => message.id), ['replacement']);
       });
 
       test('emits MessageWireEvent', () async {
@@ -856,7 +867,7 @@ void main() {
         expect(receivedEvents, hasLength(1));
         final event = receivedEvents.first as MessageWireEvent;
         expect(event.seq, 5);
-        expect(connection.messages, hasLength(1));
+        expect(event.message.id, 'msg-5');
       });
 
       test('emits CommandsWireEvent', () async {
@@ -985,7 +996,7 @@ void main() {
     });
 
     group('history reset', () {
-      test('reset clears existing messages', () async {
+      test('reset flag reaches listeners unchanged', () async {
         await connection.connect();
         await flush();
 
@@ -997,7 +1008,6 @@ void main() {
           ],
         });
         await flush();
-        expect(connection.messages, hasLength(2));
 
         adapter.simulateMessage({
           'kind': 'history',
@@ -1007,11 +1017,12 @@ void main() {
           'reset': true,
         });
         await flush();
-        expect(connection.messages, hasLength(1));
-        expect(connection.messages.first.id, 'msg-new');
+        final frames = receivedEvents.whereType<HistoryWireEvent>().toList();
+        expect(frames.map((frame) => frame.reset), [false, true]);
+        expect(frames.last.messages.single.id, 'msg-new');
       });
 
-      test('non-reset appends to messages', () async {
+      test('non-reset history is forwarded as an increment', () async {
         await connection.connect();
         await flush();
 
@@ -1030,7 +1041,73 @@ void main() {
           ],
         });
         await flush();
-        expect(connection.messages, hasLength(2));
+        final frames = receivedEvents.whereType<HistoryWireEvent>().toList();
+        expect(frames.map((frame) => frame.reset), [false, false]);
+        expect(
+          frames.expand((frame) => frame.messages).map((message) => message.id),
+          ['msg-1', 'msg-2'],
+        );
+      });
+    });
+
+    group('transport retention', () {
+      // The session view's bounded history window is the only owner of
+      // decoded transcript rows. The transport used to keep a second copy
+      // that grew with every live frame, every repeated older page and every
+      // update to one key, regardless of the window's bounds.
+      test('exposes no transcript list and keeps only paging state', () async {
+        await connection.connect();
+        await flush();
+
+        adapter.simulateMessage({
+          'kind': 'history',
+          'reset': true,
+          'cursor': 'reconnect-1',
+          'olderCursor': 'older-1',
+          'hasEarlier': true,
+          'messages': [
+            for (var i = 0; i < 100; i++)
+              {'type': 'model-output', 'key': 'initial-$i', 'text': 'x'},
+          ],
+        });
+        for (var i = 0; i < 2000; i++) {
+          adapter.simulateMessage({
+            'kind': 'message',
+            'seq': i + 1,
+            'message': {'type': 'model-output', 'key': 'live-$i', 'text': 'x'},
+          });
+        }
+        for (var repeat = 0; repeat < 10; repeat++) {
+          adapter.simulateMessage({
+            'kind': 'history-page',
+            'cursor': 'older-2',
+            'hasMore': true,
+            'endOfHistory': false,
+            'messages': [
+              for (var i = 0; i < 100; i++)
+                {'type': 'model-output', 'key': 'older-$i', 'text': 'x'},
+            ],
+          });
+        }
+        for (var i = 0; i < 1000; i++) {
+          adapter.simulateMessage({
+            'kind': 'message',
+            'seq': 2001 + i,
+            'message': {'type': 'model-output', 'key': 'same', 'text': '$i'},
+          });
+        }
+        await flush();
+
+        expect(receivedEvents, hasLength(1 + 2000 + 10 + 1000));
+        expect(connection.cursor, 'reconnect-1');
+        expect(connection.olderCursor, 'older-2');
+        expect(connection.hasEarlier, isTrue);
+        expect(
+          // A regression that restores a transcript getter fails here.
+          // ignore: avoid_dynamic_calls
+          () => (connection as dynamic).messages,
+          throwsNoSuchMethodError,
+        );
       });
     });
 
@@ -1102,6 +1179,304 @@ void main() {
       });
     });
 
+    group('history refresh and newer pages (revision 28)', () {
+      Future<void> attach() async {
+        await connection.connect();
+        await flush();
+        adapter.simulateMessage({
+          'kind': 'history',
+          'reset': true,
+          'messages': <dynamic>[],
+          'cursor': 'c1',
+          'attachTicket': 't1',
+          'olderCursor': 'o1',
+          'hasEarlier': true,
+          'endCursor': 'e1',
+          'newerHistory': true,
+          'gap': {
+            'code': 'HISTORY_CURSOR_GONE',
+            'reason': 'cursor-out-of-range',
+            'message': 'full replay was sent',
+          },
+        });
+        await flush();
+      }
+
+      Map<String, dynamic> lastSent() =>
+          jsonDecode(adapter.sentFrames.last) as Map<String, dynamic>;
+
+      test('a refresh answer advances only the reconnect cursor', () async {
+        await attach();
+        final id = connection.requestHistoryRefresh(cursor: 'c1');
+        expect(id, isNotNull);
+        expect(lastSent(), {
+          'kind': 'history-refresh',
+          'cursor': 'c1',
+          'clientMessageId': id,
+        });
+        adapter.simulateMessage({
+          'kind': 'history',
+          'messages': [
+            {'type': 'user-message', 'key': 'u1', 'text': 'persisted'},
+          ],
+          'cursor': 'c2',
+          'endCursor': 'e2',
+          'newerHistory': true,
+          'clientMessageId': id,
+        });
+        await flush();
+        final refresh = receivedEvents.whereType<HistoryWireEvent>().last;
+        expect(refresh.clientMessageId, id);
+        expect(connection.cursor, 'c2');
+        expect(connection.attachTicket, 't1', reason: 'a refresh is no ticket');
+        expect(connection.olderCursor, 'o1');
+        expect(connection.hasEarlier, isTrue);
+        expect(connection.lastHistoryGap?.code, 'HISTORY_CURSOR_GONE');
+      });
+
+      test('a refresh is sent only from the current cursor', () async {
+        await attach();
+        expect(connection.requestHistoryRefresh(cursor: 'stale'), isNull);
+        expect(
+          adapter.sentFrames.where((frame) => frame.contains('refresh')),
+          isEmpty,
+        );
+      });
+
+      test('an answer from a cursor since moved past is dropped', () async {
+        await attach();
+        final id = connection.requestHistoryRefresh(cursor: 'c1');
+        // A resync replaced the window before the answer arrived.
+        adapter
+          ..simulateMessage({
+            'kind': 'history',
+            'reset': true,
+            'messages': <dynamic>[],
+            'cursor': 'c9',
+            'endCursor': 'e9',
+            'newerHistory': true,
+          })
+          ..simulateMessage({
+            'kind': 'history',
+            'messages': [
+              {'type': 'user-message', 'key': 'u1', 'text': 'stale'},
+            ],
+            'cursor': 'c2',
+            'endCursor': 'e2',
+            'clientMessageId': id,
+          });
+        await flush();
+        expect(connection.cursor, 'c9');
+        expect(
+          receivedEvents.whereType<HistoryWireEvent>().map((e) => e.cursor),
+          ['c1', 'c9'],
+        );
+      });
+
+      test('a reset settles every refresh asked before it, even one whose '
+          'cursor it restores', () async {
+        await attach();
+        final id = connection.requestHistoryRefresh(cursor: 'c1');
+        // A replacement that lands back on the same cursor (the refreshed
+        // rows were reverted), then the answer read before it.
+        adapter
+          ..simulateMessage({
+            'kind': 'history',
+            'reset': true,
+            'messages': <dynamic>[],
+            'cursor': 'c1',
+            'endCursor': 'e1',
+            'newerHistory': true,
+          })
+          ..simulateMessage({
+            'kind': 'history',
+            'messages': [
+              {'type': 'user-message', 'key': 'u1', 'text': 'reverted'},
+            ],
+            'cursor': 'c2',
+            'endCursor': 'e2',
+            'clientMessageId': id,
+          });
+        await flush();
+        expect(connection.cursor, 'c1');
+        expect(
+          receivedEvents.whereType<HistoryWireEvent>().map((e) => e.cursor),
+          ['c1', 'c1'],
+        );
+        // One asked after the reset is answered as usual.
+        final next = connection.requestHistoryRefresh(cursor: 'c1');
+        adapter.simulateMessage({
+          'kind': 'history',
+          'messages': <dynamic>[],
+          'cursor': 'c3',
+          'clientMessageId': next,
+        });
+        await flush();
+        expect(connection.cursor, 'c3');
+      });
+
+      test('an unrequested or repeated answer is dropped', () async {
+        await attach();
+        final id = connection.requestHistoryRefresh(cursor: 'c1');
+        for (final answer in ['nobody-asked', id!, id]) {
+          adapter.simulateMessage({
+            'kind': 'history',
+            'messages': <dynamic>[],
+            'cursor': answer == 'nobody-asked' ? 'cX' : 'c2',
+            'clientMessageId': answer,
+          });
+        }
+        await flush();
+        expect(connection.cursor, 'c2');
+        expect(
+          receivedEvents.whereType<HistoryWireEvent>().map((e) => e.cursor),
+          ['c1', 'c2'],
+        );
+      });
+
+      test(
+        'a reconnect forgets requests the old socket can never answer',
+        () async {
+          await connection.connect();
+          await flush();
+          adapter.simulateMessage({
+            'kind': 'history',
+            'messages': <dynamic>[],
+            'cursor': 'c1',
+          });
+          await flush();
+          final id = connection.requestHistoryRefresh(cursor: 'c1');
+          final oldAdapter = adapter..simulateDisconnect();
+          await flush();
+          await connection.connect();
+          await flush();
+          expect(identical(adapter, oldAdapter), isFalse);
+          adapter.simulateMessage({
+            'kind': 'history',
+            'messages': <dynamic>[],
+            'cursor': 'c7',
+            'clientMessageId': id,
+          });
+          await flush();
+          expect(connection.cursor, 'c1');
+        },
+      );
+
+      test(
+        'an automatic reconnect forgets requests the old socket can never '
+        'answer',
+        () async {
+          await attach();
+          final id = connection.requestHistoryRefresh(cursor: 'c1');
+          final oldAdapter = adapter..simulateDisconnect();
+          await flush();
+          // The reconnect timer (1s) opens a new socket by itself.
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
+          await flush();
+          expect(identical(adapter, oldAdapter), isFalse);
+          expect(adapter.isConnected, isTrue);
+          adapter.simulateMessage({
+            'kind': 'history',
+            'messages': <dynamic>[],
+            'cursor': 'c7',
+            'clientMessageId': id,
+          });
+          await flush();
+          expect(connection.cursor, 'c1');
+        },
+      );
+
+      test('a reset carrying a refresh id is no refresh answer', () async {
+        await attach();
+        final id = connection.requestHistoryRefresh(cursor: 'c1');
+        adapter.simulateMessage({
+          'kind': 'history',
+          'reset': true,
+          'messages': <dynamic>[],
+          'cursor': 'c2',
+          'clientMessageId': id,
+        });
+        await flush();
+        expect(connection.cursor, 'c1');
+        expect(receivedEvents.whereType<HistoryWireEvent>(), hasLength(1));
+      });
+
+      test('a nack settles the request it answers', () async {
+        await attach();
+        final id = connection.requestHistoryRefresh(cursor: 'c1');
+        adapter
+          ..simulateMessage({
+            'kind': 'nack',
+            'code': 'HISTORY_PAGE_SOURCE_CHANGED',
+            'message': 'try again',
+            'clientMessageId': id,
+          })
+          ..simulateMessage({
+            'kind': 'history',
+            'messages': <dynamic>[],
+            'cursor': 'c2',
+            'clientMessageId': id,
+          });
+        await flush();
+        expect(connection.cursor, 'c1');
+        expect(receivedEvents.whereType<NackWireEvent>(), hasLength(1));
+        expect(receivedEvents.whereType<HistoryWireEvent>(), hasLength(1));
+      });
+
+      test('no refresh is sent on a socket that is not open', () async {
+        final closing = _ClosingWebSocketAdapter();
+        connection = SessionConnection(
+          resolver: EndpointResolver(baseUrl: 'http://127.0.0.1:7734'),
+          tool: 'opencode',
+          sessionId: 'session-1',
+          adapterFactory: (_) => closing,
+        );
+        await connection.connect();
+        await flush();
+        closing.simulateMessage({
+          'kind': 'history',
+          'messages': <dynamic>[],
+          'cursor': 'c1',
+        });
+        await flush();
+        closing.open = false;
+        expect(connection.requestHistoryRefresh(cursor: 'c1'), isNull);
+        closing.open = true;
+        expect(connection.requestHistoryRefresh(cursor: 'c1'), isNotNull);
+      });
+
+      test('a newer page never moves the older boundary', () async {
+        await attach();
+        final id = connection.requestNewerHistoryPage(
+          cursor: 'o1',
+          until: 'e1',
+          limit: 50,
+        );
+        expect(lastSent(), {
+          'kind': 'history-page',
+          'cursor': 'o1',
+          'limit': 50,
+          'direction': 'newer',
+          'until': 'e1',
+          'clientMessageId': id,
+        });
+        adapter.simulateMessage({
+          'kind': 'history-page',
+          'messages': <dynamic>[],
+          'cursor': 'e1',
+          'hasMore': false,
+          'endOfHistory': true,
+          'direction': 'newer',
+          'clientMessageId': id,
+        });
+        await flush();
+        expect(connection.olderCursor, 'o1');
+        expect(connection.hasEarlier, isTrue);
+        final page = receivedEvents.whereType<HistoryPageWireEvent>().single;
+        expect(page.isNewer, isTrue);
+      });
+    });
+
     group('seq: 0 replay frames', () {
       test('tolerates seq: 0 message frames', () async {
         await connection.connect();
@@ -1120,7 +1495,7 @@ void main() {
         expect(receivedEvents, hasLength(1));
         final event = receivedEvents.first as MessageWireEvent;
         expect(event.seq, 0);
-        expect(connection.messages, hasLength(1));
+        expect(event.message.id, 'replay-1');
       });
     });
 
@@ -1664,6 +2039,43 @@ void main() {
       });
 
       test(
+        'a restart does not carry the last attach failure into the new attach',
+        () async {
+          await connection.connect();
+          await flush();
+          adapter
+            ..simulateMessage({
+              'kind': 'hello',
+              'brokerContract': {'revision': 20, 'surfaceHash': 'fixture'},
+              'clientContract': {'revision': 20, 'surfaceHash': 'fixture'},
+              'compatibility': {
+                'status': 'exact',
+                'readOnly': false,
+                'brokerRevision': 20,
+                'clientRevision': 20,
+              },
+            })
+            ..simulateMessage({
+              'kind': 'error',
+              'message': 'attach failed: native session refused',
+            })
+            ..simulateDisconnect();
+          await flush();
+          expect(connection.lastConnectionError, isNotNull);
+
+          final seen = <Object?>[];
+          final subscription = connection.stateStream.listen(
+            (_) => seen.add(connection.lastConnectionError),
+          );
+          await connection.restartAttach();
+          await flush();
+          await subscription.cancel();
+          expect(seen, isNotEmpty);
+          expect(seen.first, isNull);
+        },
+      );
+
+      test(
         'pre-bootstrap broker error closes once and preserves the attach cause',
         () async {
           await connection.connect();
@@ -1844,6 +2256,30 @@ void main() {
           query = Uri.parse(streamUrl!).queryParameters;
           expect(query.containsKey('ownerEpoch'), isFalse);
           expect(query.containsKey('ownerSeq'), isFalse);
+        },
+      );
+
+      test(
+        'a restart attaches again as it was, from the last history cursor',
+        () async {
+          await connection.reattach(mode: 'resume', reason: 'lease-restore');
+          await flush();
+          adapter.simulateMessage({
+            'kind': 'history',
+            'messages': <dynamic>[],
+            'cursor': 'cursor-v2',
+          });
+          await flush();
+
+          await connection.restartAttach();
+          await flush();
+
+          expect(connection.state, SessionConnectionState.connected);
+          final query = Uri.parse(streamUrl!).queryParameters;
+          expect(query['mode'], 'resume');
+          expect(query['reason'], 'lease-restore');
+          expect(query['ticket'], 'cursor-v2');
+          expect(connection.mode, 'resume');
         },
       );
 

@@ -24,6 +24,7 @@ import type {
 } from '@cosyncing/adapter-api';
 import { CONTEXT_INJECTION_EVENT, boundContextBody } from '@cosyncing/adapter-api';
 import {
+  boundedReasonixToolPayload,
   mapReasonixInterruptedTail,
   mapReasonixRecord,
   reasonixMessageKey,
@@ -87,7 +88,6 @@ const MAX_PROMPT_ADMISSIONS = 256;
 const MAX_PENDING_PERMISSIONS = 64;
 const MAX_NATIVE_PERMISSION_OPTIONS = 64;
 const MAX_PERMISSION_FIELD_CHARS = 512;
-const MAX_TOOL_PAYLOAD_BYTES = 64 * 1024;
 const MAX_AVAILABLE_COMMANDS = 256;
 const MAX_TOOL_FIELD_CHARS = 512;
 const PENDING_CREATE_PROBE_INTERVAL_MS = 100;
@@ -738,18 +738,6 @@ function boundedDetail(value: unknown): string | undefined {
   }
 }
 
-function boundedToolPayload(value: unknown, label: 'input' | 'output'): unknown {
-  if (value === undefined) return undefined;
-  try {
-    const encoded = JSON.stringify(value);
-    if (encoded === undefined) return undefined;
-    if (Buffer.byteLength(encoded, 'utf8') <= MAX_TOOL_PAYLOAD_BYTES) return value;
-    return `[Reasonix tool ${label} exceeded ${MAX_TOOL_PAYLOAD_BYTES} bytes; omitted]`;
-  } catch {
-    return `[unserializable Reasonix tool ${label}]`;
-  }
-}
-
 function boundedToolField(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length <= MAX_TOOL_FIELD_CHARS
     ? value
@@ -784,7 +772,7 @@ export function mapReasonixSessionUpdate(
   if (update.sessionUpdate === 'tool_call') {
     const callId = boundedToolField(update.toolCallId, fallbackCallId);
     const title = boundedToolField(update.title, 'Reasonix tool');
-    return [{ type: 'tool-call', callId, toolName: title, title, args: boundedToolPayload(update.rawInput, 'input') }];
+    return [{ type: 'tool-call', callId, toolName: title, title, args: boundedReasonixToolPayload(update.rawInput, 'input') }];
   }
   if (update.sessionUpdate === 'tool_call_update') {
     const status = typeof update.status === 'string' ? update.status.toLowerCase() : '';
@@ -795,7 +783,7 @@ export function mapReasonixSessionUpdate(
       type: 'tool-result',
       callId,
       toolName: title,
-      result: boundedToolPayload(update.rawOutput ?? content ?? update.status, 'output'),
+      result: boundedReasonixToolPayload(update.rawOutput ?? content ?? update.status, 'output'),
       isError: status === 'failed',
     }];
   }

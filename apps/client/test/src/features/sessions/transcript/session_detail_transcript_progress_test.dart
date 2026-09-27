@@ -1,8 +1,10 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../../../support/session_detail_page_test_harness.dart';
+import '../../../../support/transcript_scroll_fixture.dart';
 
 /// N2-D widget proof: the transcript's right-edge thumb position is derived
 /// from stable logical row position and stays monotone through real gestures,
@@ -107,6 +109,61 @@ double? _displayedProgress(WidgetTester tester) {
       .alignment
       .resolve(TextDirection.ltr);
   return (alignment.y + 1) / 2;
+}
+
+final Finder _thumb = find.byKey(
+  const Key('session-transcript-scrollbar-thumb'),
+);
+
+/// A one-line row, so a hundred of them are a few viewports tall.
+AgentMessage _shortRow(int index) => AgentMessage.fromJson({
+  'type': 'user-message',
+  'key': 'short-$index',
+  'text': 'Short row $index.',
+});
+
+Future<void> _wheel(WidgetTester tester, double dy) async {
+  await tester.sendEventToBinding(
+    PointerScrollEvent(
+      position: tester.getCenter(
+        find.byKey(const Key('session-detail-chat-scroll')),
+      ),
+      scrollDelta: Offset(0, dy),
+    ),
+  );
+  await tester.pump();
+}
+
+/// The newest of 3,000 short rows, open at the tail.
+Future<FixturePagingBroker> _openShortTail(WidgetTester tester) async {
+  useRoomyTestViewport(tester);
+  final broker = FixturePagingBroker(total: 3000, row: _shortRow);
+  await tester.pumpWidget(
+    buildSessionDetailTestPage(events: const [], connection: broker),
+  );
+  await tester.pumpAndSettle();
+  return broker;
+}
+
+/// The reader, at the tail of a list now centered on a row near it, turns
+/// back up a little: the whole range still scrolls, though it ends below
+/// zero, so the reading is shown.
+Future<void> _expectReadingShownBelowZero(WidgetTester tester) async {
+  final position = _position(tester);
+  expect(
+    position.maxScrollExtent,
+    lessThanOrEqualTo(0),
+    reason: 'the list is centered on a row within a viewport of its end',
+  );
+  expect(
+    position.maxScrollExtent - position.minScrollExtent,
+    greaterThan(position.viewportDimension),
+  );
+  await _wheel(tester, -100);
+  await tester.pump(const Duration(milliseconds: 100));
+  expect(position.pixels, lessThan(position.maxScrollExtent));
+  expect(_thumb, findsOneWidget);
+  expect(_displayedProgress(tester), lessThan(1));
 }
 
 /// One captured frame of the regression trace. `tailRowBuilt` records whether
@@ -458,6 +515,86 @@ void main() {
         );
       },
     );
+
+    group('on a centered range that ends below zero', () {
+      testWidgets('after a capped replacement re-centers on the reader near '
+          'the tail', (tester) async {
+        final broker = await _openShortTail(tester);
+        broker.emitEvent(
+          HistoryWireEvent(
+            messages: [for (var i = 2901; i < 3000; i++) _shortRow(i)],
+            reset: true,
+            cursor: 'r3000',
+            olderCursor: 'b2901',
+            hasEarlier: true,
+            endCursor: 'b3000',
+            newerHistory: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await _expectReadingShownBelowZero(tester);
+      });
+
+      testWidgets('after each later replacement re-centers it again, with the '
+          'reader reading back and returning in between', (tester) async {
+        final broker = await _openShortTail(tester);
+        for (var first = 2901; first < 2904; first++) {
+          broker.emitEvent(
+            HistoryWireEvent(
+              messages: [for (var i = first; i < 3000; i++) _shortRow(i)],
+              reset: true,
+              cursor: 'r3000',
+              olderCursor: 'b$first',
+              hasEarlier: true,
+              endCursor: 'b3000',
+              newerHistory: true,
+            ),
+          );
+          await tester.pumpAndSettle();
+          await _expectReadingShownBelowZero(tester);
+          // Back up a few viewports, the reading shown all the way, and to
+          // the latest rows again.
+          final position = _position(tester);
+          for (var tick = 0; tick < 12; tick++) {
+            await _wheel(tester, -240);
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(_thumb, findsOneWidget, reason: 'tick $tick');
+          }
+          await tester.pumpAndSettle();
+          position.jumpTo(position.maxScrollExtent);
+          await tester.pumpAndSettle();
+        }
+      });
+
+      testWidgets('but not where nothing scrolls', (tester) async {
+        useRoomyTestViewport(tester);
+        final connection = ScriptedSessionDetailConnection(
+          events: [
+            HistoryWireEvent(
+              messages: [for (var i = 0; i < 3; i++) _shortRow(i)],
+              reset: true,
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+        // A replacement re-centers the short list on the reader's row.
+        connection.emitEvent(
+          HistoryWireEvent(
+            messages: [for (var i = 1; i < 4; i++) _shortRow(i)],
+            reset: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final position = _position(tester);
+        expect(position.maxScrollExtent, position.minScrollExtent);
+        await _wheel(tester, -100);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(_thumb, findsNothing);
+      });
+    });
 
     testWidgets('the logical indicator is vertical on the right edge', (
       tester,

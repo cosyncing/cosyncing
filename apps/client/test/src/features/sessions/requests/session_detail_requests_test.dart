@@ -562,6 +562,100 @@ void main() {
     );
 
     testWidgets(
+      'a card the reconnect does not send again no longer waits, and one it '
+      'sends again does',
+      (tester) async {
+        // Room for all four cards.
+        tester.view
+          ..physicalSize = const Size(1200, 4000)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        AgentMessage permission(String id) => AgentMessage(
+          type: AgentMessageType.permissionRequest,
+          raw: {'type': 'permission-request', 'requestId': id},
+        );
+        AgentMessage question(String id) => AgentMessage(
+          type: AgentMessageType.questionRequest,
+          raw: {
+            'type': 'question-request',
+            'requestId': id,
+            'question': 'Continue?',
+          },
+        );
+        final connection = ScriptedSessionDetailConnection(
+          events: [
+            defaultScriptedHello,
+            const HistoryWireEvent(messages: [], cursor: 'reconnect-0'),
+            MessageWireEvent(seq: 1, message: permission('perm-gone')),
+            MessageWireEvent(seq: 2, message: question('q-gone')),
+            MessageWireEvent(seq: 3, message: permission('perm-kept')),
+            MessageWireEvent(seq: 4, message: question('q-kept')),
+            // The socket drops; the reconnect replays only the cards still
+            // waiting.
+            defaultScriptedHello,
+            const HistoryWireEvent(messages: [], cursor: 'reconnect-0'),
+            MessageWireEvent(seq: 0, message: permission('perm-kept')),
+            MessageWireEvent(seq: 0, message: question('q-kept')),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.ensureVisible(
+          find.byKey(const Key('session-detail-permission-approve-perm-gone')),
+        );
+        expect(
+          tester
+              .widget<FilledButton>(
+                find.byKey(
+                  const Key('session-detail-permission-approve-perm-gone'),
+                ),
+              )
+              .onPressed,
+          isNull,
+        );
+        expect(
+          find.byKey(
+            const Key('session-detail-permission-withdrawn-perm-gone'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('session-detail-question-withdrawn-q-gone')),
+          findsOneWidget,
+        );
+        expect(
+          find.text('No longer waiting for an answer.'),
+          findsNWidgets(2),
+        );
+        Future<TextButton> dismiss(String id) async {
+          final button = find.byKey(Key('session-detail-question-reject-$id'));
+          await tester.ensureVisible(button);
+          return tester.widget<TextButton>(button);
+        }
+
+        expect((await dismiss('q-gone')).onPressed, isNull);
+        expect((await dismiss('q-kept')).onPressed, isNotNull);
+        expect(find.text('Resolved in another client.'), findsNothing);
+        await tester.ensureVisible(
+          find.byKey(const Key('session-detail-permission-approve-perm-kept')),
+        );
+        expect(
+          tester
+              .widget<FilledButton>(
+                find.byKey(
+                  const Key('session-detail-permission-approve-perm-kept'),
+                ),
+              )
+              .onPressed,
+          isNotNull,
+        );
+      },
+    );
+
+    testWidgets(
       'deactivates the question card after external resolution',
       (tester) async {
         final connection = ScriptedSessionDetailConnection(

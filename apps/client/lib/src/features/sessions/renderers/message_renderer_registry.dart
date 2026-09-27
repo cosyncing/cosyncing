@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/transcript_markdown.dart';
+import 'package:cosyncing_client/src/features/sessions/renderers/transcript_render_cache.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_diff_body_loader.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_file_link_scope.dart';
@@ -102,6 +103,46 @@ Widget buildAgentMessageRenderer(
     message,
   );
 }
+
+/// Test-only counters for the transcript's markdown and code rendering work,
+/// so a measurement can tell how often, and for how long, rows parse their
+/// markdown and highlight their code.
+@visibleForTesting
+final class TranscriptRenderWorkCounter {
+  /// Markdown sources parsed.
+  int markdownParses = 0;
+
+  /// Code units of markdown parsed.
+  int markdownParsedUnits = 0;
+
+  /// Time spent parsing markdown.
+  int markdownParseMicros = 0;
+
+  /// Code blocks highlighted.
+  int codeHighlights = 0;
+
+  /// Code units highlighted.
+  int codeHighlightedUnits = 0;
+
+  /// Time spent highlighting code.
+  int codeHighlightMicros = 0;
+
+  /// Markdown parses answered from the cache.
+  int markdownCacheHits = 0;
+
+  /// Markdown bodies that returned what they built last time, unchanged.
+  int markdownBodyReuses = 0;
+
+  /// Blocks a changed markdown body kept from what it built last time.
+  int markdownBlocksReused = 0;
+
+  /// Code highlights answered from the cache.
+  int codeCacheHits = 0;
+}
+
+/// Test-only sink for [TranscriptRenderWorkCounter]; null in production.
+@visibleForTesting
+TranscriptRenderWorkCounter? debugTranscriptRenderWork;
 
 /// Renders [source] as markdown blocks, for a host outside the transcript.
 ///

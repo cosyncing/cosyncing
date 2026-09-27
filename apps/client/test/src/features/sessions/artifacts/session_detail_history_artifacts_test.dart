@@ -1407,8 +1407,11 @@ void main() {
       );
 
       test(
-        'hydrating a capped snapshot reconciles a live delta without dupes',
+        'hydrating an oversized legacy snapshot resumes by reset and names '
+        'what it could not keep',
         () async {
+          // 500 rows: the pre-window client persisted up to this many. The
+          // window's own snapshots never exceed the open-tail allowance.
           fakeTranscriptRepository.stored = SessionTranscriptSnapshot(
             brokerProfileId: fakeControllerBrokerScope(),
             sessionKey: key,
@@ -1436,16 +1439,28 @@ void main() {
           final hydrated = container.read(
             sessionDetailControllerProvider(key),
           );
-          expect(hydrated.messageEvents, hasLength(100));
-          expect(hydrated.latestHistoryTruncation?.shown, 100);
+          // Four times the old 100-row trim survives; the rest is named as a
+          // range that needs a reconnect, never presented as contiguous.
+          expect(
+            hydrated.messageEvents,
+            hasLength(kMaxOpenTranscriptTailMessages),
+          );
+          expect(hydrated.messageEvents.last.raw['key'], 'msg-599');
+          expect(
+            hydrated.latestHistoryTruncation?.shown,
+            kMaxOpenTranscriptTailMessages,
+          );
           expect(hydrated.latestHistoryTruncation?.total, 600);
-          expect(hydrated.hasEarlierHistory, isTrue);
           expect(
             hydrated.leadingTranscriptHistoryGap?.kind,
             TranscriptHistoryGapKind.reconnectRequired,
           );
+          // More rows than one broker frame: the snapshot does not resume
+          // incrementally, so the first attach is an authoritative reset.
+          expect(hydrated.historyCursor, isNull);
+          expect(fakeConnection.seededHistoryCursor, isNull);
 
-          // Live reattach delta re-sends the last final plus two new messages.
+          // A delta that still arrives re-sends the last final plus two rows.
           fakeConnection.emitEvent(
             HistoryWireEvent(
               messages: [
@@ -1478,18 +1493,307 @@ void main() {
             state.messageEvents.where((m) => m.raw['key'] == 'msg-599'),
             hasLength(1),
           );
-          // The two genuinely new rows survive while the active decoded
-          // window remains inside H1's hard count budget.
           expect(
             state.messageEvents,
-            hasLength(kRetainedTranscriptTailMessages),
+            hasLength(kMaxOpenTranscriptTailMessages),
           );
           expect(state.messageEvents.last.raw['key'], 'msg-601');
-          // Earlier content is still surfaced, not a silent continuous gap.
-          expect(state.hasEarlierHistory, isTrue);
-          expect(state.olderHistoryCursor, 'older2');
+          expect(
+            state.leadingTranscriptHistoryGap?.kind,
+            TranscriptHistoryGapKind.reconnectRequired,
+          );
+          expect(state.historyStartReached, isFalse);
         },
       );
+
+      test('a head-released snapshot resumes by reset, which clears the '
+          'released range', () async {
+        // Small enough for one broker frame, but released at its head: no
+        // incremental frame could reach the released rows.
+        fakeTranscriptRepository.stored = SessionTranscriptSnapshot(
+          brokerProfileId: fakeControllerBrokerScope(),
+          sessionKey: key,
+          messages: [
+            for (var i = 0; i < 50; i++)
+              AgentMessage.fromJson({
+                'type': 'model-output',
+                'key': 'msg-$i',
+                'text': 'cached $i',
+              }),
+          ],
+          cursor: 'tail',
+          hasEarlier: false,
+          headReleased: true,
+          updatedAt: DateTime.utc(2026, 9, 23),
+        );
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final hydrated = container.read(sessionDetailControllerProvider(key));
+        expect(
+          hydrated.leadingTranscriptHistoryGap?.kind,
+          TranscriptHistoryGapKind.reconnectRequired,
+        );
+        expect(fakeConnection.seededHistoryCursor, isNull);
+
+        fakeConnection.emitEvent(
+          HistoryWireEvent(
+            messages: [
+              for (var i = 0; i < 60; i++)
+                AgentMessage.fromJson({
+                  'type': 'model-output',
+                  'key': 'msg-$i',
+                  'text': 'reduced $i',
+                }),
+            ],
+            reset: true,
+            cursor: 'reconnect-1',
+            olderCursor: 'older-1',
+            hasEarlier: true,
+            endCursor: 'end-1',
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(state.leadingTranscriptHistoryGap, isNull);
+        expect(state.activeTranscriptWindow.leadingEdgeReleased, isFalse);
+        expect(state.olderHistoryCursor, 'older-1');
+      });
+
+      group('bounded window wiring', () {
+        AgentMessage row(String key, {int chars = 16}) =>
+            AgentMessage.fromJson({
+              'type': 'model-output',
+              'key': key,
+              'text': 'x' * chars,
+            });
+
+        Future<SessionDetailController> attachWith(
+          List<AgentMessage> messages, {
+          String? olderCursor = 'older-0',
+        }) async {
+          keepSessionDetailAlive(container, key);
+          final controller = container.read(
+            sessionDetailControllerProvider(key).notifier,
+          );
+          await controller.attach();
+          fakeConnection.emitEvent(
+            HistoryWireEvent(
+              messages: messages,
+              reset: true,
+              cursor: 'reconnect-0',
+              olderCursor: olderCursor,
+              hasEarlier: olderCursor != null,
+              endCursor: 'end-0',
+            ),
+          );
+          await drainSessionDetailMicrotasks();
+          return controller;
+        }
+
+        Future<void> emitLive(Iterable<AgentMessage> messages) async {
+          var seq = 1000;
+          for (final message in messages) {
+            fakeConnection.emitEvent(
+              MessageWireEvent(seq: seq++, message: message),
+            );
+          }
+          await drainSessionDetailMicrotasks();
+        }
+
+        SessionDetailState read() =>
+            container.read(sessionDetailControllerProvider(key));
+
+        test("live frames carry the reader's row into the window", () async {
+          final controller = await attachWith([
+            for (var i = 0; i < 100; i++) row('t$i'),
+          ]);
+          controller.protectHistoryViewportAnchor('model-output:key:t0');
+          await emitLive([for (var i = 0; i < 800; i++) row('live-$i')]);
+
+          final state = read();
+          expect(
+            state.canonicalTranscriptMessages.any((m) => m.raw['key'] == 't0'),
+            isTrue,
+          );
+          expect(
+            state.canonicalTranscriptMessages.last.raw['key'],
+            'live-799',
+          );
+        });
+
+        test(
+          'a released range is reloaded with exactly its row count',
+          () async {
+            final plan = AgentMessage.fromJson(const {
+              'type': 'task-list-state',
+              'key': 'plan',
+              'title': 'Plan',
+              'status': 'running',
+              'items': <Object?>[],
+            });
+            final controller = await attachWith([
+              plan,
+              for (var i = 0; i < 99; i++) row('t$i'),
+            ]);
+            await emitLive([for (var i = 0; i < 350; i++) row('live-$i')]);
+            expect(read().olderHistoryCursor, 'end-0');
+
+            expect(await controller.loadEarlierHistory(), isTrue);
+            expect(fakeConnection.lastHistoryPageCursor, 'end-0');
+            expect(fakeConnection.lastHistoryPageLimit, 99);
+          },
+        );
+
+        test('a page too large to keep is asked for again, smaller', () async {
+          final controller = await attachWith([
+            for (var i = 0; i < 100; i++) row('t$i'),
+          ]);
+          await emitLive([
+            for (var i = 0; i < 300; i++) row('live-$i', chars: 4000),
+          ]);
+          expect(await controller.loadEarlierHistory(), isTrue);
+          expect(fakeConnection.lastHistoryPageLimit, 100);
+          fakeConnection.emitEvent(
+            HistoryPageWireEvent(
+              messages: [for (var i = 0; i < 100; i++) row('o$i', chars: 9000)],
+              cursor: 'older-1',
+              hasMore: true,
+              endOfHistory: false,
+              clientMessageId: fakeConnection.lastHistoryPageClientMessageId,
+            ),
+          );
+          await drainSessionDetailMicrotasks();
+
+          expect(fakeConnection.historyPageRequestCount, 2);
+          expect(fakeConnection.lastHistoryPageCursor, 'older-0');
+          expect(fakeConnection.lastHistoryPageLimit, 50);
+          expect(read().historyPageErrorCode, isNull);
+          expect(read().historyPageError, isNull);
+        });
+
+        test('reloading the released start page restores the start of '
+            'history', () async {
+          final controller = await attachWith([
+            for (var i = 0; i < 100; i++) row('t$i'),
+          ]);
+          Future<void> answer(
+            List<AgentMessage> messages, {
+            String? cursor,
+          }) async {
+            fakeConnection.emitEvent(
+              HistoryPageWireEvent(
+                messages: messages,
+                cursor: cursor,
+                hasMore: cursor != null,
+                endOfHistory: cursor == null,
+                clientMessageId: fakeConnection.lastHistoryPageClientMessageId,
+              ),
+            );
+            await drainSessionDetailMicrotasks();
+          }
+
+          final older = [for (var i = 0; i < 100; i++) row('p$i')];
+          expect(await controller.loadEarlierHistory(), isTrue);
+          await answer(older, cursor: 'older-1');
+          expect(await controller.loadEarlierHistory(), isTrue);
+          await answer(const []);
+          expect(read().historyStartReached, isTrue);
+
+          await emitLive([for (var i = 0; i < 301; i++) row('live-$i')]);
+          expect(read().historyStartReached, isFalse);
+          expect(read().olderHistoryCursor, 'end-0');
+
+          expect(await controller.loadEarlierHistory(), isTrue);
+          await answer([
+            for (var i = 0; i < 100; i++) row('t$i'),
+          ], cursor: 'older-0');
+          expect(await controller.loadEarlierHistory(), isTrue);
+          expect(fakeConnection.lastHistoryPageCursor, 'older-0');
+          expect(fakeConnection.lastHistoryPageLimit, 100);
+          // The session opens with state rows: the walk stops after `p0` and
+          // reports more history behind it.
+          await answer(older, cursor: 'walk-stopped-after-p0');
+
+          expect(read().olderHistoryCursor, isNull);
+          expect(read().historyStartReached, isTrue);
+        });
+
+        test('a page request never asks for fewer than one row', () async {
+          final controller = await attachWith([
+            for (var i = 0; i < 100; i++) row('t$i'),
+          ]);
+          expect(await controller.loadEarlierHistory(limit: 0), isTrue);
+          expect(fakeConnection.lastHistoryPageCursor, 'older-0');
+          expect(fakeConnection.lastHistoryPageLimit, 1);
+        });
+
+        test('a page for a boundary the window has since released is dropped '
+            'without an error', () async {
+          final controller = await attachWith([
+            for (var i = 0; i < 100; i++) row('t$i'),
+          ]);
+          expect(await controller.loadEarlierHistory(), isTrue);
+          expect(fakeConnection.lastHistoryPageCursor, 'older-0');
+          // Live growth releases the attach frame while the page is in flight.
+          await emitLive([for (var i = 0; i < 350; i++) row('live-$i')]);
+          expect(read().olderHistoryCursor, 'end-0');
+          fakeConnection.emitEvent(
+            HistoryPageWireEvent(
+              messages: [for (var i = 0; i < 100; i++) row('o$i')],
+              cursor: 'older-1',
+              hasMore: true,
+              endOfHistory: false,
+              clientMessageId: fakeConnection.lastHistoryPageClientMessageId,
+            ),
+          );
+          await drainSessionDetailMicrotasks();
+
+          final state = read();
+          expect(state.historyPageLoading, isFalse);
+          expect(state.historyPageErrorCode, isNull);
+          expect(
+            state.canonicalTranscriptMessages.any((m) => m.raw['key'] == 'o0'),
+            isFalse,
+          );
+          expect(await controller.loadEarlierHistory(), isTrue);
+          expect(fakeConnection.lastHistoryPageCursor, 'end-0');
+        });
+
+        test(
+          'the start of history is retracted when the start is released',
+          () async {
+            await attachWith(
+              [for (var i = 0; i < 100; i++) row('t$i')],
+              olderCursor: null,
+            );
+            expect(read().historyStartReached, isTrue);
+            await emitLive([for (var i = 0; i < 350; i++) row('live-$i')]);
+            expect(read().historyStartReached, isFalse);
+          },
+        );
+
+        test(
+          'the persisted snapshot never claims a boundary the tail lost',
+          () async {
+            await attachWith([for (var i = 0; i < 100; i++) row('t$i')]);
+            await emitLive([for (var i = 0; i < 1000; i++) row('live-$i')]);
+
+            final snapshot = fakeTranscriptRepository.upserts.last;
+            expect(snapshot.headReleased, isTrue);
+            expect(snapshot.olderCursor, isNull);
+            expect(snapshot.hasEarlier, isFalse);
+            expect(
+              snapshot.messages.length,
+              lessThanOrEqualTo(kMaxOpenTranscriptTailMessages),
+            );
+            expect(snapshot.messages.last.raw['key'], 'live-999');
+          },
+        );
+      });
 
       test(
         'loadEarlierHistory times out and ignores its stale reply after retry',
