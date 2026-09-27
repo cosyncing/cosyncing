@@ -65,7 +65,7 @@ console.log('PASS  publication verifier targets the current server token field')
 
 {
   const empty: CandidateCredentialInputWitness = {
-    focusedEditable: false, matchesField: false, matchesValue: false, valueLength: 0, activeTag: 'other',
+    focusedEditable: false, inputListenerAttached: false, matchesField: false, matchesValue: false, valueLength: 0, activeTag: 'other',
   };
   let focused = false;
   let inserted = false;
@@ -74,7 +74,7 @@ console.log('PASS  publication verifier targets the current server token field')
     clickField: async () => {},
     inspect: async () => {
       focused = ++probes >= 3;
-      return { ...empty, focusedEditable: focused, matchesField: focused, matchesValue: inserted };
+      return { ...empty, focusedEditable: focused, inputListenerAttached: focused, matchesField: focused, matchesValue: inserted };
     },
     replaceText: async () => { assert.equal(focused, true, 'must not type before the delayed Flutter editor has focus'); inserted = true; },
     waitFor: async (predicate) => { for (let i = 0; i < 4; i++) if (await predicate()) return true; return false; },
@@ -82,11 +82,40 @@ console.log('PASS  publication verifier targets the current server token field')
   assert.equal(inserted, true);
   console.log('PASS  credential input waits for delayed editable focus before typing');
 
+  let listenerAttached = false;
+  let listenerProbes = 0;
+  let listenerWrites = 0;
+  await enterCandidateCredential({
+    clickField: async () => {},
+    inspect: async () => {
+      listenerAttached = ++listenerProbes >= 3;
+      return { ...empty, focusedEditable: true, matchesField: true,
+        inputListenerAttached: listenerAttached, matchesValue: listenerWrites > 0 };
+    },
+    replaceText: async () => {
+      assert.equal(listenerAttached, true, 'DOM focus must not allow typing before Flutter listens');
+      listenerWrites++;
+    },
+    waitFor: async (predicate) => { for (let i = 0; i < 4; i++) if (await predicate()) return true; return false; },
+  });
+  assert.equal(listenerWrites, 1);
+  console.log('PASS  focused semantics editor waits for its delayed input listener before typing');
+
+  let unhandledWrites = 0;
+  await assert.rejects(enterCandidateCredential({
+    clickField: async () => {},
+    inspect: async () => ({ ...empty, focusedEditable: true, matchesField: true, matchesValue: true }),
+    replaceText: async () => { unhandledWrites++; },
+    waitFor: async (predicate) => predicate(),
+  }), /did not accept its credential input/);
+  assert.equal(unhandledWrites, 0);
+  console.log('PASS  a DOM value without an input listener cannot pass credential readiness');
+
   let attempts = 0;
   let replacements = 0;
   await enterCandidateCredential({
     clickField: async () => { attempts++; },
-    inspect: async () => ({ ...empty, focusedEditable: true, matchesField: true, matchesValue: replacements === 2, valueLength: replacements === 2 ? 43 : 0, activeTag: 'input' }),
+    inspect: async () => ({ ...empty, focusedEditable: true, inputListenerAttached: true, matchesField: true, matchesValue: replacements === 2, valueLength: replacements === 2 ? 43 : 0, activeTag: 'input' }),
     replaceText: async () => { replacements++; },
     waitFor: async (predicate) => predicate(),
   });
@@ -97,7 +126,7 @@ console.log('PASS  publication verifier targets the current server token field')
   let wrongFieldWrites = 0;
   await assert.rejects(enterCandidateCredential({
     clickField: async () => {},
-    inspect: async () => ({ ...empty, focusedEditable: true, valueLength: 4, activeTag: 'input' }),
+    inspect: async () => ({ ...empty, focusedEditable: true, inputListenerAttached: true, valueLength: 4, activeTag: 'input' }),
     replaceText: async () => { wrongFieldWrites++; },
     waitFor: async (predicate) => predicate(),
   }), /did not accept its credential input/);
@@ -107,7 +136,7 @@ console.log('PASS  publication verifier targets the current server token field')
   let inputAttempts = 0;
   await assert.rejects(enterCandidateCredential({
     clickField: async () => {},
-    inspect: async () => ({ ...empty, focusedEditable: true, matchesField: true, valueLength: 43, activeTag: 'input' }),
+    inspect: async () => ({ ...empty, focusedEditable: true, inputListenerAttached: true, matchesField: true, valueLength: 43, activeTag: 'input' }),
     replaceText: async () => { inputAttempts++; },
     waitFor: async (predicate) => predicate(),
   }), (error: Error) => {

@@ -41,13 +41,14 @@ export const CANDIDATE_CREDENTIAL_FIELD_LABEL = 'Server token';
 
 export interface CandidateCredentialInputWitness {
   focusedEditable: boolean;
+  inputListenerAttached: boolean;
   matchesField: boolean;
   matchesValue: boolean;
   valueLength: number;
   activeTag: string;
 }
 
-/** Wait for Flutter's editable, which can attach after its semantics field receives the click. */
+/** Flutter can focus its semantics input before attaching the text-editing listener. */
 export async function enterCandidateCredential(options: {
   clickField(): Promise<void>;
   replaceText(): Promise<void>;
@@ -59,12 +60,13 @@ export async function enterCandidateCredential(options: {
     await options.clickField();
     if (!await options.waitFor(async () => {
       witness = await options.inspect();
-      return witness.focusedEditable && witness.matchesField;
+      return witness.focusedEditable && witness.matchesField && witness.inputListenerAttached;
     }, 5_000)) continue;
     await options.replaceText();
     if (await options.waitFor(async () => {
       witness = await options.inspect();
-      return witness.focusedEditable && witness.matchesField && witness.matchesValue;
+      return witness.focusedEditable && witness.matchesField && witness.inputListenerAttached
+        && witness.matchesValue;
     }, 5_000)) return;
   }
   // Witnesses contain only booleans, lengths and tag names; never return or log the credential value.
@@ -678,34 +680,68 @@ async function probeBuiltClient(options: {
         }`,
       );
     }
-    const credentialInput = async (): Promise<CandidateCredentialInputWitness> => evaluate(`(() => {
-      const expectedLabel = ${JSON.stringify(CANDIDATE_CREDENTIAL_FIELD_LABEL.toLowerCase())};
-      let active = document.activeElement;
-      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
-      const editable = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
-      const focusedEditable = editable && active.isConnected && !active.disabled && !active.readOnly;
-      const label = (element) => (element.getAttribute('aria-label')
-        || element.getAttribute('placeholder') || element.textContent || '').trim().toLowerCase();
-      const rect = active?.getBoundingClientRect();
-      const fields = Array.from(document.querySelectorAll(
-        'flt-semantics, flt-semantics *, input, textarea'
-      )).filter((element) => label(element) === expectedLabel);
-      const matchesField = focusedEditable && fields.some((element) => {
-        if (element === active || element.contains(active)) return true;
-        // Flutter can keep the editing input outside the semantics tree. Its painted rectangle must
-        // still contain the labelled field's centre; a focused editor elsewhere is not this field.
-        const field = element.getBoundingClientRect();
-        const x = field.x + field.width / 2, y = field.y + field.height / 2;
-        return field.width > 0 && field.height > 0 && rect.width > 0 && rect.height > 0
-          && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    const credentialInput = async (): Promise<CandidateCredentialInputWitness> => {
+      const editor = await send('Runtime.evaluate', {
+        expression: `(() => {
+          let active = document.activeElement;
+          while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+          return active;
+        })()`,
       });
-      return {
-        focusedEditable, matchesField,
-        matchesValue: matchesField && active.value === ${JSON.stringify(options.token)},
-        valueLength: editable ? active.value.length : 0,
-        activeTag: editable ? active.tagName.toLowerCase() : 'other',
+      const objectId = editor.result?.objectId;
+      if (!objectId) return {
+        focusedEditable: false, inputListenerAttached: false, matchesField: false,
+        matchesValue: false, valueLength: 0, activeTag: 'other',
       };
-    })()`);
+      try {
+        // DOM focus and a changed DOM value alone do not prove Flutter received the input. The
+        // semantics node exists before SemanticsTextEditingStrategy installs its input handler.
+        // Inspect listeners on that exact node, then recheck its focus before accepting the witness.
+        const { listeners } = await send('DOMDebugger.getEventListeners', { objectId, depth: 0 });
+        const response = await send('Runtime.callFunctionOn', {
+          objectId,
+          returnByValue: true,
+          arguments: [
+            { value: CANDIDATE_CREDENTIAL_FIELD_LABEL.toLowerCase() },
+            { value: options.token },
+            { value: listeners.some((listener: { type: string }) => listener.type === 'input') },
+          ],
+          functionDeclaration: `function(expectedLabel, expectedValue, inputListenerAttached) {
+            const active = this;
+            let focused = document.activeElement;
+            while (focused?.shadowRoot?.activeElement) focused = focused.shadowRoot.activeElement;
+            const editable = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
+            const focusedEditable = editable && active === focused && active.isConnected
+              && !active.disabled && !active.readOnly;
+            const label = (element) => (element.getAttribute('aria-label')
+              || element.getAttribute('placeholder') || element.textContent || '').trim().toLowerCase();
+            const rect = active?.getBoundingClientRect();
+            const fields = Array.from(document.querySelectorAll(
+              'flt-semantics, flt-semantics *, input, textarea'
+            )).filter((element) => label(element) === expectedLabel);
+            const matchesField = focusedEditable && fields.some((element) => {
+              if (element === active || element.contains(active)) return true;
+              // Flutter can keep the editing input outside the semantics tree. Its painted rectangle must
+              // still contain the labelled field's centre; a focused editor elsewhere is not this field.
+              const field = element.getBoundingClientRect();
+              const x = field.x + field.width / 2, y = field.y + field.height / 2;
+              return field.width > 0 && field.height > 0 && rect.width > 0 && rect.height > 0
+                && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+            });
+            return {
+              focusedEditable, inputListenerAttached, matchesField,
+              matchesValue: matchesField && active.value === expectedValue,
+              valueLength: editable ? active.value.length : 0,
+              activeTag: editable ? active.tagName.toLowerCase() : 'other',
+            };
+          }`,
+        });
+        if (response.exceptionDetails) throw new Error('candidate credential readiness inspection failed');
+        return response.result.value as CandidateCredentialInputWitness;
+      } finally {
+        await send('Runtime.releaseObject', { objectId });
+      }
+    };
     await enterCandidateCredential({
       clickField: () => clickLabel(CANDIDATE_CREDENTIAL_FIELD_LABEL),
       inspect: credentialInput,

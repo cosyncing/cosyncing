@@ -112,7 +112,8 @@ try {
     const dir = join(previewRoot, 'artifacts', 'blobs');
     // Blobs live at `<2-char prefix>/<hash>`; the prefix directories are not blobs.
     return existsSync(dir)
-      ? readdirSync(dir, { recursive: true }).map(String).filter((entry) => entry.includes('/'))
+      ? readdirSync(dir, { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile()).map((entry) => entry.name)
       : [];
   };
   const indexPath = join(previewRoot, 'artifacts', 'index.json');
