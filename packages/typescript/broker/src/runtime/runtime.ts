@@ -119,9 +119,18 @@ import { buildDiffRefMessage, INLINE_DIFF_CAP } from '../sessions/diff-reference
 import { assertR2ActionsSafe, consumeConfirmNonce, deriveSessionRevision, getR2Action, issueConfirmNonce, r2ActionAvailable, r2EnabledActions, r2MaxBytes, reserveR2RateSlot } from '../security/r2-policy.ts';
 import { runTranscriptExport } from '../security/r2-export.ts';
 import {
-  backwardHistoryCursor,
+  backwardHistoryCursorBoundary,
   capHistoryDelta,
+  estimatedClientDecodedBytes,
+  HISTORY_FRAME_MAX_DECODED_BYTES,
   historyDelta,
+  type HistoryRefresh,
+  historyRefresh,
+  historyRefreshRequest,
+  type HistoryRefreshRefusal,
+  cursorDurableHistory,
+  holdRunningTurn,
+  isPendingToolSlot,
   isCursorDurableMessage,
 } from '../sessions/history-delta.ts';
 import {
@@ -134,7 +143,9 @@ import {
   IndexedHistoryPageCacheBuilder,
   type HistoryPageCache,
   HistoryPageCachePool,
+  historyFitsEncodedPageCache,
   sameHistorySourceIdentity,
+  validHistorySourceIdentity,
 } from '../sessions/history-page-cache.ts';
 import { refreshSessionOptions } from '../sessions/session-options.ts';
 import { SessionMetadataStore } from '../sessions/session-metadata-store.ts';
@@ -681,6 +692,13 @@ function envNumber(name: string, fallback: number): number {
 // on the client (the Chrome-tab-crash bug); the cursor still covers the full prefix so reattaches
 // stay incremental. See capHistoryDelta.
 const HISTORY_MAX_MESSAGES = envNumber('COSYNCING_HISTORY_MAX_MESSAGES', 500);
+// Decoded-byte bound on the same frame, measured with the client's estimator (0 disables). It is
+// the frame's share of the client's one bounded window, so an attach never delivers rows the
+// client would have to drop without a boundary. See HISTORY_FRAME_MAX_DECODED_BYTES.
+const HISTORY_MAX_DECODED_BYTES = envNumber(
+  'COSYNCING_HISTORY_MAX_DECODED_BYTES',
+  HISTORY_FRAME_MAX_DECODED_BYTES,
+);
 const FS_READ_CAP_BYTES = envNumber('COSYNCING_FS_READ_MAX_BYTES', DEFAULT_FS_READ_CAP_BYTES);
 const UPLOAD_MAX_BYTES = envNumber('COSYNCING_UPLOAD_MAX_BYTES', 64 * 1024 * 1024);
 const FS_DOWNLOAD_MAX_BYTES = envNumber('COSYNCING_FS_DOWNLOAD_MAX_BYTES', UPLOAD_MAX_BYTES);
@@ -2594,6 +2612,78 @@ function socketPrincipalActive(ws: ServerWebSocket<WsData>): boolean {
 const MIN_PROMPT_GAP_MS = 350;
 const historyPageCaches = new HistoryPageCachePool();
 
+/**
+ * When a pooled snapshot was read: the managed connection it was read for, how many transcript rows
+ * that connection had delivered live by then, and whether a turn was running while it was read.
+ *
+ * A source revision is not always exact. OpenCode's moves only every few writes, so a snapshot
+ * pooled under the current revision can be missing rows the session has since written, and it was
+ * answered from as if it were current: a refresh came back empty and a second client's newer
+ * cursors were refused as gone. A live transcript row after the read proves the snapshot is
+ * behind. A snapshot read while a turn ran may end on rows the turn has rewritten since, so frames
+ * and pages served from it stop at the running-turn hold even once the turn is over.
+ */
+type PooledHistoryRead = { mc: ManagedConn; liveWrites: number; turnRunning: boolean; sequence: number };
+const pooledHistoryReads = new WeakMap<HistoryPageCache, PooledHistoryRead>();
+/** Counts pooled reads as they begin, so a request can tell a snapshot read for it from an older one. */
+let pooledHistoryReadSequence = 0;
+
+function beginPooledHistoryRead(mc: ManagedConn | undefined): PooledHistoryRead | undefined {
+  return mc
+    ? { mc, liveWrites: mc.liveHistoryWrites, turnRunning: mc.turnInFlight(), sequence: ++pooledHistoryReadSequence }
+    : undefined;
+}
+
+/** A mark taken when a request arrives, for {@link pooledHistoryReadAfter}. */
+function pooledHistoryReadMark(): number {
+  return pooledHistoryReadSequence;
+}
+
+/**
+ * Whether [cache] was read after [mark]: it then already reflects every cursor the request
+ * carries, and a refusal from it is the answer, never a reason to read the source again.
+ */
+function pooledHistoryReadAfter(cache: HistoryPageCache, mark: number): boolean {
+  return (pooledHistoryReads.get(cache)?.sequence ?? 0) > mark;
+}
+
+function notePooledHistoryRead(cache: HistoryPageCache, read: PooledHistoryRead | undefined): void {
+  if (!read) return;
+  pooledHistoryReads.set(cache, { ...read, turnRunning: read.turnRunning || read.mc.turnInFlight() });
+}
+
+/**
+ * Whether a pooled generic snapshot is behind its session (see {@link PooledHistoryRead}). A native
+ * capture is one observation of an immutable prefix, identified exactly, so it is never judged
+ * stale this way.
+ */
+function pooledHistoryCacheBehind(cache: HistoryPageCache, mc: ManagedConn): boolean {
+  if (cache.kind !== 'encoded') return false;
+  const read = pooledHistoryReads.get(cache);
+  if (!read) return false;
+  return read.mc !== mc || mc.liveHistoryWrites > read.liveWrites;
+}
+
+/**
+ * Whether [code], refused from pooled [cache], may only mean the snapshot is behind the session, so
+ * that one fresh read must decide it. A cursor beyond the snapshot is gone from it. A generic
+ * snapshot read while a turn ran can also hold a row the turn has rewritten since (text that was
+ * still streaming), which a cursor from a later read of the same coarse revision covers as it now
+ * is. A snapshot read while the session was idle holds no such row, so a cursor that diverges from
+ * it has diverged from the session, and is refused without another read.
+ */
+function pooledSnapshotRefusal(cache: HistoryPageCache, code: string | undefined): boolean {
+  if (code === 'HISTORY_CURSOR_GONE') return true;
+  return code === 'HISTORY_CURSOR_DIVERGED'
+    && cache.kind === 'encoded'
+    && pooledHistoryReads.get(cache)?.turnRunning === true;
+}
+
+/** Whether frames and pages served from [cache] stop at the running-turn hold. */
+function pooledHistoryCacheHolds(cache: HistoryPageCache, mc: ManagedConn): boolean {
+  return mc.turnInFlight() || pooledHistoryReads.get(cache)?.turnRunning === true;
+}
+
 function historyPageCacheScope(
   tool: string,
   id: string,
@@ -2612,18 +2702,9 @@ async function readHistorySourceIdentity(
   connection: SessionConnection,
 ): Promise<HistorySourceIdentity | undefined> {
   try {
-    const identity = await connection.getHistorySourceIdentity?.();
-    if (
-      !identity
-      || typeof identity.sourceId !== 'string'
-      || identity.sourceId.length === 0
-      || typeof identity.revision !== 'string'
-      || identity.revision.length === 0
-      || (identity.appendPosition !== undefined
-        && (!Number.isSafeInteger(identity.appendPosition)
-          || identity.appendPosition < 0))
-    ) return undefined;
-    return Object.freeze({ ...identity });
+    return validHistorySourceIdentity(
+      await connection.getHistorySourceIdentity?.(),
+    );
   } catch {
     return undefined;
   }
@@ -2644,7 +2725,7 @@ function sameHistorySourceRevision(
 async function readNativeHistory(
   connection: SessionConnection,
   artifactMode: 'inline' | 'reference' | undefined,
-  reason: 'attach' | 'page-cache-miss',
+  reason: 'attach' | 'page-cache-miss' | 'refresh',
   signal?: AbortSignal,
 ): Promise<
   | { kind: 'history'; messages: AgentMessage[] }
@@ -2663,28 +2744,72 @@ async function readNativeHistory(
   }
 }
 
+/**
+ * Whether the paging route will be able to serve pages over one generic history
+ * read, and the page cache for it when the read is an exact snapshot.
+ *
+ * - `seeded`: the read matched one source revision and its cache is pooled.
+ * - `fits`: the rows fit the paging cache and a page request (which reads the
+ *   current source) resolves them, but no cache was pooled: the source only
+ *   appended while it was read, or the caller asked for no seeding.
+ * - `resource-limit`: the history does not fit the paging cache.
+ * - `unversioned`: the source has no identity; every page is refused.
+ * - `moved`: the source was rewritten while it was read.
+ *
+ * Only the first two may name a page boundary (`endCursor`); the rest withhold
+ * it, because a client treats that boundary as permission to release rows.
+ */
+type HistoryPagingReadiness = 'seeded' | 'fits' | 'resource-limit' | 'unversioned' | 'moved';
+
+/**
+ * [seed] pools the page cache for an exact snapshot. A truncated frame seeds, so
+ * its older boundary pages the snapshot it was cut from. An untruncated frame
+ * only needs the verdict, and a page request builds its cache lazily as before,
+ * so it asks for none: the verdict is then [fingerprint]-memoised and usually
+ * settled without encoding (see {@link historyFitsEncodedPageCache}).
+ */
 function seedHistoryPageCache(options: {
   scope: string;
   sourceBefore?: HistorySourceIdentity;
   sourceAfter?: HistorySourceIdentity;
   history: AgentMessage[];
-}): boolean {
-  const { scope, sourceBefore, sourceAfter, history } = options;
+  seed: boolean;
+  fingerprint?: string;
+  /** When [history] was read (see PooledHistoryRead). */
+  read?: PooledHistoryRead;
+}): HistoryPagingReadiness {
+  const { scope, sourceBefore, sourceAfter, history, seed, fingerprint, read } = options;
+  if (!sourceBefore || !sourceAfter) return 'unversioned';
   if (!sameHistorySourceRevision(sourceBefore, sourceAfter)) {
-    return false;
+    if (!historySourceStillContainsSnapshot(sourceBefore, sourceAfter)) {
+      return 'moved';
+    }
+    return historyFitsEncodedPageCache(sourceBefore, history, fingerprint)
+      ? 'fits'
+      : 'resource-limit';
   }
-  const cached = historyPageCaches.get(scope, sourceAfter!);
-  if (
+  const cached = historyPageCaches.get(scope, sourceAfter);
+  if (cached && read && pooledHistoryCacheBehind(cached, read.mc)) {
+    // This attach read the session itself, so a pooled snapshot of the same revision that has
+    // fallen behind it is replaced, never trusted.
+    historyPageCaches.delete(scope);
+  } else if (
     cached
-    && sameHistorySourceIdentity(cached.sourceIdentity, sourceAfter!)
+    && sameHistorySourceIdentity(cached.sourceIdentity, sourceAfter)
   ) {
-    return true;
+    return 'seeded';
+  }
+  if (!seed) {
+    return historyFitsEncodedPageCache(sourceBefore, history, fingerprint)
+      ? 'fits'
+      : 'resource-limit';
   }
   const cache = EncodedHistoryPageCache.create(sourceBefore, history);
   if (!cache || !historyPageCaches.put(scope, cache)) {
-    return false;
+    return 'resource-limit';
   }
-  return true;
+  notePooledHistoryRead(cache, read);
+  return 'seeded';
 }
 
 /**
@@ -2717,8 +2842,20 @@ async function readHistoryPagePrefix(options: {
   source: HistorySourceIdentity;
   connection: SessionConnection;
   artifactMode: 'inline' | 'reference' | undefined;
+  mc?: ManagedConn;
 }): Promise<HistoryPageCacheOutcome> {
   const { source, connection, artifactMode } = options;
+  const read = beginPooledHistoryRead(options.mc);
+  const outcome = await readHistoryPagePrefixUnrecorded(source, connection, artifactMode);
+  if (outcome.kind === 'cache') notePooledHistoryRead(outcome.cache, read);
+  return outcome;
+}
+
+async function readHistoryPagePrefixUnrecorded(
+  source: HistorySourceIdentity,
+  connection: SessionConnection,
+  artifactMode: 'inline' | 'reference' | undefined,
+): Promise<HistoryPageCacheOutcome> {
   if (typeof connection.captureHistorySnapshot === 'function') {
     if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') {
       console.error(`[h1-history-read] page-cache-miss ${connection.info.tool}:${connection.info.id}`);
@@ -2748,7 +2885,7 @@ async function readHistoryPagePrefix(options: {
   if (history.kind === 'unavailable') return { kind: 'source-changed' };
   const sourceAfter = await readHistorySourceIdentity(connection);
   if (!sameHistorySourceRevision(source, sourceAfter)) return { kind: 'source-changed' };
-  const cache = EncodedHistoryPageCache.create(source, history.messages);
+  const cache = EncodedHistoryPageCache.create(source, cursorDurableHistory(history.messages).durable);
   return cache ? { kind: 'cache', cache } : { kind: 'resource-limit' };
 }
 
@@ -3022,8 +3159,11 @@ async function buildCurrentHistoryPageCache(options: {
   source: HistorySourceIdentity;
   connection: SessionConnection;
   artifactMode: 'inline' | 'reference' | undefined;
+  mc?: ManagedConn;
 }): Promise<HistoryPageCacheOutcome> {
-  const { scope, source, connection, artifactMode } = options;
+  const { scope, source, connection, artifactMode, mc } = options;
+  const pooled = mc ? historyPageCaches.getExact(scope, source) : undefined;
+  if (pooled && mc && pooledHistoryCacheBehind(pooled, mc)) historyPageCaches.delete(scope);
   // The pool stores only successful builds, so the typed failure is carried
   // beside the single-flight promise rather than inside it. It starts as the
   // transient outcome so a build this caller coalesced onto — or one another
@@ -3033,7 +3173,7 @@ async function buildCurrentHistoryPageCache(options: {
     scope,
     source,
     async () => {
-      const outcome = await readHistoryPagePrefix({ source, connection, artifactMode });
+      const outcome = await readHistoryPagePrefix({ source, connection, artifactMode, mc });
       if (outcome.kind === 'cache') return outcome.cache;
       failure = outcome;
       return undefined;
@@ -3041,6 +3181,77 @@ async function buildCurrentHistoryPageCache(options: {
     { exact: true },
   );
   return cache ? { kind: 'cache', cache } : failure;
+}
+
+/**
+ * What a `history-refresh` of a session without snapshot capture is answered from.
+ *
+ * Such an adapter can only be read whole, so a refresh used to read and rehash its entire history
+ * per request and per client. An exact read is now pooled as the scope's page cache: every later
+ * refresh, page and client of the same source revision is answered from it without another read,
+ * and concurrent requests for one revision share a single read. A source that only appended while
+ * it was read is still answered from that read, but not pooled, because no revision describes it.
+ */
+type GenericRefreshSource =
+  | { kind: 'cache'; cache: EncodedHistoryPageCache }
+  | { kind: 'appended'; durable: AgentMessage[] }
+  | { kind: 'resource-limit'; exact: boolean }
+  | { kind: 'unavailable' | 'unversioned' | 'moved' };
+
+const genericRefreshReads = new Map<string, Promise<GenericRefreshSource>>();
+
+function currentGenericRefreshSource(options: {
+  scope: string;
+  source: HistorySourceIdentity;
+  connection: SessionConnection;
+  artifactMode: 'inline' | 'reference' | undefined;
+  mc: ManagedConn;
+  /** Read the source even when a current-looking snapshot is pooled. */
+  bypassPool?: boolean;
+}): Promise<GenericRefreshSource> {
+  const pooled = historyPageCaches.getExact(options.scope, options.source);
+  if (pooled && (options.bypassPool || pooledHistoryCacheBehind(pooled, options.mc))) {
+    historyPageCaches.delete(options.scope);
+  } else if (pooled?.kind === 'encoded') {
+    return Promise.resolve({ kind: 'cache', cache: pooled });
+  }
+  const key = `${options.scope}\0${JSON.stringify(options.source)}`;
+  const inFlight = genericRefreshReads.get(key);
+  if (inFlight) return inFlight;
+  const read = readGenericRefreshSource(options);
+  genericRefreshReads.set(key, read);
+  const settle = () => {
+    if (genericRefreshReads.get(key) === read) genericRefreshReads.delete(key);
+  };
+  read.then(settle, settle);
+  return read;
+}
+
+async function readGenericRefreshSource(options: {
+  scope: string;
+  source: HistorySourceIdentity;
+  connection: SessionConnection;
+  artifactMode: 'inline' | 'reference' | undefined;
+  mc: ManagedConn;
+}): Promise<GenericRefreshSource> {
+  const { scope, source, connection, artifactMode } = options;
+  const read = beginPooledHistoryRead(options.mc);
+  const history = await readNativeHistory(connection, artifactMode, 'refresh');
+  if (history.kind === 'unavailable') return { kind: 'unavailable' };
+  const sourceAfter = await readHistorySourceIdentity(connection);
+  if (!sourceAfter) return { kind: 'unversioned' };
+  const durable = cursorDurableHistory(history.messages).durable;
+  if (sameHistorySourceRevision(source, sourceAfter)) {
+    // The same readiness the attach decides before it names an end boundary.
+    const cache = EncodedHistoryPageCache.create(source, durable);
+    if (!cache || !historyPageCaches.put(scope, cache)) return { kind: 'resource-limit', exact: true };
+    notePooledHistoryRead(cache, read);
+    return { kind: 'cache', cache };
+  }
+  if (!historySourceStillContainsSnapshot(source, sourceAfter)) return { kind: 'moved' };
+  return historyFitsEncodedPageCache(source, durable, historyDelta(durable).cursor)
+    ? { kind: 'appended', durable }
+    : { kind: 'resource-limit', exact: false };
 }
 
 function isPromptClientMessage(kind: unknown): boolean {
@@ -3164,6 +3375,11 @@ function healthWithSecurityState(): Record<string, unknown> {
   };
 }
 
+/**
+ * [effect] `'deliver'` stores what a reference points at (the diff blob, a
+ * `data:` artifact's bytes); `'measure'` builds the identical shape with no
+ * storage at all, for a caller that only needs the row's delivered size.
+ */
 function refMessage(
   tool: string,
   id: string,
@@ -3171,17 +3387,43 @@ function refMessage(
   message: AgentMessage,
   brokerUrl?: string,
   authorization?: ArtifactAuthorizationScope,
+  effect: 'deliver' | 'measure' = 'deliver',
 ): AgentMessage {
   if (mode === 'reference' && message.type === 'tool-result') {
     const callId = message.callId || 'diff';
     return buildDiffRefMessage(message, INLINE_DIFF_CAP, (body) =>
-      artifactStore.stashDiff(tool, id, `${id}:${callId}`, body, brokerUrl, authorization),
+      effect === 'measure'
+        ? artifactStore.previewDiff(tool, id, `${id}:${callId}`, body, brokerUrl, authorization)
+        : artifactStore.stashDiff(tool, id, `${id}:${callId}`, body, brokerUrl, authorization),
     );
   }
   if (message.type !== 'file-artifact') return message;
+  if (mode !== 'reference') return artifactStore.displayOnly(message);
+  return effect === 'measure'
+    ? artifactStore.previewReference({ tool, id }, message, brokerUrl, authorization)
+    : artifactStore.toReference({ tool, id }, message, brokerUrl, authorization);
+}
+
+/**
+ * The shape one history row takes on egress to a connection in [mode] — the
+ * ONE transform history frames and pages apply ({@link refMessages}), and so
+ * the one their decoded-size bound measures. A reference-mode connection
+ * receives an oversized diff as a small `diffRef`; an inline one receives the
+ * row unchanged. The bound measures with `effect: 'measure'`: it sizes rows it
+ * may then trim away, so it must neither store a blob nor fail on storage.
+ */
+function historyEgressMessage(
+  tool: string,
+  id: string,
+  mode: 'inline' | 'reference' | undefined,
+  message: AgentMessage,
+  brokerUrl?: string,
+  authorization?: ArtifactAuthorizationScope,
+  effect: 'deliver' | 'measure' = 'deliver',
+): AgentMessage {
   return mode === 'reference'
-    ? artifactStore.toReference({ tool, id }, message, brokerUrl, authorization)
-    : artifactStore.displayOnly(message);
+    ? refMessage(tool, id, mode, message, brokerUrl, authorization, effect)
+    : message;
 }
 
 function refMessages(
@@ -3193,7 +3435,7 @@ function refMessages(
   authorization?: ArtifactAuthorizationScope,
 ): AgentMessage[] {
   return mode === 'reference'
-    ? messages.map((m) => refMessage(tool, id, mode, m, brokerUrl, authorization))
+    ? messages.map((m) => historyEgressMessage(tool, id, mode, m, brokerUrl, authorization))
     : messages;
 }
 
@@ -3216,6 +3458,10 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
   }
   if (msg?.kind === 'history-page') {
     void handleHistoryPage(ws, msg);
+    return;
+  }
+  if (msg?.kind === 'history-refresh') {
+    void handleHistoryRefresh(ws, msg);
     return;
   }
   if (peerLacksRole(ws.data.principal, 'files')
@@ -3285,6 +3531,7 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
 async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise<void> {
   const mc = ws.data.mc;
   if (!mc) return;
+  const readMark = pooledHistoryReadMark();
   const clientMessageId = parseClientMessageId(msg?.clientMessageId);
   const send = (event: WireEvent) => ws.send(JSON.stringify(event));
   if (clientMessageId === '') {
@@ -3301,7 +3548,37 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
     });
     return;
   }
+  // Revision 28: a page NEWER than its cursor, optionally stopping at `until`. An older broker
+  // ignores both fields and answers a backward page, which is why the reply names its direction.
+  const rawDirection = msg?.direction;
+  if (rawDirection !== undefined && rawDirection !== 'older' && rawDirection !== 'newer') {
+    send({
+      kind: 'nack',
+      code: 'BAD_PARAM',
+      message: 'history page direction must be older or newer',
+      ...(clientMessageId ? { clientMessageId } : {}),
+    });
+    return;
+  }
+  const newer = rawDirection === 'newer';
+  if (msg?.until !== undefined && (!newer || typeof msg.until !== 'string')) {
+    send({
+      kind: 'nack',
+      code: 'BAD_PARAM',
+      message: 'history page until applies only to a newer page and must be a cursor',
+      ...(clientMessageId ? { clientMessageId } : {}),
+    });
+    return;
+  }
+  const rawUntil = newer && typeof msg?.until === 'string' ? msg.until : undefined;
   const rawCursor = typeof msg?.cursor === 'string' ? msg.cursor : undefined;
+  // A newer page to the end of a history a turn is still writing, or of a snapshot read while one
+  // was, stops at the running-turn hold (see runningTurnHoldEnd).
+  const loadFrom = (source: HistoryPageCache) => newer
+    ? source.loadNewerPage(rawCursor, limit, rawUntil, { artifactMode: ws.data.artifactMode }, {
+        holdTrailingText: pooledHistoryCacheHolds(source, mc),
+      })
+    : source.loadPage(rawCursor, limit, { artifactMode: ws.data.artifactMode });
   const scope = historyPageCacheScope(
     ws.data.tool,
     ws.data.id,
@@ -3383,12 +3660,21 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
   };
 
   let cache = historyPageCaches.get(scope, currentSource);
+  // A pooled snapshot the session has written past since it was read is an ancestor of the current
+  // source, whatever its revision says (see PooledHistoryRead).
+  let cacheIsCurrent = (candidate: HistoryPageCache) =>
+    sameHistorySourceIdentity(candidate.sourceIdentity, currentSource)
+    && !pooledHistoryCacheBehind(candidate, mc);
+  // Reserved positions keep their cursor while their payload changes. An ancestor is valid for
+  // navigation, but cannot answer a reconnect's single-slot read with the latest result.
+  if (cache?.hasPendingToolSlots && !cacheIsCurrent(cache)) cache = undefined;
   if (!cache) {
     const built = await buildCurrentHistoryPageCache({
       scope,
       source: currentSource,
       connection: mc.conn,
       artifactMode: ws.data.artifactMode,
+      mc,
     });
     if (built.kind !== 'cache') {
       failBuild(built);
@@ -3396,39 +3682,100 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
     }
     cache = built.cache;
   }
-  let page = await cache.loadPage(rawCursor, limit, {
-    artifactMode: ws.data.artifactMode,
-  });
+  let page = await loadFrom(cache);
   if ('kind' in page) {
     failBuild(page);
     return;
   }
+  // A newer page that reached its `until` is complete, whatever the source holds beyond it.
+  const reachedUntil = newer && !page.gap && rawUntil !== undefined && page.cursor === rawUntil;
   if (
-    page.gap?.code === 'HISTORY_CURSOR_GONE'
-    && !sameHistorySourceIdentity(cache.sourceIdentity, currentSource)
+    pooledSnapshotRefusal(cache, page.gap?.code)
+    && cacheIsCurrent(cache)
+    && !pooledHistoryReadAfter(cache, readMark)
+  ) {
+    // A cursor beyond a snapshot of the current revision, or over a row it holds differently, was
+    // issued by a later read of that same revision, so the snapshot is behind: rebuild it once,
+    // like an ancestor.
+    const behind = cache;
+    cacheIsCurrent = (candidate) => candidate !== behind
+      && sameHistorySourceIdentity(candidate.sourceIdentity, currentSource);
+    historyPageCaches.delete(scope);
+  }
+  if (
+    (pooledSnapshotRefusal(cache, page.gap?.code)
+      // A newer page that ran off the end of an append ancestor has not reached the current end.
+      || (newer && !page.gap && page.endOfHistory && !reachedUntil))
+    && !cacheIsCurrent(cache)
   ) {
     // A newer truncated client may hold a boundary beyond an append ancestor
     // that is still valid for older clients. Build the observed current source
     // once, replace the ancestor, then retry the same opaque cursor. The
     // current index continues to validate all unchanged older prefix cursors.
+    const ancestor = cache;
     const currentCache = await buildCurrentHistoryPageCache({
       scope,
       source: currentSource,
       connection: mc.conn,
       artifactMode: ws.data.artifactMode,
+      mc,
     });
-    if (currentCache.kind !== 'cache') {
-      failBuild(currentCache);
-      return;
+    if (currentCache.kind === 'cache') {
+      cache = currentCache.cache;
+      page = await loadFrom(cache);
+      if ('kind' in page) {
+        failBuild(page);
+        return;
+      }
+    } else {
+      // A session that is still writing has no exact revision to index, so every rebuild during
+      // its turn fails. The ancestor is still an exact prefix of it: a newer page is answered up
+      // to the ancestor's end (short of an `until` beyond it), and the rest is read once the
+      // source settles.
+      let partial: Awaited<ReturnType<typeof loadFrom>> | undefined;
+      if (currentCache.kind === 'source-changed' && newer) {
+        if (!page.gap) {
+          partial = page;
+        } else if (rawUntil !== undefined) {
+          // The cursor or the `until` lies beyond the ancestor; without the `until` the page
+          // stops at the ancestor's end, and the cursor alone is refused as before.
+          partial = await ancestor.loadNewerPage(rawCursor, limit, undefined, { artifactMode: ws.data.artifactMode }, {
+            holdTrailingText: pooledHistoryCacheHolds(ancestor, mc),
+          });
+        }
+      }
+      if (!partial || 'kind' in partial || partial.gap) {
+        failBuild(currentCache);
+        return;
+      }
+      page = partial;
     }
-    cache = currentCache.cache;
-    page = await cache.loadPage(rawCursor, limit, {
-      artifactMode: ws.data.artifactMode,
+  }
+  if (newer && !page.gap && page.endOfHistory && !cacheIsCurrent(cache)) {
+    // The end of an append ancestor is the end of a snapshot, never of a history that has grown.
+    page = { ...page, hasMore: true, endOfHistory: false };
+  }
+  if (
+    newer
+    && !page.gap
+    && page.hasMore
+    && page.messages.length === 0
+    && page.cursor !== undefined
+    && page.cursor !== rawUntil
+    && backwardHistoryCursorBoundary(page.cursor) === backwardHistoryCursorBoundary(rawCursor)
+  ) {
+    // A newer page that moved neither rows nor its boundary while more history lies beyond it gives
+    // the client nothing to insert and the same request to repeat. The snapshot it was read from
+    // ends at the cursor while the session writes past it: an append ancestor whose current source
+    // could not be read yet, or rows the running turn may still rewrite. They can be read once the
+    // session settles, so the client is told to try again rather than handed an empty page.
+    send({
+      kind: 'nack',
+      code: 'HISTORY_PAGE_SOURCE_CHANGED',
+      message: 'This session is still writing the history after this position. Try again.',
+      ...(clientMessageId ? { clientMessageId } : {}),
     });
-    if ('kind' in page) {
-      failBuild(page);
-      return;
-    }
+    return;
   }
   if (page.gap) {
     send({
@@ -3443,7 +3790,8 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
     ws.data.tool,
     ws.data.id,
     ws.data.artifactMode,
-    page.messages,
+    (ws.data.compatibility.client?.revision ?? 0) >= 28
+      ? page.messages : page.messages.filter((row) => !isPendingToolSlot(row)),
     undefined,
     ws.data.artifactAuthorization,
   );
@@ -3453,8 +3801,209 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
     ...(page.cursor ? { cursor: page.cursor } : {}),
     hasMore: page.hasMore,
     endOfHistory: page.endOfHistory,
+    ...(newer ? { direction: 'newer' as const } : {}),
     ...(clientMessageId ? { clientMessageId } : {}),
   });
+}
+
+/**
+ * Revision 28: one incremental `history` frame from the client's own reconnect position, sent on
+ * request while the socket stays attached.
+ *
+ * A bounded client asks for it when rows it received live have no broker boundary yet: the frame
+ * restates the rows persisted since its last frame and names the boundary after them (`cursor` for
+ * a reconnect, `endCursor` for paging), so the client can release those rows later and reload them
+ * exactly instead of marking them as needing a reconnect. The frame is a bounded PREFIX of what was
+ * persisted (never a replacement), and while a turn runs it leaves out the newest rows that turn may
+ * still rewrite (see refreshPrefixEnd). It is sent only where the attach would name an end
+ * boundary, and never across a history replacement that happened while it was read.
+ */
+async function handleHistoryRefresh(ws: ServerWebSocket<WsData>, msg: any): Promise<void> {
+  const mc = ws.data.mc;
+  const client = ws.data.client;
+  if (!mc || !client) return;
+  const send = (event: WireEvent) => ws.send(JSON.stringify(event));
+  const clientMessageId = parseClientMessageId(msg?.clientMessageId);
+  if (!clientMessageId) {
+    send({
+      kind: 'nack',
+      code: 'BAD_CLIENT_MESSAGE_ID',
+      message: 'history-refresh requires a short ASCII clientMessageId',
+    });
+    return;
+  }
+  const nack = (code: string, message: string): void => {
+    send({ kind: 'nack', code, message, clientMessageId });
+  };
+  const request = historyRefreshRequest(msg, mc);
+  if ('code' in request) {
+    nack(request.code, request.message);
+    return;
+  }
+  const { limit, since } = request;
+  const epoch = mc.historyReplacementEpoch;
+  try {
+    await answerHistoryRefresh(ws, mc, client, { limit, since, epoch, clientMessageId, nack });
+  } catch (error) {
+    // Every request is answered: the client waits for this id before it asks again.
+    console.error(`${LOG_PREFIX} history refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    nack('HISTORY_PAGE_SOURCE_CHANGED', 'This session history could not be read. Try again.');
+  }
+}
+
+async function answerHistoryRefresh(
+  ws: ServerWebSocket<WsData>,
+  mc: ManagedConn,
+  client: Client,
+  request: {
+    limit: number;
+    since: string;
+    epoch: number;
+    clientMessageId: string;
+    nack: (code: string, message: string) => void;
+  },
+): Promise<void> {
+  const { limit, since, epoch, clientMessageId, nack } = request;
+  const readMark = pooledHistoryReadMark();
+  const measure = (message: AgentMessage): number =>
+    estimatedClientDecodedBytes(client.historyEgress ? client.historyEgress(message) : message);
+  const bound = (cache?: HistoryPageCache) => ({
+    max: limit,
+    maxDecodedBytes: HISTORY_MAX_DECODED_BYTES,
+    measure,
+    holdTrailingText: cache ? pooledHistoryCacheHolds(cache, mc) : mc.turnInFlight(),
+  });
+  const source = await readHistorySourceIdentity(mc.conn);
+  if (!source) {
+    ws.data.historyPagingUnavailableWithoutIdentity = true;
+    nack(
+      'HISTORY_PAGE_SOURCE_UNVERSIONED',
+      'This native history cannot be paged safely without a source revision.',
+    );
+    return;
+  }
+  if (
+    ws.data.historyPagingUnavailableSource
+    && historySourceStillContainsSnapshot(ws.data.historyPagingUnavailableSource, source)
+  ) {
+    nack('HISTORY_PAGE_RESOURCE_LIMIT', 'This native history exceeds the bounded paging cache.');
+    return;
+  }
+  const scope = historyPageCacheScope(ws.data.tool, ws.data.id, ws.data.artifactMode);
+  let refreshed: HistoryRefresh | HistoryRefreshRefusal;
+  if (typeof mc.conn.captureHistorySnapshot === 'function') {
+    const built = await buildCurrentHistoryPageCache({
+      scope,
+      source,
+      connection: mc.conn,
+      artifactMode: ws.data.artifactMode,
+      mc,
+    });
+    if (built.kind !== 'cache' || built.cache.kind !== 'indexed') {
+      if (built.kind === 'resource-limit') {
+        ws.data.historyPagingUnavailableSource = source;
+        nack('HISTORY_PAGE_RESOURCE_LIMIT', 'This native history exceeds the bounded paging cache.');
+      } else {
+        nack(
+          'HISTORY_PAGE_SOURCE_CHANGED',
+          'This session was still writing while its history was indexed. Try again.',
+        );
+      }
+      return;
+    }
+    const loaded = await built.cache.loadRefresh(since, bound(built.cache), {
+      artifactMode: ws.data.artifactMode,
+    });
+    if ('kind' in loaded) {
+      if (loaded.kind === 'resource-limit') {
+        ws.data.historyPagingUnavailableSource = source;
+        nack('HISTORY_PAGE_RESOURCE_LIMIT', 'This native history exceeds the bounded paging cache.');
+      } else {
+        nack(
+          'HISTORY_PAGE_SOURCE_CHANGED',
+          'This session was still writing while its history was read. Try again.',
+        );
+      }
+      return;
+    }
+    refreshed = loaded;
+  } else {
+    let current = await currentGenericRefreshSource({
+      scope,
+      source,
+      connection: mc.conn,
+      artifactMode: ws.data.artifactMode,
+      mc,
+    });
+    // A cursor beyond a snapshot pooled before this request under the current revision, or over a
+    // row that snapshot holds differently, proves the snapshot is behind (another read of the same
+    // revision issued it): read the source once more and answer from that (see
+    // pooledSnapshotRefusal).
+    if (current.kind === 'cache' && !pooledHistoryReadAfter(current.cache, readMark)) {
+      const pooled = current.cache.loadRefresh(since, bound(current.cache));
+      if ('gap' in pooled && pooledSnapshotRefusal(current.cache, pooled.gap.code)) {
+        current = await currentGenericRefreshSource({
+          scope,
+          source,
+          connection: mc.conn,
+          artifactMode: ws.data.artifactMode,
+          mc,
+          bypassPool: true,
+        });
+      }
+    }
+    switch (current.kind) {
+      case 'unavailable':
+        nack('HISTORY_PAGE_SOURCE_CHANGED', 'Native history is temporarily unavailable. Try again.');
+        return;
+      case 'unversioned':
+        ws.data.historyPagingUnavailableWithoutIdentity = true;
+        nack(
+          'HISTORY_PAGE_SOURCE_UNVERSIONED',
+          'This native history cannot be paged safely without a source revision.',
+        );
+        return;
+      case 'resource-limit':
+        if (current.exact) ws.data.historyPagingUnavailableSource = source;
+        nack('HISTORY_PAGE_RESOURCE_LIMIT', 'This native history exceeds the bounded paging cache.');
+        return;
+      case 'moved':
+        nack(
+          'HISTORY_PAGE_SOURCE_CHANGED',
+          'This session was rewritten while its history was read. Try again.',
+        );
+        return;
+      case 'cache':
+        refreshed = current.cache.loadRefresh(since, bound(current.cache));
+        break;
+      case 'appended':
+        refreshed = historyRefresh(current.durable, since, bound());
+        break;
+    }
+  }
+  if ('gap' in refreshed) {
+    nack(refreshed.gap.code, refreshed.gap.message);
+    return;
+  }
+  const delivered = ws.data.mc === mc
+    && ws.data.client === client
+    && mc.deliverHistoryRefresh(client, epoch, {
+      kind: 'history',
+      messages: refreshed.messages,
+      reset: false,
+      cursor: refreshed.cursor,
+      endCursor: refreshed.endCursor,
+      newerHistory: true,
+      clientMessageId,
+    });
+  if (!delivered) {
+    // The socket moved to another owner, or every window was replaced while this read ran: the
+    // frame would describe history the client no longer holds.
+    nack(
+      'HISTORY_PAGE_SOURCE_CHANGED',
+      'This session history was replaced while it was read. Try again.',
+    );
+  }
 }
 
 /** Run one client→broker message (prompt/approve/…). Errors are reported, never silently dropped. */
@@ -7076,7 +7625,7 @@ server = Bun.serve<WsData>({
         return;
       }
       registerPeerSocket(ws);
-      const { tool, id, reason, expectedOwnerRevision, since, artifactMode } = ws.data;
+      const { tool, id, reason, expectedOwnerRevision, since: requestedSince, artifactMode } = ws.data;
       const historyBootstrapAbort = new AbortController();
       ws.data.historyBootstrapAbort = historyBootstrapAbort;
       const sessionOptionsAbort = new AbortController();
@@ -7090,8 +7639,28 @@ server = Bun.serve<WsData>({
       };
       let mode = ws.data.mode;
       const compatibility = ws.data.compatibility ?? evaluateBrokerClientCompatibility();
+      // Older clients do not retain/reload pending result slots. A complete attach snapshot
+      // lets them see completions they missed, while keeping their existing rendering contract.
+      const slotAware = (compatibility.client?.revision ?? 0) >= 28;
+      // This socket's history egress shape, and the decoded size of a row in
+      // it: every frame bound for this socket measures what it will actually
+      // send, through the same transform that sends it — built without storing
+      // anything, since the bound sizes rows it may then trim away.
+      const historyEgress = (message: AgentMessage): AgentMessage =>
+        historyEgressMessage(
+          tool,
+          id,
+          artifactMode,
+          message,
+          undefined,
+          ws.data.artifactAuthorization,
+          'measure',
+        );
+      const deliveredDecodedBytes = (message: AgentMessage): number =>
+        estimatedClientDecodedBytes(historyEgress(message));
       const sendRaw: Client = (ev) => {
         if (!historyBootstrapActive()) return;
+        if (!slotAware && ev.kind === 'message' && isPendingToolSlot(ev.message)) return;
         if (ev.kind === 'message' && !canSendBackgroundMessage(ev.message, compatibility.client?.revision ?? 0)) return;
         try {
           const prepared =
@@ -7114,7 +7683,7 @@ server = Bun.serve<WsData>({
                     tool,
                     id,
                     artifactMode,
-                    ev.messages,
+                    slotAware ? ev.messages : ev.messages.filter((row) => !isPendingToolSlot(row)),
                     undefined,
                     ws.data.artifactAuthorization,
                   ),
@@ -7209,11 +7778,18 @@ server = Bun.serve<WsData>({
         }
         requireHistoryBootstrapActive();
         ws.data.mc = mc;
+        const since = slotAware || !mc.conn.historyUsesToolSlots ? requestedSince : undefined;
         // Buffer live messages until history is delivered: guarantees history-then-live
         // order with no gap and no lost messages during the getHistory() round-trip (B2).
         let historyDone = false;
         const queue: WireEvent[] = [];
         const client: Client = (ev) => (historyDone ? sendRaw(ev) : queue.push(ev));
+        client.historyEgress = historyEgress;
+        // Once this socket knows the paging route refuses its source, a hub
+        // resync must not hand it a page boundary to release rows against.
+        client.historyPagingRefused = () =>
+          Boolean(ws.data.historyPagingUnavailableSource)
+          || ws.data.historyPagingUnavailableWithoutIdentity === true;
         client.onManagedConnChanged = (next) => {
           // Hub wrapper folds preserve this WebSocket. Retarget both inbound
           // mutation authority and close/release bookkeeping before the old
@@ -7266,10 +7842,18 @@ server = Bun.serve<WsData>({
             message: string;
           };
           truncated?: { shown: number; total: number };
+          /** Backward-page boundary after the frame's newest durable
+           *  message; only a source that can serve pages issues it. */
+          endCursor?: string;
+          /** Absolute durable boundary before a capped tail. */
+          olderBoundary?: number;
+          /** Backward cursor at {@link olderBoundary}. */
+          olderCursor?: string;
         } = {
           messages: [],
           reset: true,
           cursor: historyDelta([]).cursor,
+          endCursor: historyDelta([]).endCursor,
         };
         let olderCursor: string | undefined;
         let hasEarlier = false;
@@ -7290,6 +7874,7 @@ server = Bun.serve<WsData>({
             attached: CompactHistoryAttach,
             options: {
               olderCursor?: string;
+              endCursor?: string;
               gap?: { code: string; reason?: string; message: string };
             } = {},
           ): void => {
@@ -7298,6 +7883,7 @@ server = Bun.serve<WsData>({
               messages: attached.messages,
               reset: attached.reset,
               cursor: attached.cursor,
+              ...(options.endCursor ? { endCursor: options.endCursor } : {}),
               ...(options.gap
                 ? { gap: options.gap }
                 : attached.gap
@@ -7350,7 +7936,7 @@ server = Bun.serve<WsData>({
             });
             requireHistoryBootstrapActive();
             if (fallback) {
-              const attached = fallback.replay.attach(since, initialLimit);
+              const attached = fallback.replay.attach(since, initialLimit, mc.turnInFlight());
               const overlays = typeof mc.conn.getHistoryOverlays === 'function'
                 ? await mc.conn.getHistoryOverlays({ artifactMode }).catch(() => [])
                 : [];
@@ -7401,6 +7987,7 @@ server = Bun.serve<WsData>({
             source,
             connection: mc.conn,
             artifactMode,
+            mc,
           });
           requireHistoryBootstrapActive();
           if (built.kind === 'cache' && built.cache.kind === 'indexed') {
@@ -7408,6 +7995,9 @@ server = Bun.serve<WsData>({
               since,
               initialLimit,
               { artifactMode },
+              HISTORY_MAX_DECODED_BYTES,
+              deliveredDecodedBytes,
+              mc.turnInFlight(),
             );
             requireHistoryBootstrapActive();
             if (!('kind' in attached)) {
@@ -7419,6 +8009,7 @@ server = Bun.serve<WsData>({
               derivedHistory = [...attached.derivedMessages, ...overlays];
               acceptCompactAttach(attached, {
                 olderCursor: attached.olderCursor,
+                endCursor: attached.endCursor,
               });
               ws.data.historyPagingUnavailableSource = undefined;
               ws.data.historyPagingUnavailableWithoutIdentity = false;
@@ -7431,6 +8022,7 @@ server = Bun.serve<WsData>({
         }
 
         if (!usedCompactAttach) {
+          const historyRead = beginPooledHistoryRead(mc);
           const historyResult = await readNativeHistory(
             mc.conn,
             artifactMode,
@@ -7460,39 +8052,55 @@ server = Bun.serve<WsData>({
             mc.observeHistory(history);
             // Cursor + capping run over the RAW history: oversized diffs are
             // stashed on EGRESS only, so unsent diffs are never hashed-to-blob.
-            durableHistory = history.filter(isCursorDurableMessage);
-            derivedHistory = history.filter((m) => !isCursorDurableMessage(m));
+            // The trailing pending/running projections replay after the frame with the overlays
+            // (see cursorDurableHistory): a cursor over them would diverge on the next read.
+            ({ durable: durableHistory, derived: derivedHistory } = cursorDurableHistory(history));
+            // While a turn runs the frame ends at the running-turn hold, and the rows the turn may
+            // still rewrite follow it with the derived rows (see holdRunningTurn), so no boundary it
+            // names is over a row that changes when the turn goes on.
+            const { framed, held } = mc.turnInFlight()
+              ? holdRunningTurn(durableHistory, since)
+              : { framed: durableHistory, held: [] as AgentMessage[] };
+            if (held.length > 0) derivedHistory = [...held, ...derivedHistory];
             delta = capHistoryDelta(
-              historyDelta(durableHistory, since),
+              historyDelta(framed, since),
               initialLimit,
-              durableHistory.length,
+              framed.length,
+              HISTORY_MAX_DECODED_BYTES,
+              { history: framed, measure: deliveredDecodedBytes },
             );
+            requireHistoryBootstrapActive();
+            // `endCursor` is named only where paging can serve it, so that is
+            // decided for every frame, not only a capped one: an incremental
+            // reconnect of a history too large to page must not hand the client
+            // an end boundary it will release rows against. Only a capped frame
+            // also seeds the cache for the snapshot it was cut from.
+            const paging = seedHistoryPageCache({
+              scope: historyCacheScope,
+              sourceBefore: historySourceBefore,
+              sourceAfter: historySourceAfter,
+              history: durableHistory,
+              seed: delta.truncated !== undefined,
+              fingerprint: delta.cursor,
+              read: historyRead,
+            });
+            ws.data.historyPagingUnavailableSource =
+              paging === 'resource-limit'
+                && sameHistorySourceRevision(
+                  historySourceBefore,
+                  historySourceAfter,
+                )
+                ? historySourceAfter
+                : undefined;
+            ws.data.historyPagingUnavailableWithoutIdentity =
+              paging === 'unversioned';
+            if (paging !== 'seeded' && paging !== 'fits') {
+              const { endCursor: _unservable, ...withoutEnd } = delta;
+              delta = withoutEnd;
+            }
             if (delta.truncated) {
-              requireHistoryBootstrapActive();
-              const seeded = seedHistoryPageCache({
-                scope: historyCacheScope,
-                sourceBefore: historySourceBefore,
-                sourceAfter: historySourceAfter,
-                history: durableHistory,
-              });
-              ws.data.historyPagingUnavailableSource = seeded
-                ? undefined
-                : sameHistorySourceRevision(
-                      historySourceBefore,
-                      historySourceAfter,
-                    )
-                  ? historySourceAfter
-                  : undefined;
-              ws.data.historyPagingUnavailableWithoutIdentity =
-                !seeded && (!historySourceBefore || !historySourceAfter);
-              olderCursor = backwardHistoryCursor(
-                durableHistory,
-                durableHistory.length - delta.truncated.shown,
-              );
+              olderCursor = delta.olderCursor;
               hasEarlier = true;
-            } else {
-              ws.data.historyPagingUnavailableSource = undefined;
-              ws.data.historyPagingUnavailableWithoutIdentity = false;
             }
           }
         } else {
@@ -7522,6 +8130,15 @@ server = Bun.serve<WsData>({
           ...(delta.gap ? { gap: { code: delta.gap.code, reason: delta.gap.reason, message: delta.gap.message } } : {}),
           ...(delta.truncated ? { truncated: delta.truncated } : {}),
           ...(olderCursor ? { olderCursor } : {}),
+          // Revision 28: the backward boundary after this frame's newest
+          // durable message. Withheld whenever the frame is not an
+          // authoritative, pageable read of the source.
+          // Revision 28: the same frames name the capability to refresh and to page newer.
+          ...(nativeHistoryAuthoritative
+            && delta.cursor !== undefined
+            && delta.endCursor
+            ? { endCursor: delta.endCursor, newerHistory: true as const }
+            : {}),
           ...(hasEarlier ? { hasEarlier: true } : {}),
         });
         // Seed resync reconciliation from a cursor the client has actually accepted. Reads started

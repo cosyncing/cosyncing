@@ -415,7 +415,14 @@ try {
   const restartHistory = afterRestart.filter((event) => event.kind === 'history');
   check('a proven host restart reaches the Hub as its own wholesale re-read',
     restartHistory.length === 1, `${restartHistory.length} history frames`);
-  const restartRows = restartHistory[0]?.kind === 'history' ? restartHistory[0].messages.length : 0;
+  // The shortened log holds only session state (its metadata and the running turn's summary),
+  // which follows the frame instead of ending it, so the rebuilt thread is the frame and the rows
+  // replayed right after it.
+  const restartFrameAt = afterRestart.findIndex((event) => event.kind === 'history');
+  const restartReplayed = restartFrameAt < 0 ? [] : afterRestart.slice(restartFrameAt + 1);
+  const restartTrailing = restartReplayed.slice(0, Math.max(0, restartReplayed.findIndex((event) => event.kind !== 'message')));
+  const restartRows = (restartHistory[0]?.kind === 'history' ? restartHistory[0].messages.length : 0)
+    + restartTrailing.length;
   check('the re-read RETRACTS the previous generation: the rebuilt thread is shorter',
     restartRows > 0 && restartRows < reconnectRows, `${restartRows} rows after restart vs ${reconnectRows} before`);
 

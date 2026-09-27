@@ -265,7 +265,7 @@ void main() {
         expect(speechOutput.current, isA<SpeechOutputSpeaking>());
 
         tester
-            .widget<ListView>(
+            .widget<ScrollView>(
               find.byKey(const Key('session-detail-chat-scroll')),
             )
             .controller!

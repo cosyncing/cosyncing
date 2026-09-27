@@ -3,6 +3,14 @@
 // ignore_for_file: invalid_use_of_visible_for_testing_member
 part of 'session_detail_controller.dart';
 
+/// Prefix of [_SessionDetailStateHelpers._nextHistoryNavigationId] ids.
+const String _historyNavigationIdPrefix = 'ch.';
+
+/// Whether [clientMessageId] names a history read this client asked for.
+bool _isHistoryNavigationId(String? clientMessageId) =>
+    clientMessageId != null &&
+    clientMessageId.startsWith(_historyNavigationIdPrefix);
+
 extension _SessionDetailStateHelpers on SessionDetailController {
   SessionCurrentModel? _decodeModel(Object? value) {
     if (value is! Map) {
@@ -19,6 +27,15 @@ extension _SessionDetailStateHelpers on SessionDetailController {
     final now = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
     final sequence = (_clientMessageCounter++).toRadixString(36);
     return 'ca.$now.$sequence';
+  }
+
+  /// A request id for reading history (a page either way, or a boundary
+  /// refresh), in its own namespace: a refusal of one is the reader's
+  /// navigation, never a failed send, however late it arrives.
+  String _nextHistoryNavigationId() {
+    final now = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    final sequence = (_clientMessageCounter++).toRadixString(36);
+    return '$_historyNavigationIdPrefix$now.$sequence';
   }
 
   void _removeOptimisticPrompt(String clientMessageId) {

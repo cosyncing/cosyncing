@@ -23,6 +23,9 @@ part of 'session_detail_page.dart';
 /// means every painted frame is already settled on the tail, and each later
 /// estimate correction re-pins the same way. No animation, no timer, no delay,
 /// no repeated post-frame chase, and nothing is hidden while it happens.
+///
+/// A reader who is not following the tail is held in place by the scroll
+/// position instead (see [_TranscriptScrollPosition]).
 class _TailFollowingScrollPhysics extends ScrollPhysics {
   const _TailFollowingScrollPhysics({
     required this.shouldFollowTail,
@@ -58,6 +61,313 @@ class _TailFollowingScrollPhysics extends ScrollPhysics {
     if (isScrolling || velocity != 0) return adjusted;
     if (!shouldFollowTail()) return adjusted;
     return newPosition.maxScrollExtent;
+  }
+}
+
+/// Creates the transcript's scroll position (see [_TranscriptScrollPosition]).
+final class _TranscriptScrollController extends ScrollController {
+  _TranscriptScrollController({
+    required this.contentEnd,
+    required this.readerDrift,
+  });
+
+  /// See [_TranscriptScrollPosition.contentEnd].
+  final double? Function() contentEnd;
+
+  /// See [_TranscriptScrollPosition.readerDrift].
+  final double Function(
+    _TranscriptScrollPosition position,
+    double minScrollExtent,
+  )
+  readerDrift;
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) => _TranscriptScrollPosition(
+    physics: physics,
+    context: context,
+    contentEnd: contentEnd,
+    readerDrift: readerDrift,
+    initialPixels: initialScrollOffset,
+    keepScrollOffset: keepScrollOffset,
+    oldPosition: oldPosition,
+    debugLabel: debugLabel,
+  );
+}
+
+/// The prefetch policy transcript surfaces created from now on use; tests
+/// shorten or disable parts of it.
+@visibleForTesting
+TranscriptPrefetchPolicy? debugTranscriptPrefetchPolicy;
+
+/// The prefetch bookkeeping of the transcript surface created last.
+@visibleForTesting
+TranscriptPrefetchController? debugTranscriptPrefetch;
+
+/// The scroll position of a centered transcript.
+///
+/// It holds the reader's place through every layout. The transcript is a
+/// centered scroll view, so rows inserted or released on either side of the
+/// center never move the rows around it; what remains is a row between the
+/// reader and the center changing height (a tool result, an expansion, a
+/// reflow). After each layout pass, before anything is painted, the position
+/// asks how far the reader's row moved ([readerDrift]) and moves the offset by
+/// the same distance with `correctBy`, which makes the viewport lay out again
+/// in the same frame. A drag keeps following the finger from there, and a
+/// running fling is not stopped: `correctBy` makes the next pass report new
+/// dimensions, and a ballistic activity then restarts from the corrected
+/// offset with its current velocity.
+///
+/// It counts the corrections the viewport applies itself ([rebased]), so the
+/// reader's row can tell a row that grew from content a sliver merely
+/// re-based: a sliver that finds its estimate was off corrects the offset by
+/// exactly the amount its rows moved, and nothing visible moves.
+///
+/// It also ends the scroll range at the last row. A centered viewport never
+/// reports a maximum below zero, so when the rows from the center down are
+/// shorter than the viewport it would let the list rest with the center row
+/// at the top, blank space below the last row and the rows above the center
+/// hidden. Ending the range at the last row's bottom instead keeps the tail
+/// at the bottom of the viewport, or a transcript shorter than the viewport
+/// at its top, exactly as a list that starts at its first row would.
+final class _TranscriptScrollPosition extends ScrollPositionWithSingleContext {
+  _TranscriptScrollPosition({
+    required super.physics,
+    required super.context,
+    required this.contentEnd,
+    required this.readerDrift,
+    super.initialPixels,
+    super.keepScrollOffset,
+    super.oldPosition,
+    super.debugLabel,
+  });
+
+  /// Where the last row's bottom is, in scroll coordinates, when it is laid
+  /// out.
+  final double? Function() contentEnd;
+
+  /// How far the reader's row moved in the layout just completed, in scroll
+  /// coordinates, given the new start of the range; zero when there is no
+  /// reader to hold. Called only inside layout.
+  final double Function(
+    _TranscriptScrollPosition position,
+    double minScrollExtent,
+  )
+  readerDrift;
+
+  /// The sum of every [correctBy] the viewport (or a re-centering) applied.
+  double rebased = 0;
+
+  /// The sum of every correction that held the reader's row in place.
+  double held = 0;
+
+  /// The offset with every correction that moved nothing on screen taken
+  /// out: it changes only when the reader scrolls.
+  double get travelled => pixels - rebased - held;
+
+  /// The velocity of a fling under way, in pixels per second (positive
+  /// toward the newest rows); zero when nothing is flinging.
+  double get flingVelocity {
+    final current = activity;
+    return current is BallisticScrollActivity ? current.velocity : 0;
+  }
+
+  @override
+  void correctBy(double correction) {
+    rebased += correction;
+    super.correctBy(correction);
+  }
+
+  @override
+  bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
+    var max = maxScrollExtent;
+    final end = contentEnd();
+    if (end != null && hasViewportDimension) {
+      final last = end - viewportDimension;
+      if (last < max) max = last < minScrollExtent ? minScrollExtent : last;
+    }
+    if (haveDimensions) {
+      final drift = readerDrift(this, minScrollExtent);
+      if (drift != 0) {
+        // Never further out of range than the offset already is.
+        final low = pixels < minScrollExtent ? pixels : minScrollExtent;
+        final high = pixels > max ? pixels : max;
+        final target = (pixels + drift).clamp(low, high);
+        if (target != pixels) {
+          held += target - pixels;
+          super.correctBy(target - pixels);
+          return false;
+        }
+      }
+    }
+    return super.applyContentDimensions(minScrollExtent, max);
+  }
+}
+
+/// Records a transcript row's own laid-out extent.
+///
+/// Row geometry is read while the viewport is still laying out (the reader
+/// anchor), where reading another box's `size` is not permitted; this value
+/// and the sliver's own layout offset are plain fields that are.
+class _RowExtentReporter extends SingleChildRenderObjectWidget {
+  const _RowExtentReporter({required super.child});
+
+  @override
+  _RenderRowExtentReporter createRenderObject(BuildContext context) =>
+      _RenderRowExtentReporter();
+}
+
+class _RenderRowExtentReporter extends RenderProxyBox {
+  double? laidOutHeight;
+  double? laidOutWidth;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    laidOutHeight = size.height;
+    laidOutWidth = size.width;
+  }
+}
+
+/// A row's place in the transcript's scroll coordinates, where 0 is the top of
+/// the center row and rows above it are negative.
+typedef _RowGeometry = ({double top, double height, double width});
+
+/// Where the last layout put the row whose [RenderObject] tree starts at
+/// [element], or null when it is not laid out in a list right now.
+///
+/// Reads layout-owned fields only (the reporter's extent and the sliver's
+/// child offset), so it is valid during layout as well as after it.
+_RowGeometry? _laidOutRowGeometry(Element element) {
+  final box = element.renderObject;
+  if (box is! _RenderRowExtentReporter || !box.attached) return null;
+  final height = box.laidOutHeight;
+  final width = box.laidOutWidth;
+  if (height == null || width == null) return null;
+  RenderObject child = box;
+  var parent = box.parent;
+  while (parent != null && parent is! RenderSliverMultiBoxAdaptor) {
+    child = parent;
+    parent = parent.parent;
+  }
+  if (parent is! RenderSliverMultiBoxAdaptor) return null;
+  final data = child.parentData;
+  if (data is! SliverMultiBoxAdaptorParentData || data.keptAlive) return null;
+  final offset = data.layoutOffset;
+  if (offset == null) return null;
+  // Rows above the center grow upward from it: their layout offset is the
+  // distance from the center to their bottom edge.
+  final reverse = parent.constraints.growthDirection == GrowthDirection.reverse;
+  return (
+    top: reverse ? -(offset + height) : offset,
+    height: height,
+    width: width,
+  );
+}
+
+/// The transcript's centered scroll view, built on [_TranscriptViewport].
+class _TranscriptScrollView extends CustomScrollView {
+  const _TranscriptScrollView({
+    super.key,
+    super.controller,
+    super.physics,
+    super.center,
+    super.scrollCacheExtent,
+    super.semanticChildCount,
+    super.slivers,
+  });
+
+  @override
+  Widget buildViewport(
+    BuildContext context,
+    ViewportOffset offset,
+    AxisDirection axisDirection,
+    List<Widget> slivers,
+  ) => _TranscriptViewport(
+    axisDirection: axisDirection,
+    offset: offset,
+    slivers: slivers,
+    center: center,
+    anchor: anchor,
+    scrollCacheExtent: scrollCacheExtent,
+    paintOrder: paintOrder,
+    clipBehavior: clipBehavior,
+  );
+}
+
+class _TranscriptViewport extends Viewport {
+  _TranscriptViewport({
+    required super.axisDirection,
+    required super.offset,
+    required super.slivers,
+    required super.center,
+    required super.anchor,
+    required super.scrollCacheExtent,
+    required super.paintOrder,
+    required super.clipBehavior,
+  });
+
+  @override
+  RenderViewport createRenderObject(BuildContext context) =>
+      _RenderTranscriptViewport(
+        axisDirection: axisDirection,
+        crossAxisDirection:
+            crossAxisDirection ??
+            Viewport.getDefaultCrossAxisDirection(context, axisDirection),
+        anchor: anchor,
+        offset: offset,
+        scrollCacheExtent: scrollCacheExtent,
+        paintOrder: paintOrder,
+        clipBehavior: clipBehavior,
+      );
+}
+
+/// Places the rows above the center where they are even when the center line
+/// has scrolled above the viewport's top edge.
+///
+/// [RenderViewport] clamps the layout offset of a sliver before the center to
+/// the viewport's extent once the center line is above the top edge, so every
+/// row that sliver keeps laid out in its cache reports a transform pinned to
+/// the top edge instead of its real place above the center. Nothing is
+/// painted or hit-tested there, but selection orders and extends its
+/// selectables through those transforms, and semantics reads their rects from
+/// them: a page that landed above the reader during a drag selection was
+/// ordered below rows it sits above, and left a hole in the copy. Only a
+/// sliver with no paint extent is moved, so painting and hit testing are
+/// unchanged.
+final class _RenderTranscriptViewport extends RenderViewport {
+  _RenderTranscriptViewport({
+    required super.axisDirection,
+    required super.crossAxisDirection,
+    required super.offset,
+    super.anchor,
+    super.scrollCacheExtent,
+    super.paintOrder,
+    super.clipBehavior,
+  });
+
+  @override
+  void updateChildLayoutOffset(
+    RenderSliver child,
+    double layoutOffset,
+    GrowthDirection growthDirection,
+  ) {
+    var placed = layoutOffset;
+    final center = this.center;
+    if (growthDirection == GrowthDirection.reverse &&
+        center != null &&
+        !child.geometry!.visible) {
+      final extent = axis == Axis.vertical ? size.height : size.width;
+      // How far the center line sits from the viewport's leading edge; the
+      // same value [RenderViewport] lays out from.
+      final centerOffset =
+          extent * anchor - (offset.pixels + center.centerOffsetAdjustment);
+      if (centerOffset < 0) placed -= centerOffset;
+    }
+    super.updateChildLayoutOffset(child, placed, growthDirection);
   }
 }
 
@@ -486,7 +796,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// Owned so the list is not the `primary` view (which would add a second,
   /// pixel-estimate-driven scrollbar on desktop), and so tail/paging behavior
   /// and the logical right-edge indicator share one position.
-  final ScrollController _scrollController = ScrollController();
+  late final _TranscriptScrollController _scrollController =
+      _TranscriptScrollController(
+        contentEnd: _contentEnd,
+        readerDrift: _readerDrift,
+      );
   late final FocusNode _historyShortcutFocusNode;
   final _TranscriptSelectionRegistry _selectionRegistry =
       _TranscriptSelectionRegistry();
@@ -509,8 +823,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// live streaming with one rule.
   bool _followTail = true;
 
-  /// The layout-phase tail invariant (U5b). Built once so the `ListView` sees a
-  /// stable physics instance across rebuilds.
+  /// The layout-phase tail invariant (U5b). Built once so the scroll view sees
+  /// a stable physics instance across rebuilds.
   late final ScrollPhysics _transcriptPhysics = _TailFollowingScrollPhysics(
     shouldFollowTail: () => _followTail && !_tailRevealPending,
   );
@@ -563,6 +877,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   _messageStableKeyByItemKey = {};
 
   final Map<String, GlobalKey<State<StatefulWidget>>> _itemKeysByIdentity = {};
+  final Map<GlobalKey<State<StatefulWidget>>, String> _identityByItemKey = {};
   final Map<String, GlobalKey<State<StatefulWidget>>>
   _itemKeyByStableMessageKey = {};
 
@@ -589,24 +904,85 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   bool _progressRefreshScheduled = false;
 
   bool _historyPageWasLoading = false;
-  GlobalKey<State<StatefulWidget>>? _historyAnchorKey;
-  double? _historyAnchorRevealDelta;
-  bool _historyAnchorRestorePending = false;
-  bool _historyAnchorRestoreScheduled = false;
-  int _historyAnchorRestoreAttempts = 0;
-  int _historyAnchorStableChecks = 0;
   String? _automaticHistoryCursorInFlight;
-  int _upwardHistoryIntentCredits = 0;
-  double _upwardHistoryIntentRemainder = 0;
-  bool _historyIntentResumeScheduled = false;
-  final Map<GlobalKey<State<StatefulWidget>>, String>
-  _reloadableGapCursorByItemKey = {};
 
-  static const int _maxHistoryAnchorRestoreAttempts = 8;
-  static const int _requiredHistoryAnchorStableChecks = 2;
-  static const double _historyAnchorTolerance = 0.5;
-  static const int _maxUpwardHistoryIntentCredits = 5;
-  static const double _upwardHistoryPixelsPerCredit = 40;
+  /// Which way the page in flight extends the transcript from the reader:
+  /// earlier rows above them, or newer rows below. It names the loading row.
+  bool _historyLoadUpward = true;
+
+  /// The released range the page in flight fills, from its request through
+  /// the frame it lands in; null for a page at the start of the list.
+  String? _fillingRangeIdentity;
+
+  /// Decides when the reader's movement asks for the next page (see
+  /// [TranscriptPrefetchController]).
+  late final TranscriptPrefetchController _prefetch =
+      TranscriptPrefetchController(
+        policy:
+            debugTranscriptPrefetchPolicy ?? const TranscriptPrefetchPolicy(),
+      );
+
+  /// Which way the reader last moved.
+  TranscriptPrefetchDirection? _movingToward;
+
+  /// The reader's recent drag, wheel and trackpad movement, newest last, as
+  /// (event time, signed distance toward the newest rows), for their speed.
+  final ListQueue<({Duration time, double delta})> _movementSamples =
+      ListQueue();
+
+  /// Ends the reader's movement once it has been still for the policy's
+  /// settle delay.
+  Timer? _prefetchSettleTimer;
+
+  /// Fires when a failed page may be asked for again.
+  Timer? _prefetchRetryTimer;
+  bool _prefetchEvaluationScheduled = false;
+
+  /// Advances each time the transport connects again: a page asked for on
+  /// an earlier connection answers nothing on this one.
+  int _connectionEpoch = 0;
+
+  /// Whether the scroll in progress began with the user's own drag, so the
+  /// fling that continues it counts as the user's movement too.
+  bool _userDrivenScroll = false;
+  final Map<GlobalKey<State<StatefulWidget>>, TranscriptHistoryGapSegment>
+  _reloadableGapByItemKey = {};
+
+  /// Row identities of the last build, in order.
+  List<String> _rowIdentities = const [];
+
+  /// The row the scroll view is centered on (scroll offset 0 is its top).
+  ///
+  /// Rows added or released above it grow the list upward and rows below it
+  /// grow it downward, so neither moves what the reader sees. It changes only
+  /// when a mutation reaches between it and the reader's row, or removes it;
+  /// see [_resolveCenter].
+  String? _centerIdentity;
+
+  /// Advances with every re-centering, so both lists are rebuilt from the new
+  /// center rather than re-indexing rows whose positions no longer hold.
+  int _centerGeneration = 0;
+
+  /// The reader anchor: the topmost visible row, where the last completed
+  /// layout put it (see [_readerDrift]).
+  GlobalKey<State<StatefulWidget>>? _anchorKey;
+  double _anchorTop = 0;
+  double _anchorHeight = 0;
+  double _anchorWidth = 0;
+
+  /// [_TranscriptScrollPosition.rebased] when the anchor was taken.
+  double _anchorRebased = 0;
+
+  /// Set when text reflows for a reason the anchor row's width cannot show (a
+  /// text scale change), so the next layout keeps the reader's place inside
+  /// the row proportionally.
+  bool _anchorReflowPending = false;
+
+  /// The anchor row's index when it was taken, and — when the reader was
+  /// then resting at the very start of the range — that offset.
+  int? _anchorIndex;
+  double? _anchorStart;
+  double? _lastTextScale;
 
   SessionViewportKey? _viewportKey;
   int? _viewportMembershipGeneration;
@@ -633,12 +1009,16 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     _viewportRegistry = ref.read(sessionViewportRegistryProvider.notifier);
     _scrollController.addListener(_onScroll);
     _initializeSemanticViewport();
+    _prefetch.startGeneration(_prefetchGeneration);
+    debugTranscriptPrefetch = _prefetch;
   }
 
   @override
   void dispose() {
     _scheduleCapturedViewportCommit(_semanticViewportCapture());
     _progressFadeTimer?.cancel();
+    _prefetchSettleTimer?.cancel();
+    _prefetchRetryTimer?.cancel();
     _progressValue.dispose();
     _progressViewportFraction.dispose();
     _progressActive.dispose();
@@ -674,35 +1054,41 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       _scheduleCapturedViewportCommit(capture);
       _armSemanticViewportRestore(capture: capture);
     }
+    if (!oldWidget.isConnected && widget.isConnected) _connectionEpoch += 1;
     if (oldWidget.isConnected != widget.isConnected ||
         oldWidget.state.sessionId != widget.state.sessionId ||
         oldWidget.state.source != widget.state.source) {
-      _clearUpwardHistoryIntent();
       _automaticHistoryCursorInFlight = null;
     }
-    if (oldWidget.state.historyPageError != widget.state.historyPageError &&
-        widget.state.historyPageError != null) {
-      _clearUpwardHistoryIntent();
-    }
+    // A new session, source, connection or transcript replacement starts a
+    // new generation: whatever was asked for before it answers nothing now.
+    _startPrefetchGeneration();
     if (oldWidget.state.historyPageLoading &&
         !widget.state.historyPageLoading) {
       _automaticHistoryCursorInFlight = null;
+      _completePrefetchRequest();
     }
     if (oldWidget.state.olderHistoryCursor != widget.state.olderHistoryCursor) {
+      final hadRequest = _automaticHistoryCursorInFlight != null;
       _automaticHistoryCursorInFlight = null;
       // A healthy local/production page can round-trip inside one Flutter
       // frame. In that case build never observes `historyPageLoading == true`,
-      // so the ordinary loading-to-ready transition cannot start restoration.
-      // Cursor advancement with our captured anchor is equivalent completion
-      // evidence and keeps the fast path from stranding both anchor and credit.
-      if (_historyAnchorKey != null &&
-          !widget.state.historyPageLoading &&
-          !_followTail) {
-        _historyAnchorRestorePending = true;
-        _historyAnchorRestoreAttempts = 0;
-        _historyAnchorStableChecks = 0;
-        _scheduleHistoryAnchorRestore();
+      // so the ordinary loading-to-ready transition never fires. Cursor
+      // advancement is equivalent completion evidence, and keeps the fast path
+      // from stranding the reader's remaining credit.
+      if (hadRequest && !widget.state.historyPageLoading) {
+        _completePrefetchRequest();
+        _onHistoryPageSettled();
       }
+    } else if (_automaticHistoryCursorInFlight != null &&
+        !oldWidget.state.historyPageLoading &&
+        !widget.state.historyPageLoading) {
+      // A page into a gap, of either direction, leaves the oldest cursor
+      // alone. Loading neither before nor after the request is the same
+      // completion evidence: it settled before any frame showed it loading.
+      _automaticHistoryCursorInFlight = null;
+      _completePrefetchRequest();
+      _onHistoryPageSettled();
     }
   }
 
@@ -718,17 +1104,15 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     final rows = <TranscriptRowGeometry>[];
     for (final entry in _mountedRowContexts.entries) {
       final index = _itemIndexByKey[entry.key];
-      if (index == null || !entry.value.mounted) continue;
-      final renderObject = entry.value.findRenderObject();
-      if (renderObject is! RenderBox || !renderObject.attached) continue;
-      final viewport = RenderAbstractViewport.maybeOf(renderObject);
-      if (viewport == null) continue;
-      final revealOffset = viewport.getOffsetToReveal(renderObject, 0).offset;
+      final element = entry.value;
+      if (index == null || !element.mounted || element is! Element) continue;
+      final geometry = _laidOutRowGeometry(element);
+      if (geometry == null) continue;
       rows.add(
         TranscriptRowGeometry(
           index: index,
-          viewportTop: revealOffset - position.pixels,
-          height: renderObject.size.height,
+          viewportTop: geometry.top - position.pixels,
+          height: geometry.height,
         ),
       );
     }
@@ -766,7 +1150,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     if (!mounted) return;
     final position = _positionOrNull();
     if (position == null || !position.hasContentDimensions) return;
-    if (position.maxScrollExtent <= 0) {
+    _refreshReaderAnchor();
+    // The list is centered, so rows above its center have negative offsets
+    // and a range can end below zero while the rows before it still scroll:
+    // only the range between the two extents says whether anything does.
+    if (position.maxScrollExtent - position.minScrollExtent <= 0) {
       // Nothing scrolls: no reading position to indicate.
       _progressValue.value = null;
       _progressViewportFraction.value = 1;
@@ -776,7 +1164,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     final sample = _computeRawProgress(position);
     final displayed = _progressLatch.update(
       raw: sample.progress,
-      offset: position.pixels,
+      // Corrections that held the reader or re-based the list are not the
+      // reader moving.
+      offset: position is _TranscriptScrollPosition
+          ? position.travelled
+          : position.pixels,
     );
     _progressViewportFraction.value = sample.viewportFraction;
     if (displayed != null) _progressValue.value = displayed;
@@ -816,6 +1208,26 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
 
   bool _onScrollNotification(ScrollNotification notification) {
     if (notification.depth != 0) return false;
+    // A fling is the user's movement as much as the drag that threw it: its
+    // travel earns loading intent the way pointer movement does, so reaching a
+    // released range or the loaded edge at speed asks for that side's page
+    // instead of stopping there. Only a scroll that began with the user's own
+    // drag counts; a jump, an animation or a layout correction never does.
+    if (notification is ScrollStartNotification) {
+      _userDrivenScroll = notification.dragDetails != null;
+    } else if (notification is ScrollUpdateNotification &&
+        (notification.dragDetails != null || _userDrivenScroll)) {
+      // After the list has moved, so the boundary ahead is measured from
+      // where the reader now is. A drag's own speed comes from its pointer
+      // events; a fling's from the fling.
+      final delta = notification.scrollDelta ?? 0;
+      if (delta.abs() > 0.01) {
+        _recordRealScrollMovement(
+          upward: delta < 0,
+          physical: notification.dragDetails != null,
+        );
+      }
+    }
     if (notification is ScrollUpdateNotification ||
         notification is ScrollEndNotification) {
       // The flag is safe to set in any notification context, but the geometry
@@ -824,78 +1236,410 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       // after the frame (coalesced by `_scheduleProgressRefresh`).
       if (notification is ScrollUpdateNotification) _markProgressActive();
       _scheduleProgressRefresh();
-      if (_upwardHistoryIntentCredits > 0) {
-        _maybeRequestEarlierFromScroll();
-      }
       if (notification is ScrollEndNotification) {
+        _userDrivenScroll = false;
+        _movementSamples.clear();
         _scheduleSemanticViewportCapture();
       }
     }
     return false;
   }
 
-  bool get _historyIntentCanArm =>
-      !widget.state.historyPageLoading &&
-      widget.state.historyPageError == null &&
-      _automaticHistoryCursorInFlight == null &&
-      !_historyAnchorRestorePending &&
-      !_historyAnchorRestoreScheduled &&
-      _historyAnchorKey == null;
-
-  /// Records fresh physical input, never layout/cursor/reconnect movement.
-  ///
-  /// Every 40 logical pixels of upward movement earns one page authorization,
-  /// bounded by the five-page client window. This preserves multiple units of
-  /// a natural swipe that arrive before the first page response. Page/cursor
-  /// progression never earns credit, so the finite physical budget cannot turn
-  /// into unbounded stationary paging.
+  /// Records the reader's own movement: a drag, the fling it threw, a wheel,
+  /// a trackpad or a key; never a layout correction, a jump or a page
+  /// landing. [physical] is movement under the reader's hand, as opposed to a
+  /// fling carrying on after the finger left. [delta] is the signed distance
+  /// toward the newest rows, with [time] its event time, for the reader's
+  /// speed; a fling reports its own.
   void _recordRealScrollMovement({
     required bool upward,
-    double distance = 0,
-    bool discrete = false,
+    bool physical = true,
+    Duration? time,
+    double delta = 0,
   }) {
-    if (!upward) {
-      _clearUpwardHistoryIntent();
-      return;
-    }
-    if (!widget.isConnected || widget.state.historyPageError != null) return;
-    if (discrete) {
-      _addUpwardHistoryIntentCredits(1);
-    } else {
-      _upwardHistoryIntentRemainder += distance.abs();
-      final earned =
-          (_upwardHistoryIntentRemainder / _upwardHistoryPixelsPerCredit)
-              .floor();
-      if (earned > 0) {
-        _upwardHistoryIntentRemainder -= earned * _upwardHistoryPixelsPerCredit;
-        _addUpwardHistoryIntentCredits(earned);
+    final direction = upward
+        ? TranscriptPrefetchDirection.older
+        : TranscriptPrefetchDirection.newer;
+    if (_movingToward != direction) _movementSamples.clear();
+    _movingToward = direction;
+    if (time != null && delta != 0) {
+      _movementSamples.addLast((time: time, delta: delta));
+      while (_movementSamples.length > 1 &&
+          time - _movementSamples.first.time > _velocityWindow) {
+        _movementSamples.removeFirst();
       }
     }
-    if (_upwardHistoryIntentCredits == 0 || !_historyIntentCanArm) {
-      return;
-    }
-    final gapCursor = _approachedReloadableGapCursor(upward: true);
-    if (gapCursor != null) {
-      _requestHistoryCursor(
-        gapCursor,
-        leadingEdge: false,
-        consumeIntentCredit: true,
+    _prefetch.recordMovement(direction: direction, physical: physical);
+    _prefetchSettleTimer?.cancel();
+    _prefetchSettleTimer = Timer(
+      _prefetch.policy.settleDelay,
+      _onPrefetchSettleTimer,
+    );
+    _evaluatePrefetch();
+  }
+
+  /// The span the reader's pointer speed is averaged over.
+  static const Duration _velocityWindow = Duration(milliseconds: 100);
+
+  void _onPrefetchSettleTimer() {
+    if (!mounted) return;
+    final position = _positionOrNull();
+    if (position is _TranscriptScrollPosition && position.flingVelocity != 0) {
+      // Still carried by a fling: it settles when the fling ends.
+      _prefetchSettleTimer = Timer(
+        _prefetch.policy.settleDelay,
+        _onPrefetchSettleTimer,
       );
       return;
     }
-    _maybeRequestEarlierFromScroll();
+    _prefetch.settle();
+    _movementSamples.clear();
   }
 
-  void _addUpwardHistoryIntentCredits(int credits) {
-    final next = _upwardHistoryIntentCredits + credits;
-    _upwardHistoryIntentCredits = next > _maxUpwardHistoryIntentCredits
-        ? _maxUpwardHistoryIntentCredits
-        : next;
+  /// The reader's speed toward the newest rows, in pixels per second: the
+  /// fling's while one carries the list, otherwise their pointer, wheel or
+  /// trackpad movement over the last [_velocityWindow].
+  double _readerVelocity(ScrollPosition position) {
+    if (position is _TranscriptScrollPosition && position.flingVelocity != 0) {
+      return position.flingVelocity;
+    }
+    if (_movementSamples.isEmpty) return 0;
+    final newest = _movementSamples.last.time;
+    var distance = 0.0;
+    for (final sample in _movementSamples) {
+      if (newest - sample.time <= _velocityWindow) distance += sample.delta;
+    }
+    return distance *
+        Duration.microsecondsPerSecond /
+        _velocityWindow.inMicroseconds;
   }
 
-  void _clearUpwardHistoryIntent() {
-    _upwardHistoryIntentCredits = 0;
-    _upwardHistoryIntentRemainder = 0;
+  /// The time the prefetch bookkeeping runs on: the current frame's.
+  Duration _prefetchNow() =>
+      WidgetsBinding.instance.currentSystemFrameTimeStamp;
+
+  /// What the prefetch bookkeeping belongs to: this session, source,
+  /// connection and transcript replacement.
+  Object get _prefetchGeneration => (
+    widget.state.source,
+    widget.state.sessionId,
+    widget.state.transcriptResetGeneration,
+    _connectionEpoch,
+  );
+
+  void _startPrefetchGeneration() {
+    final generation = _prefetchGeneration;
+    if (_prefetch.generation == generation) return;
+    _prefetch.startGeneration(generation);
+    _movingToward = null;
+    _movementSamples.clear();
+    _prefetchSettleTimer?.cancel();
+    _prefetchRetryTimer?.cancel();
+  }
+
+  /// Asks for the page beyond the boundary the reader is heading for when
+  /// the prefetch policy says it is time (see [TranscriptPrefetchController]).
+  void _evaluatePrefetch() {
+    final direction = _movingToward;
+    if (direction == null || !mounted) return;
+    final state = widget.state;
+    if (!widget.isConnected ||
+        state.historyPageLoading ||
+        _automaticHistoryCursorInFlight != null) {
+      return;
+    }
+    final position = _positionOrNull();
+    if (position == null ||
+        !position.hasContentDimensions ||
+        position.viewportDimension <= 0) {
+      return;
+    }
+    final target = _nearestPrefetchTarget(direction, position);
+    if (target == null) return;
+    final decision = _prefetch.decide(
+      direction: direction,
+      key: target.key,
+      distance: target.distance,
+      velocity: _readerVelocity(position),
+      viewport: position.viewportDimension,
+      now: _prefetchNow(),
+    );
+    if (decision == TranscriptPrefetchDecision.request) target.request();
+    _armPrefetchRetry();
+  }
+
+  /// Evaluates after this frame lays out, when a page landed or the list
+  /// changed under a reader who may still be moving.
+  void _schedulePrefetchEvaluation() {
+    if (_prefetchEvaluationScheduled) return;
+    _prefetchEvaluationScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _prefetchEvaluationScheduled = false;
+      if (mounted) _evaluatePrefetch();
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  /// Wakes the evaluation when a failed boundary's backoff passes.
+  ///
+  /// Only a backoff still running is waited for. Once one has passed, its
+  /// boundary is asked for by the next evaluation that finds the reader
+  /// there, and everything that could bring them there (their movement, a
+  /// page landing, the layout changing) evaluates by itself; waking for it
+  /// meanwhile would schedule a frame whose evaluation wakes for it again,
+  /// for as long as the reader stays away.
+  void _armPrefetchRetry() {
+    _prefetchRetryTimer?.cancel();
+    _prefetchRetryTimer = null;
+    final now = _prefetchNow();
+    final at = _prefetch.nextRetryAfter(now);
+    if (at == null) return;
+    _prefetchRetryTimer = Timer(at - now, () {
+      _prefetchRetryTimer = null;
+      if (mounted) _schedulePrefetchEvaluation();
+    });
+  }
+
+  /// The boundary nearest the reader in [direction] that can load: the start
+  /// of what is loaded, or a released range, with its distance beyond the
+  /// viewport edge (zero on screen) and how to ask for it.
+  ({String key, double distance, VoidCallback request})? _nearestPrefetchTarget(
+    TranscriptPrefetchDirection direction,
+    ScrollPosition position,
+  ) {
+    final upward = direction == TranscriptPrefetchDirection.older;
+    final viewport = position.viewportDimension;
+    ({String key, double distance, VoidCallback request})? nearest;
+    void consider(String key, double distance, VoidCallback request) {
+      final value = distance < 0 ? 0.0 : distance;
+      if (nearest == null || value < nearest!.distance) {
+        nearest = (key: key, distance: value, request: request);
+      }
+    }
+
+    final state = widget.state;
+    final cursor = state.olderHistoryCursor;
+    if (upward &&
+        !state.historyStartReached &&
+        cursor != null &&
+        cursor.isNotEmpty &&
+        !state.historyPagingBlockedAt(cursor)) {
+      // The list is centered, so its start is the minimum extent, not zero.
+      final key = 'older:$cursor';
+      consider(
+        key,
+        position.pixels - position.minScrollExtent,
+        () => _requestHistoryCursor(
+          cursor,
+          leadingEdge: true,
+          prefetchKey: key,
+        ),
+      );
+    }
+    final estimate = _mountedRowSpan();
+    for (final entry in _reloadableGapByItemKey.entries) {
+      final gap = entry.value;
+      // A gap the broker refused a position of loads no more on this attach.
+      if (state.historyGapRefused(gap)) continue;
+      double? top;
+      double? bottom;
+      final geometry = _rowGeometry(entry.key);
+      if (geometry != null) {
+        top = geometry.top - position.pixels;
+        bottom = top + geometry.height;
+      } else if (estimate != null) {
+        // Not laid out: place it by its index among the rows that are.
+        final index = _itemIndexByKey[entry.key];
+        if (index == null) continue;
+        if (index < estimate.firstIndex) {
+          bottom =
+              estimate.top -
+              (estimate.firstIndex - index - 1) * estimate.rowHeight -
+              position.pixels;
+          top = bottom - estimate.rowHeight;
+        } else if (index > estimate.lastIndex) {
+          top =
+              estimate.bottom +
+              (index - estimate.lastIndex - 1) * estimate.rowHeight -
+              position.pixels;
+          bottom = top + estimate.rowHeight;
+        }
+      }
+      if (top == null || bottom == null) continue;
+      final onScreen = bottom >= 0 && top <= viewport;
+      final key = 'gap:${gap.id}';
+      void request() => _requestGapFill(gap, upward: upward, prefetchKey: key);
+      if (onScreen) {
+        consider(key, 0, request);
+      } else if (upward && bottom < 0) {
+        consider(key, -bottom, request);
+      } else if (!upward && top > viewport) {
+        consider(key, top - viewport, request);
+      }
+    }
+    return nearest;
+  }
+
+  /// The laid-out rows' first and last index, their extent, and their mean
+  /// height, for placing rows that are not laid out.
+  ({
+    int firstIndex,
+    int lastIndex,
+    double top,
+    double bottom,
+    double rowHeight,
+  })?
+  _mountedRowSpan() {
+    int? firstIndex;
+    int? lastIndex;
+    double? top;
+    double? bottom;
+    for (final entry in _mountedRowContexts.entries) {
+      final index = _itemIndexByKey[entry.key];
+      final element = entry.value;
+      if (index == null || !element.mounted || element is! Element) continue;
+      final geometry = _laidOutRowGeometry(element);
+      if (geometry == null) continue;
+      if (firstIndex == null || index < firstIndex) {
+        firstIndex = index;
+        top = geometry.top;
+      }
+      if (lastIndex == null || index > lastIndex) {
+        lastIndex = index;
+        bottom = geometry.top + geometry.height;
+      }
+    }
+    if (firstIndex == null || lastIndex == null || top == null) return null;
+    final rows = lastIndex - firstIndex + 1;
+    return (
+      firstIndex: firstIndex,
+      lastIndex: lastIndex,
+      top: top,
+      bottom: bottom!,
+      rowHeight: (bottom - top) / rows,
+    );
+  }
+
+  /// Settles the prefetch bookkeeping for the page that just finished,
+  /// successful or not.
+  void _completePrefetchRequest() {
+    if (_prefetch.inFlightKey == null) return;
+    final now = _prefetchNow();
+    if (widget.state.historyPageError == null) {
+      _prefetch.finish(now, applied: true);
+    } else {
+      _prefetch.fail(
+        now,
+        transient: isTransientHistoryPageErrorCode(
+          widget.state.historyPageErrorCode,
+        ),
+      );
+    }
+    _armPrefetchRetry();
+  }
+
+  /// Settles a request the controller declined to send. Its refusal is in
+  /// the state the next build brings, or nowhere: either way, not retried
+  /// until the reader asks explicitly or a new generation starts.
+  void _declinePrefetchRequest(String key) {
+    if (_prefetch.inFlightKey != key) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _prefetch.inFlightKey != key) return;
+      final code = widget.state.historyPageErrorCode;
+      _prefetch.fail(
+        _prefetchNow(),
+        transient:
+            widget.state.historyPageError != null &&
+            isTransientHistoryPageErrorCode(code),
+      );
+      _armPrefetchRetry();
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  /// Loads into [gap].
+  ///
+  /// Moving down, the gap fills from its older edge with a newer page where
+  /// the broker pages forward (contract revision 28), so the rows arrive where
+  /// the reader is heading. Moving up, it fills from its newer edge — unless
+  /// it is an open range (see
+  /// [TranscriptHistoryNavigation.reloadsOnlyForward]), which only a newer
+  /// page can fill without running past where it began. Without forward
+  /// paging, both directions page back from the newer edge.
+  void _requestGapFill(
+    TranscriptHistoryGapSegment gap, {
+    required bool upward,
+    required String prefetchKey,
+  }) {
+    final reload = gap.reloadCursor!;
+    final forward = gap.forwardCursor;
+    final forwardWanted =
+        !upward ||
+        widget.state.activeTranscriptWindow.reloadsOnlyForward(reload);
+    if (forward != null &&
+        forwardWanted &&
+        widget.controller.canLoadNewerHistory) {
+      _requestNewerHistoryCursor(
+        forward,
+        until: reload,
+        upward: upward,
+        range: gap.id,
+        prefetchKey: prefetchKey,
+      );
+      return;
+    }
+    _requestHistoryCursor(
+      reload,
+      leadingEdge: false,
+      upward: upward,
+      range: gap.id,
+      prefetchKey: prefetchKey,
+    );
+  }
+
+  void _requestNewerHistoryCursor(
+    String cursor, {
+    required String until,
+    required bool upward,
+    required String range,
+    required String prefetchKey,
+  }) {
+    if (!widget.isConnected ||
+        widget.state.historyPageLoading ||
+        cursor.isEmpty ||
+        _automaticHistoryCursorInFlight == cursor) {
+      return;
+    }
+    _beginPrefetchRequest(prefetchKey, upward: upward);
+    _automaticHistoryCursorInFlight = cursor;
+    _historyLoadUpward = upward;
+    _fillingRangeIdentity = range;
+    _protectVisibleHistoryRow();
+    unawaited(
+      widget.controller.loadNewerHistory(cursor: cursor, until: until).then((
+        sent,
+      ) {
+        // A request the controller declined never loads, so nothing would
+        // release the slot.
+        if (sent || !mounted || _automaticHistoryCursorInFlight != cursor) {
+          return;
+        }
+        _automaticHistoryCursorInFlight = null;
+        _declinePrefetchRequest(prefetchKey);
+        _onHistoryPageSettled();
+      }),
+    );
+  }
+
+  void _beginPrefetchRequest(String key, {required bool upward}) {
+    _prefetch
+      ..begin(
+        key: key,
+        direction: upward
+            ? TranscriptPrefetchDirection.older
+            : TranscriptPrefetchDirection.newer,
+      )
+      ..markSent(_prefetchNow());
   }
 
   /// Tracks whether the user has scrolled away from the end.
@@ -905,6 +1649,9 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   void _onScroll() {
     final position = _positionOrNull();
     if (position == null) return;
+    if (position is _TranscriptScrollPosition) {
+      _prefetch.observeOffset(position.travelled);
+    }
     final atBottom =
         position.pixels >= position.maxScrollExtent - _bottomThreshold;
     if (atBottom != _followTail) {
@@ -914,46 +1661,10 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     }
   }
 
-  bool _insideHistoryThreshold() {
-    final position = _positionOrNull();
-    if (position == null || !position.hasContentDimensions) return false;
-    return position.pixels <= position.viewportDimension;
-  }
-
-  void _maybeRequestEarlierFromScroll() {
-    if (_upwardHistoryIntentCredits == 0 || !_insideHistoryThreshold()) return;
-    if (!widget.isConnected) {
-      // A gesture made while offline is not a standing subscription. Reconnect
-      // and layout notifications must not turn it into an automatic request.
-      _clearUpwardHistoryIntent();
-      return;
-    }
-    final state = widget.state;
-    final cursor = state.olderHistoryCursor;
-    if (state.historyStartReached) {
-      _clearUpwardHistoryIntent();
-      return;
-    }
-    if (state.historyPageLoading ||
-        state.historyPageError != null ||
-        cursor == null ||
-        cursor.isEmpty ||
-        _automaticHistoryCursorInFlight == cursor) {
-      return;
-    }
-    _requestHistoryCursor(
-      cursor,
-      leadingEdge: true,
-      consumeIntentCredit: true,
-    );
-  }
-
   void _requestEarlierExplicitly() {
     final state = widget.state;
     final cursor = state.olderHistoryCursor;
-    final terminalFailure = isTerminalHistoryPageErrorCode(
-      state.historyPageErrorCode,
-    );
+    final terminalFailure = state.historyPagingBlockedAt(cursor);
     if (!widget.isConnected ||
         state.historyStartReached ||
         state.historyPageLoading ||
@@ -962,7 +1673,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
         cursor.isEmpty) {
       return;
     }
-    _requestHistoryCursor(cursor, leadingEdge: true);
+    // Asking explicitly is its own retry: whatever the automatic backoff
+    // holds for this boundary no longer applies.
+    final key = 'older:$cursor';
+    _prefetch.forgetFailure(key);
+    _requestHistoryCursor(cursor, leadingEdge: true, prefetchKey: key);
   }
 
   KeyEventResult _handleHistoryKeyEvent(KeyEvent event) {
@@ -980,7 +1695,16 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
         key == LogicalKeyboardKey.end;
     if (!upward && !downward) return KeyEventResult.ignored;
 
-    _recordRealScrollMovement(upward: upward, discrete: true);
+    if (key == LogicalKeyboardKey.end) {
+      // A jump to the latest rows reads no released range on the way.
+      _prefetchSettleTimer?.cancel();
+      _prefetch.settle();
+    } else {
+      // Before the jump, from what the reader was looking at when they
+      // pressed it: a released range on screen is filled even when the jump
+      // carries them past it.
+      _recordRealScrollMovement(upward: upward);
+    }
     final position = _positionOrNull();
     if (position == null || !position.hasContentDimensions) {
       return KeyEventResult.handled;
@@ -1007,6 +1731,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       ),
     };
     position.jumpTo(target);
+    // And again from where the jump put them.
+    if (key != LogicalKeyboardKey.end) _schedulePrefetchEvaluation();
     // Handling the key ourselves prevents the browser's page-scroll default
     // from moving focus outside the transcript after lazy-list reshaping.
     if (!_historyShortcutFocusNode.hasFocus) {
@@ -1018,47 +1744,218 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   void _requestHistoryCursor(
     String cursor, {
     required bool leadingEdge,
-    bool consumeIntentCredit = false,
+    required String prefetchKey,
+    bool upward = true,
+    String? range,
   }) {
     final state = widget.state;
     if (!widget.isConnected ||
         (leadingEdge && state.historyStartReached) ||
         state.historyPageLoading ||
         cursor.isEmpty ||
-        _automaticHistoryCursorInFlight == cursor ||
-        (consumeIntentCredit && _upwardHistoryIntentCredits == 0)) {
+        // Every automatic or explicit request passes here; a position the
+        // broker refused loads no more on this attach.
+        state.historyPagingBlockedAt(cursor) ||
+        _automaticHistoryCursorInFlight == cursor) {
       return;
     }
-    if (consumeIntentCredit) _upwardHistoryIntentCredits -= 1;
+    _beginPrefetchRequest(prefetchKey, upward: upward);
     _automaticHistoryCursorInFlight = cursor;
-    _captureHistoryAnchor();
-    unawaited(widget.controller.loadEarlierHistory(cursor: cursor));
+    _historyLoadUpward = upward;
+    _fillingRangeIdentity = range;
+    _protectVisibleHistoryRow();
+    unawaited(
+      widget.controller.loadEarlierHistory(cursor: cursor).then((sent) {
+        // A request the controller declined never loads, so nothing would
+        // release the slot.
+        if (sent || !mounted || _automaticHistoryCursorInFlight != cursor) {
+          return;
+        }
+        _automaticHistoryCursorInFlight = null;
+        _declinePrefetchRequest(prefetchKey);
+        _onHistoryPageSettled();
+      }),
+    );
   }
 
-  String? _approachedReloadableGapCursor({required bool upward}) {
+  /// Whether [gap]'s row sits in the lower half of the viewport or below it,
+  /// so the rows it holds are newer than what the reader is reading.
+  bool _gapBelowReader(TranscriptHistoryGapSegment gap) {
     final position = _positionOrNull();
-    if (position == null || !position.hasContentDimensions) return null;
-    for (final entry in _reloadableGapCursorByItemKey.entries) {
-      final rowContext = entry.key.currentContext;
-      if (rowContext == null) continue;
-      final renderObject = rowContext.findRenderObject();
-      if (renderObject is! RenderBox || !renderObject.attached) continue;
-      final viewport = RenderAbstractViewport.maybeOf(renderObject);
-      if (viewport == null) continue;
-      final rowTop =
-          viewport.getOffsetToReveal(renderObject, 0).offset - position.pixels;
-      final rowBottom = rowTop + renderObject.size.height;
-      final intersectsViewport =
-          rowBottom >= 0 && rowTop <= position.viewportDimension;
-      final liesAhead = upward
-          ? rowBottom >= -position.viewportDimension && rowTop < 0
-          : rowTop <= position.viewportDimension * 2 &&
-                rowBottom > position.viewportDimension;
-      if (intersectsViewport || liesAhead) {
-        return entry.value;
+    final key = _itemKeysByIdentity[gap.id];
+    if (position == null || !position.hasContentDimensions || key == null) {
+      return false;
+    }
+    final row = _rowGeometry(key);
+    if (row == null) return false;
+    return row.top - position.pixels > position.viewportDimension / 2;
+  }
+
+  /// The bottom of the last row, when the viewport has laid it out.
+  double? _contentEnd() {
+    if (_orderedItemKeys.isEmpty) return null;
+    final row = _rowGeometry(_orderedItemKeys.last);
+    return row == null ? null : row.top + row.height;
+  }
+
+  /// Where the last layout put the row for [key] (see [_laidOutRowGeometry]).
+  _RowGeometry? _rowGeometry(GlobalKey<State<StatefulWidget>> key) {
+    final element = key.currentContext;
+    if (element is! Element) return null;
+    return _laidOutRowGeometry(element);
+  }
+
+  /// The row the reader is reading, optionally only among [survivors]: a
+  /// message row over a footer, notice or gap, and the first one that starts
+  /// in the upper half of the viewport over one that only reaches into it
+  /// from above; failing both, the topmost row on screen.
+  ///
+  /// While a page fills a released range on screen, the rows on the reader's
+  /// side of that range come first: below it for a page that brings the rows
+  /// above them (they are moving up into it), above it for one that brings
+  /// the rows below. The page then lands on the far side of the reader's row
+  /// instead of pushing it away.
+  ({GlobalKey<State<StatefulWidget>> key, String identity, _RowGeometry row})?
+  _readerRow(ScrollPosition position, {Set<String>? survivors}) {
+    if (!position.hasPixels || position.viewportDimension <= 0) return null;
+    final viewportTop = position.pixels;
+    final viewportBottom = viewportTop + position.viewportDimension;
+    final rangeKey = _fillingRangeIdentity == null
+        ? null
+        : _itemKeysByIdentity[_fillingRangeIdentity];
+    final range = rangeKey == null ? null : _rowGeometry(rangeKey);
+    final onScreenRange =
+        range != null &&
+            range.top + range.height > viewportTop &&
+            range.top < viewportBottom
+        ? range
+        : null;
+    ({GlobalKey<State<StatefulWidget>> key, String identity, _RowGeometry row})?
+    best;
+    var bestIsMessage = false;
+    var bestOnReaderSide = false;
+    var bestStartsOnScreen = false;
+    final upperHalf = viewportTop + position.viewportDimension / 2;
+    for (final entry in _mountedRowContexts.entries) {
+      final element = entry.value;
+      if (element is! Element) continue;
+      final identity = _identityByItemKey[entry.key];
+      if (identity == null) continue;
+      if (survivors != null && !survivors.contains(identity)) continue;
+      final row = _laidOutRowGeometry(element);
+      if (row == null || row.height <= 0) continue;
+      if (row.top + row.height <= viewportTop || row.top >= viewportBottom) {
+        continue;
+      }
+      final isMessage = _messageItemKeys.contains(entry.key);
+      final onReaderSide =
+          onScreenRange != null &&
+          (_historyLoadUpward
+              ? row.top >= onScreenRange.top + onScreenRange.height - 0.5
+              : row.top + row.height <= onScreenRange.top + 0.5);
+      final startsOnScreen =
+          row.top >= viewportTop - 0.5 && row.top < upperHalf;
+      final better =
+          best == null ||
+          (onReaderSide && !bestOnReaderSide) ||
+          (onReaderSide == bestOnReaderSide &&
+              ((isMessage && !bestIsMessage) ||
+                  (isMessage == bestIsMessage &&
+                      ((startsOnScreen && !bestStartsOnScreen) ||
+                          (startsOnScreen == bestStartsOnScreen &&
+                              row.top < best.row.top)))));
+      if (better) {
+        best = (key: entry.key, identity: identity, row: row);
+        bestIsMessage = isMessage;
+        bestOnReaderSide = onReaderSide;
+        bestStartsOnScreen = startsOnScreen;
       }
     }
-    return null;
+    return best;
+  }
+
+  /// Re-takes the reader anchor from the completed layout, and — for a
+  /// transcript whose reading place is recorded at all — tells the window
+  /// which row the reader is on, so a page released to fit the budget while a
+  /// fling is still moving is not the one they have reached.
+  void _refreshReaderAnchor() {
+    final position = _transcriptPosition();
+    if (position == null || !position.hasContentDimensions) return;
+    final reader = _readerRow(position);
+    if (reader == null) return;
+    _anchorKey = reader.key;
+    _anchorTop = reader.row.top;
+    _anchorHeight = reader.row.height;
+    _anchorWidth = reader.row.width;
+    _anchorRebased = position.rebased;
+    _anchorIndex = _itemIndexByKey[reader.key];
+    _anchorStart = position.pixels <= position.minScrollExtent + 0.5
+        ? position.pixels
+        : null;
+    if (_viewportKey != null &&
+        _viewportMembershipGeneration != null &&
+        !_followTail &&
+        !_semanticViewportRestorePending) {
+      final stableKey = _messageStableKeyByItemKey[reader.key];
+      if (stableKey != null) {
+        widget.controller.protectHistoryViewportAnchor(stableKey);
+      }
+    }
+  }
+
+  /// How far the reader's row moved in the layout just completed (see
+  /// [_TranscriptScrollPosition]).
+  ///
+  /// Called from inside the viewport's layout, after every row this frame
+  /// needs has been laid out. The anchor is where the last completed layout
+  /// put the reader's row, so the reader's own movement since — a drag, a
+  /// fling, a key press, however long a page took to arrive — is already in
+  /// the position and is kept; only the row's displacement by the content
+  /// around it is undone.
+  double _readerDrift(
+    _TranscriptScrollPosition position,
+    double minScrollExtent,
+  ) {
+    if (_followTail || _tailRevealPending || _semanticViewportRestorePending) {
+      return 0;
+    }
+    final key = _anchorKey;
+    if (key == null) return 0;
+    final row = _rowGeometry(key);
+    if (row == null) return 0;
+    // A sliver that re-bases its rows corrects the offset by the same amount;
+    // for rows in that sliver, that moved nothing the reader can see.
+    final rebasedSince = position.rebased - _anchorRebased;
+    final expectedTop = _anchorTop + rebasedSince;
+    final pixels = position.pixels;
+    var drift = row.top - expectedTop;
+    final reflowed =
+        _anchorReflowPending || (row.width - _anchorWidth).abs() > 0.5;
+    final into = pixels - expectedTop;
+    if (reflowed && _anchorHeight > 0 && into > 0 && into < _anchorHeight) {
+      // The row's own text re-wrapped: keep the same share of it above the
+      // reader, so the line they were on stays near the top.
+      drift = row.top + into / _anchorHeight * row.height - pixels;
+    }
+    final start = _anchorStart;
+    if (start != null &&
+        _itemIndexByKey[key] == _anchorIndex &&
+        (pixels - rebasedSince - start).abs() <= 0.5) {
+      // A reader resting at the very start sees the rows above their row
+      // too: the history notice, the start marker. With nothing inserted
+      // above, one of those changing size keeps its top edge, as the start of
+      // a list does, and moves what is below it.
+      drift = minScrollExtent - pixels;
+      _anchorStart = minScrollExtent;
+    } else {
+      _anchorStart = null;
+    }
+    _anchorTop = row.top;
+    _anchorHeight = row.height;
+    _anchorWidth = row.width;
+    _anchorRebased = position.rebased;
+    _anchorReflowPending = false;
+    return drift;
   }
 
   void _jumpToLatest() {
@@ -1082,6 +1979,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     return _scrollController.positions.first;
   }
 
+  _TranscriptScrollPosition? _transcriptPosition() {
+    final position = _positionOrNull();
+    return position is _TranscriptScrollPosition ? position : null;
+  }
+
   /// Queues one post-frame settle check for the hidden opening reveal (U5).
   ///
   /// The loop self-chains, so it also covers lazy extent corrections that
@@ -1090,8 +1992,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// step neither jumps nor reveals (the estimated extent already equals the
   /// offset while the real last row is still unmounted), nothing else may be
   /// left to produce the next frame, and the gate would stay hidden forever.
-  /// So every queue also requests the frame explicitly, exactly like
-  /// [_scheduleHistoryAnchorRestore].
+  /// So every queue also requests the frame explicitly.
   void _scheduleTailRevealSettle() {
     if (_tailRevealScheduled) return;
     _tailRevealScheduled = true;
@@ -1145,14 +2046,9 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     // The offset must sit AT the real extent — neither short of it nor past
     // it (an over-estimated jump can overshoot, which is not a settled tail).
     if ((position.pixels - position.maxScrollExtent).abs() > 0.5) return false;
-    final lastContext = _orderedItemKeys.last.currentContext;
-    if (lastContext == null) return false;
-    final renderObject = lastContext.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.attached) return false;
-    final viewport = RenderAbstractViewport.maybeOf(renderObject);
-    if (viewport == null) return false;
-    final revealOffset = viewport.getOffsetToReveal(renderObject, 0).offset;
-    final rowBottom = revealOffset + renderObject.size.height;
+    final last = _rowGeometry(_orderedItemKeys.last);
+    if (last == null) return false;
+    final rowBottom = last.top + last.height;
     final viewportBottom = position.pixels + position.viewportDimension;
     return rowBottom <= viewportBottom + 0.5;
   }
@@ -1258,72 +2154,110 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     );
   }
 
-  void _clearHistoryAnchorState() {
-    _historyAnchorKey = null;
-    _historyAnchorRevealDelta = null;
-    _historyAnchorRestorePending = false;
-    _historyAnchorRestoreScheduled = false;
-    _historyAnchorRestoreAttempts = 0;
-    _historyAnchorStableChecks = 0;
+  /// A page request of either direction finished (or was declined): record
+  /// the reader's place, and see whether a reader still moving needs the
+  /// next page.
+  void _onHistoryPageSettled() {
+    _forgetFillingRangeAfterFrame();
     final record = _viewportRecord();
     widget.controller.protectHistoryViewportAnchor(
       (record?.followTail ?? true) ? null : record?.anchorMessageKey,
     );
     _scheduleSemanticViewportCapture();
-    _scheduleBlockedHistoryIntentResume();
+    _schedulePrefetchEvaluation();
   }
 
-  void _scheduleBlockedHistoryIntentResume() {
-    if (_upwardHistoryIntentCredits == 0 || _historyIntentResumeScheduled) {
-      return;
-    }
-    _historyIntentResumeScheduled = true;
+  /// Keeps [_fillingRangeIdentity] through the frame being built — the one
+  /// the page lands in, whose re-centering still needs to know which side of
+  /// the range the reader is on — and forgets it after.
+  void _forgetFillingRangeAfterFrame() {
+    final range = _fillingRangeIdentity;
+    if (range == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _historyIntentResumeScheduled = false;
-      if (!mounted || _upwardHistoryIntentCredits == 0) return;
-      if (!_historyIntentCanArm) return;
-      if (!widget.isConnected || widget.state.historyPageError != null) return;
-
-      final gapCursor = _approachedReloadableGapCursor(upward: true);
-      if (gapCursor != null) {
-        _requestHistoryCursor(
-          gapCursor,
-          leadingEdge: false,
-          consumeIntentCredit: true,
-        );
-        return;
+      if (_fillingRangeIdentity == range && !widget.state.historyPageLoading) {
+        _fillingRangeIdentity = null;
       }
-      final state = widget.state;
-      final cursor = state.olderHistoryCursor;
-      if (!state.historyStartReached &&
-          !state.historyPageLoading &&
-          cursor != null &&
-          cursor.isNotEmpty) {
-        // Exact anchor restoration may increase the raw pixel offset by the
-        // prepended rows' height, but it does not move the user's logical
-        // reading position away from the edge. Consume one finite unit from
-        // the already-recorded physical movement without a second threshold
-        // test.
-        _requestHistoryCursor(
-          cursor,
-          leadingEdge: true,
-          consumeIntentCredit: true,
-        );
-        return;
-      }
-      if (state.historyStartReached) {
-        _clearUpwardHistoryIntent();
-        return;
-      }
-      _maybeRequestEarlierFromScroll();
     });
-    WidgetsBinding.instance.scheduleFrame();
   }
 
   int? _findChildIndex(Key? key) {
     if (key == null) return null;
     if (key is! GlobalKey<State<StatefulWidget>>) return null;
     return _itemIndexByKey[key];
+  }
+
+  /// Chooses the row the scroll view is centered on for this build, from last
+  /// frame's rows and geometry.
+  ///
+  /// The center is kept while every row from it to the reader's row is the
+  /// same, in the same order, as last frame: whatever was added or released
+  /// then lies beyond one of the two, and the list grows or shrinks away from
+  /// the reader. Otherwise — a page landed or was released between them, or
+  /// the center row itself left — the list is re-centered on the reader's row
+  /// and the offset corrected by exactly that row's distance from the old
+  /// center, before this frame's layout, so nothing on screen moves.
+  int _resolveCenter(List<String> identities, {required int preferredIndex}) {
+    final previous = _rowIdentities;
+    _rowIdentities = identities;
+    if (identities.isEmpty) {
+      _centerIdentity = null;
+      return 0;
+    }
+    final oldCenter = _centerIdentity;
+    final centerIndex = oldCenter == null ? -1 : identities.indexOf(oldCenter);
+    final position = _transcriptPosition();
+    final reader = position == null || !position.hasContentDimensions
+        ? null
+        : _readerRow(position, survivors: identities.toSet());
+    if (position == null || reader == null) {
+      if (centerIndex >= 0) return centerIndex;
+      // Nothing laid out survives to hold the place: start over.
+      final start = preferredIndex.clamp(0, identities.length - 1);
+      _centerIdentity = identities[start];
+      _centerGeneration += 1;
+      _anchorKey = null;
+      return start;
+    }
+    if (centerIndex >= 0 &&
+        _runUnchanged(previous, identities, oldCenter!, reader.identity)) {
+      return centerIndex;
+    }
+    _centerIdentity = reader.identity;
+    _centerGeneration += 1;
+    // The reader's row becomes scroll offset 0: move the offset by the same
+    // distance so its place on screen is unchanged. This runs before this
+    // frame's layout, which is the one that first lays out the new center.
+    position.correctBy(-reader.row.top);
+    _anchorKey = reader.key;
+    _anchorTop = 0;
+    _anchorHeight = reader.row.height;
+    _anchorWidth = reader.row.width;
+    _anchorRebased = position.rebased;
+    _anchorStart = null;
+    return identities.indexOf(reader.identity);
+  }
+
+  /// Whether the rows from [from] to [to] (inclusive) are the same rows, in
+  /// the same order, in [previous] and [next].
+  static bool _runUnchanged(
+    List<String> previous,
+    List<String> next,
+    String from,
+    String to,
+  ) {
+    final oldFrom = previous.indexOf(from);
+    final oldTo = previous.indexOf(to);
+    final newFrom = next.indexOf(from);
+    final newTo = next.indexOf(to);
+    if (oldFrom < 0 || oldTo < 0 || newFrom < 0 || newTo < 0) return false;
+    if (oldTo - oldFrom != newTo - newFrom) return false;
+    final shift = newFrom - oldFrom;
+    final low = oldFrom < oldTo ? oldFrom : oldTo;
+    final high = oldFrom < oldTo ? oldTo : oldFrom;
+    for (var index = low; index <= high; index++) {
+      if (previous[index] != next[index + shift]) return false;
+    }
+    return true;
   }
 
   void _syncItemRegistry({
@@ -1337,6 +2271,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     );
     _orderedItemKeys.clear();
     _itemIndexByKey.clear();
+    _identityByItemKey.clear();
     _messageItemKeys.clear();
     _messageStableKeyByItemKey.clear();
     _itemKeyByStableMessageKey.clear();
@@ -1349,6 +2284,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       );
       _orderedItemKeys.add(key);
       _itemIndexByKey[key] = index;
+      _identityByItemKey[key] = identity;
       if (messageIndices.contains(index)) {
         _messageItemKeys.add(key);
         final stableMessageKey = canonicalMessageKeys[index];
@@ -1363,35 +2299,14 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     }
   }
 
-  void _captureHistoryAnchor() {
-    final position = _positionOrNull();
-    if (position == null || position.viewportDimension <= 0) {
-      return;
-    }
-
-    for (final key in _orderedItemKeys) {
-      if (!_messageItemKeys.contains(key)) continue;
-      final keyContext = key.currentContext;
-      if (keyContext == null) continue;
-      final renderObject = keyContext.findRenderObject();
-      if (renderObject is! RenderBox) continue;
-      final viewport = RenderAbstractViewport.maybeOf(renderObject);
-      if (viewport == null) continue;
-
-      final revealOffset = viewport.getOffsetToReveal(renderObject, 0).offset;
-      final viewportTop = revealOffset - position.pixels;
-      final viewportBottom = viewportTop + renderObject.size.height;
-      if (viewportBottom < 0 || viewportTop > position.viewportDimension) {
-        continue;
-      }
-
-      _historyAnchorKey = key;
-      _historyAnchorRevealDelta = viewportTop;
-      widget.controller.protectHistoryViewportAnchor(
-        _messageStableKeyByItemKey[key],
-      );
-      return;
-    }
+  /// Tells the window which row the reader is on as a page is requested, so
+  /// the budget the page is fitted into keeps it. The position itself needs no
+  /// capture here: the reader anchor is re-taken from every layout, so the
+  /// page lands against where the reader is when it arrives.
+  void _protectVisibleHistoryRow() {
+    final visible = _firstUsefulVisibleMessage();
+    if (visible == null) return;
+    widget.controller.protectHistoryViewportAnchor(visible.stableMessageKey);
   }
 
   void _initializeSemanticViewport() {
@@ -1520,15 +2435,10 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     for (final key in _orderedItemKeys) {
       final stableMessageKey = _messageStableKeyByItemKey[key];
       if (stableMessageKey == null) continue;
-      final rowContext = key.currentContext;
-      if (rowContext == null) continue;
-      final renderObject = rowContext.findRenderObject();
-      if (renderObject is! RenderBox || !renderObject.attached) continue;
-      final viewport = RenderAbstractViewport.maybeOf(renderObject);
-      if (viewport == null) continue;
-      final viewportTop =
-          viewport.getOffsetToReveal(renderObject, 0).offset - position.pixels;
-      final viewportBottom = viewportTop + renderObject.size.height;
+      final row = _rowGeometry(key);
+      if (row == null) continue;
+      final viewportTop = row.top - position.pixels;
+      final viewportBottom = viewportTop + row.height;
       if (viewportBottom < 0 || viewportTop > position.viewportDimension) {
         continue;
       }
@@ -1636,24 +2546,17 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       return;
     }
 
-    final targetContext = targetKey.currentContext;
-    if (targetContext == null) {
+    if (targetKey.currentContext == null) {
       _seekSemanticViewportTarget(position, targetKey);
       _retrySemanticViewportRestore();
       return;
     }
-    final renderObject = targetContext.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.attached) {
+    final target = _rowGeometry(targetKey);
+    if (target == null) {
       _retrySemanticViewportRestore();
       return;
     }
-    final viewport = RenderAbstractViewport.maybeOf(renderObject);
-    if (viewport == null) {
-      _retrySemanticViewportRestore();
-      return;
-    }
-    final revealOffset = viewport.getOffsetToReveal(renderObject, 0).offset;
-    final targetOffset = (revealOffset - record!.anchorViewportTop!).clamp(
+    final targetOffset = (target.top - record!.anchorViewportTop!).clamp(
       position.minScrollExtent,
       position.maxScrollExtent,
     );
@@ -1682,19 +2585,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     final mounted = <({int index, double offset, double height})>[];
     for (final entry in _mountedRowContexts.entries) {
       final index = _itemIndexByKey[entry.key];
-      final renderObject = entry.value.findRenderObject();
-      if (index == null ||
-          renderObject is! RenderBox ||
-          !renderObject.attached) {
-        continue;
-      }
-      final viewport = RenderAbstractViewport.maybeOf(renderObject);
-      if (viewport == null) continue;
-      mounted.add((
-        index: index,
-        offset: viewport.getOffsetToReveal(renderObject, 0).offset,
-        height: renderObject.size.height,
-      ));
+      final element = entry.value;
+      if (index == null || element is! Element) continue;
+      final row = _laidOutRowGeometry(element);
+      if (row == null) continue;
+      mounted.add((index: index, offset: row.top, height: row.height));
     }
     if (mounted.isEmpty) return;
     mounted.sort((a, b) => a.index.compareTo(b.index));
@@ -1735,96 +2630,16 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     setState(() {});
   }
 
-  void _retryHistoryAnchorRestore() {
-    if (_historyAnchorRestoreAttempts >= _maxHistoryAnchorRestoreAttempts) {
-      _clearHistoryAnchorState();
-      return;
-    }
-    _scheduleHistoryAnchorRestore();
-  }
-
-  void _restoreHistoryAnchor() {
-    final position = _positionOrNull();
-    if (!_historyAnchorRestorePending) return;
-    _historyAnchorRestoreAttempts += 1;
-    if (position == null || !position.hasContentDimensions) {
-      _historyAnchorStableChecks = 0;
-      _retryHistoryAnchorRestore();
-      return;
-    }
-
-    if (_followTail) {
-      _clearHistoryAnchorState();
-      return;
-    }
-
-    final key = _historyAnchorKey;
-    final anchorRevealDelta = _historyAnchorRevealDelta;
-    if (key == null || anchorRevealDelta == null) {
-      _clearHistoryAnchorState();
-      return;
-    }
-
-    final keyContext = key.currentContext;
-    if (keyContext == null) {
-      _historyAnchorStableChecks = 0;
-      _retryHistoryAnchorRestore();
-      return;
-    }
-
-    final renderObject = keyContext.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.attached) {
-      _historyAnchorStableChecks = 0;
-      _retryHistoryAnchorRestore();
-      return;
-    }
-
-    final viewport = RenderAbstractViewport.maybeOf(renderObject);
-    if (viewport == null) {
-      _historyAnchorStableChecks = 0;
-      _retryHistoryAnchorRestore();
-      return;
-    }
-
-    final revealOffset = viewport.getOffsetToReveal(renderObject, 0).offset;
-    final targetOffset = revealOffset - anchorRevealDelta;
-    final offsetDelta = targetOffset - position.pixels;
-    if (offsetDelta.abs() <= _historyAnchorTolerance) {
-      _historyAnchorStableChecks += 1;
-      if (_historyAnchorStableChecks >= _requiredHistoryAnchorStableChecks) {
-        _clearHistoryAnchorState();
-      } else {
-        _retryHistoryAnchorRestore();
-      }
-      return;
-    }
-    _historyAnchorStableChecks = 0;
-    final newOffset = (position.pixels + offsetDelta).clamp(
-      0.0,
-      position.maxScrollExtent,
-    );
-    if (newOffset == position.pixels) {
-      _retryHistoryAnchorRestore();
-      return;
-    }
-    position.jumpTo(newOffset);
-    _retryHistoryAnchorRestore();
-  }
-
-  void _scheduleHistoryAnchorRestore() {
-    if (_historyAnchorRestoreScheduled) return;
-    _historyAnchorRestoreScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _historyAnchorRestoreScheduled = false;
-      if (!mounted) return;
-      _restoreHistoryAnchor();
-    });
-    WidgetsBinding.instance.scheduleFrame();
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // A text scale change re-wraps every row without changing the reader's
+    // row width, which is how the anchor otherwise recognizes a reflow.
+    final textScale = MediaQuery.textScalerOf(context).scale(16);
+    if (_lastTextScale != null && _lastTextScale != textScale) {
+      _anchorReflowPending = true;
+    }
+    _lastTextScale = textScale;
     final inlineTarget = InlineScheduledMessageKey(
       tool: widget.state.tool,
       sessionId: widget.state.sessionId,
@@ -1921,22 +2736,19 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
           // successful poll silently removes.
           final inlineError = inlineState.mutationError;
           final historyLoading = widget.state.historyPageLoading;
-          final historyAnchorTransitionToLoading =
-              !_historyPageWasLoading && historyLoading && !_followTail;
-          final historyAnchorTransitionToReady =
-              _historyPageWasLoading && !historyLoading && !_followTail;
-
-          if (historyAnchorTransitionToLoading) {
-            _historyAnchorRestorePending = false;
-            _historyAnchorRestoreAttempts = 0;
-            _historyAnchorStableChecks = 0;
-          } else if (historyAnchorTransitionToReady) {
-            _historyAnchorRestorePending = _historyAnchorKey != null;
-            if (!_historyAnchorRestorePending) {
-              _scheduleBlockedHistoryIntentResume();
-            }
+          // A page that finished while the reader is still moving may call
+          // for the next. The page itself needs no settling: the centered
+          // list and the layout-time anchor placed it already.
+          if (_historyPageWasLoading && !historyLoading) {
+            _forgetFillingRangeAfterFrame();
+            if (!_followTail) _schedulePrefetchEvaluation();
           }
           _historyPageWasLoading = historyLoading;
+          // Which way the page in flight extends the list, and which range it
+          // fills. A request this surface did not make (a retry the controller
+          // issued itself) is not tied to any one range.
+          final loadingUpward = _historyLoadUpward;
+          final cursorInFlight = _automaticHistoryCursorInFlight;
 
           Widget wrapContextRegion(AgentMessage message, Widget child) {
             return _MessageContextRegion(
@@ -1982,6 +2794,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                     isNewestEligibleForIdentity: false,
                     resolvedRequestIds: resolvedRequestIds,
                     resolvedRequestDecisions: resolvedRequestDecisions,
+                    withdrawnRequestIds: widget.state.withdrawnRequestIds,
                     onForkFromMessage: widget.onForkFromMessage,
                     artifactActionState: _artifactActionStateForMessage(
                       widget.state,
@@ -2057,17 +2870,35 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
               _ChatHistoryGapItem(:final gap) => _HistoryDecodedGapRow(
                 gap: gap,
                 connected: widget.isConnected,
-                loading: widget.state.historyPageLoading,
-                failed: widget.state.historyPageError != null,
-                terminalFailure: isTerminalHistoryPageErrorCode(
-                  widget.state.historyPageErrorCode,
-                ),
+                loading:
+                    widget.state.historyPageLoading &&
+                    !widget.state.historyGapRefused(gap) &&
+                    (cursorInFlight == null ||
+                        cursorInFlight == gap.reloadCursor ||
+                        cursorInFlight == gap.forwardCursor),
+                loadingNewer: !loadingUpward,
+                failed:
+                    widget.state.historyPageError != null ||
+                    widget.state.historyGapRefused(gap),
+                terminalFailure:
+                    isTerminalHistoryPageErrorCode(
+                      widget.state.historyPageErrorCode,
+                    ) ||
+                    widget.state.historyGapRefused(gap),
                 onRetry: gap.reloadCursor == null
                     ? null
                     : () {
+                        // Asking explicitly is its own retry: whatever the
+                        // automatic backoff holds for this range no longer
+                        // applies.
+                        final key = 'gap:${gap.id}';
+                        _prefetch.forgetFailure(key);
                         _requestHistoryCursor(
                           gap.reloadCursor!,
                           leadingEdge: false,
+                          upward: !_gapBelowReader(gap),
+                          range: gap.id,
+                          prefetchKey: key,
                         );
                       },
               ),
@@ -2135,23 +2966,30 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
           // per-row derivation above, which is cached and only touches rows
           // that actually changed.
           rowWork?.reconciledRows += totalItems;
+          // Decided against last frame's rows and geometry, so this runs
+          // before the registry below is replaced.
+          final centerIndex = _resolveCenter(
+            itemIdentities,
+            preferredIndex: messageCount > 0 ? messageOffset : 0,
+          );
+          final centerGeneration = _centerGeneration;
           _syncItemRegistry(
             identities: itemIdentities,
             messageIndices: messageIndices,
             canonicalMessageKeys: canonicalMessageKeys,
           );
-          _reloadableGapCursorByItemKey.clear();
+          _reloadableGapByItemKey.clear();
           for (var index = 0; index < chatItems.length; index++) {
             final item = chatItems[index];
             if (item case _ChatHistoryGapItem(
-              gap: TranscriptHistoryGapSegment(
-                kind: TranscriptHistoryGapKind.reloadable,
-                reloadCursor: final cursor?,
-              ),
+              gap: final gap &&
+                  TranscriptHistoryGapSegment(
+                    kind: TranscriptHistoryGapKind.reloadable,
+                    reloadCursor: _?,
+                  ),
             )) {
-              _reloadableGapCursorByItemKey[_orderedItemKeys[messageOffset +
-                      index]] =
-                  cursor;
+              _reloadableGapByItemKey[_orderedItemKeys[messageOffset + index]] =
+                  gap;
             }
           }
           _totalRowCount = totalItems;
@@ -2185,9 +3023,19 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                     hasEarlier: widget.state.hasEarlierHistory,
                     startReached: widget.state.historyStartReached,
                     connected: widget.isConnected,
-                    loading: historyLoading,
-                    pagingError: widget.state.historyPageError,
-                    pagingErrorCode: widget.state.historyPageErrorCode,
+                    // The top of the list shows only a page that extends it
+                    // upward; a range filling below the reader says so there.
+                    loading: historyLoading && loadingUpward,
+                    pagingError:
+                        widget.state.historyPageError ??
+                        (widget.state.olderHistoryRefusal == null
+                            ? null
+                            : const LocalizedFailure.notice(
+                                FailureLead.historyPageDiverged,
+                              )),
+                    pagingErrorCode:
+                        widget.state.historyPageErrorCode ??
+                        widget.state.olderHistoryRefusal,
                     onLoadEarlier: widget.isConnected
                         ? _requestEarlierExplicitly
                         : null,
@@ -2286,9 +3134,6 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
           // List growth, prepends, and expansion change row geometry without a
           // gesture; refresh the reading once this frame lays out.
           _scheduleProgressRefresh();
-          if (_historyAnchorRestorePending) {
-            _scheduleHistoryAnchorRestore();
-          }
           // The scroll view spans the full tab width; readability comes from
           // constraining each row instead of the viewport (see
           // `_ReadableColumn`). The native scrollbar is suppressed: its thumb
@@ -2307,6 +3152,12 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
             onNotification: (notification) {
               if (notification.depth == 0) {
                 _scheduleProgressRefresh();
+                // A failed boundary whose backoff passed while the reader was
+                // away is asked for again once a change like this one (a
+                // jump, a row changing height) brings it back into reach.
+                if (_prefetch.retryDue(_prefetchNow())) {
+                  _schedulePrefetchEvaluation();
+                }
               }
               return false;
             },
@@ -2314,29 +3165,40 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
               onNotification: _onScrollNotification,
               child: Listener(
                 behavior: HitTestBehavior.translucent,
+                // A drag moves the content with the finger, so the reader
+                // heads the other way; a wheel scrolls the way it turns.
                 onPointerMove: (event) {
                   if (event.delta.dy.abs() > 0.01) {
                     _recordRealScrollMovement(
                       upward: event.delta.dy > 0,
-                      distance: event.delta.dy.abs(),
+                      time: event.timeStamp,
+                      delta: -event.delta.dy,
                     );
                   }
                 },
-                onPointerCancel: (_) => _clearUpwardHistoryIntent(),
+                onPointerCancel: (_) {
+                  _prefetchSettleTimer?.cancel();
+                  _prefetch.settle();
+                },
                 onPointerSignal: (event) {
                   if (event is PointerScrollEvent &&
                       event.scrollDelta.dy.abs() > 0.01) {
                     _recordRealScrollMovement(
                       upward: event.scrollDelta.dy < 0,
-                      distance: event.scrollDelta.dy.abs(),
+                      time: event.timeStamp,
+                      delta: event.scrollDelta.dy,
                     );
+                    // The wheel moves the list after this event; the
+                    // boundary ahead is measured again from there.
+                    _schedulePrefetchEvaluation();
                   }
                 },
                 onPointerPanZoomUpdate: (event) {
                   if (event.panDelta.dy.abs() > 0.01) {
                     _recordRealScrollMovement(
                       upward: event.panDelta.dy > 0,
-                      distance: event.panDelta.dy.abs(),
+                      time: event.timeStamp,
+                      delta: -event.panDelta.dy,
                     );
                   }
                 },
@@ -2363,9 +3225,17 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                               behavior: ScrollConfiguration.of(
                                 context,
                               ).copyWith(scrollbars: false),
-                              child: ListView.builder(
+                              child: _TranscriptScrollView(
                                 key: const Key('session-detail-chat-scroll'),
                                 controller: _scrollController,
+                                // Scroll offset 0 is the center row's top:
+                                // rows before it are laid out upward from
+                                // there, rows after it downward, so adding or
+                                // releasing rows at either end never shifts
+                                // the ones around the reader.
+                                center: ValueKey<String>(
+                                  'transcript-rows-from-$centerGeneration',
+                                ),
                                 scrollCacheExtent:
                                     const ScrollCacheExtent.viewport(
                                       2,
@@ -2380,10 +3250,51 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                                     context,
                                   ),
                                 ),
-                                findChildIndexCallback: _findChildIndex,
-                                itemCount: totalItems,
-                                itemBuilder: (context, index) =>
-                                    buildScrollItem(index),
+                                semanticChildCount: totalItems,
+                                slivers: [
+                                  SliverList(
+                                    key: ValueKey<String>(
+                                      'transcript-rows-before-'
+                                      '$centerGeneration',
+                                    ),
+                                    delegate: SliverChildBuilderDelegate(
+                                      (context, index) => buildScrollItem(
+                                        centerIndex - 1 - index,
+                                      ),
+                                      childCount: centerIndex,
+                                      findChildIndexCallback: (key) {
+                                        final index = _findChildIndex(key);
+                                        if (index == null ||
+                                            index >= centerIndex) {
+                                          return null;
+                                        }
+                                        return centerIndex - 1 - index;
+                                      },
+                                      semanticIndexCallback: (_, index) =>
+                                          centerIndex - 1 - index,
+                                    ),
+                                  ),
+                                  SliverList(
+                                    key: ValueKey<String>(
+                                      'transcript-rows-from-$centerGeneration',
+                                    ),
+                                    delegate: SliverChildBuilderDelegate(
+                                      (context, index) =>
+                                          buildScrollItem(centerIndex + index),
+                                      childCount: totalItems - centerIndex,
+                                      findChildIndexCallback: (key) {
+                                        final index = _findChildIndex(key);
+                                        if (index == null ||
+                                            index < centerIndex) {
+                                          return null;
+                                        }
+                                        return index - centerIndex;
+                                      },
+                                      semanticIndexCallback: (_, index) =>
+                                          centerIndex + index,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                             Positioned(
@@ -2526,7 +3437,7 @@ class _TranscriptRowGeometryTrackerState
   }
 
   @override
-  Widget build(BuildContext context) => widget.child;
+  Widget build(BuildContext context) => _RowExtentReporter(child: widget.child);
 }
 
 /// Passive monotone right-edge scrollbar for the transcript (N2-D).
@@ -2712,6 +3623,7 @@ class _HistoryDecodedGapRow extends StatelessWidget {
     required this.gap,
     required this.connected,
     required this.loading,
+    required this.loadingNewer,
     required this.failed,
     required this.terminalFailure,
     required this.onRetry,
@@ -2720,6 +3632,10 @@ class _HistoryDecodedGapRow extends StatelessWidget {
   final TranscriptHistoryGapSegment gap;
   final bool connected;
   final bool loading;
+
+  /// Whether the page filling this range brings the rows below the reader
+  /// (newer than what they are reading) rather than the rows above.
+  final bool loadingNewer;
   final bool failed;
   final bool terminalFailure;
   final VoidCallback? onRetry;
@@ -2729,11 +3645,16 @@ class _HistoryDecodedGapRow extends StatelessWidget {
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
     final reloadable = gap.kind == TranscriptHistoryGapKind.reloadable;
+    final label = switch (gap.kind) {
+      TranscriptHistoryGapKind.reloadable => l10n.sessionHistoryDecodedGap,
+      TranscriptHistoryGapKind.reconnectRequired =>
+        l10n.sessionHistoryDecodedGapReconnect,
+      TranscriptHistoryGapKind.unsavedReleased =>
+        l10n.sessionHistoryUnsavedReleased,
+    };
     return Semantics(
       container: true,
-      label: reloadable
-          ? l10n.sessionHistoryDecodedGap
-          : l10n.sessionHistoryDecodedGapReconnect,
+      label: label,
       child: ConstrainedBox(
         key: Key(gap.id),
         constraints: const BoxConstraints(minHeight: 36),
@@ -2759,12 +3680,14 @@ class _HistoryDecodedGapRow extends StatelessWidget {
               Flexible(
                 child: Text(
                   !reloadable
-                      ? l10n.sessionHistoryDecodedGapReconnect
+                      ? label
                       : failed
                       ? l10n.sessionHistoryLoadFailed
                       : loading
-                      ? l10n.sessionHistoryLoadingEarlier
-                      : l10n.sessionHistoryDecodedGap,
+                      ? (loadingNewer
+                            ? l10n.sessionHistoryLoadingNewer
+                            : l10n.sessionHistoryLoadingEarlier)
+                      : label,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
                     color: failed && reloadable
                         ? tokens.statusError

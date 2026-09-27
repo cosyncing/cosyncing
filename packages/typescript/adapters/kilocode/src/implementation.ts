@@ -40,11 +40,13 @@ import { diagnoseKiloSetup } from './diagnostics.ts';
 import { KiloObserveConnection, type KiloObserveOptions } from './observe.ts';
 import {
   discoverKiloStore,
+  kiloHistoryContinuation,
   kiloHistorySourceIdentity,
   KILO_MAX_RAW_HISTORY_BYTES,
   kiloDataRoot,
   kiloDatabasePaths,
   readKiloHistory,
+  type KiloHistorySnapshot,
   type KiloStoredSession,
   type KiloStoreTrace,
 } from './store.ts';
@@ -82,38 +84,11 @@ function preserveModelLabel(
   return { ...native, label: fallback.label };
 }
 
-/**
- * Kilo persists a streaming assistant part IN PLACE: the same row's text grows as the model writes.
- * `reconcileDisk` snapshots every row's encoding at `beforeMutation` (mid-turn — a permission reply
- * is the ordinary case) and compares it as an append-only prefix at `sessionSettled`, so that
- * growth read as "history was rewritten or replaced" and permanently revoked Drive on the next
- * NORMAL turn boundary. Measured: a mid-turn snapshot followed by extending `prt-answer` demoted a
- * healthy session to observe and dropped its stored boundary.
- *
- * Only an assistant-produced streaming row may grow, only under an unchanged type and key, and only
- * by EXTENDING its text. A foreign writer replacing content fails every one of those, so genuine
- * rewrite detection is untouched.
- */
-function isStreamedGrowth(before: string, after: string | undefined): boolean {
-  if (after === undefined) return false;
-  let previous: Record<string, unknown>;
-  let current: Record<string, unknown>;
-  try {
-    previous = JSON.parse(before) as Record<string, unknown>;
-    current = JSON.parse(after) as Record<string, unknown>;
-  } catch {
-    return false;
-  }
-  if (previous.type !== 'model-output' && previous.type !== 'thinking') return false;
-  if (previous.type !== current.type || previous.key !== current.key) return false;
-  if (typeof previous.text !== 'string' || typeof current.text !== 'string') return false;
-  return current.text.startsWith(previous.text);
-}
-
 class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
   private knownMessageIds: string[] = [];
   private knownRowIds = new Set<string>();
   private knownEncodings: string[] = [];
+  private knownSettledRows = 0;
   private knownUserIds = new Set<string>();
   private claimedUserIds = new Set<string>();
   private invalid = false;
@@ -131,7 +106,7 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
     if (!snapshot) throw new Error('Kilo Drive requires one stable SQLite snapshot.');
     const boundary = kiloHistorySourceIdentity(this.session, snapshot);
     if (!sameBoundary(this.expected, boundary)) throw new Error('Kilo durable ownership boundary changed before live attach.');
-    this.remember(snapshot.messageIds, snapshot.messages);
+    this.remember(snapshot);
   }
 
   async beforeMutation(): Promise<void> { await this.reconcileDisk(false); }
@@ -169,26 +144,28 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
     // and `prime()` thirty lines above already treats the same answer as a
     // refusal rather than a revocation.
     if (!snapshot) throw new Error('Kilo SQLite ownership snapshot could not be read; refusing this mutation.');
+    // The disk was last read at `beforeMutation`, usually mid-turn (a permission reply is the
+    // ordinary case), so the turn's own progress since then is not a rewrite: Kilo writes a message
+    // in place until it completes (see kiloHistoryContinuation). Read as an append-only prefix, that
+    // progress permanently revoked Drive on the next normal turn boundary.
     const prefix = snapshot.messageIds.length >= this.knownMessageIds.length
-      && snapshot.encodings.length >= this.knownEncodings.length
       && this.knownMessageIds.every((id, index) => snapshot.messageIds[index] === id)
-      && this.knownEncodings.every((encoding, index) =>
-        snapshot.encodings[index] === encoding
-        || isStreamedGrowth(encoding, snapshot.encodings[index]));
+      && kiloHistoryContinuation({ encodings: this.knownEncodings, settledRows: this.knownSettledRows }, snapshot) !== undefined;
     if (!prefix) return this.fail('Kilo SQLite history was rewritten or replaced.');
     const users = snapshot.messages.flatMap((message) =>
       message.type === 'user-message' && message.key ? [message.key] : []);
     const foreign = users.find((id) => !this.knownUserIds.has(id) && !this.claimedUserIds.has(id));
     if (foreign) return this.fail('Kilo SQLite history contains a foreign user prompt.');
-    this.remember(snapshot.messageIds, snapshot.messages);
+    this.remember(snapshot);
     if (publish) this.publish(kiloHistorySourceIdentity(this.session, snapshot));
   }
 
-  private remember(ids: readonly string[], messages: readonly AgentMessage[]): void {
-    this.knownMessageIds = [...ids];
-    for (const id of ids) this.knownRowIds.add(id);
-    this.knownEncodings = messages.map((message) => JSON.stringify(message));
-    for (const message of messages) {
+  private remember(snapshot: KiloHistorySnapshot): void {
+    this.knownMessageIds = [...snapshot.messageIds];
+    for (const id of snapshot.messageIds) this.knownRowIds.add(id);
+    this.knownEncodings = [...snapshot.encodings];
+    this.knownSettledRows = snapshot.settledRows;
+    for (const message of snapshot.messages) {
       if (message.type === 'user-message' && message.key) this.knownUserIds.add(message.key);
     }
   }

@@ -11,10 +11,21 @@ import {
   backwardHistoryCursorParts,
   BackwardHistoryCursorIndexer,
   type BackwardHistoryPage,
+  estimatedClientDecodedBytes,
+  HISTORY_FRAME_MAX_PROJECTIONS,
   historyCursorFromHash,
   historyCursorParts,
+  type HistoryRefresh,
+  type HistoryRefreshRefusal,
   isBackwardPageMessage,
   isCursorDurableMessage,
+  isVolatileTailMessage,
+  isPendingToolSlot,
+  MAX_VOLATILE_TAIL_ROWS,
+  refreshPrefixEnd,
+  runningTurnHoldEnd,
+  VolatileHistoryTail,
+  withToolSlotCursor,
 } from './history-delta.ts';
 
 /** One active native-history snapshot may contribute at most this many
@@ -83,11 +94,16 @@ export const HISTORY_PAGE_CACHE_MAX_OVERLAP_ENTRIES = 1_024;
  * 500-message maximum — large enough for every plan/goal/metadata key a real
  * session carries, small enough that it can never be mistaken for the window.
  */
-export const HISTORY_PAGE_CACHE_MAX_ATTACH_PROJECTIONS = 24;
+export const HISTORY_PAGE_CACHE_MAX_ATTACH_PROJECTIONS = HISTORY_FRAME_MAX_PROJECTIONS;
+
+/** Stands in for a row the running-turn hold looks at but cannot read: neither text nor a tool call
+ * or result, so it holds nothing and settles no call. */
+const HOLDS_NOTHING = { type: 'status', status: 'idle' } as AgentMessage;
 
 type EncodedHistoryMessage = {
   json: string;
   pageable: boolean;
+  pendingToolSlot?: boolean;
 };
 
 export interface HistoryPageCacheStats {
@@ -112,11 +128,129 @@ export interface CompactHistoryAttach {
   };
   truncated?: { shown: number; total: number };
   olderCursor?: string;
+  /**
+   * Backward-page cursor for the boundary after this frame's newest durable
+   * message (see HistoryDelta.endCursor). Only an index that can serve pages
+   * issues one; the bounded-tail fallback never does.
+   */
+  endCursor?: string;
   hasEarlier: boolean;
   /** Latest text lengths the client holds after this attach. A reset contains
    * only identities present in [messages]; an incremental attach also includes
    * its cursor-acknowledged prefix. */
   deliveredText: ReadonlyMap<string, number>;
+}
+
+/**
+ * One adapter's history source probe, or undefined when it does not describe a
+ * source paging can be bound to. Without one the paging route refuses every
+ * page, so nothing may promise a page boundary for that source.
+ */
+export function validHistorySourceIdentity(
+  identity: unknown,
+): Readonly<HistorySourceIdentity> | undefined {
+  if (!identity || typeof identity !== 'object') return undefined;
+  const candidate = identity as Partial<HistorySourceIdentity>;
+  if (
+    typeof candidate.sourceId !== 'string'
+    || candidate.sourceId.length === 0
+    || typeof candidate.revision !== 'string'
+    || candidate.revision.length === 0
+    || (candidate.appendPosition !== undefined
+      && (!Number.isSafeInteger(candidate.appendPosition)
+        || candidate.appendPosition < 0))
+  ) return undefined;
+  return Object.freeze({ ...(candidate as HistorySourceIdentity) });
+}
+
+/**
+ * Upper bound on one backward cursor's encoded bytes for any boundary under
+ * the entry message cap: `{"v":1,"k":"older","b":<=6 digits,"h":<43-char
+ * SHA-256 base64url>}` in base64url is 104 bytes.
+ */
+const MAX_ENCODED_CURSOR_BYTES = 128;
+
+/** Verdicts already reached, by exact source snapshot (see {@link historyFitsEncodedPageCache}). */
+const encodedPageCacheFitVerdicts = new Map<string, boolean>();
+const MAX_ENCODED_PAGE_CACHE_FIT_VERDICTS = 512;
+
+/**
+ * Whether one complete durable history fits the encoded paging cache, which is
+ * what serves pages for a source without a native random-access capture. A
+ * history that does not fit is refused page by page, so a frame over it must
+ * not name a page boundary.
+ *
+ * This runs for frames that build no cache, so it avoids the build where it
+ * can. First, a verdict is reused for the exact same snapshot: the same source
+ * identity, the same length, and the same [fingerprint] (the frame's full-prefix
+ * reconnect cursor). A source that grows or is replaced changes the key and is
+ * judged afresh. Second, a sufficient bound settles most histories with a
+ * structural walk instead of an encode-and-hash: a message's JSON is at most
+ * three times its decoded-size estimate (at most 6 bytes per UTF-16 unit
+ * against 2, with the estimate's per-value overhead covering every delimiter),
+ * so a history whose bound fits the budget certainly fits. Only a history near
+ * the limits pays the exact build.
+ */
+export function historyFitsEncodedPageCache(
+  identity: Readonly<HistorySourceIdentity>,
+  history: AgentMessage[],
+  fingerprint?: string,
+  maxBytes = HISTORY_PAGE_CACHE_MAX_ENTRY_BYTES,
+  maxMessages = HISTORY_PAGE_CACHE_MAX_ENTRY_MESSAGES,
+): boolean {
+  const key = fingerprint === undefined
+    ? undefined
+    : JSON.stringify([
+      identity.sourceId,
+      identity.revision,
+      identity.appendPosition ?? null,
+      identity.rewriteToken ?? null,
+      history.length,
+      fingerprint,
+      maxBytes,
+      maxMessages,
+    ]);
+  if (key !== undefined) {
+    const known = encodedPageCacheFitVerdicts.get(key);
+    if (known !== undefined) {
+      encodedPageCacheFitVerdicts.delete(key);
+      encodedPageCacheFitVerdicts.set(key, known);
+      return known;
+    }
+  }
+  const fits = encodedPageCacheCertainlyFits(history, maxBytes, maxMessages)
+    ?? EncodedHistoryPageCache.create(identity, history, maxBytes, maxMessages) !== undefined;
+  if (key !== undefined) {
+    encodedPageCacheFitVerdicts.set(key, fits);
+    while (encodedPageCacheFitVerdicts.size > MAX_ENCODED_PAGE_CACHE_FIT_VERDICTS) {
+      encodedPageCacheFitVerdicts.delete(encodedPageCacheFitVerdicts.keys().next().value!);
+    }
+  }
+  return fits;
+}
+
+/**
+ * `false` when the durable count alone is over the cap, `true` when the
+ * three-times bound fits, `undefined` when only the exact build can tell.
+ */
+function encodedPageCacheCertainlyFits(
+  history: AgentMessage[],
+  maxBytes: number,
+  maxMessages: number,
+): boolean | undefined {
+  let durable = 0;
+  let bound = MAX_ENCODED_CURSOR_BYTES;
+  let conclusive = true;
+  for (const message of history) {
+    if (!isCursorDurableMessage(message)) continue;
+    durable += 1;
+    if (durable > maxMessages) return false;
+    if (conclusive) {
+      bound += 3 * estimatedClientDecodedBytes(message) + 1 + MAX_ENCODED_CURSOR_BYTES;
+      if (bound > maxBytes) conclusive = false;
+    }
+  }
+  return conclusive ? true : undefined;
 }
 
 /** Whether both probes describe the exact same native source snapshot. */
@@ -189,15 +323,16 @@ export class EncodedHistoryPageCacheBuilder implements HistorySnapshotSink {
       this.overflowed = true;
       return false;
     }
-    const json = JSON.stringify(message);
     const cursor = this.indexer.push(message);
+    const json = JSON.stringify(withToolSlotCursor(message, cursor));
     this.encodedBytes += Buffer.byteLength(json, 'utf8') + 1
       + Buffer.byteLength(cursor, 'utf8');
     if (this.encodedBytes > this.maxBytes) {
       this.overflowed = true;
       return false;
     }
-    this.encoded.push({ json, pageable: isBackwardPageMessage(message) });
+    this.encoded.push({ json, pageable: isBackwardPageMessage(message),
+      pendingToolSlot: isPendingToolSlot(message) });
     this.cursors.push(cursor);
     return true;
   }
@@ -224,6 +359,7 @@ export class EncodedHistoryPageCacheBuilder implements HistorySnapshotSink {
  */
 export class EncodedHistoryPageCache {
   readonly kind = 'encoded' as const;
+  get hasPendingToolSlots(): boolean { return this.messages.some((row) => row.pendingToolSlot); }
 
   private constructor(
     readonly sourceIdentity: Readonly<HistorySourceIdentity>,
@@ -342,6 +478,164 @@ export class EncodedHistoryPageCache {
   ): Promise<BackwardHistoryPage> {
     return this.page(rawCursor, limit);
   }
+
+  /** The exact boundary [rawCursor] names in this snapshot, or the page-shaped refusal. */
+  private boundaryOf(rawCursor: string | undefined): number | BackwardHistoryPage {
+    const boundary = backwardHistoryCursorBoundary(rawCursor);
+    if (boundary === undefined || boundary < 0) return cursorRefusal('invalid', rawCursor);
+    if (boundary >= this.cursors.length) return cursorRefusal('gone', rawCursor);
+    if (this.cursors[boundary] !== rawCursor) return cursorRefusal('diverged', rawCursor);
+    return boundary;
+  }
+
+  /**
+   * One chronological page NEWER than [rawCursor] (contract revision 28): the mirror of
+   * {@link page}, stopping after [limit] pageable rows or at [rawUntil]. See
+   * `forwardHistoryPage` in history-delta.ts for the walk; this is the same walk over the
+   * encoded snapshot.
+   */
+  pageNewer(
+    rawCursor: string | undefined,
+    limit = 100,
+    rawUntil?: string,
+    options: { holdTrailingText?: boolean } = {},
+  ): BackwardHistoryPage {
+    const start = this.boundaryOf(rawCursor);
+    if (typeof start !== 'number') return start;
+    let stop = this.messages.length;
+    if (rawUntil !== undefined) {
+      const until = this.boundaryOf(rawUntil);
+      if (typeof until !== 'number') return until;
+      if (until < start) return cursorRefusal('invalid', rawUntil);
+      stop = until;
+    } else if (options.holdTrailingText) {
+      // See forwardHistoryPage: a page to the end of a history a turn is still writing stops at
+      // the running-turn hold.
+      stop = runningTurnHoldEnd(start, stop, (index) => JSON.parse(this.messages[index]!.json) as AgentMessage);
+    }
+    const pageLimit = Math.max(
+      1,
+      Math.min(
+        HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES,
+        Number.isFinite(limit) ? Math.trunc(limit) : 100,
+      ),
+    );
+    const page: AgentMessage[] = [];
+    let boundary = start;
+    while (boundary < stop && page.length < pageLimit) {
+      const encoded = this.messages[boundary]!;
+      boundary += 1;
+      if (encoded.pageable) page.push(JSON.parse(encoded.json) as AgentMessage);
+    }
+    // See forwardHistoryPage: a full page ends just before the next row a page carries.
+    while (boundary < stop && !this.messages[boundary]!.pageable) boundary += 1;
+    const hasMore = boundary < this.messages.length;
+    return {
+      messages: page,
+      cursor: rawUntil !== undefined && boundary === stop ? rawUntil : this.cursors[boundary],
+      hasMore,
+      endOfHistory: !hasMore,
+    };
+  }
+
+  async loadNewerPage(
+    rawCursor: string | undefined,
+    limit = 100,
+    rawUntil?: string,
+    _query?: HistoryQuery,
+    options: { holdTrailingText?: boolean } = {},
+  ): Promise<BackwardHistoryPage> {
+    return this.pageNewer(rawCursor, limit, rawUntil, options);
+  }
+
+  /**
+   * One `history-refresh` frame from this snapshot (contract revision 28): the frame `historyRefresh`
+   * in history-delta.ts builds over the same durable rows, from the stored boundary hashes instead
+   * of rehashing the prefix. Only the rows the frame may carry are decoded.
+   */
+  loadRefresh(
+    since: string | undefined,
+    options: {
+      max: number;
+      maxDecodedBytes?: number;
+      measure?: (message: AgentMessage) => number;
+      holdTrailingText?: boolean;
+    },
+  ): HistoryRefresh | HistoryRefreshRefusal {
+    const count = this.messages.length;
+    const parsed = historyCursorParts(since);
+    if (!parsed) {
+      return {
+        gap: { reason: 'invalid-cursor', code: 'HISTORY_CURSOR_INVALID', message: 'history cursor is invalid' },
+      };
+    }
+    if (!Number.isInteger(parsed.boundary) || parsed.boundary < 0 || parsed.boundary > count) {
+      return {
+        gap: {
+          reason: 'cursor-out-of-range',
+          code: 'HISTORY_CURSOR_GONE',
+          message: 'history cursor is outside the retained session history',
+        },
+      };
+    }
+    const hashAt = (boundary: number) => backwardHistoryCursorParts(this.cursors[boundary])!.hash;
+    if (hashAt(parsed.boundary) !== parsed.hash) {
+      return {
+        gap: {
+          reason: 'cursor-prefix-mismatch',
+          code: 'HISTORY_CURSOR_DIVERGED',
+          message: 'history cursor no longer matches this session',
+        },
+      };
+    }
+    const decoded = new Map<number, AgentMessage>();
+    const rowAt = (index: number): AgentMessage => {
+      let message = decoded.get(index);
+      if (!message) {
+        message = JSON.parse(this.messages[index]!.json) as AgentMessage;
+        decoded.set(index, message);
+      }
+      return message;
+    };
+    const start = parsed.boundary;
+    const end = refreshPrefixEnd(start, count, rowAt, options);
+    return {
+      messages: Array.from({ length: end - start }, (_, offset) => rowAt(start + offset)),
+      cursor: historyCursorFromHash(end, hashAt(end)),
+      endCursor: this.cursors[end]!,
+      more: end < count,
+    };
+  }
+}
+
+/** The typed page refusal for a cursor this snapshot cannot resolve. */
+function cursorRefusal(
+  kind: 'invalid' | 'gone' | 'diverged',
+  rawCursor: string | undefined,
+): BackwardHistoryPage {
+  const gap = kind === 'invalid'
+    ? {
+        reason: 'invalid-cursor' as const,
+        code: 'HISTORY_CURSOR_INVALID' as const,
+        message: 'backward history cursor is invalid',
+      }
+    : kind === 'gone'
+      ? {
+          reason: 'cursor-out-of-range' as const,
+          code: 'HISTORY_CURSOR_GONE' as const,
+          message: 'backward history cursor is outside the retained session history',
+        }
+      : {
+          reason: 'cursor-prefix-mismatch' as const,
+          code: 'HISTORY_CURSOR_DIVERGED' as const,
+          message: 'backward history cursor no longer matches this session',
+        };
+  return {
+    messages: [],
+    hasMore: false,
+    endOfHistory: false,
+    gap: { ...gap, ...(rawCursor ? { cursor: rawCursor } : {}) },
+  };
 }
 
 type CompactProjection = {
@@ -368,8 +662,12 @@ export class IndexedHistoryPageCacheBuilder implements HistorySnapshotSink {
   private readonly projections = new Map<string, CompactProjection>();
   private readonly derived = new Map<string, number>();
   private readonly overlap = new Map<string, CompactOverlap>();
+  /** The history's trailing pending/running projections, not yet proven transcript. */
+  private readonly volatileTail = new VolatileHistoryTail<{ message: AgentMessage; location: number }>();
   private indexBytes = 0;
   private overflowed = false;
+  private readonly pendingSlotCursors = new Map<number, string>();
+  private hasPendingToolSlots = false;
 
   constructor(
     private readonly maxBytes = HISTORY_PAGE_CACHE_MAX_INDEX_BYTES,
@@ -394,7 +692,17 @@ export class IndexedHistoryPageCacheBuilder implements HistorySnapshotSink {
       return false;
     }
 
-    if (!isCursorDurableMessage(message)) {
+    if (!isCursorDurableMessage(message)) return this.acceptDerived(message, location);
+    // A volatile row waits until a transcript row proves it is history; one still ending the
+    // snapshot at `finish` replays as derived (see cursorDurableHistory).
+    for (const entry of this.volatileTail.push({ message, location }, isVolatileTailMessage(message))) {
+      if (!this.acceptDurable(entry.message, entry.location)) return false;
+    }
+    return true;
+  }
+
+  private acceptDerived(message: AgentMessage, location: number): boolean {
+    {
       const key = `${message.type}\0${(message as { key?: string }).key ?? location}`;
       if (this.derived.has(key)) {
         // Replacement only refreshes recency/location. The retained map still
@@ -412,13 +720,21 @@ export class IndexedHistoryPageCacheBuilder implements HistorySnapshotSink {
       }
       return this.checkBytes();
     }
+  }
 
+  private acceptDurable(message: AgentMessage, location: number): boolean {
     if (this.locations.length >= this.maxMessages) {
       this.overflowed = true;
       return false;
     }
     const index = this.locations.length;
     const hash = this.indexer.pushHash(message);
+    if (isPendingToolSlot(message)) {
+      this.hasPendingToolSlots = true;
+      const cursor = backwardHistoryCursorFromHash(index + 1, hash);
+      this.pendingSlotCursors.set(location, cursor);
+      this.indexBytes += cursor.length * 2 + 64;
+    }
     this.hashes.push(hash);
     this.locations.push(location);
     this.pageable.push(isBackwardPageMessage(message));
@@ -477,6 +793,9 @@ export class IndexedHistoryPageCacheBuilder implements HistorySnapshotSink {
     sourceIdentity: Readonly<HistorySourceIdentity>,
     reader: HistorySnapshotPageReader | undefined,
   ): IndexedHistoryPageCache | undefined {
+    for (const { message, location } of this.volatileTail.tail) {
+      if (!this.acceptDerived(message, location)) break;
+    }
     if (
       this.overflowed
       || !reader
@@ -498,6 +817,8 @@ export class IndexedHistoryPageCacheBuilder implements HistorySnapshotSink {
       overlap: [...this.overlap.values()],
       indexBytes: this.indexBytes + reader.retainedBytes,
       reader,
+      pendingSlotCursors: this.pendingSlotCursors,
+      hasPendingToolSlots: this.hasPendingToolSlots,
     });
   }
 }
@@ -517,6 +838,8 @@ export class IndexedHistoryPageCache {
   private readonly derived: readonly number[];
   private readonly overlap: readonly CompactOverlap[];
   private readonly reader: HistorySnapshotPageReader;
+  private readonly pendingSlotCursors: ReadonlyMap<number, string>;
+  readonly hasPendingToolSlots: boolean;
   private _lastReadWork:
     | { recordsRead: number; bytesRead: number }
     | undefined;
@@ -531,6 +854,8 @@ export class IndexedHistoryPageCache {
     overlap: readonly CompactOverlap[];
     indexBytes: number;
     reader: HistorySnapshotPageReader;
+    pendingSlotCursors?: ReadonlyMap<number, string>;
+    hasPendingToolSlots?: boolean;
   }) {
     this.sourceIdentity = Object.freeze({ ...parts.sourceIdentity });
     this.hashes = parts.hashes;
@@ -541,6 +866,8 @@ export class IndexedHistoryPageCache {
     this.overlap = parts.overlap;
     this.encodedBytes = parts.indexBytes;
     this.reader = parts.reader;
+    this.pendingSlotCursors = parts.pendingSlotCursors ?? new Map();
+    this.hasPendingToolSlots = parts.hasPendingToolSlots ?? false;
   }
 
   get stats(): HistoryPageCacheStats {
@@ -618,7 +945,44 @@ export class IndexedHistoryPageCache {
       return { kind: 'source-changed' };
     }
     this._lastReadWork = result.work;
-    return result.messages;
+    return result.messages.map((row, index) => withToolSlotCursor(row, this.pendingSlotCursors.get(locations[index]!)));
+  }
+
+  /**
+   * The running-turn hold over rows `[start, end)` (see `runningTurnHoldEnd`), reading only the
+   * newest rows it looks at. [known] holds rows the caller already read, by index.
+   *
+   * The hold decides from exactly the rows the shared function asks for, so this path and the
+   * whole-array one name the same boundary. A row it asks for that is not read yet stands in as a
+   * row that holds nothing; the rows down to it are then read, newest first, and the hold decides
+   * again, until it asked for nothing unread.
+   */
+  private async runningTurnHoldEnd(
+    start: number,
+    end: number,
+    query?: HistoryQuery,
+    known?: ReadonlyMap<number, AgentMessage>,
+  ): Promise<number | HistoryPageReadFailure> {
+    const rows = new Map<number, AgentMessage>(known);
+    for (;;) {
+      let wanted = end;
+      const held = runningTurnHoldEnd(start, end, (index) => {
+        const row = rows.get(index);
+        if (row) return row;
+        if (index < wanted) wanted = index;
+        return HOLDS_NOTHING;
+      });
+      if (wanted === end) return held;
+      // Everything the hold asked for, and at least a few rows more toward the start.
+      let readTo = end;
+      while (readTo > wanted && rows.has(readTo - 1)) readTo -= 1;
+      const from = Math.max(start, Math.min(wanted, readTo - 16));
+      const missing: number[] = [];
+      for (let index = from; index < readTo; index += 1) if (!rows.has(index)) missing.push(index);
+      const read = await this.resolve(missing.map((index) => this.locations[index]!), query);
+      if (!Array.isArray(read)) return read;
+      read.forEach((message, offset) => rows.set(missing[offset]!, message));
+    }
   }
 
   async loadPage(
@@ -662,12 +1026,153 @@ export class IndexedHistoryPageCache {
     };
   }
 
+  /**
+   * One page NEWER than [rawCursor] from the index (contract revision 28), the mirror of
+   * {@link loadPage}: it stops after [limit] pageable rows or at [rawUntil], and its cursor names
+   * the boundary after the page.
+   */
+  async loadNewerPage(
+    rawCursor: string | undefined,
+    limit = 100,
+    rawUntil?: string,
+    query?: HistoryQuery,
+    options: { holdTrailingText?: boolean } = {},
+  ): Promise<BackwardHistoryPage | HistoryPageReadFailure> {
+    const start = this.olderBoundary(rawCursor);
+    if (typeof start !== 'number') return start;
+    let stop = this.locations.length;
+    if (rawUntil !== undefined) {
+      const until = this.olderBoundary(rawUntil);
+      if (typeof until !== 'number') return until;
+      if (until < start) return cursorRefusal('invalid', rawUntil);
+      stop = until;
+    } else if (options.holdTrailingText) {
+      // See forwardHistoryPage: a page to the end of a history a turn is still writing stops at
+      // the running-turn hold.
+      const held = await this.runningTurnHoldEnd(start, stop, query);
+      if (typeof held !== 'number') return held;
+      stop = held;
+    }
+    const pageLimit = Math.max(
+      1,
+      Math.min(
+        HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES,
+        Number.isFinite(limit) ? Math.trunc(limit) : 100,
+      ),
+    );
+    const locations: number[] = [];
+    let boundary = start;
+    while (boundary < stop && locations.length < pageLimit) {
+      if (this.pageable[boundary] === 1) locations.push(this.locations[boundary]!);
+      boundary += 1;
+    }
+    // See forwardHistoryPage: a full page ends just before the next row a page carries.
+    while (boundary < stop && this.pageable[boundary] !== 1) boundary += 1;
+    const messages = await this.resolve(locations, query);
+    if (!Array.isArray(messages)) return messages;
+    const hasMore = boundary < this.locations.length;
+    return {
+      messages,
+      cursor: rawUntil !== undefined && boundary === stop
+        ? rawUntil
+        : backwardHistoryCursorFromHash(boundary, this.hashes[boundary]!),
+      hasMore,
+      endOfHistory: !hasMore,
+    };
+  }
+
+  /**
+   * One `history-refresh` frame from the index (contract revision 28): every durable row from the
+   * client's reconnect position [since], as a bounded prefix. See `historyRefresh` in
+   * history-delta.ts; both deliver the same frame for the same history.
+   */
+  async loadRefresh(
+    since: string | undefined,
+    options: {
+      max: number;
+      maxDecodedBytes?: number;
+      measure?: (message: AgentMessage) => number;
+      holdTrailingText?: boolean;
+    },
+    query?: HistoryQuery,
+  ): Promise<HistoryRefresh | HistoryRefreshRefusal | HistoryPageReadFailure> {
+    const count = this.locations.length;
+    const parsed = historyCursorParts(since);
+    if (!parsed) {
+      return {
+        gap: {
+          reason: 'invalid-cursor',
+          code: 'HISTORY_CURSOR_INVALID',
+          message: 'history cursor is invalid',
+        },
+      };
+    }
+    if (!Number.isInteger(parsed.boundary) || parsed.boundary < 0 || parsed.boundary > count) {
+      return {
+        gap: {
+          reason: 'cursor-out-of-range',
+          code: 'HISTORY_CURSOR_GONE',
+          message: 'history cursor is outside the retained session history',
+        },
+      };
+    }
+    if (this.hashes[parsed.boundary] !== parsed.hash) {
+      return {
+        gap: {
+          reason: 'cursor-prefix-mismatch',
+          code: 'HISTORY_CURSOR_DIVERGED',
+          message: 'history cursor no longer matches this session',
+        },
+      };
+    }
+    const start = parsed.boundary;
+    const max = Number.isFinite(options.max) && options.max > 0
+      ? Math.min(HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES, Math.trunc(options.max))
+      : HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES;
+    const readEnd = Math.min(count, start + max);
+    const rows = await this.resolve(
+      Array.from(this.locations.slice(start, readEnd)),
+      query,
+    );
+    if (!Array.isArray(rows)) return rows;
+    // While a turn runs the frame also stops at the running-turn hold over the whole history, which
+    // may lie inside the rows read (an earlier call still waiting for its result) as well as at the
+    // end. The hold reads only the newest rows it looks at, and none of these again.
+    let stop = readEnd;
+    if (options.holdTrailingText === true) {
+      const known = new Map(rows.map((message, offset) => [start + offset, message] as const));
+      const held = await this.runningTurnHoldEnd(start, count, query, known);
+      if (typeof held !== 'number') return held;
+      stop = Math.min(stop, held);
+    }
+    const end = refreshPrefixEnd(start, stop, (index) => rows[index - start]!, {
+      ...options,
+      max,
+      holdTrailingText: false,
+    });
+    return {
+      messages: rows.slice(0, end - start),
+      cursor: historyCursorFromHash(end, this.hashes[end]!),
+      endCursor: backwardHistoryCursorFromHash(end, this.hashes[end]!),
+      more: end < count,
+    };
+  }
+
+  /**
+   * One bounded attach frame from the index.
+   *
+   * [measure] is the decoded-size estimate of one message as THIS client receives it (its egress
+   * transform composed with the estimator); the byte bound is applied to that delivered shape.
+   */
   async loadAttach(
     since: string | undefined,
     max: number,
     query?: HistoryQuery,
+    maxDecodedBytes = Number.POSITIVE_INFINITY,
+    measure: (message: AgentMessage) => number = estimatedClientDecodedBytes,
+    holdTrailingText = false,
   ): Promise<CompactHistoryAttach | HistoryPageReadFailure> {
-    const count = this.locations.length;
+    const total = this.locations.length;
     const parsed = historyCursorParts(since);
     let start = 0;
     let reset = true;
@@ -683,7 +1188,7 @@ export class IndexedHistoryPageCache {
       if (
         !Number.isInteger(parsed.boundary)
         || parsed.boundary < 0
-        || parsed.boundary > count
+        || parsed.boundary > total
       ) {
         gap = {
           reason: 'cursor-out-of-range',
@@ -703,6 +1208,15 @@ export class IndexedHistoryPageCache {
         reset = false;
       }
     }
+    // While a turn runs the frame ends at the running-turn hold (see `holdRunningTurn` in
+    // history-delta.ts): the held rows follow it with the derived rows, and every boundary the frame
+    // names stays valid when the turn rewrites them.
+    let count = total;
+    if (holdTrailingText) {
+      const held = await this.runningTurnHoldEnd(start, total, query);
+      if (typeof held !== 'number') return held;
+      count = held;
+    }
 
     const boundedMax = Math.min(
       HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES,
@@ -719,7 +1233,13 @@ export class IndexedHistoryPageCache {
       truncated = { shown: boundedMax, total: count };
     }
 
-    let projectionLocations: number[] = [];
+    const projectionBudget = Math.max(
+      0,
+      Math.min(HISTORY_PAGE_CACHE_MAX_ATTACH_PROJECTIONS, boundedMax - 1),
+    );
+    const sortedProjections = [...this.projections.values()]
+      .sort((left, right) => left.index - right.index);
+    let projectionEntries: CompactProjection[] = [];
     if (truncated) {
       // Projection enrichment belongs INSIDE the requested attach bound, and it
       // may never buy its slots from the newest transcript rows.
@@ -758,38 +1278,148 @@ export class IndexedHistoryPageCache {
       // the accepted cost of keeping the H1 guarantee that the latest
       // plan/goal survives a bounded attach; it is not free, and callers that
       // order by identity rather than by array position are unaffected.
-      const projectionBudget = Math.max(
-        0,
-        Math.min(HISTORY_PAGE_CACHE_MAX_ATTACH_PROJECTIONS, boundedMax - 1),
-      );
-      const projections = [...this.projections.values()]
-        .sort((left, right) => left.index - right.index);
       for (let spent = 0; spent <= projectionBudget; spent += 1) {
         const candidateStart = count - (boundedMax - spent);
-        const exposed = projections
+        const exposed = sortedProjections
           .filter((projection) => projection.index < candidateStart);
         if (exposed.length <= spent || spent === projectionBudget) {
           shownStart = candidateStart;
-          projectionLocations = (
-            exposed.length <= spent ? exposed : exposed.slice(exposed.length - spent)
-          ).map((projection) => projection.location);
+          projectionEntries = exposed.length <= spent
+            ? exposed
+            : exposed.slice(exposed.length - spent);
           break;
         }
       }
       // The frame carries the contiguous tail plus whatever enrichment fit, so
       // `shown` has to be that count and not the requested bound.
       truncated = {
-        shown: (count - shownStart) + projectionLocations.length,
+        shown: (count - shownStart) + projectionEntries.length,
         total: count,
       };
     }
     const locations = [
       ...Array.from(this.locations.slice(shownStart)),
-      ...projectionLocations,
+      ...projectionEntries.map((projection) => projection.location),
     ];
-    const messages = await this.resolve(locations, query);
-    if (!Array.isArray(messages)) return messages;
-    const derivedMessages = await this.resolve(this.derived, query);
+    const resolved = await this.resolve(locations, query);
+    if (!Array.isArray(resolved)) return resolved;
+    let messages = resolved;
+    // The decoded-byte bound applies to the final frame, after the reader has
+    // produced the real payloads (lane H1d), measured on the shape this client
+    // receives: the tail shrinks from its oldest end, at least one tail message
+    // always survives, and enrichment is dropped before it could keep the frame
+    // over budget. Like a count cap, a byte-trimmed frame is a replacement with
+    // a backward cursor at the true boundary, so nothing it leaves out becomes
+    // unreachable — and, being a replacement, it re-exposes the latest state
+    // rows that fell behind its new start (from the WHOLE history, including
+    // the prefix an incremental frame would have left to the client), exactly
+    // like the generic cap. State rows are never backward-pageable, so a frame
+    // that dropped one would lose the plan or goal it carries for good.
+    const tailLength = count - shownStart;
+    if (Number.isFinite(maxDecodedBytes) && maxDecodedBytes > 0 && tailLength > 0) {
+      const byIndex = new Map<number, AgentMessage>();
+      for (let offset = 0; offset < tailLength; offset += 1) {
+        byIndex.set(shownStart + offset, messages[offset]!);
+      }
+      projectionEntries.forEach((projection, offset) => {
+        byIndex.set(projection.index, messages[tailLength + offset]!);
+      });
+      const bytesOf = new Map<number, number>();
+      const measureAt = (index: number): number => {
+        let bytes = bytesOf.get(index);
+        if (bytes === undefined) {
+          bytes = measure(byIndex.get(index)!);
+          bytesOf.set(index, bytes);
+        }
+        return bytes;
+      };
+      let projectionBytes = 0;
+      for (const projection of projectionEntries) {
+        projectionBytes += measureAt(projection.index);
+      }
+      // No frame can start before `floor`: from there the tail ALONE is over
+      // budget, so rows older than it are never measured.
+      let floor = count;
+      let tailBytes = 0;
+      while (
+        floor > shownStart
+        && tailBytes + measureAt(floor - 1) <= maxDecodedBytes
+      ) {
+        floor -= 1;
+        tailBytes += measureAt(floor);
+      }
+      if (floor === count) {
+        floor = count - 1;
+        tailBytes = measureAt(floor);
+      }
+      if (floor > shownStart || tailBytes + projectionBytes > maxDecodedBytes) {
+        // Every projection a later start could expose: the tail rows (already
+        // read) and the newest allowance of those before the current start.
+        const exposedAtStart = sortedProjections
+          .filter((projection) => projection.index < shownStart);
+        const olderNeeded = exposedAtStart
+          .slice(Math.max(0, exposedAtStart.length - projectionBudget))
+          .filter((projection) => !byIndex.has(projection.index));
+        if (olderNeeded.length > 0) {
+          const extra = await this.resolve(
+            olderNeeded.map((projection) => projection.location),
+            query,
+          );
+          if (!Array.isArray(extra)) return extra;
+          olderNeeded.forEach((projection, offset) => {
+            byIndex.set(projection.index, extra[offset]!);
+          });
+        }
+        const latest = sortedProjections.map((projection) => projection.index);
+        let exposedCount = 0;
+        let projectionIndices: number[] = [];
+        const expose = (tailStart: number): void => {
+          while (
+            exposedCount < latest.length
+            && latest[exposedCount]! < tailStart
+          ) {
+            exposedCount += 1;
+          }
+          // Enrichment stays inside the count bound beside the tail, as on
+          // the generic path.
+          const allowance = Math.min(
+            projectionBudget,
+            exposedCount,
+            Math.max(0, boundedMax - (count - tailStart)),
+          );
+          projectionIndices = latest.slice(exposedCount - allowance, exposedCount);
+          projectionBytes = 0;
+          for (const index of projectionIndices) projectionBytes += measureAt(index);
+        };
+        let start = Math.max(shownStart, floor);
+        expose(start);
+        while (tailBytes + projectionBytes > maxDecodedBytes && start < count - 1) {
+          tailBytes -= measureAt(start);
+          start += 1;
+          expose(start);
+        }
+        while (
+          tailBytes + projectionBytes > maxDecodedBytes
+          && projectionIndices.length > 0
+        ) {
+          projectionBytes -= measureAt(projectionIndices[0]!);
+          projectionIndices = projectionIndices.slice(1);
+        }
+        const frame: AgentMessage[] = [];
+        for (let index = start; index < count; index += 1) {
+          frame.push(byIndex.get(index)!);
+        }
+        for (const index of projectionIndices) frame.push(byIndex.get(index)!);
+        messages = frame;
+        shownStart = start;
+        reset = true;
+        truncated = { shown: messages.length, total: count };
+      }
+    }
+    const derivedMessages = await this.resolve(
+      [...Array.from(this.locations.slice(count, total)), ...this.derived],
+      query,
+    );
     if (!Array.isArray(derivedMessages)) return derivedMessages;
     const cursor = historyCursorFromHash(count, this.hashes[count]!);
     return {
@@ -797,6 +1427,7 @@ export class IndexedHistoryPageCache {
       derivedMessages,
       reset,
       cursor,
+      endCursor: backwardHistoryCursorFromHash(count, this.hashes[count]!),
       ...(gap ? { gap } : {}),
       ...(truncated ? { truncated } : {}),
       ...(truncated
@@ -1078,6 +1709,26 @@ function clipMessageWithinBytes(
  * behind the window. That is reported as earlier-history-present with no
  * reload cursor, which is exactly what is true.
  */
+/**
+ * Rows a bounded-tail frame is missing for want of a payload: retained rows too large to send that
+ * no stand-in may be built for, and rows of the trailing pending/running run [volatile] that the
+ * window evicted (their boundary is at or before [headBoundary]). Withheld rows are counted apart.
+ */
+function countOmittedTailRows(
+  tail: readonly TailEntry[],
+  volatile: readonly TailEntry[],
+  headBoundary: number,
+): number {
+  let omitted = 0;
+  for (const entry of tail) {
+    if (entry.json === undefined && !entry.withheld) omitted += 1;
+  }
+  for (const entry of volatile) {
+    if (entry.boundaryAfter <= headBoundary && entry.json === undefined && !entry.withheld) omitted += 1;
+  }
+  return omitted;
+}
+
 export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
   /** Asks the adapter for the degraded whole-source read this sink can absorb. */
   readonly readsBoundedTailOnly = true;
@@ -1087,6 +1738,19 @@ export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
   private readonly derived = new Map<string, TailDerived>();
   private readonly overlap = new Map<string, number>();
   private readonly projections = new Map<string, TailProjection>();
+  /**
+   * The history's trailing pending/running rows (see cursorDurableHistory), oldest first and at
+   * most MAX_VOLATILE_TAIL_ROWS of them. They are retained under the same budget and state rules as
+   * every other row, but the replay ends before them and sends them after its frame, so the cursor
+   * it issues is the one every other path issues for the same history, even when the run reaches
+   * back past the retained window. A row of the run the window evicted keeps its place here with no
+   * payload, and is counted with the omitted rows, so the frame says it is missing. Only a
+   * transcript row after them makes them history.
+   */
+  private volatileEntries: TailEntry[] = [];
+  /** The boundary before {@link volatileEntries}, and its hash: where the replay's frame ends. */
+  private volatileStart = 0;
+  private volatileStartHash: string;
   private count = 0;
   private tailBytes = 0;
   private projectionBytes = 0;
@@ -1112,6 +1776,7 @@ export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
   ) {
     this.headHash = this.indexer.openingHash;
     this.latestHash = this.indexer.openingHash;
+    this.volatileStartHash = this.indexer.openingHash;
   }
 
   /** Total durable messages observed, including evicted ones. */
@@ -1150,14 +1815,11 @@ export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
    * A message too large to send whose variant no stand-in may be built for. The
    * frame must admit these: they are counted in `truncated.total` and in the
    * cursor chain, so silence would make `shown` and `total` disagree for no
-   * stated reason.
+   * stated reason. Rows of the trailing pending/running run that the window
+   * evicted are counted too (see countOmittedTailRows).
    */
   get omittedMessages(): number {
-    let omitted = 0;
-    for (const entry of this.tail) {
-      if (entry.json === undefined && !entry.withheld) omitted += 1;
-    }
-    return omitted;
+    return countOmittedTailRows(this.tail, this.volatileEntries, this.headBoundary);
   }
 
   /**
@@ -1211,20 +1873,50 @@ export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
 
   accept(message: AgentMessage): boolean {
     if (!isCursorDurableMessage(message)) {
-      const key = `${message.type}\0${(message as { key?: string }).key ?? ''}`;
-      const json = JSON.stringify(message);
-      const previous = this.derived.get(key);
-      if (previous) this.derivedBytes -= previous.bytes;
-      this.derived.delete(key);
-      const bytes = tailEntryBytes(json);
-      this.derived.set(key, { json, bytes });
-      this.derivedBytes += bytes;
-      while (this.derived.size > HISTORY_PAGE_CACHE_MAX_PROJECTION_ENTRIES) {
-        if (!this.evictOldestDerived()) break;
-      }
-      this.evictToBudget();
+      this.acceptDerived(message);
       return true;
     }
+    const volatile = isVolatileTailMessage(message);
+    if (volatile && this.volatileEntries.length === 0) {
+      this.volatileStart = this.count;
+      this.volatileStartHash = this.latestHash;
+    }
+    const accepted = this.acceptDurable(message);
+    if (!volatile) {
+      this.volatileEntries = [];
+      this.volatileStart = this.count;
+      this.volatileStartHash = this.latestHash;
+    } else if (this.lastEntry) {
+      this.volatileEntries.push(this.lastEntry);
+      if (this.volatileEntries.length > MAX_VOLATILE_TAIL_ROWS) {
+        // A longer run is treated as transcript, oldest first (see VolatileHistoryTail).
+        const released = this.volatileEntries.shift()!;
+        this.volatileStart = released.boundaryAfter;
+        this.volatileStartHash = released.hashAfter;
+      }
+    }
+    return accepted;
+  }
+
+  /** The entry {@link acceptDurable} created last. */
+  private lastEntry: TailEntry | undefined;
+
+  private acceptDerived(message: AgentMessage): void {
+    const key = `${message.type}\0${(message as { key?: string }).key ?? ''}`;
+    const json = JSON.stringify(message);
+    const previous = this.derived.get(key);
+    if (previous) this.derivedBytes -= previous.bytes;
+    this.derived.delete(key);
+    const bytes = tailEntryBytes(json);
+    this.derived.set(key, { json, bytes });
+    this.derivedBytes += bytes;
+    while (this.derived.size > HISTORY_PAGE_CACHE_MAX_PROJECTION_ENTRIES) {
+      if (!this.evictOldestDerived()) break;
+    }
+    this.evictToBudget();
+  }
+
+  private acceptDurable(message: AgentMessage): boolean {
     // The cursor chain is folded from the REAL message, always and first, so a
     // clipped stand-in below cannot move a boundary hash. An append or a
     // reconnect resolves against exactly the same chain an index built from the
@@ -1272,14 +1964,16 @@ export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
     }
 
     const stateKey = tailStateProjectionKey(message);
-    this.tail.push({
+    const entry: TailEntry = {
       json,
       hashAfter: this.latestHash,
       boundaryAfter: this.count,
       bytes,
       clipped,
       ...(stateKey !== undefined ? { stateKey } : {}),
-    });
+    };
+    this.lastEntry = entry;
+    this.tail.push(entry);
     this.tailBytes += bytes;
 
     if (stateKey !== undefined) {
@@ -1449,6 +2143,13 @@ export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
     this.tailBytes -= evicted.bytes;
     this.headBoundary = evicted.boundaryAfter;
     this.headHash = evicted.hashAfter;
+    // A row of the trailing pending/running run stays listed there, without the payload the
+    // budget no longer pays for (see volatileEntries).
+    if (evicted.boundaryAfter > this.volatileStart) {
+      evicted.json = undefined;
+      evicted.bytes = 0;
+      evicted.clipped = false;
+    }
   }
 
   /** The finished bounded replay for one captured prefix. */
@@ -1465,9 +2166,11 @@ export class BoundedTailHistorySnapshotSink implements HistorySnapshotSink {
         .sort((left, right) => left.index - right.index),
       overlap: this.overlap,
       count: this.count,
+      volatileStart: this.volatileStart,
+      volatileStartHash: this.volatileStartHash,
+      volatile: this.volatileEntries,
       headBoundary: this.headBoundary,
       headHash: this.headHash,
-      latestHash: this.latestHash,
     });
   }
 }
@@ -1487,9 +2190,17 @@ export class BoundedTailHistoryReplay {
   private readonly projections: readonly TailProjection[];
   private readonly overlap: ReadonlyMap<string, number>;
   private readonly count: number;
+  /**
+   * Where the frame ends: before the history's trailing pending/running rows, which are sent after
+   * it (see BoundedTailHistorySnapshotSink), with the hash of that boundary. It can lie behind the
+   * retained window when the run is longer than the window; the frame then carries no tail rows.
+   */
+  private readonly end: number;
+  private readonly endHash: string;
+  /** The trailing pending/running rows, sent after the frame. */
+  private readonly volatile: readonly TailEntry[];
   private readonly headBoundary: number;
   private readonly headHash: string;
-  private readonly latestHash: string;
   private readonly stateRetractionLatched: boolean;
   private readonly stateAuthorityUnverifiedFlag: boolean;
 
@@ -1500,9 +2211,11 @@ export class BoundedTailHistoryReplay {
     projections: readonly TailProjection[];
     overlap: ReadonlyMap<string, number>;
     count: number;
+    volatileStart?: number;
+    volatileStartHash?: string;
+    volatile?: readonly TailEntry[];
     headBoundary: number;
     headHash: string;
-    latestHash: string;
     stateRetractionLatched?: boolean;
     stateAuthorityUnverified?: boolean;
   }) {
@@ -1514,7 +2227,16 @@ export class BoundedTailHistoryReplay {
     this.count = parts.count;
     this.headBoundary = parts.headBoundary;
     this.headHash = parts.headHash;
-    this.latestHash = parts.latestHash;
+    this.volatile = [...(parts.volatile ?? [])];
+    if (parts.volatileStart !== undefined && parts.volatileStartHash !== undefined) {
+      this.end = parts.volatileStart;
+      this.endHash = parts.volatileStartHash;
+    } else {
+      this.end = parts.count;
+      this.endHash = parts.count === parts.headBoundary
+        ? parts.headHash
+        : this.tail[parts.count - parts.headBoundary - 1]!.hashAfter;
+    }
     this.stateRetractionLatched = parts.stateRetractionLatched === true;
     this.stateAuthorityUnverifiedFlag = parts.stateAuthorityUnverified === true;
   }
@@ -1559,13 +2281,9 @@ export class BoundedTailHistoryReplay {
     return clipped;
   }
 
-  /** Retained rows too large to send that no stand-in may be built for. */
+  /** Rows missing for want of a payload (see countOmittedTailRows). */
   get omittedMessages(): number {
-    let omitted = 0;
-    for (const entry of this.tail) {
-      if (entry.json === undefined && !entry.withheld) omitted += 1;
-    }
-    return omitted;
+    return countOmittedTailRows(this.tail, this.volatile, this.headBoundary);
   }
 
   /** Retained rows whose payload was withheld, for either reason. */
@@ -1601,6 +2319,7 @@ export class BoundedTailHistoryReplay {
    * every cursor behind it to the wrong hash.
    */
   private hashAt(boundary: number): string | undefined {
+    if (boundary === this.end) return this.endHash;
     if (boundary === this.headBoundary) return this.headHash;
     if (boundary < this.headBoundary || boundary > this.count) return undefined;
     return this.tail[boundary - this.headBoundary - 1]?.hashAfter;
@@ -1612,7 +2331,7 @@ export class BoundedTailHistoryReplay {
    * Never returns an authoritative empty replay for a non-empty history, and
    * never issues an older cursor it cannot serve.
    */
-  attach(since: string | undefined, max: number): CompactHistoryAttach {
+  attach(since: string | undefined, max: number, holdTrailingText = false): CompactHistoryAttach {
     const parsed = historyCursorParts(since);
     let reset = true;
     let start = this.headBoundary;
@@ -1626,10 +2345,11 @@ export class BoundedTailHistoryReplay {
       };
     } else if (parsed) {
       const hash = this.hashAt(parsed.boundary);
+      // A boundary among the trailing pending/running rows was never issued for this history.
       if (
         !Number.isInteger(parsed.boundary)
         || parsed.boundary < 0
-        || parsed.boundary > this.count
+        || parsed.boundary > this.end
       ) {
         gap = {
           reason: 'cursor-out-of-range',
@@ -1671,6 +2391,18 @@ export class BoundedTailHistoryReplay {
       start = this.headBoundary;
     }
 
+    // While a turn runs the frame ends at the running-turn hold (see `holdRunningTurn` in
+    // history-delta.ts), and the held rows follow it. Only retained rows can be inspected: the hold
+    // stops at the window's start, and a row whose payload was not retained holds nothing and
+    // settles no call (so a call whose result was omitted still holds the rows after it).
+    let end = this.end;
+    if (holdTrailingText && end > this.headBoundary) {
+      end = runningTurnHoldEnd(Math.max(start, this.headBoundary), end, (index) => {
+        const json = this.tail[index - this.headBoundary]?.json;
+        return json === undefined ? HOLDS_NOTHING : JSON.parse(json) as AgentMessage;
+      });
+    }
+
     const boundedMax = Math.min(
       HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES,
       Number.isFinite(max) && max > 0 ? Math.max(1, Math.trunc(max)) : 100,
@@ -1685,15 +2417,29 @@ export class BoundedTailHistoryReplay {
     const shownStart = Math.max(
       start,
       this.headBoundary,
-      this.count - boundedMax,
+      end - boundedMax,
     );
-    if (shownStart > start) reset = true;
+    // Only rows between the client's boundary and the frame's end that the frame cannot carry make
+    // it a replacement. A trailing run that reaches back past the window leaves the frame's end
+    // before the window's start, and a client already at that end is missing nothing.
+    if (Math.min(shownStart, end) > start) reset = true;
 
     // Omitted rows drop out here and nowhere else. They stay in `this.tail` so
     // the boundary arithmetic above keeps working, but they have no payload to
     // send, so they are simply not part of the frame (H1c round 4, finding 3).
-    const shownTail = this.tail.slice(shownStart - this.headBoundary);
+    // A trailing run longer than the window leaves `end` behind it: no tail row
+    // is then part of the frame.
+    const tailEnd = Math.max(end, this.headBoundary);
+    const shownTail = this.tail.slice(shownStart - this.headBoundary, tailEnd - this.headBoundary);
     const tailJson = shownTail
+      .map((entry) => entry.json)
+      .filter((json): json is string => json !== undefined);
+    // After the frame: the rows the running-turn hold kept out of it, then the whole trailing
+    // pending/running run, including rows the window evicted.
+    const trailingJson = [
+      ...this.tail.slice(tailEnd - this.headBoundary, Math.max(this.end, this.headBoundary) - this.headBoundary),
+      ...this.volatile,
+    ]
       .map((entry) => entry.json)
       .filter((json): json is string => json !== undefined);
     // Genuinely free slots only — and never more of them than the indexed path
@@ -1718,16 +2464,16 @@ export class BoundedTailHistoryReplay {
     // Only a REPLACEMENT frame describes a window; an incremental delta says
     // nothing about how much history exists, and claiming otherwise would put
     // "Showing the newest N of M" on a frame carrying three new messages.
-    const truncated = reset && (shownStart > 0 || messages.length < this.count)
-      ? { shown: messages.length, total: this.count }
+    const truncated = reset && (shownStart > 0 || messages.length < end)
+      ? { shown: messages.length, total: end }
       : undefined;
     return {
       messages,
-      derivedMessages: this.derivedJson.map(
+      derivedMessages: [...this.derivedJson, ...trailingJson].map(
         (json) => JSON.parse(json) as AgentMessage,
       ),
       reset,
-      cursor: historyCursorFromHash(this.count, this.latestHash),
+      cursor: historyCursorFromHash(end, this.hashAt(end)!),
       ...(gap ? { gap } : {}),
       ...(truncated ? { truncated } : {}),
       // Deliberately NO `olderCursor`: without an index there is no boundary

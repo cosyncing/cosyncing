@@ -448,6 +448,38 @@ export class ArtifactStore {
       const parsed = parseDataUrl(message.url);
       if (parsed) return this.putBytes(session, message, parsed.bytes, parsed.mimeType, brokerUrl, {}, authorization);
     }
+    return this.existingReference(session, message, brokerUrl, authorization);
+  }
+
+  /**
+   * The message {@link toReference} would return, computed without storing anything: no blob, no
+   * index commit, no recency tick. A caller that only needs the delivered SIZE of a row (a history
+   * frame's decoded-size bound, which measures rows it may then trim away) uses this; the shape is
+   * built by the same code, so the two cannot drift.
+   */
+  previewReference(
+    session: ArtifactSession,
+    message: AgentMessage,
+    brokerUrl?: string,
+    authorization = INTERNAL_ARTIFACT_SCOPE,
+  ): AgentMessage {
+    if (message.type !== 'file-artifact') return message;
+    if (message.url?.startsWith('data:')) {
+      const parsed = parseDataUrl(message.url);
+      if (parsed) {
+        const { record } = this.bytesRecord(session, message, parsed.bytes, parsed.mimeType, {});
+        return this.asMessage(session, message, record, brokerUrl, authorization);
+      }
+    }
+    return this.existingReference(session, message, brokerUrl, authorization);
+  }
+
+  private existingReference(
+    session: ArtifactSession,
+    message: AgentMessage & { type: 'file-artifact' },
+    brokerUrl: string | undefined,
+    authorization: ArtifactAuthorizationScope,
+  ): AgentMessage {
     const key = message.artifactKey;
     if (!key) return this.displayOnly(message);
     const record = this.lookupRecord(session.tool, session.id, key);
@@ -538,33 +570,47 @@ export class ArtifactStore {
     options: { sessionQualified?: boolean } = {},
     authorization = INTERNAL_ARTIFACT_SCOPE,
   ): AgentMessage & { type: 'file-artifact' } {
-    const contentHash = sha256(bytes);
-    const rel = message.path || message.name || contentHash;
-    const artifactKey = message.artifactKey || artifactKeyFor(rel, contentHash);
-    const filePath = this.blobPath(contentHash);
+    const { record } = this.bytesRecord(session, message, bytes, fallbackMimeType, options);
+    const filePath = record.filePath;
     mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
     if (createdBlob) writeFileSync(filePath, bytes);
     const now = this.nextRecency();
-    const rec: ArtifactRecord = {
-      key: recordKey(this.brokerSource, session.tool, session.id, artifactKey),
-      brokerSource: this.brokerSource,
-      tool: session.tool,
-      sessionId: session.id,
-      artifactKey,
-      contentHash,
-      filePath,
-      path: rel,
-      name: message.name || basename(rel),
-      mimeType: message.mimeType || fallbackMimeType,
-      size: bytes.byteLength,
-      createdAt: now,
-      lastAccessedAt: now,
-      ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
-      ...(message.proactive === true ? { proactive: true as const } : {}),
-    };
+    const rec: ArtifactRecord = { ...record, createdAt: now, lastAccessedAt: now };
     this.commitRecord(rec, createdBlob);
     return this.asMessage(session, message, rec, brokerUrl, authorization);
+  }
+
+  /** The record {@link putBytes} stores for these bytes, before any recency or storage. */
+  private bytesRecord(
+    session: ArtifactSession,
+    message: AgentMessage & { type: 'file-artifact' },
+    bytes: Buffer,
+    fallbackMimeType: string,
+    options: { sessionQualified?: boolean },
+  ): { record: ArtifactRecord } {
+    const contentHash = sha256(bytes);
+    const rel = message.path || message.name || contentHash;
+    const artifactKey = message.artifactKey || artifactKeyFor(rel, contentHash);
+    return {
+      record: {
+        key: recordKey(this.brokerSource, session.tool, session.id, artifactKey),
+        brokerSource: this.brokerSource,
+        tool: session.tool,
+        sessionId: session.id,
+        artifactKey,
+        contentHash,
+        filePath: this.blobPath(contentHash),
+        path: rel,
+        name: message.name || basename(rel),
+        mimeType: message.mimeType || fallbackMimeType,
+        size: bytes.byteLength,
+        createdAt: 0,
+        lastAccessedAt: 0,
+        ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
+        ...(message.proactive === true ? { proactive: true as const } : {}),
+      },
+    };
   }
 
   /**
@@ -583,23 +629,21 @@ export class ArtifactStore {
     authorization = INTERNAL_ARTIFACT_SCOPE,
   ): { fetchUrl: string; contentHash: string; byteSize: number } {
     const bytes = Buffer.from(body, 'utf8');
-    const contentHash = sha256(bytes);
-    const rel = `diff/${keyBase}`;
-    const artifactKey = artifactKeyFor(rel, contentHash);
-    const filePath = this.blobPath(contentHash);
+    const identity = this.diffIdentity(keyBase, bytes);
+    const filePath = this.blobPath(identity.contentHash);
     mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
     if (createdBlob) writeFileSync(filePath, bytes);
     const now = this.nextRecency();
     const rec: ArtifactRecord = {
-      key: recordKey(this.brokerSource, tool, sessionId, artifactKey),
+      key: recordKey(this.brokerSource, tool, sessionId, identity.artifactKey),
       brokerSource: this.brokerSource,
       tool,
       sessionId,
-      artifactKey,
-      contentHash,
+      artifactKey: identity.artifactKey,
+      contentHash: identity.contentHash,
       filePath,
-      path: rel,
+      path: identity.rel,
       name: `${keyBase}.diff`,
       mimeType: 'text/x-diff; charset=utf-8',
       size: bytes.byteLength,
@@ -607,10 +651,50 @@ export class ArtifactStore {
       lastAccessedAt: now,
     };
     this.commitRecord(rec, createdBlob);
+    return this.diffReference(tool, sessionId, identity, bytes.byteLength, brokerUrl, authorization);
+  }
+
+  /**
+   * The reference {@link stashDiff} would return for [body], computed without storing anything (see
+   * {@link previewReference}).
+   */
+  previewDiff(
+    tool: string,
+    sessionId: string,
+    keyBase: string,
+    body: string,
+    brokerUrl?: string,
+    authorization = INTERNAL_ARTIFACT_SCOPE,
+  ): { fetchUrl: string; contentHash: string; byteSize: number } {
+    const bytes = Buffer.from(body, 'utf8');
+    return this.diffReference(
+      tool,
+      sessionId,
+      this.diffIdentity(keyBase, bytes),
+      bytes.byteLength,
+      brokerUrl,
+      authorization,
+    );
+  }
+
+  private diffIdentity(keyBase: string, bytes: Buffer): { contentHash: string; rel: string; artifactKey: string } {
+    const contentHash = sha256(bytes);
+    const rel = `diff/${keyBase}`;
+    return { contentHash, rel, artifactKey: artifactKeyFor(rel, contentHash) };
+  }
+
+  private diffReference(
+    tool: string,
+    sessionId: string,
+    identity: { contentHash: string; artifactKey: string },
+    byteSize: number,
+    brokerUrl: string | undefined,
+    authorization: ArtifactAuthorizationScope,
+  ): { fetchUrl: string; contentHash: string; byteSize: number } {
     return {
-      fetchUrl: this.signedUrl(tool, sessionId, artifactKey, brokerUrl, SIGNATURE_TTL_MS, authorization),
-      contentHash,
-      byteSize: bytes.byteLength,
+      fetchUrl: this.signedUrl(tool, sessionId, identity.artifactKey, brokerUrl, SIGNATURE_TTL_MS, authorization),
+      contentHash: identity.contentHash,
+      byteSize,
     };
   }
 

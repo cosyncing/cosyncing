@@ -390,6 +390,10 @@
   "@failureNoticeHistoryPageMalformed": {
     "description": "Notice: the broker returned an unparseable history page."
   },
+  "failureNoticeHistoryPageDiverged": "This session's history changed after it was loaded. Reopen the session to load it again.",
+  "@failureNoticeHistoryPageDiverged": {
+    "description": "Notice: the broker no longer recognises the history position this page was asked from, so no retry can succeed until the session is loaded again."
+  },
   "failureNoticeCommandModelArgument": "Remove \"model\" from command arguments. Use the model selector instead.",
   "@failureNoticeCommandModelArgument": {
     "description": "Notice: model must not be passed as a command argument."
@@ -3173,6 +3177,10 @@
   "sessionRequestSent": "Sent",
   "sessionRequestFailed": "Failed",
   "sessionRequestResolvedElsewhere": "Resolved in another client.",
+  "sessionRequestNoLongerWaiting": "No longer waiting for an answer.",
+  "@sessionRequestNoLongerWaiting": {
+    "description": "Request card label: the session no longer offers this approval or question, so it cannot be answered here; no resolution for it reached this device."
+  },
   "sessionRequestConnectToReply": "Connect to the session to reply.",
   "sessionRequestReadOnlyReply": "This request is read-only. Answer where the agent is running.",
   "sessionRequestReject": "Reject",
@@ -3936,6 +3944,10 @@
   "@sessionHistoryLoadingEarlier": {
     "description": "Compact transcript-top status while one older history page is loading."
   },
+  "sessionHistoryLoadingNewer": "Loading newer messages…",
+  "@sessionHistoryLoadingNewer": {
+    "description": "Compact status on a released transcript range below the reader while the newer page that fills it is loading."
+  },
   "sessionHistoryLoadEarlier": "Load earlier messages",
   "@sessionHistoryLoadEarlier": {
     "description": "Accessible fallback button for loading one older transcript page."
@@ -4013,6 +4025,10 @@
   "sessionHistoryDecodedGapReconnect": "Some recent messages were released. Reconnect to restore them.",
   "@sessionHistoryDecodedGapReconnect": {
     "description": "Gap marker when no opaque page cursor can restore locally evicted live rows."
+  },
+  "sessionHistoryUnsavedReleased": "Some messages that were never saved to this session's history were released to save memory. They can't be restored.",
+  "@sessionHistoryUnsavedReleased": {
+    "description": "Notice where rows no history holds (a resolved approval card, a prompt not yet saved) were released to fit the memory budget; neither reloading nor reconnecting can restore them, so no action is offered."
   },
   "sessionHistoryLoadGap": "Load gap",
   "@sessionHistoryLoadGap": {

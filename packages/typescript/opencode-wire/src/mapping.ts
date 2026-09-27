@@ -235,13 +235,30 @@ export function mapOpenCodePart(
   }
   const activity = tool === 'task' ? taskActivity(part, historical) : undefined;
   const toolSemantic = semantic(tool, input, state, status);
+  // The call as history carries it. OpenCode stores one part per tool and rewrites it as the tool
+  // runs and finishes, so history projects the call from what does not change once the tool runs
+  // (its input), and keeps it beside the result once the tool finished: the live stream emitted
+  // the call first, and a client identifies a call and its result separately, so history without
+  // the call left every live call standing as a row no reload returns.
+  const historyCall: AgentMessage = {
+    type: 'tool-call', callId, toolName: tool, toolClass: displayClass(tool),
+    historySlot: true,
+    ...(toolSemantic ? { semantic: toolSemantic } : {}),
+    title: summary(tool, input, {}, false), args: input,
+  };
   if (status !== 'completed' && status !== 'error') return [
     ...(activity ? [activity] : []),
-    {
-      type: 'tool-call', callId, toolName: tool, toolClass: displayClass(tool),
-      ...(toolSemantic ? { semantic: toolSemantic } : {}),
-      title: state.title ?? summary(tool, input, {}, false), args: input,
-    },
+    historical
+      ? historyCall
+      : {
+          type: 'tool-call', callId, toolName: tool, toolClass: displayClass(tool),
+          historySlot: true,
+          ...(toolSemantic ? { semantic: toolSemantic } : {}),
+          title: state.title ?? summary(tool, input, {}, false), args: input,
+        },
+    // The result occupies its native part's position from the first read. Completing an earlier
+    // parallel tool then updates this row instead of inserting ahead of already-issued cursors.
+    { type: 'tool-result', callId, toolName: tool, historySlot: true, pending: true },
   ];
   const md = state.metadata ?? {};
   const fd = md.filediff ?? {};
@@ -256,8 +273,10 @@ export function mapOpenCodePart(
   }
   return [
     ...(activity ? [activity] : []),
+    ...(historical ? [historyCall] : []),
     {
       type: 'tool-result', callId, toolName: tool, toolClass: displayClass(tool),
+      historySlot: true, pending: false,
       ...(toolSemantic ? { semantic: toolSemantic } : {}),
       isError: status === 'error' || (exitCode != null && exitCode !== 0),
       result: tool === 'bash' ? (md.output ?? state.output) : (state.output ?? state.error),

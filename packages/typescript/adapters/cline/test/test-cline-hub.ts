@@ -9,6 +9,8 @@ import type { ClineTerminalSummary } from '../src/mapping.ts';
 import { Hub } from '../../../broker/src/sessions/hub.ts';
 import { AttentionPolicy } from '../../../broker/src/attention/attention-policy.ts';
 import { AttentionStore } from '../../../broker/src/attention/attention-store.ts';
+import { historyRefreshRequest } from '../../../broker/src/sessions/history-delta.ts';
+import { auditLiveAgainstHistory } from '../../../broker/test/helpers/live-history-key-audit.ts';
 import {
   CLINE_HUB_CORE_MINIMUM_VERSION,
   CLINE_HUB_MAX_FRAME_BYTES,
@@ -97,14 +99,15 @@ class FakeHub {
     toolResultTurn?: boolean;
     omitAssistant?: boolean;
     lateUsage?: boolean;
-    trailingAssistantGate?: { received: () => void; release: Promise<void> };
+    trailingAssistantGate?: { received: () => void; release: Promise<void>; text: string };
     persistenceGate?: { received: () => void; release: Promise<void> };
   };
   private deferredRun?: { socket: FakeSocket; envelope: Record<string, any> };
   private delayedMessages?: { received: () => void; release: Promise<void> };
   private delayedCreate?: { received: () => void; release: Promise<void> };
   private delayedCreatedReply?: { received: () => void; release: Promise<void> };
-  private trailingAssistantNext?: { received: () => void; release: Promise<void> };
+  private trailingAssistantNext?: { received: () => void; release: Promise<void>; text: string };
+  private streamedTurnNext?: { modelTool: boolean; iterationEvents: boolean; received: () => void; release: Promise<void> };
 
   constructor(readonly profile: string, readonly cwd: string) {}
 
@@ -274,6 +277,16 @@ class FakeHub {
       this.trailingAssistantNext = undefined;
       this.heldNextRunPersistence = undefined;
       this.snapshotFailureNext = undefined;
+      const streamedTurn = this.streamedTurnNext;
+      this.streamedTurnNext = undefined;
+      if (streamedTurn) {
+        this.status = 'running';
+        this.messages.push({ id: userId, role: 'user', ts: Date.now(), content: [{ type: 'text', text: String(payload.prompt) }] });
+        this.writeMessages();
+        this.event('run.started', this.sessionId, { clientId: envelope.clientId, runId: `run-${this.runCounter}` });
+        void this.streamTurn(socket, envelope, streamedTurn);
+        return;
+      }
       if (payload.delivery === 'queue') {
         this.status = 'running';
         this.messages.push({
@@ -515,7 +528,7 @@ class FakeHub {
               id: `assistant-trailing-${this.runCounter}`,
               role: 'assistant',
               modelInfo: { provider: 'openai-compatible', id: 'fixture-model' },
-              content: [{ type: 'text', text: ':durable-tail' }],
+              content: [{ type: 'text', text: run.trailingAssistantGate!.text }],
             });
             this.writeMessages();
           });
@@ -610,14 +623,119 @@ class FakeHub {
   addExtraUserBlockToNextRun(): void { this.extraUserBlockNext = true; }
   /** Real Cline persists tool results as `role: 'user'` rows carrying `tool_result` blocks. */
   useToolResultTurnNext(): void { this.toolResultNext = true; }
+  /**
+   * The next run.start streams a two-step turn the way Cline 3.0.61 (core and agents 0.0.82) does,
+   * with no approval. Each model call is an iteration: its reasoning and text stream as deltas, the
+   * message persists when the call ends, and only then does each of its tool calls start and finish
+   * (`executePreparedTool`), each result persisting as its own `role: 'user'` row. Step one has
+   * thinking, text and two tool calls; step two thinking and text. With `modelTool`, step one's
+   * model also runs a tool mid-stream, as a provider-executed tool does: it starts between two text
+   * deltas, and the message records it only in `metadata.modelToolActivities`. The turn pauses at
+   * `midTurn` (after step one, or with `modelTool` just before step one persists) until released.
+   * With `iterationEvents: false` it reports no iterations, as a Hub without those events would.
+   */
+  streamTurnNext(options: { modelTool?: boolean; iterationEvents?: boolean } = {}): { midTurn: Promise<void>; release: () => void } {
+    let markReceived!: () => void;
+    let release!: () => void;
+    const midTurn = new Promise<void>((resolve) => { markReceived = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this.streamedTurnNext = {
+      modelTool: options.modelTool === true,
+      iterationEvents: options.iterationEvents !== false,
+      received: markReceived,
+      release: gate,
+    };
+    return { midTurn, release };
+  }
+  /** An answer delta this Drive's prompt did not cause, as a foreign client's run streams it. */
+  foreignDelta(text: string): void { this.event('assistant.delta', this.sessionId, { text }); }
+
+  private async streamTurn(
+    socket: FakeSocket,
+    envelope: Record<string, any>,
+    turn: { modelTool: boolean; iterationEvents: boolean; received: () => void; release: Promise<void> },
+  ): Promise<void> {
+    const n = this.runCounter;
+    const iteration = (event: 'iteration.started' | 'iteration.finished', payload: Record<string, unknown>) => {
+      if (turn.iterationEvents) this.event(event, this.sessionId, payload);
+    };
+    const modelInfo = { provider: 'openai-compatible', id: 'fixture-model' };
+    const stream = (event: 'assistant.delta' | 'reasoning.delta', text: string) => {
+      for (const chunk of text.match(/.{1,4}/gsu) ?? []) this.event(event, this.sessionId, { text: chunk });
+    };
+    const runTools = (ids: string[]) => {
+      for (const id of ids) {
+        this.event('tool.started', this.sessionId, { toolCallId: id, toolName: 'read_files', input: { path: `${id}.txt` } });
+        this.event('tool.finished', this.sessionId, { toolCallId: id, toolName: 'read_files', output: `body of ${id}` });
+      }
+      for (const id of ids) {
+        this.messages.push({
+          id: `msg_result_${id}`, role: 'user', ts: Date.now(),
+          content: [{ type: 'tool_result', tool_use_id: id, name: 'read_files', content: `body of ${id}` }],
+        });
+      }
+      this.writeMessages();
+    };
+    const tools = [`toolu_a_${n}`, `toolu_b_${n}`];
+    const modelToolId = `srvtoolu_${n}`;
+    iteration('iteration.started', { iteration: 1 });
+    stream('reasoning.delta', 'reading the task');
+    stream('assistant.delta', turn.modelTool ? 'I will search first.' : 'I will read two files.');
+    if (turn.modelTool) {
+      this.event('tool.started', this.sessionId, { toolCallId: modelToolId, toolName: 'web_search', input: { query: 'fixture' } });
+      this.event('tool.finished', this.sessionId, { toolCallId: modelToolId, toolName: 'web_search', output: 'search results' });
+      stream('assistant.delta', ' Then I will read two files.');
+      turn.received();
+      await turn.release;
+    }
+    this.messages.push({
+      id: `msg_step1_${n}`, role: 'assistant', ts: Date.now(), modelInfo,
+      content: [
+        { type: 'thinking', thinking: 'reading the task' },
+        { type: 'text', text: turn.modelTool ? 'I will search first. Then I will read two files.' : 'I will read two files.' },
+        ...tools.map((id) => ({ type: 'tool_use', id, name: 'read_files', input: { path: `${id}.txt` } })),
+      ],
+      metrics: { inputTokens: 20, outputTokens: 6 },
+      ...(turn.modelTool ? {
+        metadata: { modelToolActivities: [{ toolCallId: modelToolId, toolName: 'web_search', execution: 'provider', input: { query: 'fixture' }, output: 'search results' }] },
+      } : {}),
+    });
+    this.writeMessages();
+    runTools(tools);
+    iteration('iteration.finished', { iteration: 1, hadToolCalls: true, toolCallCount: tools.length });
+    if (!turn.modelTool) {
+      turn.received();
+      await turn.release;
+    }
+    iteration('iteration.started', { iteration: 2 });
+    stream('reasoning.delta', 'both files read');
+    stream('assistant.delta', 'Both files say the same thing.');
+    this.messages.push({
+      id: `msg_step2_${n}`, role: 'assistant', ts: Date.now(), modelInfo,
+      content: [{ type: 'thinking', thinking: 'both files read' }, { type: 'text', text: 'Both files say the same thing.' }],
+      metrics: { inputTokens: 31, outputTokens: 8 },
+    });
+    this.writeMessages();
+    iteration('iteration.finished', { iteration: 2, hadToolCalls: false, toolCallCount: 0 });
+    this.status = 'idle';
+    socket.message({
+      kind: 'reply',
+      envelope: {
+        version: CLINE_HUB_PROTOCOL_VERSION,
+        requestId: envelope.requestId,
+        ok: true,
+        payload: { result: { finishReason: 'completed', text: 'Both files say the same thing.' } },
+      },
+    });
+  }
   omitAssistantFromNextCompletedRun(): void { this.omitNextAssistant = true; }
   landLateUsageAfterNextReply(): void { this.lateUsageNext = true; }
-  holdTrailingAssistantAfterNextReply(): { replySent: Promise<void>; release: () => void } {
+  holdTrailingAssistantAfterNextReply(text = ':durable-tail'): { replySent: Promise<void>; release: () => void } {
     let markReplySent!: () => void;
     let release!: () => void;
     const replySent = new Promise<void>((resolve) => { markReplySent = resolve; });
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    this.trailingAssistantNext = { received: markReplySent, release: gate };
+    this.trailingAssistantNext = { received: markReplySent, release: gate, text };
     return { replySent, release };
   }
   failNextRunSnapshotOnly(
@@ -1258,6 +1376,17 @@ try {
   check('streamed answer chunks coalesce into one transcript row per turn',
     answerChunkCount > 1 && answerByKey.size < answerChunkCount,
     JSON.stringify({ chunks: answerChunkCount, keys: answerByKey.size }));
+  {
+    const liveAnswerKeys = [...answerByKey.entries()]
+      .filter(([, text]) => text === 'answer:first managed prompt').map(([key]) => key);
+    const durableAnswerKeys = history
+      .filter((row) => row.type === 'model-output' && row.text === 'answer:first managed prompt')
+      .map((row) => (row as { key?: string }).key);
+    check('a Hub answer carries one key live and in history',
+      liveAnswerKeys.length === 1 && durableAnswerKeys.length === 1
+        && liveAnswerKeys[0] === durableAnswerKeys[0],
+      JSON.stringify({ liveAnswerKeys, durableAnswerKeys }));
+  }
 
   // Late usage re-publishes the settled terminal under the same key. The policy ignores that second
   // terminal because the first one closed the observation, so it is harmless, but only while no
@@ -1287,6 +1416,56 @@ try {
     runEvents('run-finished', lateUsageFrames[0]?.turnId).length === 1
       && runEvents('run-finished').length === 2,
     JSON.stringify(attentionStore.listEvents().map((event) => `${event.kind}:${event.turnId}`)));
+
+  {
+    // A client merges rows by key, so a streamed row and its history copy must carry one key, or a
+    // history refresh or reconnect frame restating the copy shows it twice. The Hub streams a
+    // two-step turn as Cline does (see `streamTurnNext`); the audit compares what this Drive
+    // streamed with its own history read, mid-turn and settled.
+    const attachHistory = await connection.getHistory();
+    const turnLive: AgentMessage[] = [];
+    const unsubscribeTurn = connection.subscribe((message) => turnLive.push(message));
+    const step = hub.streamTurnNext();
+    const streamedTurn = connection.sendPrompt({ text: 'compare the two files', clientMessageId: 'client-streamed' });
+    await step.midTurn;
+    const midTurnHistory = await connection.getHistory();
+    const midTurnAudit = auditLiveAgainstHistory({ attachHistory, live: turnLive, history: midTurnHistory });
+    const midTurnRefresh = historyRefreshRequest({ cursor: 'cursor' }, owner);
+    step.release();
+    await streamedTurn;
+    unsubscribeTurn();
+    const settledHistory = await connection.getHistory();
+    const settledAudit = auditLiveAgainstHistory({ attachHistory, live: turnLive, history: settledHistory });
+    const turnRows = (rows: readonly AgentMessage[]) => rows
+      .filter((row) => (row.type === 'model-output' || row.type === 'thinking') && row.key?.startsWith('client-streamed:'))
+      .map((row) => `${(row as { key?: string }).key}=${(row as { text?: string }).text}`);
+    check('every row a Hub Drive turn streams carries its history key, mid-turn and settled',
+      midTurnAudit.liveOnly.length === 0 && settledAudit.liveOnly.length === 0,
+      JSON.stringify({ midTurn: midTurnAudit.liveOnly, settled: settledAudit.liveOnly }));
+    check('a Hub turn keys text by its prompt and the tools started before it',
+      JSON.stringify(turnRows(settledHistory)) === JSON.stringify([
+        'client-streamed:reasoning:0=reading the task',
+        'client-streamed:assistant:0=I will read two files.',
+        'client-streamed:reasoning:2=both files read',
+        'client-streamed:assistant:2=Both files say the same thing.',
+      ]),
+      JSON.stringify(turnRows(settledHistory)));
+    check('a history refresh and a reconnect frame show no Hub Drive row twice or under another text, mid-turn and settled',
+      midTurnAudit.refreshRows !== undefined && midTurnAudit.refreshRows > 0
+        && settledAudit.refreshRows !== undefined && settledAudit.refreshRows > 0
+        && midTurnAudit.duplicatesAfterRefresh.length === 0
+        && midTurnAudit.duplicatesAfterReconnect.length === 0
+        && settledAudit.duplicatesAfterRefresh.length === 0
+        && settledAudit.duplicatesAfterReconnect.length === 0
+        && midTurnAudit.textMismatches.length === 0
+        && settledAudit.textMismatches.length === 0,
+      JSON.stringify({ midTurnAudit, settledAudit }));
+    check('the broker serves a history refresh on a Hub Drive connection',
+      connection.liveRowsRekeyedInHistory === undefined
+        && owner.historyRefreshRefusal() === undefined
+        && 'since' in midTurnRefresh,
+      JSON.stringify(midTurnRefresh));
+  }
 
   const nativeRenameSpawnsBefore = fake.ledger().filter((entry) => entry.kind === 'spawn'
     && entry.argv?.[0] === 'history' && entry.argv?.[1] === 'update').length;
@@ -1319,11 +1498,16 @@ try {
   trailingGate.release();
   await Bun.sleep(25);
   const trailingRename = await adapter.renameSession(created.id, 'Cline rename after durable tail');
+  // No tool starts between the answer and the tail, so the tail's text would stream into the
+  // answer's row, and history joins it there. The tail is the newest message and carries no usage
+  // yet, so the joined row is not final although its first part is.
   check('completed turns retain Drive only after the durable transcript tail is stable enough for native rename',
     trailingRename?.title === 'Cline rename after durable tail'
       && connection.info.control?.drive.state === 'driving'
       && (await connection.getHistory()).some((row) =>
-        row.type === 'model-output' && row.text === ':durable-tail'));
+        row.type === 'model-output' && row.key === 'client-durable-tail:assistant:0'
+          && row.text === 'answer:completed reply before durable tail:durable-tail'
+          && row.final === undefined));
   hub.setDurableTitle('Externally renamed Cline session');
   check('managed discovery reflects later native title changes instead of a stale broker cache',
     (await adapter.discoverSessions()).find((row) => row.id === created.id)?.title
@@ -1756,6 +1940,14 @@ try {
   // is a `run.abort` the demotion issues itself; count it across the transition.
   const abortsBeforeForeignRun = hub.frames.filter(
     (frame) => frame.envelope?.command === 'run.abort').length;
+  // No owned turn anchors a delta that arrives while the Drive is idle, so it keeps its event id,
+  // which no history row has.
+  const refusedBeforeStrayDelta = reopened.liveRowsRekeyedInHistory;
+  hub.foreignDelta('answer no owned turn anchors');
+  check('an answer delta no owned turn anchors makes the Drive refuse history refreshes from then on',
+    refusedBeforeStrayDelta === undefined && reopened.liveRowsRekeyedInHistory === true
+      && reopened.info.control?.drive.state === 'driving',
+    String(refusedBeforeStrayDelta));
   hub.foreignRun();
   check('a foreign Hub run immediately demotes and retires writer authority',
     reopened.info.attachMode === 'observe' && reopened.info.control?.drive.supported === false);
@@ -1980,7 +2172,14 @@ try {
     .find((row) => row.type === 'permission-request');
   await settleFenceConnection.respondPermission(settleFencePermission!.requestId, 'approve');
   await heldForeignPersistence.replySent;
+  const refusedBeforeDemotion = settleFenceConnection.liveRowsRekeyedInHistory;
   hub.foreignRun();
+  // Demotion drops the correlations history keys owned turns by, so a delta the still-open turn
+  // streams now has a key its history no longer gives.
+  hub.foreignDelta('answer after demotion');
+  check('a delta streamed into an owned turn after demotion makes the Drive refuse history refreshes',
+    refusedBeforeDemotion === undefined && settleFenceConnection.liveRowsRekeyedInHistory === true,
+    String(refusedBeforeDemotion));
   heldForeignPersistence.release();
   await assert.rejects(settleFenceTurn, /read-only|ownership generation changed/u);
   const settleFenceHistory = await settleFenceConnection.getHistory();
@@ -2478,6 +2677,95 @@ try {
       && hub.frames.filter((frame) => frame.envelope?.command === 'run.abort').length
         === busyRenameAbortsBefore);
   await busyRenameConnection.close();
+
+  hub.restoreMessages(stableMessages);
+  boundary = stableBoundary;
+  {
+    // A tool the model runs mid-stream (a provider-executed one) starts between two answer deltas,
+    // so the text after it streams under the next segment, while the persisted message joins the
+    // text into one block and records the tool only in its metadata. Nothing positions that text,
+    // so the connection says so: live as soon as text follows such a tool, before the message
+    // persists, and on a history read that finds one in an owned turn.
+    const modelToolAdapter = resumeAdapter();
+    const modelToolConnection = await modelToolAdapter.attach(created.id, 'resume');
+    const modelToolLive: AgentMessage[] = [];
+    modelToolConnection.subscribe((message) => modelToolLive.push(message));
+    const step = hub.streamTurnNext({ modelTool: true });
+    const modelToolTurn = modelToolConnection.sendPrompt({ text: 'search then read', clientMessageId: 'client-model-tool' });
+    await step.midTurn;
+    const refusedBeforePersisted = modelToolConnection.liveRowsRekeyedInHistory;
+    step.release();
+    await modelToolTurn;
+    const modelToolHistory = await modelToolConnection.getHistory();
+    await modelToolConnection.close();
+    const liveStepTwoKeys = [...new Set(modelToolLive
+      .filter((row) => row.type === 'model-output' && row.delta !== undefined)
+      .map((row) => (row as { key?: string }).key))];
+    check('text streamed after a mid-stream model tool makes the Drive refuse history refreshes before its message persists',
+      refusedBeforePersisted === true,
+      String(refusedBeforePersisted));
+    check('a model tool counts toward the segment of the text after it, live and in history',
+      JSON.stringify(liveStepTwoKeys) === JSON.stringify(['client-model-tool:assistant:0', 'client-model-tool:assistant:1', 'client-model-tool:assistant:3'])
+        && modelToolHistory.some((row) => row.type === 'model-output'
+          && row.key === 'client-model-tool:assistant:3' && row.text === 'Both files say the same thing.'),
+      JSON.stringify(liveStepTwoKeys));
+    const reattached = await modelToolAdapter.attach(created.id, 'resume');
+    const refusedOnAttach = reattached.liveRowsRekeyedInHistory;
+    await reattached.getHistory();
+    check('a history read that finds a mid-stream model tool in an owned turn makes the Drive refuse history refreshes',
+      refusedOnAttach === undefined && reattached.liveRowsRekeyedInHistory === true,
+      String(refusedOnAttach));
+    await reattached.close();
+  }
+
+  hub.restoreMessages(stableMessages);
+  boundary = stableBoundary;
+  {
+    // Without iteration events a tool the model ran mid-stream looks like one its message asked
+    // for, so the Drive cannot say where text streamed after either belongs.
+    const quietAdapter = resumeAdapter();
+    const quietConnection = await quietAdapter.attach(created.id, 'resume');
+    const step = hub.streamTurnNext({ iterationEvents: false });
+    const quietTurn = quietConnection.sendPrompt({ text: 'read without iterations', clientMessageId: 'client-no-iterations' });
+    await step.midTurn;
+    const beforeTextAfterTools = quietConnection.liveRowsRekeyedInHistory;
+    step.release();
+    await quietTurn;
+    check('text streamed after a tool on a Hub that reports no iterations makes the Drive refuse history refreshes',
+      beforeTextAfterTools === undefined && quietConnection.liveRowsRekeyedInHistory === true,
+      String(beforeTextAfterTools));
+    await quietConnection.close();
+  }
+
+  hub.restoreMessages(stableMessages);
+  boundary = stableBoundary;
+  {
+    // Blocks that share a key join into one row, which must stay within the body bound one block
+    // has, and say it was cut.
+    const boundAdapter = resumeAdapter();
+    const boundConnection = await boundAdapter.attach(created.id, 'resume');
+    const tailGate = hub.holdTrailingAssistantAfterNextReply(`:${'x'.repeat(2 * 1024 * 1024)}`);
+    const boundTurn = boundConnection.sendPrompt({ text: 'reply before an oversize tail', clientMessageId: 'client-oversize-tail' });
+    for (let attempt = 0; attempt < 40 && !(await boundConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
+      await Bun.sleep(5);
+    }
+    const boundPermission = (await boundConnection.getPending!()).find((row) => row.type === 'permission-request');
+    await boundConnection.respondPermission(boundPermission!.requestId, 'approve');
+    await boundTurn;
+    await tailGate.replySent;
+    await Bun.sleep(125);
+    tailGate.release();
+    await Bun.sleep(25);
+    const joinedRow = (await boundConnection.getHistory()).find((row) =>
+      row.type === 'model-output' && row.key === 'client-oversize-tail:assistant:0');
+    const joinedText = joinedRow?.type === 'model-output' ? joinedRow.text ?? '' : '';
+    check('a history row joined from blocks sharing a key stays within the body bound and says it was cut',
+      joinedRow?.type === 'model-output' && joinedRow.bodyTruncated === true
+        && Buffer.byteLength(joinedText, 'utf8') === 2 * 1024 * 1024
+        && joinedText.startsWith('answer:reply before an oversize tail:xxx'),
+      JSON.stringify({ bytes: Buffer.byteLength(joinedText, 'utf8'), truncated: joinedRow?.type === 'model-output' ? joinedRow.bodyTruncated : undefined }));
+    await boundConnection.close();
+  }
 
   hub.restoreMessages(stableMessages);
   boundary = stableBoundary;

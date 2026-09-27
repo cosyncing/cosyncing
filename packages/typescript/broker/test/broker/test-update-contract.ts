@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 /** Deterministic version surfaces, compatibility, signed update checks, and auth acceptance. */
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   BROKER_CONTRACT,
+  CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
   evaluateBrokerClientCompatibility,
 } from '../../../adapter-api/src/index.ts';
 import { parseQrPairingPayload } from '../../../crypto/src/index.ts';
@@ -71,6 +72,36 @@ const hardHash = evaluateBrokerClientCompatibility({
   surfaceHash: 'fnv1a32:00000000',
 });
 const legacy = evaluateBrokerClientCompatibility();
+// Published identities, read from the registry rather than re-pinned. Revision 27 is the newest
+// published revision (public main) and revision 26 is the one the shipped 0.5.13 clients and brokers
+// advertise. With a one-revision overlap window this revision is writable against 27 and read-only
+// against 26, as `evaluateBrokerClientCompatibility` says.
+const publishedRegistry = JSON.parse(readFileSync(
+  new URL('../../../../../contracts/contract-revisions.json', import.meta.url),
+  'utf8',
+)) as { revisions: Array<{ revision: number; surfaceHash: string; minimumClientRevision: number; clientMinimumBrokerRevision: number }> };
+const publishedRow = (revision: number) => publishedRegistry.revisions.find((row) => row.revision === revision)!;
+const previous = publishedRow(BROKER_CONTRACT.revision - 1);
+const shipped = publishedRow(26);
+const asClient = (row: typeof previous) => ({
+  revision: row.revision,
+  minimumBrokerRevision: row.clientMinimumBrokerRevision,
+  surfaceHash: row.surfaceHash,
+});
+const asBroker = (row: typeof previous) => ({
+  revision: row.revision,
+  minimumClientRevision: row.minimumClientRevision,
+  surfaceHash: row.surfaceHash,
+});
+const currentClient = {
+  revision: BROKER_CONTRACT.revision,
+  minimumBrokerRevision: CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
+  surfaceHash: BROKER_CONTRACT.surfaceHash,
+};
+const previousClientOnCurrentBroker = evaluateBrokerClientCompatibility(asClient(previous));
+const currentClientOnPreviousBroker = evaluateBrokerClientCompatibility(currentClient, asBroker(previous));
+const shippedClientOnCurrentBroker = evaluateBrokerClientCompatibility(asClient(shipped));
+const currentClientOnShippedBroker = evaluateBrokerClientCompatibility(currentClient, asBroker(shipped));
 check('contract surface hash is deterministic and machine-readable', /^fnv1a32:[a-f0-9]{8}$/.test(BROKER_CONTRACT.surfaceHash));
 check('published build/schema metadata carries the exact current contract identity',
   PUBLISHED_SCHEMA_VERSIONS.brokerContract === BROKER_CONTRACT.revision
@@ -163,6 +194,32 @@ check('a client requiring a newer broker degrades to read-only', hardMinimum.sta
 check('same revision with a different public surface fails closed', hardHash.status === 'hard-incompatible' && hardHash.readOnly);
 check('pre-handshake negotiation remains unknown; stream auth enforces the ticket boundary separately',
   legacy.status === 'unknown' && !legacy.readOnly);
+// Revision 28 carries the whole history-boundary change (endCursor, history-refresh, newer pages)
+// in one revision, so it stays inside the overlap window with the newest published revision (27).
+// Against the shipped revision 26 it is two revisions away: both sides stay connected but read-only,
+// until the overlap policy or the release order changes.
+check('the newest published identity is revision 27',
+  previous?.revision === 27 && previous.surfaceHash === 'fnv1a32:63d88dbb'
+    && previous.minimumClientRevision === 17 && previous.clientMinimumBrokerRevision === 16,
+  `${previous?.revision}/${previous?.surfaceHash}`);
+check('the shipped revision-26 identity is the one 0.5.13 peers advertise',
+  shipped?.revision === 26 && shipped.surfaceHash === 'fnv1a32:caf34ce7'
+    && shipped.minimumClientRevision === 17 && shipped.clientMinimumBrokerRevision === 16,
+  `${shipped?.revision}/${shipped?.surfaceHash}`);
+check('a revision-27 client on this broker stays writable',
+  previousClientOnCurrentBroker.status === 'client-behind' && !previousClientOnCurrentBroker.readOnly,
+  previousClientOnCurrentBroker.reason);
+check('this client on a revision-27 broker stays writable',
+  currentClientOnPreviousBroker.status === 'broker-behind' && !currentClientOnPreviousBroker.readOnly,
+  currentClientOnPreviousBroker.reason);
+check('a shipped revision-26 client on this broker is outside the overlap window and read-only',
+  shippedClientOnCurrentBroker.status === 'hard-incompatible' && shippedClientOnCurrentBroker.readOnly,
+  shippedClientOnCurrentBroker.reason);
+check('this client on a shipped revision-26 broker is outside the overlap window and read-only',
+  currentClientOnShippedBroker.status === 'hard-incompatible' && currentClientOnShippedBroker.readOnly,
+  currentClientOnShippedBroker.reason);
+check('this client needs no broker newer than the newest published one',
+  CLIENT_MINIMUM_BROKER_CONTRACT_REVISION <= previous.revision);
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const keyId = 'update-contract-fixture';
@@ -448,6 +505,14 @@ try {
     `contractRevision=${BROKER_CONTRACT.revision + 1}&minimumBrokerRevision=${BROKER_CONTRACT.revision + 1}&clientVersion=2.0.0`,
   );
   const legacyHello = await firstWsFrame(piHello.id, 'clientVersion=0.9.0');
+  const previousClientHello = await firstWsFrame(piHello.id,
+    `contractRevision=${previous.revision}&minimumBrokerRevision=${previous.clientMinimumBrokerRevision}`
+    + `&contractSurfaceHash=${encodeURIComponent(previous.surfaceHash)}&clientVersion=0.5.14`,
+  );
+  const shippedClientHello = await firstWsFrame(piHello.id,
+    `contractRevision=${shipped.revision}&minimumBrokerRevision=${shipped.clientMinimumBrokerRevision}`
+    + `&contractSurfaceHash=${encodeURIComponent(shipped.surfaceHash)}&clientVersion=0.5.13`,
+  );
   check('WebSocket hello advertises broker identity and equal compatibility',
     hello.kind === 'hello' && hello.broker?.version === BUILD_INFO.version
       && hello.compatibility?.status === 'compatible');
@@ -462,6 +527,16 @@ try {
   check('hard WebSocket mismatch explicitly degrades to read-only',
     hardHello.kind === 'hello' && hardHello.compatibility?.status === 'hard-incompatible'
       && hardHello.compatibility?.readOnly === true);
+  check('a revision-27 client attaching to this broker is writable',
+    previousClientHello.kind === 'hello'
+      && previousClientHello.compatibility?.status === 'client-behind'
+      && previousClientHello.compatibility?.readOnly === false,
+    JSON.stringify(previousClientHello.compatibility));
+  check('a shipped revision-26 client attaching to this broker is read-only',
+    shippedClientHello.kind === 'hello'
+      && shippedClientHello.compatibility?.status === 'hard-incompatible'
+      && shippedClientHello.compatibility?.readOnly === true,
+    JSON.stringify(shippedClientHello.compatibility));
   check('legacy WebSocket clients negotiate unknown without forced read-only',
     legacyHello.kind === 'hello' && legacyHello.compatibility?.status === 'unknown'
       && legacyHello.compatibility?.readOnly === false);

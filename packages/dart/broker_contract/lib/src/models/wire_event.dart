@@ -184,6 +184,9 @@ class HistoryWireEvent extends WireEvent {
     this.cursor,
     this.attachTicket,
     this.olderCursor,
+    this.endCursor,
+    this.newerHistory = false,
+    this.clientMessageId,
     this.hasEarlier = false,
     this.gap,
     this.truncated,
@@ -201,6 +204,9 @@ class HistoryWireEvent extends WireEvent {
       cursor: json['cursor'] as String?,
       attachTicket: json['attachTicket'] as String?,
       olderCursor: json['olderCursor'] as String?,
+      endCursor: json['endCursor'] as String?,
+      newerHistory: json['newerHistory'] == true,
+      clientMessageId: json['clientMessageId'] as String?,
       hasEarlier: json['hasEarlier'] as bool? ?? false,
       gap: gapJson is Map<String, dynamic>
           ? HistoryGap.fromJson(gapJson)
@@ -227,6 +233,24 @@ class HistoryWireEvent extends WireEvent {
   /// Opaque cursor for the page immediately before this attach tail.
   final String? olderCursor;
 
+  /// Opaque backward-paging cursor at the boundary after this frame's newest
+  /// row (contract revision 28), in the same encoding as [olderCursor] and
+  /// every page cursor. A bounded client that releases rows this frame
+  /// delivered can reload exactly them by paging backward from here. Absent
+  /// when the broker cannot page this history, so its presence is the
+  /// capability; never derive it from [cursor].
+  final String? endCursor;
+
+  /// Whether this broker serves `history-refresh` and newer `history-page`
+  /// requests for this session (contract revision 28). Sent exactly where
+  /// [endCursor] is, so its presence is the capability; never infer it from
+  /// a contract revision.
+  final bool newerHistory;
+
+  /// The `history-refresh` request this incremental frame answers (contract
+  /// revision 28). Null on attach and resync frames.
+  final String? clientMessageId;
+
   /// Whether the broker retained older transcript messages.
   final bool hasEarlier;
 
@@ -245,13 +269,17 @@ class HistoryWireEvent extends WireEvent {
     if (cursor != null) 'cursor': cursor,
     if (attachTicket != null) 'attachTicket': attachTicket,
     if (olderCursor != null) 'olderCursor': olderCursor,
+    if (endCursor != null) 'endCursor': endCursor,
+    if (newerHistory) 'newerHistory': true,
+    if (clientMessageId != null) 'clientMessageId': clientMessageId,
     if (hasEarlier) 'hasEarlier': true,
     if (gap != null) 'gap': gap!.toJson(),
     if (truncated != null) 'truncated': truncated!.toJson(),
   };
 }
 
-/// A chronological page of transcript messages older than the attach tail.
+/// A chronological page of transcript messages: older than its request
+/// cursor, or (contract revision 28) newer when [isNewer].
 class HistoryPageWireEvent extends WireEvent {
   /// Creates a history page.
   const HistoryPageWireEvent({
@@ -259,6 +287,7 @@ class HistoryPageWireEvent extends WireEvent {
     required this.hasMore,
     required this.endOfHistory,
     this.cursor,
+    this.isNewer = false,
     this.clientMessageId,
   });
 
@@ -282,6 +311,7 @@ class HistoryPageWireEvent extends WireEvent {
       cursor: json['cursor'] as String?,
       hasMore: json['hasMore'] as bool? ?? false,
       endOfHistory: json['endOfHistory'] as bool? ?? false,
+      isNewer: json['direction'] == 'newer',
       clientMessageId: json['clientMessageId'] as String?,
     );
   }
@@ -289,14 +319,23 @@ class HistoryPageWireEvent extends WireEvent {
   /// Messages in normal chronological order.
   final List<AgentMessage> messages;
 
-  /// Cursor for the next older page.
+  /// For an older page, the cursor for the next older page. For a newer page,
+  /// the boundary after its rows (the requested `until` verbatim when the
+  /// walk reached it); always present.
   final String? cursor;
 
-  /// Whether another older page exists.
+  /// Whether another page exists in this page's direction.
   final bool hasMore;
 
-  /// Whether the retained beginning of history has been reached.
+  /// Whether the retained beginning (older) or the current end (newer) of
+  /// history has been reached.
   final bool endOfHistory;
+
+  /// Whether the broker answered with a page NEWER than the request cursor
+  /// (it echoes `direction: "newer"`). A broker without the capability
+  /// ignores the request's direction and answers with an older page, which
+  /// a newer request must never accept.
+  final bool isNewer;
 
   /// Optional request correlation id.
   final String? clientMessageId;
@@ -308,6 +347,7 @@ class HistoryPageWireEvent extends WireEvent {
     if (cursor != null) 'cursor': cursor,
     'hasMore': hasMore,
     'endOfHistory': endOfHistory,
+    if (isNewer) 'direction': 'newer',
     if (clientMessageId != null) 'clientMessageId': clientMessageId,
   };
 }

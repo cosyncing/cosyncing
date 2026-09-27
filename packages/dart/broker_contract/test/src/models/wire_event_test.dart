@@ -192,6 +192,34 @@ void main() {
         expect(event.attachTicket, 'cursor-1');
       });
 
+      test('endCursor round-trips and stays distinct from cursor', () {
+        final json = {
+          'kind': 'history',
+          'messages': <dynamic>[],
+          'reset': true,
+          'cursor': 'reconnect-cursor',
+          'olderCursor': 'older-boundary',
+          'endCursor': 'end-boundary',
+        };
+
+        final event = WireEvent.fromJson(json) as HistoryWireEvent;
+        expect(event.endCursor, 'end-boundary');
+        expect(event.cursor, 'reconnect-cursor');
+        expect(event.toJson()['endCursor'], 'end-boundary');
+      });
+
+      test('an older broker frame has no endCursor', () {
+        final event =
+            WireEvent.fromJson({
+                  'kind': 'history',
+                  'messages': <dynamic>[],
+                  'cursor': 'reconnect-cursor',
+                })
+                as HistoryWireEvent;
+        expect(event.endCursor, isNull);
+        expect(event.toJson().containsKey('endCursor'), isFalse);
+      });
+
       test('toJson round-trips attachTicket', () {
         final json = {
           'kind': 'history',
@@ -253,6 +281,36 @@ void main() {
         expect(event.toJson()['truncated'], {'shown': 500, 'total': 16384});
       });
 
+      test('reads the revision-28 capability and refresh correlation', () {
+        final refresh =
+            WireEvent.fromJson({
+                  'kind': 'history',
+                  'messages': <dynamic>[],
+                  'cursor': 'c',
+                  'endCursor': 'e',
+                  'newerHistory': true,
+                  'clientMessageId': 'refresh-1',
+                })
+                as HistoryWireEvent;
+        expect(refresh.newerHistory, isTrue);
+        expect(refresh.clientMessageId, 'refresh-1');
+        expect(refresh.toJson()['newerHistory'], isTrue);
+        expect(refresh.toJson()['clientMessageId'], 'refresh-1');
+
+        // Presence is the capability: absent or anything but `true` is none.
+        for (final value in <Object?>[null, false, 'true', 1]) {
+          final frame =
+              WireEvent.fromJson({
+                    'kind': 'history',
+                    'messages': <dynamic>[],
+                    'newerHistory': ?value,
+                  })
+                  as HistoryWireEvent;
+          expect(frame.newerHistory, isFalse, reason: '$value');
+          expect(frame.toJson().containsKey('newerHistory'), isFalse);
+        }
+      });
+
       test('malformed capped-history counts fail closed', () {
         final event =
             WireEvent.fromJson({
@@ -292,6 +350,34 @@ void main() {
         expect(event.endOfHistory, isFalse);
         expect(event.clientMessageId, 'page-1');
         expect(event.toJson()['kind'], 'history-page');
+      });
+
+      test('a newer page names its direction; anything else is older', () {
+        final newer =
+            WireEvent.fromJson({
+                  'kind': 'history-page',
+                  'messages': <dynamic>[],
+                  'cursor': 'end',
+                  'hasMore': false,
+                  'endOfHistory': true,
+                  'direction': 'newer',
+                })
+                as HistoryPageWireEvent;
+        expect(newer.isNewer, isTrue);
+        expect(newer.toJson()['direction'], 'newer');
+        for (final value in <Object?>[null, 'older', 'NEWER', true]) {
+          final page =
+              WireEvent.fromJson({
+                    'kind': 'history-page',
+                    'messages': <dynamic>[],
+                    'hasMore': false,
+                    'endOfHistory': true,
+                    'direction': ?value,
+                  })
+                  as HistoryPageWireEvent;
+          expect(page.isNewer, isFalse, reason: '$value');
+          expect(page.toJson().containsKey('direction'), isFalse);
+        }
       });
 
       test('fails closed on malformed rows instead of advancing past them', () {

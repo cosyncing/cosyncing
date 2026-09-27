@@ -62,6 +62,7 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_file_l
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_progress.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/transcript_prefetch.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/session_viewport_registry.dart';
@@ -87,10 +88,16 @@ import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show
-        RenderAbstractViewport,
+        GrowthDirection,
+        RenderProxyBox,
+        RenderSliver,
+        RenderSliverMultiBoxAdaptor,
+        RenderViewport,
         ScrollCacheExtent,
         SelectedContent,
-        SelectionStatus;
+        SelectionStatus,
+        SliverMultiBoxAdaptorParentData,
+        ViewportOffset;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';

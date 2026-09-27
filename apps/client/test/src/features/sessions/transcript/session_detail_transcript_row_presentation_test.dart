@@ -170,7 +170,7 @@ void main() {
       // rows have a named ceiling rather than an incidental one.
       expect(
         deep.derivedRows,
-        lessThanOrEqualTo(kRetainedTranscriptTailMessages),
+        lessThanOrEqualTo(kTranscriptHistoryPageMessages),
       );
     });
 

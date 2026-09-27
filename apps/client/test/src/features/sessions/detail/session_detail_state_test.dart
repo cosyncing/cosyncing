@@ -1247,12 +1247,12 @@ void main() {
         ),
       );
 
-      expect(window.messageCount, lessThan(kRetainedTranscriptTailMessages));
+      expect(window.messageCount, lessThan(kTranscriptHistoryPageMessages));
       expect(
         window.estimatedBytes,
         lessThanOrEqualTo(kMaxActiveTranscriptDecodedBytes),
       );
-      expect(window.tailPrefixEvicted, isTrue);
+      expect(window.leadingEdgeReleased, isTrue);
       expect(
         window.leadingGap?.kind,
         TranscriptHistoryGapKind.reconnectRequired,
@@ -1546,7 +1546,7 @@ void main() {
         shallow.applyLiveMessage(message(2500), work: shallowWork);
         deep.applyLiveMessage(message(2500), work: deepWork);
 
-        expect(shallowWork.inspectedMessages, kRetainedTranscriptTailMessages);
+        expect(shallowWork.inspectedMessages, kTranscriptHistoryPageMessages);
         expect(deepWork.inspectedMessages, shallowWork.inspectedMessages);
         expect(deepWork.estimatedMessages, shallowWork.estimatedMessages);
         expect(

@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:convert';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
@@ -16,6 +17,9 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_conver
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:flutter/foundation.dart';
+
+part 'session_detail_history_navigation.dart';
+part 'session_detail_history_window.dart';
 
 /// How a controller-decided draft value should reach the composer (DR1).
 enum SessionDraftSurfaceKind {
@@ -314,6 +318,7 @@ class SessionDetailState {
     this.historyPageLoading = false,
     this.historyPageError,
     this.historyPageErrorCode,
+    this.historyRefusedCursors = const {},
     this.historyStartReached = false,
     this.transcriptResetGeneration = 0,
     this.driveRestorePhase = SessionDriveRestorePhase.idle,
@@ -431,6 +436,29 @@ class SessionDetailState {
   /// Machine-readable paging failure. Resource/source failures are terminal
   /// for this cursor epoch; transport/malformed failures remain retryable.
   final String? historyPageErrorCode;
+
+  /// History positions the broker refused this attach, by the refusal's code
+  /// (see [isHistoryCursorRefusalCode]). Only a range with one of them as an
+  /// edge stops paging; every other range pages as usual. Cleared by the next
+  /// history frame that answers no refresh, which replaces the positions.
+  final Map<String, String> historyRefusedCursors;
+
+  /// Whether a page request from [cursor] (toward [until], for a newer page)
+  /// cannot succeed on this attach: paging was refused outright, or the
+  /// broker refused one of those positions.
+  bool historyPagingBlockedAt(String? cursor, {String? until}) =>
+      isTerminalHistoryPageErrorCode(historyPageErrorCode) ||
+      historyRefusedCursors.containsKey(cursor) ||
+      historyRefusedCursors.containsKey(until);
+
+  /// Whether the broker refused a position [gap] is an edge of: it loads from
+  /// neither edge on this attach.
+  bool historyGapRefused(TranscriptHistoryGapSegment gap) =>
+      historyRefusedCursors.containsKey(gap.reloadCursor) ||
+      historyRefusedCursors.containsKey(gap.forwardCursor);
+
+  /// The refusal of the leading edge's position, when the broker refused it.
+  String? get olderHistoryRefusal => historyRefusedCursors[olderHistoryCursor];
 
   /// Whether an authoritative history response reached the native beginning.
   final bool historyStartReached;
@@ -562,6 +590,10 @@ class SessionDetailState {
   /// a live rebuild.
   Map<String, String?> get resolvedRequestDecisions =>
       _activeTranscript.resolvedRequestDecisions;
+
+  /// Cards no longer waiting for an answer although no resolution for them
+  /// arrived (see [TranscriptHistoryWindow.withdrawnRequestIds]).
+  Set<String> get withdrawnRequestIds => _activeTranscript.withdrawnRequestIds;
 
   /// Explicit gap rows between [transcriptMessageSegments].
   List<TranscriptHistoryGapSegment> get transcriptHistoryGaps =>
@@ -742,6 +774,7 @@ class SessionDetailState {
     bool? historyPageLoading,
     LocalizedFailure? historyPageError,
     String? historyPageErrorCode,
+    Map<String, String>? historyRefusedCursors,
     bool? historyStartReached,
     int? transcriptResetGeneration,
     SessionDriveRestorePhase? driveRestorePhase,
@@ -812,6 +845,9 @@ class SessionDetailState {
       historyPageErrorCode: clearHistoryPageError
           ? null
           : historyPageErrorCode ?? this.historyPageErrorCode,
+      historyRefusedCursors: historyRefusedCursors == null
+          ? this.historyRefusedCursors
+          : Map.unmodifiable(historyRefusedCursors),
       historyStartReached: historyStartReached ?? this.historyStartReached,
       transcriptResetGeneration:
           transcriptResetGeneration ?? this.transcriptResetGeneration,
@@ -947,964 +983,6 @@ final class TranscriptHistoryWorkCounter {
   int reusedConversationSegments = 0;
 }
 
-/// One decoded, cursor-bounded native history page.
-@immutable
-final class TranscriptHistoryPage {
-  /// Creates one immutable page with optional precomputed byte accounting.
-  TranscriptHistoryPage({
-    required List<AgentMessage> messages,
-    required this.olderCursor,
-    required this.newerCursor,
-    required this.isTail,
-    int? estimatedBytes,
-  }) : messages = List<AgentMessage>.unmodifiable(messages),
-       estimatedBytes =
-           estimatedBytes ??
-           messages.fold<int>(
-             0,
-             (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
-           );
-
-  /// Canonical messages in native chronological order.
-  final List<AgentMessage> messages;
-
-  /// Opaque cursor immediately before this page, when more history exists.
-  final String? olderCursor;
-
-  /// Opaque cursor immediately after this page; null for the recent tail.
-  final String? newerCursor;
-
-  /// Whether this is the separately retained newest tail.
-  final bool isTail;
-
-  /// Conservative decoded-size estimate maintained at mutation time.
-  final int estimatedBytes;
-
-  /// Whether this page contains [key], with optional work instrumentation.
-  bool containsStableKey(String key, {TranscriptHistoryWorkCounter? work}) {
-    for (final message in messages) {
-      work?.inspectedMessages += 1;
-      if (stableTranscriptMessageKey(message) == key) return true;
-    }
-    return false;
-  }
-}
-
-/// Why a decoded range is absent between two retained transcript segments.
-enum TranscriptHistoryGapKind {
-  /// The newer segment carries an opaque boundary that can reload the gap.
-  reloadable,
-
-  /// Locally evicted live rows require a fresh attach to recover.
-  reconnectRequired,
-}
-
-/// Explicit UI/model boundary for omitted decoded messages.
-@immutable
-final class TranscriptHistoryGapSegment {
-  /// Creates an explicit omitted-range boundary.
-  const TranscriptHistoryGapSegment({
-    required this.id,
-    required this.kind,
-    this.reloadCursor,
-  });
-
-  /// Stable row identity.
-  final String id;
-
-  /// Whether this gap can be filled with a page or needs reattach.
-  final TranscriptHistoryGapKind kind;
-
-  /// Opaque newer-edge cursor for one backward reload page.
-  final String? reloadCursor;
-}
-
-/// One cached cursor-contiguous conversation run plus any omitted range before
-/// it.
-///
-/// Page identities survive live tail replacement, so unchanged older
-/// [turns] are reused by the production transcript widget rather than rebuilt
-/// from the complete active history window.
-@immutable
-final class TranscriptConversationSegment {
-  /// Creates one renderable contiguous-run projection.
-  const TranscriptConversationSegment({
-    required this.turns,
-    this.gapBefore,
-  });
-
-  /// Cached conversation turns for this contiguous page run and display mode.
-  final List<ConversationTurn> turns;
-
-  /// Explicit missing range before this run.
-  final TranscriptHistoryGapSegment? gapBefore;
-}
-
-/// Result of accepting one older page into the active decoded window.
-@immutable
-final class TranscriptHistoryPageMutation {
-  /// Creates an insertion result.
-  const TranscriptHistoryPageMutation({
-    required this.window,
-    required this.accepted,
-  });
-
-  /// Updated window. Identical to the input when [accepted] is false.
-  final TranscriptHistoryWindow window;
-
-  /// Whether the page fit and matched an existing opaque boundary.
-  final bool accepted;
-}
-
-/// Explicit bounded transcript page table.
-///
-/// Pages stay in chronological order. Cursor equality proves adjacency.
-/// Eviction keeps an active contiguous browsing run plus the recent tail and
-/// leaves a reloadable gap instead of flattening non-contiguous rows into one
-/// ordinary transcript.
-@immutable
-final class TranscriptHistoryWindow {
-  /// Sentinel used before the first transcript-bearing frame.
-  const TranscriptHistoryWindow.uninitialized()
-    : initialized = false,
-      pages = const [],
-      historyCursor = null,
-      latestHistoryGap = null,
-      latestHistoryTruncation = null,
-      liveState = null,
-      telemetry = SessionTelemetry.empty,
-      questionState = SessionQuestionState.empty,
-      tailPrefixEvicted = false;
-
-  const TranscriptHistoryWindow._({
-    required this.pages,
-    required this.historyCursor,
-    required this.latestHistoryGap,
-    required this.latestHistoryTruncation,
-    required this.liveState,
-    required this.telemetry,
-    required this.questionState,
-    required this.tailPrefixEvicted,
-  }) : initialized = true;
-
-  /// Builds a bounded tail from one authoritative history frame.
-  ///
-  /// Latest-wins restatements collapse to their last copy before the bounds
-  /// apply, so the retained tail holds exactly ONE canonical reading per
-  /// state/telemetry key — the same shape the delta reconciliation emits.
-  /// A raw list with duplicates left the reading's recency ambiguous: live
-  /// upserts landed on the first copy while position said the last copy was
-  /// newest, so later merges could resurrect a stale value.
-  factory TranscriptHistoryWindow.fromHistory(HistoryWireEvent event) {
-    var questionState = SessionQuestionState.empty;
-    for (final message in event.messages) {
-      questionState = questionState.applyMessage(message);
-    }
-    final tailMessages = _collapseLatestWinsRestatements(
-      event.messages.map(questionState.restoreMessage).toList(),
-    );
-    var tailBytes = tailMessages.fold<int>(
-      0,
-      (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
-    );
-    var prefixEvicted = false;
-    while (tailMessages.length > kRetainedTranscriptTailMessages ||
-        tailBytes > kMaxActiveTranscriptDecodedBytes) {
-      if (tailMessages.isEmpty) break;
-      tailBytes -= estimatedAgentMessageDecodedBytes(tailMessages.removeAt(0));
-      prefixEvicted = true;
-    }
-    final tail = TranscriptHistoryPage(
-      messages: tailMessages,
-      olderCursor: event.olderCursor,
-      newerCursor: null,
-      isTail: true,
-      estimatedBytes: tailBytes,
-    );
-    return TranscriptHistoryWindow._(
-      pages: List.unmodifiable([tail]),
-      historyCursor: event.cursor,
-      latestHistoryGap: event.gap,
-      latestHistoryTruncation: prefixEvicted
-          ? HistoryTruncation(
-              shown: tailMessages.length,
-              total: event.truncated?.total ?? event.messages.length,
-            )
-          : event.truncated,
-      liveState: SessionLiveState.fromMessages(tailMessages),
-      telemetry: SessionTelemetry.fromMessages(tailMessages),
-      questionState: questionState,
-      tailPrefixEvicted: prefixEvicted,
-    );
-  }
-
-  /// Legacy fixture adapter. Production controller state never reduces its
-  /// transcript from the event log.
-  factory TranscriptHistoryWindow.fromEvents(List<WireEvent> events) {
-    var window = const TranscriptHistoryWindow.uninitialized();
-    for (final event in events) {
-      switch (event) {
-        case HistoryWireEvent():
-          window = window.applyHistory(event);
-        case HistoryPageWireEvent():
-          final requestedCursor = window.olderHistoryCursor;
-          if (requestedCursor != null) {
-            window = window
-                .prependPage(event, requestedCursor: requestedCursor)
-                .window;
-          }
-        case MessageWireEvent(:final message):
-          window = window.applyLiveMessage(message);
-        case _:
-          break;
-      }
-    }
-    return window.initialized
-        ? window
-        : TranscriptHistoryWindow._(
-            pages: const [],
-            historyCursor: null,
-            latestHistoryGap: null,
-            latestHistoryTruncation: null,
-            liveState: SessionLiveState.fromMessages(const []),
-            telemetry: SessionTelemetry.empty,
-            questionState: SessionQuestionState.empty,
-            tailPrefixEvicted: false,
-          );
-  }
-
-  /// Whether this table has consumed at least one transcript frame.
-  final bool initialized;
-
-  /// Retained pages in chronological order.
-  final List<TranscriptHistoryPage> pages;
-
-  /// Latest reconnect cursor represented by the recent tail.
-  final String? historyCursor;
-
-  /// Latest authoritative reconnect-gap metadata.
-  final HistoryGap? latestHistoryGap;
-
-  /// Latest authoritative initial-tail truncation metadata.
-  final HistoryTruncation? latestHistoryTruncation;
-
-  /// Incremental latest-wins state projection.
-  final SessionLiveState? liveState;
-
-  /// Incremental latest telemetry projection.
-  final SessionTelemetry telemetry;
-
-  /// Live question authority retained independently of bounded history pages.
-  final SessionQuestionState questionState;
-
-  /// The retained tail discarded older local rows that have no opaque native
-  /// boundary. This is surfaced as reconnect-required, never hidden.
-  final bool tailPrefixEvicted;
-
-  _TranscriptHistoryDerived get _derived {
-    final cached = _transcriptHistoryDerivedCache[this];
-    if (cached != null) return cached;
-    final derived = _TranscriptHistoryDerived.fromWindow(this);
-    _transcriptHistoryDerivedCache[this] = derived;
-    return derived;
-  }
-
-  /// Identity-deduplicated canonical messages, built lazily for rendering.
-  List<AgentMessage> get canonicalMessages => _derived.canonicalMessages;
-
-  /// Canonical transcript rows excluding state/telemetry frames.
-  List<AgentMessage> get transcriptMessages => _derived.transcriptMessages;
-
-  /// Active terminal-output rows.
-  List<AgentMessage> get terminalOutputMessages =>
-      List<AgentMessage>.unmodifiable(
-        pages.expand(
-          (page) => _pageDerived(page).terminalOutputMessages,
-        ),
-      );
-
-  /// Active file-artifact rows.
-  List<AgentMessage> get fileArtifactMessages =>
-      List<AgentMessage>.unmodifiable(
-        pages.expand(
-          (page) => _pageDerived(page).fileArtifactMessages,
-        ),
-      );
-
-  /// Active file-artifact descriptors.
-  List<SessionArtifactDescriptor> get fileArtifactDescriptors =>
-      List<SessionArtifactDescriptor>.unmodifiable(
-        pages.expand(
-          (page) => _pageDerived(page).fileArtifactDescriptors,
-        ),
-      );
-
-  /// Explicit omitted ranges between retained contiguous runs.
-  List<TranscriptHistoryGapSegment> get gaps => _derived.gaps;
-
-  /// Explicit gap before the first segment, if local tail trimming created one.
-  TranscriptHistoryGapSegment? get leadingGap =>
-      tailPrefixEvicted && (pages.isEmpty || pages.first.isTail)
-      ? const TranscriptHistoryGapSegment(
-          id: 'history-gap-leading-local',
-          kind: TranscriptHistoryGapKind.reconnectRequired,
-        )
-      : null;
-
-  /// Whether any retained page has a renderable transcript message.
-  bool get hasTranscriptMessages {
-    for (final page in pages) {
-      if (_pageDerived(page).transcriptMessages.isNotEmpty) return true;
-    }
-    return false;
-  }
-
-  /// Latest request resolutions folded from page-local projections.
-  Map<String, String?> get resolvedRequestDecisions {
-    final result = <String, String?>{};
-    for (final page in pages) {
-      result.addAll(_pageDerived(page).resolvedRequestDecisions);
-    }
-    for (final id in questionState.resolvedRequestIds) {
-      result.putIfAbsent(id, () => null);
-    }
-    return Map<String, String?>.unmodifiable(result);
-  }
-
-  /// Cursor immediately before the oldest retained browsing run.
-  String? get olderHistoryCursor {
-    if (pages.isEmpty) return null;
-    return pages.first.olderCursor;
-  }
-
-  /// Whether the oldest retained run has another native page before it.
-  bool get hasEarlierHistory => olderHistoryCursor != null;
-
-  /// Total estimated decoded bytes retained by all pages.
-  int get estimatedBytes =>
-      pages.fold<int>(0, (sum, page) => sum + page.estimatedBytes);
-
-  /// Total raw message slots retained by all pages.
-  int get messageCount =>
-      pages.fold<int>(0, (sum, page) => sum + page.messages.length);
-
-  /// Flat optimistic/decorated transcript projection.
-  List<AgentMessage> transcriptMessagesWith(
-    List<SessionOptimisticPrompt> optimisticPrompts,
-    Map<String, String> clientKeys,
-  ) => _presentation(optimisticPrompts, clientKeys).messages;
-
-  /// Optimistic/decorated transcript runs that never cross a decoded gap.
-  List<List<AgentMessage>> transcriptMessageSegmentsWith(
-    List<SessionOptimisticPrompt> optimisticPrompts,
-    Map<String, String> clientKeys,
-  ) => _presentation(optimisticPrompts, clientKeys).segments;
-
-  /// Builds cached production conversation descriptors for contiguous runs.
-  ///
-  /// Each immutable page owns its canonical projection. A run projection
-  /// preserves conversation/tool grouping across adjacent page boundaries,
-  /// while a prewarmed prefix excluding the mutable tail lets the next live
-  /// update reuse every older turn descriptor.
-  List<TranscriptConversationSegment> transcriptConversationSegmentsWith(
-    List<SessionOptimisticPrompt> optimisticPrompts,
-    Map<String, String> clientKeys, {
-    required ToolDisplayMode mode,
-    TranscriptHistoryWorkCounter? work,
-  }) {
-    if (pages.isEmpty) return const [];
-    final pageRuns = <List<TranscriptHistoryPage>>[];
-    final gapsBeforeRuns = <TranscriptHistoryGapSegment?>[];
-    for (final page in pages) {
-      if (pageRuns.isEmpty) {
-        pageRuns.add([page]);
-        gapsBeforeRuns.add(null);
-        continue;
-      }
-      final gap = _historyGapBetween(
-        pageRuns.last.last,
-        page,
-        tailPrefixEvicted: tailPrefixEvicted,
-      );
-      // The recent tail is a presentation checkpoint even when its cursor is
-      // adjacent. Only that page changes under streaming; keeping the older
-      // run separate lets it retain canonical/turn identity. A partial first
-      // tail turn is stitched to the older run below without inventing a gap.
-      if (gap == null && !page.isTail) {
-        pageRuns.last.add(page);
-      } else {
-        pageRuns.add([page]);
-        gapsBeforeRuns.add(gap);
-      }
-    }
-
-    // Release first: a page that just stopped owning a run still holds the run
-    // it owned last frame, whose pages may already be evicted.
-    _releaseNonOwnerRunCaches(pages, pageRuns);
-    final derivedRuns = [
-      for (final run in pageRuns) _runDerived(run, work: work),
-    ];
-    final promptBuckets = List<List<SessionOptimisticPrompt>?>.filled(
-      pageRuns.length,
-      null,
-    );
-    var runFloor = 0;
-    for (final prompt in optimisticPrompts) {
-      final deliveredKey = prompt.deliveredMessageKey;
-      final anchorKey = prompt.anchorMessageKey;
-      final int target;
-      if (deliveredKey != null) {
-        final runIndex = derivedRuns.indexWhere(
-          (run) => run.stableKeys.contains(deliveredKey),
-        );
-        // A delivered holder whose echo no run carries renders nothing (the
-        // run projection skips it). Bucketing it to the last run would only
-        // drag every later prompt down through the monotonic floor.
-        if (runIndex < 0) continue;
-        target = runIndex;
-      } else if (anchorKey != null) {
-        final runIndex = derivedRuns.indexWhere(
-          (run) => run.stableKeys.contains(anchorKey),
-        );
-        // A pending prompt has no canonical row; when its anchor is gone the
-        // last run is the reserved fallback.
-        target = runIndex < 0 ? pageRuns.length - 1 : runIndex;
-      } else {
-        target = 0;
-      }
-      final resolved = target < runFloor ? runFloor : target;
-      runFloor = resolved;
-      (promptBuckets[resolved] ??= <SessionOptimisticPrompt>[]).add(prompt);
-    }
-
-    final result = <TranscriptConversationSegment>[];
-    for (var index = 0; index < pageRuns.length; index++) {
-      final messages = derivedRuns[index].present(
-        optimisticPrompts: promptBuckets[index] ?? const [],
-        clientKeys: clientKeys,
-        work: work,
-      );
-      final turns = _conversationTurnsForRun(
-        messages,
-        mode: mode,
-        work: work,
-      );
-      var presentedTurns = turns;
-      if (index > 0 &&
-          gapsBeforeRuns[index] == null &&
-          turns.isNotEmpty &&
-          turns.first.isPartial &&
-          result.last.turns.isNotEmpty) {
-        final stitched = _stitchConversationBoundary(
-          result.last.turns,
-          turns,
-        );
-        final previous = result.last;
-        result[result.length - 1] = TranscriptConversationSegment(
-          turns: stitched.previous,
-          gapBefore: previous.gapBefore,
-        );
-        presentedTurns = stitched.current;
-      }
-      result.add(
-        TranscriptConversationSegment(
-          turns: presentedTurns,
-          gapBefore: gapsBeforeRuns[index],
-        ),
-      );
-    }
-    return List<TranscriptConversationSegment>.unmodifiable(result);
-  }
-
-  _TranscriptHistoryPresentation _presentation(
-    List<SessionOptimisticPrompt> optimisticPrompts,
-    Map<String, String> clientKeys,
-  ) {
-    final cached = _transcriptHistoryPresentationCache[this];
-    if (cached != null &&
-        identical(cached.optimisticPrompts, optimisticPrompts) &&
-        identical(cached.clientKeys, clientKeys)) {
-      return cached;
-    }
-    final projected = projectOptimisticTranscriptMessages(
-      transcriptMessages,
-      optimisticPrompts,
-      clientKeys,
-    );
-    final boundaryKeys = _derived.segmentStartKeys.skip(1).toSet();
-    final result = <List<AgentMessage>>[];
-    var current = <AgentMessage>[];
-    for (final message in projected) {
-      final key = stableTranscriptMessageKey(message);
-      if (current.isNotEmpty && key != null && boundaryKeys.contains(key)) {
-        result.add(List.unmodifiable(current));
-        current = <AgentMessage>[];
-      }
-      current.add(message);
-    }
-    if (current.isNotEmpty || result.isEmpty) {
-      result.add(List.unmodifiable(current));
-    }
-    final presentation = _TranscriptHistoryPresentation(
-      optimisticPrompts: optimisticPrompts,
-      clientKeys: clientKeys,
-      messages: projected,
-      segments: List.unmodifiable(result),
-    );
-    _transcriptHistoryPresentationCache[this] = presentation;
-    return presentation;
-  }
-
-  /// Applies an authoritative replay/delta. A reset starts a new cursor epoch;
-  /// an incremental frame reconciles the recent tail into the frame's
-  /// native/source order (see [_applyHistoryDelta]).
-  TranscriptHistoryWindow applyHistory(
-    HistoryWireEvent event, {
-    String? preserveMessageKey,
-  }) {
-    if (!initialized) {
-      return TranscriptHistoryWindow.fromHistory(event);
-    }
-    if (event.reset) {
-      final replacement = TranscriptHistoryWindow.fromHistory(event);
-      if (preserveMessageKey == null ||
-          replacement.pages.any(
-            (page) => page.containsStableKey(preserveMessageKey),
-          )) {
-        return replacement;
-      }
-      final anchorPageIndex = pages.indexWhere(
-        (page) => page.containsStableKey(preserveMessageKey),
-      );
-      if (anchorPageIndex < 0) return replacement;
-
-      // A reconnect reset authoritatively replaces the live tail, but browser
-      // suspension must not discard the bounded page the user is reading.
-      // Keep that one payload page as a disconnected history run until the
-      // viewport remount settles or explicitly moves its protection.
-      final replacementKeys = <String>{};
-      for (final page in replacement.pages) {
-        for (final message in page.messages) {
-          final key = stableTranscriptMessageKey(message);
-          if (key != null) replacementKeys.add(key);
-        }
-      }
-      final anchorMessages = <AgentMessage>[];
-      for (final message in pages[anchorPageIndex].messages) {
-        final key = stableTranscriptMessageKey(message);
-        if (key == null || !replacementKeys.contains(key)) {
-          anchorMessages.add(SessionQuestionState.historicalMessage(message));
-        }
-      }
-      var protectedIndex = anchorMessages.indexWhere(
-        (message) => stableTranscriptMessageKey(message) == preserveMessageKey,
-      );
-      if (protectedIndex < 0) {
-        return replacement;
-      }
-      final oldAnchorPage = pages[anchorPageIndex];
-      var anchorBytes = anchorMessages.fold<int>(
-        0,
-        (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
-      );
-      final availableBytes =
-          kMaxActiveTranscriptDecodedBytes - replacement.estimatedBytes;
-      while (anchorBytes > availableBytes && anchorMessages.length > 1) {
-        final removeFromStart =
-            protectedIndex > anchorMessages.length - protectedIndex - 1;
-        final removed = removeFromStart
-            ? anchorMessages.removeAt(0)
-            : anchorMessages.removeLast();
-        if (removeFromStart) protectedIndex--;
-        anchorBytes -= estimatedAgentMessageDecodedBytes(removed);
-      }
-      if (anchorBytes > availableBytes) return replacement;
-      final retainedAnchorPage = TranscriptHistoryPage(
-        messages: anchorMessages,
-        olderCursor: oldAnchorPage.olderCursor,
-        newerCursor: oldAnchorPage.newerCursor,
-        isTail: false,
-        estimatedBytes: anchorBytes,
-      );
-      return TranscriptHistoryWindow._(
-        pages: List.unmodifiable([
-          retainedAnchorPage,
-          ...replacement.pages,
-        ]),
-        historyCursor: replacement.historyCursor,
-        latestHistoryGap: replacement.latestHistoryGap,
-        latestHistoryTruncation: replacement.latestHistoryTruncation,
-        liveState: replacement.liveState,
-        telemetry: replacement.telemetry,
-        questionState: replacement.questionState,
-        tailPrefixEvicted: true,
-      );
-    }
-    var next = this;
-    if (event.messages.isNotEmpty) {
-      next = next._applyHistoryDelta(event.messages);
-    }
-    var nextPages = next.pages;
-    final preservesUnavailablePaging =
-        isHistoryUnavailableGapCode(event.gap?.code) && !event.reset;
-    if ((event.olderCursor != null || preservesUnavailablePaging) &&
-        nextPages.isNotEmpty) {
-      final tailIndex = nextPages.lastIndexWhere((page) => page.isTail);
-      final tail = nextPages[tailIndex];
-      nextPages = List.unmodifiable([
-        ...nextPages.take(tailIndex),
-        TranscriptHistoryPage(
-          messages: tail.messages,
-          // An unavailable non-reset frame has no authoritative replacement
-          // paging position. Keep the last accepted cursor so Load Earlier
-          // remains usable while the visible cached rows are preserved.
-          olderCursor: event.olderCursor ?? tail.olderCursor,
-          newerCursor: null,
-          isTail: true,
-          estimatedBytes: tail.estimatedBytes,
-        ),
-        ...nextPages.skip(tailIndex + 1),
-      ]);
-    }
-    return TranscriptHistoryWindow._(
-      pages: nextPages,
-      historyCursor: event.cursor ?? next.historyCursor,
-      latestHistoryGap: event.gap,
-      latestHistoryTruncation: event.truncated ?? next.latestHistoryTruncation,
-      liveState: next.liveState,
-      telemetry: next.telemetry,
-      questionState: next.questionState,
-      tailPrefixEvicted: next.tailPrefixEvicted,
-    );
-  }
-
-  /// This window, guaranteed to hold at least one writable tail page.
-  ///
-  /// An INITIALIZED window can still hold zero pages — the legacy event
-  /// reduce yields one when no transcript-bearing frame ever arrived, which
-  /// is exactly the state a transcript export appends its artifact into. Both
-  /// that and the uninitialized sentinel need a tail page to append through,
-  /// or the tail lookup below indexes an empty list and throws. Carry the
-  /// window's own metadata over so bootstrapping never discards a cursor,
-  /// gap, or telemetry the window already established.
-  TranscriptHistoryWindow get _tailWritableBase =>
-      initialized && pages.isNotEmpty
-      ? this
-      : TranscriptHistoryWindow._(
-          pages: [
-            TranscriptHistoryPage(
-              messages: const [],
-              olderCursor: null,
-              newerCursor: null,
-              isTail: true,
-              estimatedBytes: 0,
-            ),
-          ],
-          historyCursor: historyCursor,
-          latestHistoryGap: latestHistoryGap,
-          latestHistoryTruncation: latestHistoryTruncation,
-          liveState: liveState ?? SessionLiveState.fromMessages(const []),
-          telemetry: telemetry,
-          questionState: questionState,
-          tailPrefixEvicted: tailPrefixEvicted,
-        );
-
-  /// Ends live question authority without changing history or its cursors.
-  /// The same adapter restores pending cards through live replay. A replacement
-  /// can return an empty delta with no pending requests.
-  TranscriptHistoryWindow invalidateQuestionAuthority() {
-    if (!initialized) return this;
-    return TranscriptHistoryWindow._(
-      pages: _mapQuestionPages(pages, SessionQuestionState.historicalMessage),
-      historyCursor: historyCursor,
-      latestHistoryGap: latestHistoryGap,
-      latestHistoryTruncation: latestHistoryTruncation,
-      liveState: liveState,
-      telemetry: telemetry,
-      questionState: SessionQuestionState.empty,
-      tailPrefixEvicted: tailPrefixEvicted,
-    );
-  }
-
-  /// Applies one live message by inspecting at most the 100-message tail in
-  /// the common append/stream-update path.
-  TranscriptHistoryWindow applyLiveMessage(
-    AgentMessage incomingMessage, {
-    TranscriptHistoryWorkCounter? work,
-  }) {
-    final base = _tailWritableBase;
-    final nextQuestionState = base.questionState.applyMessage(incomingMessage);
-    final message = nextQuestionState.restoreMessage(incomingMessage);
-    final tailIndex = base.pages.lastIndexWhere((page) => page.isTail);
-    final safeTailIndex = tailIndex < 0 ? base.pages.length - 1 : tailIndex;
-    final tail = base.pages[safeTailIndex];
-    final nextTailMessages = List<AgentMessage>.of(tail.messages);
-    final key = stableTranscriptMessageKey(message);
-    var existingIndex = -1;
-    if (key != null) {
-      for (var index = 0; index < nextTailMessages.length; index++) {
-        work?.inspectedMessages += 1;
-        if (stableTranscriptMessageKey(nextTailMessages[index]) == key) {
-          existingIndex = index;
-          break;
-        }
-      }
-    }
-    var nextBytes = tail.estimatedBytes;
-    if (existingIndex >= 0) {
-      final previous = nextTailMessages[existingIndex];
-      final merged = mergeStableTranscriptMessage(previous, message);
-      work?.estimatedMessages += 2;
-      nextBytes -= estimatedAgentMessageDecodedBytes(previous);
-      nextBytes += estimatedAgentMessageDecodedBytes(merged);
-      nextTailMessages[existingIndex] = merged;
-    } else {
-      work?.estimatedMessages += 1;
-      nextTailMessages.add(message);
-      nextBytes += estimatedAgentMessageDecodedBytes(message);
-    }
-    var prefixEvicted = base.tailPrefixEvicted;
-    while (nextTailMessages.length > kRetainedTranscriptTailMessages ||
-        nextBytes > kMaxActiveTranscriptDecodedBytes) {
-      if (nextTailMessages.isEmpty) break;
-      work?.estimatedMessages += 1;
-      nextBytes -= estimatedAgentMessageDecodedBytes(
-        nextTailMessages.removeAt(0),
-      );
-      prefixEvicted = true;
-    }
-    final nextTail = TranscriptHistoryPage(
-      messages: nextTailMessages,
-      olderCursor: tail.olderCursor,
-      newerCursor: null,
-      isTail: true,
-      estimatedBytes: nextBytes,
-    );
-    final nextPages = List<TranscriptHistoryPage>.of(base.pages);
-    if (nextPages.isEmpty) {
-      nextPages.add(nextTail);
-    } else {
-      nextPages[safeTailIndex] = nextTail;
-    }
-    return TranscriptHistoryWindow._(
-      pages: identical(nextQuestionState, base.questionState)
-          ? List.unmodifiable(nextPages)
-          : _mapQuestionPages(nextPages, nextQuestionState.restoreMessage),
-      historyCursor: base.historyCursor,
-      latestHistoryGap: base.latestHistoryGap,
-      latestHistoryTruncation: base.latestHistoryTruncation,
-      liveState: (base.liveState ?? SessionLiveState.fromMessages(const []))
-          .applyMessage(message),
-      telemetry: base.telemetry.applyMessage(message),
-      questionState: nextQuestionState,
-      tailPrefixEvicted: prefixEvicted,
-    );
-  }
-
-  /// Applies one authoritative incremental history frame to the recent tail.
-  ///
-  /// Unlike live delivery, the frame carries native/source order, so it can
-  /// REPAIR order, not just extend it: a row the tail never retained (missed
-  /// live delivery, cache restore) returns to its authoritative position
-  /// among the rows the frame shares with the tail instead of appending
-  /// behind an already-retained later row. Older pages, cursor identity, and
-  /// the H1/H1c bounds are untouched — the reconciliation writes only the
-  /// bounded tail page.
-  TranscriptHistoryWindow _applyHistoryDelta(List<AgentMessage> messages) {
-    final base = _tailWritableBase;
-    final tailIndex = base.pages.lastIndexWhere((page) => page.isTail);
-    final safeTailIndex = tailIndex < 0 ? base.pages.length - 1 : tailIndex;
-    final tail = base.pages[safeTailIndex];
-    final reconciled = reconcileTranscriptHistoryDeltaDetailed(
-      retained: tail.messages,
-      frame: messages,
-    );
-    var nextQuestionState = base.questionState;
-    if (!reconciled.frameSuperseded) {
-      for (final message in messages) {
-        nextQuestionState = nextQuestionState.applyMessage(message);
-      }
-    }
-    final nextTailMessages = reconciled.messages
-        .map(nextQuestionState.restoreMessage)
-        .toList();
-    var nextBytes = nextTailMessages.fold<int>(
-      0,
-      (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
-    );
-    var prefixEvicted = base.tailPrefixEvicted;
-    while (nextTailMessages.length > kRetainedTranscriptTailMessages ||
-        nextBytes > kMaxActiveTranscriptDecodedBytes) {
-      if (nextTailMessages.isEmpty) break;
-      nextBytes -= estimatedAgentMessageDecodedBytes(
-        nextTailMessages.removeAt(0),
-      );
-      prefixEvicted = true;
-    }
-    final nextTail = TranscriptHistoryPage(
-      messages: nextTailMessages,
-      olderCursor: tail.olderCursor,
-      newerCursor: null,
-      isTail: true,
-      estimatedBytes: nextBytes,
-    );
-    final nextPages = List<TranscriptHistoryPage>.of(base.pages);
-    nextPages[safeTailIndex] = nextTail;
-    var liveState = base.liveState ?? SessionLiveState.fromMessages(const []);
-    var telemetry = base.telemetry;
-    // A superseded frame restates values older than rows the projections have
-    // already folded; applying it would silently regress latest-wins state.
-    if (!reconciled.frameSuperseded) {
-      for (final message in messages) {
-        liveState = liveState.applyMessage(message);
-        telemetry = telemetry.applyMessage(message);
-      }
-    }
-    return TranscriptHistoryWindow._(
-      pages: identical(nextQuestionState, base.questionState)
-          ? List.unmodifiable(nextPages)
-          : _mapQuestionPages(nextPages, nextQuestionState.restoreMessage),
-      historyCursor: base.historyCursor,
-      latestHistoryGap: base.latestHistoryGap,
-      latestHistoryTruncation: base.latestHistoryTruncation,
-      liveState: liveState,
-      telemetry: telemetry,
-      questionState: nextQuestionState,
-      tailPrefixEvicted: prefixEvicted,
-    );
-  }
-
-  /// Inserts one page at the exact requested opaque boundary.
-  TranscriptHistoryPageMutation prependPage(
-    HistoryPageWireEvent event, {
-    required String requestedCursor,
-    String? preserveMessageKey,
-    TranscriptHistoryWorkCounter? work,
-  }) {
-    if (!initialized || requestedCursor.isEmpty) {
-      return TranscriptHistoryPageMutation(window: this, accepted: false);
-    }
-    final pageMessages = event.messages
-        .map(questionState.restoreMessage)
-        .toList();
-    final pageBytes = pageMessages.fold<int>(0, (sum, message) {
-      work?.estimatedMessages += 1;
-      return sum + estimatedAgentMessageDecodedBytes(message);
-    });
-    if (pageBytes > kMaxActiveTranscriptDecodedBytes) {
-      return TranscriptHistoryPageMutation(window: this, accepted: false);
-    }
-    final insertionIndex = pages.indexWhere(
-      (page) => page.olderCursor == requestedCursor,
-    );
-    if (insertionIndex < 0) {
-      return TranscriptHistoryPageMutation(window: this, accepted: false);
-    }
-    final inserted = TranscriptHistoryPage(
-      messages: pageMessages,
-      olderCursor: event.hasMore ? event.cursor : null,
-      newerCursor: requestedCursor,
-      isTail: false,
-      estimatedBytes: pageBytes,
-    );
-    final candidate = <TranscriptHistoryPage>[
-      ...pages.take(insertionIndex),
-      inserted,
-      ...pages.skip(insertionIndex),
-    ];
-    final insertedIndex = insertionIndex;
-    var anchorIndex = -1;
-    if (preserveMessageKey != null) {
-      anchorIndex = candidate.indexWhere(
-        (page) => page.containsStableKey(preserveMessageKey, work: work),
-      );
-    }
-    if (anchorIndex < 0) {
-      anchorIndex = (insertedIndex + 1).clamp(0, candidate.length - 1);
-    }
-
-    final required = <int>{
-      insertedIndex,
-      anchorIndex,
-      candidate.lastIndexWhere((page) => page.isTail),
-    }..remove(-1);
-    var retainedBytes = required.fold<int>(
-      0,
-      (sum, index) => sum + candidate[index].estimatedBytes,
-    );
-    var retainedMessages = required.fold<int>(
-      0,
-      (sum, index) => sum + candidate[index].messages.length,
-    );
-    if (retainedBytes > kMaxActiveTranscriptDecodedBytes ||
-        retainedMessages > kMaxActiveTranscriptMessages) {
-      return TranscriptHistoryPageMutation(window: this, accepted: false);
-    }
-
-    final priority = <int>[];
-    for (var distance = 1; distance < candidate.length; distance++) {
-      for (final center in [insertedIndex, anchorIndex]) {
-        final older = center - distance;
-        final newer = center + distance;
-        if (older >= 0 && !priority.contains(older)) priority.add(older);
-        if (newer < candidate.length && !priority.contains(newer)) {
-          priority.add(newer);
-        }
-      }
-    }
-    for (final index in priority) {
-      if (required.contains(index) ||
-          required.length >= kMaxActiveTranscriptPages) {
-        continue;
-      }
-      final page = candidate[index];
-      if (retainedBytes + page.estimatedBytes >
-              kMaxActiveTranscriptDecodedBytes ||
-          retainedMessages + page.messages.length >
-              kMaxActiveTranscriptMessages) {
-        continue;
-      }
-      required.add(index);
-      retainedBytes += page.estimatedBytes;
-      retainedMessages += page.messages.length;
-    }
-    final ordered = required.toList()..sort();
-    return TranscriptHistoryPageMutation(
-      accepted: true,
-      window: TranscriptHistoryWindow._(
-        pages: List.unmodifiable([
-          for (final index in ordered) candidate[index],
-        ]),
-        historyCursor: historyCursor,
-        latestHistoryGap: latestHistoryGap,
-        // The attach-tail count no longer describes the active page table once
-        // one older page is present. Explicit gaps carry the truthful scope.
-        latestHistoryTruncation: null,
-        liveState: liveState,
-        telemetry: telemetry,
-        questionState: questionState,
-        tailPrefixEvicted: tailPrefixEvicted,
-      ),
-    );
-  }
-}
-
-List<TranscriptHistoryPage> _mapQuestionPages(
-  List<TranscriptHistoryPage> pages,
-  AgentMessage Function(AgentMessage) restoreMessage,
-) => List.unmodifiable([
-  for (final page in pages)
-    if (page.messages.every((m) => identical(m, restoreMessage(m))))
-      page
-    else
-      TranscriptHistoryPage(
-        messages: page.messages.map(restoreMessage).toList(),
-        olderCursor: page.olderCursor,
-        newerCursor: page.newerCursor,
-        isTail: page.isTail,
-      ),
-]);
-
 _TranscriptHistoryPageDerived _pageDerived(
   TranscriptHistoryPage page, {
   TranscriptHistoryWorkCounter? work,
@@ -1924,6 +1002,7 @@ final class _TranscriptHistoryPageDerived {
     required this.terminalOutputMessages,
     required this.fileArtifactMessages,
     required this.fileArtifactDescriptors,
+    required this.rowIndexByKey,
   });
 
   factory _TranscriptHistoryPageDerived.fromPage(
@@ -1933,8 +1012,11 @@ final class _TranscriptHistoryPageDerived {
     work?.derivedMessages += page.messages.length;
     final canonical = <AgentMessage>[];
     final indexByKey = <String, int>{};
-    for (final message in page.messages) {
+    final rowIndexByKey = <String, int>{};
+    for (var row = 0; row < page.messages.length; row++) {
+      final message = page.messages[row];
       final key = stableTranscriptMessageKey(message);
+      if (key != null) rowIndexByKey.putIfAbsent(key, () => row);
       final existingIndex = key == null ? null : indexByKey[key];
       if (existingIndex == null) {
         if (key != null) indexByKey[key] = canonical.length;
@@ -1987,6 +1069,7 @@ final class _TranscriptHistoryPageDerived {
             .map(SessionArtifactDescriptor.fromMessage)
             .whereType<SessionArtifactDescriptor>(),
       ),
+      rowIndexByKey: Map<String, int>.unmodifiable(rowIndexByKey),
     );
   }
 
@@ -1996,6 +1079,9 @@ final class _TranscriptHistoryPageDerived {
   final List<AgentMessage> terminalOutputMessages;
   final List<AgentMessage> fileArtifactMessages;
   final List<SessionArtifactDescriptor> fileArtifactDescriptors;
+
+  /// The first row of the page holding each stable key.
+  final Map<String, int> rowIndexByKey;
 }
 
 _TranscriptHistoryRunDerived _runDerived(
@@ -2345,29 +1431,6 @@ final class _DropFirstImmutableList<E> extends ListBase<E> {
       throw UnsupportedError('immutable list');
 }
 
-TranscriptHistoryGapSegment? _historyGapBetween(
-  TranscriptHistoryPage previous,
-  TranscriptHistoryPage page, {
-  required bool tailPrefixEvicted,
-}) {
-  final connected =
-      previous.newerCursor == page.olderCursor &&
-      !(page.isTail && tailPrefixEvicted);
-  if (connected) return null;
-  final reloadCursor = page.isTail && tailPrefixEvicted
-      ? null
-      : page.olderCursor;
-  return TranscriptHistoryGapSegment(
-    id:
-        'history-gap-${previous.newerCursor ?? 'local'}-'
-        '${page.olderCursor ?? 'tail'}',
-    kind: reloadCursor == null
-        ? TranscriptHistoryGapKind.reconnectRequired
-        : TranscriptHistoryGapKind.reloadable,
-    reloadCursor: reloadCursor,
-  );
-}
-
 final class _TranscriptHistoryDerived {
   _TranscriptHistoryDerived({
     required this.canonicalMessages,
@@ -2387,11 +1450,7 @@ final class _TranscriptHistoryDerived {
         continue;
       }
       final previous = pageGroups.last.last;
-      final gap = _historyGapBetween(
-        previous,
-        page,
-        tailPrefixEvicted: window.tailPrefixEvicted,
-      );
+      final gap = _historyGapBetween(previous, page);
       if (gap == null) {
         pageGroups.last.add(page);
       } else {
@@ -2641,12 +1700,46 @@ const int kRetainedSessionDetailDebugEvents = 32;
 ///
 /// `HISTORY_PAGE_SOURCE_CHANGED` is deliberately absent (H1b): a session that
 /// was still writing while its history was indexed is the ordinary condition
-/// for an active agent, and the next attempt reads a newer prefix. Only
-/// measured resource limits and an unversionable source are terminal.
-bool isTerminalHistoryPageErrorCode(String? code) => const {
-  'HISTORY_PAGE_RESOURCE_LIMIT',
-  'HISTORY_PAGE_SOURCE_UNVERSIONED',
-  'HISTORY_PAGE_CLIENT_RESOURCE_LIMIT',
+/// for an active agent, and the next attempt reads a newer prefix. Measured
+/// resource limits, an unversionable source, and a refused position (see
+/// [isHistoryCursorRefusalCode]) are terminal.
+bool isTerminalHistoryPageErrorCode(String? code) =>
+    isHistoryCursorRefusalCode(code) ||
+    const {
+      'HISTORY_PAGE_RESOURCE_LIMIT',
+      'HISTORY_PAGE_SOURCE_UNVERSIONED',
+      'HISTORY_PAGE_CLIENT_RESOURCE_LIMIT',
+    }.contains(code);
+
+/// Whether a history page that failed with [code] may succeed if asked for
+/// again from the same position after a pause: it timed out, the transport
+/// dropped it, the broker was busy, or the source was still being written.
+/// A refusal, a limit, a malformed answer (no code) or being offline is not:
+/// a limit needs a smaller page or the reader's decision, and a reconnect
+/// starts over anyway.
+bool isTransientHistoryPageErrorCode(String? code) => const {
+  'HISTORY_PAGE_TIMEOUT',
+  'HISTORY_PAGE_TRANSPORT',
+  'HISTORY_PAGE_SOURCE_CHANGED',
+  kHistoryPageNoProgressCode,
+  'RATE_LIMITED',
+}.contains(code);
+
+/// The failure this client records for a history page that brought no rows
+/// and ended where it was asked from (see
+/// [TranscriptHistoryPageRejection.noProgress]). The broker sends no such
+/// code; it names the answer, not a refusal.
+const String kHistoryPageNoProgressCode = 'HISTORY_PAGE_CLIENT_NO_PROGRESS';
+
+/// Whether a refusal names the history position itself: the source no longer
+/// has it (rewritten, shrunk, or never issued). Asking again from the same
+/// position cannot succeed, so paging from it (and toward it) stops until a
+/// history frame replaces the window's positions; other positions page as
+/// usual (see [SessionDetailState.historyPagingBlockedAt]).
+bool isHistoryCursorRefusalCode(String? code) => const {
+  'HISTORY_CURSOR_DIVERGED',
+  'HISTORY_CURSOR_GONE',
+  'HISTORY_CURSOR_INVALID',
 }.contains(code);
 
 /// Whether a history gap says the broker could not READ this history, rather
@@ -2667,7 +1760,9 @@ bool isHistoryUnavailableGapCode(String? code) => const {
 /// Broker and client history page size used by H1.
 const int kTranscriptHistoryPageMessages = 100;
 
-/// Maximum decoded history pages retained by one active Session Detail.
+/// Page-sized units in one active Session Detail's message budget. The window
+/// enforces the derived message and decoded-byte budgets rather than a page
+/// count, so a window never holds more rows than this many full pages.
 const int kMaxActiveTranscriptPages = 5;
 
 /// Hard active canonical-message count derived from the page budget.
@@ -2676,10 +1771,6 @@ const int kMaxActiveTranscriptMessages =
 
 /// Estimated decoded object/string budget for one active transcript window.
 const int kMaxActiveTranscriptDecodedBytes = 4 * 1024 * 1024;
-
-/// The newest tail is always a first-class retained segment so Jump to latest
-/// never has to download the intervening transcript.
-const int kRetainedTranscriptTailMessages = kTranscriptHistoryPageMessages;
 
 /// Conservative decoded-memory estimate without JSON-encoding the transcript.
 ///
@@ -2952,15 +2043,42 @@ List<AgentMessage> reconcileTranscriptHistoryDelta({
 /// restatements over projections built from those newer rows. Order is still
 /// taken from the frame for the region it covers; recency is never inferred
 /// from timestamps or arrival timing, only from this coverage evidence.
-({List<AgentMessage> messages, bool frameSuperseded})
+///
+/// [isLiveRow] names the retained rows no frame has vouched for (received
+/// live past the tail's broker block, or kept inside it as rows its reload
+/// does not return). Those after the newest retained row the frame places
+/// arrived after everything the frame covers: they follow the whole frame,
+/// so its rows — including state or telemetry restatements and rows the tail
+/// missed, which have no place among the live rows — end its range before
+/// them. Without it (no block to tell them apart) they keep their place after
+/// that row.
+///
+/// [isFixedRow] names the retained rows whose place a frame vouched for (the
+/// tail's broker block, less the rows its reload does not return). Only those
+/// relate positions: a row delivered live may sit where it was shown rather
+/// than where it was saved (a prompt shown when sent and saved once the agent
+/// took it), so a fixed row the frame does not cover keeps its place after the
+/// last FIXED row the frame places, not after such a row, and a restated row
+/// without a key is matched between fixed rows only. Without it every retained
+/// row counts.
+///
+/// A row without a place of its own was shown before every placed row after
+/// it, so it goes no later than the earliest place one of them takes,
+/// whatever the row before it placed: a prompt shown queued and taken later
+/// sits where it was shown but is saved after rows shown after it, and the
+/// rows that followed it on screen stay before those.
+({List<AgentMessage> messages, bool frameSuperseded, int lastFrameIndex})
 reconcileTranscriptHistoryDeltaDetailed({
   required List<AgentMessage> retained,
   required List<AgentMessage> frame,
+  bool Function(int retainedIndex)? isLiveRow,
+  bool Function(int retainedIndex)? isFixedRow,
 }) {
   if (frame.isEmpty) {
     return (
       messages: List<AgentMessage>.of(retained),
       frameSuperseded: false,
+      lastFrameIndex: -1,
     );
   }
   // Where each key's merged row will be emitted, and separately where anchor
@@ -2980,18 +2098,92 @@ reconcileTranscriptHistoryDeltaDetailed({
     }
   }
   final retainedByKey = <String, AgentMessage>{};
+  // Retained rows without a key that the frame restates (see
+  // [_matchRestatedKeylessRows]): retained index -> frame index.
+  final keylessRestated = _matchRestatedKeylessRows(
+    retained: retained,
+    frame: frame,
+    anchorIndexByKey: anchorIndexByKey,
+    isFixedRow: isFixedRow,
+  );
+  // The newest retained row whose place the frame names: a covered anchor or
+  // a restated keyless row. Live rows after it arrived after everything the
+  // frame covers, so they follow the whole frame (see `trailing` below).
+  var lastPlacedRetainedIndex = -1;
+  for (var r = 0; r < retained.length; r++) {
+    final key = stableTranscriptMessageKey(retained[r]);
+    if (key == null
+        ? keylessRestated.containsKey(r)
+        : anchorIndexByKey.containsKey(key)) {
+      lastPlacedRetainedIndex = r;
+    }
+  }
+  bool fixed(int r) => isFixedRow == null || isFixedRow(r);
+  // The earliest group a placed row after each retained row joins, or
+  // frame.length when none follows it: a row the frame places at index i is
+  // emitted just after group i - 1, and an uncovered fixed row joins the
+  // group after the last fixed row the frame places.
+  final placedAfter = List<int>.filled(retained.length, frame.length);
+  {
+    final placedAt = List<int?>.filled(retained.length, null);
+    var fixedSoFar = -1;
+    for (var r = 0; r < retained.length; r++) {
+      final row = retained[r];
+      final key = stableTranscriptMessageKey(row);
+      final at = key == null ? keylessRestated[r] : anchorIndexByKey[key];
+      if (at != null) {
+        placedAt[r] = at - 1;
+        if (fixed(r)) fixedSoFar = at;
+      } else if (fixed(r) &&
+          (key == null || !emitIndexByKey.containsKey(key))) {
+        placedAt[r] = fixedSoFar;
+      }
+    }
+    var earliest = frame.length;
+    for (var r = retained.length - 1; r >= 0; r--) {
+      placedAfter[r] = earliest;
+      final at = placedAt[r];
+      if (at != null && at < earliest) earliest = at;
+    }
+  }
   // Uncovered retained rows grouped by the frame index of their nearest
-  // ANCHOR-covered predecessor (-1 when no anchor precedes them).
+  // placed predecessor (-1 when none precedes them), and the rows after the
+  // last placed one.
   final uncoveredAfter = <int, List<AgentMessage>>{};
-  var lastCoveredFrameIndex = -1;
+  final trailing = <AgentMessage>[];
+  // Where the previous retained row went: the frame index it was placed at,
+  // or the group it joined. A row without a fixed place goes with the row
+  // before it, one with a fixed place after the last fixed row the frame
+  // places (see [isFixedRow]).
+  var previousGroup = -1;
+  var lastFixedCoveredFrameIndex = -1;
   var lastCoveredAnchorRetainedIndex = -1;
   var lastUncoveredAnchorRetainedIndex = -1;
   for (var r = 0; r < retained.length; r++) {
     final row = retained[r];
     final key = stableTranscriptMessageKey(row);
+    final restatedAt = key == null ? keylessRestated[r] : null;
+    if (restatedAt != null) {
+      // The frame's copy is emitted in its place. It places the rows after
+      // it, but it is no evidence that the retained tail extends past the
+      // frame: equal content is not identity.
+      previousGroup = restatedAt;
+      if (fixed(r)) lastFixedCoveredFrameIndex = restatedAt;
+      continue;
+    }
     final emitIndex = key == null ? null : emitIndexByKey[key];
     if (key == null || emitIndex == null) {
-      (uncoveredAfter[lastCoveredFrameIndex] ??= <AgentMessage>[]).add(row);
+      if (isLiveRow != null && r > lastPlacedRetainedIndex && isLiveRow(r)) {
+        trailing.add(row);
+      } else {
+        final group = fixed(r)
+            ? lastFixedCoveredFrameIndex
+            : previousGroup < placedAfter[r]
+            ? previousGroup
+            : placedAfter[r];
+        (uncoveredAfter[group] ??= <AgentMessage>[]).add(row);
+        previousGroup = group;
+      }
       if (_isReconcilePositionAnchor(row)) {
         lastUncoveredAnchorRetainedIndex = r;
       }
@@ -3000,7 +2192,10 @@ reconcileTranscriptHistoryDeltaDetailed({
     retainedByKey[key] = row;
     final anchorIndex = anchorIndexByKey[key];
     if (anchorIndex != null) {
-      lastCoveredFrameIndex = anchorIndex;
+      // A prompt shown when sent is saved where the agent took it, after the
+      // rows shown after it: it places none of them.
+      if (!_isQueuedPrompt(row)) previousGroup = anchorIndex;
+      if (fixed(r)) lastFixedCoveredFrameIndex = anchorIndex;
       lastCoveredAnchorRetainedIndex = r;
     }
     // A covered latest-wins row is absorbed by the frame's restatement: it
@@ -3016,11 +2211,16 @@ reconcileTranscriptHistoryDeltaDetailed({
     if (rows != null) merged.addAll(rows);
   }
 
+  // Merged index of the newest row the frame itself placed: everything up to
+  // it is a frame row or sits between frame rows, so it lies inside the
+  // frame's durable range.
+  var lastFrameIndex = -1;
   emitUncovered(-1);
   for (var index = 0; index < frame.length; index++) {
     final message = frame[index];
     final key = stableTranscriptMessageKey(message);
     if (key == null) {
+      lastFrameIndex = merged.length;
       merged.add(message);
       emitUncovered(index);
       continue;
@@ -3031,6 +2231,9 @@ reconcileTranscriptHistoryDeltaDetailed({
         merged[existingMergedIndex],
         message,
       );
+      if (existingMergedIndex > lastFrameIndex) {
+        lastFrameIndex = existingMergedIndex;
+      }
     } else if (emitIndexByKey[key] == index) {
       final previous = retainedByKey[key];
       mergedIndexByKey[key] = merged.length;
@@ -3044,16 +2247,116 @@ reconcileTranscriptHistoryDeltaDetailed({
       } else {
         row = mergeStableTranscriptMessage(previous, message);
       }
+      lastFrameIndex = merged.length;
       merged.add(row);
     }
     // An earlier copy of a latest-wins key is superseded by the frame's later
     // restatement and deliberately not emitted.
     emitUncovered(index);
   }
+  // Live rows that arrived after everything the frame covers (see
+  // [isLiveRow]).
+  merged.addAll(trailing);
   return (
     messages: List<AgentMessage>.unmodifiable(merged),
     frameSuperseded: frameSuperseded,
+    lastFrameIndex: lastFrameIndex,
   );
+}
+
+/// Retained rows without a stable key that [frame] restates, as retained
+/// index -> frame index.
+///
+/// A row without a key (a token count, a status tick, an error) cannot be
+/// related by identity, so without this a frame restating one the tail
+/// already holds kept both copies. A frame row matches a retained row of the
+/// same content that lies where the frame puts it: after the retained copy of
+/// the frame's previous covered anchor (and after the previous match), and
+/// before the retained copy of its next one. Matching is monotone, one to
+/// one, and only among retained rows the frame does not otherwise cover —
+/// the same containment the broker applies when it replays rows a resync
+/// raced.
+///
+/// Only anchors with a fixed place (see [isFixedRow]) bound a match. A row
+/// received live sits where it arrived, which need not be where it was saved:
+/// a prompt shown when sent and saved after the rows that followed it would
+/// otherwise put an error card shown after it out of reach of the frame's
+/// copy, and the card would be held twice.
+Map<int, int> _matchRestatedKeylessRows({
+  required List<AgentMessage> retained,
+  required List<AgentMessage> frame,
+  required Map<String, int> anchorIndexByKey,
+  bool Function(int retainedIndex)? isFixedRow,
+}) {
+  final keyless = <int, String>{};
+  for (var r = 0; r < retained.length; r++) {
+    if (stableTranscriptMessageKey(retained[r]) == null) {
+      keyless[r] = _keylessRowSignature(retained[r]);
+    }
+  }
+  if (keyless.isEmpty) return const {};
+  // Retained index of each anchor key the frame places, where that retained
+  // row has a fixed place.
+  final retainedAnchorAt = <String, int>{};
+  for (var r = 0; r < retained.length; r++) {
+    final key = stableTranscriptMessageKey(retained[r]);
+    if (key != null &&
+        anchorIndexByKey.containsKey(key) &&
+        (isFixedRow == null || isFixedRow(r))) {
+      retainedAnchorAt.putIfAbsent(key, () => r);
+    }
+  }
+  // For each frame index, the retained index of the next covered anchor in
+  // frame order (retained.length when none follows).
+  final nextAnchorAt = List<int>.filled(frame.length + 1, retained.length);
+  for (var index = frame.length - 1; index >= 0; index--) {
+    final key = stableTranscriptMessageKey(frame[index]);
+    final at = key == null || anchorIndexByKey[key] != index
+        ? null
+        : retainedAnchorAt[key];
+    nextAnchorAt[index] = at ?? nextAnchorAt[index + 1];
+  }
+  final matched = <int, int>{};
+  var after = -1;
+  for (var index = 0; index < frame.length; index++) {
+    final message = frame[index];
+    final key = stableTranscriptMessageKey(message);
+    if (key != null) {
+      final at = anchorIndexByKey[key] == index ? retainedAnchorAt[key] : null;
+      if (at != null && at > after) after = at;
+      continue;
+    }
+    final signature = _keylessRowSignature(message);
+    final before = nextAnchorAt[index + 1];
+    for (var r = after + 1; r < before && r < retained.length; r++) {
+      if (keyless[r] == signature && !matched.containsKey(r)) {
+        matched[r] = index;
+        after = r;
+        break;
+      }
+    }
+  }
+  return matched;
+}
+
+/// The content of a row without a stable key, independent of how its fields
+/// were ordered on the wire.
+String _keylessRowSignature(AgentMessage message) =>
+    jsonEncode(_canonicalJsonValue(message.raw));
+
+Object? _canonicalJsonValue(Object? value) {
+  if (value is Map) {
+    final entries = [
+      for (final entry in value.entries) ('${entry.key}', entry.value),
+    ]..sort((a, b) => a.$1.compareTo(b.$1));
+    return <String, Object?>{
+      for (final (key, item) in entries) key: _canonicalJsonValue(item),
+    };
+  }
+  if (value is List) {
+    return [for (final item in value) _canonicalJsonValue(item)];
+  }
+  return value;
 }
 
 /// Merges two canonical emissions with the same non-text identity.
@@ -3061,6 +2364,24 @@ AgentMessage mergeStableTranscriptMessage(
   AgentMessage previous,
   AgentMessage incoming,
 ) {
+  // A stale page or native update can contain a reservation after completion.
+  // Filling a slot is monotonic: a reservation never erases a completed result.
+  if (incoming.type == AgentMessageType.toolResult &&
+      incoming.raw['historySlot'] == true &&
+      incoming.raw['pending'] == true &&
+      previous.raw['historySlot'] == true &&
+      previous.raw['pending'] == false) {
+    return previous;
+  }
+  if (incoming.type == AgentMessageType.toolResult &&
+      incoming.raw['pending'] == true &&
+      incoming.raw['reloadCursor'] == null &&
+      previous.raw['reloadCursor'] is String) {
+    return AgentMessage.fromJson({
+      ...incoming.raw,
+      'reloadCursor': previous.raw['reloadCursor'],
+    });
+  }
   if (incoming.type == AgentMessageType.userMessage) {
     // A delivered/replayed re-emit of the same user row can lack the app-send
     // correlation its first (stamped) emission carried; dropping it would
@@ -3089,6 +2410,22 @@ AgentMessage mergeStableTranscriptMessage(
   if (incomingText is String) return _withCarriedFinality(previous, incoming);
 
   final delta = incoming.raw['delta'];
+  if (delta is String && previous.raw['bodyTruncated'] == true) {
+    // A shortened body is a prefix of text this client no longer holds, so a
+    // continuation cannot be appended to it truthfully. Keep the flagged
+    // preview until a full-text restatement replaces it, carrying completion.
+    if (incoming.raw['final'] != true || previous.raw['final'] == true) {
+      return previous;
+    }
+    return AgentMessage(
+      type: previous.type,
+      id: previous.id,
+      seq: incoming.seq ?? previous.seq,
+      parentId: previous.parentId,
+      timestamp: incoming.timestamp ?? previous.timestamp,
+      raw: <String, dynamic>{...previous.raw, 'final': true},
+    );
+  }
   if (delta is! String) {
     final previousText = previous.raw['text'];
     if (previousText is! String) return incoming;

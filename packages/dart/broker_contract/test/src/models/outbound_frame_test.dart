@@ -392,5 +392,60 @@ void main() {
       expect(frame['attachTicket'], 't-2');
       expect(frame.containsKey('clientMessageId'), isFalse);
     });
+
+    test('an older history page names no direction', () {
+      expect(OutboundFrame.historyPage(cursor: 'b', limit: 7), {
+        'kind': 'history-page',
+        'cursor': 'b',
+        'limit': 7,
+      });
+    });
+
+    test('a newer history page names its direction and optional stop', () {
+      expect(
+        OutboundFrame.historyPage(
+          cursor: 'b',
+          limit: 50,
+          newer: true,
+          until: 'e',
+          clientMessageId: 'n-1',
+        ),
+        {
+          'kind': 'history-page',
+          'cursor': 'b',
+          'limit': 50,
+          'direction': 'newer',
+          'until': 'e',
+          'clientMessageId': 'n-1',
+        },
+      );
+      expect(
+        () => OutboundFrame.historyPage(cursor: 'b', until: 'e'),
+        throwsArgumentError,
+      );
+    });
+
+    test('a history refresh carries its cursor and correlation id', () {
+      expect(
+        OutboundFrame.historyRefresh(cursor: 'c', clientMessageId: 'r-1'),
+        {'kind': 'history-refresh', 'cursor': 'c', 'clientMessageId': 'r-1'},
+      );
+      expect(
+        OutboundFrame.historyRefresh(
+          cursor: 'c',
+          clientMessageId: 'r-2',
+          limit: 100,
+        )['limit'],
+        100,
+      );
+      expect(
+        () => OutboundFrame.historyRefresh(
+          cursor: 'c',
+          clientMessageId: 'r-3',
+          limit: 0,
+        ),
+        throwsRangeError,
+      );
+    });
   });
 }

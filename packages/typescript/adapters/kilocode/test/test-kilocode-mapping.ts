@@ -18,10 +18,15 @@ const tool = mapKiloPart({
   id: 'p3', type: 'tool', callID: 'call-1', tool: 'read',
   state: { status: 'completed', input: { filePath: 'src/a.ts' }, output: 'ok' },
 });
+// A finished tool keeps its call beside its result in history, as the live stream emitted it.
+const toolResult = tool.find((message) => message.type === 'tool-result');
 check('a synthetic shared-lineage tool shape preserves canonical read semantics without claiming Kilo capture',
-  tool[0]?.type === 'tool-result'
-    && tool[0].semantic?.kind === 'file-read'
-    && tool[0].semantic.path === 'src/a.ts',
+  tool.length === 2
+    && tool[0]?.type === 'tool-call' && tool[0].callId === 'call-1'
+    && toolResult?.type === 'tool-result'
+    && toolResult.callId === 'call-1'
+    && toolResult.semantic?.kind === 'file-read'
+    && toolResult.semantic.path === 'src/a.ts',
   JSON.stringify(tool));
 
 check('measured step boundary parts remain non-rendering lifecycle records',

@@ -10,14 +10,27 @@
 import type {
   AgentMessage,
   HistorySnapshotPageReader,
+  HistorySourceIdentity,
 } from '../../../adapter-api/src/index.ts';
 import { mapTranscript } from '../../../adapters/claude/src/index.ts';
 import { mapRollout } from '../../../adapters/codex/src/index.ts';
 import { OpenCodeAdapter } from '../../../adapters/opencode/src/index.ts';
 import { mapPiJsonlText } from '../../../adapters/pi/src/index.ts';
+import { mapOpenCodePart } from '../../../opencode-wire/src/mapping.ts';
 import {
   backwardHistoryCursor,
+  backwardHistoryPage,
+  backwardHistoryCursorBoundary,
+  capHistoryDelta,
+  capHistoryMessages,
+  estimatedClientDecodedBytes,
+  forwardHistoryPage,
+  historyCursorFromHash,
+  historyDelta,
+  historyRefresh,
+  holdRunningTurn,
   isBackwardPageMessage,
+  runningTurnHoldEnd,
 } from '../../src/sessions/history-delta.ts';
 import {
   EncodedHistoryPageCache,
@@ -28,6 +41,7 @@ import {
   HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES,
   HistoryPageCachePool,
   HISTORY_PAGE_CACHE_MAX_PROJECTION_ENTRIES,
+  historyFitsEncodedPageCache,
   IndexedHistoryPageCacheBuilder,
 } from '../../src/sessions/history-page-cache.ts';
 import { Database } from 'bun:sqlite';
@@ -883,6 +897,487 @@ for (const tool of ['codex', 'claude', 'opencode', 'pi'] as const) {
       && expected.every((message) => reachable.includes(message)),
     `displaced rows must stay reachable exactly once: reachable=${reachable.length} expected=${expected.length}`,
   );
+}
+
+// ── Lane H1d: the indexed attach names its end boundary and fits the client's decoded budget ────
+// A bounded client may release an attach frame it can no longer hold. The frame therefore carries
+// the backward cursor at its newest row (the same canonical encoding every page cursor uses), and
+// a reload with the frame's pageable row count lands on the frame's own older boundary. The frame
+// is also bounded by the client's decoded estimate, so a wide tail degrades to a shorter frame
+// with the true boundary instead of arriving too large to keep.
+{
+  const wide: AgentMessage[] = [];
+  for (let index = 0; index < 60; index += 1) {
+    if (index === 5) {
+      wide.push({
+        type: 'task-list-state',
+        key: 'plan-wide',
+        title: 'Plan',
+        status: 'running',
+        source: 'tool-call',
+        sourceTool: 'update_plan',
+        items: [{ id: '1', title: 'step', status: 'in-progress' }],
+      } as unknown as AgentMessage);
+      continue;
+    }
+    wide.push({
+      type: 'model-output',
+      key: `wide-${index}`,
+      text: `${index}:`.padEnd(40_000, 'w'),
+    } as unknown as AgentMessage);
+  }
+  const identity = source('indexed-end-boundary', wide.length);
+  const builder = new IndexedHistoryPageCacheBuilder();
+  for (let index = 0; index < wide.length; index += 1) {
+    assert(builder.accept(wide[index]!, index), `wide fixture overflowed at ${index}`);
+  }
+  const reader: HistorySnapshotPageReader = {
+    retainedBytes: 0,
+    read(locations) {
+      return {
+        identity,
+        messages: locations.map((location) => wide[location]!),
+        work: { recordsRead: locations.length, bytesRead: 0 },
+      };
+    },
+  };
+  const cache = builder.finish(identity, reader);
+  assert(cache, 'wide fixture must fit compact metadata bounds');
+
+  const full = await cache.loadAttach(undefined, INITIAL_TAIL);
+  assert(!('kind' in full), 'unbounded-byte attach must resolve');
+  assert(
+    full.endCursor === backwardHistoryCursor(wide, wide.length),
+    'the attach end boundary must be the canonical backward cursor at the newest row',
+  );
+
+  const budget = 1024 * 1024;
+  const bounded = await cache.loadAttach(undefined, INITIAL_TAIL, undefined, budget);
+  assert(!('kind' in bounded), 'byte-bounded attach must resolve');
+  const bytes = bounded.messages.reduce((sum, message) => sum + estimatedClientDecodedBytes(message), 0);
+  assert(
+    bounded.messages.length > 0 && bytes <= budget,
+    `the attach frame must fit the decoded budget: ${bytes} > ${budget}`,
+  );
+  const boundedTail = bounded.messages.filter((message) => message.type !== 'task-list-state');
+  assert(
+    (boundedTail.at(-1) as { key?: string }).key === 'wide-59',
+    'a byte-bounded attach must still end its tail at the newest row',
+  );
+  // The plan row sits far behind the byte-trimmed tail start. State rows are never
+  // backward-pageable, and a replacement frame rebuilds the client's live state from what it
+  // carries, so a frame that trimmed it away would lose the plan for good: it must be re-exposed
+  // behind the tail exactly as the generic cap does.
+  assert(
+    bounded.messages.some((message) =>
+      message.type === 'task-list-state' && (message as { key?: string }).key === 'plan-wide'),
+    'a byte-trimmed indexed attach re-exposes the latest state row it trimmed away',
+  );
+  const generic = capHistoryMessages(wide, INITIAL_TAIL, wide.length, budget);
+  assert(
+    JSON.stringify(bounded.messages) === JSON.stringify(generic.messages),
+    'the indexed and generic byte bounds deliver the same final frame shape',
+  );
+  assert(
+    bounded.reset && bounded.truncated?.shown === bounded.messages.length
+      && bounded.truncated?.total === wide.length && bounded.olderCursor,
+    `a byte-bounded attach must report honest truncation: ${JSON.stringify(bounded.truncated)}`,
+  );
+  assert(bounded.endCursor === full.endCursor, 'byte trimming never moves the end boundary');
+  const pageable = bounded.messages.filter(isBackwardPageMessage);
+  const reload = await cache.loadPage(bounded.endCursor!, pageable.length);
+  assert(!('kind' in reload) && !reload.gap, 'the end boundary must resolve as a page cursor');
+  assert(
+    JSON.stringify(reload.messages) === JSON.stringify(pageable),
+    'a reload from the end boundary returns exactly the frame rows',
+  );
+  assert(
+    reload.cursor === bounded.olderCursor,
+    'the reload reconnects with the frame older boundary by cursor equality',
+  );
+  const before = await cache.loadPage(bounded.olderCursor!, HISTORY_PAGE_CACHE_MAX_PAGE_MESSAGES);
+  assert(!('kind' in before) && !before.gap, 'the byte-trimmed older boundary must resolve');
+  const reachable = [...before.messages, ...pageable].map((message) => JSON.stringify(message));
+  const expected = wide.filter(isBackwardPageMessage).map((message) => JSON.stringify(message));
+  assert(
+    reachable.length === expected.length && expected.every((message, index) => reachable[index] === message),
+    `byte trimming must leave every transcript row reachable exactly once: ${reachable.length}/${expected.length}`,
+  );
+
+  // An incremental reconnect whose suffix does not fit becomes a replacement. The client's copy of
+  // the prefix — where the plan lives — is about to be replaced, so the replacement must carry the
+  // plan from that prefix, on the indexed path and on the generic one alike.
+  const since = historyCursorFromHash(10, backwardHistoryCursorHash(wide, 10));
+  const reconnect = await cache.loadAttach(since, INITIAL_TAIL, undefined, budget);
+  assert(!('kind' in reconnect), 'byte-bounded reconnect must resolve');
+  assert(reconnect.reset, 'a reconnect trimmed by the byte bound is a replacement');
+  assert(
+    reconnect.messages.some((message) => message.type === 'task-list-state'),
+    'a byte-trimmed indexed reconnect re-exposes the prefix state row the replacement would lose',
+  );
+  const genericReconnect = capHistoryDelta(
+    historyDelta(wide, since),
+    INITIAL_TAIL,
+    wide.length,
+    budget,
+    { history: wide },
+  );
+  assert(genericReconnect.reset, 'the generic reconnect is also a replacement');
+  assert(
+    genericReconnect.messages.some((message) => message.type === 'task-list-state'),
+    'a byte-trimmed generic reconnect re-exposes the prefix state row the replacement would lose',
+  );
+  assert(
+    JSON.stringify(reconnect.messages) === JSON.stringify(genericReconnect.messages),
+    'the indexed and generic reconnect replacements deliver the same frame',
+  );
+  assert(
+    genericReconnect.olderCursor === reconnect.olderCursor,
+    'both replacements name the same older boundary',
+  );
+
+  // The bound is measured on the shape the client receives: a measure that reports every row as
+  // tiny (as a reference-mode egress would for rows whose bodies move behind a reference) keeps the
+  // whole count-bounded tail.
+  const delivered = await cache.loadAttach(undefined, INITIAL_TAIL, undefined, budget, () => 1_000);
+  assert(!('kind' in delivered), 'delivered-shape attach must resolve');
+  assert(
+    delivered.messages.length === wide.length && !delivered.truncated,
+    `the byte bound measures the delivered shape, not the stored one: ${delivered.messages.length}`,
+  );
+}
+
+// An incremental reconnect that the byte bound turns into a replacement salvages prefix state, but
+// never past the count bound: the salvaged rows share the frame's slots with the tail, on the indexed
+// path exactly as on the generic one.
+{
+  const history: AgentMessage[] = [];
+  for (let index = 0; index < 30; index += 1) {
+    history.push({ type: 'task-list-state', key: `plan${index}`, title: 'P', status: 'running', items: [] } as unknown as AgentMessage);
+  }
+  for (let index = 0; index < 20; index += 1) {
+    history.push({ type: 'model-output', key: `p${index}`, text: 'x' } as unknown as AgentMessage);
+  }
+  const prefixLength = history.length;
+  history.push({ type: 'model-output', key: 'big', text: 'y'.repeat(1_200_000) } as unknown as AgentMessage);
+  for (let index = 0; index < 99; index += 1) {
+    history.push({ type: 'model-output', key: `s${index}`, text: 'z'.repeat(100) } as unknown as AgentMessage);
+  }
+  const identity = source('salvage-count-bound', history.length);
+  const builder = new IndexedHistoryPageCacheBuilder();
+  for (let index = 0; index < history.length; index += 1) {
+    assert(builder.accept(history[index]!, index), `salvage fixture overflowed at ${index}`);
+  }
+  const cache = builder.finish(identity, {
+    retainedBytes: 0,
+    read(locations) {
+      return {
+        identity,
+        messages: locations.map((location) => history[location]!),
+        work: { recordsRead: locations.length, bytesRead: 0 },
+      };
+    },
+  });
+  assert(cache, 'salvage fixture must fit compact metadata bounds');
+  const since = historyCursorFromHash(prefixLength, backwardHistoryCursorHash(history, prefixLength));
+  const budget = 2 * 1024 * 1024;
+  const indexed = await cache.loadAttach(since, INITIAL_TAIL, undefined, budget);
+  assert(!('kind' in indexed), 'salvaging reconnect must resolve');
+  const generic = capHistoryDelta(historyDelta(history, since), INITIAL_TAIL, history.length, budget, { history });
+  assert(indexed.reset && generic.reset, 'the oversized reconnect becomes a replacement');
+  assert(
+    indexed.messages.length <= INITIAL_TAIL && generic.messages.length <= INITIAL_TAIL,
+    `salvaged state never exceeds the count bound: ${indexed.messages.length}/${generic.messages.length}`,
+  );
+  assert(
+    indexed.messages.some((message) => (message as { key?: string }).key === 'plan29'),
+    'the newest salvaged plan survives inside the bound',
+  );
+  assert(
+    JSON.stringify(indexed.messages) === JSON.stringify(generic.messages)
+      && indexed.olderCursor === generic.olderCursor,
+    'the indexed and generic salvaging replacements deliver the same frame',
+  );
+  assert(indexed.truncated?.shown === indexed.messages.length, 'shown counts the delivered rows');
+}
+
+// The paging-fit verdict for a frame that builds no cache is reused for the exact same snapshot and
+// judged afresh when the source grows or is replaced; without a snapshot fingerprint nothing is
+// reused. The sufficient bound never admits a history the exact build would refuse.
+{
+  let reads = 0;
+  const counted = (rows: AgentMessage[]): AgentMessage[] => new Proxy(rows, {
+    get(target, property, receiver) {
+      if (typeof property === 'string' && /^\d+$/.test(property)) reads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const rows = (count: number, prefix = 'fit'): AgentMessage[] => Array.from({ length: count }, (_, index) => ({
+    type: 'model-output',
+    key: `${prefix}-${index}`,
+    text: `row ${index}`,
+  }) as unknown as AgentMessage);
+  const readsOf = (fn: () => boolean): { fits: boolean; reads: number } => {
+    reads = 0;
+    const fits = fn();
+    return { fits, reads };
+  };
+  const first: HistorySourceIdentity = { sourceId: 'fit-memo', revision: '1', appendPosition: 40, rewriteToken: 'fit-memo:a' };
+  const history = counted(rows(40));
+  const fingerprint = historyDelta(rows(40)).cursor;
+
+  const cold = readsOf(() => historyFitsEncodedPageCache(first, history, fingerprint));
+  assert(cold.fits && cold.reads >= 40, `a first verdict reads the history: ${cold.reads}`);
+  const warm = readsOf(() => historyFitsEncodedPageCache(first, history, fingerprint));
+  assert(warm.fits && warm.reads === 0, `the same snapshot reuses its verdict: ${warm.reads}`);
+
+  const grownRows = counted(rows(41));
+  const grown = readsOf(() => historyFitsEncodedPageCache(
+    { ...first, revision: '2', appendPosition: 41 },
+    grownRows,
+    historyDelta(rows(41)).cursor,
+  ));
+  assert(grown.fits && grown.reads >= 41, `a grown source is judged afresh: ${grown.reads}`);
+  const replacedRows = counted(rows(40, 'rewritten'));
+  const replaced = readsOf(() => historyFitsEncodedPageCache(
+    { ...first, revision: '3', rewriteToken: 'fit-memo:b' },
+    replacedRows,
+    historyDelta(rows(40, 'rewritten')).cursor,
+  ));
+  assert(replaced.fits && replaced.reads >= 40, `a replaced source is judged afresh: ${replaced.reads}`);
+  const unkeyed = readsOf(() => historyFitsEncodedPageCache(first, history));
+  assert(unkeyed.fits && unkeyed.reads >= 40, `without a fingerprint nothing is reused: ${unkeyed.reads}`);
+
+  // Over the message cap: refused.
+  assert(!historyFitsEncodedPageCache(first, rows(101), undefined, 1024 * 1024, 100), 'a history over the message cap does not fit');
+  // Control characters encode as six JSON bytes per UTF-16 unit, three times their estimate. Such a
+  // history over the byte cap must be refused even where twice its estimate would fit.
+  const control = Array.from({ length: 3 }, (_, index) => ({
+    type: 'model-output',
+    key: `control-${index}`,
+    text: '\u0001'.repeat(60_000),
+  }) as unknown as AgentMessage);
+  const estimate = control.reduce((sum, message) => sum + estimatedClientDecodedBytes(message), 0);
+  assert(2 * estimate < 1024 * 1024, 'precondition: twice the estimate fits the cap');
+  assert(
+    EncodedHistoryPageCache.create(first, control, 1024 * 1024, 100) === undefined,
+    'precondition: the exact build refuses the control-character history',
+  );
+  assert(
+    !historyFitsEncodedPageCache(first, control, undefined, 1024 * 1024, 100),
+    'the sufficient bound never admits a history the exact build refuses',
+  );
+  assert(historyFitsEncodedPageCache(first, control, undefined, 2 * 1024 * 1024, 100), 'the same history fits a larger cap');
+}
+
+// ── Revision 28: newer pages and refresh frames, generic and indexed alike ─────────────────────
+// A forward walk and a refresh frame must be the same rows with the same boundaries whether the
+// session's history is served from the encoded cache, the native index, or the plain durable
+// list, so a client cannot tell (and need not care) which one answered.
+{
+  const history: AgentMessage[] = [];
+  for (let index = 0; index < 400; index += 1) {
+    if (index % 37 === 5) {
+      history.push({ type: 'task-list-state', key: `plan${index % 3}`, title: 'P', status: 'running', items: [] } as unknown as AgentMessage);
+    }
+    history.push({
+      type: index % 3 === 0 ? 'user-message' : 'model-output',
+      key: `n${index}`,
+      text: `newer paging row ${index} ${'y'.repeat(index % 11 === 0 ? 30_000 : 64)}`,
+    } as unknown as AgentMessage);
+  }
+  history.push({ type: 'model-output', key: 'streaming-tail', text: 'still growing' } as unknown as AgentMessage);
+  const identity = source('newer-parity', history.length);
+  const encoded = EncodedHistoryPageCache.create(identity, history);
+  assert(encoded, 'newer-parity fixture must fit the encoded cache');
+  const builder = new IndexedHistoryPageCacheBuilder();
+  for (let index = 0; index < history.length; index += 1) {
+    assert(builder.accept(history[index]!, index), `newer-parity fixture overflowed at ${index}`);
+  }
+  const indexed = builder.finish(identity, {
+    retainedBytes: 0,
+    read(locations) {
+      return {
+        identity,
+        messages: locations.map((location) => history[location]!),
+        work: { recordsRead: locations.length, bytesRead: 0 },
+      };
+    },
+  });
+  assert(indexed, 'newer-parity fixture must fit the native index');
+  const same = (left: unknown, right: unknown, what: string) => {
+    assert(JSON.stringify(left) === JSON.stringify(right), `${what}: ${JSON.stringify(left).slice(0, 200)} != ${JSON.stringify(right).slice(0, 200)}`);
+  };
+  const boundaries = [0, 1, 5, 6, 40, 187, 399, history.length - 1, history.length];
+  for (const at of boundaries) {
+    const cursor = backwardHistoryCursor(history, at);
+    // 4 and 5 end full pages right before a state row (at boundaries 1 and 0).
+    for (const limit of [1, 4, 5, 7, 100, 500]) {
+      for (const until of [undefined, backwardHistoryCursor(history, Math.min(history.length, at + 50))]) {
+        const reference = forwardHistoryPage(history, cursor, limit, until);
+        same(await encoded.loadNewerPage(cursor, limit, until), reference, `encoded newer page ${at}/${limit}/${Boolean(until)}`);
+        same(await indexed.loadNewerPage(cursor, limit, until), reference, `indexed newer page ${at}/${limit}/${Boolean(until)}`);
+      }
+    }
+  }
+  for (const bad of ['nope', backwardHistoryCursor([...history, ...history], history.length + 3)]) {
+    same(await encoded.loadNewerPage(bad, 10), forwardHistoryPage(history, bad, 10), 'encoded refusal parity');
+    same(await indexed.loadNewerPage(bad, 10), forwardHistoryPage(history, bad, 10), 'indexed refusal parity');
+  }
+
+  const measure = (message: AgentMessage) => estimatedClientDecodedBytes(message);
+  for (const at of [0, 17, 250, history.length - 2, history.length - 1, history.length]) {
+    const since = historyCursorFromHash(at, backwardHistoryCursorHash(history, at));
+    for (const max of [1, 50, 100, 500]) {
+      for (const holdTrailingText of [false, true]) {
+        const options = { max, maxDecodedBytes: 256 * 1024, measure, holdTrailingText };
+        const reference = historyRefresh(history, since, options);
+        same(await indexed.loadRefresh(since, options), reference, `indexed refresh ${at}/${max}/${holdTrailingText}`);
+        same(encoded.loadRefresh(since, options), reference, `encoded refresh ${at}/${max}/${holdTrailingText}`);
+      }
+    }
+  }
+  const held = historyRefresh(history, historyCursorFromHash(history.length - 2, backwardHistoryCursorHash(history, history.length - 2)), {
+    max: 100,
+    holdTrailingText: true,
+  });
+  assert(!('gap' in held) && held.messages.length === 1 && held.more, 'the streaming tail is held while a turn runs');
+  for (const bad of ['nope', historyCursorFromHash(history.length + 1, 'x')]) {
+    same(await indexed.loadRefresh(bad, { max: 100 }), historyRefresh(history, bad, { max: 100 }), 'indexed refresh refusal parity');
+    same(encoded.loadRefresh(bad, { max: 100 }), historyRefresh(history, bad, { max: 100 }), 'encoded refresh refusal parity');
+  }
+  const diverged = historyCursorFromHash(10, backwardHistoryCursorHash(history, 11));
+  same(await indexed.loadRefresh(diverged, { max: 100 }), historyRefresh(history, diverged, { max: 100 }), 'indexed refresh divergence parity');
+  same(encoded.loadRefresh(diverged, { max: 100 }), historyRefresh(history, diverged, { max: 100 }), 'encoded refresh divergence parity');
+}
+
+// ── Stable tool slots, generic and indexed alike ─────────────────────────────────────────
+// Every native tool reserves its result position while running. Finishing a tool updates
+// that position, so even very old pending tools do not hold completed output outside frames.
+{
+  const tool = (callID: string, status: 'running' | 'completed') => mapOpenCodePart({
+    type: 'tool',
+    id: `prt_${callID}`,
+    callID,
+    tool: 'bash',
+    state: status === 'completed'
+      ? { status, input: { command: `echo ${callID}` }, output: 'done', metadata: { exit: 0, output: 'done' }, time: { start: 1, end: 2 } }
+      : { status, input: { command: `echo ${callID}` }, time: { start: 1 } },
+  }, { historical: true });
+  const text = (id: string, body: string) => mapOpenCodePart({ type: 'text', id, text: body, time: { start: 1, end: 2 } }, { historical: true });
+  const finished = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => tool(`${prefix}${index}`, 'completed')).flat();
+  const lead = Array.from({ length: 30 }, (_, index) => text(`lead${index}`, `transcript row ${index}`)).flat();
+  const cases: Array<{ name: string; history: AgentMessage[]; hold: (history: AgentMessage[]) => number }> = [
+    {
+      // Twelve finished tools, 24 rows, after the one still running: more than one read of the index.
+      name: 'a waiting call among finished ones',
+      history: [...lead, ...text('step', 'Running them together.'), ...tool('slow', 'running'), ...finished('quick', 12)],
+      hold: (history) => history.at(-1)?.type === 'model-output' ? history.length - 1 : history.length,
+    },
+    {
+      name: 'the later of two calls finished first',
+      history: [...lead, ...tool('a', 'running'), ...tool('b', 'completed')],
+      hold: (history) => history.length,
+    },
+    {
+      name: 'the earlier of two calls finished first',
+      history: [...lead, ...tool('a', 'completed'), ...tool('b', 'running')],
+      hold: (history) => history.length,
+    },
+    {
+      name: 'a waiting call, then text still streaming',
+      history: [...lead, ...tool('slow', 'running'), ...finished('quick', 3), ...text('streaming', 'still gro')],
+      hold: (history) => history.at(-1)?.type === 'model-output' ? history.length - 1 : history.length,
+    },
+    {
+      // A late result must keep its position even after hundreds of later rows.
+      name: 'a waiting call further back than the search',
+      history: [...lead, ...tool('orphan', 'running'), ...finished('later', 160)],
+      hold: (history) => history.length,
+    },
+    {
+      // Many pending tools still occupy durable, reloadable slots.
+      name: 'a trailing run of calls longer than the search',
+      history: [...lead, ...finished('done', 2), ...Array.from({ length: 70 }, (_, index) => tool(`run${index}`, 'running')).flat()],
+      hold: (history) => history.length,
+    },
+  ];
+  const same = (left: unknown, right: unknown, what: string) => {
+    assert(JSON.stringify(left) === JSON.stringify(right), `${what}: ${JSON.stringify(left).slice(0, 200)} != ${JSON.stringify(right).slice(0, 200)}`);
+  };
+  for (const { name, history, hold } of cases) {
+    const expected = hold(history);
+    assert(expected >= 0, `${name}: the fixture has the call it names`);
+    same(runningTurnHoldEnd(0, history.length, (index) => history[index]!), expected, `${name}: the hold`);
+    const identity = source(`running-hold-${name}`, history.length);
+    const encoded = EncodedHistoryPageCache.create(identity, history);
+    assert(encoded, `${name}: the fixture fits the encoded cache`);
+    const builder = new IndexedHistoryPageCacheBuilder();
+    history.forEach((message, index) => assert(builder.accept(message, index), `${name}: the index overflowed at ${index}`));
+    let recordsRead = 0;
+    const indexed = builder.finish(identity, {
+      retainedBytes: 0,
+      read(locations) {
+        recordsRead += locations.length;
+        return {
+          identity,
+          messages: locations.map((location) => history[location]!),
+          work: { recordsRead: locations.length, bytesRead: 0 },
+        };
+      },
+    });
+    assert(indexed, `${name}: the fixture fits the native index`);
+
+    const { framed } = holdRunningTurn(history);
+    same(framed.length, expected, `${name}: the whole-array attach ends at the hold`);
+    const attach = historyDelta(framed);
+    const indexedAttach = await indexed.loadAttach(undefined, 500, undefined, Number.POSITIVE_INFINITY, undefined, true);
+    assert(!('kind' in indexedAttach), `${name}: the indexed attach was served`);
+    same([indexedAttach.cursor, indexedAttach.endCursor], [attach.cursor, attach.endCursor], `${name}: the indexed attach ends where the whole-array attach does`);
+
+    // Every count bound, from the opening boundary and from one just before the hold: a refresh or
+    // a newer page never names a boundary past the hold, and every path names the same one.
+    for (const at of [0, Math.max(0, expected - 1)]) {
+      const cursor = backwardHistoryCursor(history, at);
+      const since = historyCursorFromHash(at, backwardHistoryCursorHash(history, at));
+      for (let limit = 1; limit <= history.length - at; limit += 1) {
+        const reference = forwardHistoryPage(history, cursor, limit, undefined, { holdTrailingText: true });
+        assert(!reference.gap && (backwardHistoryCursorBoundary(reference.cursor) ?? -1) <= Math.max(at, expected),
+          `${name}: a newer page of ${limit} from ${at} stops at the hold`);
+        same(await encoded.loadNewerPage(cursor, limit, undefined, undefined, { holdTrailingText: true }), reference, `${name}: encoded newer page ${at}/${limit}`);
+        same(await indexed.loadNewerPage(cursor, limit, undefined, undefined, { holdTrailingText: true }), reference, `${name}: indexed newer page ${at}/${limit}`);
+        const options = { max: limit, holdTrailingText: true };
+        const refreshed = historyRefresh(history, since, options);
+        assert(!('gap' in refreshed) && (backwardHistoryCursorBoundary(refreshed.endCursor) ?? -1) <= Math.max(at, expected),
+          `${name}: a refresh of ${limit} from ${at} stops at the hold`);
+        same(await indexed.loadRefresh(since, options), refreshed, `${name}: indexed refresh ${at}/${limit}`);
+        same(encoded.loadRefresh(since, options), refreshed, `${name}: encoded refresh ${at}/${limit}`);
+      }
+    }
+    // The index reads only the newest rows the hold looks at, never the whole history.
+    recordsRead = 0;
+    await indexed.loadNewerPage(backwardHistoryCursor(history, 0), 1, undefined, undefined, { holdTrailingText: true });
+    assert(recordsRead <= 17, `${name}: the indexed hold read ${recordsRead} of ${history.length} rows`);
+    const completed = history.map((message) => message.type === 'tool-result' && message.pending
+      ? { ...message, pending: false, text: 'late completion' } : message);
+    for (let at = 1; at <= history.length; at += 1) {
+      const cursor = backwardHistoryCursor(history, at);
+      const page = backwardHistoryPage(completed, cursor, 1);
+      assert(!page.gap, `${name}: completion invalidated boundary ${at}`);
+      const original = history[at - 1];
+      if (original?.type === 'tool-result' && original.pending) {
+        assert(page.messages[0]?.type === 'tool-result' && page.messages[0].pending === false,
+          `${name}: reloading a reserved slot returns the completed result`);
+      }
+    }
+  }
+}
+
+function backwardHistoryCursorHash(messages: AgentMessage[], boundary: number): string {
+  const decoded = JSON.parse(
+    Buffer.from(backwardHistoryCursor(messages, boundary), 'base64url').toString('utf8'),
+  ) as { h: string };
+  return decoded.h;
 }
 
 console.log('PASS H1 bounded encoded broker history page cache');

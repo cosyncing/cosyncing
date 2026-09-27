@@ -115,12 +115,84 @@ export interface KiloStoredSession {
   dataRoot: string;
 }
 
-export interface KiloHistorySnapshot {
+export interface KiloHistorySnapshot extends KiloHistoryMark {
   messages: import('@cosyncing/adapter-api').AgentMessage[];
   encodings: string[];
   messageIds: string[];
   revision: string;
   sourceIdentity: string;
+}
+
+/**
+ * What a later read of a Kilo session is compared against: the rows one read mapped, and how many
+ * of them lead with messages the store had finished writing (the rest it still rewrites in place).
+ */
+export interface KiloHistoryMark {
+  readonly encodings: readonly string[];
+  readonly settledRows: number;
+}
+
+/**
+ * Kilo persists a streaming assistant part IN PLACE: the same row's text grows as the model writes.
+ * Only an assistant-produced streaming row may grow, only under an unchanged type and key, and only
+ * by EXTENDING its text. A foreign writer replacing content fails every one of those.
+ */
+export function isKiloStreamedGrowth(before: string, after: string | undefined): boolean {
+  if (after === undefined) return false;
+  let previous: Record<string, unknown>;
+  let current: Record<string, unknown>;
+  try {
+    previous = JSON.parse(before) as Record<string, unknown>;
+    current = JSON.parse(after) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  if (previous.type !== 'model-output' && previous.type !== 'thinking') return false;
+  if (previous.type !== current.type || previous.key !== current.key) return false;
+  if (typeof previous.text !== 'string' || typeof current.text !== 'string') return false;
+  return current.text.startsWith(previous.text);
+}
+
+/** A mapped row's identity when it carries one: its type with its key or call id. */
+function keyedRowIdentity(encoding: string): string | undefined {
+  try {
+    const row = JSON.parse(encoding) as { type?: unknown; key?: unknown; callId?: unknown };
+    const id = typeof row.key === 'string' ? row.key : typeof row.callId === 'string' ? row.callId : undefined;
+    return id === undefined ? undefined : `${String(row.type)}\0${id}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The first row of [current] that may differ from the read [previous] describes, or undefined when
+ * [current] does not continue that read: the history was rewound, reverted or replaced.
+ *
+ * The rows of messages the store had finished writing must come back unchanged, apart from a
+ * streamed text that grew. The rows after them may change as their messages progress: text grows,
+ * a running tool gains its result, a completed step gains its summary before its token reading.
+ * They may not lose a row that carried a key, which only a revert or a rewrite removes.
+ */
+export function kiloHistoryContinuation(
+  previous: KiloHistoryMark,
+  current: Pick<KiloHistorySnapshot, 'encodings'>,
+): number | undefined {
+  const settled = Math.min(previous.settledRows, previous.encodings.length);
+  if (current.encodings.length < settled) return undefined;
+  let from = settled;
+  for (let index = 0; index < settled; index += 1) {
+    const before = previous.encodings[index]!;
+    const after = current.encodings[index];
+    if (before === after) continue;
+    if (!isKiloStreamedGrowth(before, after)) return undefined;
+    from = Math.min(from, index);
+  }
+  const kept = new Set(current.encodings.slice(settled).map(keyedRowIdentity));
+  for (const encoding of previous.encodings.slice(settled)) {
+    const identity = keyedRowIdentity(encoding);
+    if (identity !== undefined && !kept.has(identity)) return undefined;
+  }
+  return from;
 }
 
 function framedDigest(values: readonly string[]): string {
@@ -694,7 +766,7 @@ export async function readKiloHistory(
       });
       return undefined;
     }
-    const messages = readOpenCodeSqliteHistory(database, session.id, {
+    const history = readOpenCodeSqliteHistory(database, session.id, {
       productId: 'kilo',
       mapPart: (part, historical) => mapKiloPart(part, historical, (event) => options.trace?.({
         op: 'store-read', path: session.databasePath, detail: event.detail,
@@ -709,13 +781,15 @@ export async function readKiloHistory(
       validateMessage: validateKiloMessage,
       validatePart: validateKiloPart,
     });
-    if (!messages) {
+    if (!history) {
       options.trace?.({ op: 'discovery-bound', path: session.databasePath, detail: 'Kilo raw or canonical history exceeds its decode bound' });
       return undefined;
     }
+    const { messages, settledRows } = history;
     return {
       messages,
       encodings: messages.map((message) => JSON.stringify(message)),
+      settledRows,
       messageIds: readOpenCodeSqliteMessageIds(database, session.id),
       revision,
       sourceIdentity,

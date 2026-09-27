@@ -23,7 +23,7 @@
  *   bun run packages/typescript/broker/test/pi/test-tool-result-enrich.ts      (exit 0 = all pass)
  */
 export {};
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { summarizeDiff, splitUnifiedDiffFiles, type AgentMessage } from '../../../adapter-api/src/index.ts';
@@ -1113,6 +1113,271 @@ process.stdin.resume();
     } finally {
       await again.close();
     }
+  }
+}
+
+// ── Live keys equal history keys on a Drive (RPC) connection ─────────────────
+// A client merges rows by key, so a live row and its session-file copy must carry one key, or a
+// history refresh or reconnect frame restating the copy shows it twice. The fake streams turns and
+// persists them the way Pi does (see `pi-rpc-turn-fixture.ts` for the source of each shape): steps
+// with thinking, text and tool calls, a steer injected mid-turn, a refused prompt, a message with
+// two text blocks around a call and one whose first text block stays empty. Everything is
+// compared through the real connection's live mapping and its real history read.
+{
+  const { PiEngineAdapter, PI_DIALECT, resolvePiDialectRuntime } = await import('../../../adapters/pi/src/index.ts');
+  const { ManagedConn } = await import('../../src/sessions/hub.ts');
+  const { historyRefreshRequest } = await import('../../src/sessions/history-delta.ts');
+  const { PI_RPC_TURN_FIXTURE_SOURCE } = await import('../helpers/pi-rpc-turn-fixture.ts');
+  const { auditLiveAgainstHistory } = await import('../helpers/live-history-key-audit.ts');
+  const root = join(brokerFixtureRoot, 'live-history-keys');
+  const cwd = join(root, 'work');
+  const fakePi = join(root, 'pi');
+  const sessionFile = join(root, 'sessions', '2026-09-26T00-00-00-000Z_keys.jsonl');
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(join(root, 'sessions'), { recursive: true });
+  writeFileSync(sessionFile, [
+    { type: 'session', version: 3, id: 'keys', timestamp: '2026-09-26T09:00:00.000Z', cwd },
+    { type: 'message', id: 'a1b2c3d4', parentId: null, timestamp: '2026-09-26T09:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'before attach' }], timestamp: Date.parse('2026-09-26T09:00:01.000Z') } },
+    { type: 'message', id: 'e5f6a7b8', parentId: 'a1b2c3d4', timestamp: '2026-09-26T09:00:03.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'answered before attach' }], timestamp: Date.parse('2026-09-26T09:00:02.000Z') } },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+  writeFileSync(fakePi, `#!/usr/bin/env bun
+import { appendFileSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+${PI_RPC_TURN_FIXTURE_SOURCE}
+const args = process.argv.slice(2);
+const file = args[args.indexOf('--session') + 1];
+const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+const fixture = createPiRpcTurnFixture({ file, emit: send, correlated: false });
+let buffered = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffered += chunk;
+  const lines = buffered.split('\\n');
+  buffered = lines.pop() ?? '';
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const req = JSON.parse(line);
+    if (req.type === 'prompt') fixture.handlePrompt(req, send);
+    else if (req.type === 'get_state') send({ type: 'response', id: req.id, command: 'get_state', success: true, data: { model: { provider: 'fixture', id: 'keys', name: 'Keys' }, thinkingLevel: 'off', sessionFile: file } });
+    else if (req.type === 'get_session_stats') send({ type: 'response', id: req.id, command: 'get_session_stats', success: true, data: {} });
+    else send({ type: 'response', id: req.id, command: req.type, success: req.type === 'abort' });
+  }
+});
+process.stdin.resume();
+`);
+  chmodSync(fakePi, 0o755);
+  const runtime = resolvePiDialectRuntime(PI_DIALECT, { HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent') }, {
+    hooks: {
+      readiness: () => ({ ready: true, executable: fakePi, message: 'fixture Pi', detailCode: 'ready' }),
+      diagnose: async () => { throw new Error('not exercised'); },
+    },
+    bridgeAsset: { source: '', sha256: '' },
+  });
+  const adapter = new PiEngineAdapter(runtime, { brokerUrl: 'http://127.0.0.1:1' });
+  const sessionId = Buffer.from(sessionFile, 'utf8').toString('base64url');
+  const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !pred()) await sleep(20);
+    return pred();
+  };
+  const drive = await adapter.attach(sessionId, 'resume');
+  try {
+    const live: AgentMessage[] = [];
+    drive.subscribe((m) => live.push(m));
+    const attachHistory = await drive.getHistory();
+    const idleCount = () => live.filter((m) => m.type === 'status' && m.status === 'idle').length;
+    const echoKey = (clientKey: string) => (live.find((m) => m.type === 'user-message'
+      && (m as { clientKey?: string }).clientKey === clientKey) as { key?: string } | undefined)?.key;
+    const delivered = (clientKey: string) => live.filter((m) => m.type === 'user-message'
+      && (m as { clientKey?: string }).clientKey === clientKey && (m as { queued?: boolean }).queued === false).length;
+    await drive.sendPrompt({ text: 'first prompt', clientMessageId: 'keys-first' });
+    await waitUntil(() => idleCount() >= 1);
+    await drive.sendPrompt({ text: 'long task', clientMessageId: 'keys-long' });
+    await waitUntil(() => live.some((m) => m.type === 'model-output' && (m as { delta?: string }).delta !== undefined));
+    await drive.sendPrompt({ text: 'steered in', clientMessageId: 'keys-steer' });
+    await waitUntil(() => idleCount() >= 2);
+    let refused = false;
+    try {
+      await drive.sendPrompt({ text: 'refuse this prompt', clientMessageId: 'keys-refused' });
+    } catch {
+      refused = true;
+    }
+    await drive.sendPrompt({ text: 'blocks please', clientMessageId: 'keys-blocks' });
+    await waitUntil(() => idleCount() >= 3);
+    await drive.sendPrompt({ text: 'same clock please', clientMessageId: 'keys-same-clock' });
+    await waitUntil(() => idleCount() >= 4);
+    // Stamped like the answer already in the file before this connection started.
+    const oldClockPrompt = `clock ${Date.parse('2026-09-26T09:00:02.000Z')}`;
+    await drive.sendPrompt({ text: oldClockPrompt, clientMessageId: 'keys-old-clock' });
+    await waitUntil(() => idleCount() >= 5);
+    // Taken by an extension command: Pi answers the RPC and writes nothing, so the next prompt's
+    // entry must not take this one's key.
+    await drive.sendPrompt({ text: '/handled-by-extension', clientMessageId: 'keys-handled' });
+    await drive.sendPrompt({ text: 'after the handled one', clientMessageId: 'keys-after-handled' });
+    await waitUntil(() => idleCount() >= 6);
+    // A steer sent after the loop's last queue check runs in a continuation after agent_end.
+    const streamedText = () => live.map((m) => (m.type === 'model-output' ? (m as { delta?: string }).delta ?? '' : '')).join('');
+    await drive.sendPrompt({ text: 'strand the next steer', clientMessageId: 'keys-strand' });
+    await waitUntil(() => streamedText().includes('answered strand the next steer'));
+    await drive.sendPrompt({ text: 'stranded steer', clientMessageId: 'keys-stranded' });
+    await waitUntil(() => idleCount() >= 8);
+    const idlesAfterStrand = idleCount();
+    // Pi turns a prompt away and the same text is sent straight again: a new prompt with its own
+    // echo, and nothing matched since the refusal to move the history read past the refused one.
+    let refusedAgain = false;
+    try {
+      await drive.sendPrompt({ text: 'refuse then resend', clientMessageId: 'keys-refused-again' });
+    } catch {
+      refusedAgain = true;
+    }
+    await drive.sendPrompt({ text: 'refuse then resend', clientMessageId: 'keys-resent' });
+    await waitUntil(() => idleCount() >= 9);
+    // The entry of the prompt after another extension-handled one reaches the file before this
+    // connection reads the events announcing it. A history read then must not give it the key of
+    // the handled prompt still queued ahead of it.
+    await drive.sendPrompt({ text: '/handled again', clientMessageId: 'keys-handled-again' });
+    await drive.sendPrompt({ text: 'late start', clientMessageId: 'keys-late' });
+    await waitUntil(() => readFileSync(sessionFile, 'utf8').includes('"text":"late start"'));
+    const raced = await drive.getHistory();
+    const announcedByRead = delivered('keys-late');
+    await waitUntil(() => idleCount() >= 10);
+    const racedRow = raced.find((m) => m.type === 'user-message' && m.text === 'late start') as { key?: string; clientKey?: string } | undefined;
+    check(
+      'a history read that finds a prompt entry before its events keeps that prompt echo key, not the queued handled one',
+      announcedByRead === 0 && racedRow?.key === echoKey('keys-late') && racedRow?.clientKey === 'keys-late',
+      JSON.stringify({ announcedByRead, key: racedRow?.key, late: echoKey('keys-late'), handled: echoKey('keys-handled-again') }),
+    );
+    const history = await drive.getHistory();
+    const audit = auditLiveAgainstHistory({ attachHistory, live, history });
+    check(
+      'Pi RPC streams every transcript row under its session-file key (only the refused and extension-handled prompts stay live-only)',
+      refused && refusedAgain
+        && JSON.stringify([...audit.liveOnly].sort()) === JSON.stringify([
+          `user-message:key:${echoKey('keys-refused')}`,
+          `user-message:key:${echoKey('keys-refused-again')}`,
+          `user-message:key:${echoKey('keys-handled')}`,
+          `user-message:key:${echoKey('keys-handled-again')}`,
+        ].sort()),
+      JSON.stringify({ refused, refusedAgain, liveOnly: audit.liveOnly }),
+    );
+    const historyKey = (text: string) => (history.find((m) => m.type === 'user-message'
+      && (m as { text?: string }).text === text) as { key?: string } | undefined)?.key;
+    check(
+      'a prompt resent after Pi refused it keeps its own echo key in history, not the refused one',
+      historyKey('refuse then resend') === echoKey('keys-resent')
+        && echoKey('keys-resent') !== echoKey('keys-refused-again')
+        && history.filter((m) => m.type === 'user-message' && m.text === 'refuse then resend').length === 1,
+      JSON.stringify([historyKey('refuse then resend'), echoKey('keys-refused-again'), echoKey('keys-resent')]),
+    );
+    check(
+      'the prompt after an extension-handled one keeps its own echo key, live and in history',
+      historyKey('after the handled one') === echoKey('keys-after-handled')
+        && delivered('keys-after-handled') === 1 && delivered('keys-handled') === 0,
+      JSON.stringify([historyKey('after the handled one'), echoKey('keys-handled'), echoKey('keys-after-handled')]),
+    );
+    check(
+      'a steer Pi runs in a continuation after agent_end keeps its echo key in history',
+      idlesAfterStrand === 8
+        && history.some((m) => m.type === 'model-output' && m.text === 'answered the late steer')
+        && historyKey('stranded steer') === echoKey('keys-stranded'),
+      JSON.stringify({ idles: idlesAfterStrand, key: historyKey('stranded steer'), echo: echoKey('keys-stranded') }),
+    );
+    check(
+      'Pi RPC text and thinking keys come from the message timestamp and non-empty block ordinal',
+      ['looking at first prompt', 'before the call', 'after the call', 'after an empty block'].every((text) =>
+        history.some((m) => m.type === 'model-output' && m.text === text && /^a\d+:t:\d$/.test(m.key ?? '')))
+        && history.some((m) => m.type === 'model-output' && m.text === 'after the call' && m.key?.endsWith(':t:1'))
+        && history.some((m) => m.type === 'model-output' && m.text === 'after an empty block' && m.key?.endsWith(':t:0'))
+        && history.some((m) => m.type === 'thinking' && m.text === 'only this one counts' && m.key?.endsWith(':r:0')),
+      JSON.stringify(history.filter((m) => m.type === 'model-output' || m.type === 'thinking').map((m) => [(m as { key?: string }).key, (m as { text?: string }).text])),
+    );
+    const keyOf = (text: string) => (history.find((m) => m.type === 'model-output' && m.text === text) as { key?: string } | undefined)?.key;
+    check(
+      'two Pi RPC messages sharing one timestamp keep separate rows, the later under an occurrence suffix',
+      /^a\d+:t:0$/.test(keyOf('first under one clock') ?? '')
+        && keyOf('second under the same clock') === keyOf('first under one clock')!.replace(/:t:0$/, '~1:t:0'),
+      JSON.stringify([keyOf('first under one clock'), keyOf('second under the same clock')]),
+    );
+    check(
+      'a Pi RPC answer repeating a timestamp from before the connection started takes the next suffix',
+      /^a\d+:t:0$/.test(keyOf('answered before attach') ?? '')
+        && keyOf('answered on an old clock') === keyOf('answered before attach')!.replace(/:t:0$/, '~1:t:0'),
+      JSON.stringify([keyOf('answered before attach'), keyOf('answered on an old clock')]),
+    );
+    const rowKeys = new Set(history.filter((m) => m.type === 'model-output' || m.type === 'thinking').map((m) => (m as { key?: string }).key));
+    const summaryTargets = history.filter((m) => m.type === 'run-summary').map((m) => (m as { assistantMessageKey?: string }).assistantMessageKey);
+    check(
+      'every Pi run summary names an answer row its history has, after an empty first text block too',
+      summaryTargets.length >= 6 && summaryTargets.every((key) => key !== undefined && rowKeys.has(key)),
+      JSON.stringify(summaryTargets),
+    );
+    const at = (type: string, text: string) => history.findIndex((m) => m.type === type && (m as { text?: string }).text === text);
+    check(
+      'a Pi RPC prompt keeps its echo key and app correlation in history, steered prompt included',
+      ['first prompt', 'long task', 'steered in', 'blocks please', 'same clock please', oldClockPrompt,
+        'after the handled one', 'strand the next steer', 'stranded steer', 'refuse then resend', 'late start'].every((text) => {
+        const row = history.find((m) => m.type === 'user-message' && m.text === text) as { key?: string; clientKey?: string } | undefined;
+        return !!row?.key?.startsWith('u:sent:') && typeof row.clientKey === 'string' && row.clientKey.startsWith('keys-');
+      })
+        // The steer really was injected mid-turn: its entry sits between the long task's steps.
+        && at('model-output', 'starting the long task') < at('user-message', 'steered in')
+        && at('user-message', 'steered in') < at('model-output', 'long task finished'),
+      JSON.stringify(history.filter((m) => m.type === 'user-message')),
+    );
+    check(
+      'a history refresh from the attach cursor and a reconnect frame show no Pi RPC row twice or under another text',
+      audit.refreshRows !== undefined && audit.refreshRows > 0
+        && audit.duplicatesAfterRefresh.length === 0
+        && audit.duplicatesAfterReconnect.length === 0
+        && audit.textMismatches.length === 0,
+      JSON.stringify(audit),
+    );
+    const managed = new ManagedConn(drive);
+    const request = historyRefreshRequest({ cursor: 'cursor' }, managed);
+    check(
+      'the broker serves a history refresh on a Pi RPC connection',
+      drive.liveRowsRekeyedInHistory === undefined
+        && managed.historyRefreshRefusal() === undefined
+        && 'since' in request,
+      JSON.stringify(request),
+    );
+  } finally {
+    await drive.close();
+  }
+
+  // A later Drive connection on the same session keeps keying the earlier connection's prompts as
+  // their echoes: the correlations live with the adapter, not with one connection.
+  const again = await adapter.attach(sessionId, 'resume');
+  let echoedIdentity: unknown;
+  try {
+    const history = await again.getHistory();
+    echoedIdentity = await again.getHistorySourceIdentity?.();
+    const prompts = history.filter((m) => m.type === 'user-message') as Array<{ key?: string; text?: string }>;
+    check(
+      'a replacement Pi Drive connection keys the earlier prompts by their echo keys',
+      prompts.filter((m) => m.key?.startsWith('u:sent:')).length === 11
+        && prompts.some((m) => m.text === 'before attach' && m.key === 'a1b2c3d4'),
+      JSON.stringify(prompts),
+    );
+  } finally {
+    await again.close();
+  }
+
+  // An adapter without those correlations keys the same bytes by entry id, so its history must name
+  // a different source, or a cursor or cached page from the other keying would be taken as current.
+  const fresh = await new PiEngineAdapter(runtime, { brokerUrl: 'http://127.0.0.1:1' }).attach(sessionId, 'resume');
+  try {
+    const prompts = (await fresh.getHistory()).filter((m) => m.type === 'user-message') as Array<{ key?: string }>;
+    const freshIdentity = await fresh.getHistorySourceIdentity?.();
+    check(
+      'the same Pi session file read without the echo correlations names a different history source',
+      prompts.length === 12 && !prompts.some((m) => m.key?.startsWith('u:sent:'))
+        && echoedIdentity !== undefined && freshIdentity !== undefined
+        && JSON.stringify(freshIdentity) !== JSON.stringify(echoedIdentity),
+      JSON.stringify({ echoedIdentity, freshIdentity }),
+    );
+  } finally {
+    await fresh.close();
   }
 }
 

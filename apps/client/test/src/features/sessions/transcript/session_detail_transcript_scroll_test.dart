@@ -128,6 +128,13 @@ ScrollPosition _transcriptPosition(WidgetTester tester) {
   return (scrollable.controller!).position;
 }
 
+/// Jumps to the top of the transcript. The list is centered, so once rows sit
+/// above its center the scroll range starts below zero.
+void _jumpToStart(WidgetTester tester) {
+  final position = _transcriptPosition(tester);
+  position.jumpTo(position.minScrollExtent);
+}
+
 double _transcriptViewportTop(WidgetTester tester) =>
     tester.getTopLeft(find.byKey(const Key('session-detail-chat-scroll'))).dy;
 
@@ -145,11 +152,19 @@ double _findInViewportTop(WidgetTester tester, Finder finder) =>
 ({int index, int itemCount, double top, double bottom, double viewportBottom})
 _tailRowGeometry(WidgetTester tester) {
   final listFinder = find.byKey(const Key('session-detail-chat-scroll'));
-  final listView = tester.widget<ListView>(listFinder);
-  final itemCount = listView.childrenDelegate.estimatedChildCount ?? 0;
-  final sliver = tester.renderObject<RenderSliverMultiBoxAdaptor>(
-    find.descendant(of: listFinder, matching: find.byType(SliverList)),
+  final scrollView = tester.widget<CustomScrollView>(listFinder);
+  final itemCount = scrollView.semanticChildCount ?? 0;
+  // The transcript is centered: the rows before the center are one list, laid
+  // out upward, and the center row onward is the other. The tail is the last
+  // child of the second, whose index counts from the center.
+  final lists = find.descendant(
+    of: listFinder,
+    matching: find.byType(SliverList, skipOffstage: false),
+    skipOffstage: false,
   );
+  final rowsBefore = tester.widget<SliverList>(lists.first);
+  final centerIndex = rowsBefore.delegate.estimatedChildCount ?? 0;
+  final sliver = tester.renderObject<RenderSliverMultiBoxAdaptor>(lists.last);
   final last = sliver.lastChild;
   if (last == null) {
     return (
@@ -165,7 +180,7 @@ _tailRowGeometry(WidgetTester tester) {
   final parentData = last.parentData! as SliverMultiBoxAdaptorParentData;
   final topLeft = last.localToGlobal(Offset.zero);
   return (
-    index: parentData.index ?? -1,
+    index: parentData.index == null ? -1 : centerIndex + parentData.index!,
     itemCount: itemCount,
     top: topLeft.dy - viewportTop,
     bottom: topLeft.dy + last.size.height - viewportTop,
@@ -301,7 +316,9 @@ void main() {
         );
 
         final position = _transcriptPosition(tester);
-        position.jumpTo(position.viewportDimension + 40);
+        position.jumpTo(
+          position.minScrollExtent + position.viewportDimension + 40,
+        );
         await tester.pump();
         expect(
           connection.historyPageRequestCount,
@@ -352,7 +369,9 @@ void main() {
         await tester.pumpAndSettle();
 
         final progressed = _transcriptPosition(tester);
-        progressed.jumpTo(progressed.viewportDimension + 40);
+        progressed.jumpTo(
+          progressed.minScrollExtent + progressed.viewportDimension + 40,
+        );
         await tester.pump();
         await tester.drag(
           find.byKey(const Key('session-detail-chat-scroll')),
@@ -372,7 +391,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        _transcriptPosition(tester).jumpTo(0);
+        _jumpToStart(tester);
         await tester.pump();
         expect(
           find.byKey(const Key('session-history-start-marker')),
@@ -412,17 +431,17 @@ void main() {
     );
 
     testWidgets(
-      'one mobile swipe credits three variable-height pages before any '
-      'response',
+      'one mobile swipe at the start chains a bounded number of short pages, '
+      'and a long page ends the chain',
       (tester) async {
         useRoomyTestViewport(tester);
         final connection = _HistoryCapableScriptedConnection(
           events: [
             HistoryWireEvent(
-              messages: _agentMessages(100, startSeq: 301),
+              messages: _agentMessages(100, startSeq: 401),
               reset: true,
               cursor: 'tail',
-              olderCursor: 'page-3',
+              olderCursor: 'page-4',
               hasEarlier: true,
             ),
           ],
@@ -431,87 +450,66 @@ void main() {
           buildSessionDetailTestPage(events: const [], connection: connection),
         );
         await tester.pumpAndSettle();
-        _transcriptPosition(tester).jumpTo(0);
+        _jumpToStart(tester);
         await tester.pump();
 
         final surface = find.byKey(
           const Key('session-detail-chat-scroll'),
         );
         final gesture = await tester.startGesture(tester.getCenter(surface));
-        // All physical intent arrives before page 3 returns. A single natural
-        // swipe must retain enough bounded credit for three pages; requiring a
-        // fresh move during every response reproduces the physical dead zone.
         await gesture.moveBy(const Offset(0, 140));
         await gesture.up();
         await tester.pump();
-        expect(connection.historyPageCursors, ['page-3']);
+        expect(connection.historyPageCursors, ['page-4']);
 
-        connection.emitEvent(
-          HistoryPageWireEvent(
-            messages: _variableHeightAgentMessages(100, startSeq: 201),
-            cursor: 'page-2',
-            hasMore: true,
-            endOfHistory: false,
-            clientMessageId: connection.lastHistoryPageClientMessageId,
-          ),
-        );
-        for (
-          var frame = 0;
-          frame < 20 && connection.historyPageRequestCount < 2;
-          frame++
-        ) {
-          await tester.pump(const Duration(milliseconds: 16));
+        // Each short page lands with the reader still at the start, so it
+        // calls for the next without any further movement — twice, the most
+        // pages asked for without the reader's hand behind them.
+        Future<void> answer(List<AgentMessage> rows, String cursor) async {
+          connection.emitEvent(
+            HistoryPageWireEvent(
+              messages: rows,
+              cursor: cursor,
+              hasMore: true,
+              endOfHistory: false,
+              clientMessageId: connection.lastHistoryPageClientMessageId,
+            ),
+          );
+          for (var frame = 0; frame < 4; frame++) {
+            await tester.pump(const Duration(milliseconds: 16));
+          }
         }
-        expect(
-          connection.historyPageCursors,
-          ['page-3', 'page-2'],
-          reason: 'the second credit survives page 3 and exact anchor restore',
-        );
 
-        connection.emitEvent(
-          HistoryPageWireEvent(
-            messages: _variableHeightAgentMessages(100, startSeq: 101),
-            cursor: 'page-1',
-            hasMore: true,
-            endOfHistory: false,
-            clientMessageId: connection.lastHistoryPageClientMessageId,
-          ),
-        );
-        for (
-          var frame = 0;
-          frame < 80 && connection.historyPageRequestCount < 3;
-          frame++
-        ) {
-          await tester.pump(const Duration(milliseconds: 16));
-        }
-        expect(
-          connection.historyPageCursors,
-          ['page-3', 'page-2', 'page-1'],
-          reason: 'one completed swipe reaches three pages without later input',
-        );
-
-        // The physical budget is exhausted after the third page. Cursor
-        // progress alone cannot recurse into page 0 while stationary.
-        connection.emitEvent(
-          HistoryPageWireEvent(
-            messages: _variableHeightAgentMessages(100),
-            cursor: 'page-0',
-            hasMore: true,
-            endOfHistory: false,
-            clientMessageId: connection.lastHistoryPageClientMessageId,
-          ),
-        );
+        await answer(_agentMessages(3, startSeq: 398), 'page-3');
+        await answer(_agentMessages(3, startSeq: 395), 'page-2');
+        expect(connection.historyPageCursors, ['page-4', 'page-3', 'page-2']);
+        await answer(_agentMessages(3, startSeq: 392), 'page-1');
         await tester.pumpAndSettle();
         expect(
           connection.historyPageRequestCount,
           3,
-          reason: 'stationary cursor/layout progress must not recurse',
+          reason: 'a still reader is not paged on and on',
         );
+
+        // Moving again asks again. A long page then leaves the reader far
+        // from the start, and nothing more is asked for.
+        final again = await tester.startGesture(tester.getCenter(surface));
+        await again.moveBy(const Offset(0, 60));
+        await again.up();
+        await tester.pump();
+        expect(connection.historyPageCursors.last, 'page-1');
+        await answer(
+          _variableHeightAgentMessages(100, startSeq: 201),
+          'page-0',
+        );
+        await tester.pumpAndSettle();
+        expect(connection.historyPageRequestCount, 4);
       },
     );
 
     testWidgets(
-      'continued trackpad intent pages again without idle recursion',
+      'continued trackpad movement pages again, and holding still chains a '
+      'bounded number',
       (tester) async {
         useRoomyTestViewport(tester);
         final connection = _HistoryCapableScriptedConnection(
@@ -529,7 +527,7 @@ void main() {
           buildSessionDetailTestPage(events: const [], connection: connection),
         );
         await tester.pumpAndSettle();
-        _transcriptPosition(tester).jumpTo(0);
+        _jumpToStart(tester);
         await tester.pump();
         final position = tester.getCenter(
           find.byKey(const Key('session-detail-chat-scroll')),
@@ -609,8 +607,8 @@ void main() {
           connection.historyPageCursors,
           ['page-2', 'page-1', 'page-0'],
           reason:
-              'all three credits came from the 120px trackpad movement, '
-              'not cursor progression',
+              'after the trackpad lifts, a page that lands with the reader '
+              'still at the start calls for the next',
         );
         connection.emitEvent(
           HistoryPageWireEvent(
@@ -621,11 +619,30 @@ void main() {
             clientMessageId: connection.lastHistoryPageClientMessageId,
           ),
         );
+        for (
+          var frame = 0;
+          frame < 20 && connection.historyPageRequestCount < 4;
+          frame++
+        ) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(connection.historyPageRequestCount, 4);
+        connection.emitEvent(
+          HistoryPageWireEvent(
+            messages: _agentMessages(5, startSeq: 181),
+            cursor: 'page-before-1',
+            hasMore: true,
+            endOfHistory: false,
+            clientMessageId: connection.lastHistoryPageClientMessageId,
+          ),
+        );
         await tester.pumpAndSettle();
         expect(
           connection.historyPageRequestCount,
-          3,
-          reason: 'exhausted physical credit does not recurse while stationary',
+          4,
+          reason:
+              'without the reader moving, at most two pages follow the last '
+              'one their movement asked for',
         );
       },
     );
@@ -694,7 +711,7 @@ void main() {
         final position = _transcriptPosition(tester);
         var found = false;
         for (
-          var offset = 0.0;
+          var offset = position.minScrollExtent;
           offset <= position.maxScrollExtent;
           offset += position.viewportDimension / 2
         ) {
@@ -734,7 +751,7 @@ void main() {
 
         controller.completeHistoryRequest();
         await tester.pump();
-        position.jumpTo(0);
+        position.jumpTo(position.minScrollExtent);
         await tester.pump();
         await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
         await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
@@ -771,7 +788,7 @@ void main() {
 
         connection.emitState(SessionDetailConnectionStatus.reconnecting);
         await tester.pump();
-        _transcriptPosition(tester).jumpTo(0);
+        _jumpToStart(tester);
         await tester.pump();
         await tester.drag(
           find.byKey(const Key('session-detail-chat-scroll')),
@@ -836,7 +853,7 @@ void main() {
           buildSessionDetailTestPage(events: const [], connection: connection),
         );
         await tester.pumpAndSettle();
-        _transcriptPosition(tester).jumpTo(0);
+        _jumpToStart(tester);
         await tester.pump();
 
         await tester.drag(
@@ -943,7 +960,7 @@ void main() {
         buildSessionDetailTestPage(events: const [], connection: connection),
       );
       await tester.pumpAndSettle();
-      _transcriptPosition(tester).jumpTo(0);
+      _jumpToStart(tester);
       await tester.pump();
       expect(
         find.byKey(const Key('session-history-load-earlier')),
@@ -1002,7 +1019,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        _transcriptPosition(tester).jumpTo(0);
+        _jumpToStart(tester);
         await tester.pump();
         expect(find.text('加载较早的消息'), findsNothing);
         expect(find.text('正在显示最新的 20/120 条消息。'), findsNothing);
@@ -1049,7 +1066,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        _transcriptPosition(tester).jumpTo(0);
+        _jumpToStart(tester);
         await tester.pump();
         expect(find.text('Load earlier messages'), findsNothing);
         await tester.drag(
@@ -1079,13 +1096,15 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Message 240'), findsOneWidget);
-      position.jumpTo(0);
+      position.jumpTo(position.minScrollExtent);
       await tester.pumpAndSettle();
 
       expect(
-        find.text('Message 141'),
+        find.text('Message 1'),
         findsOneWidget,
-        reason: 'the active live tail retains only the newest 100 messages',
+        reason:
+            'all 240 live messages fit the active window, so the oldest is '
+            'still retained (and only built once scrolled into view)',
       );
     });
 
@@ -1363,9 +1382,10 @@ void main() {
       await tester.pumpAndSettle();
 
       // Scroll up into the history, far enough to clear the follow threshold.
-      _transcriptPosition(tester).jumpTo(0);
+      _jumpToStart(tester);
       await tester.pumpAndSettle();
-      expect(_transcriptPosition(tester).pixels, 0);
+      final top = _transcriptPosition(tester).minScrollExtent;
+      expect(_transcriptPosition(tester).pixels, top);
 
       for (final event in _messages(10, startSeq: 200)) {
         connection.emitEvent(event);
@@ -1374,7 +1394,7 @@ void main() {
 
       expect(
         _transcriptPosition(tester).pixels,
-        0,
+        top,
         reason: 'the user was reading history, so the view must stay put',
       );
     });
@@ -1389,7 +1409,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      _transcriptPosition(tester).jumpTo(0);
+      _jumpToStart(tester);
       await tester.pumpAndSettle();
 
       // Return to the end, which re-arms the follow.
@@ -1469,7 +1489,8 @@ void main() {
         final toolDetails = find.byKey(
           const Key('tool-anchor-call-details'),
         );
-        final position = _transcriptPosition(tester)..jumpTo(0);
+        final position = _transcriptPosition(tester);
+        _jumpToStart(tester);
         await tester.pumpAndSettle();
 
         expect(

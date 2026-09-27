@@ -1127,6 +1127,54 @@ try {
     JSON.stringify(runSummaries(stoppedLive)));
   await stopped.close();
 
+  // One connection across a tool turn: the call ACP showed live is the call history keeps, under
+  // the same id, next to its result, for this connection and for one that attaches afterwards.
+  writeDurableRows(initial, 67);
+  let toolAlive = true;
+  const toolLive: AgentMessage[] = [];
+  let toolDrive: TestDriveConnection | undefined;
+  const toolTransport: ReasonixAcpTransport = {
+    get alive() { return toolAlive; },
+    async sessionPrompt(params) {
+      toolDrive!.pushUpdate({
+        sessionId: id,
+        update: {
+          sessionUpdate: 'tool_call', toolCallId: 'call-step', title: 'bash', kind: 'execute', status: 'pending',
+          rawInput: { command: 'ls' },
+        },
+      });
+      writeDurableRows(toolTurnRows(params.prompt[0]?.text ?? '', 'tool call final answer'), 68, toolTurnAuthored);
+      await waitFor(() => hasFrame(toolLive, finalKey, 'done'));
+      return { stopReason: 'end_turn' };
+    },
+    sessionCancel() {},
+    async close() { toolAlive = false; },
+  };
+  toolDrive = new TestDriveConnection(session, info, toolTransport);
+  toolDrive.subscribe((message) => toolLive.push(message));
+  await toolDrive.getHistory();
+  await toolDrive.sendPrompt({ text: 'tool turn with a live call' });
+  const liveCall = toolLive.find((message) => message.type === 'tool-call');
+  const toolHistory = await toolDrive.getHistory();
+  const keptCalls = toolHistory.filter((message) => message.type === 'tool-call');
+  const keptResultAt = toolHistory.findIndex((message) => message.type === 'tool-result' && message.callId === 'call-step');
+  check('the call the drive showed live is the call its history keeps, just before its result',
+    liveCall?.type === 'tool-call'
+      && liveCall.callId === 'call-step'
+      && keptCalls.length === 1
+      && JSON.stringify(keptCalls[0]) === JSON.stringify(liveCall)
+      && toolHistory.indexOf(keptCalls[0]!) === keptResultAt - 1,
+    JSON.stringify({ liveCall, keptCalls, keptResultAt }));
+  check('every call row this connection sent for the turn is that one row',
+    toolLive.filter((message) => message.type === 'tool-call')
+      .every((message) => JSON.stringify(message) === JSON.stringify(liveCall)),
+    JSON.stringify(toolLive.filter((message) => message.type === 'tool-call')));
+  const reloaded = await new ReasonixObserveConnection({ session, info }).getHistory();
+  check('a client attaching after the turn holds the same call',
+    JSON.stringify(reloaded.filter((message) => message.type === 'tool-call')) === JSON.stringify(keptCalls),
+    JSON.stringify(reloaded.filter((message) => message.type === 'tool-call')));
+  await toolDrive.close();
+
   // Race order for a created session: its initial snapshot publishes only after
   // the first turn has returned and been claimed. The snapshot is catch-up and
   // must carry no running; the pairing follows it.

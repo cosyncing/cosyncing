@@ -861,9 +861,11 @@ void main() {
         'user-message:$steeredId',
       ]);
 
-      // The turn runs long: the bounded tail evicts the anchor row while the
-      // echo stays in the window, followed by more of the turn's output.
-      for (var i = 61; i <= 140; i++) {
+      // The turn runs long: the open tail's allowance releases the anchor
+      // row while the echo stays in the window, followed by more of the
+      // turn's output (o1..o440 plus the echo exceed the allowance by more
+      // than the rows before o1, but the echo onward still fits).
+      for (var i = 61; i <= 440; i++) {
         emitMessage({
           'type': 'model-output',
           'key': 'o$i',

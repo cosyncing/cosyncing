@@ -258,10 +258,13 @@ try {
     await until(() => copiesOf(joiner!, keys[3]!).length > 0);
     await sleep(400);
 
+    // The turn is still running, so the frame ends at the running-turn hold: the newest block is
+    // not in it (the live stream may still extend it) and follows it instead, once.
     const historyFrame = joiner.frames.find((f) => f.kind === 'history');
     check(
       'the joining client really did receive a capped history frame (the boundary this exercises)',
-      historyFrame?.truncated?.shown === 1 && historyFrame?.truncated?.total === keys.length,
+      historyFrame?.truncated?.shown === 1 && historyFrame?.truncated?.total === keys.length - 1
+        && historyFrame?.messages?.[0]?.key === keys[2],
       `truncated=${JSON.stringify(historyFrame?.truncated)} messages=${historyFrame?.messages?.length}`,
     );
     const capped = copiesOf(joiner, keys[0]!);
@@ -272,11 +275,17 @@ try {
     );
     // Capping widens what must still be sent; it does not turn the reconciliation off for the
     // messages the frame did carry.
-    const delivered = copiesOf(joiner, keys[3]!);
+    const delivered = copiesOf(joiner, keys[2]!);
     check(
       'the block the capped history DID deliver is still not restated',
       delivered.length === 1 && delivered.at(-1)?.final === true,
       `copies=${delivered.length} final=${String(delivered.at(-1)?.final)}`,
+    );
+    const held = copiesOf(joiner, keys[3]!);
+    check(
+      'the block the running-turn hold kept out of the frame reaches the client once, still final',
+      held.length === 1 && held.at(-1)?.final === true,
+      `copies=${held.length} final=${String(held.at(-1)?.final)}`,
     );
 
     // Older-page prepend. `handleHistoryPage` re-reads the adapter's history, so a page walks the
@@ -291,7 +300,7 @@ try {
     const pagedKeys = (pageFrame?.messages ?? []).map((m: any) => m?.key);
     check(
       'an older-page prepend returns the earlier blocks under the identities they already had',
-      paged && keys.slice(0, 3).every((k) => pagedKeys.includes(k)),
+      paged && JSON.stringify(pagedKeys) === JSON.stringify(keys.slice(0, 2)),
       `pageKeys=${JSON.stringify(pagedKeys)}`,
     );
     // The block that was capped out reached this client live; the page must fill in ABOVE it under
@@ -313,13 +322,19 @@ try {
   {
     const { id, driver } = await openSession('cursor');
     opened.push(driver);
+    // The turn is still running, so every frame ends at the running-turn hold: the newest block
+    // stays out of the cursor and follows each frame. The block before it is what a cursor
+    // acknowledges.
     const key = 'pi:answer:5';
+    const newest = 'pi:answer:5b';
     await post('/pi/bridge/events', {
       id,
       events: [
         { t: 'status', running: true },
         { t: 'delta', key, delta: 'Persisted once.' },
         { t: 'final', key, text: 'Persisted once.' },
+        { t: 'delta', key: newest, delta: 'Then more.' },
+        { t: 'final', key: newest, text: 'Then more.' },
       ],
     });
     await sleep(200);
@@ -351,6 +366,12 @@ try {
       'a cursor reconnect does not restate the message that cursor already acknowledges',
       copies.length === 0,
       `copies=${copies.length} final=${JSON.stringify(copies.map((c) => c.final ?? null))}`,
+    );
+    const heldCopies = copiesOf(joiner, newest);
+    check(
+      'the block the running-turn hold kept out of that cursor is restated once, still final',
+      heldCopies.length === 1 && heldCopies[0]?.final === true,
+      `copies=${heldCopies.length} final=${JSON.stringify(heldCopies.map((c) => c.final ?? null))}`,
     );
     joiner.close();
     joiner = undefined;

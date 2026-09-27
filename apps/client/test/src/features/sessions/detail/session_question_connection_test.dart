@@ -152,7 +152,7 @@ void main() {
           olderCursor: 'older',
         ),
       ).applyLiveMessage(question(readOnly: false));
-      for (var i = 0; i < kRetainedTranscriptTailMessages; i++) {
+      for (var i = 0; i < kMaxActiveTranscriptMessages; i++) {
         window = window.applyLiveMessage(
           AgentMessage.fromJson({
             'type': 'model-output',

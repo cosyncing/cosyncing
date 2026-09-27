@@ -176,6 +176,37 @@ abstract interface class SessionHistoryConnection {
   });
 }
 
+/// Optional transport capability for revision-28 history navigation: refresh
+/// the broker boundary after rows received live, and page newer history.
+///
+/// Separate from [SessionHistoryConnection] so transports that only page
+/// backward keep compiling and simply never refresh or page forward. Use it
+/// only where a history frame carried `newerHistory`.
+abstract interface class SessionHistoryNavigationConnection {
+  /// Requests one incremental history frame from [cursor], the reconnect
+  /// cursor of the last frame. Returns false when nothing was sent (the
+  /// transport has moved past [cursor], or is not open).
+  Future<bool> requestHistoryRefresh({
+    required String cursor,
+    required String clientMessageId,
+    int? limit,
+  });
+
+  /// Requests the page newer than [cursor], stopping at [until] when given.
+  Future<void> requestNewerHistoryPage({
+    required String cursor,
+    String? until,
+    int? limit,
+    String? clientMessageId,
+  });
+
+  /// Closes the socket and attaches again as it was (the same control mode
+  /// and reason, the read-only latch, and the last history cursor as the
+  /// ticket). A broker that no longer has that cursor answers with a capped
+  /// reset whose positions are valid.
+  Future<void> restartAttach();
+}
+
 /// Factory for creating a [SessionDetailConnection].
 typedef SessionDetailConnectionFactory =
     SessionDetailConnection Function({
@@ -209,7 +240,10 @@ final sessionSocketAdapterFactoryProvider =
 
 /// Production [SessionDetailConnection] backed by [SessionConnection].
 class BrokerSessionDetailConnection
-    implements SessionDetailConnection, SessionHistoryConnection {
+    implements
+        SessionDetailConnection,
+        SessionHistoryConnection,
+        SessionHistoryNavigationConnection {
   /// Creates a broker-backed session detail connection.
   BrokerSessionDetailConnection({
     required EndpointResolver resolver,
@@ -325,6 +359,37 @@ class BrokerSessionDetailConnection
       clientMessageId: clientMessageId,
     );
   }
+
+  @override
+  Future<bool> requestHistoryRefresh({
+    required String cursor,
+    required String clientMessageId,
+    int? limit,
+  }) async =>
+      _inner.requestHistoryRefresh(
+        cursor: cursor,
+        limit: limit,
+        clientMessageId: clientMessageId,
+      ) !=
+      null;
+
+  @override
+  Future<void> requestNewerHistoryPage({
+    required String cursor,
+    String? until,
+    int? limit,
+    String? clientMessageId,
+  }) async {
+    _inner.requestNewerHistoryPage(
+      cursor: cursor,
+      until: until,
+      limit: limit,
+      clientMessageId: clientMessageId,
+    );
+  }
+
+  @override
+  Future<void> restartAttach() => _inner.restartAttach();
 
   @override
   Future<void> sendPlanAction(

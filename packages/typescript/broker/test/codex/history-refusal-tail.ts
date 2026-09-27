@@ -39,7 +39,9 @@ import {
 } from '../../../adapters/codex/src/index.ts';
 import {
   backwardHistoryCursorFromHash,
+  cursorDurableHistory,
   historyCursorFromHash,
+  historyDelta,
 } from '../../src/sessions/history-delta.ts';
 import {
   BoundedTailHistorySnapshotSink,
@@ -838,6 +840,42 @@ try {
     );
     assert(unsafeAttach.hasEarlier, 'a frame short of its history must say so');
 
+    // (b2) A history that ENDS in current session state (here an oversized usage reading, which
+    //      no stand-in may replace) keeps it outside the cursor space, like every other read of
+    //      the same history: the frame ends before it and claims no hole, and it cannot ship after
+    //      the frame either. A transcript row after it makes it history, and its omission a hole.
+    {
+      const kept = Array.from({ length: 6 }, (_unused, index) => ({
+        type: 'user-message',
+        key: `state-kept-${index}`,
+        text: `row ${index}`,
+      }) as unknown as AgentMessage);
+      const usage = {
+        type: 'metadata-update',
+        key: 'sessionUsage',
+        value: { note: 'u'.repeat(8_000) },
+      } as unknown as AgentMessage;
+      const stateTail = new BoundedTailHistorySnapshotSink(500, maxBytes);
+      for (const message of [...kept, usage]) stateTail.accept(message);
+      const trailing = stateTail.finish({ sourceId: 'state-tail', revision: '1' }).attach(undefined, PAGE_MESSAGES);
+      assert.equal(trailing.messages.length, 6);
+      assert.equal(trailing.truncated, undefined, 'trailing current state is not a transcript hole');
+      assert.equal(
+        trailing.derivedMessages.some((message) => message.type === 'metadata-update'),
+        false,
+        'an oversized trailing state row does not ship after the frame either',
+      );
+      assert.equal(
+        trailing.cursor,
+        historyDelta(cursorDurableHistory([...kept, usage]).durable).cursor,
+        'the bounded replay ends where every other read of the same history does',
+      );
+      stateTail.accept({ type: 'user-message', key: 'after-usage', text: 'after it' } as unknown as AgentMessage);
+      const settled = stateTail.finish({ sourceId: 'state-tail', revision: '2' }).attach(undefined, PAGE_MESSAGES);
+      assert.equal(settled.messages.length, 7);
+      assert.deepEqual(settled.truncated, { shown: 7, total: 8 }, 'followed by a transcript row it is an omitted row');
+    }
+
     // (c) No replay payload may carry broker-authored English. The round-3
     //     stand-in injected a marker sentence into message bodies, which is the
     //     same localization defect S2 removed from the gap notice.
@@ -1010,9 +1048,11 @@ try {
         `${label}: the surviving row must be the unrelated one`,
       );
       assertNeverAuthoritativeEmpty(attach, `${label} supersede`, replay.durableCount);
+      // A trailing metadata value is current state rather than transcript, so the frame ends
+      // before it; the withheld older row is still a hole it admits.
       assert.deepEqual(
         attach.truncated,
-        { shown: 1, total: 3 },
+        { shown: 1, total: label === 'metadata-update' ? 2 : 3 },
         `${label}: the frame must admit it carries fewer rows than the history holds`,
       );
       assert(attach.hasEarlier, `${label}: a short frame must say so`);

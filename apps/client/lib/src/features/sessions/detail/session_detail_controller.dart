@@ -35,6 +35,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 part '../artifacts/session_detail_artifact_coordinator.dart';
 part '../requests/session_detail_request_coordinator.dart';
 part '../transcript/session_detail_draft_coordinator.dart';
+part '../transcript/session_detail_history_navigation_coordinator.dart';
+part '../transcript/session_detail_tool_slot_recovery.dart';
 part '../transcript/session_detail_messaging_coordinator.dart';
 part '../transcript/session_detail_transcript_persistence.dart';
 part 'session_detail_bootstrap.dart';
@@ -154,6 +156,38 @@ class SessionDetailController
   Timer? _commandProgressTimer;
   String? _historyPageRequestId;
   String? _historyPageCursorInFlight;
+  int? _historyPageLimitInFlight;
+  // Contract revision 28 (see session_detail_history_navigation_coordinator):
+  // the page in flight may be a newer one, into the gap ending at its `until`.
+  bool _historyPageNewer = false;
+  String? _historyPageUntilInFlight;
+  bool _newerHistoryOffered = false;
+  bool _newerPagingRefused = false;
+  // Every refresh still answerable on this socket, with the cursor it was
+  // asked from: never more than one per cursor, and settled once a frame
+  // moves the window off that cursor.
+  final Map<String, String> _historyRefreshRequests = {};
+  final Map<String, ({String cursor, int attempts})> _toolSlotReloads = {};
+  final Set<String> _toolSlotsChecked = {};
+  ({String id, String callId})? _toolSlotInFlight;
+  Timer? _toolSlotTimer;
+  // When each of those stops holding back the next refresh from its cursor,
+  // and those that no longer do (still answerable: the transport still takes
+  // their answers).
+  final Map<String, Timer> _historyRefreshTimeouts = {};
+  final Set<String> _historyRefreshesOverdue = {};
+  // A turn ended while a refresh from the window's cursor was unanswered.
+  bool _historyRefreshTurnEndQueued = false;
+  bool _historyRefreshDisabled = false;
+  String? _historyRefreshBlockedCursor;
+  ({int rows, int bytes})? _historyRefreshBackoff;
+  bool _awaitingReconnectFrame = false;
+  // A reattach because the broker no longer had the window's reconnect
+  // cursor: whether this attach may still make one, whether one is on its
+  // way (its attach may not make another), and while the next must wait.
+  bool _historyCursorRecoveryUsed = false;
+  bool _historyCursorRecoveryPending = false;
+  Timer? _historyCursorRecoveryCooldown;
   String? _historyViewportAnchorKey;
   String? _interruptClientMessageId;
   var _interruptTurnGeneration = 0;
@@ -174,9 +208,6 @@ class SessionDetailController
   late SessionCacheWriteFence _cacheWriteFence;
   SessionTranscriptSnapshot? _pendingTranscriptSnapshot;
   SessionCacheWriteAdmission? _pendingTranscriptAdmission;
-  List<AgentMessage> _transcriptCacheTailMessages = const [];
-  String? _transcriptCacheTailOlderCursor;
-  bool _transcriptCacheTailHasEarlier = false;
   final List<_PendingAttachTicket> _pendingTranscriptTickets =
       <_PendingAttachTicket>[];
   var _transcriptCommitInFlight = false;
@@ -315,6 +346,11 @@ class SessionDetailController
       _abortBootstrapActionRefresh();
       _commandProgressTimer?.cancel();
       _historyPageTimeout?.cancel();
+      _toolSlotTimer?.cancel();
+      for (final timer in _historyRefreshTimeouts.values) {
+        timer.cancel();
+      }
+      _historyCursorRecoveryCooldown?.cancel();
       _initialHistoryTimeout?.cancel();
       _draftPublishAckTimer?.cancel();
       if (!(_attachmentPromptResult?.isCompleted ?? true)) {
@@ -493,6 +529,7 @@ class SessionDetailController
     _abortBootstrapActionRefresh();
     _bootstrapAttempt++;
     _clearHistoryPageTracking();
+    _clearHistoryRefreshTracking();
     _requestedDriveReason = null;
     _liveAttachArmed = false;
     _establishedAttachIntent = null;
@@ -792,6 +829,7 @@ class SessionDetailController
     _cancelInitialHistoryTimeout();
     _forgetNegotiatedContract();
     _clearHistoryPageTracking();
+    _clearHistoryRefreshTracking();
     _requestedDriveReason = null;
     _liveAttachArmed = false;
     if (previousConnection != null) {
@@ -1269,74 +1307,6 @@ class SessionDetailController
     }
   }
 
-  void _updateTranscriptCacheTail(WireEvent event) {
-    if (event is HistoryPageWireEvent) return;
-    var next = event is HistoryWireEvent && event.reset
-        ? <AgentMessage>[]
-        : List<AgentMessage>.of(_transcriptCacheTailMessages);
-    final indexByKey = <String, int>{};
-    for (var index = 0; index < next.length; index++) {
-      final key = stableTranscriptMessageKey(next[index]);
-      if (key != null) indexByKey[key] = index;
-    }
-
-    void add(AgentMessage message) {
-      final key = stableTranscriptMessageKey(message);
-      final existingIndex = key == null ? null : indexByKey[key];
-      if (existingIndex == null) {
-        if (key != null) indexByKey[key] = next.length;
-        next.add(message);
-      } else {
-        next[existingIndex] = mergeStableTranscriptMessage(
-          next[existingIndex],
-          message,
-        );
-      }
-    }
-
-    switch (event) {
-      case HistoryWireEvent(:final messages):
-        if (event.reset) {
-          for (final message in messages) {
-            add(message);
-          }
-        } else {
-          // An incremental frame carries native/source order: recover rows the
-          // persisted tail never saw into their authoritative positions and
-          // repair any malformed order it previously persisted, instead of
-          // appending every unseen key behind the final response.
-          next = List<AgentMessage>.of(
-            reconcileTranscriptHistoryDelta(retained: next, frame: messages),
-          );
-        }
-        if (event.reset || event.olderCursor != null) {
-          _transcriptCacheTailOlderCursor = event.olderCursor;
-          _transcriptCacheTailHasEarlier =
-              event.hasEarlier && event.olderCursor != null;
-        }
-      case MessageWireEvent(:final message):
-        add(message);
-      case _:
-        return;
-    }
-
-    var retainedBytes = 0;
-    final retainedReverse = <AgentMessage>[];
-    for (var index = next.length - 1; index >= 0; index--) {
-      if (retainedReverse.length >= maxPersistedTranscriptMessages) break;
-      final message = next[index];
-      final bytes = estimatedAgentMessageDecodedBytes(message);
-      if (retainedBytes + bytes > maxPersistedTranscriptSnapshotBytes) {
-        continue;
-      }
-      retainedReverse.add(message);
-      retainedBytes += bytes;
-    }
-    _transcriptCacheTailMessages = List<AgentMessage>.unmodifiable(
-      retainedReverse.reversed,
-    );
-  }
-
   void _enqueueTranscriptPersistence(WireEvent event) {
     if (event is! HistoryWireEvent && event is! MessageWireEvent) {
       return;
@@ -1347,13 +1317,18 @@ class SessionDetailController
     // Coalesce persistence: a later snapshot fully supersedes earlier ones for
     // the same session, so keep only the latest pending snapshot rather than a
     // full-transcript serialize + row rewrite for every incoming message.
+    // The window is the only owner of decoded rows; the snapshot is its open
+    // tail with that tail's real boundary, so hydration never claims a
+    // contiguous range that has a hole in it.
+    final run = state.activeTranscriptWindow.persistableTail();
     _pendingTranscriptSnapshot = SessionTranscriptSnapshot(
       brokerProfileId: brokerProfileId,
       sessionKey: arg,
-      messages: _transcriptCacheTailMessages,
+      messages: run.messages,
       cursor: state.historyCursor,
-      olderCursor: _transcriptCacheTailOlderCursor,
-      hasEarlier: _transcriptCacheTailHasEarlier,
+      olderCursor: run.olderCursor,
+      hasEarlier: run.olderCursor != null,
+      headReleased: run.headReleased,
       gap: state.latestHistoryGap,
       truncation: state.latestHistoryTruncation,
       updatedAt: DateTime.now(),
@@ -1477,6 +1452,7 @@ class SessionDetailController
         _interruptTurnGeneration++;
         _interruptClientMessageId = null;
         _clearHistoryPageTracking();
+        _clearHistoryRefreshTracking();
         // The transport can no longer acknowledge an outstanding draft publish,
         // and whatever answers the NEXT connect may be a different broker
         // build. Forget the negotiated capability with it: the row stays dirty
@@ -1563,6 +1539,7 @@ class SessionDetailController
           !identical(_connection, connection)) {
         return;
       }
+      if (_handleToolSlotReply(event)) return;
       // A timed-out or superseded page is no longer part of the active cursor
       // chain. Ignore it wholesale: merging its messages would advance the
       // projection behind a retry that is still using the prior cursor.
@@ -1571,6 +1548,16 @@ class SessionDetailController
               event.clientMessageId != _historyPageRequestId)) {
         return;
       }
+      // The same holds for a refresh answer: one this window is not waiting
+      // for, from the cursor it still holds, would restate rows out of place.
+      if (event is HistoryWireEvent &&
+          event.clientMessageId != null &&
+          !_acceptsHistoryRefreshAnswer(event)) {
+        return;
+      }
+      final historyRefreshAnswer =
+          event is HistoryWireEvent && event.clientMessageId != null;
+      if (event is HelloWireEvent) _startHistoryNavigationEpoch();
       final brokerProfileId = _brokerScopeKey;
       if (brokerProfileId != null &&
           (event is HistoryWireEvent ||
@@ -1654,8 +1641,10 @@ class SessionDetailController
           );
         }
       }
-      if (previousSessionStatus == SessionStatus.working &&
-          sessionInfo?.status != SessionStatus.working) {
+      final turnEnded =
+          previousSessionStatus == SessionStatus.working &&
+          sessionInfo?.status != SessionStatus.working;
+      if (turnEnded) {
         _interruptTurnGeneration++;
       }
       // R0b: this socket observes the turn boundary before the roster journal
@@ -1679,48 +1668,130 @@ class SessionDetailController
           ? SessionInterruptPhase.idle
           : interruptPhase;
       _advanceBootstrapStateForHistoryEvent(event, bootstrapAttempt);
-      _updateTranscriptCacheTail(event);
       final requestedHistoryCursor = _historyPageCursorInFlight;
+      final requestedHistoryLimit = _historyPageLimitInFlight;
+      final requestedNewer = _historyPageNewer;
+      final requestedHistoryUntil = _historyPageUntilInFlight;
       var historyPageLoading = state.historyPageLoading;
       LocalizedFailure? historyPageError;
       String? historyPageErrorCode;
+      Map<String, String>? historyRefusedCursors;
       var clearHistoryPageError = false;
       // Hello starts a wire connection epoch even if transport status was
       // coalesced. Cursor continuity does not prove adapter continuity.
       var transcriptWindow = event is HelloWireEvent
           ? state.transcriptWindow.invalidateQuestionAuthority()
           : state.transcriptWindow;
-      var acceptedHistoryPage = true;
+      var pageRejection = TranscriptHistoryPageRejection.none;
+      var pageAdoptedSessionStart = false;
       switch (event) {
         case HistoryWireEvent():
+          // The reconnect's own answer, a reset with no gap, only capped what
+          // was persisted since this window's cursor: its pages stay. Only a
+          // broker that pages forward (contract revision 28) can fill the gap
+          // it leaves from its older edge, where the rows kept there begin.
+          final catchUp =
+              !historyRefreshAnswer &&
+              _awaitingReconnectFrame &&
+              event.reset &&
+              event.gap == null &&
+              event.newerHistory &&
+              transcriptWindow.historyCursor != null;
+          if (!historyRefreshAnswer) _awaitingReconnectFrame = false;
+          _newerHistoryOffered = event.newerHistory;
+          final liveBefore = transcriptWindow.liveRowsWithoutBoundary;
           transcriptWindow = transcriptWindow.applyHistory(
             event,
             preserveMessageKey: _historyViewportAnchorKey,
+            catchUp: catchUp,
           );
+          _afterHistoryFrame(
+            transcriptWindow.historyCursor,
+            refreshAnswer: historyRefreshAnswer,
+            reset: event.reset,
+          );
+          if (historyRefreshAnswer) {
+            _onHistoryRefreshAnswered(
+              before: liveBefore,
+              after: transcriptWindow.liveRowsWithoutBoundary,
+            );
+          }
         case HistoryPageWireEvent() when requestedHistoryCursor != null:
-          final mutation = transcriptWindow.prependPage(
-            event,
-            requestedCursor: requestedHistoryCursor,
-            preserveMessageKey: _historyViewportAnchorKey,
-          );
+          final TranscriptHistoryPageMutation mutation;
+          if (!requestedNewer) {
+            mutation = transcriptWindow.prependPage(
+              event,
+              requestedCursor: requestedHistoryCursor,
+              preserveMessageKey: _historyViewportAnchorKey,
+            );
+          } else if (!event.isNewer || requestedHistoryUntil == null) {
+            // A broker that ignores the direction answers with an older page,
+            // which is never applied as a newer one. It stays refused for
+            // this attach.
+            _newerPagingRefused = true;
+            mutation = TranscriptHistoryPageMutation(
+              window: transcriptWindow,
+              rejection: TranscriptHistoryPageRejection.stale,
+            );
+          } else {
+            mutation = transcriptWindow.insertNewerPage(
+              event,
+              requestedCursor: requestedHistoryCursor,
+              until: requestedHistoryUntil,
+              preserveMessageKey: _historyViewportAnchorKey,
+            );
+          }
           transcriptWindow = mutation.window;
-          acceptedHistoryPage = mutation.accepted;
+          pageRejection = mutation.rejection;
+          pageAdoptedSessionStart = mutation.adoptedSessionStart;
         case MessageWireEvent(:final message):
-          transcriptWindow = transcriptWindow.applyLiveMessage(message);
+          transcriptWindow = transcriptWindow.applyLiveMessage(
+            message,
+            protectedKey: _historyViewportAnchorKey,
+          );
         case _:
           break;
       }
-      if (event is HistoryWireEvent) {
+      final acceptedHistoryPage =
+          pageRejection == TranscriptHistoryPageRejection.none;
+      // A page too large to keep beside the rows the window must hold is
+      // retried smaller; only a single row that still does not fit is final.
+      final retryHistoryPageLimit =
+          pageRejection == TranscriptHistoryPageRejection.overBudget &&
+              requestedHistoryCursor != null &&
+              (requestedHistoryLimit ?? kTranscriptHistoryPageMessages) > 1
+          ? (requestedHistoryLimit ?? kTranscriptHistoryPageMessages) ~/ 2
+          : null;
+      if (event is HistoryWireEvent && !historyRefreshAnswer) {
         historyPageLoading = false;
         _clearHistoryPageTracking();
         clearHistoryPageError = true;
+        historyRefusedCursors = const {};
+      } else if (event is NackWireEvent &&
+          _isHistoryRefreshRequest(event.clientMessageId)) {
+        // A background request: its refusal changes when the next one is
+        // asked for, and is not the reader's error.
+        _onHistoryRefreshRefused(event.clientMessageId!, event.code);
       } else if (event is HistoryPageWireEvent &&
           (_historyPageRequestId == null ||
               event.clientMessageId == _historyPageRequestId)) {
         historyPageLoading = false;
         _clearHistoryPageTracking();
-        if (acceptedHistoryPage) {
+        if (acceptedHistoryPage ||
+            pageRejection == TranscriptHistoryPageRejection.stale ||
+            retryHistoryPageLimit != null) {
+          // A stale page answers a boundary a replacement or release already
+          // moved past: nothing failed, and the reader's next scroll asks for
+          // the boundary the window holds now.
           clearHistoryPageError = true;
+        } else if (pageRejection == TranscriptHistoryPageRejection.noProgress) {
+          // The same boundary asked for again at once would get the same
+          // answer, so this is a failure that can pass: it waits out a
+          // backoff before the next attempt, as a refusal of that kind does.
+          historyPageErrorCode = kHistoryPageNoProgressCode;
+          historyPageError = const LocalizedFailure.notice(
+            FailureLead.loadEarlierHistory,
+          );
         } else {
           historyPageErrorCode = 'HISTORY_PAGE_CLIENT_RESOURCE_LIMIT';
           historyPageError = const LocalizedFailure.notice(
@@ -1732,11 +1803,25 @@ class SessionDetailController
           event.clientMessageId == _historyPageRequestId) {
         historyPageLoading = false;
         _clearHistoryPageTracking();
-        historyPageErrorCode = event.code;
-        historyPageError = LocalizedFailure(
-          lead: FailureLead.loadEarlierHistory,
-          detail: boundedTechnicalDetail('${event.code}: ${event.message}'),
-        );
+        if (isHistoryCursorRefusalCode(event.code) &&
+            requestedHistoryCursor != null) {
+          // The broker no longer has that position: the range it is an edge
+          // of stops paging, and every other range pages as usual.
+          historyRefusedCursors = {
+            ...state.historyRefusedCursors,
+            requestedHistoryCursor: event.code,
+          };
+        } else {
+          historyPageErrorCode = event.code;
+          historyPageError = isHistoryCursorRefusalCode(event.code)
+              ? const LocalizedFailure.notice(FailureLead.historyPageDiverged)
+              : LocalizedFailure(
+                  lead: FailureLead.loadEarlierHistory,
+                  detail: boundedTechnicalDetail(
+                    '${event.code}: ${event.message}',
+                  ),
+                );
+        }
       } else if (event is UnknownWireEvent &&
           event.kind == 'history-page' &&
           _historyPageRequestId != null) {
@@ -1777,19 +1862,25 @@ class SessionDetailController
         // fold.
         HistoryWireEvent(:final reset, :final hasEarlier, :final truncated)
             when reset =>
-          !hasEarlier &&
-              truncated == null &&
-              !transcriptWindow.tailPrefixEvicted,
-        HistoryPageWireEvent(:final endOfHistory) when acceptedHistoryPage =>
-          endOfHistory,
+          !hasEarlier && truncated == null,
+        // An exact reload of a released range that began at the session start
+        // restores that start even when the broker's walk, stopping at the
+        // requested row count, reports more history behind it.
+        // A newer page's end is the current end of history, not its start.
+        HistoryPageWireEvent(:final endOfHistory)
+            when acceptedHistoryPage && !requestedNewer =>
+          endOfHistory || pageAdoptedSessionStart,
         _ => state.historyStartReached,
       };
-      // Live/delta growth can evict the head after the claim was made. A
-      // leading local gap means the top of the retained window is not the
-      // session start, whichever event carried the claim; an endOfHistory
-      // page at the head keeps it (its eviction gap sits mid-window).
+      // The claim is also structural: it holds only while the window's oldest
+      // retained row is the session's first. Releasing the start page, a
+      // retained browsing anchor in front of a reset, or rows released with no
+      // boundary all move the head away from it, whichever event carried the
+      // claim.
       final historyStartReached =
-          wireHistoryStartReached && transcriptWindow.leadingGap == null;
+          wireHistoryStartReached &&
+          transcriptWindow.olderHistoryCursor == null &&
+          !transcriptWindow.leadingEdgeReleased;
       state = state.copyWith(
         events: appendSessionDetailEventLog(state.events, event),
         transcriptWindow: transcriptWindow,
@@ -1813,6 +1904,7 @@ class SessionDetailController
         historyPageLoading: historyPageLoading,
         historyPageError: historyPageError,
         historyPageErrorCode: historyPageErrorCode,
+        historyRefusedCursors: historyRefusedCursors,
         clearHistoryPageError: clearHistoryPageError,
         historyStartReached: historyStartReached,
         clearError:
@@ -1920,6 +2012,28 @@ class SessionDetailController
         unawaited(_handleSharedDraftEvent(event));
       }
       unawaited(_handleOutboxReceipt(event));
+      if (retryHistoryPageLimit != null && requestedHistoryCursor != null) {
+        unawaited(
+          requestedNewer && requestedHistoryUntil != null
+              ? _loadNewerHistoryCoordinated(
+                  cursor: requestedHistoryCursor,
+                  until: requestedHistoryUntil,
+                  limit: retryHistoryPageLimit,
+                )
+              : _loadEarlierHistoryCoordinated(
+                  limit: retryHistoryPageLimit,
+                  cursor: requestedHistoryCursor,
+                ),
+        );
+      }
+      if (event is MessageWireEvent ||
+          event is SessionWireEvent ||
+          event is HistoryWireEvent) {
+        _maybeRequestHistoryRefresh(turnEnded: turnEnded);
+      }
+      if ((event is HistoryWireEvent && !historyRefreshAnswer) || turnEnded) {
+        _queueToolSlotReloads(recheck: turnEnded);
+      }
     });
   }
 
@@ -2038,6 +2152,11 @@ class SessionDetailController
       case SessionWireEvent(:final info)
           when info.status != SessionStatus.working:
         return (status: null, replace: current != null);
+      // A refused boundary refresh or history page is the reader's navigation,
+      // not the turn: the provider may still be retrying.
+      case NackWireEvent(:final clientMessageId)
+          when _isHistoryNavigationId(clientMessageId):
+        return (status: null, replace: false);
       case EndedWireEvent() || NackWireEvent():
         return (status: null, replace: current != null);
       case _:
@@ -2174,7 +2293,11 @@ class SessionDetailController
         }
         _scheduleLocalMaintenance();
       case NackWireEvent(:final clientMessageId, :final code, :final message):
-        if (clientMessageId == null || clientMessageId.isEmpty) {
+        // A refused history read settles in the history handling; it sent
+        // nothing the outbox or the composer holds.
+        if (clientMessageId == null ||
+            clientMessageId.isEmpty ||
+            _isHistoryNavigationId(clientMessageId)) {
           return;
         }
         final detail = message.isEmpty ? code : message;
@@ -2272,6 +2395,22 @@ class SessionDetailController
     int limit = kTranscriptHistoryPageMessages,
     String? cursor,
   }) => _loadEarlierHistoryCoordinated(limit: limit, cursor: cursor);
+
+  /// Whether this attach can page NEWER history (contract revision 28): its
+  /// broker offered it on the last history frame and has not refused it.
+  bool get canLoadNewerHistory => _canLoadNewerHistory;
+
+  /// Loads one page newer than [cursor] into the gap ending at [until]; see
+  /// [TranscriptHistoryNavigation.insertNewerPage].
+  Future<bool> loadNewerHistory({
+    required String cursor,
+    required String until,
+    int limit = kTranscriptHistoryPageMessages,
+  }) => _loadNewerHistoryCoordinated(
+    cursor: cursor,
+    until: until,
+    limit: limit,
+  );
 
   /// Records the first visible canonical row so active-history eviction keeps
   /// that page plus the recent tail. This is local memory policy only.

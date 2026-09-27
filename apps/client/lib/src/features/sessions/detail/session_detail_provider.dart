@@ -34,6 +34,20 @@ final sessionHistoryPageTimeoutProvider = Provider<Duration>(
   (ref) => const Duration(seconds: 20),
 );
 
+/// How long a boundary refresh may go unanswered before the next one may be
+/// asked for. A read the broker never finishes answers nothing, not even a
+/// refusal.
+final sessionHistoryRefreshTimeoutProvider = Provider<Duration>(
+  (ref) => const Duration(seconds: 30),
+);
+
+/// How long after reattaching because the broker no longer had the window's
+/// reconnect cursor another such reattach waits, however often the cursor is
+/// refused meanwhile.
+final sessionHistoryCursorRecoveryBackoffProvider = Provider<Duration>(
+  (ref) => const Duration(minutes: 2),
+);
+
 /// Provider for one session detail controller.
 final AutoDisposeNotifierProviderFamily<
   SessionDetailController,

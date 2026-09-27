@@ -127,7 +127,6 @@ interface AgyPendingRow {
   key: string;
   text: string;
   sentAt: number;
-  queued: boolean;
 }
 
 /** A step being assembled from `step_update` deltas. */
@@ -236,13 +235,20 @@ export class AgyDriveConnection extends AgyObserveConnection {
    * `getHistory()` and nothing else, so an overlay never reaches a reloaded page
    * (reflection §6, the fact that decided claude's design). This is the only
    * reason a refreshed browser still shows words the user typed a second ago.
+   *
+   * Every row still here is UNDELIVERED at the time of the read, so it replays
+   * queued whatever the session was doing when it was sent, as claude's do. The
+   * live emit keeps the send-time flag (an idle send is not "queued" to the
+   * person who typed it). Replayed unqueued, the row counted toward the cursor a
+   * client resumes from, and the transcript line that delivers it, written
+   * before the rows this one follows, made that cursor diverge on every send.
    */
   protected override extraHistoryRows(): AgentMessage[] {
     return this.pendingRows.map((row) => ({
       type: 'user-message' as const,
       text: row.text,
       key: row.key,
-      ...(row.queued ? { queued: true } : {}),
+      queued: true,
       sentAt: row.sentAt,
     }));
   }
@@ -513,7 +519,7 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // a later repeat of the same words.
     const evicted = pushAgyQueuedSend(this.queuedSends, { text, key, notBeforeOffset });
     for (const goneKey of evicted) this.dropPendingRow(goneKey);
-    this.pendingRows.push({ key, text, sentAt, queued });
+    this.pendingRows.push({ key, text, sentAt });
     while (this.pendingRows.length > AGY_PENDING_SEND_LIMIT) {
       const gone = this.pendingRows.shift()!;
       retireAgyQueuedSend(this.queuedSends, gone.key);

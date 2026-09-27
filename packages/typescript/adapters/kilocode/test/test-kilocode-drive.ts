@@ -709,6 +709,61 @@ try {
       boundaryRetained: boundaries.has(diskSession.id),
     }));
 
+  // The same mid-turn read, then the step's own progress to its end: its text grows, its running
+  // tool gains its result, and the message completes with its run summary before its final token
+  // reading. Kilo writes a message in place until it completes, so none of that is a rewrite, and
+  // Drive survives the turn boundary.
+  const stepAt = Date.parse('2026-08-23T10:00:40.000Z');
+  const stepMessage = (completed: boolean) => JSON.stringify({
+    role: 'assistant', parentID: 'msg-user', providerID: 'vllm-fixture', modelID: 'qwen-fixture',
+    time: { created: stepAt, ...(completed ? { completed: stepAt + 900 } : {}) },
+    ...(completed ? { finish: 'stop' } : {}),
+    cost: completed ? 0.1 : 0,
+    tokens: completed
+      ? { input: 4, output: 1, cache: { read: 0, write: 0 }, total: 5 }
+      : { input: 0, output: 0, cache: { read: 0, write: 0 }, total: 0 },
+  });
+  const stepTool = (status: 'running' | 'completed') => JSON.stringify({
+    type: 'tool', tool: 'bash', callID: 'call-step',
+    state: status === 'completed'
+      ? { status, input: { command: 'ls' }, output: 'a.txt', title: 'ls', metadata: { exit: 0 }, time: { start: 1, end: 2 } }
+      : { status, input: { command: 'ls' }, time: { start: 1 } },
+  });
+  const stepDatabase = new Database(join(root, 'kilo.db'));
+  stepDatabase.query('insert into message values (?, ?, ?, ?, ?)')
+    .run('msg-drive-step', diskSession.id, stepAt, stepAt, stepMessage(false));
+  stepDatabase.query('insert into part values (?, ?, ?, ?, ?, ?)').run(
+    'prt-step-text', 'msg-drive-step', diskSession.id, stepAt + 100, stepAt + 100,
+    JSON.stringify({ type: 'text', text: 'Checking', time: { start: stepAt + 100 } }),
+  );
+  stepDatabase.query('insert into part values (?, ?, ?, ?, ?, ?)').run(
+    'prt-step-tool', 'msg-drive-step', diskSession.id, stepAt + 200, stepAt + 200, stepTool('running'),
+  );
+  stepDatabase.close();
+  let stepSnapshotTaken = true;
+  try {
+    await diskConnection.runCommand?.('stop');
+  } catch {
+    stepSnapshotTaken = false;
+  }
+  const settledStepDatabase = new Database(join(root, 'kilo.db'));
+  settledStepDatabase.query('update part set data = ? where id = ?').run(
+    JSON.stringify({ type: 'text', text: 'Checking the directory.', time: { start: stepAt + 100, end: stepAt + 300 } }),
+    'prt-step-text',
+  );
+  settledStepDatabase.query('update part set data = ? where id = ?').run(stepTool('completed'), 'prt-step-tool');
+  settledStepDatabase.query('update message set data = ? where id = ?').run(stepMessage(true), 'msg-drive-step');
+  settledStepDatabase.close();
+  emit({ type: 'session.idle', properties: { sessionID: diskSession.id } });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  check('a step completing in place after a mid-turn ownership read does not revoke Drive',
+    diskConnection.info.attachMode !== 'observe' && boundaries.has(diskSession.id),
+    JSON.stringify({
+      stepSnapshotTaken,
+      attachMode: diskConnection.info.attachMode,
+      boundaryRetained: boundaries.has(diskSession.id),
+    }));
+
   const rewrittenDatabase = new Database(join(root, 'kilo.db'));
   rewrittenDatabase.query('update part set data = ? where id = ?').run(
     JSON.stringify({ type: 'text', text: 'foreign replacement' }), 'prt-user',

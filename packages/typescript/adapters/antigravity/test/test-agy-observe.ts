@@ -17,7 +17,7 @@
  *   bun run packages/typescript/adapters/antigravity/test/test-agy-observe.ts   (exit 0 = all pass)
  */
 export {};
-import { appendFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentMessage } from '@cosyncing/adapter-api';
 import {
@@ -95,6 +95,8 @@ function duplicates(messages: AgentMessage[]): string[] {
     // Keyless control frames (notice, history-reset) are legitimately repeatable.
     const record = message as unknown as Record<string, unknown>;
     if (record.key === undefined && record.callId === undefined) continue;
+    // So is the task panel: one upserted row, restated wherever the ledger changes.
+    if (message.type === 'task-list-state') continue;
     const id = identity(message);
     if (seen.has(id)) dupes.push(id);
     seen.add(id);
@@ -747,8 +749,12 @@ function duplicates(messages: AgentMessage[]): string[] {
       status: string;
       items: Array<{ id?: string; status: string; title: string }>;
     }>;
-    check('history carries exactly one background-task panel', panels.length === 1, String(panels.length));
-    const items = new Map(panels[0]!.items.map((item) => [item.id!, item]));
+    // The panel is one upserted row, restated wherever the ledger changed; the newest is the one a
+    // client shows.
+    check('history restates one background-task panel, under one key',
+      panels.length > 0 && new Set(panels.map((panel) => panel.key)).size === 1, String(panels.length));
+    const newest = panels.at(-1)!;
+    const items = new Map(newest.items.map((item) => [item.id!, item]));
     check('the settled task reports the outcome the settlement recorded',
       items.get('task-7')?.status === 'done', JSON.stringify(items.get('task-7')));
     check('a task the host said it CANCELED reports cancelled, not done',
@@ -757,7 +763,7 @@ function duplicates(messages: AgentMessage[]): string[] {
     // The taxonomy, end to end: five settlements are in the inbox and only the
     // two task ones may become ledger entries.
     check('the subagent, `system` and senderless settlements produce no ledger entries',
-      panels[0]!.items.length === 2, JSON.stringify(panels[0]!.items.map((item) => item.id)));
+      newest.items.length === 2, JSON.stringify(newest.items.map((item) => item.id)));
     // Rendering follows the taxonomy (round-2b review finding 4): a tool block
     // is a record of WORK — the two tasks and the subagent — while `system` and
     // senderless settlements name no task and no conversation, so a tool block
@@ -789,11 +795,11 @@ function duplicates(messages: AgentMessage[]): string[] {
       JSON.stringify(withBody[0]!.result.log).slice(0, 80));
 
     const again = await connection.getHistory();
-    check('a second replay produces the same panel, not a second one',
-      again.filter((message) => message.type === 'task-list-state').length === 1);
+    check('a second replay produces the same panels, not more of them',
+      JSON.stringify(again.filter((message) => message.type === 'task-list-state')) === JSON.stringify(panels));
     check('a second replay does not double the ledger\'s entries',
-      JSON.stringify((again.find((message) => message.type === 'task-list-state') as { items: unknown[] }).items)
-        === JSON.stringify(panels[0]!.items));
+      JSON.stringify((again.findLast((message) => message.type === 'task-list-state') as { items: unknown[] }).items)
+        === JSON.stringify(newest.items));
     await connection.close();
   } finally {
     tree.cleanup();
@@ -874,6 +880,115 @@ function duplicates(messages: AgentMessage[]): string[] {
       refused = true;
     }
     check('listing a model does not make an observe connection writable', refused);
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// ── The replay only grows at its end as the conversation goes on ────────────
+//
+// A client resumes an Antigravity session from the rows it already holds, so a
+// later replay must keep every earlier row where it was. Steps append to the
+// transcript, a settlement lands in the inbox when its task ends, and the panel
+// folds both: each is placed where it happened, never gathered at the end,
+// where every later step moved all of them.
+{
+  const tree = buildAgyFixtureTree({ transcriptSteps: 13, withoutSettlement: true });
+  try {
+    const connection = new AgyObserveConnection({
+      roots: tree.roots, conversationId: CONVERSATION, info: infoFor(CONVERSATION), trace: () => {},
+    });
+    const inbox = join(tree.roots.appData, 'brain', CONVERSATION, '.system_generated', 'messages');
+    const reads: AgentMessage[][] = [await connection.getHistory()];
+    appendFileSync(tree.transcriptPath, jsonl(FIXTURE.transcript.slice(13, 21)));
+    reads.push(await connection.getHistory());
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(join(inbox, `${String(FIXTURE.settlement.id)}.json`), JSON.stringify(FIXTURE.settlement));
+    reads.push(await connection.getHistory());
+    appendFileSync(tree.transcriptPath, jsonl([...FIXTURE.transcript.slice(21), ...FIXTURE.appendedSteps]));
+    reads.push(await connection.getHistory());
+    const extends_ = reads.slice(1).map((later, index) =>
+      JSON.stringify(later.slice(0, reads[index]!.length)) === JSON.stringify(reads[index]));
+    check('each replay keeps every row of the one before it where it was',
+      extends_.every(Boolean), JSON.stringify(extends_));
+    const final = reads.at(-1)!;
+    const settlementAt = final.findIndex((message) => message.type === 'tool-result'
+      && (message as { callId: string }).callId.endsWith(`:task:${String(FIXTURE.settlement.sender)}`));
+    const deliveredAt = final.findIndex((message) =>
+      message.type === 'model-output' && (message as { key?: string }).key === `${agyStepKey(CONVERSATION, 24)}:text`);
+    check('a settlement sits where its inbox file says it was written, before the steps after that',
+      settlementAt > 0 && deliveredAt > settlementAt, `${settlementAt} vs ${deliveredAt}`);
+    const panels = final.filter((message) => message.type === 'task-list-state') as Array<{ items: Array<{ status: string }> }>;
+    check('the panel is restated where the ledger changed: once for the task, once for its settlement',
+      panels.length === 2 && panels[0]!.items[0]?.status === 'in-progress' && panels[1]!.items[0]?.status === 'done',
+      JSON.stringify(panels.map((panel) => panel.items)));
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// A settlement that records no usable time goes after the step whose tool call it reports on.
+{
+  const tree = buildAgyFixtureTree({ withoutSettlement: true });
+  try {
+    const inbox = join(tree.roots.appData, 'brain', CONVERSATION, '.system_generated', 'messages');
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(join(inbox, `${String(FIXTURE.settlement.id)}.json`),
+      JSON.stringify({ ...FIXTURE.settlement, timestamp: undefined }));
+    const connection = new AgyObserveConnection({
+      roots: tree.roots, conversationId: CONVERSATION, info: infoFor(CONVERSATION), trace: () => {},
+    });
+    const history = await connection.getHistory();
+    const settlementAt = history.findIndex((message) => message.type === 'tool-result'
+      && (message as { callId: string }).callId.endsWith(`:task:${String(FIXTURE.settlement.sender)}`));
+    // Step 14 is the tool step: it maps to the result of the call step 13 made.
+    const toolStepAt = history.findIndex((message) => message.type === 'tool-result'
+      && (message as { callId: string }).callId === `${agyStepKey(CONVERSATION, 13)}:call:0`);
+    const nextStepAt = history.findIndex((message) =>
+      JSON.stringify(message).includes(`"${agyStepKey(CONVERSATION, 15)}:`));
+    check('an untimed settlement follows the step it reports on, before the next one',
+      toolStepAt >= 0 && settlementAt > toolStepAt && settlementAt < nextStepAt,
+      `${settlementAt}; step 14 at ${toolStepAt}; step 15 at ${nextStepAt}`);
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// Inbox file names carry no time: two notices written in the opposite order to their names still
+// go where their timestamps put them.
+{
+  const tree = buildAgyFixtureTree({ withoutSettlement: true });
+  try {
+    const inbox = join(tree.roots.appData, 'brain', CONVERSATION, '.system_generated', 'messages');
+    mkdirSync(inbox, { recursive: true });
+    const notice = (id: string, timestamp: string, content: string) => JSON.stringify({
+      ...FIXTURE.settlement, id, sender: 'system', timestamp, content, sourceMetadata: undefined,
+    });
+    // Named first, written later: between step 8 and step 9.
+    writeFileSync(join(inbox, 'a.json'), notice('a', '2026-08-20T10:10:09.500000000Z', 'The later notice'));
+    // Named second, written earlier: between step 4 and step 5.
+    writeFileSync(join(inbox, 'b.json'), notice('b', '2026-08-20T10:10:05.500000000Z', 'The earlier notice'));
+    const connection = new AgyObserveConnection({
+      roots: tree.roots, conversationId: CONVERSATION, info: infoFor(CONVERSATION), trace: () => {},
+    });
+    const history = await connection.getHistory();
+    const noticeAt = (text: string) => history.findIndex((message) =>
+      message.type === 'notice' && (message as { message: string }).message.includes(text));
+    // A tool step maps to the result of the call the step before it made.
+    const toolStepAt = (callStep: number) => history.findIndex((message) => message.type === 'tool-result'
+      && (message as { callId: string }).callId === `${agyStepKey(CONVERSATION, callStep)}:call:0`);
+    const stepAt = (stepIndex: number) => history.findIndex((message) =>
+      JSON.stringify(message).includes(`"${agyStepKey(CONVERSATION, stepIndex)}:`));
+    const earlier = noticeAt('The earlier notice');
+    const later = noticeAt('The later notice');
+    check('inbox entries are placed by the time they were written, not by their file names',
+      toolStepAt(3) >= 0 && earlier > toolStepAt(3) && earlier < stepAt(5)
+        && later > toolStepAt(7) && later < stepAt(9),
+      `earlier ${earlier} (step 4 at ${toolStepAt(3)}, step 5 at ${stepAt(5)}); `
+        + `later ${later} (step 8 at ${toolStepAt(7)}, step 9 at ${stepAt(9)})`);
     await connection.close();
   } finally {
     tree.cleanup();

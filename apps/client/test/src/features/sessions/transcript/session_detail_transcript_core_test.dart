@@ -731,7 +731,7 @@ void main() {
         await tester.pumpAndSettle();
 
         tester
-            .widget<ListView>(
+            .widget<ScrollView>(
               find.byKey(const Key('session-detail-chat-scroll')),
             )
             .controller!

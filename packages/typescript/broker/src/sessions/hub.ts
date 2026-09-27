@@ -35,7 +35,20 @@ import {
 import { validateResolvedWorkspacePath } from '../artifacts/fs-browse.ts';
 import type { SharedDraftStore } from './draft-store.ts';
 import { planSemanticFromMessage } from './client-message-policy.ts';
-import { backwardHistoryCursor, capHistoryDelta, historyDelta, isCursorDurableMessage } from './history-delta.ts';
+import {
+  capHistoryDelta,
+  estimatedClientDecodedBytes,
+  HISTORY_FRAME_MAX_DECODED_BYTES,
+  historyDelta,
+  isBackwardPageMessage,
+  cursorDurableHistory,
+  holdRunningTurn,
+  isCursorDurableMessage,
+} from './history-delta.ts';
+import {
+  historyFitsEncodedPageCache,
+  validHistorySourceIdentity,
+} from './history-page-cache.ts';
 import type { SessionControlTransition } from '../attention/attention-policy.ts';
 import type { LiveOverlayEntry } from '../roster/roster-overlay.ts';
 import {
@@ -90,6 +103,15 @@ export type WireEvent =
       truncated?: { shown: number; total: number };
       /** Opaque cursor for the page immediately before this capped attach tail. */
       olderCursor?: string;
+      /** Revision 28: opaque backward-page cursor for the boundary immediately after this frame's
+       *  newest durable message — the same boundary as `cursor`, in the encoding `history-page`
+       *  accepts. Present only when the frame is an authoritative, pageable read. */
+      endCursor?: string;
+      /** Revision 28: this broker serves `history-refresh` and newer `history-page` requests for
+       *  this session. Sent exactly where `endCursor` is, so its presence is the capability. */
+      newerHistory?: true;
+      /** Revision 28: the `history-refresh` request this incremental frame answers. */
+      clientMessageId?: string;
       hasEarlier?: boolean;
     }
   | {
@@ -98,6 +120,8 @@ export type WireEvent =
       cursor?: string;
       hasMore: boolean;
       endOfHistory: boolean;
+      /** Revision 28: present on a page newer than its request cursor. */
+      direction?: 'newer';
       clientMessageId?: string;
     }
   | { kind: 'message'; seq: number; message: AgentMessage }
@@ -132,12 +156,26 @@ export type WireEvent =
    *  Never sent for a mode-only attach — those keep the legacy error+close behavior. */
   | { kind: 'attach-conflict'; requestedMode: string; reason: string; code: string; message: string };
 
-/** Resync history bound — same knob as the attach-path cap in main.ts (0 disables). */
+/** Resync history bound — same knob as the attach-path cap in main.ts (0 disables).
+ *
+ *  The default is the client's page size, not the 500-message attach default for clients that name
+ *  no `initialHistory`: a resync replaces every attached client's window, and a first-party client
+ *  retains one bounded window whose newest frame must leave room for live growth. A larger reset
+ *  would either be trimmed by the client with no boundary inside it or crowd out everything else,
+ *  while the frame's `olderCursor` keeps every omitted row one page request away. */
+const RESYNC_DEFAULT_MAX_MESSAGES = 100;
 const RESYNC_MAX_MESSAGES = (() => {
   const raw = process.env.COSYNCING_HISTORY_MAX_MESSAGES?.trim();
-  if (!raw) return 500;
+  if (!raw) return RESYNC_DEFAULT_MAX_MESSAGES;
   const n = Number(raw);
-  return Number.isFinite(n) ? n : 500;
+  return Number.isFinite(n) ? n : RESYNC_DEFAULT_MAX_MESSAGES;
+})();
+/** Decoded-byte bound on the same frame, measured with the client's estimator (0 disables). */
+const RESYNC_MAX_DECODED_BYTES = (() => {
+  const raw = process.env.COSYNCING_HISTORY_MAX_DECODED_BYTES?.trim();
+  if (!raw) return HISTORY_FRAME_MAX_DECODED_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : HISTORY_FRAME_MAX_DECODED_BYTES;
 })();
 
 /** Attach-time live text is a convenience replay window, not durable history. Bound it independently
@@ -227,6 +265,14 @@ export type Client = ((event: WireEvent) => void) & {
   /** Atomically retarget the runtime socket when this subscriber moves to a
    *  surviving wrapper. Callback-only fixture clients may omit it. */
   onManagedConnChanged?: (managed: ManagedConn) => void;
+  /** The shape a history row takes on egress to this subscriber (its artifact
+   *  mode's transform), built without side effects: it is called only to
+   *  MEASURE a history frame bound for this subscriber, over rows the bound may
+   *  then trim away. A subscriber that omits it receives rows unchanged. */
+  historyEgress?: (message: AgentMessage) => AgentMessage;
+  /** Whether this subscriber already knows the paging route refuses its source. It then receives
+   *  no page boundary (`endCursor`), which it would treat as permission to release rows. */
+  historyPagingRefused?: () => boolean;
 };
 
 export interface ManagedConnAttentionHooks {
@@ -547,6 +593,10 @@ export class ManagedConn {
   private resyncBaselineLiveRowCount = 0;
   private resyncBaselineLiveRowBytes = 0;
   private resyncBaselineLiveRowsUsable = true;
+  /** Moves whenever every client's window is about to be, or has been, replaced (a history reset
+   *  or a resync broadcast). A `history-refresh` computed across a move describes history the
+   *  clients no longer hold, so it is not sent (contract revision 28). */
+  private historyEpoch = 0;
 
   constructor(
     public conn: SessionConnection,
@@ -776,6 +826,7 @@ export class ManagedConn {
     this.unsub = conn.subscribe((m) => this.push(m));
     conn.setClientCount?.(this.clients.size);
     this.clearLiveText();
+    this.noteHistoryWrite();
     this.liveRunning = conn.info.status !== 'idle';
     this.liveNeedsInput = conn.info.status === 'needs-input';
     this.observedConnStatus = conn.info.status;
@@ -888,7 +939,7 @@ export class ManagedConn {
    *  it as an artifact — so "make an html/pdf and send it to me" works with zero extra agent context.
    *  Source-code churn (.ts/.py/…) is excluded by {@link DELIVERABLE}; edits aren't 'write'. */
   private maybeSurfaceWrite(message: AgentMessage): void {
-    if (message.type !== 'tool-result' || message.isError) return;
+    if (message.type !== 'tool-result' || message.isError || message.pending) return;
     // Case-INSENSITIVE. Each adapter chooses the string it normalises its
     // native write tool to, and the comparison here used to be exact: OpenCode
     // emits 'write' and matched, while Claude and Kimi both emit 'Write' and
@@ -984,6 +1035,7 @@ export class ManagedConn {
     // Out-of-band transcript change (undo/redo): re-pull the revert-filtered history and re-push
     // it wholesale instead of forwarding a chat message — the only way bubbles can *disappear*.
     if (message.type === 'history-reset') {
+      this.historyEpoch += 1;
       this.clearLiveText();
       void this.refreshPendingQueuedUsers();
       this.currentPlans.clear();
@@ -991,6 +1043,9 @@ export class ManagedConn {
       this.resyncResetNotice = message.notice;
       void this.resync(message.notice);
       return;
+    }
+    if (isCursorDurableMessage(message) && message.type !== 'status' && message.type !== 'metadata-update') {
+      this.noteHistoryWrite();
     }
     this.observePlan(message);
     this.accumulateLive(message);
@@ -1094,6 +1149,7 @@ export class ManagedConn {
     if (current === this.observedConnStatus || this.foldingAdapterStatus) return;
     this.observedConnStatus = current;
     this.liveNeedsInput = current === 'needs-input';
+    if (this.liveRunning && current === 'idle') this.noteHistoryWrite();
     this.liveRunning = current !== 'idle';
     // One run-state representation: write the managed projection back, so `conn.info.status` and the
     // published owner status cannot disagree even for one frame. Only pendingInput can differ from
@@ -1164,6 +1220,7 @@ export class ManagedConn {
       // status frame. A real permission/question remains authoritative in pendingInput below.
       this.liveNeedsInput = false;
       if (message.status === 'idle') {
+        if (this.liveRunning) this.noteHistoryWrite();
         this.liveRunning = false;
         this.clearLiveText(); // turn finished → those parts are now in history; reset the accumulator
       } else if (message.status === 'running') {
@@ -1190,6 +1247,59 @@ export class ManagedConn {
     // attached client stops showing a stale `working` the moment the turn ends, instead of waiting
     // for the roster poll. Existing `{ kind: 'session' }` frame — no contract change.
     if (this.conn.info.status !== statusBefore) this.broadcastSession(this.conn.info);
+  }
+
+  /** Whether a turn is running now. The newest durable text row can then still be growing in the
+   *  live stream, so a `history-refresh` leaves it for a later frame. */
+  turnInFlight(): boolean {
+    return this.liveRunning;
+  }
+
+  private historyWriteCount = 0;
+
+  /**
+   * Moves whenever a history snapshot read before now may be behind this session: a transcript row
+   * arrived live, a turn ended (the rows it wrote are final only now), or the connection was
+   * replaced. An adapter's source revision does not always move with every write (OpenCode's moves
+   * only every few), so a pooled snapshot is trusted as current only while this count is where it
+   * was when the snapshot was read.
+   */
+  get liveHistoryWrites(): number {
+    return this.historyWriteCount;
+  }
+
+  private noteHistoryWrite(): void {
+    this.historyWriteCount += 1;
+  }
+
+  /** Why this session refuses a `history-refresh`, or undefined when it serves one. A connection
+   *  that keys live rows differently from their history rows would have every restated row shown
+   *  twice (see `SessionConnection.liveRowsRekeyedInHistory`). */
+  historyRefreshRefusal(): string | undefined {
+    return this.conn.liveRowsRekeyedInHistory === true
+      ? 'This session keys its live rows differently from its saved history, so refreshing would show them twice.'
+      : undefined;
+  }
+
+  /** See {@link historyEpoch}. */
+  get historyReplacementEpoch(): number {
+    return this.historyEpoch;
+  }
+
+  /**
+   * Sends one `history-refresh` answer (contract revision 28) to [client], read while the
+   * replacement epoch was [epoch]. A reset or resync since then replaced every window, so the frame
+   * would describe history the client no longer holds: it is not sent, and the caller answers with
+   * a retryable refusal. Returns whether the frame was sent.
+   */
+  deliverHistoryRefresh(
+    client: Client,
+    epoch: number,
+    frame: Extract<WireEvent, { kind: 'history' }>,
+  ): boolean {
+    if (epoch !== this.historyEpoch || !this.clients.has(client)) return false;
+    client(frame);
+    return true;
   }
 
   /** Accumulated in-flight text as replayable messages — sent to a client right after history so
@@ -1306,7 +1416,12 @@ export class ManagedConn {
     const preWindowLiveRows = this.resyncBaselineLiveRowsUsable
       ? new Map(this.resyncBaselineLiveRows)
       : null;
-    let sent: { frame: AgentMessage[]; derived: AgentMessage[]; persistedAfterBaseline: AgentMessage[] } | null = null;
+    let sent: {
+      frame: AgentMessage[];
+      derived: AgentMessage[];
+      persistedAfterBaseline: AgentMessage[];
+      reachableBehindFrame: AgentMessage[];
+    } | null = null;
     try {
       let full = await this.conn.getHistory().catch(() => null);
       // An EMPTY snapshot here is almost always a transient read (the CLI mid-rewrite at a compaction
@@ -1327,6 +1442,11 @@ export class ManagedConn {
           full = refreshed;
         }
       }
+      // The paging route refuses every page of a source without an identity, so the frame may name
+      // a page boundary only when there is one (probed after the read it describes).
+      const source = validHistorySourceIdentity(
+        await (async () => this.conn.getHistorySourceIdentity?.())().catch(() => undefined),
+      );
       // The reset would erase live frames we deliberately stopped retaining. Abort this resync;
       // clients already received those frames live and can retry from durable history later.
       if (this.resyncReplayOverflow) return;
@@ -1337,13 +1457,62 @@ export class ManagedConn {
       // derived overlays replay after it. The cap is the same state-aware projection as attach:
       // a raw slice loses durable panels/goal state that may not recur in the transcript tail.
       // Governing doc: docs/architecture/client-ui.md
-      const durable = full.filter(isCursorDurableMessage);
-      const derived = full.filter((m) => !isCursorDurableMessage(m));
-      const delta = capHistoryDelta(historyDelta(durable), RESYNC_MAX_MESSAGES, durable.length);
+      // The trailing pending/running projections replay with the overlays: they are not history
+      // yet, and a cursor over them would diverge on the next read (see cursorDurableHistory).
+      const split = cursorDurableHistory(full);
+      // While a turn runs the frame ends at the running-turn hold, and the rows the turn may still
+      // rewrite replay after it with the overlays (see holdRunningTurn).
+      const { framed: durable, held } = this.liveRunning
+        ? holdRunningTurn(split.durable)
+        : { framed: split.durable, held: [] as AgentMessage[] };
+      const derived = held.length > 0 ? [...held, ...split.derived] : split.derived;
+      // One frame goes to every subscriber, so it is measured on the LARGEST shape any of them
+      // receives (each subscriber's own egress, e.g. a reference-mode socket's `diffRef`): every
+      // subscriber's delivered frame then stays within the bound.
+      const egresses = [...this.clients].map((client) => client.historyEgress);
+      const measure = (message: AgentMessage): number => {
+        if (egresses.length === 0) return estimatedClientDecodedBytes(message);
+        let bytes = 0;
+        for (const egress of egresses) {
+          const size = estimatedClientDecodedBytes(egress ? egress(message) : message);
+          if (size > bytes) bytes = size;
+        }
+        return bytes;
+      };
+      const delta = capHistoryDelta(
+        historyDelta(durable),
+        RESYNC_MAX_MESSAGES,
+        durable.length,
+        RESYNC_MAX_DECODED_BYTES,
+        { history: durable, measure },
+      );
+      // A page boundary is permission for a client to release the frame's rows, so it is named only
+      // where a page request can serve it: a versioned source whose history fits the paging cache
+      // (a native random-access capture pages without that cache), and never to a subscriber that
+      // already knows paging is refused for its source.
+      const endCursorServable = source !== undefined
+        && (typeof this.conn.captureHistorySnapshot === 'function'
+          || historyFitsEncodedPageCache(source, split.durable, delta.cursor));
       let persistedAfterBaseline: AgentMessage[] = [];
+      // Rows the snapshot holds behind a capped frame's tail start are not in the frame, but its
+      // older boundary pages them back: they are delivered as far as a raced copy is concerned —
+      // only where that boundary pages for EVERY subscriber, since the replay is shared.
+      let reachableBehindFrame: AgentMessage[] = [];
+      const olderBoundaryPagesForAll = endCursorServable
+        && [...this.clients].every((client) => client.historyPagingRefused?.() !== true);
       if (acceptedCursor !== undefined && preWindowLiveRows !== null) {
         const advance = historyDelta(durable, acceptedCursor);
         if (!advance.reset) {
+          const acceptedBoundary = durable.length - advance.messages.length;
+          if (
+            olderBoundaryPagesForAll
+            && delta.olderBoundary !== undefined
+            && delta.olderBoundary > acceptedBoundary
+          ) {
+            reachableBehindFrame = durable
+              .slice(acceptedBoundary, delta.olderBoundary)
+              .filter(isBackwardPageMessage);
+          }
           // Rows delivered live before resync are in the cursor suffix when they later persist, but
           // they cannot cover a raced occurrence. Subtract them occurrence-for-occurrence. Missing
           // or ambiguous persistence only shrinks the budget, preserving the lossless direction.
@@ -1360,12 +1529,11 @@ export class ManagedConn {
       // A capped reset replaces the client's window, so without the backward cursor the older
       // history would become unreachable after every undo/compaction — same construction as the
       // attach path (the paging handler rebuilds its cache on demand; no seeding is needed here).
-      const olderCursor = delta.truncated
-        ? backwardHistoryCursor(durable, durable.length - delta.truncated.shown)
-        : undefined;
+      const olderCursor = delta.truncated ? delta.olderCursor : undefined;
       this.ring.length = 0; // fresh baseline so a late joiner doesn't replay pre-revert live frames
       this.ringBytes = 0;
-      sent = { frame: delta.messages, derived, persistedAfterBaseline };
+      this.historyEpoch += 1;
+      sent = { frame: delta.messages, derived, persistedAfterBaseline, reachableBehindFrame };
       for (const c of this.clients) {
         c({
           kind: 'history',
@@ -1374,6 +1542,9 @@ export class ManagedConn {
           ...(delta.cursor !== undefined ? { cursor: delta.cursor } : {}),
           ...(delta.truncated ? { truncated: delta.truncated } : {}),
           ...(olderCursor ? { olderCursor } : {}),
+          ...(endCursorServable && c.historyPagingRefused?.() !== true
+            ? { endCursor: delta.endCursor, newerHistory: true as const }
+            : {}),
           ...(delta.truncated ? { hasEarlier: true } : {}),
         });
         for (const m of derived) c({ kind: 'message', seq: ++this.seq, message: m });
@@ -1404,7 +1575,13 @@ export class ManagedConn {
       // nothing got ahead of them — no replay. They are now pre-window live evidence for the next
       // resync, however, so fold them into the accepted-cursor suffix accounting.
       if (sent) {
-        this.replayAfterResync(raced ?? [], sent.frame, sent.derived, sent.persistedAfterBaseline);
+        this.replayAfterResync(
+          raced ?? [],
+          sent.frame,
+          sent.derived,
+          sent.persistedAfterBaseline,
+          sent.reachableBehindFrame,
+        );
       } else {
         for (const message of raced ?? []) this.recordLiveBeyondResyncBaseline(message);
         if (replayOverflow) {
@@ -1442,11 +1619,18 @@ export class ManagedConn {
     frame: AgentMessage[],
     derived: AgentMessage[],
     persistedAfterBaseline: AgentMessage[],
+    reachableBehindFrame: AgentMessage[] = [],
   ): void {
     const deliveredText = new Map<string, string>();
     const deliveredFinal = new Set<string>();
     const deliveredRowBudget = new Map<string, number>();
     const coveredRowBudget = new Map<string, number>();
+    // A row behind a capped frame's start is reachable by paging, so an identical raced copy is
+    // already represented; replaying it would append it after the frame and show it twice.
+    for (const m of reachableBehindFrame) {
+      const json = canonicalMessageJson(m);
+      deliveredRowBudget.set(json, (deliveredRowBudget.get(json) ?? 0) + 1);
+    }
     for (const m of [...frame, ...derived]) {
       const key = liveOverlapKey(m);
       if (key) {

@@ -4,7 +4,8 @@
  * Only a native `user` role becomes a human bubble. System rows become context,
  * measured tool rows become bounded tool results, and unknown shapes use the
  * named context-injection category so a future Reasonix schema cannot turn
- * machine-authored material into user speech or take out replay.
+ * machine-authored material into user speech or take out replay. An assistant row's
+ * `tool_calls` become the calls its tool rows answer.
  */
 import {
   CONTEXT_INJECTION_EVENT,
@@ -20,6 +21,7 @@ export interface ReasonixTranscriptRecord {
   workDurationMs?: unknown;
   createdAt?: unknown;
   name?: unknown;
+  tool_calls?: unknown;
   tool_call_id?: unknown;
   tool_execution?: unknown;
   [key: string]: unknown;
@@ -27,6 +29,9 @@ export interface ReasonixTranscriptRecord {
 
 const MAX_TOOL_FIELD_CHARS = 512;
 const MAX_TOOL_RESULT_BYTES = 64 * 1024;
+const MAX_TOOL_PAYLOAD_BYTES = 64 * 1024;
+/** Calls restated from one assistant row, which bounds what a malformed row can cost. */
+const MAX_TOOL_CALLS_PER_RECORD = 256;
 
 export interface ReasonixDisplayEntry {
   index: number;
@@ -69,6 +74,50 @@ function boundedToolField(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_TOOL_FIELD_CHARS
     ? value
     : fallback;
+}
+
+/** A tool payload as the live drive reports it: the value, or a stated omission. */
+export function boundedReasonixToolPayload(value: unknown, label: 'input' | 'output'): unknown {
+  if (value === undefined) return undefined;
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) return undefined;
+    if (Buffer.byteLength(encoded, 'utf8') <= MAX_TOOL_PAYLOAD_BYTES) return value;
+    return `[Reasonix tool ${label} exceeded ${MAX_TOOL_PAYLOAD_BYTES} bytes; omitted]`;
+  } catch {
+    return `[unserializable Reasonix tool ${label}]`;
+  }
+}
+
+/**
+ * The calls an assistant row made, as the live drive showed them. v1.25.2 dispatches each call
+ * over ACP under the id it stores in `tool_calls`, and writes that id again on the tool row that
+ * holds the result (upstream `internal/agent/run_loop.go`, `execute_batch.go`), so a replayed call
+ * pairs with its result and matches the live row. ACP sends the stored arguments as raw JSON when
+ * they parse and omits them otherwise.
+ */
+function toolCallsOf(value: unknown, key: string): AgentMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, MAX_TOOL_CALLS_PER_RECORD).flatMap((entry, index): AgentMessage[] => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return [];
+    const call = entry as { id?: unknown; name?: unknown; arguments?: unknown };
+    let args: unknown;
+    if (typeof call.arguments === 'string' && call.arguments !== '') {
+      try {
+        args = JSON.parse(call.arguments);
+      } catch {
+        args = undefined;
+      }
+    }
+    const toolName = boundedToolField(call.name, 'Reasonix tool');
+    return [{
+      type: 'tool-call',
+      callId: boundedToolField(call.id, `${key}:call:${index}`),
+      toolName,
+      title: toolName,
+      args: boundedReasonixToolPayload(args, 'input'),
+    }];
+  });
 }
 
 function boundedToolResult(value: unknown): unknown {
@@ -151,6 +200,8 @@ export function mapReasonixRecord(
           source: 'reasonix',
         });
       }
+      // After the step's footer, so each call sits beside the tool rows that follow with its result.
+      out.push(...toolCallsOf(record.tool_calls, key));
       if (out.length > 0) return out;
     }
 

@@ -12,6 +12,7 @@ class _MonospaceDetailSection extends StatelessWidget {
     required this.text,
     this.keyPrefix = 'terminal-output-body',
     this.codeLanguage,
+    this.cacheHighlight = true,
   });
 
   final String sourceId;
@@ -23,6 +24,11 @@ class _MonospaceDetailSection extends StatelessWidget {
   /// Key namespace. Defaults to the terminal-output value so existing keys are
   /// unchanged; markdown code blocks pass their own prefix.
   final String keyPrefix;
+
+  /// Whether the highlighted runs are kept in [transcriptRenderCache]: not
+  /// for a block still streaming in, whose every version would push out one
+  /// that is done.
+  final bool cacheHighlight;
 
   @override
   Widget build(BuildContext context) {
@@ -59,7 +65,24 @@ class _MonospaceDetailSection extends StatelessWidget {
       fontFamily: 'monospace',
       height: 1.5,
     );
-    final highlighted = highlightTranscriptCode(text, language: language);
+    final work = debugTranscriptRenderWork;
+    final stopwatch = work == null ? null : (Stopwatch()..start());
+    final result = transcriptRenderCache.code(
+      text,
+      language: language,
+      keep: cacheHighlight,
+    );
+    final highlighted = result.tokens;
+    if (work != null) {
+      if (result.hit) {
+        work.codeCacheHits += 1;
+      } else {
+        work
+          ..codeHighlights += 1
+          ..codeHighlightedUnits += text.length
+          ..codeHighlightMicros += stopwatch!.elapsedMicroseconds;
+      }
+    }
     return Container(
       key: ValueKey('$keyPrefix-$sourceId'),
       width: double.infinity,

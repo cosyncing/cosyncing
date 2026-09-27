@@ -259,6 +259,9 @@ export class PiEngineAdapter implements AgentBackend {
   protected readonly bridgeUsesIntegrationFile: boolean;
   /** Runs the bridge auto-install at most once per adapter instance (historically per broker). */
   private bridgeEnsured = false;
+  /** Per session file: the echo keys of upstream Pi Drive prompts. Held here, not by a connection,
+   *  so a later Drive connection on the same session keeps keying those prompts as their echoes. */
+  private readonly userEchoRegistries = new Map<string, PiUserEchoRegistry>();
 
   constructor(rt: PiDialectRuntime, opts: PiAdapterOptions = {}) {
     this.rt = rt;
@@ -487,9 +490,29 @@ export class PiEngineAdapter implements AgentBackend {
         ? `${this.rt.dialect.displayName} CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`
         : readiness.message);
     }
-    const conn = new PiConnection(this.rt, path, cwd, info);
+    const conn = new PiConnection(this.rt, path, cwd, info, this.userEchoRegistry(path));
     await conn.start();
     return conn;
+  }
+
+  /** OMP persists each Drive prompt's correlation in its own entry; only upstream Pi needs one. */
+  private userEchoRegistry(path: string): PiUserEchoRegistry | undefined {
+    if (this.rt.dialect.toolId === 'omp') return undefined;
+    let registry = this.userEchoRegistries.get(path);
+    if (!registry) {
+      registry = new PiUserEchoRegistry();
+      this.userEchoRegistries.set(path, registry);
+      // Bounded: the oldest session's prompts fall back to entry-id keys on its next attach.
+      while (this.userEchoRegistries.size > PI_USER_ECHO_SESSIONS) {
+        const oldest = this.userEchoRegistries.keys().next().value;
+        if (oldest === undefined) break;
+        this.userEchoRegistries.delete(oldest);
+      }
+    } else {
+      this.userEchoRegistries.delete(path);
+      this.userEchoRegistries.set(path, registry);
+    }
+    return registry;
   }
 
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
@@ -1082,6 +1105,10 @@ function piSessionInfoFromState(
 }
 
 class PiConnection implements SessionConnection {
+  // Every row this connection streams live carries the key its session-file entry gets on reload:
+  // assistant text and thinking by the message's own timestamp (`piAssistantKeyBase`), upstream Pi
+  // prompts through `PiUserEchoRegistry`, OMP prompts by the correlation their entry persists. So
+  // it does not declare `liveRowsRekeyedInHistory`, and the broker serves it a history refresh.
   private readonly handlers = new Set<AgentMessageHandler>();
   private proc: Bun.Subprocess<'pipe', 'pipe', 'pipe'> | undefined;
   private reqId = 0;
@@ -1111,6 +1138,18 @@ class PiConnection implements SessionConnection {
    *  Entries grow with every turn, so the seed strictly exceeds every previously-issued number
    *  (the same rule the bridge extension applies at hello). */
   private turnSeq = 0;
+  /** The assistant message streaming now. Its deltas are keyed as its session entry will be on
+   *  reload: `<base>:t|r:<ordinal>`, the base from the message's timestamp and the ordinal of the
+   *  non-empty block among blocks of its kind. `turnSeq` keys only a stream that carries no
+   *  timestamp, which no measured Pi or OMP stream does. */
+  private streamingAssistant: {
+    rawBase?: string;
+    base?: string;
+    ordinals: { text: Map<number, number>; thinking: Map<number, number> };
+  } | undefined;
+  /** Assistant messages per key base in this session, seeded from the file at start and counted
+   *  as `mapPiMessages` counts them (see {@link nextPiAssistantKeyBase}). */
+  private readonly assistantKeyBaseCounts = new Map<string, number>();
   /** Tool-call arguments by callId, so a later tool_execution_end can recover the edited file's path
    *  (Pi's result event carries no args) for the canonical tool-result `path` chip. */
   private readonly toolArgs = new Map<string, any>();
@@ -1179,6 +1218,8 @@ class PiConnection implements SessionConnection {
     private readonly sessionPath: string,
     private readonly cwd: string | undefined,
     readonly info: SessionInfo,
+    /** Upstream Pi only: OMP's prompt entries persist their own correlation. */
+    private readonly userEchoes?: PiUserEchoRegistry,
   ) {}
 
   private emit(m: AgentMessage): void {
@@ -1253,6 +1294,11 @@ class PiConnection implements SessionConnection {
       this.turnSeq = countJsonlLines(raw);
       this.userSeq = this.turnSeq;
       this.nextUserTurnOrdinal = countPiJsonlUserMessages(raw);
+      for (const row of activePiJsonlRows(parsePiJsonlRows(raw.split('\n')))) {
+        const message = piJsonlRowMessage(row.obj);
+        const base = message?.role === 'assistant' ? piAssistantKeyBase(message) : undefined;
+        if (base) nextPiAssistantKeyBase(base, this.assistantKeyBaseCounts);
+      }
     } catch {
       /* a fresh session file may not exist yet — counters stay at 0 */
     }
@@ -1367,6 +1413,41 @@ class PiConnection implements SessionConnection {
     });
   }
 
+  /** Open the assistant message a `message_start` (or, on a stream that omits it, the first update)
+   *  announces, under the key base its session entry will have. */
+  private beginStreamingAssistant(message: any): void {
+    const rawBase = piAssistantKeyBase(message);
+    const base = rawBase ? nextPiAssistantKeyBase(rawBase, this.assistantKeyBaseCounts) : undefined;
+    this.streamingAssistant = {
+      ...(rawBase ? { rawBase } : {}),
+      ...(base ? { base } : {}),
+      ordinals: { text: new Map(), thinking: new Map() },
+    };
+  }
+
+  /** The key of the block a text/thinking delta grows: the same key `mapPiMessage` gives that
+   *  block in the persisted message, so the history copy replaces the streamed row. */
+  private streamedBlockKey(kind: 'text' | 'thinking', contentIndex: unknown, partial: any): string {
+    const partialBase = piAssistantKeyBase(partial);
+    if (!this.streamingAssistant || (partialBase && partialBase !== this.streamingAssistant.rawBase)) {
+      this.beginStreamingAssistant(partial);
+    }
+    const streaming = this.streamingAssistant!;
+    const suffix = kind === 'text' ? 't' : 'r';
+    if (!streaming.base) return `t${this.turnSeq}:${suffix}`;
+    const index = typeof contentIndex === 'number' && Number.isInteger(contentIndex) ? contentIndex : -1;
+    const ordinals = streaming.ordinals[kind];
+    let ordinal = ordinals.get(index);
+    if (ordinal === undefined) {
+      // The partial holds every block before this one complete, so counting its non-empty blocks
+      // of this kind gives the ordinal history assigns. First-seen order is the fallback for an
+      // update that carries no partial.
+      ordinal = piAssistantBlockOrdinal(partial, index, kind) ?? ordinals.size;
+      ordinals.set(index, ordinal);
+    }
+    return `${streaming.base}:${suffix}:${ordinal}`;
+  }
+
   /** Degraded RPC fallback: Pi normally emits turn_start BEFORE the user message_start, so
    *  turn_start itself must never mint a summary. If a runtime omits the user event entirely,
    *  the first assistant event opens the turn here using the run clock and queued prompt link. */
@@ -1396,10 +1477,41 @@ class PiConnection implements SessionConnection {
     const index = this.pendingUserTurns.indexOf(userKey);
     if (index !== -1) this.pendingUserTurns.splice(index, 1);
     this.pendingUserEchoes.delete(userKey);
+    this.userEchoes?.retire(userKey);
   }
 
-  private consumePendingUserTurn(nativeSentAt?: number, expectedKey?: string): string | undefined {
-    const index = expectedKey === undefined ? 0 : this.pendingUserTurns.indexOf(expectedKey);
+  /** Correlate an upstream Pi prompt's echo key with the entry Pi will write for it, fenced at the
+   *  file's current line count (see {@link PiUserEchoRegistry}). */
+  private recordUserEcho(key: string, text: string, clientKey: string | undefined): void {
+    if (!this.userEchoes) return;
+    let fenceLine = 0;
+    try {
+      fenceLine = countJsonlLines(readFileSync(this.sessionPath, 'utf8'));
+    } catch {
+      /* no file yet: Pi writes the entry, and every other, after line 0 */
+    }
+    this.userEchoes.add(key, fenceLine, text, clientKey, fileHistorySourceIdentity(this.sessionPath));
+  }
+
+  /** Prompts sent but never started can no longer produce an entry. */
+  private retirePendingUserTurns(): void {
+    for (const key of this.pendingUserTurns) this.userEchoes?.retire(key);
+  }
+
+  /** `text` is the entering user message's text. Upstream Pi starts prompts in the order they were
+   *  sent, so a message carrying a later pending prompt's text means the ones before it never
+   *  produced a message (an extension command or input handler took them). They are skipped and
+   *  retired, exactly as {@link PiUserEchoRegistry.assigner} skips them for history. */
+  private consumePendingUserTurn(nativeSentAt?: number, expectedKey?: string, text?: string): string | undefined {
+    let index = expectedKey === undefined ? 0 : this.pendingUserTurns.indexOf(expectedKey);
+    if (expectedKey === undefined && text !== undefined && this.userEchoes) {
+      const matched = this.pendingUserTurns.findIndex((key) => this.pendingUserEchoes.get(key)?.text === text);
+      for (const skipped of matched > 0 ? this.pendingUserTurns.splice(0, matched) : []) {
+        this.pendingUserEchoes.delete(skipped);
+        this.userEchoes.retire(skipped);
+      }
+      index = 0;
+    }
     if (index < 0) return undefined;
     const [userKey] = this.pendingUserTurns.splice(index, 1);
     if (!userKey) return undefined;
@@ -1462,6 +1574,10 @@ class PiConnection implements SessionConnection {
         // RUN instead left one summary spanning every queued turn, so count, keys, timing and
         // token grouping all changed on the first reload of the session file.
         const m = ev.message;
+        if (m?.role === 'assistant') {
+          this.beginStreamingAssistant(m);
+          return;
+        }
         const correlation = piCollabPromptCorrelation(m);
         // A skill invocation is a user turn to EVERY reader of the durable file
         // — `mapPiMessage`, `mapPiMessages`, `countPiJsonlUserMessages` and the
@@ -1481,7 +1597,11 @@ class PiConnection implements SessionConnection {
           ?? nativeTimeMs(m.timestamp)
           ?? nativeTimeMs(ev.timestamp)
           ?? Date.now();
-        const pendingUserKey = this.consumePendingUserTurn(userStartedAt, correlation?.messageKey);
+        const pendingUserKey = this.consumePendingUserTurn(
+          userStartedAt,
+          correlation?.messageKey,
+          correlation || skill ? undefined : contentToText(m.content),
+        );
         const userKey = pendingUserKey ?? correlation?.messageKey
           ?? (skill ? ordinalAnchor : undefined);
         if (!pendingUserKey && !correlation && skill) {
@@ -1532,6 +1652,7 @@ class PiConnection implements SessionConnection {
         // the key constant so every reply's deltas collided and merged into one bubble (the same bug
         // the bridge fixed). turn_start IS forwarded over RPC stdout. See the bridge extension.
         this.turnSeq++;
+        this.streamingAssistant = undefined;
         // The installed Pi loop emits this BEFORE the user message_start. Opening a fallback here
         // minted an orphan running summary, then message_start opened the real ordinal one. Wait
         // for that user event; a degraded stream falls back at its first assistant event instead.
@@ -1543,6 +1664,7 @@ class PiConnection implements SessionConnection {
         // turn never inherits the previous turn's span or usage.
         const m = ev.message;
         if (m?.role !== 'assistant') return;
+        this.streamingAssistant = undefined;
         this.ensureCurrentRun();
         const currentRun = this.currentRun!;
         currentRun.lastAssistant = {
@@ -1571,6 +1693,9 @@ class PiConnection implements SessionConnection {
         }
         this.retryActive = false;
         this.runStartedAt = undefined;
+        // Their echoes stay in the registry: upstream Pi delivers a steer that arrived while the run
+        // was ending in a continuation run after this event (`_handlePostAgentRun`), and a history
+        // read then keys its entry by that echo.
         this.pendingUserTurns.length = 0; // unconsumed queue entries died with the run
         this.pendingUserEchoes.clear();
         // Whatever is still open closes at the run's end clock. A degraded stream that
@@ -1584,11 +1709,12 @@ class PiConnection implements SessionConnection {
         const e = ev.assistantMessageEvent ?? {};
         this.ensureCurrentRun();
         this.currentRun!.sawAssistantActivity = true;
-        // Pi gives no message.id, so the turn counter IS the key. Key by content KIND (text/thinking),
-        // not the model-dependent contentIndex, so live deltas and any finalized/history snapshot
-        // align on the same key — matches the bridge extension's keying.
-        if (e.type === 'text_delta') this.emit({ type: 'model-output', delta: e.delta, key: `t${this.turnSeq}:t` });
-        else if (e.type === 'thinking_delta') this.emit({ type: 'thinking', delta: e.delta, key: `t${this.turnSeq}:r` });
+        // Pi gives no message.id, and the entry id is minted only when the session file persists the
+        // message, so neither can key a delta. The partial message every update carries has the
+        // timestamp the entry will keep, and the block index says which block the delta grows.
+        const partial = ev.message ?? e.partial;
+        if (e.type === 'text_delta') this.emit({ type: 'model-output', delta: e.delta, key: this.streamedBlockKey('text', e.contentIndex, partial) });
+        else if (e.type === 'thinking_delta') this.emit({ type: 'thinking', delta: e.delta, key: this.streamedBlockKey('thinking', e.contentIndex, partial) });
         else if (e.type === 'toolcall_end' && e.toolCall) {
           const callId = e.toolCall.id ?? `t${this.turnSeq}`;
           if (e.toolCall.arguments !== undefined) this.toolArgs.set(callId, e.toolCall.arguments);
@@ -1746,7 +1872,8 @@ class PiConnection implements SessionConnection {
     try {
       const raw = readFileSync(this.sessionPath, 'utf8');
       if (raw.trim()) {
-        const history = mapPiJsonlText(raw, 0, this.rt.dialect);
+        this.userEchoes?.bind(fileHistorySourceIdentity(this.sessionPath));
+        const history = mapPiJsonlText(raw, 0, this.rt.dialect, this.userEchoes?.assigner());
         // A file with no message entries yet (a fresh session header, or a runtime
         // that has not flushed) proves nothing — let RPC state answer instead.
         if (history.length > 0) {
@@ -1782,7 +1909,13 @@ class PiConnection implements SessionConnection {
   }
 
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {
-    return fileHistorySourceIdentity(this.sessionPath);
+    const identity = fileHistorySourceIdentity(this.sessionPath);
+    // Rows keyed through the registry exist only under it: a replacement registry, or a dropped
+    // correlation, hands entries back their entry-id keys, which rewrites rows already served. The
+    // token names both, so no cache or cursor spans that change.
+    return identity && this.userEchoes
+      ? { ...identity, rewriteToken: `${identity.rewriteToken ?? ''}:echo${this.userEchoes.token}` }
+      : identity;
   }
 
   /**
@@ -1987,6 +2120,8 @@ class PiConnection implements SessionConnection {
     const userKey = durableRpcCorrelation
       ? `${PI_REMOTE_USER_KEY_PREFIX}${randomUUID()}`
       : `u:sent:${++this.userSeq}`;
+    // Before Pi can have written the entry: its history copy must take this key (see the registry).
+    if (!durableRpcCorrelation) this.recordUserEcho(userKey, text, input.clientMessageId);
     this.lastUserMessageKey = userKey;
     // Consumed FIFO by the user message_start this prompt produces — queued steers are
     // delivered in send order, and each turn's summary must link to ITS echo bubble.
@@ -2217,6 +2352,9 @@ class PiConnection implements SessionConnection {
     } catch {
       /* ignore */
     }
+    // The abort drops what Pi had queued, so a prompt that never started never gets an entry; a
+    // later connection's prompt must not inherit its key.
+    this.retirePendingUserTurns();
     this.handlers.clear();
     this.toolArgs.clear();
     // Not `kill()`: on Windows that would leave the Pi this connection started running forever.
@@ -2551,6 +2689,52 @@ function piSkillPromptInvocation(message: any): { text: string; sentAt?: number 
   };
 }
 
+/** Keys one entry's rows the way the live stream keyed them, where the entry alone cannot. */
+interface PiEntryKeys {
+  /** The optimistic echo key a Drive connection gave this user prompt before Pi persisted it. */
+  userKey?: string;
+  userClientKey?: string;
+  /** See {@link piAssistantKeyBase}. */
+  assistantKeyBase?: string;
+}
+
+/**
+ * The reload-stable identity of one assistant message, shared by its live deltas and its session
+ * entry: the message's own `timestamp`. Pi's RPC stream carries no entry id (the session file mints
+ * it when it persists the message), so an entry-id key could never be known live. The timestamp is
+ * set once when the provider stream starts, travels on every `message_start`/`message_update`
+ * partial, and is persisted unchanged on the entry, so both sides derive the same key from it.
+ */
+function piAssistantKeyBase(message: any): string | undefined {
+  const timestamp = message?.timestamp;
+  return typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0
+    ? `a${timestamp}`
+    : undefined;
+}
+
+/** The key base of the next assistant message carrying `base`: `base` itself the first time, then
+ *  `base~1`, `base~2`, … Two messages sharing one timestamp would otherwise share every text key
+ *  and merge into one row. Live and history count the session's messages in the same order, so
+ *  they agree on the suffix. Never observed on a real session file, but a merge would lose text. */
+function nextPiAssistantKeyBase(base: string, counts: Map<string, number>): string {
+  const seen = counts.get(base) ?? 0;
+  counts.set(base, seen + 1);
+  return seen === 0 ? base : `${base}~${seen}`;
+}
+
+/** How many non-empty blocks of `kind` precede `index` in an assistant message: the ordinal a
+ *  history read gives the block at `index` (it skips empty blocks, as {@link mapPiMessage} does). */
+function piAssistantBlockOrdinal(message: any, index: number, kind: 'text' | 'thinking'): number | undefined {
+  const content = message?.content;
+  if (!Array.isArray(content) || !Number.isInteger(index) || index < 0 || index >= content.length) return undefined;
+  let ordinal = 0;
+  for (let i = 0; i < index; i += 1) {
+    const block = content[i];
+    if (block?.type === kind && (kind === 'text' ? block.text : block.thinking)) ordinal += 1;
+  }
+  return ordinal;
+}
+
 function mapPiMessage(
   m: any,
   index = 0,
@@ -2559,6 +2743,7 @@ function mapPiMessage(
   entryTimestamp?: number,
   allowCollabCorrelation = true,
   skillUserKey?: string,
+  keys?: PiEntryKeys,
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
   if (m?.role === 'user') {
@@ -2566,7 +2751,8 @@ function mapPiMessage(
     const imageCount = contentImageCount(m.content);
     // Key by Pi's message id when present, else deterministically by position — so the history copy
     // dedupes against any live echo and keys identically across reattaches (OpenCode keys its too).
-    const key = keyBase ?? (m.id != null ? String(m.id) : `h${index}`);
+    // A Drive connection's own prompt keeps the key its live echo already carried.
+    const key = keys?.userKey ?? keyBase ?? (m.id != null ? String(m.id) : `h${index}`);
     const sentAt = nativeTimeMs(m.timestamp) ?? entryTimestamp;
     if (text || imageCount > 0) out.push({
       type: 'user-message',
@@ -2574,6 +2760,7 @@ function mapPiMessage(
       key,
       turnId: key,
       sentAt,
+      ...(keys?.userKey && keys.userClientKey ? { clientKey: keys.userClientKey } : {}),
       ...(imageCount ? { imageCount } : {}),
     });
   } else if (m?.role === 'custom') {
@@ -2597,11 +2784,12 @@ function mapPiMessage(
     });
   } else if (m?.role === 'assistant') {
     const content = Array.isArray(m.content) ? m.content : [];
+    const base = keys?.assistantKeyBase ?? keyBase;
     let textSeq = 0;
     let thinkingSeq = 0;
     for (const c of content) {
-      if (c.type === 'text' && c.text) out.push({ type: 'model-output', text: c.text, final: true, key: keyBase ? `${keyBase}:t:${textSeq++}` : undefined });
-      else if (c.type === 'thinking' && c.thinking) out.push({ type: 'thinking', text: c.thinking, key: keyBase ? `${keyBase}:r:${thinkingSeq++}` : undefined });
+      if (c.type === 'text' && c.text) out.push({ type: 'model-output', text: c.text, final: true, key: base ? `${base}:t:${textSeq++}` : undefined });
+      else if (c.type === 'thinking' && c.thinking) out.push({ type: 'thinking', text: c.thinking, key: base ? `${base}:r:${thinkingSeq++}` : undefined });
       else if (c.type === 'toolCall') {
         const semantic = piToolSemantic(c.name ?? 'tool', { args: c.arguments, hasResult: false });
         out.push({ type: 'tool-call', callId: c.id ?? '', toolName: c.name ?? 'tool', toolClass: piToolDisplayClass(c.name ?? 'tool'), args: c.arguments, ...(semantic ? { semantic } : {}) });
@@ -2621,8 +2809,126 @@ function mapPiMessage(
   return out;
 }
 
-export function mapPiJsonlText(raw: string, firstIndex = 0, dialect: PiDialect = PI_DIALECT): AgentMessage[] {
-  return mapPiJsonlLines(raw.split('\n'), firstIndex, true, undefined, dialect, true);
+export function mapPiJsonlText(
+  raw: string,
+  firstIndex = 0,
+  dialect: PiDialect = PI_DIALECT,
+  userEchoes?: PiUserEchoAssigner,
+): AgentMessage[] {
+  return mapPiJsonlLines(raw.split('\n'), firstIndex, true, undefined, dialect, true, userEchoes);
+}
+
+/** Sessions whose Drive prompt echoes an adapter remembers at once. */
+const PI_USER_ECHO_SESSIONS = 128;
+
+/** Answers, for each plain user entry of one history read in file order, the echo key it takes. */
+export type PiUserEchoAssigner = (lineIndex: number, text: string) => { key: string; clientKey?: string } | undefined;
+
+interface PiUserEchoCorrelation {
+  key: string;
+  /** The prompt text as sent, which Pi persists unchanged unless it expands or transforms it. */
+  text: string;
+  clientKey?: string;
+  /** Lines the session file held when the prompt was sent: its entry can only come after them. */
+  fenceLine: number;
+  /** The prompt can no longer produce an entry (refused, skipped by a later prompt's message, or
+   *  its connection closed first), so no entry may take its key. */
+  retired: boolean;
+}
+
+/**
+ * The durable key of upstream Pi's own Drive prompts.
+ *
+ * Upstream Pi persists a plain prompt with an entry id it mints itself, after the prompt was sent,
+ * and nothing the broker sent survives into that entry (unlike OMP's correlated prompt command). The
+ * live echo therefore has to carry a key before any durable identity exists, and history must give
+ * the entry that same key or a client merging by key shows the prompt twice.
+ *
+ * This records each sent prompt with its text and the line count the file had when it was sent. A
+ * history read then hands the echo keys, in send order, to the plain user entries written after
+ * each fence — the order in which the live stream consumes them (one per user `message_start`,
+ * oldest first). Pi starts prompts in send order, so an entry carrying a later prompt's exact text
+ * skips the ones before it: those never produced an entry (Pi 0.78.1 runs an extension command, or
+ * an input handler that handles the text, without persisting a message). An entry whose text
+ * matches none (a skill or prompt template Pi expanded) takes the oldest. A prompt that can no
+ * longer be delivered is retired so no later entry takes its key.
+ *
+ * Adding a correlation never changes a row already in history: its entry is written after the
+ * fence. Only dropping one does (the bound, or a rewritten file), and that advances
+ * {@link token}, which the connection folds into its history source identity so caches and
+ * cursors from before it are refused rather than silently re-keyed.
+ */
+export class PiUserEchoRegistry {
+  static readonly MAX_CORRELATIONS = 256;
+  private static instances = 0;
+  /** Distinguishes this registry from one that replaced it after the adapter dropped it. */
+  private readonly epoch = ++PiUserEchoRegistry.instances;
+  private readonly correlations: PiUserEchoCorrelation[] = [];
+  /** The file the fences count lines of: its inode, and its prefix hash once the prefix is whole. */
+  private sourceId: string | undefined;
+  private prefixToken: string | undefined;
+  private dropped = 0;
+
+  /** Changes whenever the keys this registry gives history rows could have changed: a correlation
+   *  was dropped, or this is a different registry. Adding one never changes an existing row. */
+  get token(): string {
+    return `${this.epoch}.${this.dropped}`;
+  }
+
+  add(
+    key: string,
+    fenceLine: number,
+    text: string,
+    clientKey: string | undefined,
+    identity: HistorySourceIdentity | undefined,
+  ): void {
+    this.bind(identity);
+    this.correlations.push({ key, text, fenceLine, retired: false, ...(clientKey ? { clientKey } : {}) });
+    while (this.correlations.length > PiUserEchoRegistry.MAX_CORRELATIONS) {
+      this.correlations.shift();
+      this.dropped += 1;
+    }
+  }
+
+  retire(key: string): void {
+    for (const correlation of this.correlations) {
+      if (correlation.key === key) correlation.retired = true;
+    }
+  }
+
+  /** A replaced or rewritten file renumbers its lines, so every fence is void: drop them all. The
+   *  prefix hash covers a fixed-size prefix, so it only proves a rewrite once the file is at least
+   *  that long; below it, the hash moves with every append. */
+  bind(identity: HistorySourceIdentity | undefined): void {
+    if (!identity) return;
+    const prefixToken = (identity.appendPosition ?? 0) >= HISTORY_SOURCE_REWRITE_PREFIX_BYTES
+      ? identity.rewriteToken
+      : undefined;
+    const replaced = this.sourceId !== undefined && this.sourceId !== identity.sourceId;
+    const rewritten = this.prefixToken !== undefined && prefixToken !== undefined && this.prefixToken !== prefixToken;
+    if ((replaced || rewritten) && this.correlations.length > 0) {
+      this.dropped += this.correlations.length;
+      this.correlations.length = 0;
+    }
+    if (replaced || rewritten) this.prefixToken = undefined;
+    this.sourceId = identity.sourceId;
+    this.prefixToken ??= prefixToken;
+  }
+
+  assigner(): PiUserEchoAssigner | undefined {
+    const live = this.correlations.filter((correlation) => !correlation.retired);
+    if (live.length === 0) return undefined;
+    let next = 0;
+    return (lineIndex, text) => {
+      const matched = live.findIndex((correlation, index) =>
+        index >= next && correlation.fenceLine <= lineIndex && correlation.text === text);
+      const taken = matched >= 0 ? matched : next;
+      const head = live[taken];
+      if (!head || lineIndex < head.fenceLine) return undefined;
+      next = taken + 1;
+      return { key: head.key, ...(head.clientKey ? { clientKey: head.clientKey } : {}) };
+    };
+  }
 }
 
 interface ParsedPiJsonlRow {
@@ -2704,6 +3010,9 @@ export interface PiJsonlTurnCarry {
   /** User-turn ordinal for the next prompt in a later append window. This makes an incremental
    *  observe tail mint the same summary identity as a fresh whole-file reload. */
   nextUserOrdinal?: number;
+  /** Assistant messages per key base so far (see {@link nextPiAssistantKeyBase}), so a later window
+   *  resolves a repeated timestamp exactly as a whole-file read does. */
+  assistantKeyBaseCounts?: Map<string, number>;
 }
 
 type PiOpenTurn = {
@@ -2733,6 +3042,7 @@ function mapPiJsonlLines(
   carry?: PiJsonlTurnCarry,
   dialect: PiDialect = PI_DIALECT,
   activeBranchOnly = false,
+  userEchoes?: PiUserEchoAssigner,
 ): AgentMessage[] {
   const entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[] = [];
   const parsedRows = parsePiJsonlRows(lines, firstIndex);
@@ -2756,7 +3066,7 @@ function mapPiJsonlLines(
       for (const c of m.content) if (c?.type === 'toolCall' && c.id != null) argsByCallId.set(String(c.id), c.arguments);
     }
   }
-  return mapPiMessages(entries, argsByCallId, includeTotals, carry, dialect);
+  return mapPiMessages(entries, argsByCallId, includeTotals, carry, dialect, userEchoes);
 }
 
 /** Pi's terminal stop reasons. `toolUse` means the run continues; absence proves nothing. */
@@ -2819,11 +3129,17 @@ function mapPiMessages(
   includeTotals: boolean,
   carry?: PiJsonlTurnCarry,
   dialect: PiDialect = PI_DIALECT,
+  userEchoes?: PiUserEchoAssigner,
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
   const summaries: AgentMessage[] = [];
   let open: PiOpenTurn | undefined = carry?.open;
   let nextUserOrdinal = carry?.nextUserOrdinal ?? 0;
+  const assistantKeyBaseCounts = carry ? (carry.assistantKeyBaseCounts ??= new Map()) : new Map<string, number>();
+  const assistantKeyBaseFor = (message: any): string | undefined => {
+    const base = piAssistantKeyBase(message);
+    return base ? nextPiAssistantKeyBase(base, assistantKeyBaseCounts) : undefined;
+  };
   const correlationCounts = new Map<string, number>();
   const clientKeyCounts = new Map<string, number>();
   for (const e of entries) {
@@ -2888,6 +3204,12 @@ function mapPiMessages(
     const allowCorrelation = !correlation || correlationIsUnique(correlation);
     const isUserBoundary = e.message?.role === 'user' || !!correlation || !!skill;
     const ordinalAnchor = isUserBoundary ? `u${nextUserOrdinal++}` : undefined;
+    // Only a plain user entry can be a Drive connection's uncorrelated prompt, and the live stream
+    // consumes one echo per such entry, so the assigner is asked exactly once for each of them.
+    const echo = e.message?.role === 'user' && !correlation && !skill
+      ? userEchoes?.(e.index, contentToText(e.message.content))
+      : undefined;
+    const assistantKeyBase = e.message?.role === 'assistant' ? assistantKeyBaseFor(e.message) : undefined;
     out.push(...mapPiMessage(
       e.message,
       e.index,
@@ -2896,6 +3218,10 @@ function mapPiMessages(
       e.entryAt ?? e.messageAt,
       allowCorrelation,
       skill ? ordinalAnchor : undefined,
+      {
+        ...(echo ? { userKey: echo.key, ...(echo.clientKey ? { userClientKey: echo.clientKey } : {}) } : {}),
+        ...(assistantKeyBase ? { assistantKeyBase } : {}),
+      },
     ));
     if (isUserBoundary) {
       // A later prompt proves the previous run ended even without a terminal
@@ -2903,7 +3229,7 @@ function mapPiMessages(
       close(open, true);
       const userKey = correlation && allowCorrelation
         ? correlation.messageKey
-        : (skill ? ordinalAnchor! : e.keyBase);
+        : (skill ? ordinalAnchor! : echo?.key ?? e.keyBase);
       open = {
         summaryAnchor: correlation
           ? (allowCorrelation ? correlation.messageKey : e.keyBase)
@@ -2920,7 +3246,7 @@ function mapPiMessages(
           stopReason: typeof e.message.stopReason === 'string' ? e.message.stopReason : undefined,
           errored: !!e.message.error,
           completedAt: e.entryAt,
-          textKey: firstPiAssistantTextKey(e.message, e.keyBase),
+          textKey: firstPiAssistantTextKey(e.message, assistantKeyBase ?? e.keyBase),
         };
       }
       accumulatePiUsage(open, e.message.usage);
@@ -2980,18 +3306,10 @@ function nativeTimeMs(value: unknown): number | undefined {
 
 function firstPiAssistantTextKey(message: any, keyBase: string): string | undefined {
   if (!Array.isArray(message?.content)) return undefined;
-  let textSeq = 0;
-  let thinkingSeq = 0;
-  for (const c of message.content) {
-    if (c?.type === 'text' && c.text) return `${keyBase}:t:${textSeq}`;
-    if (c?.type === 'text') textSeq++;
-    else if (c?.type === 'thinking') thinkingSeq++;
-  }
-  thinkingSeq = 0;
-  for (const c of message.content) {
-    if (c?.type === 'thinking' && c.thinking) return `${keyBase}:r:${thinkingSeq}`;
-    if (c?.type === 'thinking') thinkingSeq++;
-  }
+  // `mapPiMessage` numbers only non-empty blocks, so the first non-empty one is always ordinal 0.
+  // Counting the empty blocks before it named a row that does not exist.
+  if (message.content.some((c: any) => c?.type === 'text' && c.text)) return `${keyBase}:t:0`;
+  if (message.content.some((c: any) => c?.type === 'thinking' && c.thinking)) return `${keyBase}:r:0`;
   return undefined;
 }
 

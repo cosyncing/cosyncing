@@ -14,6 +14,7 @@ class _MessageRow extends StatelessWidget {
     required this.onForkFromMessage,
     required this.artifactActionState,
     this.resolvedRequestDecisions = const {},
+    this.withdrawnRequestIds = const {},
   });
 
   final AgentMessage message;
@@ -38,6 +39,10 @@ class _MessageRow extends StatelessWidget {
   /// resolution, e.g. a question). Drives the settled card's compact outcome
   /// now that resolution frames render no standalone Chat row.
   final Map<String, String?> resolvedRequestDecisions;
+
+  /// Request ids the session no longer offers although no resolution for them
+  /// arrived: their cards deactivate without an outcome.
+  final Set<String> withdrawnRequestIds;
   final ValueChanged<String> onForkFromMessage;
   final SessionArtifactActionState artifactActionState;
 
@@ -58,6 +63,8 @@ class _MessageRow extends StatelessWidget {
     final requestId = onExtractRequestId(message);
     final isResolved =
         requestId != null && resolvedRequestIds.contains(requestId);
+    final isWithdrawn =
+        requestId != null && withdrawnRequestIds.contains(requestId);
 
     final requestAction = switch (message.type) {
       AgentMessageType.permissionRequest when requestId != null =>
@@ -82,7 +89,8 @@ class _MessageRow extends StatelessWidget {
             decision: 'reject',
           ),
           isEnabled: isConnected && canMutate,
-          isResolved: isResolved,
+          isResolved: isResolved || isWithdrawn,
+          isWithdrawn: isWithdrawn,
           resolvedDecision: resolvedRequestDecisions[requestId],
         ),
       AgentMessageType.questionRequest when requestId != null =>
@@ -91,7 +99,8 @@ class _MessageRow extends StatelessWidget {
           questions: message.questionRequestQuestions,
           isReadOnly: message.requestIsReadOnly,
           isEnabled: isConnected && canMutate,
-          isResolved: isResolved,
+          isResolved: isResolved || isWithdrawn,
+          isWithdrawn: isWithdrawn,
           onSubmit: (answers) => controller.sendQuestionAnswer(
             requestId: requestId,
             answers: answers,
@@ -249,11 +258,13 @@ final class _TranscriptSelectionRegistry extends ChangeNotifier {
     final selected = <_TranscriptSelectionMessage>[];
     for (final (notifier, message) in _messages.values) {
       if (!notifier.registered) continue;
-      final details = notifier.selection;
-      final range = details.range;
-      if (details.status == SelectionStatus.uncollapsed &&
-          range != null &&
-          range.startOffset != range.endOffset) {
+      // The status only, never the range. The range asks each selectable in
+      // the row for its own, and while a row rebuilds under a live selection
+      // (a markdown row's links are selectables of their own) some of them
+      // have none yet: asking then fails an assertion in debug builds and a
+      // null check in release. This runs during build. An uncollapsed
+      // status already means the row holds selected text.
+      if (notifier.selection.status == SelectionStatus.uncollapsed) {
         selected.add(message);
       }
     }
@@ -453,11 +464,18 @@ class _MessageContextRegionState extends ConsumerState<_MessageContextRegion> {
 
   @override
   Widget build(BuildContext context) {
+    // Stable for as long as the row shows the same message. A reply streaming
+    // in arrives as a new message per chunk, with no id and a new seq, under
+    // one key: an identity that changed with it would rebuild the row from
+    // scratch on every chunk, losing everything inside it (a thinking row
+    // the reader opened, a selection) and laying out all of its text again.
+    final rawKey = message.raw['key'];
     final identity =
         message.toolCallId ??
         message.userMessageClientKey ??
         message.userMessageKey ??
         message.id ??
+        (rawKey is String && rawKey.isNotEmpty ? rawKey : null) ??
         message.seq ??
         identityHashCode(message);
     final registry = _selectionRegistry;
@@ -748,6 +766,7 @@ class _PermissionRequestActions extends StatefulWidget {
     required this.onReject,
     required this.isEnabled,
     required this.isResolved,
+    this.isWithdrawn = false,
     this.resolvedDecision,
   });
 
@@ -765,6 +784,11 @@ class _PermissionRequestActions extends StatefulWidget {
   /// Whether a `permission-resolved` for this request already arrived (locally
   /// or from another client). When true the approve/reject buttons deactivate.
   final bool isResolved;
+
+  /// Whether the session no longer offers this request although no
+  /// resolution for it arrived ([isResolved] is then true too): the card
+  /// shows no outcome.
+  final bool isWithdrawn;
 
   /// The canonical resolution's decision (`approve`, `approve-session`,
   /// `reject`, `external`, …) when [isResolved]; renders the settled card's
@@ -887,7 +911,19 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (resolvedElsewhere) ...[
+        if (widget.isWithdrawn &&
+            _outcome != _RequestActionOutcomeState.sent) ...[
+          Text(
+            l10n.sessionRequestNoLongerWaiting,
+            key: ValueKey(
+              'session-detail-permission-withdrawn-${widget.requestId}',
+            ),
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 4),
+        ] else if (resolvedElsewhere) ...[
           Text(
             switch (widget.resolvedDecision) {
               'approve' => l10n.sessionRequestOutcomeApproved,
@@ -977,6 +1013,7 @@ class _QuestionRequestActions extends StatefulWidget {
     required this.isResolved,
     required this.onSubmit,
     required this.onReject,
+    this.isWithdrawn = false,
   });
 
   final String requestId;
@@ -987,6 +1024,11 @@ class _QuestionRequestActions extends StatefulWidget {
   /// Whether a `question-resolved` for this request already arrived (locally or
   /// from another client). When true the answer/dismiss controls deactivate.
   final bool isResolved;
+
+  /// Whether the session no longer offers this question although no
+  /// resolution for it arrived ([isResolved] is then true too): the card
+  /// shows no outcome.
+  final bool isWithdrawn;
   final Future<bool> Function(List<List<String>> answers) onSubmit;
   final Future<bool> Function() onReject;
 
@@ -1169,7 +1211,18 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (widget.isResolved && _outcome != _RequestActionOutcomeState.sent)
+        if (widget.isWithdrawn && _outcome != _RequestActionOutcomeState.sent)
+          Text(
+            l10n.sessionRequestNoLongerWaiting,
+            key: ValueKey(
+              'session-detail-question-withdrawn-${widget.requestId}',
+            ),
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          )
+        else if (widget.isResolved &&
+            _outcome != _RequestActionOutcomeState.sent)
           Text(
             l10n.sessionRequestResolvedElsewhere,
             style: theme.textTheme.labelSmall?.copyWith(

@@ -329,9 +329,10 @@ void main() {
     // the trim evicts the window head. Before the fix the completed summary
     // collapsed to its turn-start position and fell off the tail: the first
     // turn lost its footer after every resync while a fresh attach kept it.
-    final big1 = turnRows(1, toolPairs: 16);
-    final big2 = turnRows(2, toolPairs: 16);
-    final big3 = turnRows(3, toolPairs: 16);
+    // Three turns of 90 tool pairs exceed the window's count budget.
+    final big1 = turnRows(1, toolPairs: 90);
+    final big2 = turnRows(2, toolPairs: 90);
+    final big3 = turnRows(3, toolPairs: 90);
     final bigFull = [...big1, ...big2, ...big3];
     var w = const TranscriptHistoryWindow.uninitialized().applyHistory(
       reset([...big1, ...big2]),
@@ -340,7 +341,7 @@ void main() {
     w = w.applyHistory(delta(bigFull));
     expect(
       w.messageCount,
-      lessThanOrEqualTo(kRetainedTranscriptTailMessages),
+      lessThanOrEqualTo(kMaxActiveTranscriptMessages),
       reason: 'bounded raw retention',
     );
     final turns = turnsOf(w);
@@ -358,5 +359,108 @@ void main() {
       'opening 3\n\nanswer 3',
       reason: 'the newest turn stays whole and last',
     );
+  });
+
+  group('rows without a key', () {
+    final error = msg({'type': 'error', 'message': 'rate limited'});
+    final call = msg({
+      'type': 'tool-call',
+      'callId': 'c1',
+      'toolName': 'exec',
+      'title': 'step',
+    });
+    final result = msg({
+      'type': 'tool-result',
+      'callId': 'c1',
+      'toolName': 'exec',
+    });
+    List<Object?> order(List<AgentMessage> rows) => [
+      for (final row in rows) row.raw['callId'] ?? row.raw['type'],
+    ];
+
+    test('a frame restating one the tail holds where the frame puts it holds '
+        'it once, whatever order its fields arrived in', () {
+      final reordered = msg({'message': 'rate limited', 'type': 'error'});
+      final merged = reconcileTranscriptHistoryDelta(
+        retained: [call, result, error],
+        frame: [call, result, reordered],
+      );
+      expect(order(merged), ['c1', 'c1', 'error']);
+    });
+
+    test('an equal one elsewhere in the tail is another row: only one between '
+        "the frame's neighbouring anchors is the one it restates", () {
+      // The tail's first error came before the call; the frame restates the
+      // one after the result.
+      final merged = reconcileTranscriptHistoryDelta(
+        retained: [error, call, result, error],
+        frame: [call, result, error],
+      );
+      expect(order(merged), ['error', 'c1', 'c1', 'error']);
+      expect(merged.first, same(error));
+
+      // The frame puts its error before the call, and the tail's only one
+      // came after the result: not the same row.
+      final apart = reconcileTranscriptHistoryDelta(
+        retained: [call, result, error],
+        frame: [error, call, result],
+      );
+      expect(order(apart), ['error', 'c1', 'c1', 'error']);
+    });
+
+    test('one received live after a prompt that history saves after it is '
+        'held once: only rows with a fixed place bound the match', () {
+      final prompt = msg({'type': 'user-message', 'key': 'u', 'text': 'u'});
+      // The block (fixed) is the call and its result; the prompt and the
+      // error arrived live, the prompt first.
+      final merged = reconcileTranscriptHistoryDeltaDetailed(
+        retained: [call, result, prompt, error],
+        frame: [error, prompt],
+        isLiveRow: (index) => index >= 2,
+        isFixedRow: (index) => index < 2,
+      ).messages;
+      expect(order(merged), ['c1', 'c1', 'error', 'user-message']);
+
+      // Without fixed places every covered row bounds the match, and the
+      // live prompt puts the error out of reach.
+      final unfixed = reconcileTranscriptHistoryDeltaDetailed(
+        retained: [call, result, prompt, error],
+        frame: [error, prompt],
+        isLiveRow: (index) => index >= 2,
+      ).messages;
+      expect(order(unfixed), ['c1', 'c1', 'error', 'user-message', 'error']);
+    });
+  });
+
+  group('rows with a fixed place', () {
+    AgentMessage text(String key) =>
+        msg({'type': 'model-output', 'key': key, 'text': key});
+    List<Object?> keys(List<AgentMessage> rows) => [
+      for (final row in rows) row.raw['key'],
+    ];
+
+    test('one the frame does not cover keeps its place before the frame, not '
+        'after a row shown live that the frame saves later', () {
+      final prompt = msg({'type': 'user-message', 'key': 'u', 'text': 'u'});
+      // The block holds the prompt (shown when sent, not saved yet) and x (a
+      // frame placed it). The next frame starts after x: the calls, then the
+      // prompt the agent took, then y.
+      final frame = [text('c0'), text('c1'), prompt, text('y')];
+      final merged = reconcileTranscriptHistoryDeltaDetailed(
+        retained: [prompt, text('x')],
+        frame: frame,
+        isLiveRow: (index) => index >= 2,
+        isFixedRow: (index) => index == 1,
+      ).messages;
+      expect(keys(merged), ['x', 'c0', 'c1', 'u', 'y']);
+
+      // A row received live, with no fixed place, still follows the row it
+      // followed live.
+      final live = reconcileTranscriptHistoryDeltaDetailed(
+        retained: [prompt, text('x')],
+        frame: frame,
+      ).messages;
+      expect(keys(live), ['c0', 'c1', 'u', 'x', 'y']);
+    });
   });
 }

@@ -338,9 +338,6 @@ extension _SessionDetailBootstrap on SessionDetailController {
     _abortBootstrapActionRefresh(attempt: attempt);
     _connectionSource = null;
     _transcriptScopeKey = null;
-    _transcriptCacheTailMessages = const [];
-    _transcriptCacheTailOlderCursor = null;
-    _transcriptCacheTailHasEarlier = false;
     _historyViewportAnchorKey = null;
     _establishedAttachIntent = null;
     state = SessionDetailState(tool: arg.tool, sessionId: arg.sessionId);
@@ -366,22 +363,30 @@ extension _SessionDetailBootstrap on SessionDetailController {
         return false;
       }
       _transcriptScopeKey = brokerProfileId;
-      _transcriptCacheTailMessages = List<AgentMessage>.unmodifiable(
-        snapshot.messages,
-      );
-      _transcriptCacheTailOlderCursor = snapshot.olderCursor;
-      _transcriptCacheTailHasEarlier =
-          snapshot.hasEarlier && snapshot.olderCursor != null;
+      // A snapshot larger than one broker frame cannot resume incrementally:
+      // the delta would land on rows whose own boundaries this client never
+      // held, so none of them could be released recoverably afterwards. A
+      // snapshot released at its head cannot either: nothing it stores
+      // reaches the released rows, so an incremental frame could never heal
+      // them and the reconnect-required range would survive every reconnect.
+      // Without a reconnect cursor the first attach is an authoritative reset
+      // that carries those boundaries again.
+      final resumable =
+          snapshot.messages.length <= kTranscriptHistoryPageMessages &&
+          !snapshot.headReleased;
       final history = HistoryWireEvent(
         messages: snapshot.messages,
         reset: true,
-        cursor: snapshot.cursor,
+        cursor: resumable ? snapshot.cursor : null,
         olderCursor: snapshot.olderCursor,
         hasEarlier: snapshot.hasEarlier,
         gap: snapshot.gap,
         truncated: snapshot.truncation,
       );
-      final transcriptWindow = TranscriptHistoryWindow.fromHistory(history);
+      final transcriptWindow = TranscriptHistoryWindow.fromHistory(
+        history,
+        headReleased: snapshot.headReleased,
+      );
       state = state.copyWith(
         events: appendSessionDetailEventLog(const [], history),
         transcriptWindow: transcriptWindow,
@@ -394,7 +399,8 @@ extension _SessionDetailBootstrap on SessionDetailController {
         historyStartReached:
             !snapshot.hasEarlier &&
             snapshot.truncation == null &&
-            !transcriptWindow.tailPrefixEvicted,
+            transcriptWindow.olderHistoryCursor == null &&
+            !transcriptWindow.leadingEdgeReleased,
       );
       return snapshot.messages.isNotEmpty;
     } on Object {

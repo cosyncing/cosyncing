@@ -111,7 +111,7 @@ void main() {
     expect(_telemetryRows(w, 'contextUsage'), 1, reason: name);
     expect(
       w.messageCount,
-      lessThanOrEqualTo(kRetainedTranscriptTailMessages),
+      lessThanOrEqualTo(kMaxActiveTranscriptMessages),
       reason: '$name: bounded retention',
     );
   }

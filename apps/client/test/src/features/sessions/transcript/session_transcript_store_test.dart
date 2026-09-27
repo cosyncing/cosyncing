@@ -139,9 +139,12 @@ void main() {
       // and is not persisted — the next attach fetches authoritative history
       // instead of being told there is nothing to send.
       expect(restored.cursor, isNull);
-      // Backward paging state still describes real broker history.
-      expect(restored.olderCursor, 'older');
-      expect(restored.hasEarlier, isTrue);
+      // 'older' names the boundary before m0, so paging from it would skip the
+      // 100 dropped rows. The row is stored as released at its head instead:
+      // earlier history exists, no stored cursor reaches it.
+      expect(restored.olderCursor, isNull);
+      expect(restored.hasEarlier, isFalse);
+      expect(restored.headReleased, isTrue);
     });
 
     test('honest total keeps the larger broker-reported total', () async {
@@ -175,7 +178,46 @@ void main() {
       );
       expect(restored!.messages, hasLength(3));
       expect(restored.truncation, isNull);
+      // Nothing was dropped, so the broker boundary still sits right before
+      // the first stored row.
+      expect(restored.olderCursor, 'older');
+      expect(restored.hasEarlier, isTrue);
+      expect(restored.headReleased, isFalse);
     });
+
+    test(
+      'a head-released snapshot round-trips without an older cursor',
+      () async {
+        const key = SessionDetailKey(tool: 'codex', sessionId: 'released');
+        await repository.upsert(
+          SessionTranscriptSnapshot(
+            brokerProfileId: 'profile-a',
+            sessionKey: key,
+            messages: [
+              AgentMessage.fromJson({
+                'type': 'model-output',
+                'key': 'live-9',
+                'text': 'newest',
+              }),
+            ],
+            cursor: 'tail',
+            olderCursor: 'older',
+            hasEarlier: true,
+            headReleased: true,
+            updatedAt: DateTime.utc(2026, 7, 17, 12),
+          ),
+        );
+
+        final restored = await repository.load(
+          brokerProfileId: 'profile-a',
+          sessionKey: key,
+        );
+        expect(restored!.messages, hasLength(1));
+        expect(restored.olderCursor, isNull);
+        expect(restored.hasEarlier, isFalse);
+        expect(restored.headReleased, isTrue);
+      },
+    );
   });
 
   group('row retention', () {
@@ -385,9 +427,11 @@ void main() {
       // be persisted — resuming from it would ask the broker for everything
       // AFTER the omitted message and silently skip it.
       expect(restored.cursor, isNull);
-      // The backward paging cursor still describes real earlier history.
-      expect(restored.olderCursor, 'older');
-      expect(restored.hasEarlier, isTrue);
+      // Nothing retained sits after 'older' any more, and the dropped rows are
+      // not reachable from it: the row is released at its head.
+      expect(restored.olderCursor, isNull);
+      expect(restored.hasEarlier, isFalse);
+      expect(restored.headReleased, isTrue);
     });
 
     test(

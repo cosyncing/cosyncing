@@ -3,7 +3,9 @@
  * RPC, owns its title through the native `title` slot + `title_change` entries (set_session_name
  * rejects an empty name), and answers get_available_commands instead of pi's get_commands. It also
  * pins turn attention: each Drive turn pairs one live running with one terminal summary under its
- * correlation key, and attaching to finished turns replays them without a live running.
+ * correlation key, and attaching to finished turns replays them without a live running. Finally it
+ * pins that a Drive connection streams every row under the key its session-file entry gets, so a
+ * history refresh or reconnect frame shows nothing twice.
  */
 export {};
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,6 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mapPiJsonlText, ompNativePromptAckDeadlineMs } from '../../../pi-engine/src/implementation.ts';
 import { OMP_DIALECT } from '../src/dialect.ts';
+import { PI_RPC_TURN_FIXTURE_SOURCE } from '../../../broker/test/helpers/pi-rpc-turn-fixture.ts';
+import { auditLiveAgainstHistory } from '../../../broker/test/helpers/live-history-key-audit.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -55,6 +59,8 @@ writeFileSync(
   bin,
   `#!/usr/bin/env bun
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+${PI_RPC_TURN_FIXTURE_SOURCE}
 const args = process.argv.slice(2);
 if (args.includes('--version')) {
   console.log('17.4.2');
@@ -97,6 +103,8 @@ function send(id, payload) {
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload) + '\\n');
 }
+// A session named "keyed" streams and persists whole turns as OMP does (see pi-rpc-turn-fixture.ts).
+const keyedTurns = current.includes('_keyed') ? createPiRpcTurnFixture({ file: current, emit, correlated: true }) : undefined;
 let buffered = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
@@ -128,6 +136,8 @@ process.stdin.on('data', (chunk) => {
     } else if (req.type === 'set_thinking_level') {
       selectedThinking = String(req.level ?? '');
       send(req.id, { success: true, data: {} });
+    } else if (req.type === 'prompt' && keyedTurns) {
+      keyedTurns.handlePrompt(req, emit);
     } else if (req.type === 'prompt') {
       send(req.id, { success: true, data: {} });
       const rawPrompt = String(req.message ?? '');
@@ -709,6 +719,117 @@ try {
           && attentionStore.listEvents().length === eventsBefore
           && attentionStore.listObservations().length === openBefore,
         JSON.stringify({ live: frames.filter((message) => message.type === 'run-summary'), history: [...replayed] }));
+    } finally {
+      await again.close();
+    }
+  }
+
+  // Live keys equal history keys on an OMP Drive connection. A client merges rows by key, so a
+  // streamed row and its session-file copy must carry one key, or a history refresh or reconnect
+  // frame restating the copy shows it twice. The keyed fake streams and persists turns as OMP does:
+  // correlated collab prompts, steps with thinking, text and tool calls, a steer injected mid-turn,
+  // a refused prompt, and a message with two text blocks around a call and one whose first text
+  // block stays empty. Both sides come from the real connection: its live mapping and its history.
+  {
+    const { ManagedConn } = await import('../../../broker/src/sessions/hub.ts');
+    const { historyRefreshRequest } = await import('../../../broker/src/sessions/history-delta.ts');
+    const keyedFile = join(sessionsRoot, '2026-08-25_keyed.jsonl');
+    const keyedSentAt = Date.parse('2026-08-25T01:00:01.000Z');
+    writeFileSync(keyedFile, [
+      { type: 'title', v: 1, title: 'Keyed', updatedAt: 1787000000000, pad: '' },
+      { type: 'session', version: 3, id: 'keyed-omp-session', timestamp: '2026-08-25T01:00:00.000Z', cwd },
+      {
+        type: 'custom_message', id: 'keyed-user-0', parentId: null, timestamp: '2026-08-25T01:00:01.500Z',
+        customType: 'collab-prompt', content: 'before attach', display: true, attribution: 'user',
+        details: { from: 'cosyncing', messageKey: 'u:remote:keyed-before', clientKey: 'omp-keys-before', sentAt: keyedSentAt },
+      },
+      {
+        type: 'message', id: 'keyed-assistant-0', parentId: 'keyed-user-0', timestamp: '2026-08-25T01:00:03.000Z',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'answered before attach' }], stopReason: 'stop', usage: { input: 1, output: 1 }, timestamp: keyedSentAt + 1_000 },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+    const keyedId = Buffer.from(keyedFile, 'utf8').toString('base64url');
+    const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+      const end = Date.now() + ms;
+      while (Date.now() < end && !pred()) await new Promise((resolve) => setTimeout(resolve, 20));
+      return pred();
+    };
+    const historyKeys = (rows: any[]) => rows.map((m) => `${m.type}:${m.key ?? m.callId ?? ''}`);
+    let firstHistoryKeys: string[] = [];
+    const drive = await adapter.attach(keyedId, 'resume');
+    try {
+      const live: any[] = [];
+      drive.subscribe((message) => live.push(message));
+      const attachHistory = await drive.getHistory();
+      const idleCount = () => live.filter((m) => m.type === 'status' && m.status === 'idle').length;
+      await drive.sendPrompt({ text: 'first prompt', clientMessageId: 'omp-keys-first' });
+      await waitUntil(() => idleCount() >= 1);
+      await drive.sendPrompt({ text: 'long task', clientMessageId: 'omp-keys-long' });
+      await waitUntil(() => live.some((m) => m.type === 'model-output' && m.delta !== undefined && idleCount() === 1));
+      await drive.sendPrompt({ text: 'steered in', clientMessageId: 'omp-keys-steer' });
+      await waitUntil(() => idleCount() >= 2);
+      let refused = false;
+      try {
+        await drive.sendPrompt({ text: 'refuse this prompt', clientMessageId: 'omp-keys-refused' });
+      } catch {
+        refused = true;
+      }
+      await drive.sendPrompt({ text: 'blocks please', clientMessageId: 'omp-keys-blocks' });
+      await waitUntil(() => idleCount() >= 3);
+      await drive.sendPrompt({ text: 'same clock please', clientMessageId: 'omp-keys-same-clock' });
+      await waitUntil(() => idleCount() >= 4);
+      const history = await drive.getHistory();
+      firstHistoryKeys = historyKeys(history);
+      const audit = auditLiveAgainstHistory({ attachHistory, live, history });
+      const refusedKey = live.find((m) => m.type === 'user-message' && m.clientKey === 'omp-keys-refused')?.key;
+      check('OMP RPC streams every transcript row under its session-file key (only the refused prompt stays live-only)',
+        refused
+          && typeof refusedKey === 'string'
+          && JSON.stringify(audit.liveOnly) === JSON.stringify([`user-message:key:${refusedKey}`]),
+        JSON.stringify({ refused, liveOnly: audit.liveOnly }));
+      check('OMP RPC text and thinking keys come from the message timestamp and non-empty block ordinal',
+        ['looking at first prompt', 'before the call', 'after the call', 'after an empty block', 'answered before attach']
+          .every((text) => history.some((m) => m.type === 'model-output' && m.text === text && /^a\d+:t:\d$/.test(m.key ?? '')))
+          && history.some((m) => m.type === 'model-output' && m.text === 'after the call' && m.key?.endsWith(':t:1'))
+          && history.some((m) => m.type === 'model-output' && m.text === 'after an empty block' && m.key?.endsWith(':t:0'))
+          && history.some((m) => m.type === 'thinking' && m.text === 'only this one counts' && m.key?.endsWith(':r:0')),
+        JSON.stringify(history.filter((m) => m.type === 'model-output' || m.type === 'thinking').map((m) => [m.key, m.text])));
+      const keyOf = (text: string): string | undefined => (history.find((m) => m.type === 'model-output' && m.text === text) as { key?: string } | undefined)?.key;
+      check('two OMP RPC messages sharing one timestamp keep separate rows, the later under an occurrence suffix',
+        /^a\d+:t:0$/.test(keyOf('first under one clock') ?? '')
+          && keyOf('second under the same clock') === keyOf('first under one clock')!.replace(/:t:0$/, '~1:t:0'),
+        JSON.stringify([keyOf('first under one clock'), keyOf('second under the same clock')]));
+      const at = (type: string, text: string) => history.findIndex((m) => m.type === type && (m as { text?: string }).text === text);
+      check('an OMP RPC prompt keeps its correlation key in history, steered prompt included',
+        ['first prompt', 'long task', 'steered in', 'blocks please', 'same clock please'].every((text) => {
+          const row = history.find((m) => m.type === 'user-message' && m.text === text) as { key?: string; clientKey?: string } | undefined;
+          return !!row?.key?.startsWith('u:remote:') && !!row.clientKey?.startsWith('omp-keys-');
+        })
+          && at('model-output', 'starting the long task') < at('user-message', 'steered in')
+          && at('user-message', 'steered in') < at('model-output', 'long task finished'),
+        JSON.stringify(history.filter((m) => m.type === 'user-message')));
+      check('a history refresh from the attach cursor and a reconnect frame show no OMP RPC row twice or under another text',
+        audit.refreshRows !== undefined && audit.refreshRows > 0
+          && audit.duplicatesAfterRefresh.length === 0
+          && audit.duplicatesAfterReconnect.length === 0
+          && audit.textMismatches.length === 0,
+        JSON.stringify(audit));
+      const managed = new ManagedConn(drive);
+      const request = historyRefreshRequest({ cursor: 'cursor' }, managed);
+      check('the broker serves a history refresh on an OMP RPC connection',
+        drive.liveRowsRekeyedInHistory === undefined
+          && managed.historyRefreshRefusal() === undefined
+          && 'since' in request,
+        JSON.stringify(request));
+    } finally {
+      await drive.close();
+    }
+    const again = await adapter.attach(keyedId, 'resume');
+    try {
+      const keys = historyKeys(await again.getHistory());
+      check('a replacement OMP Drive connection reads the same keys',
+        keys.length > 0 && JSON.stringify(keys) === JSON.stringify(firstHistoryKeys),
+        JSON.stringify({ keys, firstHistoryKeys }));
     } finally {
       await again.close();
     }

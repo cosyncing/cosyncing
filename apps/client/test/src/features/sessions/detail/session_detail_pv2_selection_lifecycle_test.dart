@@ -24,7 +24,7 @@ List<AgentMessage> _rows(int start, int count) => [
 Finder get _transcript => find.byKey(const Key('session-detail-chat-scroll'));
 
 ScrollController _scrollController(WidgetTester tester) =>
-    tester.widget<ListView>(_transcript).controller!;
+    tester.widget<ScrollView>(_transcript).controller!;
 
 Future<void> _selectAcross(
   WidgetTester tester,
@@ -359,13 +359,17 @@ void main() {
       'PV2 lifecycle row 2',
     );
 
-    connection
-      ..emitEvent(
-        MessageWireEvent(seq: 101, message: _rows(101, 1).single),
-      )
-      ..emitEvent(
-        MessageWireEvent(seq: 102, message: _rows(102, 1).single),
+    // The reader follows the tail (no protected anchor), so live growth past
+    // the window's count budget releases the oldest rows, selection or not.
+    for (
+      var index = 101;
+      index <= 100 + kMaxActiveTranscriptMessages;
+      index++
+    ) {
+      connection.emitEvent(
+        MessageWireEvent(seq: index, message: _rows(index, 1).single),
       );
+    }
     await tester.pumpAndSettle();
 
     expect(
