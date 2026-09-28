@@ -373,12 +373,18 @@ final class _SeededSessionViewportRegistry extends SessionViewportRegistry {
 /// keeping the rest of the MediaQuery (viewport size, padding) intact.
 Widget _maybeScaleText(double scale, Widget child) {
   return Builder(
-    builder: (context) => MediaQuery(
-      data: MediaQuery.of(
-        context,
-      ).copyWith(textScaler: TextScaler.linear(scale), disableAnimations: true),
-      child: child,
-    ),
+    builder: (context) {
+      final media = MediaQuery.of(context);
+      return MediaQuery(
+        // At scale 1 the platform's text scale stays live, so a test that
+        // changes it mid-run reflows the page.
+        data: media.copyWith(
+          textScaler: scale == 1 ? media.textScaler : TextScaler.linear(scale),
+          disableAnimations: true,
+        ),
+        child: child,
+      );
+    },
   );
 }
 
