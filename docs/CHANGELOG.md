@@ -26,9 +26,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Conversations use a compact context header and composer with directly
   accessible model, permissions, microphone, context usage, Send and Stop.
   Display settings independently persist conversation text size, spacing and
-  reading width. Status indicators are static. The new default Quiet Workspace
-  palette and bundled Lato typography support light and dark appearances;
-  previously selected palettes remain available.
+  reading width. Status indicators are static. Flat White Minimalist is the
+  new default palette; the new Quiet Workspace palette and bundled Lato
+  typography support light and dark appearances, and previously selected
+  palettes remain available.
 - Notifications show requests and unread completions above recent activity,
   with independent filters. Activity read/clear actions preserve pending
   requests, and clearing offers Undo before synchronizing its exact event
@@ -115,6 +116,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   it is treated as a broker in another environment, so the Windows install is offered the
   next port and the WSL broker keeps running. A broker setup cannot place still has to be
   stopped explicitly.
+- Switching themes in the Flutter client applies in one step, rather than
+  through a fade that re-rendered every screen for each of its frames,
+  including hidden session tabs. Settings → Usage overview appears at once,
+  adds its lower sections over the next few frames, and no longer lays out its
+  share previews again on every rebuild.
 - Finished and failed turns of Cline, Grok, Reasonix and Kimi sessions sent
   from Cosyncing now notify. These integrations reported a turn only when it
   ended, which the Server never counts as a turn it saw run, so they never

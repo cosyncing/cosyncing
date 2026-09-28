@@ -43,7 +43,7 @@ enum WorkspaceDestination {
 /// Metrics follow the approved workspace demo on the 4pt grid. The header row
 /// is exactly as tall as the session tab strip beside it so the two read as
 /// one band.
-class WorkspaceSidebar extends ConsumerWidget {
+class WorkspaceSidebar extends ConsumerStatefulWidget {
   /// Creates the sidebar.
   const WorkspaceSidebar({
     required this.width,
@@ -119,7 +119,46 @@ class WorkspaceSidebar extends ConsumerWidget {
   final Future<void> Function() onRefresh;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<WorkspaceSidebar> createState() => _WorkspaceSidebarState();
+}
+
+class _WorkspaceSidebarState extends ConsumerState<WorkspaceSidebar> {
+  // The roster is the sidebar's one expensive child. A new destination, unread
+  // count or width rebuilds the sidebar without changing the roster, so the
+  // roster widget is reused until its own inputs change. Its callbacks forward
+  // to the current widget, so a reused roster never calls a stale one.
+  _SidebarRoster? _roster;
+  Object? _rosterInputs;
+
+  void _newSession({SessionProjectGroup? project}) =>
+      widget.onNewSession(project: project);
+
+  void _openSession(SessionRef session) => widget.onOpenSession(session);
+
+  Future<void> _refresh() => widget.onRefresh();
+
+  _SidebarRoster _rosterFor(SessionListState listState) {
+    final inputs = (
+      listState,
+      widget.searchFocusNode,
+      widget.canCreateSession,
+    );
+    if (_roster == null || inputs != _rosterInputs) {
+      _roster = _SidebarRoster(
+        listState: listState,
+        searchFocusNode: widget.searchFocusNode,
+        canCreateSession: widget.canCreateSession,
+        onNewSession: _newSession,
+        onOpenSession: _openSession,
+        onRefresh: _refresh,
+      );
+      _rosterInputs = inputs;
+    }
+    return _roster!;
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
@@ -132,11 +171,11 @@ class WorkspaceSidebar extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             SizedBox(
-              height: headerHeight,
+              height: WorkspaceSidebar.headerHeight,
               child: Row(
                 children: [
                   const SizedBox(width: 4),
-                  if (width >= compactWidth) ...[
+                  if (widget.width >= WorkspaceSidebar.compactWidth) ...[
                     const CosyncingBrandMark(),
                     const SizedBox(width: 8),
                   ],
@@ -159,13 +198,13 @@ class WorkspaceSidebar extends ConsumerWidget {
                     presentation: RosterFreshnessPresentation.fromListState(
                       listState,
                     ),
-                    onRefresh: onRefresh,
+                    onRefresh: widget.onRefresh,
                   ),
                   _SidebarIconButton(
                     key: const Key('workspace-roster-collapse'),
                     tooltip: l10n.workspaceHideSidebar,
                     glyph: StrokeGlyph.panel,
-                    onPressed: onCollapse,
+                    onPressed: widget.onCollapse,
                   ),
                 ],
               ),
@@ -176,41 +215,35 @@ class WorkspaceSidebar extends ConsumerWidget {
               glyph: StrokeGlyph.compose,
               label: l10n.newSessionTitle,
               emphasized: true,
-              onTap: canCreateSession ? onNewSession : null,
+              onTap: widget.canCreateSession ? widget.onNewSession : null,
             ),
             const SizedBox(height: 4),
             _SidebarNavRow(
               key: const Key('sessions-workspace-overview'),
               glyph: StrokeGlyph.overview,
               label: l10n.workspaceOverview,
-              selected: destination == WorkspaceDestination.overview,
-              onTap: onOverview,
+              selected: widget.destination == WorkspaceDestination.overview,
+              onTap: widget.onOverview,
             ),
             const SizedBox(height: 4),
             _SidebarNavRow(
               key: const Key('sessions-workspace-attention'),
               glyph: StrokeGlyph.bell,
               label: l10n.notificationsTitle,
-              selected: destination == WorkspaceDestination.notifications,
-              trailing: unreadCount > 0 ? navBadgeLabel(unreadCount) : null,
-              onTap: onNotifications,
+              selected:
+                  widget.destination == WorkspaceDestination.notifications,
+              trailing: widget.unreadCount > 0
+                  ? navBadgeLabel(widget.unreadCount)
+                  : null,
+              onTap: widget.onNotifications,
             ),
             const SizedBox(height: 16),
-            Expanded(
-              child: _SidebarRoster(
-                listState: listState,
-                searchFocusNode: searchFocusNode,
-                canCreateSession: canCreateSession,
-                onNewSession: onNewSession,
-                onOpenSession: onOpenSession,
-                onRefresh: onRefresh,
-              ),
-            ),
+            Expanded(child: _rosterFor(listState)),
             _SidebarFooter(
-              settingsAttention: settingsAttention,
-              selected: destination == WorkspaceDestination.settings,
-              onServer: onServer,
-              onSettings: onSettings,
+              settingsAttention: widget.settingsAttention,
+              selected: widget.destination == WorkspaceDestination.settings,
+              onServer: widget.onServer,
+              onSettings: widget.onSettings,
             ),
           ],
         ),

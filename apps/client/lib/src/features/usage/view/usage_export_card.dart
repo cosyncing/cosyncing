@@ -146,6 +146,10 @@ class UsageExportCardPlan {
     final projectCounts = kind.carriesProjectNames
         ? const <int>[usageRankingRows, 4, 3, 2, 1, 0]
         : const <int>[0];
+    // Every rung lays out largely the same strings, and a clipped name is
+    // measured once per character it loses; one layout per string and style
+    // serves the whole ladder.
+    final painters = <(String, TextStyle), TextPainter>{};
     UsageExportCardPlan? last;
     for (final maxProjects in projectCounts) {
       for (final slack in const [12.0, 0.0]) {
@@ -161,6 +165,7 @@ class UsageExportCardPlan {
             baseStyle: baseStyle,
             maxProjects: maxProjects,
             cellCap: cellCap,
+            painters: painters,
           ).build();
           if (last.slack >= slack) return last;
         }
@@ -223,6 +228,7 @@ class _UsageCardBuilder {
     required this.baseStyle,
     required this.maxProjects,
     required this.cellCap,
+    required this.painters,
   });
 
   final UsageExportCardKind kind;
@@ -235,6 +241,9 @@ class _UsageCardBuilder {
   final TextStyle baseStyle;
   final int maxProjects;
   final double cellCap;
+
+  /// Laid-out painters shared by every rung of one fit.
+  final Map<(String, TextStyle), TextPainter> painters;
 
   static const double _left = _padX;
   static const double _right = usageExportCardWidth - _padX;
@@ -264,12 +273,15 @@ class _UsageCardBuilder {
         height: 1,
       );
 
-  TextPainter _painter(String value, TextStyle style) => TextPainter(
-    text: TextSpan(text: value, style: style),
-    textDirection: ui.TextDirection.ltr,
-    textScaler: TextScaler.noScaling,
-    maxLines: 1,
-  )..layout();
+  TextPainter _painter(String value, TextStyle style) => painters.putIfAbsent(
+    (value, style),
+    () => TextPainter(
+      text: TextSpan(text: value, style: style),
+      textDirection: ui.TextDirection.ltr,
+      textScaler: TextScaler.noScaling,
+      maxLines: 1,
+    )..layout(),
+  );
 
   double _measure(String value, TextStyle style) =>
       _painter(value, style).width;
@@ -772,7 +784,7 @@ class _UsageCardBuilder {
 /// this client's theme tokens: 360×640 logical, 24px gutters, the eyebrow and
 /// section labels in the tier colour, heat cells shaded by the served
 /// intensity exactly as the report page's heatmap shades them.
-class UsageExportCard extends StatelessWidget {
+class UsageExportCard extends StatefulWidget {
   /// Creates an export card.
   const UsageExportCard({
     required this.kind,
@@ -800,17 +812,44 @@ class UsageExportCard extends StatelessWidget {
   final bool includeCost;
 
   @override
+  State<UsageExportCard> createState() => _UsageExportCardState();
+}
+
+class _UsageExportCardState extends State<UsageExportCard> {
+  UsageExportCardPlan? _plan;
+  Object? _planInputs;
+
+  @override
   Widget build(BuildContext context) {
-    final plan = UsageExportCardPlan.fit(
-      kind: kind,
-      period: period,
-      report: report,
-      locale: locale,
-      includeCost: includeCost,
-      l10n: AppLocalizations.of(context),
-      tokens: context.tokens,
-      baseStyle: Theme.of(context).textTheme.bodySmall!,
+    final l10n = AppLocalizations.of(context);
+    final tokens = context.tokens;
+    final baseStyle = Theme.of(context).textTheme.bodySmall!;
+    // Fitting lays the card out many times over, so a rebuild that changes
+    // none of its inputs keeps the plan it already has.
+    final inputs = (
+      widget.kind,
+      widget.period,
+      widget.report,
+      widget.locale,
+      widget.includeCost,
+      l10n,
+      tokens,
+      baseStyle,
     );
+    var plan = _plan;
+    if (plan == null || inputs != _planInputs) {
+      plan = _plan = UsageExportCardPlan.fit(
+        kind: widget.kind,
+        period: widget.period,
+        report: widget.report,
+        locale: widget.locale,
+        includeCost: widget.includeCost,
+        l10n: l10n,
+        tokens: tokens,
+        baseStyle: baseStyle,
+      );
+      _planInputs = inputs;
+    }
     return SizedBox(
       width: usageExportCardWidth,
       height: usageExportCardHeight,

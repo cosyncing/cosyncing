@@ -12,21 +12,21 @@ import 'package:cosyncing_client/src/design/themes/teal_obsidian_theme.dart';
 
 /// All selectable themes, in display order. Shown in Settings → Appearance.
 const List<ThemeSpec> kAppThemes = <ThemeSpec>[
+  flatWhiteMinimalistTheme,
   quietWorkspaceTheme,
   tealObsidianTheme,
   graphiteMinimalistTheme,
   nordicWarmthTheme,
-  flatWhiteMinimalistTheme,
   cyberAmberTheme,
   royalNavyTheme,
   softMinimalistTheme,
 ];
 
 /// Default theme id used before any user selection.
-const String kDefaultThemeId = 'quiet-workspace';
+const String kDefaultThemeId = 'flat-white-minimalist';
 
 /// Resolves a persisted theme id to its [ThemeSpec], falling back to the first
-/// registered theme for unknown / null ids.
+/// registered theme (the default) for unknown / null ids.
 ThemeSpec themeSpecById(String? id) {
   for (final theme in kAppThemes) {
     if (theme.id == id) {

@@ -13,6 +13,7 @@ import 'package:cosyncing_client/src/features/usage/view/usage_podium.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_share_section.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
@@ -411,27 +412,36 @@ class _UsageReportBodyState extends State<_UsageReportBody> {
             locale: locale,
           ),
           const SizedBox(height: 24),
-          UsageWhenYouWork(
-            totalTokens: report.totals.tokens,
-            hourly: report.hourly,
-            showHourlyChart: period != UsagePeriod.today,
-            weekday: report.weekday,
-            timezone: report.timezone,
-            locale: locale,
+          _Staggered(
+            frames: 1,
+            child: UsageWhenYouWork(
+              totalTokens: report.totals.tokens,
+              hourly: report.hourly,
+              showHourlyChart: period != UsagePeriod.today,
+              weekday: report.weekday,
+              timezone: report.timezone,
+              locale: locale,
+            ),
           ),
           const SizedBox(height: 24),
-          UsageAgentTable(
-            key: sections[3],
-            tools: report.tools,
-            locale: locale,
-            range: report.range,
+          _Staggered(
+            frames: 2,
+            child: UsageAgentTable(
+              key: sections[3],
+              tools: report.tools,
+              locale: locale,
+              range: report.range,
+            ),
           ),
           const SizedBox(height: 24),
-          UsageShareSection(
-            key: sections[4],
-            period: period,
-            report: report,
-            locale: locale,
+          _Staggered(
+            frames: 3,
+            child: UsageShareSection(
+              key: sections[4],
+              period: period,
+              report: report,
+              locale: locale,
+            ),
           ),
         ],
         const SizedBox(height: 24),
@@ -439,6 +449,48 @@ class _UsageReportBodyState extends State<_UsageReportBody> {
       ],
     );
   }
+}
+
+/// Builds [child] [frames] frames after it first mounts.
+///
+/// Opening the report built every section in one frame, and the sections below
+/// the fold (the agent table, and four share previews that each fit a card)
+/// cost more than everything above it. Each now arrives in a frame of its own,
+/// so the page appears at once and the rest follows while the top is read.
+class _Staggered extends StatefulWidget {
+  const _Staggered({required this.frames, required this.child});
+
+  /// Frames to wait before building [child].
+  final int frames;
+
+  final Widget child;
+
+  @override
+  State<_Staggered> createState() => _StaggeredState();
+}
+
+class _StaggeredState extends State<_Staggered> {
+  late int _remaining = widget.frames;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_remaining > 0) _waitAFrame();
+  }
+
+  void _waitAFrame() {
+    SchedulerBinding.instance
+      ..addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _remaining -= 1);
+        if (_remaining > 0) _waitAFrame();
+      })
+      ..scheduleFrame();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _remaining > 0 ? const SizedBox.shrink() : widget.child;
 }
 
 class _Header extends ConsumerWidget {

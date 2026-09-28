@@ -19,6 +19,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_pr
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
@@ -1247,6 +1248,39 @@ void main() {
         await tester.pumpAndSettle();
         expectSidebarExposed('Settings');
         semantics.dispose();
+      },
+    );
+
+    testWidgets(
+      'changing destination rebuilds the sidebar rows but not its roster',
+      (tester) async {
+        await pumpApp(
+          tester,
+          surfaceSize: const Size(1200, 900),
+          overrides: [
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              InMemorySessionArtifactTransferRepository(),
+            ),
+          ],
+        );
+        final sidebar = tester.widget(find.byType(WorkspaceSidebar));
+        final roster = tester.widget(find.byType(SessionListPane));
+
+        await tester.tap(
+          find.byKey(const Key('sessions-workspace-attention')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('sessions-workspace-settings')));
+        await tester.pumpAndSettle();
+
+        // The sidebar was rebuilt for the new destination...
+        final rebuilt = tester.widget<WorkspaceSidebar>(
+          find.byType(WorkspaceSidebar),
+        );
+        expect(rebuilt, isNot(same(sidebar)));
+        expect(rebuilt.destination, WorkspaceDestination.settings);
+        // ...and its roster is the same widget, so the list was not rebuilt.
+        expect(tester.widget(find.byType(SessionListPane)), same(roster));
       },
     );
 

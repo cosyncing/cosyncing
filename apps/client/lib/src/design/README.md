@@ -123,6 +123,7 @@ user-selectable and persisted (see
 The Dart modules are the source of truth shipped to contributors. This keeps
 the build reproducible without depending on internal design notes.
 
-The default Quiet Workspace palette uses neutral light/dark surfaces. Existing
-selected palettes remain available. Lato is bundled for consistent typography
-on native and web clients; its license ships in `assets/fonts/OFL.txt`.
+The default Flat White Minimalist palette uses near-white and neutral dark
+surfaces. Existing selected palettes remain available. Lato is bundled for
+consistent typography on native and web clients; its license ships in
+`assets/fonts/OFL.txt`.

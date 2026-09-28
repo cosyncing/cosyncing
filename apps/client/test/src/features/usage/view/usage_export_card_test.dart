@@ -1011,4 +1011,58 @@ void main() {
     expect(await written, ['light.png', 'dark.png']);
     expect(order, ['light.png', 'dark.png']);
   });
+
+  testWidgets('a rebuild with the same inputs keeps the fitted plan', (
+    tester,
+  ) async {
+    // Fitting lays the card out many times over; the share section rebuilds
+    // its four previews on every toggle and theme change.
+    final spec = themeSpecById(kDefaultThemeId);
+    final served = report();
+    var includeCost = false;
+    late StateSetter rebuild;
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        theme: buildAppTheme(spec.light, Brightness.light),
+        home: Center(
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              rebuild = setState;
+              return UsageExportCard(
+                kind: UsageExportCardKind.overview,
+                period: UsagePeriod.month,
+                report: served,
+                locale: 'en',
+                includeCost: includeCost,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // The painter repaints exactly when it was handed a different plan.
+    CustomPainter painter() => tester
+        .widget<CustomPaint>(
+          find
+              .descendant(
+                of: find.byType(UsageExportCard),
+                matching: find.byType(CustomPaint),
+              )
+              .first,
+        )
+        .painter!;
+
+    final fitted = painter();
+    rebuild(() {});
+    await tester.pump();
+    final kept = painter();
+    expect(kept.shouldRepaint(fitted), isFalse);
+
+    rebuild(() => includeCost = true);
+    await tester.pump();
+    expect(painter().shouldRepaint(kept), isTrue);
+  });
 }

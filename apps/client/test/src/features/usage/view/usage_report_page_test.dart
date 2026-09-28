@@ -179,6 +179,26 @@ void main() {
     expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
   });
 
+  testWidgets('the sections below the fold arrive after the page', (
+    tester,
+  ) async {
+    // Building every section in the frame that opens the report made the page
+    // appear late: the agent table and the share previews cost more than the
+    // rest of it together.
+    await tester.pumpWidget(buildSubject(response: served(sampleReport())));
+    final hero = find.byKey(const Key('usage-report-hero'));
+    for (var frame = 0; frame < 5 && hero.evaluate().isEmpty; frame++) {
+      await tester.pump();
+    }
+    expect(hero, findsOneWidget);
+    expect(find.byKey(const Key('usage-report-agents')), findsNothing);
+    expect(find.byKey(const Key('usage-report-share')), findsNothing);
+
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('usage-report-agents')), findsOneWidget);
+    expect(find.byKey(const Key('usage-report-share')), findsOneWidget);
+  });
+
   testWidgets('a served report prints its window and totals', (tester) async {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
     await tester.pumpAndSettle();

@@ -67,11 +67,13 @@ ThemeData buildAppTheme(
     scrollbarTheme: ScrollbarThemeData(
       thickness: const WidgetStatePropertyAll(4),
       radius: Radius.circular(t.radiusXs),
-      thumbColor: WidgetStateProperty.resolveWith(
-        (states) => t.textTertiary.withValues(
-          alpha: states.contains(WidgetState.dragged) ? 0.6 : 0.3,
-        ),
-      ),
+      // A map, not `resolveWith`: a closure is a new object on every call, so
+      // two themes built from the same tokens never compared equal, and every
+      // rebuild above MaterialApp read as a theme change that rebuilt the app.
+      thumbColor: WidgetStateProperty<Color?>.fromMap({
+        WidgetState.dragged: t.textTertiary.withValues(alpha: 0.6),
+        WidgetState.any: t.textTertiary.withValues(alpha: 0.3),
+      }),
       trackVisibility: const WidgetStatePropertyAll(false),
     ),
     dividerTheme: DividerThemeData(color: t.separator, space: 1, thickness: 1),

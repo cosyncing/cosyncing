@@ -3,6 +3,8 @@ import 'dart:ui' as ui;
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/app/app.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
@@ -24,6 +26,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_control
 import 'package:cosyncing_client/src/features/sessions/list/session_list_repository.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
+import 'package:cosyncing_client/src/features/settings/controller/theme_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
@@ -215,6 +218,31 @@ void main() {
       expect(
         materialApp.theme?.visualDensity,
         VisualDensity.adaptivePlatformDensity,
+      );
+    });
+
+    testWidgets('a theme change is complete in the next frame', (tester) async {
+      // A cross-fade rebuilt every themed widget on each of its frames,
+      // retained conversations included, which is what made switching stutter.
+      final container = buildContainer(themeMode: 'light');
+      await tester.pumpWidget(buildApp(container: container));
+      await tester.pumpAndSettle();
+      final page = find.byType(Navigator).first;
+      expect(
+        Theme.of(tester.element(page)).extension<AppTokens>(),
+        same(themeSpecById(kDefaultThemeId).light),
+      );
+
+      unawaited(
+        container
+            .read(themeControllerProvider.notifier)
+            .selectTheme('teal-obsidian'),
+      );
+      await tester.pump();
+
+      expect(
+        Theme.of(tester.element(page)).extension<AppTokens>(),
+        same(themeSpecById('teal-obsidian').light),
       );
     });
 
