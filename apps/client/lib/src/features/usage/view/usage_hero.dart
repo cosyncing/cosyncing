@@ -95,12 +95,45 @@ class UsageHero extends StatelessWidget {
         final columns = constraints.maxWidth >= 600 ? 4 : 2;
         final width =
             (constraints.maxWidth - spacing * (columns - 1)) / columns;
-        return Wrap(
+        final input = totals.tokensIn;
+        final output = totals.tokensOut;
+        final splitTotal = (input ?? 0) + (output ?? 0);
+        return Column(
           key: const Key('usage-report-hero'),
-          spacing: spacing,
-          runSpacing: spacing,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (final tile in tiles) SizedBox(width: width, child: tile),
+            Wrap(
+              spacing: spacing,
+              runSpacing: spacing,
+              children: [
+                for (final tile in tiles) SizedBox(width: width, child: tile),
+              ],
+            ),
+            if (input != null && output != null && splitTotal > 0) ...[
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(context.tokens.radiusXs),
+                child: LinearProgressIndicator(
+                  value: (input / splitTotal).clamp(0, 1),
+                  minHeight: 4,
+                  backgroundColor: context.tokens.accent.withValues(alpha: 0.2),
+                  color: context.tokens.accent.withValues(alpha: 0.7),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                l10n.usageTokenBreakdown(
+                  formatCompactCount(input, locale: locale),
+                  formatCompactCount(output, locale: locale),
+                  totals.tokensCache == null
+                      ? '—'
+                      : formatCompactCount(totals.tokensCache!, locale: locale),
+                ),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: context.tokens.textTertiary,
+                ),
+              ),
+            ],
           ],
         );
       },
@@ -153,7 +186,7 @@ class _StatTile extends StatelessWidget {
     final tokens = context.tokens;
     final valueStyle = theme.textTheme.headlineSmall?.copyWith(
       color: valueColor,
-      fontWeight: FontWeight.w600,
+      fontWeight: FontWeight.w400,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
     // The value slot is pinned to one unscaled line: a value long enough to
@@ -163,13 +196,8 @@ class _StatTile extends StatelessWidget {
       textDirection: ui.TextDirection.ltr,
       textScaler: MediaQuery.textScalerOf(context),
     )..layout()).height;
-    final tile = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      decoration: BoxDecoration(
-        color: tokens.surface,
-        border: Border.all(color: tokens.separator),
-        borderRadius: BorderRadius.circular(tokens.radiusLg),
-      ),
+    final tile = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -195,7 +223,7 @@ class _StatTile extends StatelessWidget {
           // The subline slot is reserved even when empty: streak and peak
           // tiles carry meta and the rest do not, and an unconditional slot is
           // what keeps every tile in the grid the same height.
-          const SizedBox(height: 2),
+          const SizedBox(height: 4),
           Text(
             meta ?? '',
             overflow: TextOverflow.ellipsis,

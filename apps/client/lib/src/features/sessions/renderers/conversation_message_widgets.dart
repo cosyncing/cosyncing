@@ -23,7 +23,6 @@ class _ConversationUserBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final queued = message.userMessageQueued;
     final text =
@@ -33,63 +32,97 @@ class _ConversationUserBubble extends StatelessWidget {
         ) ??
         '';
     final hasBody = text.trim().isNotEmpty || attachments.isEmpty;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxWidth = constraints.maxWidth.isFinite
-            ? constraints.maxWidth * 0.82
-            : double.infinity;
-        return Align(
-          alignment: Alignment.centerRight,
-          child: Opacity(
-            opacity: queued ? 0.62 : 1,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: maxWidth),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer.withValues(
-                    alpha: 0.75,
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Opacity(
+        opacity: queued ? 0.62 : 1,
+        child: _BubbleMeasure(
+          child: Container(
+            decoration: BoxDecoration(
+              color: context.tokens.surface2,
+              borderRadius: BorderRadius.circular(context.tokens.radiusLg),
+            ),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 8,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (queued) ...[
+                  _ToolMetadataChip(
+                    key: const Key('queued-user-message-badge'),
+                    label: l10n.sessionTurnQueuedBadge,
                   ),
-                  borderRadius: BorderRadius.circular(context.tokens.radiusLg),
-                ),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (queued) ...[
-                      _ToolMetadataChip(
-                        key: const Key('queued-user-message-badge'),
-                        label: l10n.sessionTurnQueuedBadge,
+                  const SizedBox(height: 4),
+                ],
+                if (hasBody) _MarkdownBody(source: text),
+                if (message.bodyTruncated)
+                  const _BodyTruncatedNote(
+                    key: Key('user-message-body-truncated'),
+                  ),
+                for (var index = 0; index < attachments.length; index++)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: hasBody || index > 0 ? 8 : 0,
+                    ),
+                    child: _UserAttachmentView(
+                      key: Key('user-attachment-$index'),
+                      message: attachments[index],
+                      action: attachmentActionBuilder?.call(
+                        attachments[index],
                       ),
-                      const SizedBox(height: 4),
-                    ],
-                    if (hasBody) _MarkdownBody(source: text),
-                    if (message.bodyTruncated)
-                      const _BodyTruncatedNote(
-                        key: Key('user-message-body-truncated'),
-                      ),
-                    for (var index = 0; index < attachments.length; index++)
-                      Padding(
-                        padding: EdgeInsets.only(
-                          top: hasBody || index > 0 ? 8 : 0,
-                        ),
-                        child: _UserAttachmentView(
-                          key: Key('user-attachment-$index'),
-                          message: attachments[index],
-                          action: attachmentActionBuilder?.call(
-                            attachments[index],
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
+                    ),
+                  ),
+              ],
             ),
           ),
-        );
-      },
+        ),
+      ),
+    );
+  }
+}
+
+/// Caps the bubble at 96% of a phone row and 88% of a wider one.
+///
+/// A render object rather than a `LayoutBuilder`: the fraction only depends on
+/// the incoming constraints, so there is nothing to rebuild during layout.
+class _BubbleMeasure extends SingleChildRenderObjectWidget {
+  const _BubbleMeasure({required super.child});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderBubbleMeasure();
+}
+
+class _RenderBubbleMeasure extends RenderProxyBox {
+  BoxConstraints _childConstraints(BoxConstraints constraints) {
+    final available = constraints.maxWidth;
+    if (!available.isFinite) return constraints;
+    final cap = available * (available < 600 ? 0.96 : 0.88);
+    return constraints.copyWith(
+      minWidth: math.min(constraints.minWidth, cap),
+      maxWidth: cap,
+    );
+  }
+
+  @override
+  void performLayout() {
+    final child = this.child;
+    if (child == null) {
+      size = constraints.smallest;
+      return;
+    }
+    child.layout(_childConstraints(constraints), parentUsesSize: true);
+    size = constraints.constrain(child.size);
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final child = this.child;
+    if (child == null) return constraints.smallest;
+    return constraints.constrain(
+      child.getDryLayout(_childConstraints(constraints)),
     );
   }
 }

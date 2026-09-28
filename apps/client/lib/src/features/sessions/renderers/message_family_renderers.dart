@@ -120,6 +120,7 @@ Widget _permissionRequestMessageRenderer(
 }) {
   final l10n = AppLocalizations.of(context);
   return _TranscriptBoxMessage(
+    plain: true,
     icon: Icons.gpp_good_outlined,
     title: l10n.sessionRequestPermissionTitle,
     summary:
@@ -200,6 +201,7 @@ Widget _questionRequestMessageRenderer(
   final l10n = AppLocalizations.of(context);
   final questions = message.questionRequestQuestions;
   return _TranscriptBoxMessage(
+    plain: true,
     icon: Icons.quiz_outlined,
     title: questions.length > 1
         ? l10n.sessionRequestQuestionsTitle

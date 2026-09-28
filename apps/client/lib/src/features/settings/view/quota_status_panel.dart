@@ -2,6 +2,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/features/settings/view/quota_provider_logo.dart';
 import 'package:flutter/material.dart';
 
 /// Remaining-percent threshold at or under which a quota row reads as a
@@ -182,6 +183,8 @@ class _QuotaProviderGroup extends StatelessWidget {
       children: [
         Row(
           children: [
+            QuotaProviderLogo(provider: provider.provider),
+            const SizedBox(width: 8),
             Expanded(
               child: Text(
                 providerName,
@@ -649,6 +652,12 @@ String quotaProviderDisplayName(String providerId) {
       return 'Kimi';
     case 'grok':
       return 'Grok';
+    case 'commandcode':
+      return 'Command Code';
+    case 'zai':
+      return 'Z.ai';
+    case 'opencode_go':
+      return 'OpenCode Go';
     default:
       if (providerId.isEmpty) return providerId;
       return providerId[0].toUpperCase() + providerId.substring(1);

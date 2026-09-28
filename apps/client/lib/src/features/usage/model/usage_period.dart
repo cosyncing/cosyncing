@@ -2,7 +2,7 @@
 /// a date window.
 ///
 /// One vocabulary for both surfaces. The Today card offers today/week/month and
-/// the report page offers week/month/year/all time, but they are the same
+/// the report offers day/week/month/year/all time, but they are the same
 /// periods resolved the same way, so a figure cannot mean one thing in Settings
 /// and another on the report.
 library;
@@ -33,6 +33,7 @@ enum UsagePeriod {
 
   /// The periods the report page offers, in display order.
   static const List<UsagePeriod> report = [
+    UsagePeriod.today,
     UsagePeriod.week,
     UsagePeriod.month,
     UsagePeriod.year,
@@ -56,8 +57,7 @@ extension UsagePeriodLink on UsagePeriod {
 
   /// Reads a link name, or `null` for anything the report does not offer.
   ///
-  /// `today` parses to `null` deliberately: it is a Today-card period, and the
-  /// report's switcher has no seat for it.
+  /// The day report uses the same stable `today` link as the summary card.
   static UsagePeriod? parse(String? value) {
     if (value == null) return null;
     for (final period in UsagePeriod.report) {
@@ -143,10 +143,9 @@ int _daysInYear(int year) =>
 ///
 /// [offset] steps back through COMPLETE periods: 0 is the period in progress,
 /// 1 the one that ended just before it started. An offset window is whole by
-/// construction — `elapsedDays == totalDays`, so `inProgress` is false. Only
-/// the bounded report periods step: `today` is a Today-card period the report
-/// never offers, and `allTime` has no boundary to step across, so an offset on
-/// either is a caller bug and throws.
+/// construction — `elapsedDays == totalDays`, so `inProgress` is false.
+/// Day offsets select earlier calendar dates. Only `allTime` has no boundary
+/// to step across, so a nonzero offset for it is a caller bug and throws.
 UsageWindow resolveUsageWindow(
   UsagePeriod period,
   DateTime now, {
@@ -156,17 +155,11 @@ UsageWindow resolveUsageWindow(
   final today = DateTime.utc(now.year, now.month, now.day);
   switch (period) {
     case UsagePeriod.today:
-      if (offset != 0) {
-        throw ArgumentError.value(
-          offset,
-          'offset',
-          'today has no previous window',
-        );
-      }
+      final day = today.subtract(Duration(days: offset));
       return UsageWindow(
         period: period,
-        from: _iso(today),
-        to: _iso(today),
+        from: _iso(day),
+        to: _iso(day),
         elapsedDays: 1,
         totalDays: 1,
       );

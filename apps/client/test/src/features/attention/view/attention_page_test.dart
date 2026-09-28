@@ -15,6 +15,7 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_notificati
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -188,19 +189,131 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Action required'), findsOneWidget);
-    expect(find.text('Maintenance'), findsOneWidget);
+    expect(find.text('Your input is needed'), findsOneWidget);
+    expect(find.text('Unread completions'), findsOneWidget);
     expect(find.text('Permission needed'), findsOneWidget);
     expect(find.text('Future broker notice'), findsOneWidget);
     await tester.scrollUntilVisible(
-      find.text('Recent'),
+      find.text('Recent activity · 2 unread'),
       300,
       scrollable: find.byType(Scrollable).last,
     );
     await tester.pumpAndSettle();
-    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('Recent activity · 2 unread'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('pending and activity filters stay independent at 320px', (
+    tester,
+  ) async {
+    tester.view
+      ..physicalSize = const Size(320, 568)
+      ..devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final sections = AttentionInboxSections.fromEntries([
+      _entry('request', 'question-required', title: 'Respond to a question'),
+      _entry('finished', 'run-finished', title: 'Inspect the result'),
+      _entry('other', 'future-kind', title: 'Another update'),
+    ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          attentionInboxProvider.overrideWith((_) async => sections),
+          attentionBadgeSeenStoreProvider.overrideWithValue(
+            _MemoryBadgeSeenStore(),
+          ),
+        ],
+        child: _localizedApp(const AttentionPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('attention-pending-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Unread completions').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('attention-event-request')), findsNothing);
+    expect(find.byKey(const Key('attention-event-finished')), findsOneWidget);
+    expect(find.byKey(const Key('attention-event-other')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('attention-jump-activity')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('attention-unread-filter')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('attention-event-request')), findsNothing);
+    expect(find.byKey(const Key('attention-event-finished')), findsOneWidget);
+    expect(find.byKey(const Key('attention-event-other')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'populated inbox visual evidence at phone tablet and desktop widths',
+    (tester) async {
+      final font = FontLoader('Lato')
+        ..addFont(rootBundle.load('assets/fonts/Lato-Regular.ttf'))
+        ..addFont(rootBundle.load('assets/fonts/Lato-Semibold.ttf'))
+        ..addFont(rootBundle.load('assets/fonts/Lato-Bold.ttf'));
+      await font.load();
+      await (FontLoader(
+        'MaterialIcons',
+      )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      for (final width in [320, 390, 820, 1440]) {
+        for (final brightness in Brightness.values) {
+          tester.view
+            ..physicalSize = Size(width.toDouble(), 844)
+            ..devicePixelRatio = 1;
+          final spec = themeSpecById(kDefaultThemeId);
+          final sections = AttentionInboxSections.fromEntries([
+            _entry(
+              'question',
+              'question-required',
+              title: 'Choose how session details open',
+            ),
+            _entry(
+              'completion',
+              'run-finished',
+              title: 'Review the reconnect tests',
+            ),
+            _entry(
+              'update',
+              'runtime-update-ready',
+              title: 'Agent runtime update available',
+            ),
+          ]);
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                attentionInboxProvider.overrideWith((_) async => sections),
+                attentionBadgeSeenStoreProvider.overrideWithValue(
+                  _MemoryBadgeSeenStore(),
+                ),
+              ],
+              child: MaterialApp(
+                localizationsDelegates: AppLocalizations.localizationsDelegates,
+                supportedLocales: AppLocalizations.supportedLocales,
+                theme: buildAppTheme(
+                  brightness == Brightness.dark ? spec.dark : spec.light,
+                  brightness,
+                ),
+                home: const AttentionPage(),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+          await expectLater(
+            find.byType(AttentionPage),
+            matchesGoldenFile(
+              'goldens/inbox_populated_${width}_${brightness.name}.png',
+            ),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        }
+      }
+    },
+  );
 
   testWidgets('renders compact empty state without overflow', (tester) async {
     tester.view.physicalSize = const Size(360, 640);
@@ -224,19 +337,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Nothing needs your attention'), findsOneWidget);
-    expect(
-      tester
-          .widget<TextButton>(
-            find.byKey(const Key('attention-clear-all')),
-          )
-          .onPressed,
-      isNull,
-    );
+    expect(find.byKey(const Key('attention-clear-all')), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
   testWidgets(
-    'non-empty Clear all uses one bulk action and one OS bulk clear',
+    'Clear activity preserves pending requests and uses exact revisions',
     (
       tester,
     ) async {
@@ -245,13 +351,18 @@ void main() {
       final repository = DriftAttentionRepository(database);
       final visibleEntry = _entry(
         'clear-me',
+        'runtime-update-ready',
+        title: 'Runtime update',
+      );
+      final pending = _entry(
+        'keep-me',
         'question-required',
         title: 'Question waiting',
       );
       await repository.persistAttentionEventsPage(
         brokerProfileId: _scope(visibleEntry.profile),
         page: AttentionEventsPage(
-          events: [visibleEntry.event],
+          events: [visibleEntry.event, pending.event],
           cursor: 1,
           reset: false,
           hasMore: false,
@@ -259,7 +370,10 @@ void main() {
       );
       final client = _PageBrokerClient();
       final sink = _PageNotificationSink();
-      final sections = AttentionInboxSections.fromEntries([visibleEntry]);
+      final sections = AttentionInboxSections.fromEntries([
+        visibleEntry,
+        pending,
+      ]);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -278,11 +392,30 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final clearButton = tester.widget<TextButton>(
-        find.byKey(const Key('attention-clear-all')),
+      await tester.ensureVisible(
+        find.byKey(const Key('attention-activity-actions')),
       );
-      expect(clearButton.onPressed, isNotNull);
+      await tester.tap(find.byKey(const Key('attention-activity-actions')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('attention-clear-all')));
+      await tester.pumpAndSettle();
+      expect(
+        client.bulkRequests,
+        isEmpty,
+        reason: 'Undo precedes durable dismissal',
+      );
+      await tester.tap(find.text('Undo'));
+      await tester.pumpAndSettle();
+      expect(client.bulkRequests, isEmpty);
+      expect(find.byKey(const Key('attention-event-clear-me')), findsOneWidget);
+      await tester.ensureVisible(
+        find.byKey(const Key('attention-activity-actions')),
+      );
+      await tester.tap(find.byKey(const Key('attention-activity-actions')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('attention-clear-all')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 6));
       await tester.pumpAndSettle();
 
       expect(client.bulkRequests, [
@@ -295,7 +428,7 @@ void main() {
               AttentionInboxEntry(profile: visibleEntry.profile, event: event),
         ),
       );
-      expect(after.all, isEmpty);
+      expect(after.all.map((entry) => entry.event.id), ['keep-me']);
       expect(visibleEntry.event.action.kind, 'open-attention-inbox');
     },
   );

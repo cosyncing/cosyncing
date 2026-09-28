@@ -126,10 +126,16 @@ void main() {
       );
     }
 
-    expect(api.windows, hasLength(4));
+    expect(api.windows, hasLength(5));
     expect(
       api.windows.map((window) => window.from).toList(),
-      ['2026-08-31', '2026-09-01', '2026-01-01', usageAllTimeFloor],
+      [
+        '2026-09-02',
+        '2026-08-31',
+        '2026-09-01',
+        '2026-01-01',
+        usageAllTimeFloor,
+      ],
     );
     // Every period ends today: the report is always a window that includes now.
     expect(api.windows.every((window) => window.to == '2026-09-02'), isTrue);
@@ -138,7 +144,7 @@ void main() {
     await container.read(
       usageReportProvider((period: UsagePeriod.year, offset: 0)).future,
     );
-    expect(api.windows, hasLength(4));
+    expect(api.windows, hasLength(5));
     for (final subscription in subscriptions) {
       subscription.close();
     }

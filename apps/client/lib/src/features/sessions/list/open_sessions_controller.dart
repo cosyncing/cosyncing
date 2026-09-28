@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_detail_sta
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_reveal_request.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -47,6 +48,25 @@ final openSessionsControllerProvider =
     AsyncNotifierProvider<OpenSessionsController, OpenSessionsState>(
       OpenSessionsController.new,
     );
+
+/// Whether the explicit overview destination is in front of the working set.
+/// This is navigation state, never session or notification state.
+final workspaceOverviewVisibleProvider = StateProvider<bool>((ref) {
+  ref.watch(activeBrokerProfileProvider.select(RosterSource.of));
+  return false;
+});
+
+/// Source-qualified undo snapshot; never reopens tabs on another machine.
+final class ClosedSessionTabs {
+  /// Captures closed tabs and their exact source.
+  const ClosedSessionTabs(this.sourceKey, this.snapshot);
+
+  /// Profile, endpoint, and incarnation of the owning broker.
+  final String? sourceKey;
+
+  /// Membership before close, in strip order.
+  final OpenSessionsState snapshot;
+}
 
 /// Owns the opened-sessions working set for the active broker profile.
 ///
@@ -263,6 +283,7 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
   /// whatever status the caller actually has — so replacing it is what makes an
   /// unknown status expressible.
   void open(SessionRef entry) {
+    ref.read(workspaceOverviewVisibleProvider.notifier).state = false;
     if (_sourceKey == null) {
       _deferredOpens
         ..removeWhere((ref) => ref.key == entry.key)
@@ -290,10 +311,17 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     } else {
       _commitLegacy(next);
     }
+    ref
+        .read(sessionRosterRevealRequestProvider.notifier)
+        .state = SessionRosterRevealRequest(
+      sourceKey: _sourceKey!,
+      sessionKey: entry.key,
+    );
   }
 
   /// Activates an already-open session by [key]; a no-op if it is not open.
   void activate(String key) {
+    ref.read(workspaceOverviewVisibleProvider.notifier).state = false;
     final current = _current;
     if (current.activeKey == key) {
       return;
@@ -452,6 +480,62 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     } else {
       _commitLegacy(next);
     }
+  }
+
+  /// Closes a snapshot of the working set, flushing each staged draft first.
+  /// New tabs opened during the barrier and other broker sources are untouched.
+  Future<ClosedSessionTabs?> closeAll() async {
+    final snapshot = _current;
+    final sourceKey = _sourceKey;
+    final generation = _membershipGeneration;
+    if (snapshot.refs.isEmpty) return null;
+    final barriers = <Future<void>>[];
+    for (final entry in snapshot.refs) {
+      final barrier = _draftDurabilityBarrier(entry.key);
+      if (barrier != null) barriers.add(barrier);
+    }
+    await Future.wait(barriers);
+    if (sourceKey != _sourceKey || generation != _membershipGeneration) {
+      return null;
+    }
+    final closingKeys = snapshot.refs.map((entry) => entry.key).toSet();
+    final kept = _current.refs
+        .where((entry) => !closingKeys.contains(entry.key))
+        .toList();
+    final activeKey = kept.any((entry) => entry.key == _current.activeKey)
+        ? _current.activeKey
+        : kept.firstOrNull?.key;
+    final next = OpenSessionsState(refs: kept, activeKey: activeKey);
+    if (_store case final LosslessOpenSessionsStore _) {
+      _setLocal(next);
+      _runLosslessOperation(
+        (store, sourceKey) =>
+            store.closeOtherMembers(sourceKey, closingKeys.toList()),
+      );
+      _saveActiveHint(activeKey);
+    } else {
+      _commitLegacy(next);
+    }
+    return ClosedSessionTabs(sourceKey, snapshot);
+  }
+
+  /// Merges back only the closed tabs, retaining any newer open metadata.
+  void restoreClosedTabs(ClosedSessionTabs closed) {
+    if (closed.sourceKey == null || closed.sourceKey != _sourceKey) return;
+    final existing = _current.refs.map((entry) => entry.key).toSet();
+    for (final entry in closed.snapshot.refs) {
+      if (!existing.contains(entry.key)) {
+        open(
+          SessionRef.cachedIdentity(
+            tool: entry.tool,
+            id: entry.id,
+            title: entry.title,
+          ),
+        );
+      }
+    }
+    final activeKey = closed.snapshot.activeKey;
+    if (activeKey != null) activate(activeKey);
   }
 
   /// Moves the tab at [oldIndex] to [newIndex].

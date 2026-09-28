@@ -4,7 +4,6 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/router.dart';
-import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
@@ -91,6 +90,10 @@ void main() {
           brokerClientProvider.overrideWith((ref) async => brokerClient),
       ],
       child: MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: child!,
+        ),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         theme: buildAppTheme(
@@ -139,6 +142,10 @@ void main() {
         ),
       ],
       child: MaterialApp.router(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: child!,
+        ),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         theme: buildAppTheme(
@@ -730,22 +737,25 @@ void main() {
       expect(claudeRow, findsOneWidget);
       expect(openCodeRow, findsOneWidget);
       final l10n = AppLocalizations.of(tester.element(claudeRow));
-      expect(
-        find.descendant(
-          of: claudeRow,
-          matching: find.text(l10n.sessionRosterAgentClaude),
+      // The harness name is in the row's one hover card, beside the title.
+      Finder rowTooltipContaining(Finder row, String value) => find.descendant(
+        of: row,
+        matching: find.byWidgetPredicate(
+          (w) => w is Tooltip && (w.message?.contains(value) ?? false),
         ),
+      );
+      expect(
+        rowTooltipContaining(claudeRow, l10n.sessionRosterAgentClaude),
         findsOneWidget,
       );
       expect(
-        find.descendant(
-          of: openCodeRow,
-          matching: find.text(l10n.sessionRosterAgentOpenCode),
-        ),
+        rowTooltipContaining(openCodeRow, l10n.sessionRosterAgentOpenCode),
         findsOneWidget,
       );
       expect(
-        find.byKey(const Key('session-agent-opencode/s2')),
+        find.byWidgetPredicate(
+          (w) => w is Tooltip && (w.message?.contains('build') ?? false),
+        ),
         findsOneWidget,
       );
     });
@@ -824,7 +834,7 @@ void main() {
       await tester.pumpAndSettle();
       await expandRosterProject(tester);
 
-      expect(find.text('Idle'), findsOneWidget);
+      expect(find.text('Idle'), findsNothing);
     });
 
     testWidgets('refresh button calls repository', (tester) async {
@@ -897,7 +907,12 @@ void main() {
       await tester.pumpAndSettle();
       await expandRosterProject(tester);
 
-      expect(find.text('research'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is Tooltip && (w.message?.contains('research') ?? false),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('app bar shows refresh button', (tester) async {
@@ -959,7 +974,7 @@ void main() {
 
         expect(find.byIcon(Icons.refresh), findsOneWidget);
         expect(find.text('Responsive session'), findsOneWidget);
-        expect(find.text('Idle'), findsOneWidget);
+        expect(find.text('Idle'), findsNothing);
       }
     });
 
@@ -978,6 +993,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+      await tester.pumpAndSettle();
       await expandRosterProject(tester);
 
       await tester.tap(find.text('Detail target'));
@@ -994,11 +1011,14 @@ void main() {
         GoRouter.of(
           tester.element(chatTab),
         ).routeInformationProvider.value.uri.toString(),
-        sessionDetailLocation(tool: 'claude', sessionId: 'session-abc'),
+        '/sessions',
       );
-      // U3: the row the user tapped names the page from the first frame. The
-      // route still carries the exact native id — identity is unchanged — but
-      // it is never what the user reads.
+      final detail = tester.widget<SessionDetailPage>(
+        find.byType(SessionDetailPage),
+      );
+      expect(detail.tool, 'claude');
+      expect(detail.sessionId, 'session-abc');
+      // The retained tab keeps exact identity while the title names the page.
       expect(find.text('Detail target'), findsWidgets);
       expect(find.text('session-abc'), findsNothing);
     });
@@ -1020,6 +1040,8 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+        await tester.pumpAndSettle();
         await expandRosterProject(tester);
 
         await tester.tap(find.text('Special target'));
@@ -1036,13 +1058,14 @@ void main() {
           GoRouter.of(
             tester.element(chatTab),
           ).routeInformationProvider.value.uri.toString(),
-          sessionDetailLocation(
-            tool: 'claude code/pro?%',
-            sessionId: 'session / # ? % 你好',
-          ),
+          '/sessions',
         );
-        // The id round-trips through the route untouched; the visible page is
-        // still named by the row that was tapped (U3).
+        final detail = tester.widget<SessionDetailPage>(
+          find.byType(SessionDetailPage),
+        );
+        expect(detail.tool, 'claude code/pro?%');
+        expect(detail.sessionId, 'session / # ? % 你好');
+        // Special characters remain exact in the retained detail identity.
         expect(find.text('Special target'), findsWidgets);
         expect(find.text('session / # ? % 你好'), findsNothing);
       },
@@ -1183,10 +1206,8 @@ void main() {
     testWidgets('a cached row keeps its title through compact navigation', (
       tester,
     ) async {
-      // Compact routes straight to the location — no working set is seeded
-      // on the way — and the Expanded-only redirect helper never runs here.
-      // Session Detail therefore has to resolve the identity the user actually
-      // tapped, or a named session arrives as its own id.
+      // A cached row seeds a title-only retained tab with unknown activity.
+      // Its source-safe identity must survive drawer navigation on phone.
       tester.view.physicalSize = const Size(420, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -1219,6 +1240,9 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
+      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       final header = find.byWidgetPredicate(
         (widget) =>
             widget.key is ValueKey<String> &&

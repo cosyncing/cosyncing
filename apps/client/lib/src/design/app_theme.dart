@@ -50,8 +50,9 @@ ThemeData buildAppTheme(
     inversePrimary: t.accent,
   );
 
-  return ThemeData(
+  final theme = ThemeData(
     useMaterial3: true,
+    fontFamily: 'Lato',
     brightness: brightness,
     colorScheme: colorScheme,
     scaffoldBackgroundColor: t.canvas,
@@ -63,6 +64,44 @@ ThemeData buildAppTheme(
       surfaceTintColor: Colors.transparent,
       elevation: 0,
     ),
+    scrollbarTheme: ScrollbarThemeData(
+      thickness: const WidgetStatePropertyAll(4),
+      radius: Radius.circular(t.radiusXs),
+      thumbColor: WidgetStateProperty.resolveWith(
+        (states) => t.textTertiary.withValues(
+          alpha: states.contains(WidgetState.dragged) ? 0.6 : 0.3,
+        ),
+      ),
+      trackVisibility: const WidgetStatePropertyAll(false),
+    ),
     dividerTheme: DividerThemeData(color: t.separator, space: 1, thickness: 1),
+  );
+  return theme.copyWith(
+    textTheme: _untracked(theme.textTheme),
+    primaryTextTheme: _untracked(theme.primaryTextTheme),
+  );
+}
+
+/// Material 3's per-role tracking (0.1-0.5 logical pixels) spaces Lato out
+/// noticeably at the small sizes this app uses; the reviewed design sets
+/// every role at the font's natural spacing.
+TextTheme _untracked(TextTheme theme) {
+  TextStyle? flat(TextStyle? style) => style?.copyWith(letterSpacing: 0);
+  return theme.copyWith(
+    displayLarge: flat(theme.displayLarge),
+    displayMedium: flat(theme.displayMedium),
+    displaySmall: flat(theme.displaySmall),
+    headlineLarge: flat(theme.headlineLarge),
+    headlineMedium: flat(theme.headlineMedium),
+    headlineSmall: flat(theme.headlineSmall),
+    titleLarge: flat(theme.titleLarge),
+    titleMedium: flat(theme.titleMedium),
+    titleSmall: flat(theme.titleSmall),
+    bodyLarge: flat(theme.bodyLarge),
+    bodyMedium: flat(theme.bodyMedium),
+    bodySmall: flat(theme.bodySmall),
+    labelLarge: flat(theme.labelLarge),
+    labelMedium: flat(theme.labelMedium),
+    labelSmall: flat(theme.labelSmall),
   );
 }

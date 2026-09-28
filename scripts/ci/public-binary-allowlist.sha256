@@ -215,3 +215,12 @@ a90dd6c50fdbbc849311808c7909f0de0863eed5986bc553325f089bb3a05099  apps/client/as
 5c5fb64f4d119c48af3c4b325d2737a4d1fe608cb05286292c8f88c71b247a8d  apps/client/assets/agents/workbuddy.png
 381afad7cbc587ab7c4c63a0f68d3aa05d47295fa4865b0b1770eca921285fc9  apps/client/assets/agents/zcode.png
 d268a422d2d5ef3234aba491f7a79494d16b2c5ade2db2239e2d5c93c0ca017d  apps/client/assets/agents/zed.png
+
+# Bundled quota/usage artwork and OFL Lato fonts.
+66936d07579cf9d56da48b1bd437d5d6cd014b93b628fb803cb87d31aad4a7be  apps/client/assets/agents/commandcode.png
+3b034f386fae89dc0fee7454d66ca123775cce1912a07b83785a733539d8997d  apps/client/assets/agents/minimax.png
+f3f4229a4aef3df394058d425e27f2c10d290df6f2f6402e916f7b4dfb8225bd  apps/client/assets/agents/zai.png
+bf1b8130069b44b9148eeece35e5423bedac49777ba746615b826b8276574a7b  apps/client/assets/fonts/Lato-Bold.ttf
+8c863f833b12bc8486671d26e3a58b13b0f9eaff1d6b10398e7c107a9b7ee05a  apps/client/assets/fonts/Lato-Italic.ttf
+6f6940be0835c3ddec9199e5fc42be4cbc61ebcfd58c623fdf719366253f1780  apps/client/assets/fonts/Lato-Regular.ttf
+2dc5d31e2cf1e29f3430eb2dfa1ba9911e08ee401b61dd12f40e0acb047a17a3  apps/client/assets/fonts/Lato-Semibold.ttf

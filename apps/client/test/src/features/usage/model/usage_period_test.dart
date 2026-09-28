@@ -121,6 +121,7 @@ void main() {
         UsagePeriod.month,
       ]);
       expect(UsagePeriod.report, [
+        UsagePeriod.today,
         UsagePeriod.week,
         UsagePeriod.month,
         UsagePeriod.year,
@@ -237,10 +238,10 @@ void main() {
       expect(leap.totalDays, 366);
     });
 
-    test('today and all time have no previous window to step into', () {
+    test('day steps backward but all time has no previous window', () {
       expect(
-        () => resolveUsageWindow(UsagePeriod.today, wednesday, offset: 1),
-        throwsArgumentError,
+        resolveUsageWindow(UsagePeriod.today, wednesday, offset: 1).from,
+        '2026-09-01',
       );
       expect(
         () => resolveUsageWindow(UsagePeriod.allTime, wednesday, offset: 1),
@@ -269,7 +270,7 @@ void main() {
     test('a period the report does not offer parses to nothing', () {
       // `today` is a Today-card period; the report switcher has no seat for it,
       // so a link naming it opens on the default rather than on a missing tab.
-      expect(UsagePeriodLink.parse('today'), isNull);
+      expect(UsagePeriodLink.parse('today'), UsagePeriod.today);
       expect(UsagePeriodLink.parse('fortnight'), isNull);
       expect(UsagePeriodLink.parse(null), isNull);
       expect(UsagePeriodLink.parse(''), isNull);

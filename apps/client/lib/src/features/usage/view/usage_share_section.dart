@@ -169,7 +169,7 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
         ),
         const SizedBox(height: 8),
         for (var index = 0; index < offered.length; index++) ...[
-          if (index > 0) const SizedBox(height: 18),
+          if (index > 0) const SizedBox(height: 16),
           _TierGroup(
             kind: offered[index],
             boundaries: _boundaries,
@@ -294,9 +294,9 @@ class _TierGroup extends StatelessWidget {
     final tierColor = carriesNames ? tokens.statusNeedsInput : tokens.accent;
     return Container(
       decoration: BoxDecoration(
-        border: Border(left: BorderSide(color: tierColor, width: 3)),
+        border: Border(left: BorderSide(color: tierColor, width: 4)),
       ),
-      padding: const EdgeInsets.only(left: 14),
+      padding: const EdgeInsets.only(left: 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -308,7 +308,7 @@ class _TierGroup extends StatelessWidget {
               fontWeight: FontWeight.w800,
             ),
           ),
-          const SizedBox(height: 2),
+          const SizedBox(height: 4),
           ConstrainedBox(
             // ~62 characters of the muted body copy, as on the source panel.
             constraints: const BoxConstraints(maxWidth: 460),
@@ -321,10 +321,10 @@ class _TierGroup extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
           Wrap(
-            spacing: 14,
-            runSpacing: 14,
+            spacing: 16,
+            runSpacing: 16,
             children: [
               for (final brightness in usageExportBrightnesses)
                 _Thumbnail(
@@ -403,7 +403,7 @@ class _Thumbnail extends StatelessWidget {
 
   /// The edge a thumbnail is scaled to — small enough to read as a preview,
   /// large enough to audit the tier it belongs to.
-  static const double width = 169;
+  static const double width = 168;
 
   @override
   Widget build(BuildContext context) {
@@ -415,7 +415,7 @@ class _Thumbnail extends StatelessWidget {
           width: width,
           decoration: BoxDecoration(
             border: Border.all(color: tokens.separator),
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(tokens.radiusMd),
           ),
           clipBehavior: Clip.antiAlias,
           child: _Preview(
@@ -430,14 +430,16 @@ class _Thumbnail extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 8),
-        Row(
-          mainAxisSize: MainAxisSize.min,
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
                 color: tierColor.withValues(alpha: 0.16),
-                borderRadius: BorderRadius.circular(999),
+                borderRadius: BorderRadius.circular(tokens.radiusMd),
               ),
               child: Text(
                 chip.toUpperCase(),
@@ -449,9 +451,10 @@ class _Thumbnail extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(width: 8),
             Text(
-              brightness == Brightness.dark ? 'dark' : 'light',
+              brightness == Brightness.dark
+                  ? AppLocalizations.of(context).themeModeDark
+                  : AppLocalizations.of(context).themeModeLight,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: tokens.textTertiary,
                 fontFamily: 'monospace',

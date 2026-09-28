@@ -999,6 +999,44 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   static const int _requiredSemanticViewportStableChecks = 2;
   static const double _semanticViewportTolerance = 0.5;
 
+  /// This page's ticker mode, followed without a build dependency: a retained
+  /// page moving on or offstage must not rebuild its whole transcript just to
+  /// tell the inline schedule controller.
+  ValueListenable<TickerModeData>? _tickerMode;
+
+  InlineScheduledMessageKey get _inlineTarget => InlineScheduledMessageKey(
+    tool: widget.state.tool,
+    sessionId: widget.state.sessionId,
+  );
+
+  bool get _hostVisible => _tickerMode?.value.enabled ?? true;
+
+  void _followTickerMode() {
+    final next = TickerMode.getValuesNotifier(context);
+    if (identical(next, _tickerMode)) return;
+    _tickerMode?.removeListener(_reportHostVisible);
+    _tickerMode = next..addListener(_reportHostVisible);
+  }
+
+  void _reportHostVisible() {
+    if (!mounted) return;
+    ref
+        .read(inlineScheduledMessageControllerProvider(_inlineTarget).notifier)
+        .setHostVisible(visible: _hostVisible);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _followTickerMode();
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    _followTickerMode();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1015,6 +1053,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
 
   @override
   void dispose() {
+    _tickerMode?.removeListener(_reportHostVisible);
     _scheduleCapturedViewportCommit(_semanticViewportCapture());
     _progressFadeTimer?.cancel();
     _prefetchSettleTimer?.cancel();
@@ -2640,12 +2679,13 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       _anchorReflowPending = true;
     }
     _lastTextScale = textScale;
-    final inlineTarget = InlineScheduledMessageKey(
-      tool: widget.state.tool,
-      sessionId: widget.state.sessionId,
-    );
+    final inlineTarget = _inlineTarget;
+    // Only what this surface renders: a poll's loading flip, or a refresh that
+    // returns the same empty list, must not rebuild every transcript row.
     final inlineState = ref.watch(
-      inlineScheduledMessageControllerProvider(inlineTarget),
+      inlineScheduledMessageControllerProvider(
+        inlineTarget,
+      ).select(_InlineScheduleView.of),
     );
     // U6: the schedule controller's automatic work rides the transport state
     // this surface already renders — no probe, endpoint, or second timer. It is
@@ -2653,11 +2693,12 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     // would rebuild the notifier on every connect/disconnect frame and drop the
     // cached cards. Repeated frames of the same value are a no-op inside the
     // controller, and nothing here writes provider state during this build.
+    // Onstage changes arrive through [_reportHostVisible] instead of a rebuild.
     final inlineController =
         ref.read(
             inlineScheduledMessageControllerProvider(inlineTarget).notifier,
           )
-          ..setHostVisible(visible: TickerMode.valuesOf(context).enabled)
+          ..setHostVisible(visible: _hostVisible)
           ..setTransportConnected(connected: widget.isConnected);
     final rowWork = debugTranscriptRowWork;
     final conversationPageSegments = widget.state
@@ -2995,6 +3036,12 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
           _totalRowCount = totalItems;
           _prepareSemanticViewportRestore();
 
+          // Read once per build, not once per row: every row shares the same
+          // spacing and reading measure.
+          final display =
+              ref.watch(conversationDisplayControllerProvider).valueOrNull ??
+              const ConversationDisplayPreferences();
+
           // Every row registers its laid-out geometry under its stable key so
           // the logical progress reading walks only mounted rows.
           Widget rowShell(
@@ -3050,7 +3097,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
               return rowShell(
                 key,
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: EdgeInsets.only(bottom: display.messageSpacing),
                   child: buildChatItem(item),
                 ),
               );
@@ -3225,76 +3272,83 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                               behavior: ScrollConfiguration.of(
                                 context,
                               ).copyWith(scrollbars: false),
-                              child: _TranscriptScrollView(
-                                key: const Key('session-detail-chat-scroll'),
-                                controller: _scrollController,
-                                // Scroll offset 0 is the center row's top:
-                                // rows before it are laid out upward from
-                                // there, rows after it downward, so adding or
-                                // releasing rows at either end never shifts
-                                // the ones around the reader.
-                                center: ValueKey<String>(
-                                  'transcript-rows-from-$centerGeneration',
-                                ),
-                                scrollCacheExtent:
-                                    const ScrollCacheExtent.viewport(
-                                      2,
-                                    ),
-                                // U5b: the tail invariant. Applied to the
-                                // ambient physics so platform scroll feel
-                                // (bounce, clamp, fling) is untouched.
-                                physics: _transcriptPhysics.applyTo(
-                                  ScrollConfiguration.of(
-                                    context,
-                                  ).getScrollPhysics(
-                                    context,
+                              child: _MeasuredTranscriptList(
+                                readingWidth: display.readingWidth,
+                                child: _TranscriptScrollView(
+                                  key: const Key(
+                                    'session-detail-chat-scroll',
                                   ),
-                                ),
-                                semanticChildCount: totalItems,
-                                slivers: [
-                                  SliverList(
-                                    key: ValueKey<String>(
-                                      'transcript-rows-before-'
-                                      '$centerGeneration',
-                                    ),
-                                    delegate: SliverChildBuilderDelegate(
-                                      (context, index) => buildScrollItem(
-                                        centerIndex - 1 - index,
+                                  controller: _scrollController,
+                                  // Scroll offset 0 is the center row's top:
+                                  // rows before it are laid out upward from
+                                  // there, rows after it downward, so adding or
+                                  // releasing rows at either end never shifts
+                                  // the ones around the reader.
+                                  center: ValueKey<String>(
+                                    'transcript-rows-from-$centerGeneration',
+                                  ),
+                                  scrollCacheExtent:
+                                      const ScrollCacheExtent.viewport(
+                                        2,
                                       ),
-                                      childCount: centerIndex,
-                                      findChildIndexCallback: (key) {
-                                        final index = _findChildIndex(key);
-                                        if (index == null ||
-                                            index >= centerIndex) {
-                                          return null;
-                                        }
-                                        return centerIndex - 1 - index;
-                                      },
-                                      semanticIndexCallback: (_, index) =>
+                                  // U5b: the tail invariant. Applied to the
+                                  // ambient physics so platform scroll feel
+                                  // (bounce, clamp, fling) is untouched.
+                                  physics: _transcriptPhysics.applyTo(
+                                    ScrollConfiguration.of(
+                                      context,
+                                    ).getScrollPhysics(
+                                      context,
+                                    ),
+                                  ),
+                                  semanticChildCount: totalItems,
+                                  slivers: [
+                                    SliverList(
+                                      key: ValueKey<String>(
+                                        'transcript-rows-before-'
+                                        '$centerGeneration',
+                                      ),
+                                      delegate: SliverChildBuilderDelegate(
+                                        (context, index) => buildScrollItem(
                                           centerIndex - 1 - index,
+                                        ),
+                                        childCount: centerIndex,
+                                        findChildIndexCallback: (key) {
+                                          final index = _findChildIndex(key);
+                                          if (index == null ||
+                                              index >= centerIndex) {
+                                            return null;
+                                          }
+                                          return centerIndex - 1 - index;
+                                        },
+                                        semanticIndexCallback: (_, index) =>
+                                            centerIndex - 1 - index,
+                                      ),
                                     ),
-                                  ),
-                                  SliverList(
-                                    key: ValueKey<String>(
-                                      'transcript-rows-from-$centerGeneration',
-                                    ),
-                                    delegate: SliverChildBuilderDelegate(
-                                      (context, index) =>
-                                          buildScrollItem(centerIndex + index),
-                                      childCount: totalItems - centerIndex,
-                                      findChildIndexCallback: (key) {
-                                        final index = _findChildIndex(key);
-                                        if (index == null ||
-                                            index < centerIndex) {
-                                          return null;
-                                        }
-                                        return index - centerIndex;
-                                      },
-                                      semanticIndexCallback: (_, index) =>
+                                    SliverList(
+                                      key: ValueKey<String>(
+                                        'transcript-rows-from-'
+                                        '$centerGeneration',
+                                      ),
+                                      delegate: SliverChildBuilderDelegate(
+                                        (context, index) => buildScrollItem(
                                           centerIndex + index,
+                                        ),
+                                        childCount: totalItems - centerIndex,
+                                        findChildIndexCallback: (key) {
+                                          final index = _findChildIndex(key);
+                                          if (index == null ||
+                                              index < centerIndex) {
+                                            return null;
+                                          }
+                                          return index - centerIndex;
+                                        },
+                                        semanticIndexCallback: (_, index) =>
+                                            centerIndex + index,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ),
                             Positioned(
@@ -3536,70 +3590,95 @@ class _TranscriptReadingScrollbar extends StatelessWidget {
   }
 }
 
-/// Constrains one transcript/composer row to a readable measure while keeping
-/// the phone gutter.
+/// The reading measure shared by every row of one list.
 ///
-/// The measure scales with the pane above [minWidth] — see [widthFraction].
-/// Below it the [ConstrainedBox] is a no-op, so the horizontal padding is what
-/// stops content from hitting the screen edge on a phone — it must sit *inside*
-/// the constraint, not outside it, or narrow viewports lose the gutter
-/// entirely.
-class _ReadableColumn extends StatelessWidget {
-  const _ReadableColumn({required this.child});
+/// Measured once by the list's own `LayoutBuilder`; rows read it rather than
+/// each running a layout builder and a preference subscription of their own.
+/// Measures the transcript list once and hands every row that measure, so
+/// no row runs a LayoutBuilder of its own.
+class _MeasuredTranscriptList extends StatelessWidget {
+  const _MeasuredTranscriptList({
+    required this.readingWidth,
+    required this.child,
+  });
 
-  /// Floor for the transcript measure, in logical pixels.
-  ///
-  /// The old 800 was a pure prose measure, but transcript rows are mostly not
-  /// prose: fenced code, diffs, and command output all read worse when wrapped
-  /// early, and on a 1440px window 800 left roughly 300px of dead gutter on
-  /// each side. 1180 keeps paragraphs inside a readable line length at the
-  /// default text scale while giving block content room to breathe.
-  ///
-  /// This is now a *floor*, not a cap: see [widthFraction]. Below it the
-  /// [ConstrainedBox] is a no-op, so the horizontal padding is what stops
-  /// content from hitting the screen edge on a phone.
-  ///
-  /// This is the single place the transcript measure is defined — the bubble's
-  /// own width factor is expressed relative to it rather than as a second
-  /// independent magic number.
-  static const double minWidth = 1180;
-
-  /// Share of the pane the transcript takes once the pane is wider than
-  /// [minWidth] / [widthFraction] (≈1388dp).
-  ///
-  /// A fixed 1180 cap was fine at 1440 but starved a 4K pane: measured, the
-  /// chat pane is 3511dp at 3840 and the rows inside it ran 1148dp — 32.7% of
-  /// the pane, with the rest dead gutter. Scaling with the pane instead puts
-  /// that surplus back into content and leaves one number to tune.
-  ///
-  /// Expressed as `max(minWidth, available * widthFraction)` so the measure is
-  /// monotone in the pane width and never *narrower* than it used to be at any
-  /// size — mid-size windows and phones are untouched.
-  static const double widthFraction = 0.85;
-
-  /// Resolved measure for a pane of [available] logical pixels.
-  static double measureFor(double available) {
-    if (!available.isFinite) return minWidth;
-    final proportional = available * widthFraction;
-    return proportional > minWidth ? proportional : minWidth;
-  }
-
+  final bool readingWidth;
   final Widget child;
 
   @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => _ReadableMeasure.fromWidth(
+      constraints.maxWidth,
+      readingWidth: readingWidth,
+      child: child,
+    ),
+  );
+}
+
+class _ReadableMeasure extends InheritedWidget {
+  _ReadableMeasure.fromWidth(
+    double available, {
+    required bool readingWidth,
+    required super.child,
+  }) : gutter = _ReadableColumn.gutterFor(available),
+       maxWidth = readingWidth
+           ? 900 + _ReadableColumn.gutterFor(available) * 2
+           : available;
+
+  final double gutter;
+  final double maxWidth;
+
+  static _ReadableMeasure? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_ReadableMeasure>();
+
+  @override
+  bool updateShouldNotify(_ReadableMeasure oldWidget) =>
+      oldWidget.gutter != gutter || oldWidget.maxWidth != maxWidth;
+}
+
+/// Constrains one transcript/composer row to a readable measure while keeping
+/// the phone gutter.
+///
+/// Full-width conversation surface, optionally limited to a 900dp reading
+/// measure. The same preference governs transcript rows and composer gutters.
+/// Inside a [_ReadableMeasure] the row reuses the list's measurement;
+/// elsewhere (composer, bootstrap views) it measures itself.
+class _ReadableColumn extends StatelessWidget {
+  const _ReadableColumn({required this.child});
+
+  static double measureFor(double available) => available;
+
+  static double gutterFor(double available) => available < 600 ? 12.0 : 24.0;
+
+  final Widget child;
+
+  Widget _constrained(double maxWidth, double gutter) => Center(
+    child: ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: gutter),
+        child: child,
+      ),
+    ),
+  );
+
+  @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return Center(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: measureFor(constraints.maxWidth),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: child,
-            ),
-          ),
+    final measure = _ReadableMeasure.maybeOf(context);
+    if (measure != null) return _constrained(measure.maxWidth, measure.gutter);
+    return Consumer(
+      builder: (context, ref, _) {
+        final display =
+            ref.watch(conversationDisplayControllerProvider).valueOrNull ??
+            const ConversationDisplayPreferences();
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final gutter = gutterFor(constraints.maxWidth);
+            return _constrained(
+              display.readingWidth ? 900 + gutter * 2 : constraints.maxWidth,
+              gutter,
+            );
+          },
         );
       },
     );
@@ -3908,4 +3987,40 @@ class _HistoryScopeNotice extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The inline schedule fields the transcript renders, compared by value.
+///
+/// Records carry no value equality, so a refresh that returns rows still
+/// rebuilds; one that returns the same empty list, or only flips `loading`,
+/// does not.
+@immutable
+final class _InlineScheduleView {
+  const _InlineScheduleView(
+    this.schedules,
+    this.mutatingIds,
+    this.mutationError,
+  );
+
+  factory _InlineScheduleView.of(InlineScheduledMessageState state) =>
+      _InlineScheduleView(
+        state.schedules,
+        state.mutatingIds,
+        state.mutationError,
+      );
+
+  final List<ScheduleRecord> schedules;
+  final Set<String> mutatingIds;
+  final InlineScheduleActionError? mutationError;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _InlineScheduleView &&
+      listEquals(schedules, other.schedules) &&
+      setEquals(mutatingIds, other.mutatingIds) &&
+      mutationError == other.mutationError;
+
+  @override
+  int get hashCode =>
+      Object.hash(schedules.length, mutatingIds.length, mutationError);
 }

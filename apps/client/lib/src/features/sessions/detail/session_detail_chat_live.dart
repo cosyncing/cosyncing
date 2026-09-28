@@ -30,6 +30,7 @@ class _ChatPanel extends ConsumerWidget {
     required this.toolExpansionRevision,
     required this.onSendCommand,
     required this.onCommandSelected,
+    required this.onSessionDetails,
     required this.onAttachFiles,
     required this.onBeginAttachmentIntake,
     required this.onReplaceAttachment,
@@ -79,6 +80,7 @@ class _ChatPanel extends ConsumerWidget {
   final int toolExpansionRevision;
   final Future<bool> Function() onSendCommand;
   final ValueChanged<String?> onCommandSelected;
+  final VoidCallback onSessionDetails;
   final VoidCallback onAttachFiles;
   final _SessionAttachmentIntakeLease? Function() onBeginAttachmentIntake;
   final ValueChanged<String> onReplaceAttachment;
@@ -108,6 +110,40 @@ class _ChatPanel extends ConsumerWidget {
         hasModelOverride: hasModelOverride,
         onCommandSelected: onCommandSelected,
         onSend: onSendCommand,
+      ),
+    );
+  }
+
+  Future<void> _scheduleDraft(BuildContext context, WidgetRef ref) async {
+    final text = promptController.text.trim();
+    if (text.isEmpty) return;
+    final schedule = await showScheduleMessageSheet(
+      context,
+      tool: sessionKey.tool,
+      sessionId: sessionKey.sessionId,
+      sessionTitle: sessionLabel,
+      text: text,
+    );
+    if (!context.mounted || schedule == null) return;
+    ref
+        .read(
+          inlineScheduledMessageControllerProvider(
+            InlineScheduledMessageKey(
+              tool: sessionKey.tool,
+              sessionId: sessionKey.sessionId,
+            ),
+          ).notifier,
+        )
+        .upsert(schedule);
+    // Preserve a newer draft typed while the schedule dialog was open.
+    if (promptController.text.trim() == text) promptController.clear();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          AppLocalizations.of(context).sessionScheduledFor(
+            DateTime.fromMillisecondsSinceEpoch(schedule.at).toString(),
+          ),
+        ),
       ),
     );
   }
@@ -159,28 +195,46 @@ class _ChatPanel extends ConsumerWidget {
     final compatibilityHint = isConnected ? _compatibilityHint(context) : null;
     final showControlBar =
         isConnected && !state.compatibilityReadOnly && !control.canPrompt;
-    final transcript = _TranscriptSurface(
-      state: state,
-      controller: controller,
-      isConnected: isConnected,
-      hasActiveBrokerClient: hasActiveBrokerClient,
-      // Same per-session gate as the status-panel Fork tile: the transcript's
-      // message-context "Fork from here" is a second entry point into the same
-      // broker route, so it answers the same shared predicate — including a
-      // standing broker refusal, which is the case a bare origin check misses.
-      canFork:
-          !state.compatibilityReadOnly &&
-          (state.agentActions?.canFork ?? false) &&
-          !state.forkBlockedAsAgentOwned,
-      toolDisplayMode:
-          ref.watch(toolDisplayControllerProvider).valueOrNull ??
-          ToolDisplayMode.responsive,
-      onForkFromMessage: onForkFromMessage,
-      reportView: reportView,
-      toolsExpanded: toolsExpanded,
-      toolExpansionRevision: toolExpansionRevision,
-      bootstrapRetrying: bootstrapRetrying,
-      onRetryBootstrap: onRetryBootstrap,
+    final display =
+        ref.watch(conversationDisplayControllerProvider).valueOrNull ??
+        const ConversationDisplayPreferences();
+    final theme = Theme.of(context);
+    final transcript = Theme(
+      data: theme.copyWith(
+        textTheme: theme.textTheme.copyWith(
+          bodyMedium: theme.textTheme.bodyMedium?.copyWith(
+            fontSize: display.fontSize,
+          ),
+          bodyLarge: theme.textTheme.bodyLarge?.copyWith(
+            fontSize: display.fontSize,
+          ),
+        ),
+      ),
+      child: _TranscriptSurface(
+        state: state,
+        controller: controller,
+        isConnected: isConnected,
+        hasActiveBrokerClient: hasActiveBrokerClient,
+        // Same per-session gate as the status-panel Fork tile: the transcript's
+        // message-context "Fork from here" is a second entry point into the
+        // same
+        // broker route, so it answers the same shared predicate — including a
+        // standing broker refusal, which is the case a bare origin check
+        // misses.
+        canFork:
+            !state.compatibilityReadOnly &&
+            (state.agentActions?.canFork ?? false) &&
+            !state.forkBlockedAsAgentOwned,
+        toolDisplayMode:
+            ref.watch(toolDisplayControllerProvider).valueOrNull ??
+            ToolDisplayMode.responsive,
+        onForkFromMessage: onForkFromMessage,
+        reportView: reportView,
+        toolsExpanded: toolsExpanded,
+        toolExpansionRevision: toolExpansionRevision,
+        bootstrapRetrying: bootstrapRetrying,
+        onRetryBootstrap: onRetryBootstrap,
+      ),
     );
     final liveStateSurface = _SessionLiveStateSurface(
       liveState: state.liveState,
@@ -237,6 +291,11 @@ class _ChatPanel extends ConsumerWidget {
                 (state.agentActions?.canAttachFiles ?? false) &&
                 !isSendingPrompt,
             stagedAttachments: stagedAttachments,
+            onSessionDetails: onSessionDetails,
+            onScheduleDraft:
+                mutationEnabled && promptController.text.trim().isNotEmpty
+                ? () => unawaited(_scheduleDraft(context, ref))
+                : null,
             onAttachFiles: onAttachFiles,
             onBeginAttachmentIntake: onBeginAttachmentIntake,
             onReplaceAttachment: onReplaceAttachment,
@@ -252,6 +311,9 @@ class _ChatPanel extends ConsumerWidget {
             selectedPermissionMode: selectedPermissionMode,
             legacyModel: state.sessionInfo?.model,
             telemetry: state.telemetry,
+            telemetryLastKnown:
+                SessionDetailFreshnessPresentation.fromState(state).freshness !=
+                SessionFreshness.current,
             onModelAndEffortSelected: onModelAndEffortSelected,
             onAgentSelected: (agent) =>
                 unawaited(controller.setAgent(agent.name)),
@@ -272,18 +334,6 @@ class _ChatPanel extends ConsumerWidget {
         Expanded(
           child: LayoutBuilder(
             builder: (context, constraints) {
-              if (constraints.maxHeight < 360) {
-                return ListView(
-                  key: const Key('session-detail-chat-compact-scroll'),
-                  children: [
-                    if (bootstrapStatus != null) bootstrapStatus,
-                    if (!state.liveState.isEmpty ||
-                        state.commandProgress != null)
-                      _ReadableColumn(child: liveStateSurface),
-                    SizedBox(height: 132, child: transcript),
-                  ],
-                );
-              }
               // The expanded panel is the reading surface for a plan or task
               // list, so its cap follows the viewport instead of a fixed 160:
               // at that height an opened list showed two rows. The transcript
@@ -298,7 +348,9 @@ class _ChatPanel extends ConsumerWidget {
                   if (!state.liveState.isEmpty || state.commandProgress != null)
                     ConstrainedBox(
                       constraints: BoxConstraints(
-                        maxHeight: liveStateMaxHeight,
+                        maxHeight: constraints.maxHeight < 360
+                            ? constraints.maxHeight * 0.3
+                            : liveStateMaxHeight,
                       ),
                       child: SingleChildScrollView(
                         child: _ReadableColumn(child: liveStateSurface),

@@ -45,6 +45,9 @@ class UsageHeatmap extends StatelessWidget {
     this.showWeekdayLabels = true,
     this.weekdayLabels = const <int, String>{},
     this.centerWhenCapped = false,
+    this.dateTooltip,
+    this.onDateSelected,
+    this.isDateEnabled,
     super.key,
   });
 
@@ -82,6 +85,15 @@ class UsageHeatmap extends StatelessWidget {
   /// Centering makes the strip read as deliberate. Long windows never cap, so
   /// they are untouched.
   final bool centerWhenCapped;
+
+  /// Exact reading for each calendar date, supplied by the report owner.
+  final String Function(DateTime date)? dateTooltip;
+
+  /// Opens the served breakdown for an enabled date.
+  final ValueChanged<DateTime>? onDateSelected;
+
+  /// Keeps uncovered and future dates visible without actionable readings.
+  final bool Function(DateTime date)? isDateEnabled;
 
   /// The alpha steps for ranks 1–4, over [AppTokens.surface2].
   ///
@@ -186,16 +198,7 @@ class UsageHeatmap extends StatelessWidget {
                         child: SizedBox(
                           height: rowHeight,
                           child: Center(
-                            child: _Cell(
-                              size: cellSize,
-                              radius: tokens.radiusXs,
-                              color: day == null
-                                  ? Colors.transparent
-                                  : _fill(
-                                      tokens,
-                                      intensityByDate[_key(day)] ?? 0,
-                                    ),
-                            ),
+                            child: _dateCell(day, cellSize, tokens),
                           ),
                         ),
                       ),
@@ -220,6 +223,28 @@ class UsageHeatmap extends StatelessWidget {
         return grid;
       },
     );
+  }
+
+  Widget _dateCell(DateTime? day, double size, AppTokens tokens) {
+    Widget cell = _Cell(
+      size: size,
+      radius: tokens.radiusXs,
+      color: day == null
+          ? tokens.surface.withValues(alpha: 0)
+          : _fill(tokens, intensityByDate[_key(day)] ?? 0),
+    );
+    if (day == null) return cell;
+    final enabled =
+        onDateSelected != null && (isDateEnabled?.call(day) ?? true);
+    if (onDateSelected != null) {
+      cell = InkWell(
+        onTap: enabled ? () => onDateSelected!(day) : null,
+        child: cell,
+      );
+    }
+    final tooltip = dateTooltip?.call(day);
+    if (tooltip != null) cell = Tooltip(message: tooltip, child: cell);
+    return cell;
   }
 
   static Color _fill(AppTokens tokens, int intensity) {

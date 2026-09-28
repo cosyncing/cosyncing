@@ -246,6 +246,55 @@ module FlutterGoldenPolicy
         "name: 'usage_export_projects_light_zh'"
       ]
     },
+    'inbox-populated' => {
+      owner: 'apps/client/test/src/features/attention/view/attention_page_test.dart',
+      root: 'apps/client/test/src/features/attention/view/goldens',
+      names: %w[320 390 820 1440].product(%w[light dark]).map { |width, mode| "inbox_populated_#{width}_#{mode}.png" },
+      fragments: [
+        'for (final width in [320, 390, 820, 1440])',
+        'for (final brightness in Brightness.values)',
+        "'goldens/inbox_populated_${width}_${brightness.name}.png'"
+      ]
+    },
+    'conversation-enhancement' => {
+      owner: 'apps/client/test/src/features/sessions/detail/conversation_enhancement_layout_test.dart',
+      root: 'apps/client/test/src/features/sessions/detail/goldens',
+      names: %w[
+        conversation_enhancement_320_568_light.png
+        conversation_enhancement_390_844_light.png
+        conversation_enhancement_390_844_dark.png
+        conversation_enhancement_390_420_light.png
+        conversation_enhancement_820_900_dark.png
+        conversation_enhancement_1440_1080_light.png
+      ],
+      fragments: [
+        '(width: 320.0, height: 568.0, dark: false)',
+        '(width: 390.0, height: 844.0, dark: false)',
+        '(width: 390.0, height: 844.0, dark: true)',
+        '(width: 390.0, height: 420.0, dark: false)',
+        '(width: 820.0, height: 900.0, dark: true)',
+        '(width: 1440.0, height: 1080.0, dark: false)',
+        "'goldens/conversation_enhancement_'",
+        "'${variant.width.toInt()}_${variant.height.toInt()}_'",
+        "matchesGoldenFile("
+      ]
+    },
+    'usage-enhancement' => {
+      owner: 'apps/client/test/src/features/usage/view/usage_enhancement_layout_test.dart',
+      root: 'apps/client/test/src/features/usage/view/goldens',
+      names: %w[
+        usage_enhancement_320_light.png
+        usage_enhancement_390_dark.png
+        usage_enhancement_1440_light.png
+      ],
+      fragments: [
+        '(width: 320.0, height: 844.0, dark: false)',
+        '(width: 390.0, height: 844.0, dark: true)',
+        '(width: 1440.0, height: 1080.0, dark: false)',
+        "'goldens/usage_enhancement_${variant.width.toInt()}_${variant.dark ? 'dark' : 'light'}.png'",
+        'matchesGoldenFile('
+      ]
+    },
     # Exact single-path fixture used by the mutation suite. It grants no
     # directory or naming-pattern exemption.
     'policy-fixture' => {

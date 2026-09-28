@@ -358,8 +358,11 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final pauseButton = find.byKey(const Key('session-goal-pause'));
-        tester.widget<OutlinedButton>(pauseButton).onPressed!();
+        await tester.tap(
+          find.byKey(const ValueKey('session-live-strip-goal:current')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('session-goal-pause')));
         await tester.pump();
 
         expect(connection.sendCommandCount, 1);
@@ -413,6 +416,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.tap(
+        find.byKey(const ValueKey('session-live-strip-goal:current')),
+      );
+      await tester.pumpAndSettle();
       final pause = tester.widget<OutlinedButton>(
         find.byKey(const Key('session-goal-pause')),
       );

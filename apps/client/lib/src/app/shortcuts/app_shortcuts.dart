@@ -557,16 +557,20 @@ const List<AppShortcutSpec> kAppShortcuts = [
     scope: AppShortcutScope.sessionList,
     group: AppShortcutGroup.sessionList,
     nativeActivators: [
+      SingleActivator(LogicalKeyboardKey.keyK, control: true),
+      SingleActivator(LogicalKeyboardKey.keyK, meta: true),
       SingleActivator(LogicalKeyboardKey.keyF, control: true),
       SingleActivator(LogicalKeyboardKey.keyF, meta: true),
     ],
     webSafeActivators: [
+      SingleActivator(LogicalKeyboardKey.keyK, control: true),
+      SingleActivator(LogicalKeyboardKey.keyK, meta: true),
       SingleActivator(LogicalKeyboardKey.keyF, control: true, alt: true),
       SingleActivator(LogicalKeyboardKey.keyF, meta: true, alt: true),
     ],
     bareActivators: [SingleActivator(LogicalKeyboardKey.slash)],
-    nativeChord: '/ or Ctrl+F / ⌘F',
-    webChord: '/ or Ctrl+Alt+F / ⌘⌥F',
+    nativeChord: 'Ctrl+K / ⌘K or /',
+    webChord: 'Ctrl+K / ⌘K or /',
   ),
 
   // The opened-sessions working set. Closing removes the tab, never the

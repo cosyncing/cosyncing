@@ -130,7 +130,7 @@ void main() {
       );
     });
 
-    testWidgets('roomy strip shows separate input, output, and runtime', (
+    testWidgets('session information preserves telemetry outside the header', (
       tester,
     ) async {
       useRoomyTestViewport(tester);
@@ -138,24 +138,22 @@ void main() {
         buildSessionDetailTestPage(events: eventsWithTelemetry()),
       );
       await tester.pumpAndSettle();
-
-      final telemetry = find.byKey(
-        const Key('session-detail-top-row-telemetry'),
-      );
-      expect(telemetry, findsOneWidget);
       expect(
-        find.text('in 10.8M · out 212k · run 4m'),
+        find.byKey(const Key('session-detail-top-row-telemetry')),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const Key('session-detail-information')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('session-detail-telemetry-panel')),
         findsOneWidget,
       );
-      expect(
-        find.ancestor(of: telemetry, matching: find.byType(ExcludeSemantics)),
-        findsOneWidget,
-      );
-      expect(find.textContaining('cache'), findsNothing);
-      expect(find.textContaining('total'), findsNothing);
+      expect(find.text('10,800,000'), findsOneWidget);
+      expect(find.text('212,000'), findsOneWidget);
+      expect(find.text('4m'), findsOneWidget);
     });
 
-    testWidgets('top telemetry follows the exact 840dp breakpoint', (
+    testWidgets('telemetry stays in information at every width', (
       tester,
     ) async {
       for (final width in const [839.0, 840.0, 1280.0, 839.0]) {
@@ -169,14 +167,14 @@ void main() {
 
         expect(
           find.byKey(const Key('session-detail-top-row-telemetry')),
-          width >= 840 ? findsOneWidget : findsNothing,
+          findsNothing,
         );
         expect(tester.takeException(), isNull);
       }
       addTearDown(tester.view.reset);
     });
 
-    testWidgets('top telemetry tolerates themes, brightness, and 2x text', (
+    testWidgets('information affordance tolerates themes and 2x text', (
       tester,
     ) async {
       tester.view
@@ -200,7 +198,7 @@ void main() {
             await tester.pumpAndSettle();
 
             expect(
-              find.byKey(const Key('session-detail-top-row-telemetry')),
+              find.byKey(const Key('session-detail-information')),
               findsOneWidget,
             );
             expect(tester.takeException(), isNull);

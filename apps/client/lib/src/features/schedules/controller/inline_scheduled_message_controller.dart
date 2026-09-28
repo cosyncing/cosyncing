@@ -323,6 +323,12 @@ final class InlineScheduledMessageController
   @visibleForTesting
   bool get debugPollingActive => _pollTimer != null;
 
+  /// The last onstage state its retained Session Detail page reported.
+  ///
+  /// Test/Debug visibility only; see [setHostVisible].
+  @visibleForTesting
+  bool get debugHostVisible => _hostVisible;
+
   @override
   InlineScheduledMessageState build(InlineScheduledMessageKey arg) {
     _target = arg;

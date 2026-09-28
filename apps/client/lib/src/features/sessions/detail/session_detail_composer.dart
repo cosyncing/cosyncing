@@ -34,7 +34,8 @@ class _ComposerBottomBar extends StatelessWidget {
     required this.currentAgent,
     required this.selectedPermissionMode,
     required this.legacyModel,
-    required this.telemetry,
+    required this.leading,
+    required this.actions,
     required this.onModelAndEffortSelected,
     required this.onAgentSelected,
     required this.onPermissionModeSelected,
@@ -59,9 +60,8 @@ class _ComposerBottomBar extends StatelessWidget {
   final String? selectedPermissionMode;
   final String? legacyModel;
 
-  /// Feeds the context meter. Renders nothing unless the broker reported a
-  /// real used/max pair, which today only codex does.
-  final SessionTelemetry telemetry;
+  final Widget leading;
+  final List<Widget> actions;
 
   final void Function(ModelOption model, String? effort)
   onModelAndEffortSelected;
@@ -206,90 +206,64 @@ class _ComposerBottomBar extends StatelessWidget {
         connectionStatus == SessionDetailConnectionStatus.disconnected ||
         connectionStatus == SessionDetailConnectionStatus.closed;
 
-    final left = SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (showModel)
-            _ComposerPickerButton(
-              key: const Key('session-detail-model-selector'),
-              icon: Icons.tune,
-              label: modelLabel,
-              tooltip: modelTooltip,
-              onPressed: enabled && models.isNotEmpty
-                  ? () => unawaited(_pickModelAndEffort(context))
-                  : null,
-              readOnly: !enabled,
-            ),
-          if (showModel && (agents.isNotEmpty || showMode))
-            const _ComposerPickerDot(),
-          // Agent/mode control (e.g. opencode build/plan): advertised-data
-          // only — absent when the adapter advertises no agents.
-          if (agents.isNotEmpty)
-            _ComposerAgentControl(
-              agents: agents,
-              currentAgent: currentAgent,
-              enabled: enabled,
-              compact: collapsed,
-              onSelected: onAgentSelected,
-            ),
-          if (agents.isNotEmpty && showMode) const _ComposerPickerDot(),
-          if (showMode)
-            _ComposerPickerButton(
-              key: const Key('session-detail-permission-selector'),
-              icon: Icons.shield_outlined,
-              // The bar shows the bare mode label (icon + status dot when
-              // collapsed); the tooltip carries what the mode applies to.
-              label: permissionModeLabel,
-              tooltip: l10n.sessionPermissionModeTooltip(permissionModeLabel),
-              compact: collapsed,
-              onPressed: enabled && modes.isNotEmpty
-                  ? () => unawaited(_pickPermissionMode(context))
-                  : null,
-              readOnly: !enabled,
-            ),
-          // Information, not an action, so it stays left of the action
-          // cluster. Renders nothing when the agent advertises no context
-          // window — a missing meter is correct, an invented one is not.
-          Padding(
-            padding: const EdgeInsets.only(left: 8),
-            child: SessionContextMeter(
-              telemetry: telemetry,
-              style: collapsed
-                  ? SessionContextMeterStyle.ring
-                  : SessionContextMeterStyle.verbose,
-            ),
-          ),
-        ],
-      ),
-    );
-
-    final rightCluster = <Widget>[
-      _ComposerIconButton(
-        buttonKey: const Key('session-detail-command-picker-button'),
-        tooltip: AppLocalizations.of(context).sessionComposerMenuSlashCommands,
-        touch: touch,
-        onPressed: onOpenCommandPicker,
-        icon: const Icon(kSlashCommandIcon, size: 16),
-      ),
-      if (detached)
-        _ComposerIconButton(
-          buttonKey: const Key('session-detail-composer-attach'),
-          tooltip: AppLocalizations.of(context).sessionAttach,
-          touch: touch,
-          onPressed: onReattach,
-          icon: const Icon(Icons.link, size: 16),
-        ),
-    ];
-
     return Row(
       key: const Key('session-detail-composer-bottom-bar'),
       children: [
+        leading,
+        if (showMode)
+          _ComposerPickerButton(
+            key: const Key('session-detail-permission-selector'),
+            icon: Icons.shield_outlined,
+            label: permissionModeLabel,
+            tooltip: l10n.sessionPermissionModeTooltip(permissionModeLabel),
+            compact: collapsed,
+            touch: touch,
+            onPressed: enabled && modes.isNotEmpty
+                ? () => unawaited(_pickPermissionMode(context))
+                : null,
+            readOnly: !enabled,
+          ),
+        if (agents.isNotEmpty && !collapsed)
+          _ComposerAgentControl(
+            agents: agents,
+            currentAgent: currentAgent,
+            enabled: enabled,
+            compact: false,
+            onSelected: onAgentSelected,
+          ),
         Expanded(
-          child: Align(alignment: Alignment.centerLeft, child: left),
+          child: LayoutBuilder(
+            builder: (context, constraints) => Align(
+              alignment: Alignment.centerRight,
+              child: showModel
+                  ? _ComposerPickerButton(
+                      key: const Key('session-detail-model-selector'),
+                      icon: Icons.tune,
+                      label: modelLabel,
+                      secondaryLabel: constraints.maxWidth < 96
+                          ? null
+                          : effortLabel,
+                      tooltip: modelTooltip,
+                      touch: touch,
+                      showIcon: !collapsed,
+                      onPressed: enabled && models.isNotEmpty
+                          ? () => unawaited(_pickModelAndEffort(context))
+                          : null,
+                      readOnly: !enabled,
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ),
         ),
-        ...rightCluster,
+        if (detached)
+          _ComposerIconButton(
+            buttonKey: const Key('session-detail-composer-attach'),
+            tooltip: l10n.sessionAttach,
+            touch: touch,
+            onPressed: onReattach,
+            icon: const Icon(Icons.link, size: 16),
+          ),
+        ...actions,
       ],
     );
   }
@@ -333,9 +307,14 @@ class _ComposerIconButton extends StatelessWidget {
       isSelected: isSelected,
       color: isSelected ? selectedColor : null,
       iconSize: 16,
-      visualDensity: VisualDensity.compact,
+      visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
       padding: EdgeInsets.zero,
-      constraints: BoxConstraints(minWidth: dim, minHeight: dim),
+      constraints: BoxConstraints.tightFor(width: dim, height: dim),
+      style: IconButton.styleFrom(
+        minimumSize: Size(dim, dim),
+        fixedSize: Size(dim, dim),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
       icon: icon,
     );
   }
@@ -352,6 +331,9 @@ class _ComposerPickerButton extends StatelessWidget {
     required this.onPressed,
     required this.readOnly,
     this.compact = false,
+    this.touch = false,
+    this.showIcon = true,
+    this.secondaryLabel,
     super.key,
   });
 
@@ -373,6 +355,9 @@ class _ComposerPickerButton extends StatelessWidget {
 
   /// Icon-only rendering with a status dot (permission at narrow width).
   final bool compact;
+  final bool touch;
+  final bool showIcon;
+  final String? secondaryLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -393,29 +378,15 @@ class _ComposerPickerButton extends StatelessWidget {
       fontWeight: FontWeight.w500,
       color: quiet,
     );
-    final Widget child = compact
-        ? Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Icon(icon, size: 16, color: quiet),
-              // The component kit's dot, at a grid size and grid offset. This
-              // was a hand-rolled 6dp Container nudged by -2/-1 — a private
-              // reimplementation of a shared component, off the grid in both
-              // its size and its position, which is exactly how a kit stops
-              // being the single place this shape is defined.
-              if (interactive)
-                Positioned(
-                  right: -4,
-                  top: -4,
-                  child: StatusDot(color: scheme.primary, size: 8),
-                ),
-            ],
-          )
+    final child = compact
+        ? Icon(icon, size: 16, color: quiet)
         : Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 14, color: quiet),
-              const SizedBox(width: 4),
+              if (showIcon) ...[
+                Icon(icon, size: 14, color: quiet),
+                const SizedBox(width: 4),
+              ],
               Flexible(
                 child: Text(
                   label,
@@ -423,6 +394,19 @@ class _ComposerPickerButton extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              if (secondaryLabel != null) ...[
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    secondaryLabel!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: labelStyle?.copyWith(
+                      color: context.tokens.textTertiary,
+                    ),
+                  ),
+                ),
+              ],
               // No chevron without a menu behind it. The arrow is the whole
               // promise this control was failing to keep.
               if (interactive) ...[
@@ -447,12 +431,14 @@ class _ComposerPickerButton extends StatelessWidget {
         child: TextButton(
           onPressed: onPressed,
           style: TextButton.styleFrom(
-            visualDensity: VisualDensity.compact,
+            visualDensity: touch
+                ? VisualDensity.standard
+                : VisualDensity.compact,
             padding: EdgeInsets.symmetric(
               horizontal: compact ? 4 : 8,
               vertical: 4,
             ),
-            minimumSize: Size.zero,
+            minimumSize: Size(touch ? 40 : 28, touch ? 40 : 28),
             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             foregroundColor: quiet,
             disabledForegroundColor: quiet,
@@ -778,11 +764,14 @@ class _PromptComposer extends ConsumerStatefulWidget {
     required this.selectedPermissionMode,
     required this.legacyModel,
     required this.telemetry,
+    required this.telemetryLastKnown,
     required this.onModelAndEffortSelected,
     required this.onAgentSelected,
     required this.onPermissionModeSelected,
     required this.onReattach,
     required this.onOpenCommandPicker,
+    required this.onSessionDetails,
+    required this.onScheduleDraft,
     this.commands = const <SlashCommand>[],
   });
 
@@ -830,12 +819,15 @@ class _PromptComposer extends ConsumerStatefulWidget {
   final String? selectedPermissionMode;
   final String? legacyModel;
   final SessionTelemetry telemetry;
+  final bool telemetryLastKnown;
   final void Function(ModelOption model, String? effort)
   onModelAndEffortSelected;
   final ValueChanged<AgentOption> onAgentSelected;
   final ValueChanged<ModeOption> onPermissionModeSelected;
   final VoidCallback onReattach;
   final VoidCallback? onOpenCommandPicker;
+  final VoidCallback onSessionDetails;
+  final VoidCallback? onScheduleDraft;
   @override
   ConsumerState<_PromptComposer> createState() => _PromptComposerState();
 }
@@ -1385,8 +1377,11 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
         onPressed: effectiveCanSend ? widget.onSend : null,
         icon: sendIcon,
         padding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
-        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
+        constraints: BoxConstraints(
+          minWidth: touch ? 40 : 32,
+          minHeight: touch ? 40 : 32,
+        ),
         style: IconButton.styleFrom(
           backgroundColor: scheme.primary,
           foregroundColor: scheme.onPrimary,
@@ -1394,8 +1389,8 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
           disabledForegroundColor: scheme.onSurfaceVariant.withValues(
             alpha: 0.5,
           ),
-          minimumSize: const Size(32, 32),
-          fixedSize: const Size(32, 32),
+          minimumSize: Size(touch ? 40 : 32, touch ? 40 : 32),
+          fixedSize: Size(touch ? 40 : 32, touch ? 40 : 32),
           padding: EdgeInsets.zero,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           shape: const CircleBorder(),
@@ -1419,15 +1414,18 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
               )
             : const Icon(Icons.stop, size: 16),
         padding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
-        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
+        constraints: BoxConstraints(
+          minWidth: touch ? 40 : 32,
+          minHeight: touch ? 40 : 32,
+        ),
         style: IconButton.styleFrom(
           backgroundColor: tokens.statusError,
           foregroundColor: scheme.onError,
           disabledBackgroundColor: tokens.surface2,
           disabledForegroundColor: tokens.textTertiary,
-          minimumSize: const Size(32, 32),
-          fixedSize: const Size(32, 32),
+          minimumSize: Size(touch ? 40 : 32, touch ? 40 : 32),
+          fixedSize: Size(touch ? 40 : 32, touch ? 40 : 32),
           padding: EdgeInsets.zero,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           shape: const CircleBorder(),
@@ -1438,74 +1436,113 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
     final controlRow = LayoutBuilder(
       builder: (context, constraints) {
         final collapsed = constraints.maxWidth < kComposerCollapseWidth;
-        return ConstrainedBox(
-          constraints: BoxConstraints(minHeight: touch ? 40 : 32),
-          child: Row(
-            children: [
-              Expanded(
-                child: _ComposerBottomBar(
+        return _ComposerBottomBar(
+          enabled: widget.controlsEnabled,
+          connectionStatus: widget.connectionStatus,
+          models: widget.models,
+          agents: widget.agents,
+          modes: widget.modes,
+          effectiveModel: widget.effectiveModel,
+          currentAgent: widget.currentAgent,
+          selectedPermissionMode: widget.selectedPermissionMode,
+          legacyModel: widget.legacyModel,
+          onModelAndEffortSelected: widget.onModelAndEffortSelected,
+          onAgentSelected: widget.onAgentSelected,
+          onPermissionModeSelected: widget.onPermissionModeSelected,
+          onReattach: widget.onReattach,
+          onOpenCommandPicker: widget.onOpenCommandPicker,
+          collapsed: collapsed,
+          touch: touch,
+          leading: PopupMenuButton<String>(
+            key: const Key('session-detail-composer-menu'),
+            tooltip: l10n.conversationEnhancementMore,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 200),
+            icon: const Icon(Icons.add, size: 20),
+            style: IconButton.styleFrom(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: touch
+                  ? VisualDensity.standard
+                  : VisualDensity.compact,
+              minimumSize: Size(touch ? 40 : 32, touch ? 40 : 32),
+              fixedSize: Size(touch ? 40 : 32, touch ? 40 : 32),
+              padding: EdgeInsets.zero,
+            ),
+            onSelected: (action) async {
+              switch (action) {
+                case 'attach':
+                  widget.onAttachFiles();
+                case 'commands':
+                  widget.onOpenCommandPicker?.call();
+                case 'schedule':
+                  widget.onScheduleDraft?.call();
+                case 'details':
+                  widget.onSessionDetails();
+                case 'agent':
+                  final selected = await showModalBottomSheet<AgentOption>(
+                    context: context,
+                    showDragHandle: true,
+                    builder: (context) => _AgentPickerSheet(
+                      agents: widget.agents,
+                      selected: widget.currentAgent,
+                    ),
+                  );
+                  if (mounted && selected != null) {
+                    widget.onAgentSelected(selected);
+                  }
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                key: const Key('session-detail-attach-button'),
+                value: 'attach',
+                enabled: effectiveCanAttach,
+                child: Text(
+                  widget.attachmentEnabled
+                      ? l10n.sessionAttachmentAddTooltip
+                      : l10n.sessionAttachmentUnsupportedTooltip,
+                ),
+              ),
+              PopupMenuItem(
+                key: const Key('session-detail-command-picker-button'),
+                value: 'commands',
+                enabled: widget.onOpenCommandPicker != null,
+                child: Text(l10n.sessionComposerMenuSlashCommands),
+              ),
+              if (collapsed && widget.agents.isNotEmpty)
+                PopupMenuItem(
+                  key: const Key('session-detail-agent-selector'),
+                  value: 'agent',
                   enabled: widget.controlsEnabled,
-                  connectionStatus: widget.connectionStatus,
-                  models: widget.models,
-                  agents: widget.agents,
-                  modes: widget.modes,
-                  effectiveModel: widget.effectiveModel,
-                  currentAgent: widget.currentAgent,
-                  selectedPermissionMode: widget.selectedPermissionMode,
-                  legacyModel: widget.legacyModel,
-                  telemetry: widget.telemetry,
-                  onModelAndEffortSelected: widget.onModelAndEffortSelected,
-                  onAgentSelected: widget.onAgentSelected,
-                  onPermissionModeSelected: widget.onPermissionModeSelected,
-                  onReattach: widget.onReattach,
-                  onOpenCommandPicker: widget.onOpenCommandPicker,
-                  collapsed: collapsed,
-                  touch: touch,
+                  child: Text(l10n.sessionComposerAgentModeSheetTitle),
                 ),
+              PopupMenuItem(
+                value: 'schedule',
+                enabled: widget.onScheduleDraft != null,
+                child: Text(l10n.sessionScheduleComposerDraft),
               ),
-              const SizedBox(width: 4),
-              _ComposerIconButton(
-                buttonKey: const Key('session-detail-attach-button'),
-                tooltip: widget.attachmentEnabled
-                    ? l10n.sessionAttachmentAddTooltip
-                    : l10n.sessionAttachmentUnsupportedTooltip,
-                touch: touch,
-                onPressed: effectiveCanAttach ? widget.onAttachFiles : null,
-                icon: widget.isPickingAttachments
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.attach_file, size: 16),
+              PopupMenuItem(
+                value: 'details',
+                child: Text(l10n.conversationEnhancementDetails),
               ),
-              _ComposerIconButton(
-                buttonKey: const Key('session-detail-voice-input-button'),
-                tooltip: l10n.sessionVoiceInputTooltip,
-                touch: touch,
-                isSelected: voiceState.isListening,
-                selectedColor: scheme.primary,
-                onPressed: canMic ? _onMicTap : null,
-                icon: Icon(
-                  voiceState.isListening ? Icons.mic : Icons.mic_none,
-                  size: 16,
-                ),
-              ),
-              const SizedBox(width: 4),
-              // During a working turn on an interrupt-capable agent, show both
-              // Send (queues a steer/follow-up) and Stop (interrupts). The
-              // controller and broker support queueing - hiding Send during
-              // working made steer impossible. Stop stays rightmost as the
-              // urgent/destructive action; Send sits to its left and remains
-              // gated by effectiveCanSend (text non-empty, not mid-HTTP-send).
-              if (widget.canInterrupt) ...[
-                sendButton,
-                const SizedBox(width: 4),
-                interruptButton,
-              ] else if (widget.controlsEnabled)
-                sendButton,
             ],
           ),
+          actions: [
+            _ComposerIconButton(
+              buttonKey: const Key('session-detail-voice-input-button'),
+              tooltip: l10n.sessionVoiceInputTooltip,
+              touch: touch,
+              isSelected: voiceState.isListening,
+              selectedColor: scheme.primary,
+              onPressed: canMic ? _onMicTap : null,
+              icon: Icon(
+                voiceState.isListening ? Icons.mic : Icons.mic_none,
+                size: 16,
+              ),
+            ),
+            if (widget.canInterrupt) interruptButton,
+            sendButton,
+          ],
         );
       },
     );
@@ -1551,40 +1588,72 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
             ],
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-              child: Focus(
-                // Sits below the app-level default shortcuts in the focus
-                // chain, so palette keys win over caret/newline/traversal.
-                canRequestFocus: false,
-                skipTraversal: true,
-                onKeyEvent: _onComposerKey,
-                child: TextField(
-                  key: const Key('session-detail-prompt-input'),
-                  controller: widget.controller,
-                  focusNode: widget.focusNode,
-                  minLines: 1,
-                  maxLines: 6,
-                  // Keep drafting the next turn while the submitted snapshot
-                  // waits for its terminal receipt. Send/attachment controls
-                  // remain guarded by [isSubmitting].
-                  enabled: widget.enabled,
-                  keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.newline,
-                  style: theme.textTheme.bodyMedium,
-                  decoration: InputDecoration(
-                    hintText: widget.controlsEnabled
-                        ? l10n.sessionComposerPromptHint
-                        : l10n.sessionComposerDraftHint,
-                    hintStyle: theme.textTheme.bodyMedium?.copyWith(
-                      color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
-                    ),
-                    // Borderless: the container edge is the only boundary.
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    disabledBorder: InputBorder.none,
-                    filled: false,
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 4),
+              child: LayoutBuilder(
+                builder: (context, constraints) => ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 40),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Focus(
+                          // Sits below the app-level default shortcuts in the
+                          // focus
+                          // chain, so palette keys win over
+                          // caret/newline/traversal.
+                          canRequestFocus: false,
+                          skipTraversal: true,
+                          onKeyEvent: _onComposerKey,
+                          child: TextField(
+                            key: const Key('session-detail-prompt-input'),
+                            controller: widget.controller,
+                            focusNode: widget.focusNode,
+                            minLines: 1,
+                            maxLines: MediaQuery.sizeOf(context).height <= 520
+                                ? 3
+                                : 6,
+                            // Keep drafting the next turn while the submitted
+                            // snapshot
+                            // waits for its terminal receipt. Send/attachment
+                            // controls
+                            // remain guarded by [isSubmitting].
+                            enabled: widget.enabled,
+                            keyboardType: TextInputType.multiline,
+                            textInputAction: TextInputAction.newline,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontSize: touch ? 16 : 15,
+                            ),
+                            decoration: InputDecoration(
+                              hintText: widget.controlsEnabled
+                                  ? l10n.sessionComposerPromptHint
+                                  : l10n.sessionComposerDraftHint,
+                              hintStyle: theme.textTheme.bodyMedium?.copyWith(
+                                color: scheme.onSurfaceVariant.withValues(
+                                  alpha: 0.7,
+                                ),
+                              ),
+                              // Borderless: the container edge is the only
+                              // boundary.
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              disabledBorder: InputBorder.none,
+                              filled: false,
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(
+                                vertical: 4,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      SessionContextMeter(
+                        telemetry: widget.telemetry,
+                        lastKnown: widget.telemetryLastKnown,
+                        style: constraints.maxWidth < kComposerCollapseWidth
+                            ? SessionContextMeterStyle.ring
+                            : SessionContextMeterStyle.verbose,
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -1654,7 +1723,7 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
                       size: 12,
                       color: tokens.accent,
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 8),
                     Flexible(
                       child: Text(
                         key: const Key('session-composer-prompt-target'),
@@ -1989,7 +2058,7 @@ class _CommandPickerSheetState extends State<_CommandPickerSheet> {
                         : null,
                   ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
                 IconButton(
                   key: const Key('session-detail-command-send-button'),
                   tooltip: l10n.sendCommand,

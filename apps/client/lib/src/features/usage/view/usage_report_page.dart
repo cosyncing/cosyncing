@@ -2,13 +2,12 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
-import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_activity.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_agent_table.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
-import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_hero.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_podium.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_share_section.dart';
@@ -58,7 +57,7 @@ class _UsageReportPageState extends ConsumerState<UsageReportPage> {
           child: ConstrainedBox(
             // The report is a reading surface: past ~880 it becomes a wide
             // sparse band rather than a denser page.
-            constraints: const BoxConstraints(maxWidth: 880),
+            constraints: const BoxConstraints(maxWidth: 1100),
             child: ListView(
               padding: const EdgeInsets.all(16),
               children: [
@@ -114,72 +113,82 @@ class _PeriodSwitcher extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final label = usagePeriodLabel(l10n, period).toLowerCase();
-    // All time has no previous window to step into. The buttons hide rather
-    // than disable, but keep their space, so picking the segment does not
-    // shift the switcher under the reader's finger.
     final navigable = period != UsagePeriod.allTime;
-    return Row(
-      children: [
-        Visibility(
-          visible: navigable,
-          maintainState: true,
-          maintainAnimation: true,
-          maintainSize: true,
-          // Zero padding with the glyph pinned left, then shifted back by the
-          // glyph's own side bearing (8px of the 24px icon box is empty): the
-          // row's visual left edge is the ‹ ink itself, flush with the
-          // content below, while the tap target stays 40px.
-          child: Transform.translate(
-            offset: const Offset(-8, 0),
-            child: IconButton(
-              key: const Key('usage-period-previous'),
-              padding: EdgeInsets.zero,
-              alignment: Alignment.centerLeft,
-              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-              icon: const Icon(Icons.chevron_left),
-              tooltip: l10n.usagePeriodPrevious(label),
-              onPressed: () => onOffsetChanged(offset + 1),
+    final periods = SegmentedButton<UsagePeriod>(
+      key: const Key('usage-period-switcher'),
+      showSelectedIcon: false,
+      expandedInsets: EdgeInsets.zero,
+      style: ButtonStyle(
+        padding: const WidgetStatePropertyAll(
+          EdgeInsets.symmetric(horizontal: 8),
+        ),
+        textStyle: WidgetStatePropertyAll(
+          Theme.of(context).textTheme.labelMedium,
+        ),
+        minimumSize: const WidgetStatePropertyAll(Size(0, 40)),
+      ),
+      segments: [
+        for (final value in UsagePeriod.report)
+          ButtonSegment(
+            value: value,
+            label: Text(usagePeriodLabel(l10n, value)),
+          ),
+      ],
+      selected: {period},
+      onSelectionChanged: (selection) => onChanged(selection.first),
+    );
+    final navigation = Visibility(
+      visible: navigable,
+      maintainState: true,
+      maintainAnimation: true,
+      maintainSize: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            key: const Key('usage-period-previous'),
+            icon: const Icon(Icons.chevron_left),
+            tooltip: l10n.usagePeriodPrevious(label),
+            onPressed: () => onOffsetChanged(offset + 1),
+          ),
+          Flexible(
+            child: TextButton(
+              key: const Key('usage-period-current'),
+              onPressed: offset == 0 ? null : () => onOffsetChanged(0),
+              child: Text(
+                l10n.usageEnhancementCurrent,
+                textAlign: TextAlign.center,
+              ),
             ),
           ),
-        ),
-        // Loose so the group stays [‹ switcher ›] on the left rather than
-        // stranding › at the far edge; the scroll view still shrinks when the
-        // row runs out of width.
-        Flexible(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: SegmentedButton<UsagePeriod>(
-              key: const Key('usage-period-switcher'),
-              showSelectedIcon: false,
-              segments: [
-                for (final value in UsagePeriod.report)
-                  ButtonSegment(
-                    value: value,
-                    label: Text(usagePeriodLabel(l10n, value)),
-                  ),
-              ],
-              selected: {period},
-              onSelectionChanged: (selection) => onChanged(selection.first),
-            ),
-          ),
-        ),
-        Visibility(
-          visible: navigable,
-          maintainState: true,
-          maintainAnimation: true,
-          maintainSize: true,
-          child: IconButton(
+          IconButton(
             key: const Key('usage-period-next'),
-            padding: EdgeInsets.zero,
-            alignment: Alignment.centerRight,
-            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
             icon: const Icon(Icons.chevron_right),
             tooltip: l10n.usagePeriodNext(label),
-            // Offset 0 is the period in progress; there is no newer window.
             onPressed: offset == 0 ? null : () => onOffsetChanged(offset - 1),
           ),
-        ),
-      ],
+        ],
+      ),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 520) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [periods, const SizedBox(height: 4), navigation],
+          );
+        }
+        return Row(
+          children: [
+            Flexible(child: periods),
+            const SizedBox(width: 16),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: constraints.maxWidth / 2),
+              child: navigation,
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -192,7 +201,7 @@ class _PeriodSwitcher extends StatelessWidget {
 /// meanings.
 String usagePeriodLabel(AppLocalizations l10n, UsagePeriod period) {
   return switch (period) {
-    UsagePeriod.today => l10n.usagePeriodToday,
+    UsagePeriod.today => l10n.usageEnhancementDay,
     UsagePeriod.week => l10n.usagePeriodWeek,
     UsagePeriod.month => l10n.usagePeriodMonth,
     UsagePeriod.year => l10n.usagePeriodYear,
@@ -225,6 +234,7 @@ String usageWindowTitle(
   final from = DateTime.tryParse(range.from);
   if (from == null) return usagePeriodLabel(l10n, period);
   return switch (period) {
+    UsagePeriod.today => DateFormat.yMMMd(locale).format(from),
     UsagePeriod.month => DateFormat.yMMMM(locale).format(from),
     UsagePeriod.year => DateFormat.y(locale).format(from),
     _ => usagePeriodLabel(l10n, period),
@@ -262,7 +272,7 @@ DateTime usageHeatmapStart(DateTime requestedFrom, UsageReport report) {
   return earliest;
 }
 
-class _UsageReportBody extends StatelessWidget {
+class _UsageReportBody extends StatefulWidget {
   const _UsageReportBody({
     required this.period,
     required this.offset,
@@ -280,7 +290,18 @@ class _UsageReportBody extends StatelessWidget {
   final DateTime now;
 
   @override
+  State<_UsageReportBody> createState() => _UsageReportBodyState();
+}
+
+class _UsageReportBodyState extends State<_UsageReportBody> {
+  final List<GlobalKey> sections = List.generate(5, (_) => GlobalKey());
+
+  @override
   Widget build(BuildContext context) {
+    final period = widget.period;
+    final offset = widget.offset;
+    final response = widget.response;
+    final now = widget.now;
     final l10n = AppLocalizations.of(context);
     final report = response?.report;
 
@@ -345,7 +366,28 @@ class _UsageReportBody extends StatelessWidget {
             ),
           )
         else ...[
+          Wrap(
+            spacing: 4,
+            children: [
+              for (final (index, title) in <(int, String)>[
+                (0, l10n.usageShareTierOverviewChip),
+                (1, l10n.usageEnhancementActivity),
+                (2, l10n.usageEnhancementLeaders),
+                (3, l10n.usageByAgent),
+                (4, l10n.usageShareTitle),
+              ])
+                TextButton(
+                  onPressed: () {
+                    final target = sections[index].currentContext;
+                    if (target != null) Scrollable.ensureVisible(target);
+                  },
+                  child: Text(title),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
           UsageHero(
+            key: sections[0],
             period: period,
             report: report,
             locale: locale,
@@ -354,209 +396,47 @@ class _UsageReportBody extends StatelessWidget {
                 : usageEstimatedTip(l10n, active),
           ),
           const SizedBox(height: 24),
-          _ActiveDays(period: period, report: report, locale: locale),
+          UsageActivity(
+            key: sections[1],
+            period: period,
+            report: report,
+            locale: locale,
+            now: now,
+          ),
           const SizedBox(height: 24),
-          UsagePodium(period: period, report: report, locale: locale),
+          UsagePodium(
+            key: sections[2],
+            period: period,
+            report: report,
+            locale: locale,
+          ),
           const SizedBox(height: 24),
           UsageWhenYouWork(
+            totalTokens: report.totals.tokens,
             hourly: report.hourly,
+            showHourlyChart: period != UsagePeriod.today,
             weekday: report.weekday,
             timezone: report.timezone,
             locale: locale,
           ),
           const SizedBox(height: 24),
-          UsageAgentTable(tools: report.tools, locale: locale),
+          UsageAgentTable(
+            key: sections[3],
+            tools: report.tools,
+            locale: locale,
+            range: report.range,
+          ),
           const SizedBox(height: 24),
-          UsageShareSection(period: period, report: report, locale: locale),
+          UsageShareSection(
+            key: sections[4],
+            period: period,
+            report: report,
+            locale: locale,
+          ),
         ],
         const SizedBox(height: 24),
         _Footer(report: report, locale: locale),
       ],
-    );
-  }
-}
-
-/// The heatmap, its legend, and the one line of streak evidence beneath it.
-class _ActiveDays extends ConsumerWidget {
-  const _ActiveDays({
-    required this.period,
-    required this.report,
-    required this.locale,
-  });
-
-  final UsagePeriod period;
-  final UsageReport report;
-  final String locale;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final l10n = AppLocalizations.of(context);
-    final daily = report.daily;
-    if (daily == null || daily.isEmpty) return const SizedBox.shrink();
-
-    final requestedFrom = DateTime.tryParse(report.range.from);
-    final servedTo = DateTime.tryParse(report.range.to);
-    if (requestedFrom == null || servedTo == null) {
-      return const SizedBox.shrink();
-    }
-
-    // All-time, and only all-time, starts where the data does.
-    //
-    // All-time asks from `usageAllTimeFloor`, and tokdash echoes it: a live
-    // all-time window answers `from: 2000-01-01` with `days: 9742` and 233
-    // daily rows. Drawn from the requested day that is ~1,392 non-lazy week
-    // columns, 97% of them holes, and the reader scrolls a quarter century of
-    // empty weeks to reach their own history. The header still prints the
-    // window that was asked for; only the grid is trimmed to what exists.
-    //
-    // Every other period keeps its requested start, because there the days
-    // before the first active one are days the report DID cover and the user
-    // was idle on. An empty cell says that; a hole says "not covered", and
-    // trimming would turn one into the other -- silently dropping the first
-    // half of a month whose work started on the 19th.
-    final from = period == UsagePeriod.allTime
-        ? usageHeatmapStart(requestedFrom, report)
-        : requestedFrom;
-
-    // The month period draws the whole calendar month: the broker closes the
-    // window at today, which left September rendering as one column. The tail
-    // after today is drawn as EMPTY CELLS (inactive), GitHub-style — a
-    // deliberate choice against the widget's hole semantics, because these
-    // days are known-future, not uncovered.
-    final to = period == UsagePeriod.month
-        ? DateTime(servedTo.year, servedTo.month + 1, 0)
-        : servedTo;
-
-    final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
-    // A year of week columns will not fit any phone, so the cells shrink with
-    // the window rather than the grid dropping weeks it cannot show. Within a
-    // density the grid solves its own cell edge against the pane width.
-    final wide = to.difference(from).inDays > 120;
-
-    // "Still running" is decided against the served window's own end, not the
-    // client clock's idea of the period -- so read the injected clock, not
-    // `DateTime.now()`. Reading the device clock here made this widget's
-    // rendering depend on the real date: it flips `windowIsOpen` the moment the
-    // real day passes the served window's end, which silently broke every
-    // report-page golden at midnight while the card goldens, which already went
-    // through the provider, kept passing. The user-facing form of the same bug
-    // is a skewed or differently-zoned device calling a finished period live.
-    final today = ref.watch(usageNowProvider)();
-    final windowIsOpen = !servedTo.isBefore(
-      DateTime(today.year, today.month, today.day),
-    );
-    final streak = _streakLine(
-      l10n,
-      report,
-      locale,
-      windowIsOpen: windowIsOpen,
-    );
-    return Column(
-      key: const Key('usage-report-active-days'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        UsageSectionTitle(title: l10n.usageActiveDaysTitle),
-        UsageHeatmap(
-          from: from,
-          to: to,
-          intensityByDate: {
-            for (final day in daily)
-              if (day.intensity != null) day.date: day.intensity!,
-          },
-          maxCellSize: wide ? 14 : 12,
-          minCellSize: wide ? 4 : usageHeatmapMinCell,
-          gap: wide ? 2 : 3,
-          weekdayLabels: _weekdayLabels(locale, sparse: compact || wide),
-        ),
-        const SizedBox(height: 8),
-        UsageHeatmapLegend(
-          lessLabel: l10n.usageLegendLess,
-          moreLabel: l10n.usageLegendMore,
-        ),
-        // The week view does not get bars: seven cells already read as
-        // magnitudes, and the `When you work` buckets own the within-week
-        // shape. Month and year do, where the grid answers "which days" and
-        // the bars answer "how much".
-        if (period == UsagePeriod.month || period == UsagePeriod.year) ...[
-          const SizedBox(height: 12),
-          Text(
-            l10n.usageDailyHistogramTitle,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: context.tokens.textTertiary,
-            ),
-          ),
-          const SizedBox(height: 4),
-          UsageDailyHistogram(
-            from: from,
-            to: to,
-            tokensByDate: {for (final day in daily) day.date: day.tokens},
-          ),
-        ],
-        if (streak != null) ...[
-          const SizedBox(height: 8),
-          Text(
-            streak,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: context.tokens.textSecondary,
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
-  /// Mon/Wed/Fri only where a full gutter would not fit.
-  static Map<int, String> _weekdayLabels(
-    String locale, {
-    required bool sparse,
-  }) {
-    const shown = [1, 3, 5];
-    return {
-      for (var weekday = 1; weekday <= 7; weekday++)
-        if (!sparse || shown.contains(weekday))
-          weekday: usageWeekdayName(weekday - 1, locale, const []),
-    };
-  }
-
-  /// The line under the heatmap, degrading rather than inventing a figure.
-  ///
-  /// The streak clause only appears on a window that is still running. The
-  /// facet's `currentStreak` is a fact about *today*; printing it beside a
-  /// closed August would attach a number to a window it does not describe —
-  /// and a served `0` beside "31 of 31 days active" reads as a contradiction
-  /// rather than as two different measurements.
-  static String? _streakLine(
-    AppLocalizations l10n,
-    UsageReport report,
-    String locale, {
-    required bool windowIsOpen,
-  }) {
-    final streaks = report.streaks;
-    final activeDays = streaks?.activeDays;
-    final totalDays = streaks?.totalDays;
-    if (activeDays == null || totalDays == null) return null;
-
-    final active = formatCompactCount(activeDays, locale: locale);
-    final total = formatCompactCount(totalDays, locale: locale);
-    final busiest = report.firsts?.busiestDay;
-    final busiestTokens = report.firsts?.busiestDayTokens;
-    final busiestDate = busiest == null ? null : DateTime.tryParse(busiest);
-    if (busiestDate == null || busiestTokens == null) {
-      return l10n.usageStreakLineShort(active, total);
-    }
-
-    final date = DateFormat.MMMd(locale).format(busiestDate);
-    final tokens = formatCompactCount(busiestTokens, locale: locale);
-    final current = streaks?.currentStreak;
-    if (!windowIsOpen || current == null || current <= 0) {
-      return l10n.usageDaysBusiestLine(active, total, date, tokens);
-    }
-    return l10n.usageStreakLine(
-      formatCompactCount(current, locale: locale),
-      active,
-      total,
-      date,
-      tokens,
     );
   }
 }
@@ -595,7 +475,10 @@ class _Header extends ConsumerWidget {
     if (offset == 0 && days != null && firsts?.lastActiveDay != null) {
       final last = DateTime.tryParse(firsts!.lastActiveDay!);
       final to = DateTime.tryParse(window.to);
-      if (last != null && to != null && !last.isBefore(to)) {
+      if (last != null &&
+          to != null &&
+          !last.isBefore(to) &&
+          !to.isBefore(DateTime(now.year, now.month, now.day))) {
         final elapsed = resolveUsageWindow(period, now);
         if (elapsed.inProgress) {
           progress = l10n.usageInProgress(
@@ -613,6 +496,7 @@ class _Header extends ConsumerWidget {
     final line = [
       if (progress != null) progress,
       l10n.usageWindowRange(window.from, window.to),
+      if (report.timezone != null) report.timezone!,
     ].join(' · ');
 
     return Column(

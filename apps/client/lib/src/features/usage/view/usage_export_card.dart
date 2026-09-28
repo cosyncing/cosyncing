@@ -433,9 +433,8 @@ class _UsageCardBuilder {
       case UsagePeriod.allTime:
         return l10n.usagePeriodAllTime;
       case UsagePeriod.today:
-        // The report never offers `today`; the branch exists so adding a
-        // period later is a compile error rather than a silently wrong title.
-        return l10n.usagePeriodToday;
+        // Historical day exports must name the served date, not "Today".
+        return DateFormat.yMMMd(locale).format(from);
     }
   }
 

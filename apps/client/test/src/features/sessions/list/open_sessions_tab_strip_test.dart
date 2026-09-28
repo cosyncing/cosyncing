@@ -4,6 +4,7 @@ import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:flutter/gestures.dart'
     show PointerDeviceKind, kMiddleMouseButton;
@@ -37,7 +38,192 @@ void main() {
   );
 
   group('OpenSessionsTabStrip', () {
-    testWidgets('hides when a single session is open', (tester) async {
+    // Widget tests default to Android, whose density is standard; desktop and
+    // web desktop resolve `adaptivePlatformDensity` to compact. That is where
+    // the tab row once shrank and its title rode the top of the tab, so the
+    // geometry is pinned under a desktop platform too.
+    testWidgets(
+      'a desktop-width tab fills and centres in the strip',
+      (
+        tester,
+      ) async {
+        tester.view
+          ..physicalSize = const Size(1440, 900)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await tester.pumpWidget(
+          host(
+            OpenSessionsTabStrip(
+              refs: [
+                _ref('codex', 'a', title: 'Refine session navigation'),
+                _ref('claude', 'b', title: 'Improve reconnect handling'),
+              ],
+              activeKey: 'codex/a',
+              onSelect: (_) {},
+              onClose: (_) {},
+              onOverview: () {},
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final strip = tester.getRect(find.byType(OpenSessionsTabStrip));
+        expect(strip.height, OpenSessionsTabStrip.height);
+        final tab = tester.getRect(
+          find
+              .descendant(
+                of: find.byKey(const Key('open-session-tab-codex/a')),
+                matching: find.byType(Material),
+              )
+              .first,
+        );
+        expect(tab.height, OpenSessionsTabStrip.tabHeight);
+        expect(tab.center.dy, moreOrLessEquals(strip.center.dy, epsilon: 1));
+        final close = tester.getRect(
+          find.byKey(const Key('open-session-tab-close-codex/a')),
+        );
+        expect(close.size, const Size.square(28));
+        expect(close.center.dy, moreOrLessEquals(tab.center.dy, epsilon: 0.5));
+        final title = tester.getRect(find.text('Refine session navigation'));
+        expect(title.center.dy, moreOrLessEquals(tab.center.dy, epsilon: 1));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.windows,
+        TargetPlatform.android,
+      }),
+    );
+
+    testWidgets('the labelled Overview tab is its own tappable button', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      tester.view
+        ..physicalSize = const Size(1440, 900)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      var overviews = 0;
+      await tester.pumpWidget(
+        host(
+          OpenSessionsTabStrip(
+            refs: [_ref('codex', 'a', title: 'Refine session navigation')],
+            activeKey: null,
+            onSelect: (_) {},
+            onClose: (_) {},
+            onOverview: () => overviews++,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final tab = find.byKey(const Key('workspace-overview-tab'));
+      final node = tester.getSemantics(tab);
+      // Its flags once merged into the page around it, which then announced
+      // itself as one selected "Overview" button with nothing to tap.
+      expect(node.rect.size, tester.getSize(tab));
+      expect(
+        node,
+        isSemantics(
+          label: 'Overview',
+          isButton: true,
+          isSelected: true,
+          hasTapAction: true,
+        ),
+      );
+      tester.semantics.tap(find.semantics.byLabel('Overview'));
+      expect(overviews, 1);
+      semantics.dispose();
+    });
+
+    testWidgets('a phone swipe scrolls reorderable tabs without moving them', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(390, 844)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final moves = <(int, int)>[];
+      await tester.pumpWidget(
+        host(
+          OpenSessionsTabStrip(
+            refs: [
+              for (var i = 0; i < 12; i++)
+                _ref('codex', '$i', title: 'Session $i'),
+            ],
+            activeKey: 'codex/0',
+            onSelect: (_) {},
+            onClose: (_) {},
+            onOverview: () {},
+            onOpenRoster: () {},
+            onReorder: (oldIndex, newIndex) => moves.add((oldIndex, newIndex)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final position = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      expect(position.maxScrollExtent, greaterThan(0));
+      await tester.dragFrom(const Offset(280, 22), const Offset(-130, 0));
+      await tester.pumpAndSettle();
+      expect(position.pixels, greaterThan(0));
+      expect(moves, isEmpty);
+    });
+
+    for (final kind in [PointerDeviceKind.touch, PointerDeviceKind.mouse]) {
+      testWidgets('$kind can deliberately reorder tabs', (tester) async {
+        tester.view
+          ..physicalSize = const Size(390, 844)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final moves = <(int, int)>[];
+        final closed = <String>[];
+        await tester.pumpWidget(
+          host(
+            OpenSessionsTabStrip(
+              refs: [
+                _ref('codex', '0', title: 'First'),
+                _ref('codex', '1', title: 'Second'),
+              ],
+              activeKey: 'codex/0',
+              onSelect: (_) {},
+              onClose: closed.add,
+              onReorder: (oldIndex, newIndex) =>
+                  moves.add((oldIndex, newIndex)),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final first = tester.getRect(
+          find.byKey(const Key('open-session-tab-codex/0')),
+        );
+        final second = tester.getRect(
+          find.byKey(const Key('open-session-tab-codex/1')),
+        );
+        final gesture = await tester.startGesture(second.center, kind: kind);
+        if (kind == PointerDeviceKind.touch) {
+          await tester.pump(const Duration(milliseconds: 600));
+        }
+        // Cross the insertion midpoint over real frames. A single teleport
+        // beyond the first tab can skip Flutter's intermediate insertion gap.
+        for (var frame = 1; frame <= 8; frame++) {
+          await gesture.moveTo(
+            Offset.lerp(second.center, first.center, frame / 8)!,
+          );
+          await tester.pump(const Duration(milliseconds: 32));
+        }
+        await tester.pump(const Duration(milliseconds: 300));
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(moves, [(1, 0)]);
+        expect(closed, isEmpty);
+      });
+    }
+
+    testWidgets('keeps a single session visible and closable', (tester) async {
       await tester.pumpWidget(
         host(
           OpenSessionsTabStrip(
@@ -49,7 +235,39 @@ void main() {
         ),
       );
 
-      expect(find.byKey(const Key('open-session-tab-claude/a')), findsNothing);
+      expect(
+        find.byKey(const Key('open-session-tab-claude/a')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('unread completion cue is separate from harness and close', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          OpenSessionsTabStrip(
+            refs: [_ref('claude', 'a'), _ref('codex', 'b')],
+            activeKey: 'claude/a',
+            unreadCompletionKeys: const {'codex/b'},
+            onSelect: (_) {},
+            onClose: (_) {},
+          ),
+        ),
+      );
+      expect(
+        find.byKey(const Key('open-session-tab-unread-codex/b')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('open-session-tab-unread-claude/a')),
+        findsNothing,
+      );
+      expect(find.byType(SessionHarnessLogo), findsNWidgets(2));
+      expect(
+        find.byKey(const Key('open-session-tab-close-codex/b')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('renders a tab per open session', (tester) async {
@@ -238,7 +456,10 @@ void main() {
       await tester.pumpAndSettle();
 
       // The scrollbar lives inside the strip: no extra height.
-      expect(tester.getSize(find.byType(OpenSessionsTabStrip)).height, 32);
+      expect(
+        tester.getSize(find.byType(OpenSessionsTabStrip)).height,
+        44,
+      );
 
       final scrollbar = find.byKey(const Key('open-sessions-tab-scrollbar'));
       expect(scrollbar, findsOneWidget);
@@ -308,7 +529,10 @@ void main() {
         ),
         findsNothing,
       );
-      expect(tester.getSize(find.byType(OpenSessionsTabStrip)).height, 32);
+      expect(
+        tester.getSize(find.byType(OpenSessionsTabStrip)).height,
+        OpenSessionsTabStrip.height,
+      );
     });
 
     // U3. `SessionRef.fromSession` writes the session id into the title slot
@@ -384,7 +608,7 @@ void main() {
       expect(find.text('ses_deep_link_01'), findsNothing);
     });
 
-    testWidgets('tabs use pulse and full ring status contracts', (
+    testWidgets('tabs separate original harness marks from input status', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -421,11 +645,10 @@ void main() {
             .first,
       );
 
-      expect(marker('claude/working').pulse, isTrue);
-      expect(marker('claude/working').ringColor, isNull);
+      expect(find.byType(SessionHarnessLogo), findsNWidgets(2));
       expect(marker('codex/needs-input').pulse, isFalse);
-      expect(marker('codex/needs-input').ringColor, isNotNull);
-      expect(marker('codex/needs-input').ringGapColor, isNotNull);
+      expect(marker('codex/needs-input').ringColor, isNull);
+      expect(marker('codex/needs-input').size, 4);
     });
   });
 }

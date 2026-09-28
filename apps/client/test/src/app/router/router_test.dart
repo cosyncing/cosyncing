@@ -24,6 +24,7 @@ import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_sidebar.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
@@ -162,6 +163,15 @@ void main() {
         ProviderScope(
           overrides: [
             clientIsWebProvider.overrideWithValue(true),
+            activeBrokerProfileProvider.overrideWith(
+              (ref) => BrokerProfile(
+                id: 'router-source',
+                displayName: 'Fixture server',
+                baseUri: Uri.parse('http://127.0.0.1:17734'),
+                createdAt: DateTime(2026),
+              ),
+            ),
+            brokerClientProvider.overrideWith((ref) async => null),
             sessionNotificationSettingsStoreProvider.overrideWithValue(
               _InMemorySessionNotificationSettingsStore(),
             ),
@@ -201,6 +211,10 @@ void main() {
             ...overrides,
           ],
           child: MaterialApp.router(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(disableAnimations: true),
+              child: child!,
+            ),
             theme: ThemeData(
               splashFactory: InkRipple.splashFactory,
               extensions: <ThemeExtension<dynamic>>[
@@ -217,6 +231,15 @@ void main() {
       );
       await tester.pumpAndSettle();
       return router;
+    }
+
+    Future<void> openWorkspaceSettings(WidgetTester tester) async {
+      final drawer = find.byKey(const Key('workspace-open-drawer'));
+      if (drawer.evaluate().isNotEmpty) {
+        await tester.tap(drawer);
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.byKey(const Key('sessions-workspace-settings')));
     }
 
     /// Opens a Settings category from the hub.
@@ -295,6 +318,7 @@ void main() {
           surfaceSize: const Size(500, 900),
           initialLocation: '/sessions/claude/session-a',
           overrides: [
+            activeBrokerProfileProvider.overrideWith((ref) => profile),
             brokerClientProvider.overrideWith((_) async => null),
             sessionArtifactTransferRepositoryProvider.overrideWithValue(
               InMemorySessionArtifactTransferRepository(),
@@ -306,7 +330,6 @@ void main() {
           tester.element(detail),
           listen: false,
         );
-        container.read(activeBrokerProfileProvider.notifier).state = profile;
         await tester.pump();
         await tester.pump();
 
@@ -331,6 +354,85 @@ void main() {
         expect(container.read(visibleAttentionSessionsProvider), isEmpty);
       },
     );
+
+    for (final collapseProject in [false, true]) {
+      testWidgets(
+        'reopening active child reveals ancestry, project=$collapseProject',
+        (tester) async {
+          final roster = _NavigationRosterController(const [
+            SessionInfo(
+              id: 'parent',
+              tool: 'codex',
+              title: 'Parent task',
+              nativeId: 'parent',
+              status: SessionStatus.idle,
+              attachMode: AttachMode.observe,
+            ),
+            SessionInfo(
+              id: 'child',
+              tool: 'codex',
+              title: 'Child task',
+              nativeId: 'child',
+              parentThreadId: 'parent',
+              origin: SessionOrigin.subagent,
+              status: SessionStatus.idle,
+              attachMode: AttachMode.observe,
+            ),
+          ]);
+          final router = await pumpApp(
+            tester,
+            surfaceSize: const Size(1200, 900),
+            initialLocation: '/sessions/codex/child',
+            overrides: [
+              sessionListControllerProvider.overrideWith(() => roster),
+              sessionArtifactTransferRepositoryProvider.overrideWithValue(
+                InMemorySessionArtifactTransferRepository(),
+              ),
+              sessionDisplayPreferencesStoreProvider.overrideWithValue(
+                InMemorySessionDisplayPreferencesStore()
+                  ..sessionRosterWindow = 'all',
+              ),
+            ],
+          );
+          final child = find.byKey(const Key('session-row-codex/child'));
+          final detail = find.byType(SessionDetailPage);
+          final detailState = tester.state(detail);
+          expect(child, findsOneWidget);
+          final collapse = find.byKey(
+            ValueKey(
+              collapseProject
+                  ? 'project-header-__ungrouped__'
+                  : 'session-children-codex/parent',
+            ),
+          );
+          await tester.tap(collapse);
+          await tester.pumpAndSettle();
+          expect(child, findsNothing);
+          roster.refreshFixture();
+          await tester.pumpAndSettle();
+          expect(child, findsNothing, reason: 'A refresh is not navigation.');
+
+          router.go('/attention');
+          await tester.pumpAndSettle();
+          router.go('/sessions/codex/child');
+          await tester.pumpAndSettle();
+          expect(tester.widget<SessionDetailPage>(detail).sessionId, 'child');
+          expect(tester.state(detail), same(detailState));
+          expect(child, findsOneWidget);
+
+          // Consuming the new navigation does not pin the ancestry open.
+          await tester.tap(collapse);
+          await tester.pumpAndSettle();
+          roster.refreshFixture();
+          await tester.pumpAndSettle();
+          expect(child, findsNothing);
+          // Repeated explicit opens work even without leaving this branch.
+          router.go('/sessions/codex/child');
+          await tester.pumpAndSettle();
+          expect(child, findsOneWidget);
+        },
+      );
+    }
 
     testWidgets('a compact deep link into a file shows the drill-in', (
       tester,
@@ -447,7 +549,7 @@ void main() {
 
       expect(
         router.routerDelegate.currentConfiguration.uri.path,
-        sessionDetailLocation(tool: 'claude', sessionId: 'session-a'),
+        sessionsRoute,
       );
       expect(find.byKey(const Key('session-file-page')), findsNothing);
     });
@@ -462,7 +564,7 @@ void main() {
         ],
       );
 
-      await tester.tap(find.text('Settings'));
+      await openWorkspaceSettings(tester);
       await tester.pumpAndSettle();
       await openSettingsCategory(
         tester,
@@ -486,7 +588,7 @@ void main() {
     ) async {
       await pumpApp(tester);
 
-      await tester.tap(find.text('Settings'));
+      await openWorkspaceSettings(tester);
       await tester.pumpAndSettle();
       await openSettingsCategory(tester, const Key('settings-category-broker'));
       expect(find.text('Saved servers'), findsAtLeastNWidgets(1));
@@ -496,7 +598,7 @@ void main() {
     testWidgets('settings can open pairing route', (tester) async {
       await pumpApp(tester);
 
-      await tester.tap(find.text('Settings'));
+      await openWorkspaceSettings(tester);
       await tester.pumpAndSettle();
       await openSettingsCategory(tester, const Key('settings-category-broker'));
       final pairingTile = find.byKey(const Key('servers-add'));
@@ -519,7 +621,7 @@ void main() {
       (tester) async {
         await pumpApp(tester);
 
-        await tester.tap(find.text('Settings'));
+        await openWorkspaceSettings(tester);
         await tester.pumpAndSettle();
         await openSettingsCategory(
           tester,
@@ -665,7 +767,8 @@ void main() {
           initialLocation: '/settings',
         );
 
-        expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
+        expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
+        expect(find.byKey(const Key('workspace-frame-menu')), findsOneWidget);
         expect(find.widgetWithText(AppBar, 'Settings'), findsOneWidget);
 
         await _sendAppShortcut(
@@ -675,7 +778,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        expect(find.widgetWithText(AppBar, 'Sessions'), findsOneWidget);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
       },
     );
 
@@ -704,8 +807,14 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.widgetWithText(AppBar, 'Notifications'), findsOneWidget);
+        // The shared sidebar stays beside every destination, so there is no
+        // separate way back to Sessions.
         expect(
           find.byKey(const Key('attention-back-to-sessions')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('sessions-workspace-attention')),
           findsOneWidget,
         );
 
@@ -859,79 +968,78 @@ void main() {
     });
 
     // Re-flagged item 26: the Attention destination must carry its unread
-    // signal in every layout it is reachable from. The wide roster header and
-    // the collapsed rail are covered in sessions_workspace_test; this is the
-    // compact layout, where the bottom nav is the only route to Attention.
-    testWidgets('compact bottom nav shows the attention unread badge', (
+    // signal in every layout it is reachable from. The wide sidebar and the
+    // collapsed rail are covered in sessions_workspace_test; this is the
+    // compact layout, where the drawer is the route to Attention.
+    Future<void> openFrameDrawer(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('workspace-frame-menu')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('compact drawer shows the attention unread count', (
       tester,
     ) async {
       await pumpApp(
         tester,
         surfaceSize: const Size(600, 900),
+        initialLocation: attentionRoute,
         overrides: [
           attentionUnreadCountProvider.overrideWith((ref) => 3),
         ],
       );
+      await openFrameDrawer(tester);
 
-      expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
-      final badge = find.descendant(
-        of: find.byKey(const Key('app-bottom-nav')),
-        matching: find.byType(Badge),
-      );
-      expect(badge, findsWidgets);
       expect(
         find.descendant(
-          of: find.byKey(const Key('app-bottom-nav')),
+          of: find.byKey(const Key('sessions-workspace-attention')),
           matching: find.text('3'),
         ),
         findsOneWidget,
       );
     });
 
-    testWidgets('compact bottom nav hides the badge at zero unread', (
+    testWidgets('compact drawer hides the count at zero unread', (
       tester,
     ) async {
       await pumpApp(
         tester,
         surfaceSize: const Size(600, 900),
+        initialLocation: attentionRoute,
         overrides: [
           attentionUnreadCountProvider.overrideWith((ref) => 0),
         ],
       );
+      await openFrameDrawer(tester);
 
       expect(
         find.descendant(
-          of: find.byKey(const Key('app-bottom-nav')),
+          of: find.byKey(const Key('sessions-workspace-attention')),
           matching: find.text('0'),
         ),
         findsNothing,
       );
     });
 
-    testWidgets('compact bottom nav marks Settings for a client update', (
+    testWidgets('compact drawer marks Settings for a client update', (
       tester,
     ) async {
       final semantics = tester.ensureSemantics();
       await pumpApp(
         tester,
         surfaceSize: const Size(600, 900),
+        initialLocation: attentionRoute,
         overrides: [
           nativeClientUpdateAvailableProvider.overrideWithValue(true),
         ],
       );
+      await openFrameDrawer(tester);
 
-      final destination = find.widgetWithText(
-        NavigationDestination,
-        'Settings',
-      );
       final badges = find.descendant(
-        of: destination,
+        of: find.byKey(const Key('sessions-workspace-settings')),
         matching: find.byType(Badge),
       );
       expect(badges, findsOneWidget);
-      for (final badge in tester.widgetList<Badge>(badges)) {
-        expect(badge.isLabelVisible, isTrue);
-      }
+      expect(tester.widget<Badge>(badges).isLabelVisible, isTrue);
       expect(
         find.bySemanticsLabel(RegExp('App update available')),
         findsOneWidget,
@@ -941,7 +1049,7 @@ void main() {
 
     testWidgets(
       'platform menu item can navigate in compact shell without breaking'
-      ' bottom nav layout',
+      ' the drawer layout',
       (tester) async {
         await pumpApp(
           tester,
@@ -949,13 +1057,14 @@ void main() {
           initialLocation: '/settings',
         );
 
-        expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
+        expect(find.byKey(const Key('workspace-frame-menu')), findsOneWidget);
 
         await _invokeMenuSelection(tester, label: 'Sessions');
         await tester.pumpAndSettle();
 
-        expect(find.widgetWithText(AppBar, 'Sessions'), findsOneWidget);
-        expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+        expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
+        expect(find.byKey(const Key('workspace-open-drawer')), findsOneWidget);
       },
     );
 
@@ -983,26 +1092,30 @@ void main() {
           find.byKey(const Key('app-desktop-command-surface')),
           findsNothing,
         );
+        // Connection sits in the shared frame, beside the sidebar.
         expect(
           find.byKey(const Key('connection-back-to-sessions')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('sessions-workspace-attention')),
           findsOneWidget,
         );
       },
     );
 
     testWidgets(
-      'compact width keeps bottom navigation and hides command surface',
+      'compact workspace offers a drawer and hides duplicate navigation',
       (tester) async {
         await pumpApp(tester, surfaceSize: const Size(600, 900));
 
-        expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
+        expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
+        expect(find.byKey(const Key('workspace-open-drawer')), findsOneWidget);
         expect(
           find.byKey(const Key('app-desktop-command-surface')),
           findsNothing,
         );
         expect(find.byKey(const Key('app-command-sessions')), findsNothing);
-        final nav = tester.widget<NavigationBar>(find.byType(NavigationBar));
-        expect(nav.destinations, hasLength(3));
         expect(find.text('Connection'), findsNothing);
       },
     );
@@ -1016,20 +1129,23 @@ void main() {
 
       expect(router.state.uri.path, connectionRoute);
       expect(find.widgetWithText(AppBar, 'Connection'), findsOneWidget);
-      await tester.tap(find.text('Settings'));
+      await tester.tap(find.byKey(const Key('workspace-frame-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('sessions-workspace-settings')));
       await tester.pumpAndSettle();
 
       expect(router.state.uri.path, settingsRoute);
       expect(find.widgetWithText(AppBar, 'Settings'), findsOneWidget);
     });
 
-    testWidgets('medium width keeps bottom navigation through 839dp', (
+    testWidgets('medium width keeps drawer navigation through 839dp', (
       tester,
     ) async {
       await pumpApp(tester, surfaceSize: const Size(839, 900));
 
-      expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
-      expect(find.byType(SessionsWorkspace), findsNothing);
+      expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
+      expect(find.byKey(const Key('workspace-open-drawer')), findsOneWidget);
+      expect(find.byType(SessionsWorkspace), findsOneWidget);
       expect(
         find.byKey(const Key('app-desktop-command-surface')),
         findsNothing,
@@ -1037,7 +1153,7 @@ void main() {
     });
 
     testWidgets(
-      'wide workspace uses contextual actions without permanent navigation',
+      'wide sidebar stays beside every destination',
       (tester) async {
         await pumpApp(
           tester,
@@ -1062,11 +1178,11 @@ void main() {
         expect(find.widgetWithText(AppBar, 'Notifications'), findsOneWidget);
         expect(
           find.byKey(const Key('attention-back-to-sessions')),
-          findsOneWidget,
+          findsNothing,
         );
 
         await tester.tap(
-          find.byKey(const Key('attention-back-to-sessions')),
+          find.byKey(const Key('sessions-workspace-overview')),
         );
         await tester.pumpAndSettle();
         expect(find.byType(SessionsWorkspace), findsOneWidget);
@@ -1078,6 +1194,10 @@ void main() {
         expect(find.widgetWithText(AppBar, 'Settings'), findsOneWidget);
         expect(
           find.byKey(const Key('settings-back-to-sessions')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('sessions-workspace-attention')),
           findsOneWidget,
         );
         expect(
@@ -1085,6 +1205,48 @@ void main() {
           findsNothing,
         );
         expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'wide sidebar stays reachable by assistive technology on every page',
+      (tester) async {
+        // Each page is a branch Navigator whose route barrier blocks the
+        // semantics painted before it; the sidebar is painted first.
+        final semantics = tester.ensureSemantics();
+        await pumpApp(
+          tester,
+          surfaceSize: const Size(1200, 900),
+          overrides: [
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              InMemorySessionArtifactTransferRepository(),
+            ),
+          ],
+        );
+
+        void expectSidebarExposed(String page) {
+          for (final label in ['New session', 'Notifications']) {
+            expect(
+              find.descendant(
+                of: find.byType(WorkspaceSidebar),
+                matching: find.bySemanticsLabel(label),
+              ),
+              findsOneWidget,
+              reason: '$label on $page',
+            );
+          }
+        }
+
+        expectSidebarExposed('Sessions');
+        await tester.tap(
+          find.byKey(const Key('sessions-workspace-attention')),
+        );
+        await tester.pumpAndSettle();
+        expectSidebarExposed('Notifications');
+        await tester.tap(find.byKey(const Key('sessions-workspace-settings')));
+        await tester.pumpAndSettle();
+        expectSidebarExposed('Settings');
+        semantics.dispose();
       },
     );
 
@@ -1441,14 +1603,14 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        expect(find.widgetWithText(AppBar, 'Sessions'), findsOneWidget);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
       },
     );
 
     testWidgets(
       'compact session detail hides bottom navigation but keeps a way back',
       (tester) async {
-        await pumpApp(
+        final router = await pumpApp(
           tester,
           surfaceSize: const Size(500, 900),
           initialLocation: '/sessions/claude/session-a',
@@ -1462,24 +1624,43 @@ void main() {
         expect(find.byType(SessionDetailPage), findsOneWidget);
         expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
 
-        // Hiding the nav is only safe because detail can be popped.
-        final backButton = find.byType(BackButton);
-        expect(backButton, findsOneWidget);
+        await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+        await tester.pumpAndSettle();
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(find.byType(Drawer), findsNothing);
+        expect(find.byType(SessionDetailPage), findsOneWidget);
 
-        await tester.tap(backButton);
+        // System Back returns to overview without closing the retained tab.
+        await tester.binding.handlePopRoute();
         await tester.pumpAndSettle();
 
         expect(find.byType(SessionDetailPage), findsNothing);
-        expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
+        expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
+        expect(find.byKey(const Key('workspace-open-drawer')), findsOneWidget);
+        expect(
+          find.byKey(const Key('open-session-tab-claude/session-a')),
+          findsOneWidget,
+        );
+        expect(
+          find.byType(SessionDetailPage, skipOffstage: false),
+          findsOneWidget,
+        );
+        expect(
+          await router.routerDelegate.popRoute(),
+          isFalse,
+          reason: 'overview allows normal platform exit',
+        );
       },
     );
 
-    testWidgets('compact session roster keeps bottom navigation', (
+    testWidgets('compact session roster exposes drawer navigation', (
       tester,
     ) async {
       await pumpApp(tester, surfaceSize: const Size(500, 900));
 
-      expect(find.byKey(const Key('app-bottom-nav')), findsOneWidget);
+      expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
+      expect(find.byKey(const Key('workspace-open-drawer')), findsOneWidget);
     });
 
     testWidgets('wide session detail is unchanged by the compact nav rule', (
@@ -2033,6 +2214,26 @@ List<PlatformMenuItem> _platformMenuActionItems(WidgetTester tester) {
   final menuBar = _platformMenuBar(tester);
   final appMenu = menuBar.menus.single as PlatformMenu;
   return appMenu.menus;
+}
+
+class _NavigationRosterController extends SessionListController {
+  _NavigationRosterController(this.sessions);
+
+  final List<SessionInfo> sessions;
+
+  @override
+  SessionListState build() => SessionListState(
+    status: SessionListStatus.loaded,
+    sessions: sessions,
+  );
+
+  @override
+  Future<void> load({bool silent = false}) async {}
+
+  void refreshFixture() => state = SessionListState(
+    status: SessionListStatus.loaded,
+    sessions: List.of(sessions),
+  );
 }
 
 class _InMemoryFilePanesStore implements FilePanesStore {

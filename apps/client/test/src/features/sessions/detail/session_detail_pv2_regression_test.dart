@@ -84,9 +84,10 @@ void main() {
         await tester.pump();
         await tester.pump();
 
+        expect(tester.takeException(), isNull);
         expect(
-          find.byKey(const Key('session-detail-chat-compact-scroll')),
-          crossing.isEven ? findsOneWidget : findsNothing,
+          tester.getBottomRight(_promptEditable()).dy,
+          lessThanOrEqualTo(tester.view.physicalSize.height),
         );
         final current = tester.widget<EditableText>(_promptEditable());
         expect(

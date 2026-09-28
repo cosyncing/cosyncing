@@ -551,11 +551,11 @@ void main() {
       expect(sink.written, hasLength(2));
       expect(
         sink.written.first.name,
-        endsWith('-overview-teal-obsidian-light.png'),
+        endsWith('-overview-$kDefaultThemeId-light.png'),
       );
       expect(
         sink.written.last.name,
-        endsWith('-overview-teal-obsidian-dark.png'),
+        endsWith('-overview-$kDefaultThemeId-dark.png'),
       );
       // The sender never chose a theme, and never had to.
       expect(find.textContaining('Saved '), findsOneWidget);
@@ -621,7 +621,7 @@ void main() {
       expect(
         sink.written.first.name,
         'cosyncing-usage-2026-08-01-2026-08-31-'
-        'projects-teal-obsidian-light.png',
+        'projects-$kDefaultThemeId-light.png',
       );
     });
 
@@ -735,11 +735,11 @@ void main() {
         findsNWidgets(2),
       );
       expect(
-        find.descendant(of: share, matching: find.text('light')),
+        find.descendant(of: share, matching: find.text('Light')),
         findsNWidgets(2),
       );
       expect(
-        find.descendant(of: share, matching: find.text('dark')),
+        find.descendant(of: share, matching: find.text('Dark')),
         findsNWidgets(2),
       );
     });
@@ -764,7 +764,7 @@ void main() {
         containsAll([
           for (final tier in ['overview', 'projects'])
             for (final mode in ['light', 'dark'])
-              '$prefix-$tier-teal-obsidian-$mode.png',
+              '$prefix-$tier-$kDefaultThemeId-$mode.png',
         ]),
       );
     });

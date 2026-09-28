@@ -25,6 +25,7 @@ class TranscriptBox extends StatelessWidget {
     this.body,
     this.trailing,
     this.actions = const [],
+    this.plain = false,
     super.key,
   });
 
@@ -46,11 +47,16 @@ class TranscriptBox extends StatelessWidget {
   /// Optional compact actions, wrapped at narrow widths and high text scales.
   final List<Widget> actions;
 
+  /// Omits the enclosing surface for inline decisions. Error tone always keeps
+  /// its readable error surface, even if this option is requested.
+  final bool plain;
+
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final theme = Theme.of(context);
     final isError = tone == TranscriptBoxTone.error;
+    final inlineDecision = plain && !isError;
     final fill = isError
         ? theme.colorScheme.errorContainer.withValues(alpha: 0.35)
         : theme.colorScheme.surfaceContainerHighest;
@@ -58,6 +64,78 @@ class TranscriptBox extends StatelessWidget {
         ? _readableErrorForeground(tokens, fill)
         : tokens.textPrimary;
 
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (!inlineDecision) ...[
+              ExcludeSemantics(
+                child: Icon(
+                  icon,
+                  size: 16,
+                  color: isError ? titleColor : tokens.textSecondary,
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              child: Text(
+                title,
+                style:
+                    (inlineDecision
+                            ? theme.textTheme.labelMedium
+                            : theme.textTheme.titleSmall)
+                        ?.copyWith(
+                          color: titleColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+              ),
+            ),
+            if (trailing != null) ...[
+              const SizedBox(width: 8),
+              trailing!,
+            ],
+          ],
+        ),
+        if (body != null) ...[
+          const SizedBox(height: 4),
+          DefaultTextStyle(
+            style:
+                (inlineDecision
+                        ? theme.textTheme.bodyMedium!
+                        : theme.textTheme.bodySmall!)
+                    .copyWith(
+                      color: tokens.textPrimary,
+                    ),
+            child: body!,
+          ),
+        ],
+        if (actions.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Align(
+            alignment: inlineDecision
+                ? AlignmentDirectional.centerStart
+                : AlignmentDirectional.centerEnd,
+            child: Wrap(
+              alignment: inlineDecision
+                  ? WrapAlignment.start
+                  : WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 4,
+              children: actions,
+            ),
+          ),
+        ],
+      ],
+    );
+    if (inlineDecision) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: content,
+      );
+    }
     return Card(
       color: fill,
       margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
@@ -66,58 +144,7 @@ class TranscriptBox extends StatelessWidget {
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ExcludeSemantics(
-                  child: Icon(
-                    icon,
-                    size: 16,
-                    color: isError ? titleColor : tokens.textSecondary,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      color: titleColor,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                if (trailing != null) ...[
-                  const SizedBox(width: 8),
-                  trailing!,
-                ],
-              ],
-            ),
-            if (body != null) ...[
-              const SizedBox(height: 4),
-              DefaultTextStyle(
-                style: theme.textTheme.bodySmall!.copyWith(
-                  color: tokens.textPrimary,
-                ),
-                child: body!,
-              ),
-            ],
-            if (actions.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Align(
-                alignment: AlignmentDirectional.centerEnd,
-                child: Wrap(
-                  alignment: WrapAlignment.end,
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: actions,
-                ),
-              ),
-            ],
-          ],
-        ),
+        child: content,
       ),
     );
   }

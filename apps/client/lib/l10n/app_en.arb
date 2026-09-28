@@ -3257,7 +3257,7 @@
   },
   "sessionRosterLoadFailed": "Could not load sessions.",
   "sessionRosterUpdateFailed": "Update failed. Showing the last session list.",
-  "sessionRosterSearchHint": "Search sessions or projects…",
+  "sessionRosterSearchHint": "Search sessions",
   "sessionRosterFilterStatus": "Status",
   "sessionRosterAllStatuses": "All statuses",
   "sessionRosterStatusNeedsInput": "Needs input",
@@ -6111,5 +6111,145 @@
   "androidBackgroundConnectionNotificationText": "Turn this off in Settings → Notifications.",
   "@androidBackgroundConnectionNotificationText": {
     "description": "Body of the ongoing background-connection notification: where to turn it off."
-  }
+  },
+  "settingsEnhancementConversation": "Conversation",
+  "settingsEnhancementMessageText": "Message text",
+  "settingsEnhancementMessageSpacing": "Message spacing",
+  "settingsEnhancementFontSize": "{size} px",
+  "settingsEnhancementReadingWidth": "Reading width",
+  "settingsEnhancementReadingWidthHint": "Limit conversations to 900 px. Off uses the available width.",
+  "settingsEnhancementIndicators": "Session indicators",
+  "settingsEnhancementWorking": "Working",
+  "settingsEnhancementNeedsInput": "Needs input",
+  "settingsEnhancementReadyReview": "Ready to review",
+  "settingsEnhancementIndicatorsHint": "Logos identify the agent. Working means a turn is executing; Needs input asks for a reply. A red dot marks an unread completion. Loading and reconnecting are separate connection states.",
+  "settingsEnhancementAgentsQuota": "Agents & Quota",
+  "settingsEnhancementAgentsQuotaHint": "Managed runtimes, quota windows and warnings",
+  "usageEnhancementDay": "Day",
+  "usageEnhancementCurrent": "Current period",
+  "usageEnhancementIntegrations": "Usage integrations",
+  "usageEnhancementIntegrationsHint": "Supported sources are shown for reference. Availability depends on the selected server and its Tokdash installation.",
+  "usageEnhancementNoReading": "No reading in this period",
+  "usageEnhancementExportCsv": "Export CSV",
+  "usageEnhancementActivity": "Activity",
+  "usageEnhancementDetailUnavailable": "— indicates a breakdown this source does not provide.",
+  "@settingsEnhancementFontSize": {
+    "placeholders": {
+      "size": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationEnhancementMore": "More composer actions",
+  "conversationEnhancementDetails": "Session details",
+  "conversationEnhancementLastKnown": "Last known: {reading}",
+  "@conversationEnhancementLastKnown": {
+    "placeholders": {
+      "reading": {
+        "type": "String"
+      }
+    }
+  },
+  "inboxEnhancementJumpActivity": "Jump to activity",
+  "inboxEnhancementNeedsAttention": "Needs attention · {count}",
+  "@inboxEnhancementNeedsAttention": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementAllPending": "All pending",
+  "inboxEnhancementInput": "Your input is needed",
+  "inboxEnhancementCompletions": "Unread completions",
+  "inboxEnhancementNoPending": "No pending requests or unread completions.",
+  "inboxEnhancementRecentActivity": "Recent activity · {count} unread",
+  "@inboxEnhancementRecentActivity": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementUnread": "Unread",
+  "inboxEnhancementActivityActions": "Activity actions",
+  "inboxEnhancementMarkAllRead": "Mark activity read",
+  "inboxEnhancementClearActivity": "Clear activity",
+  "inboxEnhancementNoActivity": "No activity matches this filter.",
+  "inboxEnhancementActivityCleared": "Activity cleared",
+  "inboxEnhancementUndo": "Undo",
+  "inboxEnhancementReply": "Reply",
+  "inboxEnhancementReview": "Review",
+  "inboxEnhancementMarkRead": "Mark read",
+  "workspaceOverview": "Overview",
+  "sessionRosterProjectsLabel": "Projects",
+  "sessionRosterFilters": "Filter sessions",
+  "sessionRosterProjectAttention": "Needs input or has finished work to review",
+  "workspaceServerSessionCount": "{count, plural, =1{1 session} other{{count} sessions}}",
+  "@workspaceServerSessionCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "workspaceHideSidebar": "Hide sidebar",
+  "workspaceRunningDetail": "Making progress",
+  "workspaceWaitingDetail": "Your input is needed",
+  "workspaceCompletionsDetail": "Finished their turn",
+  "workspaceOverviewHeading": "Your day, in sync.",
+  "workspaceOverviewIntro": "A little perspective on everything you’re building.",
+  "workspaceNoMachine": "Choose a server",
+  "workspaceRunning": "Running",
+  "workspaceWaiting": "Waiting for you",
+  "workspaceUnreadCompletions": "Unread completions",
+  "workspaceCompletionReadNote": "Completion notifications are read when you open their session.",
+  "workspaceLoading": "Loading current data…",
+  "workspaceStateUnavailable": "Current activity is unavailable. Cached session identities remain in the sidebar.",
+  "workspacePartialRoster": "Partial roster: counts include only sessions this server has discovered so far.",
+  "workspaceNeedsAttention": "Needs attention",
+  "workspaceNothingHere": "Nothing in this view right now.",
+  "workspaceToday": "Today’s activity",
+  "workspaceUsageDetails": "Usage details",
+  "workspaceEstimatedTime": "Estimated agent activity",
+  "workspaceRuntimeUnavailable": "Observed execution time is unavailable.",
+  "workspaceConcurrentTime": "Concurrent sessions add together.",
+  "workspaceTokenBreakdownUnavailable": "This source does not provide a complete token breakdown.",
+  "workspacePartialUsage": "Partial usage: readings unavailable for {sources}.",
+  "@workspacePartialUsage": {
+    "placeholders": {
+      "sources": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceCoverageUnknown": "Source coverage is unavailable.",
+  "workspaceCloseAllTabs": "Close all tabs",
+  "workspaceTabsClosed": "Tabs closed. Sessions keep running.",
+  "workspaceUndoCloseTabs": "Undo",
+  "workspaceChildAttention": "{count} linked sessions · {waiting} need input · {ready} recently completed",
+  "@workspaceChildAttention": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "waiting": {
+        "type": "int"
+      },
+      "ready": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementSubagentOf": "Subagent of {parent}",
+  "@inboxEnhancementSubagentOf": {
+    "placeholders": {
+      "parent": {
+        "type": "String"
+      }
+    }
+  },
+  "themeQuietWorkspaceName": "Quiet Workspace",
+  "themeQuietWorkspaceDescription": "Quiet neutral surfaces with green and amber activity cues.",
+  "usageEnhancementLeaders": "Leaders"
 }

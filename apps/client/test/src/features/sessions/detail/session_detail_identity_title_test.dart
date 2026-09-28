@@ -114,10 +114,13 @@ void main() {
     addTearDown(tester.view.reset);
   }
 
-  /// The session title as the top strip actually renders it.
+  /// The information control exposes the known title without repeating the tab.
   Finder stripTitle(String text) => find.descendant(
     of: find.byKey(const Key('session-detail-top-strip')),
-    matching: find.text(text),
+    matching: find.byWidgetPredicate(
+      (widget) =>
+          widget is Tooltip && (widget.message?.endsWith('\n$text') ?? false),
+    ),
   );
 
   /// The composer's current text, or null when there is no composer field.
@@ -193,6 +196,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+      await tester.pumpAndSettle();
       await expandRosterProject(tester);
 
       await tester.tap(find.text('Refactor the broker gate'));
@@ -237,6 +242,9 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
+      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       final header = find.byWidgetPredicate(
         (widget) =>
             widget.key is ValueKey<String> &&
@@ -315,6 +323,8 @@ void main() {
           onConnection: (created) => connection = created,
         ),
       );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
       await tester.pumpAndSettle();
       await expandRosterProject(tester);
       await tester.tap(find.text('Old title'));
@@ -782,6 +792,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(stripTitle('Opening session'), findsOneWidget);
 
+      await tester.tap(find.byKey(const Key('session-detail-information')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('session-detail-rename-button')));
       await tester.pumpAndSettle();
 
@@ -823,6 +835,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.tap(find.byKey(const Key('session-detail-information')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('session-detail-rename-button')));
       await tester.pumpAndSettle();
       expect(

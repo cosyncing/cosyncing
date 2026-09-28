@@ -13,6 +13,30 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- The Flutter workspace now keeps session tabs visible, including a single
+  open session, and offers an overview plus Close all with Undo. Closing a tab
+  leaves its session running. The sidebar stays beside Notifications and
+  Settings too; phones and other narrow screens open the same sidebar as a
+  drawer from the menu button instead of a bottom navigation bar.
+- The sidebar roster starts with every project collapsed and marks a project
+  that needs input or has finished work with a single dot. A project's path
+  appears on hover; long-press or right-click opens its menu (new session,
+  rename). Compact rows use original harness logos and preserve subagent
+  hierarchy with independent parent status and descendant attention cues.
+- Conversations use a compact context header and composer with directly
+  accessible model, permissions, microphone, context usage, Send and Stop.
+  Display settings independently persist conversation text size, spacing and
+  reading width. Status indicators are static. The new default Quiet Workspace
+  palette and bundled Lato typography support light and dark appearances;
+  previously selected palettes remain available.
+- Notifications show requests and unread completions above recent activity,
+  with independent filters. Activity read/clear actions preserve pending
+  requests, and clearing offers Undo before synchronizing its exact event
+  snapshot. Opening a session continues to read its completion notifications.
+- Settings retain category-to-detail navigation on phones and show a category
+  rail on wide screens. Agents & Quota uses branded provider identities;
+  Usage overview adds a day range, period-aware charts, ranking details,
+  the complete sortable agent table on phones and period-scoped CSV export.
 - Notifications are now configurable per type, in three families: Sessions
   (permission requests, questions, finished and failed turns, finished goals,
   failed scheduled messages), Security (security alerts, new devices), and

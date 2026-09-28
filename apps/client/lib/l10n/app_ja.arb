@@ -1016,7 +1016,7 @@
   "sessionForkAgentOwnedRefusal": "このセッションは別のエージェントセッションから生成されたものです。親のセッションを分岐してください。",
   "sessionRosterLoadFailed": "セッションを読み込めませんでした。",
   "sessionRosterUpdateFailed": "更新に失敗しました。直前のセッション一覧を表示しています。",
-  "sessionRosterSearchHint": "セッションやプロジェクトを検索…",
+  "sessionRosterSearchHint": "セッションを検索",
   "sessionRosterFilterStatus": "ステータス",
   "sessionRosterAllStatuses": "すべてのステータス",
   "sessionRosterStatusNeedsInput": "入力待ち",
@@ -1599,5 +1599,104 @@
   "androidBackgroundConnectionSubtitle": "アプリを離れても Cosyncing を動かし続け、通知を遅れずに届けます。動作中は Android に音の鳴らない通知が表示され、電池の消費が増えます。",
   "androidBackgroundConnectionChannelName": "バックグラウンド接続",
   "androidBackgroundConnectionNotificationTitle": "通知を受け取るために接続中",
-  "androidBackgroundConnectionNotificationText": "「設定 → 通知」でオフにできます。"
+  "androidBackgroundConnectionNotificationText": "「設定 → 通知」でオフにできます。",
+  "themeQuietWorkspaceName": "落ち着いたワークスペース",
+  "themeQuietWorkspaceDescription": "ニュートラルな背景と緑・琥珀色の動作表示。",
+  "inboxEnhancementJumpActivity": "アクティビティへ移動",
+  "inboxEnhancementNeedsAttention": "対応が必要 · {count}",
+  "@inboxEnhancementNeedsAttention": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementAllPending": "すべての未対応",
+  "inboxEnhancementInput": "入力が必要",
+  "inboxEnhancementCompletions": "未読の完了通知",
+  "inboxEnhancementNoPending": "未対応のリクエストや未読の完了通知はありません。",
+  "inboxEnhancementRecentActivity": "最近のアクティビティ · 未読 {count} 件",
+  "@inboxEnhancementRecentActivity": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementUnread": "未読",
+  "inboxEnhancementActivityActions": "アクティビティの操作",
+  "inboxEnhancementMarkAllRead": "アクティビティを既読にする",
+  "inboxEnhancementClearActivity": "アクティビティを消去",
+  "inboxEnhancementNoActivity": "このフィルターに一致するアクティビティはありません。",
+  "inboxEnhancementActivityCleared": "アクティビティを消去しました",
+  "inboxEnhancementUndo": "元に戻す",
+  "inboxEnhancementReply": "返信",
+  "inboxEnhancementReview": "確認",
+  "inboxEnhancementMarkRead": "既読にする",
+  "inboxEnhancementSubagentOf": "{parent} のサブエージェント",
+  "@inboxEnhancementSubagentOf": {
+    "placeholders": {
+      "parent": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceOverview": "概要",
+  "sessionRosterProjectsLabel": "プロジェクト",
+  "sessionRosterFilters": "セッションを絞り込む",
+  "sessionRosterProjectAttention": "入力待ち、または確認待ちの完了した作業があります",
+  "workspaceServerSessionCount": "{count, plural, other{{count} 件のセッション}}",
+  "workspaceHideSidebar": "サイドバーを隠す",
+  "workspaceRunningDetail": "進行中",
+  "workspaceWaitingDetail": "入力が必要です",
+  "workspaceCompletionsDetail": "ターンを完了しました",
+  "workspaceOverviewHeading": "今日の作業を、ひと目で。",
+  "workspaceOverviewIntro": "進行中のプロジェクトを見渡せます。",
+  "workspaceNoMachine": "サーバーを選択",
+  "workspaceRunning": "実行中",
+  "workspaceWaiting": "入力待ち",
+  "workspaceUnreadCompletions": "未読の完了通知",
+  "workspaceCompletionReadNote": "セッションを開くと完了通知が既読になります。",
+  "workspaceLoading": "最新データを読み込み中…",
+  "workspaceStateUnavailable": "現在の活動状況は取得できません。キャッシュしたセッション情報はサイドバーに残っています。",
+  "workspacePartialRoster": "一部のセッションのみ：このサーバーが検出できたセッションを集計しています。",
+  "workspaceNeedsAttention": "対応が必要",
+  "workspaceNothingHere": "現在、この表示に項目はありません。",
+  "workspaceToday": "今日の活動",
+  "workspaceUsageDetails": "使用量の詳細",
+  "workspaceEstimatedTime": "エージェントの推定活動時間",
+  "workspaceRuntimeUnavailable": "観測された実行時間を取得できません。",
+  "workspaceConcurrentTime": "同時に実行したセッションの時間は合算されます。",
+  "workspaceTokenBreakdownUnavailable": "このデータソースは完全なトークン内訳を提供していません。",
+  "workspacePartialUsage": "使用量は一部のみ：{sources} のデータを取得できません。",
+  "workspaceCoverageUnknown": "データソースの網羅状況を取得できません。",
+  "workspaceCloseAllTabs": "すべてのタブを閉じる",
+  "workspaceTabsClosed": "タブを閉じました。セッションは実行を続けます。",
+  "workspaceUndoCloseTabs": "元に戻す",
+  "workspaceChildAttention": "関連セッション {count} 件 · 入力待ち {waiting} 件 · 最近の完了 {ready} 件",
+  "settingsEnhancementConversation": "会話",
+  "settingsEnhancementMessageText": "メッセージの文字サイズ",
+  "settingsEnhancementMessageSpacing": "メッセージの間隔",
+  "settingsEnhancementFontSize": "{size} px",
+  "settingsEnhancementReadingWidth": "読みやすい幅",
+  "settingsEnhancementReadingWidthHint": "会話の幅を 900 px に制限します。オフの場合は利用可能な幅を使います。",
+  "settingsEnhancementIndicators": "セッションの表示",
+  "settingsEnhancementWorking": "実行中",
+  "settingsEnhancementNeedsInput": "入力が必要",
+  "settingsEnhancementReadyReview": "確認待ち",
+  "settingsEnhancementIndicatorsHint": "ロゴはエージェントを示します。「実行中」はターンを実行している状態、「入力が必要」は返信を待っている状態です。赤い点は未読の完了通知を示します。読み込みと再接続は独立した接続状態です。",
+  "settingsEnhancementAgentsQuota": "エージェントとクォータ",
+  "settingsEnhancementAgentsQuotaHint": "管理されたランタイム、クォータ期間と警告",
+  "usageEnhancementDay": "日",
+  "usageEnhancementCurrent": "現在の期間",
+  "usageEnhancementIntegrations": "使用量の連携",
+  "usageEnhancementIntegrationsHint": "対応するソースを参考として表示します。利用可否は選択したサーバーと Tokdash のインストール状況によります。",
+  "usageEnhancementNoReading": "この期間のデータなし",
+  "usageEnhancementExportCsv": "CSV を出力",
+  "usageEnhancementActivity": "アクティビティ",
+  "usageEnhancementDetailUnavailable": "— はこのソースが提供していない内訳を示します。",
+  "usageEnhancementLeaders": "ランキング",
+  "conversationEnhancementMore": "入力欄のその他の操作",
+  "conversationEnhancementDetails": "セッションの詳細",
+  "conversationEnhancementLastKnown": "最後に確認した値: {reading}"
 }

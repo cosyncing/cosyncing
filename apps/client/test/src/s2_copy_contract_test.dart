@@ -167,6 +167,15 @@ bool _reviewedLiteral(String path, String text) {
 // casing, interpolation, path, or punctuation heuristics: those broad
 // exemptions are exactly how reachable English escaped the S2 audit.
 const _reviewedLiteralByLocation = <String>{
+  // Original product wordmark; brand spelling is identical in every locale.
+  'lib/src/features/sessions/workspace/workspace_sidebar.dart::cosyncing',
+  // Count and compositions of already-localized labels with session data.
+  'lib/src/features/attention/view/attention_page.dart::'
+      r'${entries.length}',
+  'lib/src/features/sessions/detail/session_detail_view_chrome.dart::'
+      r'${l10n.conversationEnhancementDetails}\n$title',
+  'lib/src/features/sessions/list/session_list_pane.dart::'
+      r'$disclosureLabel. $childAttention',
   // URL example: executable syntax, not natural-language copy.
   'lib/src/features/connection/view/connection_page.dart::'
       'http://127.0.0.1:7734',

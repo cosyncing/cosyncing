@@ -3,7 +3,9 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_source_catalog.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_detail_dialog.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:flutter/material.dart';
 
@@ -67,10 +69,23 @@ class UsagePodium extends StatelessWidget {
           rows: [
             for (final tool in harnesses)
               (
-                name: tool.label ?? tool.tool,
+                name: usageSourceDisplayName(tool.tool, tool.label),
                 tool: tool.tool,
                 tokens: tool.tokens,
                 share: tool.tokens / total,
+                onTap: () => showUsageDetailDialog(
+                  context,
+                  title: usageSourceDisplayName(tool.tool, tool.label),
+                  locale: locale,
+                  tokens: tool.tokens,
+                  cost: tool.cost,
+                  input: tool.tokensIn,
+                  output: tool.tokensOut,
+                  cache: tool.tokensCache,
+                  messages: tool.requests,
+                  sessions: tool.sessions,
+                  activeMs: tool.activeMs,
+                ),
               ),
           ],
           detail: _harnessDetail(l10n, harnesses.first, locale),
@@ -86,6 +101,17 @@ class UsagePodium extends StatelessWidget {
                 tool: null,
                 tokens: model.tokens,
                 share: model.tokens / total,
+                onTap: () => showUsageDetailDialog(
+                  context,
+                  title: model.name,
+                  locale: locale,
+                  tokens: model.tokens,
+                  cost: model.cost,
+                  input: model.tokensIn,
+                  output: model.tokensOut,
+                  cache: model.tokensCache,
+                  messages: model.requests,
+                ),
               ),
           ],
           detail: formatUsageCost(
@@ -108,6 +134,14 @@ class UsagePodium extends StatelessWidget {
                 // the facet is a subset, and a share of a subset would
                 // overstate it.
                 share: project.tokens / total,
+                onTap: () => showUsageDetailDialog(
+                  context,
+                  title: project.project,
+                  locale: locale,
+                  tokens: project.tokens,
+                  cost: project.cost,
+                  messages: project.requests,
+                ),
               ),
           ],
           locale: locale,
@@ -180,9 +214,8 @@ class UsagePodium extends StatelessWidget {
 
   static String _title(AppLocalizations l10n, UsagePeriod period) {
     return switch (period) {
-      // The report never offers `today`; the branch exists so adding a period
-      // later is a compile error rather than a silently wrong heading.
-      UsagePeriod.today || UsagePeriod.week => l10n.usagePodiumTitleWeek,
+      UsagePeriod.today => l10n.usageEnhancementLeaders,
+      UsagePeriod.week => l10n.usagePodiumTitleWeek,
       UsagePeriod.month => l10n.usagePodiumTitleMonth,
       UsagePeriod.year => l10n.usagePodiumTitleYear,
       UsagePeriod.allTime => l10n.usagePodiumTitleAllTime,
@@ -210,6 +243,7 @@ typedef _PodiumEntry = ({
   String? tool,
   double tokens,
   double share,
+  VoidCallback onTap,
 });
 
 class _PodiumTile extends StatelessWidget {
@@ -233,13 +267,8 @@ class _PodiumTile extends StatelessWidget {
     final theme = Theme.of(context);
     final tokensTheme = context.tokens;
     final leader = rows.first.tokens;
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: tokensTheme.surface,
-        border: Border.all(color: tokensTheme.separator),
-        borderRadius: BorderRadius.circular(tokensTheme.radiusLg),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -251,7 +280,7 @@ class _PodiumTile extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           for (var index = 0; index < rows.length; index++) ...[
-            if (index > 0) const SizedBox(height: 6),
+            if (index > 0) const SizedBox(height: 8),
             _PodiumRow(
               entry: rows[index],
               leader: leader <= 0 ? 1 : leader,
@@ -260,7 +289,7 @@ class _PodiumTile extends StatelessWidget {
             ),
           ],
           if (detail != null) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             Text(
               detail!,
               style: theme.textTheme.bodySmall?.copyWith(
@@ -305,42 +334,48 @@ class _PodiumRow extends StatelessWidget {
       fontWeight: first ? FontWeight.w600 : FontWeight.w400,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
+    return InkWell(
+      onTap: entry.onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (entry.tool != null) ...[
-              UsageAgentNameMark(
-                tool: entry.tool!,
-                style: nameStyle ?? DefaultTextStyle.of(context).style,
-              ),
-              const SizedBox(
-                width: usageAgentNameMarkOffset - usageAgentNameMarkSize,
-              ),
-            ],
-            Expanded(
-              child: Text(
-                entry.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: nameStyle,
-              ),
+            Row(
+              children: [
+                if (entry.tool != null) ...[
+                  UsageAgentNameMark(
+                    tool: entry.tool!,
+                    style: nameStyle ?? DefaultTextStyle.of(context).style,
+                  ),
+                  const SizedBox(
+                    width: usageAgentNameMarkOffset - usageAgentNameMarkSize,
+                  ),
+                ],
+                Expanded(
+                  child: Text(
+                    entry.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: nameStyle,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  formatUsageCountWithShare(
+                    entry.tokens,
+                    entry.share,
+                    locale: locale,
+                  ),
+                  style: valueStyle,
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            Text(
-              formatUsageCountWithShare(
-                entry.tokens,
-                entry.share,
-                locale: locale,
-              ),
-              style: valueStyle,
-            ),
+            const SizedBox(height: 4),
+            UsageShareBar(fraction: entry.tokens / leader, height: 4),
           ],
         ),
-        const SizedBox(height: 3),
-        UsageShareBar(fraction: entry.tokens / leader, height: 3),
-      ],
+      ),
     );
   }
 }

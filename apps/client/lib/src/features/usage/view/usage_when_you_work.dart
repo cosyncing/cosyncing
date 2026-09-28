@@ -3,6 +3,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_detail_dialog.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -24,8 +25,16 @@ class UsageWhenYouWork extends StatelessWidget {
     required this.weekday,
     required this.timezone,
     required this.locale,
+    required this.totalTokens,
+    this.showHourlyChart = true,
     super.key,
   });
+
+  /// Whole-period total; a sparse weekday facet is not the denominator.
+  final double totalTokens;
+
+  /// Day activity already owns the hourly chart.
+  final bool showHourlyChart;
 
   /// Served hourly facet, or `null` if tokdash did not serve it.
   final UsageReportHourly? hourly;
@@ -69,7 +78,7 @@ class UsageWhenYouWork extends StatelessWidget {
           // beneath it rather than any single figure.
           suffix: timezone == null ? null : l10n.usageWhenTz(timezone!),
         ),
-        if (hours.isNotEmpty) ...[
+        if (hours.isNotEmpty && showHourlyChart) ...[
           _HourStrip(buckets: hours, locale: locale),
           const SizedBox(height: 12),
         ],
@@ -84,7 +93,11 @@ class UsageWhenYouWork extends StatelessWidget {
             );
             final right = days.isEmpty
                 ? const SizedBox.shrink()
-                : _WeekdayRows(buckets: days, locale: locale);
+                : _WeekdayRows(
+                    buckets: days,
+                    locale: locale,
+                    totalTokens: totalTokens,
+                  );
             if (stacked) {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -121,6 +134,7 @@ class _HourStrip extends StatelessWidget {
       for (final bucket in buckets) bucket.hour: bucket.tokens,
     };
     final peak = byHour.values.fold<double>(0, (a, b) => a > b ? a : b);
+    final readings = {for (final bucket in buckets) bucket.hour: bucket};
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -134,11 +148,24 @@ class _HourStrip extends StatelessWidget {
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 1),
-                    child: _HourBar(
-                      // A share of the busiest hour, so the tallest bar is the
-                      // peak and every other bar is read against it.
-                      fraction: peak <= 0 ? 0 : (byHour[hour] ?? 0) / peak,
-                      tokens: tokens,
+                    child: Tooltip(
+                      message: _hourReadingLabel(hour, readings[hour], locale),
+                      child: InkWell(
+                        onTap: readings[hour] == null
+                            ? null
+                            : () => showUsageDetailDialog(
+                                context,
+                                title: _hourLabel(hour, locale),
+                                locale: locale,
+                                tokens: readings[hour]!.tokens,
+                                cost: readings[hour]!.cost,
+                                messages: readings[hour]!.requests,
+                              ),
+                        child: _HourBar(
+                          fraction: peak <= 0 ? 0 : (byHour[hour] ?? 0) / peak,
+                          tokens: tokens,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -249,10 +276,15 @@ class _Highlights extends StatelessWidget {
 }
 
 class _WeekdayRows extends StatelessWidget {
-  const _WeekdayRows({required this.buckets, required this.locale});
+  const _WeekdayRows({
+    required this.buckets,
+    required this.locale,
+    required this.totalTokens,
+  });
 
   final List<UsageReportWeekdayBucket> buckets;
   final String locale;
+  final double totalTokens;
 
   @override
   Widget build(BuildContext context) {
@@ -262,21 +294,21 @@ class _WeekdayRows extends StatelessWidget {
       0,
       (value, bucket) => bucket.tokens > value ? bucket.tokens : value,
     );
-    final ordered = [...buckets]
-      ..sort((a, b) => a.weekday.compareTo(b.weekday));
+    final byDay = {for (final bucket in buckets) bucket.weekday: bucket};
+    final ordered = [for (var day = 0; day < 7; day++) (day, byDay[day])];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final bucket in ordered)
+        for (final (day, bucket) in ordered)
           Padding(
-            padding: const EdgeInsets.only(bottom: 6),
+            padding: const EdgeInsets.only(bottom: 8),
             child: Row(
               children: [
                 SizedBox(
                   width: 36,
                   child: Text(
-                    usageWeekdayName(bucket.weekday, locale, buckets),
+                    usageWeekdayName(day, locale, buckets),
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: tokens.textSecondary,
                     ),
@@ -285,12 +317,20 @@ class _WeekdayRows extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: UsageShareBar(
-                    fraction: peak <= 0 ? 0 : bucket.tokens / peak,
+                    fraction: peak <= 0 || bucket == null
+                        ? 0
+                        : bucket.tokens / peak,
                   ),
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  formatCompactCount(bucket.tokens, locale: locale),
+                  bucket == null
+                      ? '—'
+                      : formatUsageCountWithShare(
+                          bucket.tokens,
+                          totalTokens <= 0 ? 0 : bucket.tokens / totalTokens,
+                          locale: locale,
+                        ),
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: tokens.textTertiary,
                     fontFeatures: const [FontFeature.tabularFigures()],
@@ -302,6 +342,17 @@ class _WeekdayRows extends StatelessWidget {
       ],
     );
   }
+}
+
+String _hourReadingLabel(
+  int hour,
+  UsageReportHourBucket? reading,
+  String locale,
+) {
+  final value = reading == null
+      ? '—'
+      : formatUsageCount(reading.tokens, locale: locale);
+  return '${_hourLabel(hour, locale)} · $value';
 }
 
 String _hourLabel(int hour, String locale) {

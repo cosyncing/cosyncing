@@ -52,6 +52,23 @@ void main() {
       expect(find.text('258k / 973k'), findsOneWidget);
     });
 
+    testWidgets('tap exposes the full reading including cached provenance', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        _contextTelemetry(used: 74000, max: 200000),
+        lastKnown: true,
+      );
+      await tester.tap(find.byKey(const Key('session-context-meter-details')));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.textContaining('Last known:'), findsOneWidget);
+      expect(find.textContaining('74k'), findsOneWidget);
+      expect(find.textContaining('200k'), findsOneWidget);
+      expect(find.textContaining('37%'), findsOneWidget);
+    });
+
     testWidgets('ring scales with the ambient text scaler (Ctrl +/-)', (
       tester,
     ) async {
@@ -149,6 +166,7 @@ Future<void> _pump(
   SessionTelemetry telemetry, {
   SessionContextMeterStyle style = SessionContextMeterStyle.ring,
   double textScale = 1,
+  bool lastKnown = false,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -159,7 +177,11 @@ Future<void> _pump(
         data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
         child: Scaffold(
           body: Center(
-            child: SessionContextMeter(telemetry: telemetry, style: style),
+            child: SessionContextMeter(
+              telemetry: telemetry,
+              style: style,
+              lastKnown: lastKnown,
+            ),
           ),
         ),
       ),

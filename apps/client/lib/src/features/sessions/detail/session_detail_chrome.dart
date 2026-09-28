@@ -178,7 +178,7 @@ String _formatGroupedCount(int value) {
 /// §3) at the product owner's request. The page's [SafeArea] adds the system
 /// inset on top of this. Kept as a single named constant so it stays trivial to
 /// tune.
-const double kComposerBottomInset = 6;
+const double kComposerBottomInset = 8;
 
 class _PageTabContent extends StatelessWidget {
   const _PageTabContent({
@@ -241,6 +241,7 @@ class _PageTabContent extends StatelessWidget {
 class _StatusChipButton extends StatelessWidget {
   const _StatusChipButton({
     required this.control,
+    required this.status,
     required this.badgeLabel,
     required this.onTap,
     required this.freshness,
@@ -248,6 +249,7 @@ class _StatusChipButton extends StatelessWidget {
   });
 
   final SessionControlView control;
+  final SessionStatus? status;
   final String? badgeLabel;
   final VoidCallback onTap;
 
@@ -297,6 +299,18 @@ class _StatusChipButton extends StatelessWidget {
                           l10n.sessionViewStatus,
                           style: Theme.of(context).textTheme.labelSmall,
                         ),
+                      )
+                    : freshness.freshness == SessionFreshness.current &&
+                          !restoringDrive &&
+                          (status == SessionStatus.working ||
+                              status == SessionStatus.needsInput)
+                    ? StatusPill(
+                        label: status == SessionStatus.working
+                            ? l10n.sessionRosterStatusWorking
+                            : l10n.sessionRosterStatusNeedsInput,
+                        color: status == SessionStatus.working
+                            ? context.tokens.statusWorking
+                            : context.tokens.statusNeedsInput,
                       )
                     : _SessionControlPill(
                         control: control,

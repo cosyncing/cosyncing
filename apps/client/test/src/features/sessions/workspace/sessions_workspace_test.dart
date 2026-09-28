@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:ui' show PointerDeviceKind;
 
 import 'package:broker_client/broker_client.dart';
@@ -9,6 +11,7 @@ import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
@@ -28,12 +31,17 @@ import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_cont
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_overview.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_sidebar.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
+import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -80,7 +88,7 @@ void main() {
         prefsStore ??
         _FakeWorkspacePrefsStore(
           const WorkspaceRosterPrefs(
-            width: SessionsWorkspace.defaultListPaneWidth,
+            width: WorkspaceFrame.defaultSidebarWidth,
             collapsed: false,
           ),
         );
@@ -89,6 +97,17 @@ void main() {
         : null;
     return ProviderScope(
       overrides: [
+        attentionInboxProvider.overrideWith(
+          (ref) async => AttentionInboxSections(
+            actionRequired: [],
+            maintenance: [],
+            resolved: [],
+          ),
+        ),
+        workspaceOverviewRosterProvider.overrideWith(
+          (ref) async => ListSessionsResponse(sessions: sessions),
+        ),
+        usageReportProvider.overrideWith((ref, query) async => null),
         sessionListControllerProvider.overrideWith(
           () => listController,
         ),
@@ -156,9 +175,18 @@ void main() {
               : themeSpecById(kDefaultThemeId).dark,
           brightness,
         ),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: child!,
+        ),
         home: Scaffold(
-          body: SessionsWorkspace(
-            detailBuilder: (context, ref) => Text('DETAIL ${ref.key}'),
+          body: RepaintBoundary(
+            key: const Key('workspace-review-capture'),
+            child: WorkspaceFrame(
+              child: SessionsWorkspace(
+                detailBuilder: (context, ref) => Text('DETAIL ${ref.key}'),
+              ),
+            ),
           ),
         ),
       ),
@@ -175,6 +203,157 @@ void main() {
     await tester.pump();
     await tester.pump();
   }
+
+  group('approved responsive workspace', () {
+    for (final width in [320.0, 390.0, 820.0, 1440.0]) {
+      for (final brightness in Brightness.values) {
+        testWidgets('overview ${width.toInt()} ${brightness.name}', (
+          tester,
+        ) async {
+          await tester.binding.setSurfaceSize(const Size(1200, 800));
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          await tester.binding.setSurfaceSize(Size(width, 900));
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = Size(width, 900);
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          if (const bool.fromEnvironment('WORKSPACE_CAPTURE')) {
+            final loader = FontLoader('Lato')
+              ..addFont(rootBundle.load('assets/fonts/Lato-Regular.ttf'));
+            await loader.load();
+            await (FontLoader('MaterialIcons')
+                  ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
+                .load();
+          }
+          await tester.pumpWidget(
+            buildSubject([
+              const SessionInfo(
+                id: 'a',
+                nativeId: 'a',
+                tool: 'claude',
+                title: 'Improve reconnect handling',
+                status: SessionStatus.working,
+                attachMode: AttachMode.observe,
+              ),
+              _session('codex', 'b', title: 'Review the token pipeline'),
+              const SessionInfo(
+                id: 'child',
+                nativeId: 'child',
+                parentThreadId: 'a',
+                tool: 'claude',
+                title: 'Check reconnect edge cases',
+                status: SessionStatus.needsInput,
+                origin: SessionOrigin.subagent,
+                attachMode: AttachMode.observe,
+              ),
+            ], brightness: brightness),
+          );
+          await tester.pumpAndSettle();
+          expect(find.byKey(const Key('workspace-overview')), findsOneWidget);
+          expect(find.text('Your day, in sync.'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+          Future<void> capture(String state) async {
+            if (!const bool.fromEnvironment('WORKSPACE_CAPTURE')) return;
+            final boundary = tester.renderObject<RenderRepaintBoundary>(
+              find.byKey(const Key('workspace-review-capture')),
+            );
+            await tester.runAsync(() async {
+              final image = await boundary.toImage();
+              final bytes = await image.toByteData(
+                format: ui.ImageByteFormat.png,
+              );
+              final file = File(
+                '../../output/review/ui-enhancement/workspace${state.isEmpty ? '' : '-$state'}-${width.toInt()}-${brightness.name}.png',
+              );
+              await file.parent.create(recursive: true);
+              await file.writeAsBytes(bytes!.buffer.asUint8List());
+              image.dispose();
+            });
+          }
+
+          await capture('');
+          if (width <= 900) {
+            await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+            await tester.pumpAndSettle();
+            expect(
+              find.descendant(
+                of: find.byType(Drawer),
+                matching: find.text('Notifications'),
+              ),
+              findsOneWidget,
+            );
+            expect(
+              find.byKey(const Key('sessions-workspace-settings')),
+              findsOneWidget,
+            );
+          }
+          await expandRosterProject(tester);
+          await tester.tap(find.byKey(const Key('session-children-claude/a')));
+          await tester.pumpAndSettle();
+          await capture('roster');
+          await tester.tapAt(
+            tester.getTopLeft(find.byKey(const Key('session-row-claude/a'))) +
+                const Offset(18, 20),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('DETAIL claude/a'), findsOneWidget);
+          expect(
+            find.byKey(const Key('open-session-tab-close-claude/a')),
+            findsOneWidget,
+          );
+          await capture('session');
+          if (width <= 900) {
+            await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+            await tester.pumpAndSettle();
+            await tester.binding.handlePopRoute();
+            await tester.pumpAndSettle();
+            expect(find.text('DETAIL claude/a'), findsOneWidget);
+            expect(find.byType(Drawer), findsNothing);
+            await tester.binding.handlePopRoute();
+          } else {
+            await tester.tap(find.byKey(const Key('workspace-overview-tab')));
+          }
+          await tester.pumpAndSettle();
+          expect(find.byKey(const Key('workspace-overview')), findsOneWidget);
+          await tester.tap(find.byKey(const Key('workspace-close-all-tabs')));
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const Key('open-session-tab-claude/a')),
+            findsNothing,
+          );
+          await tester.tap(find.text('Undo'));
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const Key('open-session-tab-claude/a')),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+        });
+      }
+    }
+  });
+
+  testWidgets('Ctrl K opens the phone drawer and focuses roster search', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 900);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(buildSubject([_session('claude', 'a')]));
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.byType(Drawer), findsOneWidget);
+    final editable = tester.widget<EditableText>(
+      find.descendant(
+        of: find.byKey(const Key('session-roster-search')),
+        matching: find.byType(EditableText),
+      ),
+    );
+    expect(editable.focusNode.hasFocus, isTrue);
+  });
 
   group('SessionsWorkspace file pane', () {
     Future<ProviderContainer> openSession(WidgetTester tester) async {
@@ -217,6 +396,8 @@ void main() {
     testWidgets('with no file open there is no second pane and no sash', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await openSession(tester);
       // No phantom pane: with nothing open this is exactly today's workspace.
       expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
@@ -228,6 +409,8 @@ void main() {
     testWidgets('opening a file adds the pane, its sash and its strip', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
 
@@ -251,6 +434,8 @@ void main() {
     });
 
     testWidgets('the top scroller never shows a file tab', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await tester.tap(find.byKey(const Key('session-row-codex/b')));
       await tester.pumpAndSettle();
@@ -283,6 +468,8 @@ void main() {
     testWidgets('switching sessions swaps the strip, it does not merge', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/mine.dart');
       await tester.tap(find.byKey(const Key('session-row-codex/b')));
@@ -308,6 +495,8 @@ void main() {
     testWidgets('closing the last file takes the pane and its sash away', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
       await tester.tap(
@@ -322,6 +511,8 @@ void main() {
     testWidgets('a file open in another session keeps the pane resting', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       // Both sessions are open tabs, which is the only way a file for `codex/b`
       // can exist: files are opened from a session that is on screen. Opening
@@ -344,6 +535,8 @@ void main() {
     testWidgets('dragging past the snap collapses to the document rail', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
 
@@ -376,6 +569,8 @@ void main() {
     testWidgets('a window too narrow for three columns shows two', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
       expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
@@ -391,6 +586,8 @@ void main() {
     testWidgets('the focus hairline follows focusedPaneProvider', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
       const sessionHairline = Key('workspace-focus-hairline-claude/a');
@@ -426,6 +623,8 @@ void main() {
     testWidgets('a rebuilding session page does not take focus back', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
       await tester.tap(find.byKey(const Key('workspace-file-pane')));
@@ -453,6 +652,8 @@ void main() {
     testWidgets('closing the focused file hands focus back to its session', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
       await tester.tap(find.byKey(const Key('workspace-file-pane')));
@@ -477,6 +678,8 @@ void main() {
     testWidgets('a focused file marks its session tab as the prompt target', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       // The strip only draws with a second tab open, which is also the only
       // case where naming the input owner distinguishes anything.
@@ -504,6 +707,8 @@ void main() {
     testWidgets('a closed session stops holding the split open', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await tester.tap(find.byKey(const Key('session-row-codex/b')));
       await tester.pumpAndSettle();
@@ -529,6 +734,8 @@ void main() {
     });
 
     testWidgets('reopening the session brings its files back', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await tester.tap(find.byKey(const Key('session-row-codex/b')));
       await tester.pumpAndSettle();
@@ -553,6 +760,8 @@ void main() {
     testWidgets('the file pane names its session, never its id', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = await openSession(tester);
       await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
 
@@ -582,6 +791,8 @@ void main() {
     testWidgets('shows the roster and a placeholder until one is opened', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject([_session('claude', 'a'), _session('codex', 'b')]),
       );
@@ -590,12 +801,14 @@ void main() {
 
       expect(find.byKey(const Key('session-row-claude/a')), findsOneWidget);
       expect(find.byKey(const Key('session-row-codex/b')), findsOneWidget);
-      expect(find.text('Select a session to open it here.'), findsOneWidget);
+      expect(find.byKey(const Key('workspace-overview')), findsOneWidget);
     });
 
     testWidgets('opening rows fills the detail pane and grows the tab strip', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject([_session('claude', 'a'), _session('codex', 'b')]),
       );
@@ -605,8 +818,11 @@ void main() {
       await tester.tap(find.byKey(const Key('session-row-claude/a')));
       await tester.pumpAndSettle();
       expect(find.text('DETAIL claude/a'), findsOneWidget);
-      // Tab strip stays hidden while a single session is open.
-      expect(find.byKey(const Key('open-session-tab-claude/a')), findsNothing);
+      // A single tab stays visible and closable.
+      expect(
+        find.byKey(const Key('open-session-tab-claude/a')),
+        findsOneWidget,
+      );
 
       await tester.tap(find.byKey(const Key('session-row-codex/b')));
       await tester.pumpAndSettle();
@@ -622,6 +838,8 @@ void main() {
     testWidgets('expanded tab strip reflects an accepted rename immediately', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject([
           _session('claude', 'a', title: 'Before'),
@@ -656,6 +874,8 @@ void main() {
     testWidgets('shows loading for initial and empty refresh states', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(const [], status: SessionListStatus.loading),
       );
@@ -681,6 +901,8 @@ void main() {
       (
         tester,
       ) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         await tester.pumpWidget(
           buildSubject(const [], hasBrokerClient: false),
         );
@@ -706,6 +928,8 @@ void main() {
     testWidgets(
       'a narrowing window empties the window, never the server',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         // The measured macOS host: 39 sessions, newest 24 days old, and a
         // roster that ships asking for seven days. Claiming the server has no
         // sessions was simply false, and it pointed at New Session instead of
@@ -724,7 +948,7 @@ void main() {
             'Nothing was active in the last 7 days. '
             'This server may have older sessions.',
           ),
-          findsNWidgets(2),
+          findsOneWidget,
         );
         expect(
           find.text(
@@ -736,6 +960,8 @@ void main() {
     );
 
     testWidgets('the empty window offers its own way out', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       // The filter bar that also widens the window is not rendered while the
       // roster is empty, so without this the only route back to the reader's
       // own sessions is guessing that a filter exists somewhere.
@@ -749,8 +975,8 @@ void main() {
       await tester.pumpAndSettle();
 
       final widen = find.byKey(const Key('workspace-empty-show-all'));
-      expect(widen, findsNWidgets(2));
-      expect(find.text('Show all sessions'), findsNWidgets(2));
+      expect(widen, findsOneWidget);
+      expect(find.text('Show all sessions'), findsOneWidget);
 
       final container = ProviderScope.containerOf(
         tester.element(find.byType(SessionsWorkspace)),
@@ -766,6 +992,8 @@ void main() {
     testWidgets('the one-day window says today, not seven days', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           const [],
@@ -779,11 +1007,13 @@ void main() {
         find.text(
           'Nothing was active today. This server may have older sessions.',
         ),
-        findsNWidgets(2),
+        findsOneWidget,
       );
     });
 
     testWidgets('keeps the connected empty workspace copy', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           const [],
@@ -794,12 +1024,9 @@ void main() {
 
       expect(
         find.text('No sessions on this server yet. Create one to get started.'),
-        findsNWidgets(2),
+        findsOneWidget,
       );
-      final create = tester.widget<IconButton>(
-        find.byKey(const Key('sessions-workspace-global-new')),
-      );
-      expect(create.onPressed, isNotNull);
+      expect(_expandedCreateAction(tester), isNotNull);
       expect(find.text('Select a session to open it here.'), findsNothing);
       expect(find.byKey(const Key('sessions-empty-connect')), findsNothing);
     });
@@ -807,6 +1034,8 @@ void main() {
     testWidgets(
       'connected empty workspace disables creation when no agent is ready',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         await tester.pumpWidget(
           buildSubject(
             const [],
@@ -819,20 +1048,19 @@ void main() {
           find.text(
             'No registered agent on this server is ready to create sessions.',
           ),
-          findsNWidgets(2),
+          findsOneWidget,
         );
         expect(find.textContaining('Create one'), findsNothing);
         expect(find.text('Select a session to open it here.'), findsNothing);
-        final create = tester.widget<IconButton>(
-          find.byKey(const Key('sessions-workspace-global-new')),
-        );
-        expect(create.onPressed, isNull);
+        expect(_expandedCreateAction(tester), isNull);
       },
     );
 
     testWidgets(
       'connected empty workspace reports readiness while checking',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         final heldReadiness = Completer<List<AgentInfo>>();
         final client = _ScriptedWorkspaceCapabilityClient([
           () => heldReadiness.future,
@@ -845,13 +1073,13 @@ void main() {
           find.text(
             'Checking whether a registered agent can create sessions…',
           ),
-          findsNWidgets(2),
+          findsOneWidget,
         );
         expect(
           find.textContaining('No registered agent on this server is ready'),
           findsNothing,
         );
-        expect(_expandedCreateAction(tester).onPressed, isNull);
+        expect(_expandedCreateAction(tester), isNull);
 
         heldReadiness.complete(const []);
         await tester.pumpAndSettle();
@@ -861,6 +1089,8 @@ void main() {
     testWidgets(
       'connected empty workspace reports a readiness check failure',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         final client = _ScriptedWorkspaceCapabilityClient([
           () => Future<List<AgentInfo>>.error(StateError('starting')),
         ]);
@@ -872,13 +1102,13 @@ void main() {
             "Couldn't check whether an agent can create sessions. Refresh to "
             'try again.',
           ),
-          findsNWidgets(2),
+          findsOneWidget,
         );
         expect(
           find.textContaining('No registered agent on this server is ready'),
           findsNothing,
         );
-        expect(_expandedCreateAction(tester).onPressed, isNull);
+        expect(_expandedCreateAction(tester), isNull);
       },
     );
 
@@ -886,6 +1116,8 @@ void main() {
       'periodic Sessions refresh recovers creation readiness without '
       'remounting',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         final client = _ScriptedWorkspaceCapabilityClient([
           () async => const [],
           () async => const [_workspaceCreationReadyAgent],
@@ -894,7 +1126,7 @@ void main() {
           buildSubject(const [], brokerClient: client),
         );
         await tester.pumpAndSettle();
-        expect(_expandedCreateAction(tester).onPressed, isNull);
+        expect(_expandedCreateAction(tester), isNull);
 
         final container = ProviderScope.containerOf(
           tester.element(find.byType(SessionsWorkspace)),
@@ -902,21 +1134,23 @@ void main() {
         await container.read(sessionRosterResumeRefreshProvider)();
         await tester.pumpAndSettle();
 
-        expect(_expandedCreateAction(tester).onPressed, isNotNull);
-        expect(find.textContaining('Create one'), findsNWidgets(2));
+        expect(_expandedCreateAction(tester), isNotNull);
+        expect(find.textContaining('Create one'), findsOneWidget);
       },
     );
 
     testWidgets('expanded creation readiness retries after request failure', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final client = _ScriptedWorkspaceCapabilityClient([
         () => Future<List<AgentInfo>>.error(StateError('starting')),
         () async => const [_workspaceCreationReadyAgent],
       ]);
       await tester.pumpWidget(buildSubject(const [], brokerClient: client));
       await tester.pumpAndSettle();
-      expect(_expandedCreateAction(tester).onPressed, isNull);
+      expect(_expandedCreateAction(tester), isNull);
 
       final container = ProviderScope.containerOf(
         tester.element(find.byType(SessionsWorkspace)),
@@ -924,31 +1158,35 @@ void main() {
       await container.read(sessionCreationReadyProvider.notifier).refresh();
       await tester.pumpAndSettle();
 
-      expect(_expandedCreateAction(tester).onPressed, isNotNull);
+      expect(_expandedCreateAction(tester), isNotNull);
       expect(client.listAgentCalls, 2);
     });
 
     testWidgets('expanded manual refresh rechecks creation readiness', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final client = _ScriptedWorkspaceCapabilityClient([
         () async => const [_workspaceCreationReadyAgent],
         () async => const [],
       ]);
       await tester.pumpWidget(buildSubject(const [], brokerClient: client));
       await tester.pumpAndSettle();
-      expect(_expandedCreateAction(tester).onPressed, isNotNull);
+      expect(_expandedCreateAction(tester), isNotNull);
 
       await tester.tap(find.byKey(const Key('roster-freshness-refresh')));
       await tester.pumpAndSettle();
 
-      expect(_expandedCreateAction(tester).onPressed, isNull);
+      expect(_expandedCreateAction(tester), isNull);
       expect(client.listAgentCalls, 2);
     });
 
     testWidgets(
       'expanded readiness rejects an old server result after switching',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         final heldA = Completer<List<AgentInfo>>();
         final client = _ScriptedWorkspaceCapabilityClient([
           () => heldA.future,
@@ -971,12 +1209,12 @@ void main() {
           incarnationId: 'server-b-generation',
         );
         await tester.pumpAndSettle();
-        expect(_expandedCreateAction(tester).onPressed, isNotNull);
+        expect(_expandedCreateAction(tester), isNotNull);
 
         heldA.complete(const []);
         await tester.pumpAndSettle();
 
-        expect(_expandedCreateAction(tester).onPressed, isNotNull);
+        expect(_expandedCreateAction(tester), isNotNull);
         expect(
           container.read(sessionCreationReadyProvider).source?.profileId,
           'server-b',
@@ -987,6 +1225,8 @@ void main() {
     testWidgets('renders the broker connection empty state in dark mode', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           const [],
@@ -1004,6 +1244,8 @@ void main() {
     testWidgets(
       'a failed refresh over retained rows states it once, in the slot',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         // Expanded used to add its own `session-roster-stale-error` banner with
         // a second Retry while the shared slot span forever, and Compact had no
         // counterpart at all. One failure, one owner, both layouts (R0b).
@@ -1041,6 +1283,8 @@ void main() {
     );
 
     testWidgets('shows an initial-load error with retry', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final controller = _StubSessionListController(
         const SessionListState(
           status: SessionListStatus.error,
@@ -1072,6 +1316,8 @@ void main() {
     testWidgets('keeps stale sessions visible while refreshing', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           [_session('claude', 'stale')],
@@ -1097,6 +1343,8 @@ void main() {
     testWidgets('refresh status does not move header actions or roster', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final controller = _StubSessionListController(
         SessionListState(
           status: SessionListStatus.loaded,
@@ -1139,6 +1387,8 @@ void main() {
     testWidgets('header exposes contextual actions and unread badge', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(buildSubject(const [], unreadCount: 3));
       await tester.pumpAndSettle();
 
@@ -1162,6 +1412,8 @@ void main() {
     testWidgets('polls the roster while the workspace is foregrounded', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final controller = _StubSessionListController(
         SessionListState(
           status: SessionListStatus.loaded,
@@ -1172,9 +1424,9 @@ void main() {
       await tester.pump();
       final afterMount = controller.loadCount;
 
-      await tester.pump(SessionsWorkspace.rosterPollInterval);
+      await tester.pump(WorkspaceFrame.rosterPollInterval);
       expect(controller.loadCount, afterMount + 1);
-      await tester.pump(SessionsWorkspace.rosterPollInterval);
+      await tester.pump(WorkspaceFrame.rosterPollInterval);
       expect(controller.loadCount, afterMount + 2);
 
       // Background refreshes must not flash the "Updating…" affordance.
@@ -1189,6 +1441,8 @@ void main() {
     testWidgets(
       'a created session opens before the roster reload completes',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         final preparedSessions = <SessionInfo>[];
         final controller = _HangingLoadSessionListController(
           SessionListState(
@@ -1232,6 +1486,8 @@ void main() {
     testWidgets(
       'a created tab opens while its Drive handoff is still connecting',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         final connecting = Completer<NewSessionConnectionHandoff>();
         await tester.pumpWidget(
           buildSubject(
@@ -1272,6 +1528,8 @@ void main() {
     testWidgets('refetches the roster immediately on lifecycle resume', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final controller = _StubSessionListController(
         SessionListState(
           status: SessionListStatus.loaded,
@@ -1286,7 +1544,7 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
       await tester.pump();
       final whileHidden = controller.loadCount;
-      await tester.pump(SessionsWorkspace.rosterPollInterval * 3);
+      await tester.pump(WorkspaceFrame.rosterPollInterval * 3);
       expect(
         controller.loadCount,
         whileHidden,
@@ -1302,7 +1560,7 @@ void main() {
       expect(controller.loadCount, whileHidden + 1);
 
       // ...and polling resumes with it.
-      await tester.pump(SessionsWorkspace.rosterPollInterval);
+      await tester.pump(WorkspaceFrame.rosterPollInterval);
       expect(controller.loadCount, whileHidden + 2);
     });
   });
@@ -1329,7 +1587,9 @@ void main() {
 
     // The owner's override on the spec: the side session list starts closed,
     // and only a saved preference reopens it.
-    testWidgets('defaults to a collapsed roster on first run', (tester) async {
+    testWidgets('opens the roster on first use', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           [_session('claude', 'a')],
@@ -1338,12 +1598,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(rosterPane, findsNothing);
-      expect(sash, findsNothing);
+      expect(rosterPane, findsOneWidget);
+      expect(sash, findsOneWidget);
       expect(find.byKey(const Key('session-row-claude/a')), findsNothing);
-      expect(expandTab, findsOneWidget);
+      expect(expandTab, findsNothing);
       // The detail pane still fills the workspace.
-      expect(find.text('Select a session to open it here.'), findsOneWidget);
+      expect(find.byKey(const Key('workspace-overview')), findsOneWidget);
     });
 
     // Restoring never writes, so a user who keeps the roster closed keeps null
@@ -1353,6 +1613,8 @@ void main() {
     testWidgets('never renders an expanded roster before the restore lands', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           [_session('claude', 'a')],
@@ -1367,8 +1629,8 @@ void main() {
 
       // And it stays that way once the (empty) store has been read.
       await tester.pumpAndSettle();
-      expect(rosterPane, findsNothing);
-      expect(expandTab, findsOneWidget);
+      expect(rosterPane, findsOneWidget);
+      expect(expandTab, findsNothing);
     });
 
     // The mirror of the above: an expanded roster is a restored preference, not
@@ -1376,12 +1638,14 @@ void main() {
     testWidgets('a saved expanded roster appears only after the restore', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           const [],
           prefsStore: _FakeWorkspacePrefsStore(
             const WorkspaceRosterPrefs(
-              width: SessionsWorkspace.defaultListPaneWidth,
+              width: WorkspaceFrame.defaultSidebarWidth,
               collapsed: false,
             ),
           ),
@@ -1391,7 +1655,7 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(rosterPane, findsOneWidget);
-      expect(rosterWidth(tester), SessionsWorkspace.defaultListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
     });
 
     // Collapsing must not strand Attention/Settings: the Expanded layout has no
@@ -1400,11 +1664,18 @@ void main() {
     testWidgets('the collapsed rail keeps the workspace actions reachable', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
         buildSubject(
           const [],
           unreadCount: 3,
-          prefsStore: _FakeWorkspacePrefsStore(),
+          prefsStore: _FakeWorkspacePrefsStore(
+            const WorkspaceRosterPrefs(
+              width: WorkspaceFrame.defaultSidebarWidth,
+              collapsed: true,
+            ),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -1432,13 +1703,15 @@ void main() {
     testWidgets('a sliver roster keeps its actions until they cannot fit', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(
         buildSubject(
           const [],
           prefsStore: _FakeWorkspacePrefsStore(
             const WorkspaceRosterPrefs(
-              width: SessionsWorkspace.compactHeaderWidth,
+              width: WorkspaceSidebar.compactWidth,
               collapsed: false,
             ),
           ),
@@ -1446,7 +1719,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(rosterWidth(tester), SessionsWorkspace.compactHeaderWidth);
+      expect(rosterWidth(tester), WorkspaceSidebar.compactWidth);
       expect(
         find.byKey(const Key('sessions-workspace-attention')),
         findsOneWidget,
@@ -1463,13 +1736,15 @@ void main() {
     testWidgets('the 120dp floor sheds secondary actions without overflow', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(
         buildSubject(
           const [],
           prefsStore: _FakeWorkspacePrefsStore(
             const WorkspaceRosterPrefs(
-              width: SessionsWorkspace.minListPaneWidth,
+              width: WorkspaceFrame.minSidebarWidth,
               collapsed: false,
             ),
           ),
@@ -1477,21 +1752,28 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(rosterWidth(tester), SessionsWorkspace.minListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.minSidebarWidth);
       expect(
         find.byKey(const Key('sessions-workspace-global-new')),
         findsOneWidget,
       );
       expect(
         find.byKey(const Key('sessions-workspace-attention')),
-        findsNothing,
+        findsOneWidget,
       );
     });
 
     testWidgets('the expand tab reopens the roster at the default width', (
       tester,
     ) async {
-      final store = _FakeWorkspacePrefsStore();
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final store = _FakeWorkspacePrefsStore(
+        const WorkspaceRosterPrefs(
+          width: WorkspaceFrame.defaultSidebarWidth,
+          collapsed: true,
+        ),
+      );
       await tester.pumpWidget(
         buildSubject([_session('claude', 'a')], prefsStore: store),
       );
@@ -1502,17 +1784,19 @@ void main() {
       await expandRosterProject(tester);
 
       expect(rosterPane, findsOneWidget);
-      expect(rosterWidth(tester), SessionsWorkspace.defaultListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
       expect(find.byKey(const Key('session-row-claude/a')), findsOneWidget);
       expect(expandTab, findsNothing);
 
       // Expanding is a choice, so it is now the saved preference.
       await tester.pump(SessionsWorkspace.resizePersistDebounce);
       expect(store.saved?.collapsed, isFalse);
-      expect(store.saved?.width, SessionsWorkspace.defaultListPaneWidth);
+      expect(store.saved?.width, WorkspaceFrame.defaultSidebarWidth);
     });
 
     testWidgets('a saved split is restored on mount', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(
         buildSubject(
@@ -1532,7 +1816,9 @@ void main() {
     testWidgets('a restored split is clamped to the current window', (
       tester,
     ) async {
-      await tester.binding.setSurfaceSize(const Size(900, 800));
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(920, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await tester.pumpWidget(
@@ -1545,26 +1831,30 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(rosterWidth(tester), 420);
+      expect(rosterWidth(tester), 440);
     });
 
     testWidgets('dragging right grows the roster and clamps at 480', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(buildSubject(const []));
       await tester.pumpAndSettle();
-      expect(rosterWidth(tester), SessionsWorkspace.defaultListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
 
       await dragSash(tester, 60);
       expect(rosterWidth(tester), greaterThan(320));
       expect(rosterWidth(tester), lessThanOrEqualTo(480));
 
       await dragSash(tester, 1000);
-      expect(rosterWidth(tester), SessionsWorkspace.maxListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
     });
 
     testWidgets('split sash stays neutral while hovered', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(buildSubject(const []));
       await tester.pumpAndSettle();
 
@@ -1589,6 +1879,8 @@ void main() {
     testWidgets('arrow keys step the split and clamp at the 120dp floor', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(buildSubject(const []));
       await tester.pumpAndSettle();
@@ -1600,11 +1892,11 @@ void main() {
 
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
       await tester.pump();
-      expect(rosterWidth(tester), 304);
+      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth - 16);
 
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
       await tester.pump();
-      expect(rosterWidth(tester), 320);
+      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
 
       // Shift coarsens the step to 64dp; four of them run into the floor.
       await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
@@ -1613,15 +1905,17 @@ void main() {
         await tester.pump();
       }
       await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-      expect(rosterWidth(tester), SessionsWorkspace.minListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.minSidebarWidth);
 
       // Home resets to the default split.
       await tester.sendKeyEvent(LogicalKeyboardKey.home);
       await tester.pump();
-      expect(rosterWidth(tester), SessionsWorkspace.defaultListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
     });
 
     testWidgets('dragging past the snap collapses the roster', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(buildSubject([_session('claude', 'a')]));
       await tester.pumpAndSettle();
@@ -1636,44 +1930,50 @@ void main() {
     // Reopening restores the width the collapse drag started from, not the
     // floor the pointer dragged through on its way past the snap.
     testWidgets('expanding restores the pre-collapse width', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(buildSubject(const []));
       await tester.pumpAndSettle();
 
       await dragSash(tester, 1000);
-      expect(rosterWidth(tester), SessionsWorkspace.maxListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
 
       await dragSash(tester, -1000);
       expect(expandTab, findsOneWidget);
 
       await tester.tap(expandTab);
       await tester.pumpAndSettle();
-      expect(rosterWidth(tester), SessionsWorkspace.maxListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
     });
 
     testWidgets('double-clicking the sash resets to the default width', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       await tester.pumpWidget(buildSubject(const []));
       await tester.pumpAndSettle();
 
       await dragSash(tester, 1000);
-      expect(rosterWidth(tester), SessionsWorkspace.maxListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
 
       await tester.tap(sash);
       await tester.pump(const Duration(milliseconds: 50));
       await tester.tap(sash);
       await tester.pumpAndSettle();
 
-      expect(rosterWidth(tester), SessionsWorkspace.defaultListPaneWidth);
+      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
     });
 
     testWidgets('a resize is persisted once it settles', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       final store = _FakeWorkspacePrefsStore(
         const WorkspaceRosterPrefs(
-          width: SessionsWorkspace.defaultListPaneWidth,
+          width: WorkspaceFrame.defaultSidebarWidth,
           collapsed: false,
         ),
       );
@@ -1681,17 +1981,20 @@ void main() {
       await tester.pumpAndSettle();
       final savesBefore = store.saveCount;
 
-      await dragSash(tester, 1000);
+      await tester.drag(sash, const Offset(1000, 0));
+      await tester.pump();
       // Debounced: nothing is written while the drag is still settling.
       expect(store.saveCount, savesBefore);
 
       await tester.pump(SessionsWorkspace.resizePersistDebounce);
       expect(store.saveCount, savesBefore + 1);
-      expect(store.saved?.width, SessionsWorkspace.maxListPaneWidth);
+      expect(store.saved?.width, WorkspaceFrame.maxSidebarWidth);
       expect(store.saved?.collapsed, isFalse);
     });
 
     testWidgets('collapsing is persisted', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await useWideSurface(tester);
       final store = _FakeWorkspacePrefsStore(
         const WorkspaceRosterPrefs(width: 400, collapsed: false),
@@ -1745,10 +2048,18 @@ class _HangingLoadSessionListController extends _StubSessionListController {
   }
 }
 
-IconButton _expandedCreateAction(WidgetTester tester) =>
-    tester.widget<IconButton>(
-      find.byKey(const Key('sessions-workspace-global-new')),
-    );
+/// The New session action's callback, from the sidebar row or the collapsed
+/// rail's button; both tap through an [InkWell].
+VoidCallback? _expandedCreateAction(WidgetTester tester) => tester
+    .widget<InkWell>(
+      find
+          .descendant(
+            of: find.byKey(const Key('sessions-workspace-global-new')),
+            matching: find.byType(InkWell),
+          )
+          .first,
+    )
+    .onTap;
 
 const AgentInfo _workspaceCreationReadyAgent = AgentInfo(
   id: 'codex',

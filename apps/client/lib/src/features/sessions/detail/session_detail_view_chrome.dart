@@ -83,6 +83,10 @@ class _OpenCodeRetryStatusBand extends StatelessWidget {
 class _SessionTopStrip extends StatelessWidget {
   const _SessionTopStrip({
     required this.title,
+    required this.sessionKey,
+    required this.status,
+    required this.contextLabel,
+    required this.machine,
     required this.editableTitle,
     required this.tool,
     required this.canRename,
@@ -94,6 +98,7 @@ class _SessionTopStrip extends StatelessWidget {
     required this.badgeLabel,
     required this.onStatusTap,
     required this.menu,
+    this.onParent,
     this.restoringDrive = false,
     this.viewLabel,
     this.onBack,
@@ -101,6 +106,11 @@ class _SessionTopStrip extends StatelessWidget {
   });
 
   final String title;
+  final SessionDetailKey sessionKey;
+  final SessionStatus? status;
+  final String contextLabel;
+  final String? machine;
+  final VoidCallback? onParent;
 
   /// The title a rename starts from, or empty when this client knows none.
   ///
@@ -148,16 +158,14 @@ class _SessionTopStrip extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final telemetryText = constraints.maxWidth >= 840
-            ? _formatSessionTopRowTelemetry(l10n, telemetry)
-            : null;
+        final compact = constraints.maxWidth < 600;
         return SizedBox(
           key: const Key('session-detail-top-strip'),
           width: double.infinity,
-          height: kSessionStripHeight,
+          height: compact ? 40 : kSessionStripHeight,
           child: Padding(
             padding: EdgeInsets.fromLTRB(
-              leadingBack == null ? 16 : 4,
+              leadingBack == null ? (compact ? 12 : 24) : 4,
               0,
               4,
               0,
@@ -190,41 +198,96 @@ class _SessionTopStrip extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         )
-                      : _SessionTitleEditor(
-                          title: title,
-                          editableTitle: editableTitle,
-                          tool: tool,
-                          canRename: canRename,
-                          busy: renameBusy,
-                          onRename: onRename,
+                      : Tooltip(
+                          message: contextLabel,
+                          child: InkWell(
+                            onTap: onParent,
+                            child: Row(
+                              children: [
+                                Icon(
+                                  onParent == null
+                                      ? Icons.folder_outlined
+                                      : Icons.subdirectory_arrow_left,
+                                  size: 14,
+                                  color: context.tokens.textSecondary,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    contextLabel,
+                                    key: const Key(
+                                      'session-detail-context-label',
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color: context.tokens.textSecondary,
+                                        ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                 ),
-                if (telemetryText != null) ...[
-                  const SizedBox(width: 8),
-                  // Non-flex, exactly like the status chip below and for the
-                  // same reason: a loose Flexible here shares the row's free
-                  // space 50/50 with the expanded title, and the unused half of
-                  // that share collapses AFTER the menu — stranding the whole
-                  // trailing cluster near the middle of a wide pane. A fixed
-                  // cap keeps giant counters ellipsizing while the title
-                  // absorbs every spare pixel and the cluster stays at the
-                  // trailing edge.
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 320),
-                    child: ExcludeSemantics(
-                      child: Text(
-                        telemetryText,
-                        key: const Key('session-detail-top-row-telemetry'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: context.tokens.textTertiary,
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                        ),
-                      ),
+                IconButton(
+                  key: const Key('session-detail-information'),
+                  tooltip: '${l10n.conversationEnhancementDetails}\n$title',
+                  icon: const Icon(Icons.info_outline, size: 16),
+                  style: IconButton.styleFrom(
+                    minimumSize: Size(compact ? 40 : 32, compact ? 40 : 32),
+                    fixedSize: Size(compact ? 40 : 32, compact ? 40 : 32),
+                    padding: EdgeInsets.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: () => showModalBottomSheet<void>(
+                    context: context,
+                    isScrollControlled: true,
+                    showDragHandle: true,
+                    builder: (context) => Consumer(
+                      builder: (context, ref, _) {
+                        final current = ref.watch(
+                          sessionDetailControllerProvider(sessionKey),
+                        );
+                        return SafeArea(
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.all(24),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _SessionTitleEditor(
+                                  title: current.sessionInfo == null
+                                      ? title
+                                      : current.sessionInfo!.title
+                                            .trim()
+                                            .isEmpty
+                                      ? l10n.sessionDetailTitleUntitled
+                                      : current.sessionInfo!.title,
+                                  editableTitle:
+                                      current.sessionInfo?.title ??
+                                      editableTitle,
+                                  tool: tool,
+                                  canRename: canRename,
+                                  busy: current.renameSessionActionState.isBusy,
+                                  onRename: onRename,
+                                ),
+                                const SizedBox(height: 12),
+                                Text(contextLabel),
+                                if (machine != null) ...[
+                                  const SizedBox(height: 8),
+                                  Text(machine!),
+                                ],
+                                const SizedBox(height: 12),
+                                _TelemetryPanel(telemetry: current.telemetry),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
-                ],
+                ),
                 const SizedBox(width: 8),
                 // This must not be a loose Flexible beside the expanded title:
                 // Flex would reserve half the remaining row for this
@@ -240,6 +303,7 @@ class _SessionTopStrip extends StatelessWidget {
                     key: const Key('session-detail-bottom-status-button'),
                     child: _StatusChipButton(
                       control: control,
+                      status: status,
                       freshness: freshness,
                       badgeLabel: badgeLabel,
                       onTap: onStatusTap,
@@ -255,40 +319,6 @@ class _SessionTopStrip extends StatelessWidget {
       },
     );
   }
-}
-
-String? _formatSessionTopRowTelemetry(
-  AppLocalizations l10n,
-  SessionTelemetry telemetry,
-) {
-  final parts = <String>[
-    if (telemetry.inputTokens case final value?)
-      l10n.sessionTurnTokensInput(_formatCompactTelemetryCount(value)),
-    if (telemetry.outputTokens case final value?)
-      l10n.sessionTurnTokensOutput(_formatCompactTelemetryCount(value)),
-    if (telemetry.totalRuntimeMs case final value?)
-      [
-        l10n.sessionDetailTelemetryChipRuntime,
-        _formatCompactDuration(value),
-      ].join(' '),
-  ];
-  return parts.isEmpty ? null : parts.join(' · ');
-}
-
-String _formatCompactTelemetryCount(int value) {
-  if (value.abs() < 1000) return '$value';
-  if (value.abs() < 1000000) {
-    final compact = (value / 1000).toStringAsFixed(
-      value.abs() < 100000 ? 1 : 0,
-    );
-    return '${compact.replaceFirst(RegExp(r'\.0$'), '')}k';
-  }
-  if (value.abs() < 1000000000) {
-    final compact = (value / 1000000).toStringAsFixed(1);
-    return '${compact.replaceFirst(RegExp(r'\.0$'), '')}M';
-  }
-  final compact = (value / 1000000000).toStringAsFixed(1);
-  return '${compact.replaceFirst(RegExp(r'\.0$'), '')}B';
 }
 
 /// Shared sizing for the strip's icon buttons: a 32dp box holding a 16px glyph
@@ -533,7 +563,7 @@ class _SessionTitleEditorState extends State<_SessionTitleEditor>
           message: l10n.sessionDetailRenameTooltip,
           excludeFromSemantics: true,
           child: InkWell(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(tokens.radiusSm),
             onTap: widget.busy ? null : _begin,
             onHover: (hovered) {
               if (hovered != _hovered && mounted) {

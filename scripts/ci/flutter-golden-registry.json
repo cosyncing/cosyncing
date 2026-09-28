@@ -2,6 +2,46 @@
   "version": 1,
   "goldens": [
     {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_1440_dark.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_1440_light.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_320_dark.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_320_light.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_390_dark.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_390_light.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_820_dark.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
+      "path": "apps/client/test/src/features/attention/view/goldens/inbox_populated_820_light.png",
+      "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
+      "family": "inbox-populated"
+    },
+    {
       "path": "apps/client/test/src/features/attention/view/goldens/notifications_dark_compact_zh.png",
       "owner": "apps/client/test/src/features/attention/view/attention_page_test.dart",
       "family": "notifications"
@@ -195,6 +235,36 @@
       "path": "apps/client/test/src/features/sessions/detail/goldens/attachment_composer_light_ready.png",
       "owner": "apps/client/test/src/features/sessions/detail/session_detail_prompt_composer_test.dart",
       "family": "attachment-composer"
+    },
+    {
+      "path": "apps/client/test/src/features/sessions/detail/goldens/conversation_enhancement_1440_1080_light.png",
+      "owner": "apps/client/test/src/features/sessions/detail/conversation_enhancement_layout_test.dart",
+      "family": "conversation-enhancement"
+    },
+    {
+      "path": "apps/client/test/src/features/sessions/detail/goldens/conversation_enhancement_320_568_light.png",
+      "owner": "apps/client/test/src/features/sessions/detail/conversation_enhancement_layout_test.dart",
+      "family": "conversation-enhancement"
+    },
+    {
+      "path": "apps/client/test/src/features/sessions/detail/goldens/conversation_enhancement_390_420_light.png",
+      "owner": "apps/client/test/src/features/sessions/detail/conversation_enhancement_layout_test.dart",
+      "family": "conversation-enhancement"
+    },
+    {
+      "path": "apps/client/test/src/features/sessions/detail/goldens/conversation_enhancement_390_844_dark.png",
+      "owner": "apps/client/test/src/features/sessions/detail/conversation_enhancement_layout_test.dart",
+      "family": "conversation-enhancement"
+    },
+    {
+      "path": "apps/client/test/src/features/sessions/detail/goldens/conversation_enhancement_390_844_light.png",
+      "owner": "apps/client/test/src/features/sessions/detail/conversation_enhancement_layout_test.dart",
+      "family": "conversation-enhancement"
+    },
+    {
+      "path": "apps/client/test/src/features/sessions/detail/goldens/conversation_enhancement_820_900_dark.png",
+      "owner": "apps/client/test/src/features/sessions/detail/conversation_enhancement_layout_test.dart",
+      "family": "conversation-enhancement"
     },
     {
       "path": "apps/client/test/src/features/sessions/detail/goldens/observe_composer_compact_dark_zh.png",
@@ -490,6 +560,21 @@
       "path": "apps/client/test/src/features/usage/view/goldens/usage_card_unavailable_dark_compact_en.png",
       "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
       "family": "usage-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_enhancement_1440_light.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_enhancement_layout_test.dart",
+      "family": "usage-enhancement"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_enhancement_320_light.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_enhancement_layout_test.dart",
+      "family": "usage-enhancement"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_enhancement_390_dark.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_enhancement_layout_test.dart",
+      "family": "usage-enhancement"
     },
     {
       "path": "apps/client/test/src/features/usage/view/goldens/usage_export_overview_dark_zh.png",

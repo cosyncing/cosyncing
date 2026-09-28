@@ -177,126 +177,131 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokens = context.tokens;
-    final duration = MediaQuery.maybeOf(context)?.disableAnimations ?? false
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final duration = reduceMotion
         ? Duration.zero
         : const Duration(milliseconds: 200);
-    return AnimatedSize(
-      duration: duration,
-      alignment: Alignment.topCenter,
-      child: _committing
-          ? const SizedBox.shrink(
-              key: Key('session-live-state-archiving'),
-            )
-          : Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Listener(
-                key: _flightSourceKey,
-                onPointerDown: (event) => _pointerKind = event.kind,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onHorizontalDragUpdate: _onDragUpdate,
-                  onHorizontalDragEnd: _onDragEnd,
-                  child: AnimatedContainer(
-                    duration: duration,
-                    transform: Matrix4.translationValues(_dragOffset, 0, 0),
-                    transformAlignment: Alignment.centerLeft,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Material(
-                          key: ValueKey('session-live-strip-${widget.item.id}'),
-                          color: tokens.surface2,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(
-                              tokens.radiusSm,
-                            ),
-                            side: BorderSide(color: tokens.separator),
+    final content = _committing
+        ? const SizedBox.shrink(
+            key: Key('session-live-state-archiving'),
+          )
+        : Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Listener(
+              key: _flightSourceKey,
+              onPointerDown: (event) => _pointerKind = event.kind,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onHorizontalDragUpdate: _onDragUpdate,
+                onHorizontalDragEnd: _onDragEnd,
+                child: AnimatedContainer(
+                  duration: duration,
+                  transform: Matrix4.translationValues(_dragOffset, 0, 0),
+                  transformAlignment: Alignment.centerLeft,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Material(
+                        key: ValueKey('session-live-strip-${widget.item.id}'),
+                        color: tokens.surface2,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(
+                            tokens.radiusSm,
                           ),
-                          clipBehavior: Clip.antiAlias,
-                          child: InkWell(
-                            key: ValueKey(
-                              'session-live-strip-toggle-${widget.item.id}',
-                            ),
-                            onTap: () => setState(() => _expanded = !_expanded),
-                            child: SizedBox(
-                              height: 38,
-                              child: Row(
-                                children: [
-                                  const SizedBox(width: 10),
-                                  Icon(widget.item.icon, size: 17),
-                                  const SizedBox(width: 7),
+                          side: BorderSide(color: tokens.separator),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          key: ValueKey(
+                            'session-live-strip-toggle-${widget.item.id}',
+                          ),
+                          onTap: () => setState(() => _expanded = !_expanded),
+                          child: SizedBox(
+                            height: 38,
+                            child: Row(
+                              children: [
+                                const SizedBox(width: 10),
+                                Icon(widget.item.icon, size: 17),
+                                const SizedBox(width: 7),
+                                Text(
+                                  widget.item.label,
+                                  style: theme.textTheme.labelLarge,
+                                ),
+                                if (widget.additionalCount > 0) ...[
+                                  const SizedBox(width: 5),
                                   Text(
-                                    widget.item.label,
-                                    style: theme.textTheme.labelLarge,
-                                  ),
-                                  if (widget.additionalCount > 0) ...[
-                                    const SizedBox(width: 5),
-                                    Text(
-                                      '+${widget.additionalCount}',
-                                      key: const Key(
-                                        'session-live-strip-additional-count',
-                                      ),
-                                      style: theme.textTheme.labelMedium
-                                          ?.copyWith(
-                                            color: tokens.textSecondary,
-                                          ),
+                                    '+${widget.additionalCount}',
+                                    key: const Key(
+                                      'session-live-strip-additional-count',
                                     ),
-                                  ],
-                                  if (widget.item.total != null) ...[
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      '${widget.item.done ?? 0}/${widget.item.total}',
-                                      key: const Key(
-                                        'session-live-strip-progress',
-                                      ),
-                                      style: theme.textTheme.labelMedium
-                                          ?.copyWith(
-                                            color: tokens.textSecondary,
-                                          ),
-                                    ),
-                                  ],
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      widget.item.title,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: theme.textTheme.bodySmall
-                                          ?.copyWith(
-                                            color: tokens.textSecondary,
-                                          ),
-                                    ),
-                                  ),
-                                  StatusPill(
-                                    label: widget.item.statusLabel,
-                                    color: widget.item.actionRequired
-                                        ? tokens.statusNeedsInput
-                                        : tokens.statusWorking,
-                                  ),
-                                  Icon(
-                                    _expanded
-                                        ? Icons.expand_less
-                                        : Icons.expand_more,
-                                    size: 18,
-                                  ),
-                                  IconButton(
-                                    key: ValueKey(
-                                      'session-live-strip-archive-'
-                                      '${widget.item.id}',
-                                    ),
-                                    tooltip: AppLocalizations.of(
-                                      context,
-                                    ).archiveToStatus,
-                                    visualDensity: VisualDensity.compact,
-                                    onPressed: () =>
-                                        unawaited(_commitArchive()),
-                                    icon: const Icon(Icons.close, size: 16),
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color: tokens.textSecondary,
+                                        ),
                                   ),
                                 ],
-                              ),
+                                if (widget.item.total != null) ...[
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    '${widget.item.done ?? 0}/${widget.item.total}',
+                                    key: const Key(
+                                      'session-live-strip-progress',
+                                    ),
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color: tokens.textSecondary,
+                                        ),
+                                  ),
+                                ],
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    widget.item.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: tokens.textSecondary,
+                                    ),
+                                  ),
+                                ),
+                                StatusPill(
+                                  label: widget.item.statusLabel,
+                                  color: widget.item.actionRequired
+                                      ? tokens.statusNeedsInput
+                                      : tokens.statusWorking,
+                                ),
+                                Icon(
+                                  _expanded
+                                      ? Icons.expand_less
+                                      : Icons.expand_more,
+                                  size: 18,
+                                ),
+                                IconButton(
+                                  key: ValueKey(
+                                    'session-live-strip-archive-'
+                                    '${widget.item.id}',
+                                  ),
+                                  tooltip: AppLocalizations.of(
+                                    context,
+                                  ).archiveToStatus,
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () => unawaited(_commitArchive()),
+                                  icon: const Icon(Icons.close, size: 16),
+                                ),
+                              ],
                             ),
                           ),
                         ),
+                      ),
+                      if (reduceMotion)
+                        Offstage(
+                          offstage: !_expanded,
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: widget.fullCard,
+                          ),
+                        )
+                      else
                         AnimatedCrossFade(
                           duration: duration,
                           crossFadeState: _expanded
@@ -308,12 +313,20 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
                             child: widget.fullCard,
                           ),
                         ),
-                      ],
-                    ),
+                    ],
                   ),
                 ),
               ),
             ),
+          );
+    // A zero-duration size animation still starts its controller during
+    // layout. Reduced motion uses the final layout directly and keeps the
+    // expanded panel mounted so its local state survives collapsing.
+    if (reduceMotion) return content;
+    return AnimatedSize(
+      duration: duration,
+      alignment: Alignment.topCenter,
+      child: content,
     );
   }
 }

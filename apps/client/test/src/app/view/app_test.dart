@@ -363,13 +363,19 @@ void main() {
           _openSessionPayload('warm-session');
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
 
       expect(
         goRouter.routeInformationProvider.value.uri.path,
-        '/sessions/codex/warm-session',
+        '/sessions',
       );
       expect(
-        find.byType(SessionDetailPage, skipOffstage: false),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is SessionDetailPage &&
+              widget.tool == 'codex' &&
+              widget.sessionId == 'warm-session',
+        ),
         findsOneWidget,
       );
       expect(
@@ -406,13 +412,19 @@ void main() {
         await tester.pumpWidget(buildApp(container: container));
         await tester.pump();
         await tester.pump(const Duration(seconds: 1));
+        await tester.pumpAndSettle();
 
         expect(
           goRouter.routeInformationProvider.value.uri.path,
-          '/sessions/codex/cold-session',
+          '/sessions',
         );
         expect(
-          find.byType(SessionDetailPage, skipOffstage: false),
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is SessionDetailPage &&
+                widget.tool == 'codex' &&
+                widget.sessionId == 'cold-session',
+          ),
           findsOneWidget,
         );
         expect(container.read(sessionNotificationTapPayloadProvider), isNull);
@@ -472,11 +484,20 @@ void main() {
         );
         await tester.pump();
         await tester.pump(const Duration(seconds: 1));
+        await tester.pumpAndSettle();
 
-        expect(find.byType(SessionDetailPage), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is SessionDetailPage &&
+                widget.tool == 'codex' &&
+                widget.sessionId == 'session-open',
+          ),
+          findsOneWidget,
+        );
         expect(
           goRouter.routeInformationProvider.value.uri.path,
-          '/sessions/codex/session-open',
+          '/sessions',
         );
         expect(repository.markReadCallCount, 0);
         expect(repository.markDismissedCallCount, 0);

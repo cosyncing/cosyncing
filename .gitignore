@@ -22,6 +22,8 @@ thirdparty/
 .packages
 build/
 coverage/
+# Flutter golden mismatch diagnostics; reviewed reference PNGs remain tracked.
+apps/client/test/**/failures/
 
 # Generated localizations (run `flutter gen-l10n`; sources are apps/client/lib/l10n/*.arb)
 apps/client/lib/l10n/app_localizations*.dart

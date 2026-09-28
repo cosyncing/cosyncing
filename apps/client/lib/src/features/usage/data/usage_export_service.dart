@@ -13,12 +13,19 @@ import 'package:share_plus/share_plus.dart';
 @immutable
 class UsageExportFile {
   /// Creates an export file.
-  const UsageExportFile({required this.name, required this.bytes});
+  const UsageExportFile({
+    required this.name,
+    required this.bytes,
+    this.mimeType = 'image/png',
+  });
 
-  /// Suggested file name, including the `.png` extension.
+  /// Media type, allowing tabular exports through the same platform sinks.
+  final String mimeType;
+
+  /// Suggested file name, including its extension.
   final String name;
 
-  /// PNG bytes.
+  /// Encoded file bytes matching [mimeType].
   final Uint8List bytes;
 }
 
@@ -112,7 +119,7 @@ Future<void> _handOverToBrowser(UsageExportFile file) async {
   await XFile.fromData(
     file.bytes,
     name: file.name,
-    mimeType: 'image/png',
+    mimeType: file.mimeType,
   ).saveTo('');
 }
 
@@ -158,7 +165,7 @@ Future<ShareResultStatus> _shareFiles(List<UsageExportFile> files) async {
     ShareParams(
       files: [
         for (final file in files)
-          XFile.fromData(file.bytes, name: file.name, mimeType: 'image/png'),
+          XFile.fromData(file.bytes, name: file.name, mimeType: file.mimeType),
       ],
       fileNameOverrides: [for (final file in files) file.name],
     ),

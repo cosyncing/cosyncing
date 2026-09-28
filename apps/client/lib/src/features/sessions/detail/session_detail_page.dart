@@ -55,6 +55,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_command_args_codec.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_request_action_helpers.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_conversation_turns.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_store.dart';
@@ -69,6 +70,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/session_viewpor
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
+import 'package:cosyncing_client/src/features/settings/controller/conversation_display_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_display_controller.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
@@ -83,7 +85,8 @@ import 'package:cosyncing_client/src/platform/speech/speech_output_state.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_hold.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:desktop_drop/desktop_drop.dart';
-import 'package:flutter/foundation.dart' show ValueListenable, kIsWeb;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, kIsWeb, listEquals, setEquals;
 import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
@@ -1903,26 +1906,23 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// than being displayed. Null means nothing is known — a direct deep link —
   /// and the caller substitutes the localized neutral label.
   ///
-  /// Every source belongs to the ACTIVE broker profile: [open] is passed only
-  /// when its hydration has settled on the current profile, and the roster
-  /// lookups re-check the roster's own source. Two profiles can carry the same
-  /// native session id, and answering from the wrong one would put another
-  /// broker's name on this page.
+  /// Every source belongs to the ACTIVE broker profile: [openTitle] comes from
+  /// the working set only once its hydration has settled on the current
+  /// profile, and the roster lookups re-check the roster's own source. Two
+  /// profiles can carry the same native session id, and answering from the
+  /// wrong one would put another broker's name on this page.
   ///
   /// Local only. Every source is already-hydrated client state: no broker
   /// request, history fetch, poll, timer, or subscription is added, and none of
   /// this is identity.
-  String? _knownSessionTitle(
-    SessionDetailState state,
-    OpenSessionsState? open,
-  ) {
+  String? _knownSessionTitle(SessionDetailState state, String? openTitle) {
     final info = state.sessionInfo;
     if (info != null) {
       final authoritative = info.title.trim();
       return authoritative.isEmpty ? null : authoritative;
     }
     return knownSessionTitle(
-      [_openSessionTitle(open), _rosterTitle(), _cachedRosterTitle()],
+      [openTitle, _rosterTitle(), _cachedRosterTitle()],
       sessionId: widget.sessionId,
     );
   }
@@ -1954,7 +1954,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       entry = SessionRef.cachedIdentity(
         tool: widget.tool,
         id: widget.sessionId,
-        title: _knownSessionTitle(session, open) ?? widget.sessionId,
+        title:
+            _knownSessionTitle(session, _openSessionTitle(open)) ??
+            widget.sessionId,
       );
     }
     // Matched on the ENTRY's key, which is the row `open` will write: a
@@ -2255,11 +2257,23 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     // `valueOrNull` until the new hydration finishes. Reading across that
     // window would show profile A's tab (and its title) on profile B, and
     // `_ensureCurrentSessionTab` would then persist it there.
-    final openSessionsAsync = ref.watch(openSessionsControllerProvider);
-    final openSessions =
-        openSessionsAsync.isLoading || openSessionsAsync.hasError
-        ? null
-        : openSessionsAsync.valueOrNull;
+    //
+    // Only the compact single-pane layout reads the whole working set, for its
+    // own strip and shortcuts. Embedded in the workspace, a page needs just its
+    // own tab's title: watching the whole set rebuilt every retained page, and
+    // each one's transcript, on every tab switch.
+    OpenSessionsState? settled(AsyncValue<OpenSessionsState> async) =>
+        async.isLoading || async.hasError ? null : async.valueOrNull;
+    final openSessions = showSinglePaneSessionStrip
+        ? settled(ref.watch(openSessionsControllerProvider))
+        : null;
+    final openTitle = showSinglePaneSessionStrip
+        ? _openSessionTitle(openSessions)
+        : ref.watch(
+            openSessionsControllerProvider.select(
+              (async) => _openSessionTitle(settled(async)),
+            ),
+          );
     if (showSinglePaneSessionStrip && openSessions != null) {
       _ensureCurrentSessionTab(openSessions, state);
     }
@@ -2342,12 +2356,29 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     // arrives the page genuinely is still opening; after it arrives with an
     // empty title the session is resolved and simply has no name, and calling
     // that "opening" would be a spinner that never ends.
-    final knownTitle = _knownSessionTitle(state, openSessions);
+    final knownTitle = _knownSessionTitle(state, openTitle);
     final visibleTitle =
         knownTitle ??
         (state.sessionInfo == null
             ? l10n.sessionDetailTitleOpening
             : l10n.sessionDetailTitleUntitled);
+    final roster = ref.watch(sessionListControllerProvider);
+    final info = state.sessionInfo;
+    final source = RosterSource.of(ref.watch(activeBrokerProfileProvider));
+    final parent = info != null && roster.source == source
+        ? SessionRosterLineage.build(roster.sessions).parentFor(info)
+        : null;
+    final project = info?.projectName?.trim();
+    final cwdParts = info?.cwd
+        ?.split(RegExp(r'[/\\]'))
+        .where((part) => part.isNotEmpty);
+    final contextLabel = (parent?.title.isNotEmpty ?? false)
+        ? parent!.title
+        : (project?.isNotEmpty ?? false)
+        ? '$project / ${state.tool}'
+        : (cwdParts?.isNotEmpty ?? false)
+        ? '${cwdParts!.last} / ${state.tool}'
+        : state.tool;
     final control = SessionControlView.fromSessionDetailState(state);
     final detailFreshness = SessionDetailFreshnessPresentation.fromState(state);
     final isSubView = _view != _SessionDetailView.chat;
@@ -2380,47 +2411,73 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                         unawaited(_selectOpenSession(key, openSessions.refs)),
                     onClose: (key) => unawaited(_closeOpenSession(key)),
                   ),
-                _SessionTopStrip(
-                  title: visibleTitle,
-                  // The rename field edits the real title, never the neutral
-                  // placeholder: committing "Opening session" as a name would
-                  // be the loading state writing itself into the broker.
-                  editableTitle: knownTitle ?? '',
-                  tool: state.tool,
-                  canRename: canRename,
-                  renameBusy: state.renameSessionActionState.isBusy,
-                  onRename: (value) => unawaited(_renameSession(value)),
-                  control: control,
-                  freshness: detailFreshness,
-                  telemetry: state.telemetry,
-                  restoringDrive:
-                      state.driveRestorePhase ==
-                      SessionDriveRestorePhase.restoring,
-                  badgeLabel: progressBadge,
-                  onStatusTap: () => _selectView(_SessionDetailView.status),
-                  viewLabel: isSubView ? _viewLabel(l10n, _view) : null,
-                  onBack: isSubView
-                      ? () => _selectView(_SessionDetailView.chat)
-                      : null,
-                  onPopRoute: _popRouteCallback(),
-                  menu: _SessionViewMenu(
-                    view: effectiveView,
-                    showTerminal: showTerminalTab,
-                    showDebug: showDebugViews,
-                    statusBadgeCount: statusBadgeCount,
-                    terminalFresh: _terminalFresh,
-                    backgroundCommandCount: backgroundCommandCount,
-                    reportView: _reportView,
-                    toolsExpanded: _toolsExpanded,
-                    onSelectView: _selectView,
-                    onReportViewChanged: (value) =>
-                        setState(() => _reportView = value),
-                    onToolsExpandedChanged: (value) => setState(() {
-                      _toolsExpanded = value;
-                      _toolExpansionRevision++;
-                    }),
+                if (!(showSinglePaneSessionStrip &&
+                    openSessions != null &&
+                    !isSubView &&
+                    MediaQuery.sizeOf(context).width < 600 &&
+                    MediaQuery.sizeOf(context).height -
+                            MediaQuery.viewInsetsOf(context).bottom <=
+                        520))
+                  _SessionTopStrip(
+                    title: visibleTitle,
+                    sessionKey: _key,
+                    status: info?.status,
+                    contextLabel: contextLabel,
+                    machine: info?.machine,
+                    onParent: parent == null
+                        ? null
+                        : () async {
+                            final parentRef = SessionRef.fromSession(parent);
+                            ref
+                                .read(openSessionsControllerProvider.notifier)
+                                .open(parentRef);
+                            if (!context.mounted) return;
+                            context.go(
+                              sessionDetailLocation(
+                                tool: parent.tool,
+                                sessionId: parent.id,
+                              ),
+                            );
+                          },
+                    // The rename field edits the real title, never the neutral
+                    // placeholder: committing "Opening session" as a name would
+                    // be the loading state writing itself into the broker.
+                    editableTitle: knownTitle ?? '',
+                    tool: state.tool,
+                    canRename: canRename,
+                    renameBusy: state.renameSessionActionState.isBusy,
+                    onRename: (value) => unawaited(_renameSession(value)),
+                    control: control,
+                    freshness: detailFreshness,
+                    telemetry: state.telemetry,
+                    restoringDrive:
+                        state.driveRestorePhase ==
+                        SessionDriveRestorePhase.restoring,
+                    badgeLabel: progressBadge,
+                    onStatusTap: () => _selectView(_SessionDetailView.status),
+                    viewLabel: isSubView ? _viewLabel(l10n, _view) : null,
+                    onBack: isSubView
+                        ? () => _selectView(_SessionDetailView.chat)
+                        : null,
+                    onPopRoute: _popRouteCallback(),
+                    menu: _SessionViewMenu(
+                      view: effectiveView,
+                      showTerminal: showTerminalTab,
+                      showDebug: showDebugViews,
+                      statusBadgeCount: statusBadgeCount,
+                      terminalFresh: _terminalFresh,
+                      backgroundCommandCount: backgroundCommandCount,
+                      reportView: _reportView,
+                      toolsExpanded: _toolsExpanded,
+                      onSelectView: _selectView,
+                      onReportViewChanged: (value) =>
+                          setState(() => _reportView = value),
+                      onToolsExpandedChanged: (value) => setState(() {
+                        _toolsExpanded = value;
+                        _toolExpansionRevision++;
+                      }),
+                    ),
                   ),
-                ),
                 if (state.activeTransientRetryStatus case final retry?)
                   _OpenCodeRetryStatusBand(retry: retry),
                 if (state.error != null && !state.bootstrapState.hasFailed)
@@ -2506,6 +2563,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                                   );
                                 });
                               },
+                              onSessionDetails: () =>
+                                  _selectView(_SessionDetailView.status),
                               onAttachFiles: _pickAttachments,
                               onBeginAttachmentIntake: _beginAttachmentIntake,
                               onReplaceAttachment: _replaceAttachment,
