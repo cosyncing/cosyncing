@@ -1,7 +1,7 @@
 name: cosyncing_client
 description: "Cross-platform client for cosyncing brokers"
 publish_to: 'none'
-version: 0.5.13+19
+version: 0.6.0+20
 
 environment:
   sdk: ^3.12.2
