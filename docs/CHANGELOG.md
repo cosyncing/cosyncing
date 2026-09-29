@@ -37,6 +37,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - On phones and other narrow screens, reopening the sidebar after opening a
   session from it now keeps the projects and subagent groups you had open,
   instead of collapsing every project again.
+- A session that finishes more than once is listed once in Notifications and
+  in the overview's Unread completions: its newest outcome replaces the earlier
+  ones, as it already did in the system notification center.
 
 ## 0.6.0 — 2026-09-29
 

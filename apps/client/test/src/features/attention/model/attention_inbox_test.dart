@@ -115,21 +115,151 @@ void main() {
     expect(inbox.actionRequired, isEmpty);
     expect(inbox.resolved.map((entry) => entry.event.id), ['failed', 'sent']);
   });
+
+  group('a session that finishes again', () {
+    test('keeps only its newest outcome', () {
+      final inbox = AttentionInboxSections.fromEntries([
+        _entry('first', 'run-finished', state: 'resolved', sessionId: 's1'),
+        _entry(
+          'second',
+          'run-finished',
+          state: 'resolved',
+          createdAt: 2,
+          sessionId: 's1',
+        ),
+        _entry(
+          'third',
+          'run-finished',
+          state: 'resolved',
+          createdAt: 3,
+          sessionId: 's1',
+        ),
+        _entry('other', 'run-finished', state: 'resolved', sessionId: 's2'),
+      ]);
+
+      expect(
+        inbox.all.map((entry) => entry.event.id),
+        unorderedEquals(['third', 'other']),
+      );
+      expect(inbox.unreadCount, 2);
+    });
+
+    test('replaces a failure or a goal with a later outcome', () {
+      final inbox = AttentionInboxSections.fromEntries([
+        _entry('failed', 'run-failed', state: 'resolved', sessionId: 's1'),
+        _entry(
+          'goal',
+          'goal-finished',
+          state: 'resolved',
+          createdAt: 2,
+          sessionId: 's1',
+        ),
+        _entry(
+          'finished',
+          'run-finished',
+          state: 'resolved',
+          createdAt: 3,
+          sessionId: 's1',
+        ),
+      ]);
+
+      expect(inbox.all.single.event.id, 'finished');
+    });
+
+    test('newest wins by creation, not by last update', () {
+      final inbox = AttentionInboxSections.fromEntries([
+        _entry(
+          'older',
+          'run-finished',
+          state: 'resolved',
+          updatedAt: 9,
+          sessionId: 's1',
+        ),
+        _entry(
+          'newer',
+          'run-finished',
+          state: 'resolved',
+          createdAt: 2,
+          updatedAt: 2,
+          sessionId: 's1',
+        ),
+      ]);
+
+      expect(inbox.all.single.event.id, 'newer');
+    });
+
+    test('a dismissed newest outcome does not bring back the older one', () {
+      final inbox = AttentionInboxSections.fromEntries([
+        _entry('older', 'run-finished', state: 'resolved', sessionId: 's1'),
+        _entry(
+          'newer',
+          'run-finished',
+          state: 'resolved',
+          createdAt: 2,
+          dismissedAt: 5,
+          sessionId: 's1',
+        ),
+      ]);
+
+      expect(inbox.all, isEmpty);
+      expect(inbox.unreadCount, 0);
+    });
+
+    test('never hides a pending request of the same session', () {
+      final inbox = AttentionInboxSections.fromEntries([
+        _entry('question', 'question-required', sessionId: 's1'),
+        _entry(
+          'finished',
+          'run-finished',
+          state: 'resolved',
+          createdAt: 2,
+          sessionId: 's1',
+        ),
+      ]);
+
+      expect(
+        inbox.all.map((entry) => entry.event.id),
+        unorderedEquals(['question', 'finished']),
+      );
+    });
+
+    test('keeps outcomes on two servers apart', () {
+      final inbox = AttentionInboxSections.fromEntries([
+        _entry('here', 'run-finished', state: 'resolved', sessionId: 's1'),
+        _entry(
+          'there',
+          'run-finished',
+          state: 'resolved',
+          createdAt: 2,
+          sessionId: 's1',
+          profileId: 'other-profile',
+        ),
+      ]);
+
+      expect(
+        inbox.all.map((entry) => entry.event.id),
+        unorderedEquals(['here', 'there']),
+      );
+    });
+  });
 }
 
 AttentionInboxEntry _entry(
   String id,
   String kind, {
   String state = 'active',
+  int createdAt = 1,
   int updatedAt = 1,
   int? readAt,
   int? dismissedAt,
   bool historicalBaseline = false,
   String severity = 'informational',
+  String? sessionId,
+  String profileId = 'profile',
 }) {
   return AttentionInboxEntry(
     profile: BrokerProfile(
-      id: 'profile',
+      id: profileId,
       displayName: 'Workstation',
       baseUri: Uri.parse('http://127.0.0.1:7734'),
       createdAt: DateTime(2026),
@@ -143,11 +273,19 @@ AttentionInboxEntry _entry(
       state: state,
       severity: severity,
       dedupeKey: id,
-      createdAt: 1,
+      createdAt: createdAt,
       updatedAt: updatedAt,
       title: id,
       historicalBaseline: historicalBaseline,
-      action: const AttentionEventAction(kind: 'open-attention-inbox'),
+      agent: sessionId == null ? null : 'claude',
+      sessionId: sessionId,
+      action: sessionId == null
+          ? const AttentionEventAction(kind: 'open-attention-inbox')
+          : AttentionEventAction(
+              kind: 'open-session',
+              tool: 'claude',
+              sessionId: sessionId,
+            ),
       readAt: readAt,
       dismissedAt: dismissedAt,
     ),
