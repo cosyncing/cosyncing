@@ -88,7 +88,9 @@ class WorkspaceUnreadCompletionKeys extends Notifier<Set<String>> {
       !setEquals(previous, next);
 }
 
-enum _OverviewFilter { attention, working, input, completions }
+// No union filter: one that meant waiting plus unread here, and waiting,
+// unread and failures on Notifications, read as a fourth category.
+enum _OverviewFilter { working, input, completions }
 
 /// Workspace landing page. Unknown data is never represented by a zero.
 class WorkspaceOverview extends ConsumerStatefulWidget {
@@ -103,7 +105,7 @@ class WorkspaceOverview extends ConsumerStatefulWidget {
 }
 
 class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
-  _OverviewFilter _filter = _OverviewFilter.attention;
+  _OverviewFilter _filter = _OverviewFilter.input;
 
   /// The broker the last settled roster described. A refetch keeps showing
   /// that roster instead of blanking every count to unknown, but only while
@@ -150,16 +152,14 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
               (session) => switch (_filter) {
                 _OverviewFilter.working =>
                   session.status == SessionStatus.working,
-                _OverviewFilter.input || _OverviewFilter.attention =>
+                _OverviewFilter.input =>
                   session.status == SessionStatus.needsInput,
                 _OverviewFilter.completions => false,
               },
             )
             .toList() ??
         <SessionInfo>[];
-    final showCompletions =
-        _filter == _OverviewFilter.attention ||
-        _filter == _OverviewFilter.completions;
+    final showCompletions = _filter == _OverviewFilter.completions;
     final narrow = MediaQuery.sizeOf(context).width < 600;
     final theme = Theme.of(context);
     final machine = _QuietLink(
@@ -169,7 +169,6 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
       onTap: () => context.go(brokerDevicesSettingsRoute),
     );
     final filterLabels = {
-      _OverviewFilter.attention: l10n.workspaceNeedsAttention,
       _OverviewFilter.working: l10n.workspaceRunning,
       _OverviewFilter.input: l10n.workspaceWaiting,
       _OverviewFilter.completions: l10n.workspaceUnreadCompletions,
@@ -781,10 +780,9 @@ class _TodayUsage extends ConsumerWidget {
               _Figure(
                 label: l10n.workspaceEstimatedTime,
                 value: runtimeValue,
-                note: active == null
-                    ? l10n.workspaceRuntimeUnavailable
-                    : '${usageEstimatedTip(l10n, active)} '
-                          '${l10n.workspaceConcurrentTime}',
+                // The dash says unavailable; how an available figure is
+                // estimated is the report's to explain, not this summary's.
+                note: active == null ? l10n.workspaceRuntimeUnavailable : '',
               ),
               _Figure(
                 label: l10n.usageTokensLabel,
@@ -826,17 +824,6 @@ class _TodayUsage extends ConsumerWidget {
           _Note(
             text: l10n.workspacePartialUsage(report.sourceErrors.join(', ')),
           ),
-        if (available)
-          _Note(
-            text: [
-              l10n.usageDayBoundaryNote,
-              if (report.timezone != null) report.timezone!,
-            ].join(' · '),
-          ),
-        if (available && report.coverage != null)
-          _Note(text: l10n.usageSourceCount(report.coverage!.sourceCount)),
-        if (available && report.coverage == null)
-          _Note(text: l10n.workspaceCoverageUnknown),
       ],
     );
   }

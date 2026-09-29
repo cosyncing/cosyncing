@@ -13,6 +13,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_control
 import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_roster_disclosure.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_empty_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/roster_freshness_slot.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
@@ -314,6 +315,11 @@ class _SidebarRoster extends ConsumerWidget {
     );
     final revealRequest = ref.watch(sessionRosterRevealRequestProvider);
     return SessionListPane(
+      // Outlives the pane: on a phone this pane sits in a drawer that is
+      // disposed each time it closes, and opening a session closes it.
+      disclosure: ref.watch(
+        sessionRosterDisclosureProvider(source?.storageKey ?? ''),
+      ),
       unreadCompletionKeys: ref.watch(workspaceUnreadCompletionKeysProvider),
       searchFocusNode: searchFocusNode,
       // The activity control displays its default while loading. The

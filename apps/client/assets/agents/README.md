@@ -5,8 +5,9 @@ surfaces (report page, share cards). Bundled with the app so it makes no
 runtime requests to brand websites. Provenance is shared with Tokdash, whose
 icon set these are taken from (`src/tokdash/static/icons/agents/` in the
 Tokdash source tree). Of the original 26 marks, 14 are byte-identical copies,
-2 are copies of Tokdash's normalized transparent derivatives, and 10 are
-rasterized from SVG sources at 64x64. Additional identities are listed below.
+2 are copies of Tokdash's normalized transparent derivatives, and 10 were
+rasterized from SVG sources at 64x64; MiMo's has since been replaced by its
+favicon. Additional identities are listed below.
 
 - Byte-identical PNG copies: Antigravity, Cline, Crush, Hermes, Kilocode,
   Kimi, OMP, OpenClaw, OpenCode, Pi, Qoder, Qoder CLI, WorkBuddy, and ZCode
@@ -27,7 +28,7 @@ rasterized from SVG sources at 64x64. Additional identities are listed below.
   [Cursor brand assets](https://cursor.com/brand); Cursor is registered for
   future compatibility, not a current data source), DeepSeek (brand blue
   `#4D6BFE`, which reads on both themes and is therefore excluded from the
-  client's dark-mode inversion set), Gemini (`gemini.svg`), MiMo, Qwen Code
+  client's dark-mode inversion set), Gemini (`gemini.svg`), Qwen Code
   (Qwen hexagon logo, Qwen purple `#6D44E8`), Reasonix, and Zed (official
   logo from the [Zed repository](https://github.com/zed-industries/zed),
   black fill). Tokdash ships only SVG for these marks, so no PNG exists to
@@ -47,7 +48,24 @@ All marks remain the property of their respective owners.
   <https://z-cdn.chatglm.cn/z-ai/static/logo.svg>. `zai.png` is a 128×128 raster
   rendering made with `convert -background none zai.svg -resize 128x128 zai.png`.
   It identifies a quota provider, separate from the ZCode usage source.
-- OpenCode Go quota reuses the OpenCode mark. Muse Code and Devin CLI retain
-  neutral initial fallbacks because the upstream usage catalog has no artwork.
+- OpenCode Go quota reuses the OpenCode mark.
+- `mimo.png` replaces the earlier MiMo raster, which squeezed the one-line
+  "Xiaomi MiMo" wordmark into a square. It is the 32×32 frame of the
+  two-line favicon linked by [MiMo](https://mimo.xiaomi.com/)
+  (`https://cdn.cnbj1.fds.api.mi-img.com/aife/mimo-blog-fe/doc_build/mimo.ico`),
+  re-encoded from ICO to PNG with every pixel unchanged. Its opaque black
+  tile reads on both themes, so it is not in the dark-mode inversion set.
+- `muse.png` identifies the Muse Code usage source. Tokdash draws no artwork
+  for it, and Meta publishes no Muse-specific mark: the
+  [Muse Code documentation](https://dev.meta.ai/docs/muse-code) carries only
+  the Meta symbol. The file is the 64×64 frame of that site's favicon
+  (`https://dev.meta.ai/favicon.ico`), re-encoded from ICO to PNG with every
+  pixel unchanged. Meta blue reads on both themes.
+- `devin.png` identifies the Devin CLI usage source, for which Tokdash also
+  draws no artwork. It is rasterized at 64×64 from the vector favicon linked by
+  [Devin](https://devin.ai/) (`https://devin.ai/favicon.svg`), a black mark on
+  transparency, with `convert -background none -density 300 favicon.svg
+  -resize 64x64`. Like the other dark-on-transparent marks it is inverted in
+  dark mode.
 
 Brand marks do not imply a configured provider or a supported session adapter.

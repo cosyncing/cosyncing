@@ -1,10 +1,10 @@
 /// Periods the usage surfaces can ask the broker for, and how each resolves to
 /// a date window.
 ///
-/// One vocabulary for both surfaces. The Today card offers today/week/month and
-/// the report offers day/week/month/year/all time, but they are the same
-/// periods resolved the same way, so a figure cannot mean one thing in Settings
-/// and another on the report.
+/// One vocabulary for every surface that links to a period — the report page,
+/// the overview's usage summary, and notifications — resolved the same way
+/// everywhere, so a figure cannot mean one thing in one place and another in
+/// the next.
 library;
 
 /// A period the report can be asked for.
@@ -23,13 +23,6 @@ enum UsagePeriod {
 
   /// Everything the broker host has recorded.
   allTime;
-
-  /// The periods the Today card offers, in display order.
-  static const List<UsagePeriod> todayCard = [
-    UsagePeriod.today,
-    UsagePeriod.week,
-    UsagePeriod.month,
-  ];
 
   /// The periods the report page offers, in display order.
   static const List<UsagePeriod> report = [
@@ -57,7 +50,7 @@ extension UsagePeriodLink on UsagePeriod {
 
   /// Reads a link name, or `null` for anything the report does not offer.
   ///
-  /// The day report uses the same stable `today` link as the summary card.
+  /// The day report uses the same stable `today` link as the overview summary.
   static UsagePeriod? parse(String? value) {
     if (value == null) return null;
     for (final period in UsagePeriod.report) {

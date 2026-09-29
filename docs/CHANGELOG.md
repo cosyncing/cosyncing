@@ -11,6 +11,33 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- Agents & Quota now shows only quota windows; token usage is in the Usage
+  overview. The Usage overview's day view no longer shows a day streak, a peak
+  day or a weekday chart, which a single day cannot fill. The report, its
+  project leaderboard and share section, and the workspace overview drop their
+  footnotes on project attribution, export file counts, day boundaries, the
+  agent-time estimate and source counts; the agent-time rule stays on its
+  tooltip. Muse Code and Devin CLI rows show their vendors' marks, and MiMo
+  shows its two-line favicon instead of a squeezed wordmark.
+- Pending work has one name per kind on both the overview and Notifications:
+  "Waiting for you" (questions and approvals), "Unread completions", and
+  "Problems" (failed runs and security or server alerts, formerly "Action
+  required", which read like a second name for requests). The "Needs
+  attention" grouping is gone: the overview opens on Waiting for you, and the
+  Notifications heading names the selected filter and its count.
+- On Android, a new app release is offered once in a dialog with Later, instead
+  of a banner that stayed over every screen and could not be dismissed. Closing
+  it, including with Back, keeps the update in Settings → General, whose entry
+  still carries the update dot.
+
+### Fixed
+
+- On phones and other narrow screens, reopening the sidebar after opening a
+  session from it now keeps the projects and subagent groups you had open,
+  instead of collapsing every project again.
+
 ## 0.6.0 — 2026-09-29
 
 ### Changed

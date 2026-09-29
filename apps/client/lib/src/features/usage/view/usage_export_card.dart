@@ -504,13 +504,26 @@ class _UsageCardBuilder {
     final agentMs = report.activeTime?.activeMsSum;
     final totalDays = streaks?.totalDays ?? report.range.days;
     final subStyle = _style(11.5, FontWeight.w700, tokens.textSecondary);
-    final sub = l10n.usageCardHeroSub(
-      streaks?.activeDays?.toString() ?? _em,
-      totalDays?.toString() ?? _em,
-      sessions == null ? _em : formatUsageCount(sessions, locale: locale),
-      formatUsageCount(report.totals.requests, locale: locale),
-      agentMs == null ? _em : formatUsageCardDuration(agentMs, locale: locale),
+    final sessionText = sessions == null
+        ? _em
+        : formatUsageCount(sessions, locale: locale);
+    final requestText = formatUsageCount(
+      report.totals.requests,
+      locale: locale,
     );
+    final agentText = agentMs == null
+        ? _em
+        : formatUsageCardDuration(agentMs, locale: locale);
+    // A day card leaves out "1 of 1 days active": the day is the window.
+    final sub = period == UsagePeriod.today
+        ? l10n.usageCardHeroSubDay(sessionText, requestText, agentText)
+        : l10n.usageCardHeroSub(
+            streaks?.activeDays?.toString() ?? _em,
+            totalDays?.toString() ?? _em,
+            sessionText,
+            requestText,
+            agentText,
+          );
     for (final row in _wrap(sub, subStyle)) {
       _line(
         row,
@@ -642,19 +655,22 @@ class _UsageCardBuilder {
     }
 
     // Days active and agent time moved into the hero sub; what stays here is
-    // what a skim reads as a table: the peak day, and the cost repeat.
+    // what a skim reads as a table: the peak day, and the cost repeat. A day
+    // card has no peak day to name but the day itself.
     final busiest = report.firsts?.busiestDay;
     final busiestDate = busiest == null ? null : DateTime.tryParse(busiest);
-    statRow(
-      l10n.usageCardBusiestLabel,
-      busiestDate == null
-          ? _em
-          : '${DateFormat.MMMd(locale).format(busiestDate)}'
-                ' · ${formatUsageCardTokens(
-                  report.firsts?.busiestDayTokens ?? 0,
-                  locale: locale,
-                )}',
-    );
+    if (period != UsagePeriod.today) {
+      statRow(
+        l10n.usageCardBusiestLabel,
+        busiestDate == null
+            ? _em
+            : '${DateFormat.MMMd(locale).format(busiestDate)}'
+                  ' · ${formatUsageCardTokens(
+                    report.firsts?.busiestDayTokens ?? 0,
+                    locale: locale,
+                  )}',
+      );
+    }
     if (costOn) {
       statRow(l10n.usageCostLabel, formatUsageCardCost(report.totals.cost));
     }

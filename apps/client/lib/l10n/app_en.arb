@@ -2065,6 +2065,14 @@
   "@androidUpdatePermissionAction": {
     "description": "Button that retries installation after Android install-source permission is granted."
   },
+  "androidUpdateLater": "Later",
+  "@androidUpdateLater": {
+    "description": "Android update dialog button that closes it without updating; the offer stays in Settings."
+  },
+  "androidUpdateSettingsHint": "This update stays in Settings → General.",
+  "@androidUpdateSettingsHint": {
+    "description": "Quiet line in the Android update dialog saying where the offer can be found after closing it."
+  },
   "settingsQuotaPanelTitle": "Usage limits",
   "@settingsQuotaPanelTitle": {
     "description": "Heading above the Tokdash quota status bars."
@@ -3593,8 +3601,10 @@
   "attentionPageRefresh": "Refresh inbox",
   "attentionPageClearAll": "Clear all",
   "attentionPageClearFailed": "Couldn't clear this notification snapshot. Try again.",
-  "attentionPageActionRequired": "Action required",
-  "attentionPageActionRequiredSubtitle": "Sessions waiting for you or runs that need inspection",
+  "attentionPageProblems": "Problems",
+  "@attentionPageProblems": {
+    "description": "Notifications filter and section for failed runs and security or server alerts."
+  },
   "attentionPageMaintenance": "Maintenance",
   "attentionPageMaintenanceSubtitle": "Runtime, quota, sync, security, and server notices",
   "attentionPageRecent": "Recent",
@@ -5021,40 +5031,6 @@
       }
     }
   },
-  "usageOpenReport": "Full report",
-  "@usageOpenReport": {
-    "description": "Action opening the report page from the Settings card."
-  },
-  "usageTodayTitle": "This machine",
-  "@usageTodayTitle": {
-    "description": "Title of the usage card in Settings. Names the scope, not the period."
-  },
-  "usagePeriodToday": "Today",
-  "@usagePeriodToday": {
-    "description": "Usage card period segment: today."
-  },
-  "usagePeriodThisWeek": "This week",
-  "@usagePeriodThisWeek": {
-    "description": "Usage card period segment: the week in progress."
-  },
-  "usagePeriodThisMonth": "This month",
-  "@usagePeriodThisMonth": {
-    "description": "Usage card period segment: the month in progress."
-  },
-  "usageInProgressNote": "In progress · day {day} of {total}",
-  "@usageInProgressNote": {
-    "description": "Note under the usage card header while the period is still running.",
-    "placeholders": {
-      "day": {
-        "type": "int",
-        "example": "2"
-      },
-      "total": {
-        "type": "int",
-        "example": "7"
-      }
-    }
-  },
   "usageTokensLabel": "Tokens",
   "@usageTokensLabel": {
     "description": "Row label for the period token total."
@@ -5062,10 +5038,6 @@
   "usageCostLabel": "Cost",
   "@usageCostLabel": {
     "description": "Row label for the period cost."
-  },
-  "usageRequestsLabel": "Requests",
-  "@usageRequestsLabel": {
-    "description": "Row label for the request count."
   },
   "usageTokenBreakdown": "{input} in · {output} out · {cache} cache read",
   "@usageTokenBreakdown": {
@@ -5084,10 +5056,6 @@
         "example": "17.6B"
       }
     }
-  },
-  "usageAgentTimeLabel": "Est. agent time",
-  "@usageAgentTimeLabel": {
-    "description": "Row label for estimated agent activity time."
   },
   "usageAgentTimeHours": "{hours} hr",
   "@usageAgentTimeHours": {
@@ -5147,50 +5115,6 @@
   "@usageTopModelLabel": {
     "description": "Row label for the most-used model."
   },
-  "usageShareOfTokens": "{percent} of tokens",
-  "@usageShareOfTokens": {
-    "description": "Share of the period token total.",
-    "placeholders": {
-      "percent": {
-        "type": "String",
-        "example": "40%"
-      }
-    }
-  },
-  "usageDeltaYesterday": "{delta} vs yesterday",
-  "@usageDeltaYesterday": {
-    "description": "Period-over-period change for the day view.",
-    "placeholders": {
-      "delta": {
-        "type": "String",
-        "example": "+39.3%"
-      }
-    }
-  },
-  "usageDeltaPriorDays": "{delta} vs the prior {count} days",
-  "@usageDeltaPriorDays": {
-    "description": "Period-over-period change against the equal-length prior stretch.",
-    "placeholders": {
-      "delta": {
-        "type": "String",
-        "example": "+138.4%"
-      },
-      "count": {
-        "type": "int",
-        "example": "2"
-      }
-    }
-  },
-  "usageDeltaPreviousPeriod": "{delta} vs the previous period",
-  "@usageDeltaPreviousPeriod": {
-    "description": "Period-over-period change when the prior window has no shorter name.",
-    "placeholders": {
-      "delta": {
-        "type": "String",
-        "example": "+15.5%"
-      }
-    }
-  },
   "usageRankHarnesses": "Top harnesses",
   "@usageRankHarnesses": {
     "description": "Heading of the per-tool ranking list."
@@ -5216,24 +5140,6 @@
         "example": "10.1%"
       }
     }
-  },
-  "usageProjectGroupNote": "Projects are grouped by repository remote — the same codebase under two remotes appears twice.",
-  "@usageProjectGroupNote": {
-    "description": "Explains why two rows can obviously be one codebase. Client-side merging would fabricate a number."
-  },
-  "usageSourceCount": "{count} tool sources",
-  "@usageSourceCount": {
-    "description": "Footer evidence for the scope claim, from the served coverage block.",
-    "placeholders": {
-      "count": {
-        "type": "int",
-        "example": "23"
-      }
-    }
-  },
-  "usageDayBoundaryNote": "Days begin at this machine's local midnight.",
-  "@usageDayBoundaryNote": {
-    "description": "Footer note fixing what a day means on these surfaces."
   },
   "usageStatTokens": "Tokens",
   "@usageStatTokens": {
@@ -5401,24 +5307,6 @@
       }
     }
   },
-  "usagePodiumProjectNote": "{count} projects · ranked by tokens · {unattributed} unattributed · {gap} from sources with no project records",
-  "@usagePodiumProjectNote": {
-    "description": "Reconciles the project facet against the period total, so the podium share cannot be read as the whole picture.",
-    "placeholders": {
-      "count": {
-        "type": "String",
-        "example": "41"
-      },
-      "unattributed": {
-        "type": "String",
-        "example": "0.8%"
-      },
-      "gap": {
-        "type": "String",
-        "example": "4.1%"
-      }
-    }
-  },
   "usageWhenTitle": "When you work",
   "@usageWhenTitle": {
     "description": "Hour-of-day section heading."
@@ -5505,16 +5393,6 @@
   "@usageColActive": {
     "description": "Table column: active time."
   },
-  "usageActiveTimeNote": "Active time excludes idle gaps over {minutes} minutes.",
-  "@usageActiveTimeNote": {
-    "description": "Footer note; the gap is served, never assumed.",
-    "placeholders": {
-      "minutes": {
-        "type": "String",
-        "example": "5"
-      }
-    }
-  },
   "usageCardTierOverview": "COSYNCING · OVERVIEW",
   "@usageCardTierOverview": {
     "description": "Overview-tier card eyebrow. Counts only; the privacy positioning lives here."
@@ -5581,6 +5459,15 @@
         "type": "String",
         "example": "1 month 2 days"
       }
+    }
+  },
+  "usageCardHeroSubDay": "{sessions} sessions · {requests} requests · {agent} agent time",
+  "@usageCardHeroSubDay": {
+    "description": "The activity line under a day card's hero figure. Leaves out days active, which a single day cannot fill.",
+    "placeholders": {
+      "sessions": { "type": "String", "example": "12" },
+      "requests": { "type": "String", "example": "1,204" },
+      "agent": { "type": "String", "example": "3 hours" }
     }
   },
   "usageCardBusiestLabel": "Busiest day",
@@ -5651,6 +5538,10 @@
   "@usageShareOverviewBody": {
     "description": "One-line audit of everything the counts-only card carries, so the preview does not have to be opened to be trusted."
   },
+  "usageShareOverviewBodyDay": "Tokens, sessions, estimated active time, top harnesses and models. Safe to post.",
+  "@usageShareOverviewBodyDay": {
+    "description": "Overview tier body for a day card, which carries no days-active count or busiest day."
+  },
   "usageShareProjectsTitle": "Project detail card",
   "@usageShareProjectsTitle": {
     "description": "Tier heading above the project-detail card's previews."
@@ -5678,10 +5569,6 @@
   "usageExportAll": "Export all four",
   "@usageExportAll": {
     "description": "Writes both tiers in both themes in one press."
-  },
-  "usageExportBothThemes": "Each export writes two PNGs — light and dark — whatever theme the app is in.",
-  "@usageExportBothThemes": {
-    "description": "The recipient picks the legible one; the sender never thinks about theme state."
   },
   "usageCostToggle": "Include cost",
   "@usageCostToggle": {
@@ -5726,10 +5613,6 @@
   "usageExportDesktopOnly": "Export runs on desktop, in the web app, and on Android.",
   "@usageExportDesktopOnly": {
     "description": "Replaces the export controls on iOS, the one platform with neither a directory sink nor a proven share sheet."
-  },
-  "usageExportBrowserPrompt": "One press writes two files — four for “Export all four” — so your browser may ask to allow multiple downloads.",
-  "@usageExportBrowserPrompt": {
-    "description": "Web only. The page cannot tell whether the browser dropped a later download, so it says the prompt is expected."
   },
   "usageWindowUnrecognized": "tokdash did not recognize this period, so it answered for a window nobody asked about. No figures are shown.",
   "@usageWindowUnrecognized": {
@@ -6151,18 +6034,18 @@
     }
   },
   "inboxEnhancementJumpActivity": "Jump to activity",
-  "inboxEnhancementNeedsAttention": "Needs attention · {count}",
-  "@inboxEnhancementNeedsAttention": {
+  "inboxEnhancementPendingHeader": "{filter} · {count}",
+  "@inboxEnhancementPendingHeader": {
+    "description": "Heading over the pending notifications: the selected filter's name and how many items it holds, as the Overview queue heading does.",
     "placeholders": {
-      "count": {
-        "type": "int"
-      }
+      "filter": { "type": "String", "example": "Waiting for you" },
+      "count": { "type": "int" }
     }
   },
-  "inboxEnhancementAllPending": "All pending",
-  "inboxEnhancementInput": "Your input is needed",
+  "inboxEnhancementAllPending": "All",
+  "inboxEnhancementInput": "Waiting for you",
   "inboxEnhancementCompletions": "Unread completions",
-  "inboxEnhancementNoPending": "No pending requests or unread completions.",
+  "inboxEnhancementNoPending": "Nothing is waiting for you, unread or failing.",
   "inboxEnhancementRecentActivity": "Recent activity · {count} unread",
   "@inboxEnhancementRecentActivity": {
     "placeholders": {
@@ -6195,7 +6078,7 @@
   },
   "workspaceHideSidebar": "Hide sidebar",
   "workspaceRunningDetail": "Making progress",
-  "workspaceWaitingDetail": "Your input is needed",
+  "workspaceWaitingDetail": "Questions and approvals",
   "workspaceCompletionsDetail": "Finished their turn",
   "workspaceOverviewHeading": "Your day, in sync.",
   "workspaceOverviewIntro": "A little perspective on everything you’re building.",
@@ -6207,13 +6090,11 @@
   "workspaceLoading": "Loading current data…",
   "workspaceStateUnavailable": "Current activity is unavailable. Cached session identities remain in the sidebar.",
   "workspacePartialRoster": "Partial roster: counts include only sessions this server has discovered so far.",
-  "workspaceNeedsAttention": "Needs attention",
   "workspaceNothingHere": "Nothing in this view right now.",
   "workspaceToday": "Today’s activity",
   "workspaceUsageDetails": "Usage details",
   "workspaceEstimatedTime": "Estimated agent activity",
   "workspaceRuntimeUnavailable": "Observed execution time is unavailable.",
-  "workspaceConcurrentTime": "Concurrent sessions add together.",
   "workspaceTokenBreakdownUnavailable": "This source does not provide a complete token breakdown.",
   "workspacePartialUsage": "Partial usage: readings unavailable for {sources}.",
   "@workspacePartialUsage": {
@@ -6223,7 +6104,6 @@
       }
     }
   },
-  "workspaceCoverageUnknown": "Source coverage is unavailable.",
   "workspaceCloseAllTabs": "Close all tabs",
   "workspaceTabsClosed": "Tabs closed. Sessions keep running.",
   "workspaceUndoCloseTabs": "Undo",

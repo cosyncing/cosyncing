@@ -333,6 +333,55 @@ void main() {
     }
   });
 
+  testWidgets('the phone drawer reopens with the projects left open', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 900);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      buildSubject([_session('claude', 'a'), _session('codex', 'b')]),
+    );
+    await tester.pumpAndSettle();
+    bool projectOpen() => tester
+        .widgetList<StrokeIcon>(
+          find.byKey(
+            const ValueKey('project-collapse-icon-$kUngroupedProjectKey'),
+          ),
+        )
+        .every((icon) => icon.quarterTurns == 0);
+
+    await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+    await tester.pumpAndSettle();
+    expect(projectOpen(), isFalse, reason: 'projects start collapsed');
+    await expandRosterProject(tester);
+    await tester.pumpAndSettle();
+    expect(projectOpen(), isTrue);
+
+    // Opening a session closes the drawer, and a closed drawer is disposed.
+    await tester.tap(find.byKey(const Key('session-row-claude/a')));
+    await tester.pumpAndSettle();
+    expect(find.byType(Drawer), findsNothing);
+    expect(find.text('DETAIL claude/a'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+    await tester.pumpAndSettle();
+    expect(projectOpen(), isTrue, reason: 'the project the user opened');
+    expect(find.byKey(const Key('session-row-codex/b')), findsOneWidget);
+
+    // A deliberate collapse survives the next reopen too.
+    await tester.tap(
+      find.byKey(const ValueKey('project-header-$kUngroupedProjectKey')),
+    );
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(Drawer), findsNothing);
+    await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+    await tester.pumpAndSettle();
+    expect(projectOpen(), isFalse);
+  });
+
   testWidgets('Ctrl K opens the phone drawer and focuses roster search', (
     tester,
   ) async {

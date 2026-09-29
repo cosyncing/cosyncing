@@ -86,8 +86,9 @@ existing inbox read semantics; they are not a separate persistent review queue.
 The same source-qualified run/goal completion events add a red trailing tab cue
 and supplement the roster's existing local completion marker.
 Daily tokens and estimated activity come from the source-bound usage service,
-with unavailable, partial, timezone, and estimate disclosures. They never use
-session lifetime tokens or context-window occupancy as today's usage.
+with unavailable and partial disclosures; the usage report, not the overview,
+explains how activity is estimated. They never use session lifetime tokens or
+context-window occupancy as today's usage.
 
 Roster rows use original harness artwork and the session's own status: small
 Working and Needs input chips, and a red dot for finished work to review. Idle

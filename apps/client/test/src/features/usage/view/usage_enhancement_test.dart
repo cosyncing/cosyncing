@@ -11,6 +11,7 @@ import 'package:cosyncing_client/src/features/usage/model/usage_source_catalog.d
 import 'package:cosyncing_client/src/features/usage/view/usage_activity.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_agent_table.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_hero.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -225,6 +226,57 @@ void main() {
       }
     },
   );
+
+  testWidgets('a day drops the streak, the peak day and the weekday bars', (
+    tester,
+  ) async {
+    final served = report();
+    // Every day-only omission is checked against the week, which still draws
+    // it, so a sample that stopped serving streaks or weekdays fails here
+    // instead of passing vacuously.
+    for (final period in [UsagePeriod.week, UsagePeriod.today]) {
+      final day = period == UsagePeriod.today;
+      await tester.pumpWidget(
+        subject(
+          Column(
+            children: [
+              UsageHero(period: period, report: served, locale: 'en'),
+              UsageActivity(
+                period: period,
+                report: served,
+                locale: 'en',
+                now: DateTime(2026, 9, 2),
+              ),
+              UsageWhenYouWork(
+                hourly: served.hourly,
+                weekday: served.weekday,
+                timezone: served.timezone,
+                locale: 'en',
+                totalTokens: served.totals.tokens,
+                showHourlyChart: !day,
+                showWeekday: !day,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final expected = day ? findsNothing : findsWidgets;
+      // The hero's tiles set their labels in capitals.
+      expect(find.text('DAY STREAK'), expected, reason: '$period streak tile');
+      expect(find.text('PEAK DAY'), expected, reason: '$period peak tile');
+      expect(find.text('Peak day'), expected, reason: '$period peak weekday');
+      expect(
+        find.textContaining('days active'),
+        expected,
+        reason: '$period streak line',
+      );
+      expect(find.text('Mon'), expected, reason: '$period weekday bars');
+      // What a day does have stays: its peak hour.
+      expect(find.text('Peak hour'), findsOneWidget, reason: '$period');
+      expect(tester.takeException(), isNull);
+    }
+  });
 
   testWidgets(
     'weekday shares use the whole period and missing days stay unknown',

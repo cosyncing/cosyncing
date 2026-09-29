@@ -7,7 +7,6 @@ import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_activity.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_agent_table.dart';
-import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_hero.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_podium.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_share_section.dart';
@@ -195,27 +194,11 @@ class _PeriodSwitcher extends StatelessWidget {
 }
 
 /// The localized name of a period segment.
-///
-/// The two surfaces label the same periods differently — the card says "This
-/// week" beside "Today", the report says "Week" beside "Year" — so the labels
-/// are separate keys over one vocabulary rather than one key reused at two
-/// meanings.
 String usagePeriodLabel(AppLocalizations l10n, UsagePeriod period) {
   return switch (period) {
     UsagePeriod.today => l10n.usageEnhancementDay,
     UsagePeriod.week => l10n.usagePeriodWeek,
     UsagePeriod.month => l10n.usagePeriodMonth,
-    UsagePeriod.year => l10n.usagePeriodYear,
-    UsagePeriod.allTime => l10n.usagePeriodAllTime,
-  };
-}
-
-/// The card's own labels for the periods it offers.
-String usageCardPeriodLabel(AppLocalizations l10n, UsagePeriod period) {
-  return switch (period) {
-    UsagePeriod.today => l10n.usagePeriodToday,
-    UsagePeriod.week => l10n.usagePeriodThisWeek,
-    UsagePeriod.month => l10n.usagePeriodThisMonth,
     UsagePeriod.year => l10n.usagePeriodYear,
     UsagePeriod.allTime => l10n.usagePeriodAllTime,
   };
@@ -418,6 +401,7 @@ class _UsageReportBodyState extends State<_UsageReportBody> {
               totalTokens: report.totals.tokens,
               hourly: report.hourly,
               showHourlyChart: period != UsagePeriod.today,
+              showWeekday: period != UsagePeriod.today,
               weekday: report.weekday,
               timezone: report.timezone,
               locale: locale,
@@ -444,8 +428,6 @@ class _UsageReportBodyState extends State<_UsageReportBody> {
             ),
           ),
         ],
-        const SizedBox(height: 24),
-        _Footer(report: report, locale: locale),
       ],
     );
   }
@@ -599,8 +581,8 @@ String? usageTokenBreakdownText(
 /// report its own version gets the second phrasing rather than a rendered
 /// `null`: the floor is still a fact, the installed version is not.
 ///
-/// Shared by the report page and the Settings card so the two cannot drift
-/// into describing the same host differently.
+/// Shared by the report page and the overview's usage summary so the two
+/// cannot drift into describing the same host differently.
 String usageTokdashUpgradeText(
   AppLocalizations l10n,
   UsageReportRuntime runtime,
@@ -620,25 +602,4 @@ String usageEstimatedTip(AppLocalizations l10n, UsageReportActiveTime active) =>
 int usageIdleGapMinutes(UsageReportActiveTime active) {
   final cap = active.gapCapMs;
   return cap == null ? 5 : (cap / Duration.millisecondsPerMinute).round();
-}
-
-class _Footer extends StatelessWidget {
-  const _Footer({required this.report, required this.locale});
-
-  final UsageReport report;
-  final String locale;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final active = report.activeTime;
-    final notes = <String>[
-      l10n.usageDayBoundaryNote,
-      if (active != null)
-        l10n.usageActiveTimeNote(usageIdleGapMinutes(active).toString()),
-      if (report.coverage != null)
-        l10n.usageSourceCount(report.coverage!.sourceCount),
-    ];
-    return UsageFootnote(text: notes.join(' · '), center: true);
-  }
 }

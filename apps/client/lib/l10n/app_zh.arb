@@ -543,6 +543,14 @@
   "androidUpdatePermissionBody": "请允许 Cosyncing 安装更新，然后点按“继续”。",
   "androidUpdateAction": "更新",
   "androidUpdatePermissionAction": "继续",
+  "androidUpdateLater": "稍后",
+  "@androidUpdateLater": {
+    "description": "Android update dialog button that closes it without updating; the offer stays in Settings."
+  },
+  "androidUpdateSettingsHint": "此更新会保留在“设置 → 通用”中。",
+  "@androidUpdateSettingsHint": {
+    "description": "Quiet line in the Android update dialog saying where the offer can be found after closing it."
+  },
   "settingsQuotaPanelTitle": "额度用量",
   "settingsQuotaAntigravityGeminiModels": "Gemini 模型",
   "settingsQuotaAntigravityClaudeGptModels": "Claude 和 GPT 模型",
@@ -1108,8 +1116,10 @@
   "attentionPageRefresh": "刷新收件箱",
   "attentionPageClearAll": "全部清除",
   "attentionPageClearFailed": "无法清除当前通知快照，请重试。",
-  "attentionPageActionRequired": "需要操作",
-  "attentionPageActionRequiredSubtitle": "等待你处理的会话或需要检查的运行",
+  "attentionPageProblems": "异常",
+  "@attentionPageProblems": {
+    "description": "Notifications filter and section for failed runs and security or server alerts."
+  },
   "attentionPageMaintenance": "维护",
   "attentionPageMaintenanceSubtitle": "运行时、配额、同步、安全和服务器通知",
   "attentionPageRecent": "最近",
@@ -1819,40 +1829,6 @@
       }
     }
   },
-  "usageOpenReport": "完整报告",
-  "@usageOpenReport": {
-    "description": "Action opening the report page from the Settings card."
-  },
-  "usageTodayTitle": "本机",
-  "@usageTodayTitle": {
-    "description": "Title of the usage card in Settings. Names the scope, not the period."
-  },
-  "usagePeriodToday": "今日",
-  "@usagePeriodToday": {
-    "description": "Usage card period segment: today."
-  },
-  "usagePeriodThisWeek": "本周",
-  "@usagePeriodThisWeek": {
-    "description": "Usage card period segment: the week in progress."
-  },
-  "usagePeriodThisMonth": "本月",
-  "@usagePeriodThisMonth": {
-    "description": "Usage card period segment: the month in progress."
-  },
-  "usageInProgressNote": "进行中 · {total} 天中的第 {day} 天",
-  "@usageInProgressNote": {
-    "description": "Note under the usage card header while the period is still running.",
-    "placeholders": {
-      "day": {
-        "type": "int",
-        "example": "2"
-      },
-      "total": {
-        "type": "int",
-        "example": "7"
-      }
-    }
-  },
   "usageTokensLabel": "Token",
   "@usageTokensLabel": {
     "description": "Row label for the period token total."
@@ -1860,10 +1836,6 @@
   "usageCostLabel": "费用",
   "@usageCostLabel": {
     "description": "Row label for the period cost."
-  },
-  "usageRequestsLabel": "请求",
-  "@usageRequestsLabel": {
-    "description": "Row label for the request count."
   },
   "usageTokenBreakdown": "输入 {input} · 输出 {output} · 缓存读取 {cache}",
   "@usageTokenBreakdown": {
@@ -1882,10 +1854,6 @@
         "example": "17.6B"
       }
     }
-  },
-  "usageAgentTimeLabel": "Agent 时间（估算）",
-  "@usageAgentTimeLabel": {
-    "description": "Row label for estimated agent activity time."
   },
   "usageAgentTimeHours": "{hours} 小时",
   "@usageAgentTimeHours": {
@@ -1945,50 +1913,6 @@
   "@usageTopModelLabel": {
     "description": "Row label for the most-used model."
   },
-  "usageShareOfTokens": "占 token 总量 {percent}",
-  "@usageShareOfTokens": {
-    "description": "Share of the period token total.",
-    "placeholders": {
-      "percent": {
-        "type": "String",
-        "example": "40%"
-      }
-    }
-  },
-  "usageDeltaYesterday": "较昨日 {delta}",
-  "@usageDeltaYesterday": {
-    "description": "Period-over-period change for the day view.",
-    "placeholders": {
-      "delta": {
-        "type": "String",
-        "example": "+39.3%"
-      }
-    }
-  },
-  "usageDeltaPriorDays": "较之前 {count} 天 {delta}",
-  "@usageDeltaPriorDays": {
-    "description": "Period-over-period change against the equal-length prior stretch.",
-    "placeholders": {
-      "delta": {
-        "type": "String",
-        "example": "+138.4%"
-      },
-      "count": {
-        "type": "int",
-        "example": "2"
-      }
-    }
-  },
-  "usageDeltaPreviousPeriod": "较上一周期 {delta}",
-  "@usageDeltaPreviousPeriod": {
-    "description": "Period-over-period change when the prior window has no shorter name.",
-    "placeholders": {
-      "delta": {
-        "type": "String",
-        "example": "+15.5%"
-      }
-    }
-  },
   "usageRankHarnesses": "Harness 排名",
   "@usageRankHarnesses": {
     "description": "Heading of the per-tool ranking list."
@@ -2014,24 +1938,6 @@
         "example": "10.1%"
       }
     }
-  },
-  "usageProjectGroupNote": "项目按仓库 remote 分组 —— 同一代码库挂在两个 remote 下会出现两次。",
-  "@usageProjectGroupNote": {
-    "description": "Explains why two rows can obviously be one codebase. Client-side merging would fabricate a number."
-  },
-  "usageSourceCount": "{count} 个工具来源",
-  "@usageSourceCount": {
-    "description": "Footer evidence for the scope claim, from the served coverage block.",
-    "placeholders": {
-      "count": {
-        "type": "int",
-        "example": "23"
-      }
-    }
-  },
-  "usageDayBoundaryNote": "每日按本机零点划分。",
-  "@usageDayBoundaryNote": {
-    "description": "Footer note fixing what a day means on these surfaces."
   },
   "usageStatTokens": "Token 数",
   "@usageStatTokens": {
@@ -2199,24 +2105,6 @@
       }
     }
   },
-  "usagePodiumProjectNote": "{count} 个项目 · 按 token 排序 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
-  "@usagePodiumProjectNote": {
-    "description": "Reconciles the project facet against the period total, so the podium share cannot be read as the whole picture.",
-    "placeholders": {
-      "count": {
-        "type": "String",
-        "example": "41"
-      },
-      "unattributed": {
-        "type": "String",
-        "example": "0.8%"
-      },
-      "gap": {
-        "type": "String",
-        "example": "4.1%"
-      }
-    }
-  },
   "usageWhenTitle": "你的时间分布",
   "@usageWhenTitle": {
     "description": "Hour-of-day section heading."
@@ -2303,16 +2191,6 @@
   "@usageColActive": {
     "description": "Table column: active time."
   },
-  "usageActiveTimeNote": "活跃时间不计超过 {minutes} 分钟的空闲。",
-  "@usageActiveTimeNote": {
-    "description": "Footer note; the gap is served, never assumed.",
-    "placeholders": {
-      "minutes": {
-        "type": "String",
-        "example": "5"
-      }
-    }
-  },
   "usageCardTierOverview": "COSYNCING · 概况",
   "@usageCardTierOverview": {
     "description": "Overview-tier card eyebrow. Counts only; the privacy positioning lives here."
@@ -2379,6 +2257,15 @@
         "type": "String",
         "example": "1个月2天"
       }
+    }
+  },
+  "usageCardHeroSubDay": "{sessions} 个会话 · {requests} 次请求 · Agent 时间 {agent}",
+  "@usageCardHeroSubDay": {
+    "description": "The activity line under a day card's hero figure. Leaves out days active, which a single day cannot fill.",
+    "placeholders": {
+      "sessions": { "type": "String", "example": "12" },
+      "requests": { "type": "String", "example": "1,204" },
+      "agent": { "type": "String", "example": "3 hours" }
     }
   },
   "usageCardBusiestLabel": "最忙的一天",
@@ -2449,6 +2336,10 @@
   "@usageShareOverviewBody": {
     "description": "One-line audit of everything the counts-only card carries, so the preview does not have to be opened to be trusted."
   },
+  "usageShareOverviewBodyDay": "token、会话、估算活跃时长，以及最常用的 harness 与模型。可放心发布。",
+  "@usageShareOverviewBodyDay": {
+    "description": "Overview tier body for a day card, which carries no days-active count or busiest day."
+  },
   "usageShareProjectsTitle": "项目明细卡片",
   "@usageShareProjectsTitle": {
     "description": "Tier heading above the project-detail card's previews."
@@ -2476,10 +2367,6 @@
   "usageExportAll": "导出全部四张",
   "@usageExportAll": {
     "description": "Writes both tiers in both themes in one press."
-  },
-  "usageExportBothThemes": "每次导出生成浅色与深色两张 PNG，与 app 当前主题无关。",
-  "@usageExportBothThemes": {
-    "description": "The recipient picks the legible one; the sender never thinks about theme state."
   },
   "usageCostToggle": "包含费用",
   "@usageCostToggle": {
@@ -2524,10 +2411,6 @@
   "usageExportDesktopOnly": "导出功能可在桌面端、网页端与 Android 上使用。",
   "@usageExportDesktopOnly": {
     "description": "Replaces the export controls on iOS and Android, where no directory sink exists."
-  },
-  "usageExportBrowserPrompt": "一次点击会生成两个文件（「导出全部四张」为四个），浏览器可能会询问是否允许多个下载。",
-  "@usageExportBrowserPrompt": {
-    "description": "Web only. The page cannot tell whether the browser dropped a later download, so it says the prompt is expected."
   },
   "usageWindowUnrecognized": "tokdash 未能识别该时间段，返回的是无人请求的区间数据，因此不显示任何数字。",
   "@usageWindowUnrecognized": {
@@ -2657,18 +2540,18 @@
     }
   },
   "inboxEnhancementJumpActivity": "跳转到动态",
-  "inboxEnhancementNeedsAttention": "需要关注 · {count}",
-  "@inboxEnhancementNeedsAttention": {
+  "inboxEnhancementPendingHeader": "{filter} · {count}",
+  "@inboxEnhancementPendingHeader": {
+    "description": "Heading over the pending notifications: the selected filter's name and how many items it holds, as the Overview queue heading does.",
     "placeholders": {
-      "count": {
-        "type": "int"
-      }
+      "filter": { "type": "String", "example": "Waiting for you" },
+      "count": { "type": "int" }
     }
   },
-  "inboxEnhancementAllPending": "全部待处理",
-  "inboxEnhancementInput": "需要你的回复",
-  "inboxEnhancementCompletions": "未读的完成通知",
-  "inboxEnhancementNoPending": "没有待处理请求或未读的完成通知。",
+  "inboxEnhancementAllPending": "全部",
+  "inboxEnhancementInput": "等待你的回复",
+  "inboxEnhancementCompletions": "未读完成通知",
+  "inboxEnhancementNoPending": "没有等待你的会话、未读完成通知或异常。",
   "inboxEnhancementRecentActivity": "最近动态 · {count} 条未读",
   "@inboxEnhancementRecentActivity": {
     "placeholders": {
@@ -2694,7 +2577,7 @@
   "workspaceServerSessionCount": "{count, plural, other{{count} 个会话}}",
   "workspaceHideSidebar": "隐藏侧边栏",
   "workspaceRunningDetail": "正在推进",
-  "workspaceWaitingDetail": "需要你的输入",
+  "workspaceWaitingDetail": "提问与权限请求",
   "workspaceCompletionsDetail": "已完成本轮",
   "workspaceOverviewHeading": "让今天的工作，同步有序。",
   "workspaceOverviewIntro": "看看所有项目的最新进展。",
@@ -2706,13 +2589,11 @@
   "workspaceLoading": "正在加载最新数据…",
   "workspaceStateUnavailable": "当前活动状态不可用。侧边栏中保留了已缓存的会话信息。",
   "workspacePartialRoster": "会话列表尚不完整：计数仅包含服务器目前已发现的会话。",
-  "workspaceNeedsAttention": "需要关注",
   "workspaceNothingHere": "此视图目前没有内容。",
   "workspaceToday": "今日活动",
   "workspaceUsageDetails": "用量详情",
   "workspaceEstimatedTime": "估算的智能体活动时间",
   "workspaceRuntimeUnavailable": "观测到的执行时间不可用。",
-  "workspaceConcurrentTime": "并行会话的时间会累加。",
   "workspaceTokenBreakdownUnavailable": "此数据源未提供完整的 token 明细。",
   "workspacePartialUsage": "用量数据不完整：{sources} 的数据不可用。",
   "@workspacePartialUsage": {
@@ -2722,7 +2603,6 @@
       }
     }
   },
-  "workspaceCoverageUnknown": "数据源覆盖情况不可用。",
   "workspaceCloseAllTabs": "关闭所有标签页",
   "workspaceTabsClosed": "标签页已关闭，会话继续运行。",
   "workspaceUndoCloseTabs": "撤销",

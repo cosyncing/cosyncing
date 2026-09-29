@@ -338,9 +338,6 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
     return Consumer(
       builder: (context, ref, _) {
         final webUpdate = ref.watch(webClientUpdateProvider).valueOrNull;
-        final androidUpdate = ref
-            .watch(androidClientUpdateControllerProvider)
-            .valueOrNull;
         final offerNotifications = ref.watch(
           notificationOnboardingVisibleProvider,
         );
@@ -359,13 +356,6 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
             // a surface, and even then a nonblocking one.
             if (webUpdate?.handoffFailed ?? false)
               const _WebClientUpdateBanner(),
-            if (androidUpdate != null &&
-                androidUpdate.status != AndroidClientUpdateStatus.unsupported &&
-                androidUpdate.status != AndroidClientUpdateStatus.current &&
-                androidUpdate.status !=
-                    AndroidClientUpdateStatus.installerLaunched &&
-                androidUpdate.status != AndroidClientUpdateStatus.failed)
-              _AndroidClientUpdateBanner(state: androidUpdate),
             if (offerNotifications) const NotificationOnboardingBanner(),
           ],
         );
@@ -375,115 +365,6 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
 
   @override
   Widget build(BuildContext context) => Overlay(initialEntries: [_entry]);
-}
-
-class _AndroidClientUpdateBanner extends ConsumerWidget {
-  const _AndroidClientUpdateBanner({required this.state});
-
-  final AndroidClientUpdateState state;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final l10n = AppLocalizations.of(context);
-    final tokens = context.tokens;
-    final colors = Theme.of(context).colorScheme;
-    final candidate = state.candidate;
-    if (candidate == null) return const SizedBox.shrink();
-
-    final downloading = state.status == AndroidClientUpdateStatus.downloading;
-    final opening = state.status == AndroidClientUpdateStatus.openingInstaller;
-    final permission =
-        state.status == AndroidClientUpdateStatus.permissionRequired;
-    final message = permission
-        ? l10n.androidUpdatePermissionBody
-        : downloading
-        ? l10n.androidUpdateDownloadingBody(candidate.version)
-        : opening
-        ? l10n.androidUpdateOpeningBody
-        : l10n.androidUpdateAvailableBody(candidate.version);
-
-    return SafeArea(
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: Material(
-          key: const Key('android-client-update-banner'),
-          color: colors.tertiaryContainer,
-          elevation: 2,
-          borderRadius: BorderRadius.circular(tokens.radiusMd),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 720),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.system_update_alt,
-                    size: 18,
-                    color: colors.onTertiaryContainer,
-                  ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          l10n.androidUpdateAvailableTitle,
-                          style: Theme.of(context).textTheme.labelMedium
-                              ?.copyWith(color: colors.onTertiaryContainer),
-                        ),
-                        Text(
-                          message,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: colors.onTertiaryContainer,
-                              ),
-                        ),
-                        if (downloading)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: LinearProgressIndicator(
-                              value: state.progress,
-                              color: colors.onTertiaryContainer,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  if (!downloading && !opening)
-                    TextButton(
-                      key: const Key('android-client-update-action'),
-                      onPressed: () => unawaited(
-                        ref
-                            .read(
-                              androidClientUpdateControllerProvider.notifier,
-                            )
-                            .downloadAndInstall(),
-                      ),
-                      child: Text(
-                        permission
-                            ? l10n.androidUpdatePermissionAction
-                            : l10n.androidUpdateAction,
-                      ),
-                    )
-                  else
-                    const Padding(
-                      padding: EdgeInsets.all(8),
-                      child: SizedBox.square(
-                        dimension: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 /// Nonblocking recovery notice for a handoff that really did not land (N3b).
