@@ -210,6 +210,35 @@ void main() {
       expect(find.textContaining('fallback-only'), findsAtLeastNWidgets(1));
     });
 
+    for (final type in [
+      AgentMessageType.permissionRequest,
+      AgentMessageType.questionRequest,
+    ]) {
+      testWidgets('$type renders an inline decision without a card', (
+        tester,
+      ) async {
+        await _pumpRenderer(
+          tester,
+          AgentMessage(
+            type: type,
+            raw: const {
+              'requestId': 'plain-decision',
+              'title': 'Approve this command?',
+              'questions': [
+                {'question': 'Which server should run this?'},
+              ],
+            },
+          ),
+        );
+        expect(find.byType(TranscriptBox), findsOneWidget);
+        expect(
+          tester.widget<TranscriptBox>(find.byType(TranscriptBox)).plain,
+          isTrue,
+        );
+        expect(find.byType(Card), findsNothing);
+      });
+    }
+
     testWidgets('error boxes show payload without generic filler', (
       tester,
     ) async {

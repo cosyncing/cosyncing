@@ -708,7 +708,10 @@ void main() {
 
         // U3: the harness session resolves with an empty title, so the strip
         // names it neutrally instead of falling back to its native id.
-        expect(find.text('Untitled session'), findsOneWidget);
+        expect(
+          find.byKey(const Key('session-detail-information')),
+          findsOneWidget,
+        );
         expect(find.text('session-1'), findsNothing);
         expect(
           find.byKey(const Key('session-detail-prompt-input')),
@@ -751,7 +754,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      const gutter = 16.0;
+      const gutter = 12.0;
       final scrollView = tester.getRect(
         find.byKey(const Key('session-detail-chat-scroll')),
       );
@@ -806,12 +809,13 @@ void main() {
         expect(disconnectedInput.decoration?.hintText, 'Draft a prompt');
         expect(
           find.byKey(const Key('session-detail-send-button')),
-          findsNothing,
+          findsOneWidget,
         );
-        final attachButton = tester.widget<IconButton>(
+        await openComposerMenu(tester);
+        final attachButton = tester.widget<PopupMenuItem<String>>(
           find.byKey(const Key('session-detail-attach-button')),
         );
-        expect(attachButton.onPressed, isNull);
+        expect(attachButton.enabled, isFalse);
       },
     );
 
@@ -842,6 +846,8 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+
+        await openComposerMenu(tester);
 
         await tester.tap(find.byKey(const Key('session-detail-attach-button')));
         await tester.pumpAndSettle();
@@ -936,6 +942,7 @@ void main() {
         await tester.pumpAndSettle();
 
         final input = find.byKey(const Key('session-detail-prompt-input'));
+        await openComposerMenu(tester);
         await tester.tap(find.byKey(const Key('session-detail-attach-button')));
         await tester.pumpAndSettle();
         await tester.enterText(input, 'First prompt with a file');
@@ -976,6 +983,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+
+      await openComposerMenu(tester);
 
       await tester.tap(find.byKey(const Key('session-detail-attach-button')));
       await tester.pumpAndSettle();
@@ -1061,6 +1070,7 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
+          await openComposerMenu(tester);
           await tester.tap(
             find.byKey(const Key('session-detail-attach-button')),
           );
@@ -1137,6 +1147,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        await openComposerMenu(tester);
         await tester.tap(find.byKey(const Key('session-detail-attach-button')));
         await tester.pumpAndSettle();
         await tester.enterText(
@@ -1163,6 +1174,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        await openComposerMenu(tester);
         await tester.tap(find.byKey(const Key('session-detail-attach-button')));
         await tester.pumpAndSettle();
         await tester.enterText(
@@ -1205,12 +1217,13 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final attach = tester.widget<IconButton>(
+        await openComposerMenu(tester);
+        final attach = tester.widget<PopupMenuItem<String>>(
           find.byKey(const Key('session-detail-attach-button')),
         );
-        expect(attach.onPressed, isNull);
+        expect(attach.enabled, isFalse);
         expect(
-          find.byTooltip("Files aren't supported in this session"),
+          find.text("Files aren't supported in this session"),
           findsOneWidget,
         );
       },

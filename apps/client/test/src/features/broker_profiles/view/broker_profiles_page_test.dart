@@ -8,11 +8,18 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_repository.dart';
+import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../../../../support/in_memory_session_display_preferences_store.dart';
+import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
   late _InMemoryBrokerProfileRepository repository;
@@ -36,6 +43,17 @@ void main() {
         activeBrokerProfileStoreProvider.overrideWithValue(activeStore),
         credentialStoreProvider.overrideWithValue(
           credentialStore ?? InMemoryCredentialStore(),
+        ),
+        // Every routed page sits beside the shared sidebar, whose roster would
+        // otherwise fetch over the network and persist through drift.
+        sessionListRepositoryProvider.overrideWith(
+          (_) async => InMemorySessionListRepository(),
+        ),
+        openSessionsStoreProvider.overrideWithValue(
+          InMemoryOpenSessionsStore(),
+        ),
+        sessionDisplayPreferencesStoreProvider.overrideWithValue(
+          InMemorySessionDisplayPreferencesStore(),
         ),
       ],
     );

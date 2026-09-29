@@ -183,6 +183,7 @@ String _textScaleLabel(AppLocalizations l10n, UiTextScale scale) =>
     };
 
 String _themeName(AppLocalizations l10n, String id) => switch (id) {
+  'quiet-workspace' => l10n.themeQuietWorkspaceName,
   'teal-obsidian' => l10n.themeTealObsidianName,
   'graphite-minimalist' => l10n.themeGraphiteMinimalistName,
   'nordic-warmth' => l10n.themeNordicWarmthName,
@@ -194,6 +195,7 @@ String _themeName(AppLocalizations l10n, String id) => switch (id) {
 };
 
 String _themeDescription(AppLocalizations l10n, String id) => switch (id) {
+  'quiet-workspace' => l10n.themeQuietWorkspaceDescription,
   'teal-obsidian' => l10n.themeTealObsidianDescription,
   'graphite-minimalist' => l10n.themeGraphiteMinimalistDescription,
   'nordic-warmth' => l10n.themeNordicWarmthDescription,

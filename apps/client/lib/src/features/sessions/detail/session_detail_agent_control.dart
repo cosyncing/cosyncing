@@ -129,22 +129,3 @@ class _AgentPickerSheet extends StatelessWidget {
     );
   }
 }
-
-/// The `·` separator between adjacent composer picker buttons.
-class _ComposerPickerDot extends StatelessWidget {
-  const _ComposerPickerDot();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 1),
-      child: Text(
-        '·',
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-        ),
-      ),
-    );
-  }
-}

@@ -48,6 +48,7 @@ class UsageAgentLogo extends StatelessWidget {
     'zed': 'assets/agents/zed.png',
     'qwen_code': 'assets/agents/qwen_code.png',
     'crush': 'assets/agents/crush.png',
+    'minimax': 'assets/agents/minimax.png',
   };
 
   /// Marks drawn dark-on-transparent that would vanish on a dark canvas;

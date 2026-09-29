@@ -1694,11 +1694,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // The bar shows the short label alone — never the raw model id, and no
-      // effort suffix (Variant A's mock shows just the model name).
+      // The picker shows the human label and effort; raw ids stay in tooltips.
       expect(find.text('Claude Opus 4.6'), findsOneWidget);
       expect(find.textContaining('claude-opus-4-6'), findsNothing);
-      expect(find.textContaining('High'), findsNothing);
+      expect(find.text('High'), findsOneWidget);
 
       // The full id and the effort both live in the selector's tooltip.
       final tooltip = tester.widget<Tooltip>(
@@ -1871,7 +1870,7 @@ void main() {
       expect(tooltip.message, contains('High'));
     });
 
-    testWidgets('below 420dp the composer grows no overflow of its own', (
+    testWidgets('below 420dp secondary input actions live in the plus menu', (
       tester,
     ) async {
       tester.view.physicalSize = const Size(380, 820);
@@ -1924,7 +1923,7 @@ void main() {
         );
       });
 
-      // The composer's own right cluster keeps its input-adjacent actions.
+      await openComposerMenu(tester);
       expect(
         find.byKey(const Key('session-detail-command-picker-button')),
         findsOneWidget,

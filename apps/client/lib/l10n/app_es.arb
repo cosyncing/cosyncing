@@ -1016,7 +1016,7 @@
   "sessionForkAgentOwnedRefusal": "Esta sesión la creó otra sesión de agente; bifurca la sesión de la que procede.",
   "sessionRosterLoadFailed": "No se pudieron cargar las sesiones.",
   "sessionRosterUpdateFailed": "La actualización falló. Se muestra la última lista de sesiones.",
-  "sessionRosterSearchHint": "Buscar sesiones o proyectos…",
+  "sessionRosterSearchHint": "Buscar sesiones",
   "sessionRosterFilterStatus": "Estado",
   "sessionRosterAllStatuses": "Todos los estados",
   "sessionRosterStatusNeedsInput": "Necesita respuesta",
@@ -1599,5 +1599,104 @@
   "androidBackgroundConnectionSubtitle": "Cosyncing sigue en ejecución cuando sales de la app, para que las notificaciones lleguen a tiempo. Mientras funciona, Android muestra una notificación silenciosa y se consume más batería.",
   "androidBackgroundConnectionChannelName": "Conexión en segundo plano",
   "androidBackgroundConnectionNotificationTitle": "Conectado para recibir notificaciones",
-  "androidBackgroundConnectionNotificationText": "Desactívalo en Ajustes → Notificaciones."
+  "androidBackgroundConnectionNotificationText": "Desactívalo en Ajustes → Notificaciones.",
+  "themeQuietWorkspaceName": "Espacio tranquilo",
+  "themeQuietWorkspaceDescription": "Superficies neutras con indicadores de actividad verdes y ámbar.",
+  "inboxEnhancementJumpActivity": "Ir a la actividad",
+  "inboxEnhancementNeedsAttention": "Requiere atención · {count}",
+  "@inboxEnhancementNeedsAttention": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementAllPending": "Todo lo pendiente",
+  "inboxEnhancementInput": "Se necesita tu respuesta",
+  "inboxEnhancementCompletions": "Finalizaciones sin leer",
+  "inboxEnhancementNoPending": "No hay solicitudes pendientes ni finalizaciones sin leer.",
+  "inboxEnhancementRecentActivity": "Actividad reciente · {count} sin leer",
+  "@inboxEnhancementRecentActivity": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementUnread": "Sin leer",
+  "inboxEnhancementActivityActions": "Acciones de actividad",
+  "inboxEnhancementMarkAllRead": "Marcar actividad como leída",
+  "inboxEnhancementClearActivity": "Borrar actividad",
+  "inboxEnhancementNoActivity": "Ninguna actividad coincide con este filtro.",
+  "inboxEnhancementActivityCleared": "Actividad borrada",
+  "inboxEnhancementUndo": "Deshacer",
+  "inboxEnhancementReply": "Responder",
+  "inboxEnhancementReview": "Revisar",
+  "inboxEnhancementMarkRead": "Marcar como leído",
+  "inboxEnhancementSubagentOf": "Subagente de {parent}",
+  "@inboxEnhancementSubagentOf": {
+    "placeholders": {
+      "parent": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceOverview": "Resumen",
+  "sessionRosterProjectsLabel": "Proyectos",
+  "sessionRosterFilters": "Filtrar sesiones",
+  "sessionRosterProjectAttention": "Necesita una respuesta o tiene trabajo terminado para revisar",
+  "workspaceServerSessionCount": "{count, plural, =1{1 sesión} other{{count} sesiones}}",
+  "workspaceHideSidebar": "Ocultar barra lateral",
+  "workspaceRunningDetail": "Avanzando",
+  "workspaceWaitingDetail": "Necesitan tu respuesta",
+  "workspaceCompletionsDetail": "Terminaron su turno",
+  "workspaceOverviewHeading": "Tu día, en sintonía.",
+  "workspaceOverviewIntro": "Una perspectiva de todo lo que estás creando.",
+  "workspaceNoMachine": "Elegir servidor",
+  "workspaceRunning": "En ejecución",
+  "workspaceWaiting": "Esperando tu respuesta",
+  "workspaceUnreadCompletions": "Finalizaciones sin leer",
+  "workspaceCompletionReadNote": "Las notificaciones de finalización se marcan como leídas al abrir su sesión.",
+  "workspaceLoading": "Cargando datos actuales…",
+  "workspaceStateUnavailable": "La actividad actual no está disponible. Las sesiones en caché siguen en la barra lateral.",
+  "workspacePartialRoster": "Lista parcial: los recuentos solo incluyen sesiones que este servidor ha descubierto.",
+  "workspaceNeedsAttention": "Necesita atención",
+  "workspaceNothingHere": "No hay nada en esta vista ahora.",
+  "workspaceToday": "Actividad de hoy",
+  "workspaceUsageDetails": "Detalles de uso",
+  "workspaceEstimatedTime": "Actividad estimada de agentes",
+  "workspaceRuntimeUnavailable": "El tiempo de ejecución observado no está disponible.",
+  "workspaceConcurrentTime": "El tiempo de sesiones simultáneas se suma.",
+  "workspaceTokenBreakdownUnavailable": "Esta fuente no ofrece un desglose completo de tokens.",
+  "workspacePartialUsage": "Uso parcial: no hay lecturas de {sources}.",
+  "workspaceCoverageUnknown": "La cobertura de fuentes no está disponible.",
+  "workspaceCloseAllTabs": "Cerrar todas las pestañas",
+  "workspaceTabsClosed": "Pestañas cerradas. Las sesiones siguen ejecutándose.",
+  "workspaceUndoCloseTabs": "Deshacer",
+  "workspaceChildAttention": "{count} sesiones vinculadas · {waiting} necesitan respuesta · {ready} finalizadas recientemente",
+  "settingsEnhancementConversation": "Conversación",
+  "settingsEnhancementMessageText": "Texto de los mensajes",
+  "settingsEnhancementMessageSpacing": "Espaciado de mensajes",
+  "settingsEnhancementFontSize": "{size} px",
+  "settingsEnhancementReadingWidth": "Ancho de lectura",
+  "settingsEnhancementReadingWidthHint": "Limita las conversaciones a 900 px. Desactivado usa todo el ancho disponible.",
+  "settingsEnhancementIndicators": "Indicadores de sesión",
+  "settingsEnhancementWorking": "En ejecución",
+  "settingsEnhancementNeedsInput": "Requiere respuesta",
+  "settingsEnhancementReadyReview": "Pendiente de revisar",
+  "settingsEnhancementIndicatorsHint": "Los logotipos identifican al agente. En ejecución indica un turno activo; Requiere respuesta solicita una respuesta. El punto rojo marca una finalización no leída. La carga y la reconexión son estados de conexión independientes.",
+  "settingsEnhancementAgentsQuota": "Agentes y cuota",
+  "settingsEnhancementAgentsQuotaHint": "Entornos administrados, ventanas de cuota y avisos",
+  "usageEnhancementDay": "Día",
+  "usageEnhancementCurrent": "Período actual",
+  "usageEnhancementIntegrations": "Integraciones de uso",
+  "usageEnhancementIntegrationsHint": "Se muestran las fuentes compatibles como referencia. La disponibilidad depende del servidor seleccionado y de su instalación de Tokdash.",
+  "usageEnhancementNoReading": "Sin datos en este período",
+  "usageEnhancementExportCsv": "Exportar CSV",
+  "usageEnhancementActivity": "Actividad",
+  "usageEnhancementDetailUnavailable": "— indica un desglose que esta fuente no proporciona.",
+  "usageEnhancementLeaders": "Clasificación",
+  "conversationEnhancementMore": "Más acciones del editor",
+  "conversationEnhancementDetails": "Detalles de la sesión",
+  "conversationEnhancementLastKnown": "Último dato conocido: {reading}"
 }

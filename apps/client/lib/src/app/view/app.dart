@@ -153,13 +153,23 @@ class _AppState extends ConsumerState<App> {
         ref.watch(uiScaleControllerProvider).valueOrNull ??
         kDefaultUiScaleSettings;
     final density = uiScale.density.visualDensity;
-    final openSessions = ref.watch(openSessionsControllerProvider).valueOrNull;
-    setBrowserCloseProtection(enabled: openSessions?.isEmpty == false);
+    // Only whether any tab is open: this widget rebuilds MaterialApp, so it
+    // must not rebuild on every tab switch.
+    final anySessionOpen = ref.watch(
+      openSessionsControllerProvider.select(
+        (open) => open.valueOrNull?.isEmpty == false,
+      ),
+    );
+    setBrowserCloseProtection(enabled: anySessionOpen);
     return MaterialApp.router(
       onGenerateTitle: (context) => AppLocalizations.of(context).appTitle,
       theme: buildAppTheme(spec.light, Brightness.light, density: density),
       darkTheme: buildAppTheme(spec.dark, Brightness.dark, density: density),
       themeMode: themeSelection.mode,
+      // A theme change applies in one frame. The default 200 ms cross-fade
+      // rebuilt every themed widget on every frame of it, retained
+      // conversations included, and made switching themes stutter.
+      themeAnimationStyle: AnimationStyle.noAnimation,
       locale: locale,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,

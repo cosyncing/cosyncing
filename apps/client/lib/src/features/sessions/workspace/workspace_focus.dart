@@ -73,16 +73,17 @@ class WorkspaceFocusablePane extends ConsumerWidget {
         Expanded(child: child),
       ],
     );
-    if (key == null) return pane;
     return Listener(
       // Pointer-down rather than a tap: focus has to move before the press
       // reaches whatever was clicked, and a translucent listener sees the
       // event without taking it, so the control underneath still gets it.
       behavior: HitTestBehavior.translucent,
-      onPointerDown: (_) {
-        final notifier = ref.read(focusedPaneProvider.notifier);
-        if (notifier.state != key) notifier.state = key;
-      },
+      onPointerDown: key == null
+          ? null
+          : (_) {
+              final notifier = ref.read(focusedPaneProvider.notifier);
+              if (notifier.state != key) notifier.state = key;
+            },
       child: pane,
     );
   }

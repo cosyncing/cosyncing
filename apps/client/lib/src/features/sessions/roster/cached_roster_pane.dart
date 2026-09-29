@@ -1,6 +1,9 @@
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/window_size_class.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/cached_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
@@ -269,8 +272,6 @@ class _CachedProjectGroupState extends State<_CachedProjectGroup> {
         ),
         if (!_collapsed)
           for (var index = 0; index < group.rows.length; index++) ...[
-            if (index > 0)
-              Divider(height: 1, thickness: 1, color: tokens.separator),
             _CachedSessionRow(
               key: Key('cached-session-row-${group.rows[index].key}'),
               row: group.rows[index],
@@ -287,12 +288,11 @@ class _CachedProjectGroupState extends State<_CachedProjectGroup> {
 const double _kCachedRowIndentStep = 12;
 
 /// Deepest indent a nested cached row may draw, matching R1c's cap.
-const int _kCachedRowMaxIndentDepth = 3;
+const int _kCachedRowMaxIndentDepth = 2;
 
 /// One cached identity row.
 ///
-/// The leading dot is the TOOL identity colour, which is identity, not status;
-/// it carries no needs-input ring and there is no status pill beside it. The
+/// The original harness logo carries identity with no live status pill. The
 /// trailing text is an explicit "last known" label so the row cannot read as a
 /// live one.
 class _CachedSessionRow extends StatelessWidget {
@@ -307,9 +307,9 @@ class _CachedSessionRow extends StatelessWidget {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final identity = row.identity;
-    final title = identity.title.isNotEmpty
-        ? identity.title
-        : identity.sessionId;
+    final title =
+        knownSessionTitle([identity.title], sessionId: identity.sessionId) ??
+        l10n.sessionDetailTitleUntitled;
     final indentDepth = row.depth < _kCachedRowMaxIndentDepth
         ? row.depth
         : _kCachedRowMaxIndentDepth;
@@ -324,55 +324,44 @@ class _CachedSessionRow extends StatelessWidget {
       type: MaterialType.transparency,
       child: InkWell(
         onTap: onTap,
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            12 + _kCachedRowIndentStep * indentDepth,
-            8,
-            12,
-            8,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: WindowSizeClass.of(context) == WindowSizeClass.compact
+                ? 40
+                : 36,
           ),
-          child: Row(
-            children: [
-              // Tool identity only. No `ringColor`: the ring means needs-input,
-              // and the cache has no idea whether it does.
-              Container(
-                width: 10,
-                height: 10,
-                decoration: BoxDecoration(
-                  color: tokens.toolColor(identity.tool),
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                // Plain text in a navigation row: no selection island, so the
-                // row's InkWell owns the tap outright.
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 12 + _kCachedRowIndentStep * indentDepth,
+              right: 8,
+            ),
+            child: Row(
+              children: [
+                SessionHarnessLogo(tool: identity.tool),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Tooltip(
+                    message: '$title\n${_subtitle(context, identity)}',
+                    child: Text(
                       title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: tokens.textPrimary,
-                        fontWeight: FontWeight.w600,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: tokens.textSecondary,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    _subtitle(context, identity),
-                  ],
+                  ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                l10n.sessionRosterCachedRowLabel,
-                key: ValueKey('cached-session-label-${row.key}'),
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.textTertiary,
+                const SizedBox(width: 8),
+                Text(
+                  l10n.sessionRosterCachedRowLabel,
+                  key: ValueKey('cached-session-label-${row.key}'),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: tokens.textTertiary,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -388,7 +377,7 @@ class _CachedSessionRow extends StatelessWidget {
     );
   }
 
-  Widget _subtitle(BuildContext context, SessionRosterIdentity identity) {
+  String _subtitle(BuildContext context, SessionRosterIdentity identity) {
     final l10n = AppLocalizations.of(context);
     final parts = <String>[_toolLabel(l10n, identity.tool)];
     if (identity.modelLabel case final model?) parts.add(model);
@@ -401,20 +390,11 @@ class _CachedSessionRow extends StatelessWidget {
       };
       if (label != null) parts.add(label);
     }
-    final child = Text(
-      parts.join(' · '),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-        color: context.tokens.textSecondary,
-      ),
-    );
+    final label = parts.join(' · ');
     final modelId = identity.modelId;
-    if (modelId == null) return child;
-    return Tooltip(
-      message: l10n.sessionRosterModelTooltip(modelId),
-      child: child,
-    );
+    return modelId == null
+        ? label
+        : '$label\n${l10n.sessionRosterModelTooltip(modelId)}';
   }
 }
 

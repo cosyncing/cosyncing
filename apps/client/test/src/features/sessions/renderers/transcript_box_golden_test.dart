@@ -42,7 +42,16 @@ void main() {
                           key: const Key('transcript-box-golden'),
                           child: SelectionArea(
                             child: Builder(
-                              builder: (context) => _buildBox(context, kind),
+                              builder: (context) =>
+                                  kind == _GoldenBoxKind.permission ||
+                                      kind == _GoldenBoxKind.question
+                                  ? ColoredBox(
+                                      color: Theme.of(
+                                        context,
+                                      ).scaffoldBackgroundColor,
+                                      child: _buildBox(context, kind),
+                                    )
+                                  : _buildBox(context, kind),
                             ),
                           ),
                         ),

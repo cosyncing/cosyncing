@@ -11,6 +11,7 @@ import 'package:cosyncing_client/src/features/connection/model/broker_auth_probe
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_auth_barrier.dart';
+import 'package:cosyncing_client/src/features/schedules/controller/inline_scheduled_message_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
@@ -124,11 +125,35 @@ void main() {
       expect(_canMutate(container, aKey), isTrue);
 
       // A → B → A changes only presentation. Both production controllers and
-      // their sockets remain the exact same objects, and A keeps Drive.
+      // their sockets remain the exact same objects, and A keeps Drive. Each
+      // page still reports going on or offstage to its inline schedules, from
+      // its ticker mode, although that no longer rebuilds the page.
+      bool onstage(SessionRef ref) => container
+          .read(
+            inlineScheduledMessageControllerProvider(
+              InlineScheduledMessageKey(tool: ref.tool, sessionId: ref.id),
+            ).notifier,
+          )
+          .debugHostVisible;
+      // Zero-length frames: each page's one-shot opening reveal settles, so a
+      // switch below is the only thing that could reach the transcript.
+      Future<void> settleReveals() async {
+        for (var frame = 0; frame < 30; frame++) {
+          await tester.pump();
+        }
+      }
+
+      await settleReveals();
+      expect(onstage(_a), isTrue);
       open.activate(_b.key);
       await tester.pump();
+      expect(onstage(_a), isFalse);
+      expect(onstage(_b), isTrue);
+      await settleReveals();
       open.activate(_a.key);
       await tester.pump();
+      expect(onstage(_a), isTrue);
+      expect(onstage(_b), isFalse);
       expect(connections.latest(_a.key), same(originalA));
       expect(connections.latest(_b.key), same(originalB));
       expect(originalA.attachCount, 2);
@@ -412,17 +437,22 @@ class _ProductionRetainedSessionHost extends ConsumerWidget {
       body: RetainedSessionPages(
         source: source,
         open: open,
-        builder: (context, session) => SessionDetailPage(
-          key: ValueKey<SessionDetailKey>(
-            SessionDetailKey(tool: session.tool, sessionId: session.id),
-          ),
-          tool: session.tool,
-          sessionId: session.id,
-          embedded: true,
-        ),
+        // A stable tear-off, as in `SessionsWorkspace`: the pages cache their
+        // widgets per builder, so a switch rebuilds no page from above.
+        builder: _page,
       ),
     );
   }
+
+  static Widget _page(BuildContext context, SessionRef session) =>
+      SessionDetailPage(
+        key: ValueKey<SessionDetailKey>(
+          SessionDetailKey(tool: session.tool, sessionId: session.id),
+        ),
+        tool: session.tool,
+        sessionId: session.id,
+        embedded: true,
+      );
 }
 
 final class _HeldAuthProbe implements BrokerAuthProbe {

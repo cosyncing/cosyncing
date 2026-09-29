@@ -8,10 +8,15 @@ lifecycle and persistence; screens render state.
 
 ## Adaptive shell
 
-The same route model serves phone, tablet, desktop, and web layouts. Compact
-surfaces use one active session; wider surfaces may keep a list and multiple
-session tabs visible. Layout depends on window size and platform capability,
-not hard-coded device names.
+The same workspace serves phone, tablet, desktop, and web layouts. Every
+top-level destination — Sessions, Notifications, Settings, and the Connection
+recovery page — renders inside one shared frame, so the sidebar is the one way
+between them at every width and there is no bottom navigation bar. Wider
+surfaces keep the sidebar beside the page, resizable. At widths up to 900
+logical pixels it becomes a modal drawer, opened from the session strip or from
+each page's app bar. Session tabs remain visible even with one open session.
+Layout depends on window size and platform capability, not hard-coded device
+names.
 
 ## Session detail
 
@@ -61,15 +66,46 @@ fraction heuristic to either of the latter two double-counts.
 
 ## Workspace layout
 
-The roster/detail split is user-draggable, persisted, clamped to a sane range,
+The sidebar/page split is user-draggable, persisted, clamped to a sane range,
 and snap-collapses below a threshold rather than degrading into an unusable
-sliver. It defaults to collapsed.
+sliver. The sidebar starts open on first use and restores the saved choice.
+Its header row is as tall as the session strip beside it, so the two read as
+one band; the server this client shows and Settings share the footer row.
 
-A collapsed roster keeps a narrow icon rail. This is not decoration: the bottom
-navigation is Compact-only, so at wider widths the roster header is the sole
-route to the Notifications and Settings destinations. Collapsing it without a
-rail creates a navigation dead end that no test covering either destination
-would catch, because both remain reachable by direct route.
+A collapsed desktop sidebar keeps a narrow icon rail with Notifications and
+Settings. The overview remains reachable from the session strip. Closing the
+last tab returns to the overview; closing all tabs offers source-scoped Undo.
+These actions only change the working set and never stop or delete sessions.
+Drafts cross the existing durability barrier before a tab closes. Phone and tablet
+system Back closes an open drawer, then returns an active conversation to the
+overview without closing its tab.
+
+The overview reads current counts from the complete roster, independent of the
+sidebar's activity-window filter. Unread completion notifications use the
+existing inbox read semantics; they are not a separate persistent review queue.
+The same source-qualified run/goal completion events add a red trailing tab cue
+and supplement the roster's existing local completion marker.
+Daily tokens and estimated activity come from the source-bound usage service,
+with unavailable, partial, timezone, and estimate disclosures. They never use
+session lifetime tokens or context-window occupancy as today's usage.
+
+Roster rows use original harness artwork and the session's own status: small
+Working and Needs input chips, and a red dot for finished work to review. Idle
+rows carry no marker. A child request changes its parent's disclosure
+treatment, not its execution status. Cached identity never claims live
+activity. Status indicators are static; nothing in the roster, tabs, or detail
+chrome animates continuously, because the web renderer repaints every frame of
+a perpetual animation on the main thread.
+
+Projects start collapsed. A project header shows one red dot while any
+session in it needs input or has finished work to review, so the signal
+survives collapsing it. A project's path is
+its hover tooltip rather than a line of its own. Long-press or right-click (or
+the context-menu key) opens its menu to rename it or start a session in it; on
+a pointer device the `+` also appears on hover. Search opens every matching
+project. Status, agent, and activity-time filters live in one menu beside the
+search field. Ctrl/Cmd K opens and focuses roster search; the existing search
+shortcuts remain available.
 
 ## View scale
 

@@ -551,11 +551,11 @@ void main() {
       expect(sink.written, hasLength(2));
       expect(
         sink.written.first.name,
-        endsWith('-overview-teal-obsidian-light.png'),
+        endsWith('-overview-$kDefaultThemeId-light.png'),
       );
       expect(
         sink.written.last.name,
-        endsWith('-overview-teal-obsidian-dark.png'),
+        endsWith('-overview-$kDefaultThemeId-dark.png'),
       );
       // The sender never chose a theme, and never had to.
       expect(find.textContaining('Saved '), findsOneWidget);
@@ -621,7 +621,7 @@ void main() {
       expect(
         sink.written.first.name,
         'cosyncing-usage-2026-08-01-2026-08-31-'
-        'projects-teal-obsidian-light.png',
+        'projects-$kDefaultThemeId-light.png',
       );
     });
 
@@ -735,11 +735,11 @@ void main() {
         findsNWidgets(2),
       );
       expect(
-        find.descendant(of: share, matching: find.text('light')),
+        find.descendant(of: share, matching: find.text('Light')),
         findsNWidgets(2),
       );
       expect(
-        find.descendant(of: share, matching: find.text('dark')),
+        find.descendant(of: share, matching: find.text('Dark')),
         findsNWidgets(2),
       );
     });
@@ -764,7 +764,7 @@ void main() {
         containsAll([
           for (final tier in ['overview', 'projects'])
             for (final mode in ['light', 'dark'])
-              '$prefix-$tier-teal-obsidian-$mode.png',
+              '$prefix-$tier-$kDefaultThemeId-$mode.png',
         ]),
       );
     });
@@ -1010,5 +1010,59 @@ void main() {
 
     expect(await written, ['light.png', 'dark.png']);
     expect(order, ['light.png', 'dark.png']);
+  });
+
+  testWidgets('a rebuild with the same inputs keeps the fitted plan', (
+    tester,
+  ) async {
+    // Fitting lays the card out many times over; the share section rebuilds
+    // its four previews on every toggle and theme change.
+    final spec = themeSpecById(kDefaultThemeId);
+    final served = report();
+    var includeCost = false;
+    late StateSetter rebuild;
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        theme: buildAppTheme(spec.light, Brightness.light),
+        home: Center(
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              rebuild = setState;
+              return UsageExportCard(
+                kind: UsageExportCardKind.overview,
+                period: UsagePeriod.month,
+                report: served,
+                locale: 'en',
+                includeCost: includeCost,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // The painter repaints exactly when it was handed a different plan.
+    CustomPainter painter() => tester
+        .widget<CustomPaint>(
+          find
+              .descendant(
+                of: find.byType(UsageExportCard),
+                matching: find.byType(CustomPaint),
+              )
+              .first,
+        )
+        .painter!;
+
+    final fitted = painter();
+    rebuild(() {});
+    await tester.pump();
+    final kept = painter();
+    expect(kept.shouldRepaint(fitted), isFalse);
+
+    rebuild(() => includeCost = true);
+    await tester.pump();
+    expect(painter().shouldRepaint(kept), isTrue);
   });
 }

@@ -16,6 +16,7 @@ class StatusPill extends StatelessWidget {
     required this.label,
     required this.color,
     this.icon,
+    this.dense = false,
     super.key,
   });
 
@@ -28,16 +29,24 @@ class StatusPill extends StatelessWidget {
   /// Optional leading icon, drawn in [color] before the label.
   final IconData? icon;
 
+  /// The roster-row size: tighter padding and a 10dp label, so a status fits
+  /// a 36dp row beside the title without crowding it.
+  final bool dense;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokens = context.tokens;
     final iconData = icon;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      padding: dense
+          ? const EdgeInsets.symmetric(horizontal: 4, vertical: 2)
+          : const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(tokens.radiusSm),
+        borderRadius: BorderRadius.circular(
+          dense ? tokens.radiusXs : tokens.radiusSm,
+        ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -51,6 +60,8 @@ class StatusPill extends StatelessWidget {
             style: theme.textTheme.labelSmall?.copyWith(
               color: color,
               fontWeight: FontWeight.w600,
+              fontSize: dense ? 10 : null,
+              height: dense ? 1.3 : null,
             ),
           ),
         ],

@@ -372,14 +372,19 @@ final class _SeededSessionViewportRegistry extends SessionViewportRegistry {
 /// Overrides the inherited text scale for [child] when [scale] is not 1,
 /// keeping the rest of the MediaQuery (viewport size, padding) intact.
 Widget _maybeScaleText(double scale, Widget child) {
-  if (scale == 1) return child;
   return Builder(
-    builder: (context) => MediaQuery(
-      data: MediaQuery.of(
-        context,
-      ).copyWith(textScaler: TextScaler.linear(scale)),
-      child: child,
-    ),
+    builder: (context) {
+      final media = MediaQuery.of(context);
+      return MediaQuery(
+        // At scale 1 the platform's text scale stays live, so a test that
+        // changes it mid-run reflows the page.
+        data: media.copyWith(
+          textScaler: scale == 1 ? media.textScaler : TextScaler.linear(scale),
+          disableAnimations: true,
+        ),
+        child: child,
+      );
+    },
   );
 }
 
@@ -566,7 +571,13 @@ final class RecordingSpeechOutput implements SpeechOutput {
 /// the composer bar's terminal icon, so its keys
 /// (`session-detail-command-picker`, `-args-input`, `-send-button`) are only in
 /// the tree once the sheet is open.
+Future<void> openComposerMenu(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('session-detail-composer-menu')));
+  await tester.pumpAndSettle();
+}
+
 Future<void> openCommandPickerSheet(WidgetTester tester) async {
+  await openComposerMenu(tester);
   await tester.tap(
     find.byKey(const Key('session-detail-command-picker-button')),
   );

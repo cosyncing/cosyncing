@@ -8,14 +8,15 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_control
 import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// V1/V2-R1 project-control refinements: contained 40x40 compact header
-/// targets with no overlap or fall-through, the wide-layout pencil vs the
-/// narrow-layout visible overflow, and the reset-disclosing rename dialog
-/// whose Save cannot submit an unchanged name.
+/// Project header actions: no inline pencil or path, a long-press sheet on
+/// touch, a hover add and a right-click menu on pointer layouts, and the
+/// reset-disclosing rename dialog whose Save cannot submit an unchanged name.
 SessionInfo _session(
   String tool,
   String id, {
@@ -95,77 +96,30 @@ void main() {
     visibilityPreferences: const SessionVisibilityPreferences(),
   );
 
-  bool contained(Rect inner, Rect outer) =>
-      inner.left >= outer.left - 0.01 &&
-      inner.top >= outer.top - 0.01 &&
-      inner.right <= outer.right + 0.01 &&
-      inner.bottom <= outer.bottom + 0.01;
+  group('project header actions', () {
+    testWidgets('the header carries no pencil, overflow, count or path line', (
+      tester,
+    ) async {
+      await setViewSize(tester, const Size(360, 800));
+      await tester.pumpWidget(
+        host(twoProjectPane(onNew: (_) {}, onRename: (_) {})),
+      );
+      await tester.pumpAndSettle();
 
-  bool overlaps(Rect a, Rect b) {
-    final intersection = a.intersect(b);
-    return intersection.width > 0.01 && intersection.height > 0.01;
-  }
+      expect(
+        find.byKey(const ValueKey('project-rename-$alphaCwd')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('project-overflow-$alphaCwd')),
+        findsNothing,
+      );
+      // Touch has no hover, so the add action lives in the long-press sheet.
+      expect(find.byKey(const ValueKey('project-new-$alphaCwd')), findsNothing);
+      expect(find.text(alphaCwd), findsNothing);
+    });
 
-  group('project header control geometry (narrow)', () {
-    testWidgets(
-      'collapsed headers expose contained, non-overlapping 40x40 targets',
-      (tester) async {
-        await setViewSize(tester, const Size(360, 800));
-        await tester.pumpWidget(
-          host(twoProjectPane(onNew: (_) {}, onRename: (_) {})),
-        );
-        await tester.pumpAndSettle();
-
-        final rects = <String, Rect>{};
-        for (final cwd in [alphaCwd, betaCwd]) {
-          final headerRect = tester.getRect(
-            find.byKey(ValueKey('project-header-$cwd')),
-          );
-          for (final control in ['project-new-$cwd', 'project-overflow-$cwd']) {
-            final rect = tester.getRect(find.byKey(ValueKey(control)));
-            rects[control] = rect;
-            expect(
-              rect.width,
-              greaterThanOrEqualTo(40),
-              reason: '$control must give a 40dp-wide touch target',
-            );
-            expect(
-              rect.height,
-              greaterThanOrEqualTo(40),
-              reason: '$control must give a 40dp-tall touch target',
-            );
-            expect(
-              contained(rect, headerRect),
-              isTrue,
-              reason:
-                  '$control must stay inside its own project header '
-                  '($rect vs $headerRect)',
-            );
-          }
-          // The actions are separated: no shared boundary pixel column.
-          final addRect = rects['project-new-$cwd']!;
-          final overflowRect = rects['project-overflow-$cwd']!;
-          expect(
-            overflowRect.left - addRect.right,
-            greaterThanOrEqualTo(4),
-            reason: 'add and overflow must not abut in $cwd',
-          );
-        }
-
-        final entries = rects.entries.toList();
-        for (var i = 0; i < entries.length; i++) {
-          for (var j = i + 1; j < entries.length; j++) {
-            expect(
-              overlaps(entries[i].value, entries[j].value),
-              isFalse,
-              reason: '${entries[i].key} overlaps ${entries[j].key}',
-            );
-          }
-        }
-      },
-    );
-
-    testWidgets('boundary-coordinate taps cannot steal a neighboring action', (
+    testWidgets('a touch long-press opens a sheet with add and rename', (
       tester,
     ) async {
       await setViewSize(tester, const Size(360, 800));
@@ -176,133 +130,116 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final addAlpha = tester.getRect(
-        find.byKey(const ValueKey('project-new-$alphaCwd')),
-      );
-      final overflowAlpha = tester.getRect(
-        find.byKey(const ValueKey('project-overflow-$alphaCwd')),
-      );
-
-      Finder rowOf(String id) => find.byKey(Key('session-row-codex/$id'));
-
-      // Dead center and edge-of-target taps invoke add — never the header
-      // toggle, never rename, never the neighboring project.
-      await tester.tapAt(addAlpha.center);
-      await tester.pumpAndSettle();
-      await tester.tapAt(addAlpha.bottomCenter - const Offset(0, 0.5));
-      await tester.pumpAndSettle();
-      expect(created, [alphaCwd, alphaCwd]);
-      expect(renamed, isEmpty);
-      expect(rowOf('a1'), findsNothing, reason: 'header must stay collapsed');
-      expect(rowOf('b1'), findsNothing);
-
-      // The gap between the two targets is dead space, not a hidden third
-      // control: nothing fires and neither header toggles.
-      final gapPoint = Offset(
-        (addAlpha.right + overflowAlpha.left) / 2,
-        addAlpha.center.dy,
-      );
-      await tester.tapAt(gapPoint);
-      await tester.pumpAndSettle();
-      expect(created, hasLength(2));
-      expect(renamed, isEmpty);
-      expect(find.byType(PopupMenuItem<VoidCallback>), findsNothing);
-      expect(rowOf('a1'), findsNothing);
-
-      // The neighboring project's add fires only for its own header.
-      final addBeta = tester.getRect(
-        find.byKey(const ValueKey('project-new-$betaCwd')),
-      );
-      await tester.tapAt(addBeta.topCenter + const Offset(0, 0.5));
-      await tester.pumpAndSettle();
-      expect(created, [alphaCwd, alphaCwd, betaCwd]);
-
-      // The overflow opens its own menu from an edge coordinate.
-      await tester.tapAt(overflowAlpha.bottomCenter - const Offset(0, 0.5));
+      final header = find.byKey(const ValueKey('project-header-$alphaCwd'));
+      expect(tester.getSize(header).height, 40);
+      await tester.longPress(header);
       await tester.pumpAndSettle();
       expect(
-        find.byKey(const ValueKey('project-overflow-rename-$alphaCwd')),
+        find.byKey(const ValueKey('project-sheet-$alphaCwd')),
         findsOneWidget,
       );
-    });
-
-    testWidgets('compact collapsed header height stays at the accepted value', (
-      tester,
-    ) async {
-      await setViewSize(tester, const Size(360, 800));
-      await tester.pumpWidget(
-        host(twoProjectPane(onNew: (_) {}, onRename: (_) {})),
-      );
-      await tester.pumpAndSettle();
-
-      final height = tester
-          .getRect(find.byKey(const ValueKey('project-header-$alphaCwd')))
-          .height;
-      // Measured 56.0 on the accepted checkpoint d167c6b at this exact
-      // configuration. Growing this is an explicit product decision, not a
-      // touch-target side effect.
-      expect(height, 56.0);
-    });
-  });
-
-  group('project header rename affordance by width', () {
-    testWidgets('wide layouts retain the pencil and gain separation', (
-      tester,
-    ) async {
-      await setViewSize(tester, const Size(1000, 800));
-      final renamed = <String>[];
-      await tester.pumpWidget(
-        host(twoProjectPane(onNew: (_) {}, onRename: renamed.add)),
-      );
-      await tester.pumpAndSettle();
-
+      // The path the header no longer prints is one long-press away.
       expect(
-        find.byKey(const ValueKey('project-rename-$alphaCwd')),
+        find.byKey(const ValueKey('project-path-$alphaCwd')),
         findsOneWidget,
       );
-      expect(
-        find.byKey(const ValueKey('project-overflow-$alphaCwd')),
-        findsNothing,
-      );
-      final addRect = tester.getRect(
-        find.byKey(const ValueKey('project-new-$alphaCwd')),
-      );
-      final pencilRect = tester.getRect(
-        find.byKey(const ValueKey('project-rename-$alphaCwd')),
-      );
-      expect(pencilRect.left - addRect.right, greaterThanOrEqualTo(4));
-
-      await tester.tap(find.byKey(const ValueKey('project-rename-$alphaCwd')));
-      await tester.pumpAndSettle();
-      expect(renamed, [alphaCwd]);
-    });
-
-    testWidgets('narrow layouts expose one visible overflow with rename', (
-      tester,
-    ) async {
-      await setViewSize(tester, const Size(360, 800));
-      final renamed = <String>[];
-      await tester.pumpWidget(
-        host(twoProjectPane(onNew: (_) {}, onRename: renamed.add)),
+      await tester.tap(
+        find.byKey(const ValueKey('project-menu-new-$alphaCwd')),
       );
       await tester.pumpAndSettle();
-
+      expect(created, [alphaCwd]);
       expect(
-        find.byKey(const ValueKey('project-rename-$alphaCwd')),
+        find.byKey(const Key('session-row-codex/a1')),
         findsNothing,
-        reason: 'narrow keeps a visible overflow instead of the pencil',
+        reason: 'a long-press must not also toggle the project open',
       );
-      final overflow = find.byKey(const ValueKey('project-overflow-$alphaCwd'));
-      expect(overflow, findsOneWidget);
 
-      await tester.tap(overflow);
+      await tester.longPress(header);
       await tester.pumpAndSettle();
       await tester.tap(
-        find.byKey(const ValueKey('project-overflow-rename-$alphaCwd')),
+        find.byKey(const ValueKey('project-menu-rename-$alphaCwd')),
       );
       await tester.pumpAndSettle();
       expect(renamed, [alphaCwd]);
     });
+
+    testWidgets(
+      'a pointer hover reveals add and a right-click opens the menu',
+      (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await setViewSize(tester, const Size(1000, 800));
+        final created = <String>[];
+        final renamed = <String>[];
+        await tester.pumpWidget(
+          host(twoProjectPane(onNew: created.add, onRename: renamed.add)),
+        );
+        await tester.pumpAndSettle();
+
+        final header = find.byKey(const ValueKey('project-header-$alphaCwd'));
+        expect(tester.getSize(header).height, 36);
+        expect(
+          find.byKey(const ValueKey('project-new-$alphaCwd')),
+          findsNothing,
+        );
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        addTearDown(mouse.removePointer);
+        await mouse.moveTo(tester.getCenter(header));
+        await tester.pump();
+        final add = find.byKey(const ValueKey('project-new-$alphaCwd'));
+        expect(add, findsOneWidget);
+        // Only the hovered project offers it.
+        expect(
+          find.byKey(const ValueKey('project-new-$betaCwd')),
+          findsNothing,
+        );
+        await tester.tap(add);
+        await tester.pumpAndSettle();
+        expect(created, [alphaCwd]);
+        expect(
+          find.byKey(const Key('session-row-codex/a1')),
+          findsNothing,
+          reason: 'the add action must not fall through to the header toggle',
+        );
+
+        await tester.tap(
+          header,
+          buttons: kSecondaryMouseButton,
+          kind: PointerDeviceKind.mouse,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('project-path-$alphaCwd')),
+          findsOneWidget,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('project-menu-rename-$alphaCwd')),
+        );
+        await tester.pumpAndSettle();
+        expect(renamed, [alphaCwd]);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.windows),
+    );
+
+    testWidgets(
+      'a pointer layout shows the path as the header tooltip',
+      (
+        tester,
+      ) async {
+        await setViewSize(tester, const Size(1000, 800));
+        await tester.pumpWidget(
+          host(twoProjectPane(onNew: (_) {}, onRename: (_) {})),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byTooltip(alphaCwd), findsOneWidget);
+        expect(find.text(alphaCwd), findsNothing);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
   });
 
   group('project rename dialog', () {

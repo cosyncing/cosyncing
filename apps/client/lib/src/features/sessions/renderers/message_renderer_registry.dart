@@ -16,6 +16,7 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_transc
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_presentation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 

@@ -4,6 +4,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/settings/controller/session_visibility_controller.dart';
+import 'package:cosyncing_client/src/features/settings/view/conversation_display_settings.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -53,14 +54,11 @@ class DisplaySettingsPage extends ConsumerWidget {
               ],
             ),
             const SizedBox(height: 16),
-            Card(
+            const ConversationDisplaySettings(),
+            SettingsSection(
+              title: l10n.settingsSessionVisibilityTitle,
               child: Column(
                 children: [
-                  ListTile(
-                    leading: const Icon(Icons.filter_alt_outlined),
-                    title: Text(l10n.settingsSessionVisibilityTitle),
-                    subtitle: Text(l10n.settingsSessionVisibilitySubtitle),
-                  ),
                   SwitchListTile(
                     key: const Key('settings-show-background-sessions'),
                     title: Text(l10n.settingsShowBackgroundSessionsTitle),

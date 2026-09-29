@@ -6,10 +6,12 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -37,6 +39,10 @@ SessionInfo _session(
   currentModel: currentModel,
   updatedAt: updatedAt,
   attachMode: AttachMode.observe,
+);
+
+Finder metadataContaining(String value) => find.byWidgetPredicate(
+  (widget) => widget is Tooltip && (widget.message?.contains(value) ?? false),
 );
 
 void main() {
@@ -72,6 +78,235 @@ void main() {
 
   /// Group key used by sessions built without a `cwd`.
   const ungrouped = '__ungrouped__';
+
+  group('authoritative completions and selected subagent ancestry', () {
+    SessionInfo node(
+      String id, {
+      String? parent,
+      SessionStatus status = SessionStatus.idle,
+      int? updatedAt,
+    }) => SessionInfo(
+      id: id,
+      tool: 'codex',
+      title: id,
+      nativeId: id,
+      parentThreadId: parent,
+      origin: parent == null ? null : SessionOrigin.subagent,
+      status: status,
+      updatedAt: updatedAt,
+      attachMode: AttachMode.observe,
+      cwd: '/work/alpha',
+    );
+
+    Widget pane(
+      List<SessionInfo> sessions, {
+      String? active,
+      Set<String>? unread = const {},
+      SessionRosterQueryWindow queryWindow = SessionRosterQueryWindow.any,
+    }) => host(
+      SessionListPane(
+        sessions: sessions,
+        activeKey: active,
+        onOpen: (_) {},
+        unreadCompletionKeys: unread,
+        visibilityPreferences: const SessionVisibilityPreferences(),
+        queryWindow: queryWindow,
+      ),
+    );
+
+    testWidgets('remote acknowledgement clears row and descendant markers', (
+      tester,
+    ) async {
+      Future<void> pump(SessionStatus status, Set<String>? unread) async {
+        await tester.pumpWidget(
+          pane([
+            node('parent'),
+            node('child', parent: 'parent', status: status),
+          ], unread: unread),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      // Seed a legacy transition as well: attaching the authoritative feed
+      // must retire that history, including if an embedding later detaches it.
+      await pump(SessionStatus.working, null);
+      await expandProject(tester, '/work/alpha');
+      final children = find.byKey(
+        const ValueKey('session-children-codex/parent'),
+      );
+      await tester.tap(children);
+      await tester.pumpAndSettle();
+      await pump(SessionStatus.idle, null);
+      final dot = find.byKey(const Key('session-ready-/codex/child'));
+      expect(dot, findsOneWidget);
+      await pump(SessionStatus.idle, {'codex/child'});
+      expect(dot, findsOneWidget);
+      String description() => tester
+          .widget<Tooltip>(
+            find.ancestor(of: children, matching: find.byType(Tooltip)).first,
+          )
+          .message!;
+      expect(description(), contains('1 recently completed'));
+      await pump(SessionStatus.idle, {});
+      expect(dot, findsNothing);
+      expect(description(), contains('0 recently completed'));
+      await pump(SessionStatus.idle, null);
+      expect(dot, findsNothing);
+    });
+
+    for (final cold in [false, true]) {
+      testWidgets('selected grandchild reveals ancestry, cold=$cold', (
+        tester,
+      ) async {
+        final sessions = [
+          node('parent'),
+          node('child', parent: 'parent'),
+          node('grandchild', parent: 'child'),
+        ];
+        await tester.pumpWidget(
+          pane(cold ? [] : sessions, active: cold ? 'codex/grandchild' : null),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('session-row-codex/grandchild')),
+          findsNothing,
+        );
+        await tester.pumpWidget(pane(sessions, active: 'codex/grandchild'));
+        await tester.pumpAndSettle();
+        for (final id in ['parent', 'child', 'grandchild']) {
+          expect(find.byKey(Key('session-row-codex/$id')), findsOneWidget);
+        }
+        // Collapsing the selected branch remains a valid choice; neither a
+        // refresh nor an unrelated completion update silently reopens it.
+        await tester.tap(
+          find.byKey(const ValueKey('session-children-codex/parent')),
+        );
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          pane(
+            sessions,
+            active: 'codex/grandchild',
+            unread: {'codex/grandchild'},
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('session-row-codex/grandchild')),
+          findsNothing,
+        );
+        await expandProject(tester, '/work/alpha');
+        await tester.pumpWidget(pane(sessions, active: 'codex/grandchild'));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('session-row-codex/parent')), findsNothing);
+        // A new navigation to the child is an explicit reveal again.
+        await tester.pumpWidget(pane(sessions));
+        await tester.pumpWidget(pane(sessions, active: 'codex/grandchild'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('session-row-codex/grandchild')),
+          findsOneWidget,
+        );
+      });
+    }
+
+    testWidgets('editing a filter retires the selected-path exception', (
+      tester,
+    ) async {
+      final sessions = [
+        node('parent'),
+        node('child', parent: 'parent'),
+        node('other'),
+      ];
+      await tester.pumpWidget(pane(sessions));
+      await tester.pumpAndSettle();
+      final search = find.byKey(const Key('session-roster-search'));
+      await tester.enterText(search, 'other');
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(pane(sessions, active: 'codex/child'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('session-row-codex/child')), findsOneWidget);
+      expect(tester.widget<TextField>(search).controller!.text, 'other');
+      await tester.enterText(search, 'other ');
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(pane(sessions, active: 'codex/child'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('session-row-codex/child')), findsNothing);
+      expect(find.byKey(const Key('session-row-codex/other')), findsOneWidget);
+      await tester.enterText(search, '');
+      await tester.pumpAndSettle();
+      // Navigation during a search used transient expansion, so clearing the
+      // filter restores the original project/branch collapse choices.
+      expect(find.byKey(const Key('session-row-codex/child')), findsNothing);
+    });
+
+    testWidgets(
+      'old selected child bypasses recency until the user filters again',
+      (tester) async {
+        final now = DateTime.now();
+        final old = now
+            .subtract(const Duration(days: 30))
+            .millisecondsSinceEpoch;
+        final sessions = [
+          node('parent', updatedAt: old),
+          node('child', parent: 'parent', updatedAt: old),
+          node('current', updatedAt: now.millisecondsSinceEpoch),
+        ];
+        Widget recent({String? active, Set<String> unread = const {}}) => pane(
+          sessions,
+          active: active,
+          unread: unread,
+          queryWindow: SessionRosterQueryWindow.last7Days,
+        );
+        await tester.pumpWidget(recent());
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('session-row-codex/child')), findsNothing);
+        await tester.pumpWidget(recent(active: 'codex/child'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('session-row-codex/parent')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('session-row-codex/child')),
+          findsOneWidget,
+        );
+        await tester.enterText(
+          find.byKey(const Key('session-roster-search')),
+          'current',
+        );
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          recent(active: 'codex/child', unread: {'codex/child'}),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('session-row-codex/child')), findsNothing);
+        expect(
+          find.byKey(const Key('session-row-codex/current')),
+          findsOneWidget,
+        );
+        await tester.enterText(
+          find.byKey(const Key('session-roster-search')),
+          '',
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('session-row-codex/child')), findsNothing);
+      },
+    );
+
+    testWidgets('cold link reveals parents that hydrate after their child', (
+      tester,
+    ) async {
+      final child = node('child', parent: 'parent');
+      await tester.pumpWidget(pane([child], active: 'codex/child'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        pane([node('parent'), child], active: 'codex/child'),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('session-row-codex/parent')), findsOneWidget);
+      expect(find.byKey(const Key('session-row-codex/child')), findsOneWidget);
+    });
+  });
 
   group('SessionListPane', () {
     const projectKey = '/work/alpha';
@@ -298,8 +533,8 @@ void main() {
         find.byKey(const ValueKey('project-header-/work/beta')),
         findsOneWidget,
       );
-      // Project total plus the idle-status summary count survive collapse.
-      expect(find.text('2'), findsNWidgets(2));
+      // Headers carry no counts; a collapsed project signals only attention.
+      expect(find.text('2'), findsNothing);
 
       await expandProject(tester, '/work/alpha');
 
@@ -398,35 +633,50 @@ void main() {
       );
     });
 
-    testWidgets('keeps the add button working while a group is collapsed', (
-      tester,
-    ) async {
-      final created = <String>[];
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session('claude', 'a', title: 'First', cwd: '/work/alpha'),
-            ],
-            activeKey: null,
-            onOpen: (_) {},
-            onNewProject: (group) => created.add(group.key),
-            visibilityPreferences: const SessionVisibilityPreferences(),
+    testWidgets(
+      'keeps the add button working while a group is collapsed',
+      (
+        tester,
+      ) async {
+        final created = <String>[];
+        await tester.pumpWidget(
+          host(
+            SessionListPane(
+              sessions: [
+                _session('claude', 'a', title: 'First', cwd: '/work/alpha'),
+              ],
+              activeKey: null,
+              onOpen: (_) {},
+              onNewProject: (group) => created.add(group.key),
+              visibilityPreferences: const SessionVisibilityPreferences(),
+            ),
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
+        );
+        await tester.pumpAndSettle();
 
-      // The group is already collapsed by default.
-      expect(find.byKey(const Key('session-row-claude/a')), findsNothing);
+        // The group is already collapsed by default.
+        expect(find.byKey(const Key('session-row-claude/a')), findsNothing);
 
-      // Tapping the add button must not also toggle the header underneath it.
-      await tester.tap(find.byKey(const ValueKey('project-new-/work/alpha')));
-      await tester.pumpAndSettle();
+        // A pointer reveals the add button by hovering the header.
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        addTearDown(mouse.removePointer);
+        await mouse.moveTo(
+          tester.getCenter(
+            find.byKey(const ValueKey('project-header-/work/alpha')),
+          ),
+        );
+        await tester.pump();
 
-      expect(created, ['/work/alpha']);
-      expect(find.byKey(const Key('session-row-claude/a')), findsNothing);
-    });
+        // Tapping the add button must not also toggle the header underneath it.
+        await tester.tap(find.byKey(const ValueKey('project-new-/work/alpha')));
+        await tester.pumpAndSettle();
+
+        expect(created, ['/work/alpha']);
+        expect(find.byKey(const Key('session-row-claude/a')), findsNothing);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.windows),
+    );
 
     testWidgets('shows agent and compact model but never the machine name', (
       tester,
@@ -458,14 +708,16 @@ void main() {
       // the machine never renders.
       await expandProject(tester, 'howard-laptop\u0000$ungrouped');
 
-      expect(find.text('Codex · GPT-5.4'), findsOneWidget);
+      expect(metadataContaining('Codex · GPT-5.4'), findsOneWidget);
       expect(find.textContaining('howard-laptop'), findsNothing);
       expect(
         find.byWidgetPredicate(
           (widget) =>
               widget is Tooltip &&
-              widget.message ==
-                  'Model: openai/gpt-5.4-codex · Variant: fast · Effort: high',
+              (widget.message?.contains(
+                    'Model: openai/gpt-5.4-codex · Variant: fast · Effort: high',
+                  ) ??
+                  false),
         ),
         findsOneWidget,
       );
@@ -484,7 +736,7 @@ void main() {
       );
       await expandProject(tester, ungrouped);
 
-      expect(find.text('Reasonix'), findsOneWidget);
+      expect(metadataContaining('Reasonix'), findsOneWidget);
     });
 
     testWidgets('shows the localized Grok Build agent name', (tester) async {
@@ -500,7 +752,7 @@ void main() {
       );
       await expandProject(tester, ungrouped);
 
-      expect(find.text('Grok Build'), findsOneWidget);
+      expect(metadataContaining('Grok Build'), findsOneWidget);
     });
 
     testWidgets('search filters the live roster without another fetch', (
@@ -572,63 +824,24 @@ void main() {
     );
 
     testWidgets(
-      'shows only non-zero project counters in order in English and Chinese',
+      'a project header marks attention with one dot, never counters',
       (tester) async {
-        final semantics = tester.ensureSemantics();
         final cases =
-            <
-              ({
-                String name,
-                List<SessionStatus> statuses,
-                List<String> ids,
-                String en,
-                String zh,
-              })
-            >[
+            <({String name, List<SessionStatus> statuses, bool attention})>[
               (
                 name: 'idle only',
                 statuses: [SessionStatus.idle, SessionStatus.idle],
-                ids: ['idle'],
-                en: 'Idle: 2',
-                zh: '空闲：2',
+                attention: false,
               ),
               (
                 name: 'working only',
                 statuses: [SessionStatus.working],
-                ids: ['working'],
-                en: 'Working: 1',
-                zh: '工作中：1',
-              ),
-              (
-                name: 'needs input only',
-                statuses: [SessionStatus.needsInput],
-                ids: ['needs-input'],
-                en: 'Needs input: 1',
-                zh: '需要输入：1',
-              ),
-              (
-                name: 'needs input and working',
-                statuses: [
-                  SessionStatus.needsInput,
-                  SessionStatus.working,
-                ],
-                ids: ['needs-input', 'working'],
-                en: 'Needs input: 1 · Working: 1',
-                zh: '需要输入：1 · 工作中：1',
+                attention: false,
               ),
               (
                 name: 'needs input and idle',
                 statuses: [SessionStatus.needsInput, SessionStatus.idle],
-                ids: ['needs-input', 'idle'],
-                en: 'Needs input: 1 · Idle: 1',
-                zh: '需要输入：1 · 空闲：1',
-              ),
-              (
-                name: 'working and idle',
-                statuses: [SessionStatus.working, SessionStatus.idle],
-                ids: ['working', 'idle'],
-                en: 'Working: 1 · Idle: 1',
-                zh: '工作中：1 · 空闲：1',
+                attention: true,
               ),
               (
                 name: 'all statuses',
@@ -637,17 +850,25 @@ void main() {
                   SessionStatus.working,
                   SessionStatus.idle,
                 ],
-                ids: ['needs-input', 'working', 'idle'],
-                en: 'Needs input: 1 · Working: 1 · Idle: 1',
-                zh: '需要输入：1 · 工作中：1 · 空闲：1',
+                attention: true,
               ),
             ];
 
         for (final localeCase in [
-          (locale: const Locale('en'), language: 'en'),
-          (locale: const Locale('zh'), language: 'zh'),
+          (
+            locale: const Locale('en'),
+            message: 'Needs input or has finished work to review',
+          ),
+          (
+            locale: const Locale('zh'),
+            message: '有会话需要输入，或有已完成的工作待查看',
+          ),
         ]) {
           for (final counterCase in cases) {
+            final reason = '${localeCase.locale}: ${counterCase.name}';
+            // A fresh pane per case: carried over, a session that was working
+            // in the previous case would correctly read as finished work.
+            await tester.pumpWidget(const SizedBox.shrink());
             await tester.pumpWidget(
               host(
                 projectRoster(counterCase.statuses),
@@ -656,113 +877,65 @@ void main() {
             );
             await tester.pumpAndSettle();
 
-            final expectedSummary = localeCase.language == 'en'
-                ? counterCase.en
-                : counterCase.zh;
-            final region = find.byKey(
-              const ValueKey('project-counts-/work/alpha'),
-            );
-            final tooltip = tester.widget<Tooltip>(
-              find.byKey(
-                const ValueKey('project-counts-tooltip-/work/alpha'),
-              ),
+            expect(
+              find.byKey(const ValueKey('project-attention-$projectKey')),
+              counterCase.attention ? findsOneWidget : findsNothing,
+              reason: reason,
             );
             expect(
-              tooltip.message,
-              expectedSummary,
-              reason: '${localeCase.language}: ${counterCase.name}',
+              find.byTooltip(localeCase.message),
+              counterCase.attention ? findsOneWidget : findsNothing,
+              reason: reason,
             );
-            expect(
-              tester.getSemantics(region).label,
-              expectedSummary,
-              reason: '${localeCase.language}: ${counterCase.name}',
-            );
-            expect(
-              find.descendant(of: region, matching: find.text('0')),
-              findsNothing,
-              reason: '${localeCase.language}: ${counterCase.name}',
-            );
-
+            // The owner's direction: no per-status counters or totals on the
+            // header, only the one dot.
             for (final id in ['needs-input', 'working', 'idle']) {
               expect(
                 find.byKey(ValueKey('project-count-$projectKey-$id')),
-                counterCase.ids.contains(id) ? findsOneWidget : findsNothing,
-                reason: '${localeCase.language}: ${counterCase.name}: $id',
+                findsNothing,
+                reason: '$reason: $id',
               );
             }
-
             expect(
-              find.byKey(const ValueKey('project-total-/work/alpha')),
-              findsOneWidget,
+              find.byKey(const ValueKey('project-total-$projectKey')),
+              findsNothing,
+              reason: reason,
             );
             expect(
-              find.byKey(const ValueKey('project-summary-/work/alpha')),
-              findsOneWidget,
+              find.text('${counterCase.statuses.length}'),
+              findsNothing,
+              reason: reason,
             );
-
-            final summaryDot = find.byKey(
-              const ValueKey('project-summary-/work/alpha'),
-            );
-            var previous = summaryDot;
-            for (var index = 0; index < counterCase.ids.length; index++) {
-              final counter = find.byKey(
-                ValueKey(
-                  'project-count-$projectKey-${counterCase.ids[index]}',
-                ),
-              );
-              final gap =
-                  tester.getTopLeft(counter).dx -
-                  tester.getTopRight(previous).dx;
-              expect(
-                gap,
-                index == 0 ? 8 : 4,
-                reason:
-                    '${localeCase.language}: ${counterCase.name}: '
-                    'gap before ${counterCase.ids[index]}',
-              );
-              previous = counter;
-            }
           }
         }
-        semantics.dispose();
       },
     );
 
-    testWidgets('removes counters again across live zero transitions', (
-      tester,
-    ) async {
+    testWidgets('the attention dot follows live transitions', (tester) async {
       Future<void> pumpStatuses(List<SessionStatus> statuses) async {
         await tester.pumpWidget(host(projectRoster(statuses)));
         await tester.pumpAndSettle();
       }
 
-      Finder counter(String id) =>
-          find.byKey(ValueKey('project-count-$projectKey-$id'));
+      final dot = find.byKey(const ValueKey('project-attention-$projectKey'));
 
       await pumpStatuses([SessionStatus.idle]);
-      expect(counter('needs-input'), findsNothing);
+      expect(dot, findsNothing);
       await pumpStatuses([SessionStatus.needsInput, SessionStatus.idle]);
-      expect(counter('needs-input'), findsOneWidget);
+      expect(dot, findsOneWidget);
       await pumpStatuses([SessionStatus.idle]);
-      expect(counter('needs-input'), findsNothing);
-
-      expect(counter('working'), findsNothing);
-      await pumpStatuses([SessionStatus.working, SessionStatus.idle]);
-      expect(counter('working'), findsOneWidget);
+      expect(dot, findsNothing);
+      await pumpStatuses([SessionStatus.working]);
+      expect(dot, findsNothing, reason: 'running is not attention');
+      // A run that finishes leaves work to review, which a collapsed project
+      // must still signal.
       await pumpStatuses([SessionStatus.idle]);
-      expect(counter('working'), findsNothing);
-
-      await pumpStatuses([SessionStatus.working]);
-      expect(counter('idle'), findsNothing);
-      await pumpStatuses([SessionStatus.working, SessionStatus.idle]);
-      expect(counter('idle'), findsOneWidget);
-      await pumpStatuses([SessionStatus.working]);
-      expect(counter('idle'), findsNothing);
+      expect(dot, findsOneWidget);
     });
 
     testWidgets(
-      'compact project headers ellipsize non-selectable cwd metadata and '
-      'keep New usable',
+      'compact project headers ellipsize the name and keep the path off the '
+      'row',
       (tester) async {
         const longProjectName =
             'A project name long enough to require compact ellipsis';
@@ -792,23 +965,30 @@ void main() {
           final title = tester.widget<Text>(find.text(longProjectName));
           expect(title.maxLines, 1);
           expect(title.overflow, TextOverflow.ellipsis);
-          final cwd = find.byKey(const ValueKey('project-cwd-$longCwd'));
-          expect(cwd, findsOneWidget);
-          final cwdText = tester.widget<Text>(cwd);
-          expect(cwdText.data, longCwd);
-          expect(cwdText.maxLines, 1);
-          expect(cwdText.overflow, TextOverflow.ellipsis);
-          // The header carries no copy affordance. It used to, and the
-          // button's tooltip opened a card over the roster row on hover. Both
-          // the button and the decorated code surface it sat in are gone; the
-          // path is non-selectable roster metadata, a plain `Text`.
+          expect(
+            find.byKey(const ValueKey('project-cwd-$longCwd')),
+            findsNothing,
+          );
+          expect(find.text(longCwd), findsNothing);
           expect(find.byType(CopyableCodeLine), findsNothing);
-          expect(find.byTooltip('Copy command'), findsNothing);
           expect(tester.takeException(), isNull);
 
-          await tester.tap(find.byKey(const ValueKey('project-new-$longCwd')));
-          await tester.pump();
+          // Touch reaches the path and New session through the long-press
+          // sheet.
+          await tester.longPress(
+            find.byKey(const ValueKey('project-header-$longCwd')),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('project-path-$longCwd')),
+            findsOneWidget,
+          );
+          await tester.tap(
+            find.byKey(const ValueKey('project-menu-new-$longCwd')),
+          );
+          await tester.pumpAndSettle();
           expect(created, 1);
+          expect(tester.takeException(), isNull);
         }
       },
     );
@@ -840,10 +1020,18 @@ void main() {
               brightness: brightness,
             ),
           );
+          await tester.pumpAndSettle();
 
-          await tester.tap(
-            find.byKey(const ValueKey('project-rename-/work/exact-project')),
+          await tester.longPress(
+            find.byKey(const ValueKey('project-header-/work/exact-project')),
           );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(
+              const ValueKey('project-menu-rename-/work/exact-project'),
+            ),
+          );
+          await tester.pumpAndSettle();
 
           expect(tester.takeException(), isNull, reason: '$brightness');
         }
@@ -942,7 +1130,7 @@ void main() {
       await expandProject(tester, ungrouped);
 
       expect(find.byKey(const Key('session-roster-search')), findsOneWidget);
-      expect(find.text('OpenCode · Opus 4.8'), findsOneWidget);
+      expect(metadataContaining('OpenCode · Opus 4.8'), findsOneWidget);
       expect(find.text('Needs input'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
@@ -975,7 +1163,7 @@ void main() {
       final localized = MaterialLocalizations.of(
         tester.element(row),
       ).formatCompactDate(updated);
-      expect(find.textContaining(localized), findsOneWidget);
+      expect(metadataContaining(localized), findsOneWidget);
       expect(localized, isNot('1/2/2020'));
     });
   });
@@ -1152,7 +1340,7 @@ void main() {
       },
     );
 
-    testWidgets('collapsed headers keep the total and non-zero counts only', (
+    testWidgets('a collapsed header keeps only the attention dot', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -1165,31 +1353,15 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const Key('session-row-codex/a1')), findsNothing);
-      final total = tester.widget<Text>(
+      expect(
+        find.byKey(const ValueKey('project-attention-/work/alpha')),
+        findsOneWidget,
+      );
+      expect(
         find.byKey(const ValueKey('project-total-/work/alpha')),
-      );
-      expect(total.data, '3');
-      expect(
-        find.byKey(const ValueKey('project-count-/work/alpha-needs-input')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('project-count-/work/alpha-working')),
-        findsOneWidget,
-      );
-      // Idle is zero here and must stay omitted while collapsed.
-      expect(
-        find.byKey(const ValueKey('project-count-/work/alpha-idle')),
         findsNothing,
       );
-      expect(
-        tester
-            .widget<Tooltip>(
-              find.byKey(const ValueKey('project-counts-tooltip-/work/alpha')),
-            )
-            .message,
-        'Needs input: 1 · Working: 2',
-      );
+      expect(find.text('3'), findsNothing);
     });
 
     testWidgets('header announces collapsed state and toggles by keyboard', (
@@ -1443,9 +1615,9 @@ void main() {
       final base = rowIndent(tester, 'p1');
       expect(rowIndent(tester, 'd1') - base, 12);
       expect(rowIndent(tester, 'd2') - base, 24);
-      expect(rowIndent(tester, 'd3') - base, 36);
+      expect(rowIndent(tester, 'd3') - base, 24);
       // Depth 4 keeps its place in the tree but stops eating roster width.
-      expect(rowIndent(tester, 'd4') - base, 36);
+      expect(rowIndent(tester, 'd4') - base, 24);
     });
 
     testWidgets('a nested tree fits compact width in light and dark', (
@@ -1502,34 +1674,37 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('the parent pill shows the rolled-up subtree status', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        roster([
-          node('p1'),
-          node('c1', parentId: 'p1', status: SessionStatus.working),
-        ]),
-      );
-      await tester.pumpAndSettle();
-      await openProject(tester);
-      await openChildren(tester, 'p1');
+    testWidgets(
+      'the parent keeps its own status while children show their status',
+      (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          roster([
+            node('p1'),
+            node('c1', parentId: 'p1', status: SessionStatus.working),
+          ]),
+        );
+        await tester.pumpAndSettle();
+        await openProject(tester);
+        await openChildren(tester, 'p1');
 
-      // Parent displays Working; the child keeps its own pill.
-      final parentPill = find.descendant(
-        of: find.byKey(const Key('session-row-opencode/p1')),
-        matching: find.text('Working'),
-      );
-      final childPill = find.descendant(
-        of: find.byKey(const Key('session-row-opencode/c1')),
-        matching: find.text('Working'),
-      );
-      expect(parentPill, findsOneWidget);
-      expect(childPill, findsOneWidget);
-      expect(find.text('Idle'), findsNothing);
-    });
+        // Idle parents remain quiet; a working child keeps its own pill.
+        final parentPill = find.descendant(
+          of: find.byKey(const Key('session-row-opencode/p1')),
+          matching: find.text('Working'),
+        );
+        final childPill = find.descendant(
+          of: find.byKey(const Key('session-row-opencode/c1')),
+          matching: find.text('Working'),
+        );
+        expect(parentPill, findsNothing);
+        expect(childPill, findsOneWidget);
+        expect(find.text('Idle'), findsNothing);
+      },
+    );
 
-    testWidgets('a roster delta updates the pill and counters in place', (
+    testWidgets('a roster delta updates the row and project dot in place', (
       tester,
     ) async {
       Future<void> pump(SessionStatus childStatus) async {
@@ -1542,51 +1717,28 @@ void main() {
         await tester.pumpAndSettle();
       }
 
+      final dot = find.byKey(const ValueKey('project-attention-$projectKey'));
       await pump(SessionStatus.working);
       await openProject(tester);
-      expect(
-        tester
-            .widget<Text>(
-              find.byKey(const ValueKey('project-total-$projectKey')),
-            )
-            .data,
-        '1',
-      );
-      expect(
-        find.byKey(const ValueKey('project-count-$projectKey-working')),
-        findsOneWidget,
-      );
+      expect(dot, findsNothing);
 
       // Same widget, one delta: no remount and no reload.
-      await pump(SessionStatus.idle);
+      await pump(SessionStatus.needsInput);
+      expect(find.byKey(const Key('session-row-opencode/p1')), findsOneWidget);
+      // A hidden child that needs input still lights its project.
+      expect(dot, findsOneWidget);
 
+      await pump(SessionStatus.idle);
       expect(
         find.descendant(
           of: find.byKey(const Key('session-row-opencode/p1')),
           matching: find.text('Idle'),
         ),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('project-count-$projectKey-working')),
         findsNothing,
-      );
-      expect(
-        find.byKey(const ValueKey('project-count-$projectKey-idle')),
-        findsOneWidget,
-      );
-      // The project total still counts logical roots only.
-      expect(
-        tester
-            .widget<Text>(
-              find.byKey(const ValueKey('project-total-$projectKey')),
-            )
-            .data,
-        '1',
       );
     });
 
-    testWidgets('expanding children never moves the project counters', (
+    testWidgets('expanding children never moves the project header', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -1602,24 +1754,8 @@ void main() {
       await tester.pumpAndSettle();
       await openProject(tester);
 
-      String counters() {
-        final total = tester
-            .widget<Text>(
-              find.byKey(const ValueKey('project-total-$projectKey')),
-            )
-            .data!;
-        final summary = tester
-            .widget<Tooltip>(
-              find.byKey(
-                const ValueKey('project-counts-tooltip-$projectKey'),
-              ),
-            )
-            .message!;
-        return '$total|$summary';
-      }
-
-      final before = counters();
-      expect(before, '1|Working: 1');
+      final header = find.byKey(const ValueKey('project-header-$projectKey'));
+      final before = tester.getRect(header);
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
 
       await tester.tap(
@@ -1629,7 +1765,7 @@ void main() {
 
       expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
       expect(find.byKey(const Key('session-row-opencode/c2')), findsOneWidget);
-      expect(counters(), before);
+      expect(tester.getRect(header), before);
     });
 
     testWidgets('parent-local expansion survives a roster delta', (
@@ -1707,7 +1843,7 @@ void main() {
               find.byKey(const ValueKey('session-children-opencode/p1')),
             )
             .label,
-        'Hide 1 linked session',
+        startsWith('Hide 1 linked session.'),
       );
       // The redundant parent chip is gone; adjacency carries the relation.
       expect(
@@ -1755,7 +1891,7 @@ void main() {
         //    the bare count, with the sentence hidden in `tooltip`.
         expect(
           data.label,
-          'Show 1 linked session',
+          startsWith('Show 1 linked session.'),
           reason: 'the name assistive technology reads must be the action',
         );
         // 1b. And it must be said ONCE. Flutter web folds label and tooltip
@@ -1795,7 +1931,7 @@ void main() {
         //    belong to one node; `performAction` throws if it lacks the action.
         expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
         tester.semantics.performAction(
-          find.semantics.byLabel('Show 1 linked session'),
+          find.semantics.byLabel(RegExp(r'^Show 1 linked session\.')),
           SemanticsAction.tap,
         );
         await tester.pumpAndSettle();
@@ -1831,7 +1967,7 @@ void main() {
               find.byKey(const ValueKey('session-children-opencode/p1')),
             )
             .label,
-        '显示 2 个关联会话',
+        startsWith('显示 2 个关联会话.'),
       );
       semantics.dispose();
     });
@@ -1857,17 +1993,17 @@ void main() {
 
       // Children start hidden, so the affordance must offer to show them.
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
-      expect(chipName(), 'Show 1 linked session');
+      expect(chipName(), startsWith('Show 1 linked session.'));
 
       await tester.tap(chip());
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
-      expect(chipName(), 'Hide 1 linked session');
+      expect(chipName(), startsWith('Hide 1 linked session.'));
 
       await tester.tap(chip());
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
-      expect(chipName(), 'Show 1 linked session');
+      expect(chipName(), startsWith('Show 1 linked session.'));
       semantics.dispose();
     });
 
@@ -2029,8 +2165,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Narrowing auto-reveals the project group, so the parent is already
-      // on screen — but its subagent subtree stays closed.
+      // Narrowing is not searching: the project starts collapsed like every
+      // other. Opened, its subagent subtree still stays closed.
+      expect(find.byKey(const Key('session-row-opencode/p1')), findsNothing);
+      await openProject(tester);
       expect(find.byKey(const Key('session-row-opencode/p1')), findsOneWidget);
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
 
@@ -2130,11 +2268,11 @@ void main() {
         find.byKey(const Key('session-row-codex/timed')),
         findsOneWidget,
       );
-      expect(find.textContaining('just now'), findsOneWidget);
+      expect(metadataContaining('just now'), findsOneWidget);
 
       now = now.add(const Duration(seconds: 31));
       await tester.pump(const Duration(seconds: 30));
-      expect(find.textContaining('1m ago'), findsOneWidget);
+      expect(metadataContaining('1m ago'), findsOneWidget);
     });
 
     testWidgets('one timer serves every row and skips unchanged rebuilds', (
@@ -2199,7 +2337,7 @@ void main() {
         timedRoster(now: () => now, updatedAt: updatedAt),
       );
       await expandProject(tester, ungrouped);
-      expect(find.textContaining('just now'), findsOneWidget);
+      expect(metadataContaining('just now'), findsOneWidget);
 
       await tester.pumpWidget(
         timedRoster(
@@ -2210,24 +2348,24 @@ void main() {
       );
       now = now.add(const Duration(minutes: 2));
       await tester.pump(const Duration(seconds: 60));
-      expect(find.textContaining('just now'), findsOneWidget);
+      expect(metadataContaining('just now'), findsOneWidget);
 
       await tester.pumpWidget(
         timedRoster(now: () => now, updatedAt: updatedAt),
       );
-      expect(find.textContaining('2m ago'), findsOneWidget);
+      expect(metadataContaining('2m ago'), findsOneWidget);
 
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
       await tester.pump();
       now = now.add(const Duration(minutes: 2));
       await tester.pump(const Duration(seconds: 60));
-      expect(find.textContaining('2m ago'), findsOneWidget);
+      expect(metadataContaining('2m ago'), findsOneWidget);
 
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       await tester.pump();
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pump();
-      expect(find.textContaining('4m ago'), findsOneWidget);
+      expect(metadataContaining('4m ago'), findsOneWidget);
       addTearDown(
         () => tester.binding.handleAppLifecycleStateChanged(
           AppLifecycleState.resumed,
@@ -2248,7 +2386,7 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('roster uses pulse and full ring status contracts', (
+    testWidgets('roster keeps harness identity separate from state pills', (
       tester,
     ) async {
       for (final testCase in const [
@@ -2268,17 +2406,23 @@ void main() {
         if (row.evaluate().isEmpty) {
           await expandProject(tester, ungrouped);
         }
-        final marker = tester.widget<StatusDot>(
-          find
-              .descendant(
-                of: row,
-                matching: find.byType(StatusDot),
-              )
-              .first,
+        expect(
+          find.descendant(of: row, matching: find.byType(SessionHarnessLogo)),
+          findsOneWidget,
         );
-        expect(marker.pulse, testCase.$2);
-        expect(marker.ringColor != null, testCase.$3);
-        expect(marker.ringGapColor != null, testCase.$3);
+        final pills = find.descendant(
+          of: row,
+          matching: find.byType(StatusPill),
+        );
+        if (testCase.$1 == SessionStatus.idle) {
+          expect(pills, findsNothing);
+        } else {
+          final pill = tester.widget<StatusPill>(pills);
+          expect(
+            pill.label,
+            testCase.$1 == SessionStatus.working ? 'Working' : 'Needs input',
+          );
+        }
       }
     });
   });

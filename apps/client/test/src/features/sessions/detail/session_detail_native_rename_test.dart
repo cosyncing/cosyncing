@@ -80,6 +80,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.tap(find.byKey(const Key('session-detail-information')));
+      await tester.pumpAndSettle();
       expect(find.text('Before'), findsNWidgets(2));
       final renameSemantics = tester.getSemantics(
         find.byKey(const Key('session-detail-rename-button')),

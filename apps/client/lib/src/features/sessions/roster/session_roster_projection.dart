@@ -574,6 +574,7 @@ final class SessionRosterProjection {
     Map<String, SessionChildExpansion> revealChildExpansion = const {},
     SessionRosterFilters filters = const SessionRosterFilters(),
     Set<String> readyToReviewKeys = const {},
+    Set<String> navigationRevealKeys = const {},
     String ungroupedLabel = 'Other sessions',
     DateTime? now,
     SessionRosterLineage? lineage,
@@ -586,12 +587,14 @@ final class SessionRosterProjection {
     // Filter each row once, judging status by its display status.
     final matches = <String, bool>{};
     for (final key in tree.orderedKeys) {
-      matches[key] = _matchesFilters(
-        tree.sessionForKey(key)!,
-        filters,
-        resolvedNow,
-        tree.effectiveStatusOfKey(key),
-      );
+      matches[key] =
+          navigationRevealKeys.contains(key) ||
+          _matchesFilters(
+            tree.sessionForKey(key)!,
+            filters,
+            resolvedNow,
+            tree.effectiveStatusOfKey(key),
+          );
     }
     // A subtree survives narrowing when it or any descendant matches, so a
     // matching child never loses the parent it has to render beneath.
@@ -620,7 +623,8 @@ final class SessionRosterProjection {
         // discovered, under another tool, or dropped as a self-link/cycle) can
         // never be revealed by a parent toggle. Surface it at top level instead
         // of letting the origin filter hide it out of reach.
-        return tree.isOrphanChildKey(key) ||
+        return navigationRevealKeys.contains(key) ||
+            tree.isOrphanChildKey(key) ||
             _originVisible(session.origin, preferences);
       }
       // While the user is actively searching, the saved overrides are ignored

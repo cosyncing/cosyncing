@@ -22,6 +22,7 @@ import 'package:cosyncing_client/src/features/sessions/roster/machine_roster_con
 import 'package:cosyncing_client/src/features/sessions/roster/roster_freshness_slot.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_overview.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -680,6 +681,9 @@ class _SessionList extends ConsumerWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 720),
         child: SessionListPane(
+          unreadCompletionKeys: ref.watch(
+            workspaceUnreadCompletionKeysProvider,
+          ),
           searchFocusNode: searchFocusNode,
           queryWindow:
               ref.watch(sessionRosterWindowProvider).valueOrNull ??

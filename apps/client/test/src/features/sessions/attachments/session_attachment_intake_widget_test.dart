@@ -340,6 +340,10 @@ void main() {
         tester.widget<TextField>(input).controller?.text,
         'platform paste',
       );
+      for (final gate in gates) {
+        gate.complete(const SessionAttachmentClipboardText(null));
+      }
+      await tester.pumpAndSettle();
     });
 
     testWidgets('text pasted after a caret move lands where it was pasted', (
@@ -1032,6 +1036,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      await openComposerMenu(tester);
       await tester.tap(find.byKey(const Key('session-detail-attach-button')));
       final input = find.byKey(const Key('session-detail-prompt-input'));
       await tester.enterText(input, 'keep this draft');

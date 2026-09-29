@@ -243,8 +243,12 @@ void main() {
         contains('Observing. The terminal owns input right now.'),
       );
       expect(
-        find.byKey(const Key('session-detail-send-button')),
-        findsNothing,
+        tester
+            .widget<IconButton>(
+              find.byKey(const Key('session-detail-send-button')),
+            )
+            .onPressed,
+        isNull,
       );
       final promptInput = tester.widget<TextField>(
         find.byKey(const Key('session-detail-prompt-input')),
@@ -413,8 +417,12 @@ void main() {
         findsNothing,
       );
       expect(
-        find.byKey(const Key('session-detail-send-button')),
-        findsNothing,
+        tester
+            .widget<IconButton>(
+              find.byKey(const Key('session-detail-send-button')),
+            )
+            .onPressed,
+        isNull,
       );
       expect(
         tester
@@ -702,8 +710,12 @@ void main() {
                 findsOneWidget,
               );
               expect(
-                find.byKey(const Key('session-detail-send-button')),
-                findsNothing,
+                tester
+                    .widget<IconButton>(
+                      find.byKey(const Key('session-detail-send-button')),
+                    )
+                    .onPressed,
+                isNull,
               );
               final field = tester.widget<TextField>(
                 find.byKey(const Key('session-detail-prompt-input')),
@@ -852,8 +864,12 @@ void main() {
         );
         expect(find.text(command), findsNothing);
         expect(
-          find.byKey(const Key('session-detail-send-button')),
-          findsNothing,
+          tester
+              .widget<IconButton>(
+                find.byKey(const Key('session-detail-send-button')),
+              )
+              .onPressed,
+          isNull,
         );
         await tester.tap(
           find.byKey(

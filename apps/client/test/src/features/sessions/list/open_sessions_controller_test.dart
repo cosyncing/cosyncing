@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_contro
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_reveal_request.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -67,6 +68,66 @@ void main() {
       expect(state.activeKey, 'claude/a');
     });
 
+    test('explicit opens request reveal, metadata refresh does not', () async {
+      final profile = _profile('p1');
+      final container = buildContainer(profile: profile);
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      final controller = container.read(
+        openSessionsControllerProvider.notifier,
+      );
+      expect(container.read(sessionRosterRevealRequestProvider), isNull);
+      controller.open(_ref('codex', 'child'));
+      final first = container.read(sessionRosterRevealRequestProvider)!;
+      expect(first.sourceKey, RosterSource.ofProfile(profile).storageKey);
+      expect(first.sessionKey, 'codex/child');
+      controller.refreshMetadata(const [
+        SessionInfo(
+          id: 'child',
+          tool: 'codex',
+          title: 'Updated title',
+          status: SessionStatus.working,
+          attachMode: AttachMode.observe,
+        ),
+      ]);
+      expect(container.read(sessionRosterRevealRequestProvider), same(first));
+      controller.open(_ref('codex', 'child'));
+      final second = container.read(sessionRosterRevealRequestProvider)!;
+      expect(second, isNot(same(first)));
+      expect(second.sourceKey, first.sourceKey);
+      expect(second.sessionKey, first.sessionKey);
+    });
+
+    test(
+      'reveal requests are cleared when the broker source changes',
+      () async {
+        final profile = StateProvider<BrokerProfile?>((_) => _profile('p1'));
+        final container = ProviderContainer(
+          overrides: [
+            openSessionsStoreProvider.overrideWithValue(store),
+            activeBrokerProfileProvider.overrideWith(
+              (ref) => ref.watch(profile),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        await container.read(openSessionsControllerProvider.future);
+        container
+            .read(openSessionsControllerProvider.notifier)
+            .open(_ref('codex', 'child'));
+        final first = container.read(sessionRosterRevealRequestProvider)!;
+        container.read(profile.notifier).state = _profile('p2');
+        expect(container.read(sessionRosterRevealRequestProvider), isNull);
+        await container.read(openSessionsControllerProvider.future);
+        container
+            .read(openSessionsControllerProvider.notifier)
+            .open(_ref('codex', 'child'));
+        final second = container.read(sessionRosterRevealRequestProvider)!;
+        expect(second.sourceKey, isNot(first.sourceKey));
+        expect(second.sessionKey, first.sessionKey);
+      },
+    );
+
     test('close removes and activates a neighbor', () async {
       final container = buildContainer(profile: _profile('p1'));
       addTearDown(container.dispose);
@@ -110,6 +171,56 @@ void main() {
       final state = container.read(openSessionsControllerProvider).value!;
       expect(state.refs.map((ref) => ref.key), ['codex/b']);
       expect(state.activeKey, 'codex/b');
+    });
+
+    test(
+      'close all and undo preserve sessions and newer open metadata',
+      () async {
+        final container = buildContainer(profile: _profile('p1'));
+        addTearDown(container.dispose);
+        await container.read(openSessionsControllerProvider.future);
+        final controller =
+            container.read(openSessionsControllerProvider.notifier)
+              ..open(_ref('claude', 'a'))
+              ..open(_ref('codex', 'b'));
+        final closed = await controller.closeAll();
+        expect(
+          container.read(openSessionsControllerProvider).value!.refs,
+          isEmpty,
+        );
+        controller
+          ..open(_ref('pi', 'c'))
+          ..restoreClosedTabs(closed!);
+        final restored = container.read(openSessionsControllerProvider).value!;
+        expect(restored.refs.map((entry) => entry.key), [
+          'pi/c',
+          'claude/a',
+          'codex/b',
+        ]);
+        expect(restored.activeKey, 'codex/b');
+        expect(restored.refs.last.status, isNull);
+      },
+    );
+
+    test('undo refuses a different broker source', () async {
+      final container = buildContainer(profile: _profile('p1'));
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .restoreClosedTabs(
+            ClosedSessionTabs(
+              'other-source',
+              OpenSessionsState(
+                refs: [_ref('claude', 'a')],
+                activeKey: 'claude/a',
+              ),
+            ),
+          );
+      expect(
+        container.read(openSessionsControllerProvider).value!.refs,
+        isEmpty,
+      );
     });
 
     test('reorder takes an already-adjusted destination index', () async {

@@ -55,30 +55,26 @@ void main() {
       reason: 'the deleted permanent command surface must not return',
     );
 
-    if (width >= 840) {
+    // The bottom navigation bar is gone at every width: the shared sidebar
+    // (or, at 900dp and below, its drawer) carries the destinations.
+    expect(bottomNavigation, findsNothing);
+    if (width > 900) {
       expect(
         attentionAction,
         findsOneWidget,
         reason:
-            'wide (>=840dp, width=$width) should expose the contextual '
-            'Attention action',
+            'wide (>900dp, width=$width) should show the sidebar with its '
+            'Notifications destination',
       );
       expect(settingsAction, findsOneWidget);
       expect(newSessionAction, findsOneWidget);
-      expect(
-        bottomNavigation,
-        findsNothing,
-        reason:
-            'wide (>=840dp, width=$width) should not render compact '
-            'bottom navigation',
-      );
     } else {
       expect(
-        bottomNavigation,
+        find.byKey(const Key('workspace-open-drawer')),
         findsOneWidget,
         reason:
-            'compact/medium (<840dp, width=$width) should retain bottom '
-            'navigation',
+            'narrow (<=900dp, width=$width) should offer the sidebar as a '
+            'drawer',
       );
       expect(attentionAction, findsNothing);
       expect(settingsAction, findsNothing);

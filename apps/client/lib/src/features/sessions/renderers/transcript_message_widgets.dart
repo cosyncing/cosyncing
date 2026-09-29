@@ -128,6 +128,7 @@ class _TranscriptBoxMessage extends StatelessWidget {
     this.detailContent,
     this.noDetailText,
     this.isError = false,
+    this.plain = false,
     this.payloadAsChips = false,
   });
 
@@ -139,6 +140,7 @@ class _TranscriptBoxMessage extends StatelessWidget {
   final Widget? detailContent;
   final String? noDetailText;
   final bool isError;
+  final bool plain;
   final bool payloadAsChips;
 
   @override
@@ -160,8 +162,9 @@ class _TranscriptBoxMessage extends StatelessWidget {
     return Align(
       alignment: Alignment.centerLeft,
       child: FractionallySizedBox(
-        widthFactor: _transcriptBubbleWidthFactor,
+        widthFactor: plain ? 1 : _transcriptBubbleWidthFactor,
         child: TranscriptBox(
+          plain: plain,
           tone: isError ? TranscriptBoxTone.error : TranscriptBoxTone.neutral,
           icon: icon,
           title: title,

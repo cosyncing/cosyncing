@@ -15,4 +15,5 @@ export 'components/section_header.dart';
 export 'components/selectable_tap_region.dart';
 export 'components/status_dot.dart';
 export 'components/status_pill.dart';
+export 'components/stroke_icon.dart';
 export 'components/transcript_box.dart';

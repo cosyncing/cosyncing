@@ -560,9 +560,12 @@ void main() {
         );
         await tester.pump();
         expect(connection.historyPageRequestCount, 1);
+        // Two-row pages keep each older boundary within one viewport of the
+        // reader, so the chain ends at the fling limit rather than because a
+        // page's rows pushed the next boundary out of reach.
         connection.emitEvent(
           HistoryPageWireEvent(
-            messages: _agentMessages(5, startSeq: 196),
+            messages: _agentMessages(2, startSeq: 199),
             cursor: 'page-1',
             hasMore: true,
             endOfHistory: false,
@@ -589,7 +592,7 @@ void main() {
         );
         connection.emitEvent(
           HistoryPageWireEvent(
-            messages: _agentMessages(5, startSeq: 191),
+            messages: _agentMessages(2, startSeq: 197),
             cursor: 'page-0',
             hasMore: true,
             endOfHistory: false,
@@ -612,7 +615,7 @@ void main() {
         );
         connection.emitEvent(
           HistoryPageWireEvent(
-            messages: _agentMessages(5, startSeq: 186),
+            messages: _agentMessages(2, startSeq: 195),
             cursor: 'page-before-0',
             hasMore: true,
             endOfHistory: false,
@@ -629,7 +632,7 @@ void main() {
         expect(connection.historyPageRequestCount, 4);
         connection.emitEvent(
           HistoryPageWireEvent(
-            messages: _agentMessages(5, startSeq: 181),
+            messages: _agentMessages(2, startSeq: 193),
             cursor: 'page-before-1',
             hasMore: true,
             endOfHistory: false,

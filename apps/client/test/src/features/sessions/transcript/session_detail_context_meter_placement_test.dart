@@ -102,7 +102,7 @@ void main() {
       expect(find.text('258k / 973k'), findsOneWidget);
     });
 
-    testWidgets('sits in the left cluster, after the permission button', (
+    testWidgets('sits beside the input above the toolbar', (
       tester,
     ) async {
       sizeViewport(tester, 1280);
@@ -123,10 +123,12 @@ void main() {
         find.byKey(const Key('session-detail-send-button')),
       );
 
-      // Information, not an action: right of the permission control but still
-      // well left of the action cluster.
       expect(meter.left, greaterThan(permission.left));
-      expect(meter.left, lessThan(send.left));
+      expect(meter.bottom, lessThanOrEqualTo(send.top));
+      final input = tester.getRect(
+        find.byKey(const Key('session-detail-prompt-input')),
+      );
+      expect(meter.left, greaterThanOrEqualTo(input.right));
     });
 
     testWidgets('drops to ring style below the collapse width', (tester) async {

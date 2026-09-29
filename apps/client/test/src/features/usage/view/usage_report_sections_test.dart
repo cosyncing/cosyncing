@@ -138,10 +138,10 @@ void main() {
       final heights = <double>{};
       for (final label in labels) {
         final text = find.descendant(of: hero, matching: find.text(label));
-        // The tile is the labelled Container the text sits in.
+        // The tile uses borderless padding around its label and figure.
         final tile = find.ancestor(
           of: text,
-          matching: find.byType(Container),
+          matching: find.byType(Padding),
         );
         heights.add(tester.getSize(tile.first).height);
       }
@@ -216,21 +216,23 @@ void main() {
       expect(heatmap.to, DateTime(2026, 8, 31));
     });
 
-    testWidgets('the week view gets no per-day histogram', (tester) async {
+    testWidgets('the week view uses daily bars without a calendar', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         buildSubject(data: sampleReport(), initialPeriod: UsagePeriod.week),
       );
       await tester.pumpAndSettle();
 
-      expect(find.byType(UsageDailyHistogram), findsNothing);
+      expect(find.byKey(const Key('usage-daily-activity')), findsOneWidget);
+      expect(find.byType(UsageHeatmap), findsNothing);
     });
 
     testWidgets('the month view draws the per-day histogram', (tester) async {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
-      expect(find.byType(UsageDailyHistogram), findsOneWidget);
-      expect(find.text('Tokens per day'), findsOneWidget);
+      expect(find.byKey(const Key('usage-daily-activity')), findsOneWidget);
     });
 
     testWidgets('no daily facet means no heatmap, not an empty grid', (
@@ -240,7 +242,7 @@ void main() {
       await tester.pumpWidget(buildSubject(data: data));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('usage-report-active-days')), findsNothing);
+      expect(find.byType(UsageHeatmap), findsNothing);
       // The rest of the report still renders: one absent facet is not an
       // absent report.
       expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
@@ -278,7 +280,7 @@ void main() {
       for (final name in [
         'Claude Code',
         'Codex',
-        'openclaw',
+        'OpenClaw',
         'claude-opus-5',
         'gpt-5.6-sol',
         'kimi-k2.5',
@@ -523,7 +525,7 @@ void main() {
       // openclaw is not one of tokdash's coding apps. It used to sit behind a
       // disclosure triangle; it is now a row like any other.
       expect(
-        find.descendant(of: agents, matching: find.text('openclaw')),
+        find.descendant(of: agents, matching: find.text('OpenClaw')),
         findsOneWidget,
       );
       expect(find.byKey(const Key('usage-report-other-tools')), findsNothing);
@@ -651,8 +653,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // The per-day histogram rides under the year grid, never over the week.
-      expect(find.byType(UsageDailyHistogram), findsOneWidget);
-      expect(find.text('Tokens per day'), findsOneWidget);
+      expect(find.byKey(const Key('usage-daily-activity')), findsOneWidget);
       // The peak tile names a month on the year period.
       expect(find.text('PEAK MONTH'), findsOneWidget);
       // The sentence is gone on every period.
@@ -675,7 +676,13 @@ void main() {
     );
     expect(find.text('你的时间分布'), findsOneWidget);
     expect(find.text('本月之最'), findsOneWidget);
-    expect(find.text('按 agent'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('usage-report-agents')),
+        matching: find.text('按 agent'),
+      ),
+      findsOneWidget,
+    );
   });
 
   group('withheld project names', () {

@@ -426,7 +426,13 @@ void main() {
       await tester.ensureVisible(
         find.byKey(const Key('debug-timeline-expander')),
       );
-      await tester.drag(find.byType(ListView), const Offset(0, -240));
+      await tester.drag(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is ListView && widget.scrollDirection == Axis.vertical,
+        ),
+        const Offset(0, -240),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('debug-timeline-expander')));
       await tester.pumpAndSettle();
@@ -1345,11 +1351,9 @@ void main() {
       );
     });
 
-    testWidgets('the compact selection pip is the shared component', (
+    testWidgets('compact permission keeps its selected mode in the tooltip', (
       tester,
     ) async {
-      // A hand-rolled circle here drifts from every other status indicator the
-      // moment one of them changes. The kit is the single definition.
       final connection = ScriptedSessionDetailConnection(
         events: const [
           OptionsWireEvent(
@@ -1376,8 +1380,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Narrow enough for the composer's compact rendering, where the label is
-      // hidden and the pip is the only signal that a mode is selected.
+      // At phone width the direct permission control remains available, with
+      // its complete selected mode exposed through the tooltip.
       tester.view
         ..physicalSize = const Size(420, 900)
         ..devicePixelRatio = 1;
@@ -1396,10 +1400,19 @@ void main() {
       );
       expect(
         dots,
-        findsOneWidget,
-        reason: 'the compact pip must be the shared component, not a Container',
+        findsNothing,
+        reason: 'permission selection must not look like session status',
       );
-      expect(tester.widget<StatusDot>(dots.first).size, 8.0);
+      final tooltip = tester.widget<Tooltip>(
+        find.descendant(of: selector, matching: find.byType(Tooltip)),
+      );
+      expect(tooltip.message, contains('Auto-approve tools'));
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('session-detail-permission-option-auto')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('an offered picker keeps its chevron', (tester) async {

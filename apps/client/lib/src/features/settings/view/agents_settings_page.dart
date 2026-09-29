@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/quota_status_panel.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_today_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -114,7 +116,7 @@ class AgentsSettingsPage extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(l10n.settingsCategoryAgentsTitle),
+        title: Text(l10n.settingsEnhancementAgentsQuota),
         actions: [
           IconButton(
             key: const Key('settings-agents-usage-report'),
@@ -275,7 +277,7 @@ class _RuntimeOwnershipStrip extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: colors.secondaryContainer.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(context.tokens.radiusMd),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -357,13 +359,10 @@ class _RuntimeStatusRow extends StatelessWidget {
     final l10n = AppLocalizations.of(context);
     final colors = Theme.of(context).colorScheme;
     final pending = _runtimeRestartIsPending(update);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border.all(color: colors.outlineVariant),
-        borderRadius: BorderRadius.circular(12),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: EdgeInsets.zero,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -373,10 +372,17 @@ class _RuntimeStatusRow extends StatelessWidget {
                 children: [
                   Row(
                     children: [
+                      UsageAgentLogo(
+                        tool: switch (update.agent) {
+                          'pi' => 'pi_agent',
+                          _ => update.agent,
+                        },
+                      ),
+                      const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           update.displayName,
-                          style: Theme.of(context).textTheme.titleSmall,
+                          style: Theme.of(context).textTheme.bodyMedium,
                         ),
                       ),
                       StatusPill(

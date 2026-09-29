@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/schedules/controller/inline_scheduled_message_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -195,5 +196,50 @@ void main() {
         lessThanOrEqualTo(kMaxActiveTranscriptMessages + 8),
       );
     });
+
+    // The transcript renders the inline schedules, so it watches their
+    // controller; it must not rebuild for the controller's own bookkeeping.
+    // A poll or an onstage return publishes `loading` and then the same empty
+    // list, and each of those used to rebuild every row.
+    testWidgets(
+      'an inline schedule refresh with nothing new rebuilds no rows',
+      (
+        tester,
+      ) async {
+        useRoomyTestViewport(tester);
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: [
+              HistoryWireEvent(messages: _page(0), reset: true, cursor: 'tail'),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byKey(const Key('session-detail-chat-scroll'))),
+        );
+        final inline = inlineScheduledMessageControllerProvider(
+          InlineScheduledMessageKey(
+            tool: _sessionKey.tool,
+            sessionId: _sessionKey.sessionId,
+          ),
+        );
+        var published = 0;
+        final subscription = container.listen(inline, (_, _) => published++);
+        addTearDown(subscription.close);
+        final counter = TranscriptRowWorkCounter();
+        debugTranscriptRowWork = counter;
+        addTearDown(() => debugTranscriptRowWork = null);
+
+        await container.read(inline.notifier).refresh(force: true);
+        await tester.pumpAndSettle();
+        debugTranscriptRowWork = null;
+
+        expect(published, greaterThan(0), reason: 'the refresh really ran');
+        expect(container.read(inline).schedules, isEmpty);
+        expect(counter.reconciledRows, 0);
+      },
+    );
   });
 }

@@ -176,16 +176,19 @@ void main() {
         );
         expect(
           find.byKey(const Key('session-detail-send-button')),
-          findsNothing,
+          findsOneWidget,
         );
+        await openComposerMenu(tester);
         expect(
           tester
-              .widget<IconButton>(
+              .widget<PopupMenuItem<String>>(
                 find.byKey(const Key('session-detail-attach-button')),
               )
-              .onPressed,
-          isNull,
+              .enabled,
+          isFalse,
         );
+        await tester.tapAt(const Offset(4, 4));
+        await tester.pumpAndSettle();
         expect(
           find.byKey(const Key('session-detail-bootstrap-blocking')),
           findsNothing,
@@ -242,7 +245,7 @@ void main() {
         );
         expect(
           find.byKey(const Key('session-detail-send-button')),
-          findsNothing,
+          findsOneWidget,
         );
         expect(
           find.byKey(const Key('session-detail-bootstrap-blocking')),

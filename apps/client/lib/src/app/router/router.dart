@@ -2,13 +2,11 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:cosyncing_client/src/app/nav_badge_label.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
-import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/attention/view/attention_page.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/view/broker_profiles_page.dart';
 import 'package:cosyncing_client/src/features/connection/view/connection_page.dart';
@@ -23,6 +21,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_branch_screen.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/agents_settings_page.dart';
@@ -37,7 +36,6 @@ import 'package:cosyncing_client/src/features/settings/view/tool_display_setting
 import 'package:cosyncing_client/src/features/transfers/view/transfer_manager_page.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
-import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -173,9 +171,8 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                     routes: [
                       GoRoute(
                         path: ':tool/:id',
-                        // On Expanded width the detail is a workspace pane; a
-                        // deep link opens a tab and collapses to /sessions.
-                        // Compact/Medium keep today's push route.
+                        // Session deep links open a retained workspace tab at
+                        // every width. Nested file routes keep their drill-in.
                         redirect: (context, state) {
                           // Route-level redirects run root-first and the first
                           // non-null wins, so redirecting here would swallow
@@ -183,9 +180,6 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                           // would lose its path and land on the roster. Stand
                           // down unless this route is the leaf.
                           if (state.matchedLocation != state.uri.path) {
-                            return null;
-                          }
-                          if (!_expandedShowsWorkspace(context)) {
                             return null;
                           }
                           final tool = state.pathParameters['tool'] ?? '';
@@ -283,8 +277,7 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                 routes: [
                   GoRoute(
                     path: attentionRoute,
-                    builder: (context, state) =>
-                        AttentionPage(showSessionsBack: _isWideLayout(context)),
+                    builder: (context, state) => const AttentionPage(),
                   ),
                 ],
               ),
@@ -292,9 +285,7 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                 routes: [
                   GoRoute(
                     path: connectionRoute,
-                    builder: (context, state) => ConnectionPage(
-                      showSessionsBack: _isWideLayout(context),
-                    ),
+                    builder: (context, state) => const ConnectionPage(),
                   ),
                 ],
               ),
@@ -302,8 +293,7 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                 routes: [
                   GoRoute(
                     path: settingsRoute,
-                    builder: (context, state) =>
-                        SettingsPage(showSessionsBack: _isWideLayout(context)),
+                    builder: (context, state) => const SettingsPage(),
                     routes: [
                       // Category pages (layer two of the Settings hierarchy).
                       GoRoute(
@@ -719,109 +709,38 @@ class _AppCommandShell extends ConsumerWidget {
       ),
     );
 
-    return _LatchedKeyboardStateGuard(child: menuBar);
+    // The pinned router selects the root navigator when a shell branch cannot
+    // pop. Register the workspace's first Back step on that root route too.
+    final isCompactWorkspace =
+        GoRouterState.of(context).uri.path == sessionsRoute &&
+        MediaQuery.sizeOf(context).width <= 900;
+    final returnToOverview =
+        isCompactWorkspace &&
+        !ref.watch(workspaceOverviewVisibleProvider) &&
+        ref.watch(openSessionsControllerProvider).valueOrNull?.active != null;
+    return PopScope<Object?>(
+      canPop: !returnToOverview,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && returnToOverview) {
+          ref.read(workspaceOverviewVisibleProvider.notifier).state = true;
+        }
+      },
+      child: _LatchedKeyboardStateGuard(child: menuBar),
+    );
   }
 }
 
-/// Shell scaffold with a bottom navigation bar for the three
-/// top-level destinations.
+/// Shell for the top-level destinations: every branch renders in the shared
+/// [WorkspaceFrame], so the sidebar (or, on narrow windows, its drawer) is the
+/// one way between Sessions, Notifications and Settings at every width.
 class _ScaffoldWithNav extends StatelessWidget {
   const _ScaffoldWithNav({required this.navigationShell});
 
   final StatefulNavigationShell navigationShell;
 
   @override
-  Widget build(BuildContext context) {
-    final isWideLayout =
-        MediaQuery.of(context).size.width >= _wideNavigationBreakpoint;
-    // Session detail is a drilled-in view, not a top-level destination. On
-    // compact layouts it owns the full viewport so the composer keeps its
-    // vertical space; the AppBar back button is the way out. Wide layouts are
-    // unaffected — they already have no bottom navigation.
-    final isDrilledIn = isDrilledInSessionLocation(
-      GoRouterState.of(context).uri.path,
-    );
-    final showBottomNav = !isWideLayout && !isDrilledIn;
-
-    return Scaffold(
-      body: navigationShell,
-      bottomNavigationBar: showBottomNav
-          ? _CompactBottomNav(navigationShell: navigationShell)
-          : null,
-    );
-  }
-}
-
-class _CompactBottomNav extends ConsumerWidget {
-  const _CompactBottomNav({required this.navigationShell});
-
-  final StatefulNavigationShell navigationShell;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final l10n = AppLocalizations.of(context);
-    final unreadCount = ref.watch(attentionUnreadCountProvider);
-    final clientUpdateAvailable = ref.watch(
-      nativeClientUpdateAvailableProvider,
-    );
-    const branchIndexes = <int>[0, 1, 3];
-    final displayedIndex = branchIndexes.indexOf(
-      navigationShell.currentIndex,
-    );
-    return NavigationBar(
-      key: const Key('app-bottom-nav'),
-      // `/connection` remains a compact deep/recovery route, but is no longer
-      // a destination. Leave Sessions selected while that branch is showing;
-      // every actual destination derives its index from [branchIndexes].
-      selectedIndex: displayedIndex < 0 ? 0 : displayedIndex,
-      onDestinationSelected: (index) {
-        final branchIndex = branchIndexes[index];
-        navigationShell.goBranch(
-          branchIndex,
-          initialLocation: branchIndex == navigationShell.currentIndex,
-        );
-      },
-      destinations: [
-        NavigationDestination(
-          icon: const Icon(Icons.terminal_outlined),
-          selectedIcon: const Icon(Icons.terminal),
-          label: l10n.sessionsTitle,
-        ),
-        NavigationDestination(
-          icon: Badge(
-            isLabelVisible: unreadCount > 0,
-            label: Text(navBadgeLabel(unreadCount)),
-            child: const Icon(Icons.notifications_outlined),
-          ),
-          selectedIcon: Badge(
-            isLabelVisible: unreadCount > 0,
-            label: Text(navBadgeLabel(unreadCount)),
-            child: const Icon(Icons.notifications),
-          ),
-          label: l10n.notificationsTitle,
-        ),
-        NavigationDestination(
-          icon: Semantics(
-            label: clientUpdateAvailable
-                ? l10n.settingsClientUpdateAvailableSemantics
-                : null,
-            child: Badge(
-              isLabelVisible: clientUpdateAvailable,
-              child: const Icon(Icons.settings_outlined),
-            ),
-          ),
-          selectedIcon: Semantics(
-            label: clientUpdateAvailable
-                ? l10n.settingsClientUpdateAvailableSemantics
-                : null,
-            child: Badge(
-              isLabelVisible: clientUpdateAvailable,
-              child: const Icon(Icons.settings),
-            ),
-          ),
-          label: l10n.settingsTitle,
-        ),
-      ],
-    );
-  }
+  Widget build(BuildContext context) => WorkspaceFrame(
+    location: GoRouterState.of(context).uri.path,
+    child: navigationShell,
+  );
 }

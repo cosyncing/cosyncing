@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_remote_wake_runtime.dart';
 import 'package:cosyncing_client/src/features/attention/controller/push_token_provider.dart';
@@ -245,7 +246,7 @@ void main() {
         ('settings-category-display', 'Display'),
         ('settings-category-notifications', 'Notifications'),
         ('settings-category-broker', 'Servers'),
-        ('settings-category-agents', 'Agents & usage'),
+        ('settings-category-agents', 'Agents & Quota'),
         // Directly after Agents & usage, keeping the two usage surfaces
         // adjacent rather than scattering usage across the hub.
         ('settings-category-usage', 'Usage overview'),
@@ -280,16 +281,8 @@ void main() {
       final tile = find.byKey(const Key('settings-category-general'));
       expect(tile, findsOneWidget);
       expect(
-        find.descendant(of: tile, matching: find.byType(Badge)),
+        find.descendant(of: tile, matching: find.byType(StatusDot)),
         findsOneWidget,
-      );
-      expect(
-        tester
-            .widget<Badge>(
-              find.descendant(of: tile, matching: find.byType(Badge)),
-            )
-            .isLabelVisible,
-        isTrue,
       );
       expect(
         find.bySemanticsLabel(RegExp('App update available')),

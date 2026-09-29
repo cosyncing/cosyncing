@@ -545,13 +545,13 @@ void main() {
 
         expect(
           router.routeInformationProvider.value.uri.toString(),
-          expectedLocation,
+          '/sessions',
         );
         expect(
           find.byKey(const Key('session-detail-tab-panel-chat')),
           findsOneWidget,
         );
-        // The id round-trips through the route intact — that is what this test
+        // The id round-trips into the selected workspace tab intact — this test
         // is about. U3 stops it being what the page is *titled*: a transfer row
         // deep-links with no known title, so Session Detail names the page
         // neutrally until the broker's session frame arrives.
@@ -616,7 +616,7 @@ void main() {
 
         expect(
           router.routeInformationProvider.value.uri.toString(),
-          expectedLocation,
+          '/sessions',
         );
         expect(
           find.byKey(const Key('session-detail-tab-panel-chat')),
@@ -1547,7 +1547,7 @@ void main() {
         await _pumpUntilRoute(tester, router, expectedLocation);
         expect(
           router.routeInformationProvider.value.uri.toString(),
-          expectedLocation,
+          '/sessions',
         );
       },
     );
@@ -2362,7 +2362,7 @@ void main() {
 
         expect(
           router.routeInformationProvider.value.uri.toString(),
-          expectedLocation,
+          '/sessions',
         );
       },
     );
@@ -3624,9 +3624,18 @@ Future<void> _pumpUntilRoute(
 }) async {
   for (var attempt = 0; attempt < 20; attempt++) {
     await tester.pump(const Duration(milliseconds: 16));
+    final expectedSession = Uri.parse(expectedLocation).pathSegments;
     final routeReady =
-        router.routeInformationProvider.value.uri.toString() ==
-        expectedLocation;
+        router.routeInformationProvider.value.uri.path == '/sessions' &&
+        find
+            .byWidgetPredicate(
+              (widget) =>
+                  widget is SessionDetailPage &&
+                  widget.tool == expectedSession[1] &&
+                  widget.sessionId == expectedSession[2],
+            )
+            .evaluate()
+            .isNotEmpty;
     final contentReady = content == null || content.evaluate().isNotEmpty;
     final absentReady = absent == null || absent.evaluate().isEmpty;
     if (routeReady && contentReady && absentReady) return;

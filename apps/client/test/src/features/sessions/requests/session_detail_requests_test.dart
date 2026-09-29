@@ -7,6 +7,7 @@ import 'dart:ui' show PointerDeviceKind;
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -98,7 +99,7 @@ void main() {
     );
 
     testWidgets(
-      'permission title, body, and actions share one selectable box',
+      'permission title, body, and actions share one plain selectable decision',
       (
         tester,
       ) async {
@@ -127,7 +128,14 @@ void main() {
           const Key('session-detail-permission-approve-perm-one-box'),
         );
         await tester.ensureVisible(action);
-        final card = find.ancestor(of: action, matching: find.byType(Card));
+        expect(
+          find.ancestor(of: action, matching: find.byType(Card)),
+          findsNothing,
+        );
+        final card = find.ancestor(
+          of: action,
+          matching: find.byType(TranscriptBox),
+        );
         expect(card, findsOneWidget);
         expect(
           find.descendant(of: card, matching: find.text('Permission request')),
@@ -151,59 +159,69 @@ void main() {
       },
     );
 
-    testWidgets('question title, input, and actions share one selectable box', (
-      tester,
-    ) async {
-      final connection = ScriptedSessionDetailConnection(
-        events: const [
-          MessageWireEvent(
-            seq: 1,
-            message: AgentMessage(
-              type: AgentMessageType.questionRequest,
-              raw: {
-                'type': 'question-request',
-                'requestId': 'question-one-box',
-                'questions': [
-                  {'question': 'Which server should run this?'},
-                ],
-              },
+    testWidgets(
+      'question title, input, and actions share one plain selectable decision',
+      (
+        tester,
+      ) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.questionRequest,
+                raw: {
+                  'type': 'question-request',
+                  'requestId': 'question-one-box',
+                  'questions': [
+                    {'question': 'Which server should run this?'},
+                  ],
+                },
+              ),
             ),
-          ),
-        ],
-      );
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: const [], connection: connection),
-      );
-      await tester.pumpAndSettle();
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
 
-      final action = find.byKey(
-        const Key(
-          'session-detail-question-answer-button-question-one-box',
-        ),
-      );
-      await tester.ensureVisible(action);
-      final card = find.ancestor(of: action, matching: find.byType(Card));
-      expect(card, findsOneWidget);
-      expect(
-        find.descendant(of: card, matching: find.text('Question')),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(
-          of: card,
-          matching: find.text('Which server should run this?'),
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: card, matching: find.byType(TextField)),
-        findsOneWidget,
-      );
-      expect(
-        find.ancestor(of: action, matching: find.byType(SelectionArea)),
-        findsOneWidget,
-      );
-    });
+        final action = find.byKey(
+          const Key(
+            'session-detail-question-answer-button-question-one-box',
+          ),
+        );
+        await tester.ensureVisible(action);
+        expect(
+          find.ancestor(of: action, matching: find.byType(Card)),
+          findsNothing,
+        );
+        final card = find.ancestor(
+          of: action,
+          matching: find.byType(TranscriptBox),
+        );
+        expect(card, findsOneWidget);
+        expect(
+          find.descendant(of: card, matching: find.text('Question')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: card,
+            matching: find.text('Which server should run this?'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: card, matching: find.byType(TextField)),
+          findsOneWidget,
+        );
+        expect(
+          find.ancestor(of: action, matching: find.byType(SelectionArea)),
+          findsOneWidget,
+        );
+      },
+    );
 
     testWidgets('request actions use pointer and touch target heights', (
       tester,

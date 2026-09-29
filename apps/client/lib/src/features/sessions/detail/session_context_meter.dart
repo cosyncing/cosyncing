@@ -30,6 +30,7 @@ class SessionContextMeter extends StatelessWidget {
   const SessionContextMeter({
     required this.telemetry,
     this.style = SessionContextMeterStyle.ring,
+    this.lastKnown = false,
     super.key,
   });
 
@@ -38,6 +39,9 @@ class SessionContextMeter extends StatelessWidget {
 
   /// Which presentation to render.
   final SessionContextMeterStyle style;
+
+  /// Whether this reading is cached while the session is disconnected.
+  final bool lastKnown;
 
   /// Base ring diameter in logical pixels before UI scale is applied.
   ///
@@ -58,7 +62,7 @@ class SessionContextMeter extends StatelessWidget {
 
     final used = telemetry.contextUsedTokens;
     final max = telemetry.contextMaxTokens;
-    final tooltip = used != null && max != null
+    final reading = used != null && max != null
         ? l10n.sessionContextMeterTooltipExact(
             _formatThousands(used),
             _formatThousands(max),
@@ -66,19 +70,42 @@ class SessionContextMeter extends StatelessWidget {
           )
         : l10n.sessionContextMeterTooltip(percent.round());
 
+    final tooltip = lastKnown
+        ? l10n.conversationEnhancementLastKnown(reading)
+        : reading;
     return Tooltip(
       message: tooltip,
-      child: switch (style) {
-        SessionContextMeterStyle.ring => _buildRing(context, percent, color),
-        SessionContextMeterStyle.verbose => _buildVerbose(
-          theme,
-          l10n,
-          percent,
-          color,
-          used,
-          max,
+      child: TextButton(
+        key: const Key('session-context-meter-details'),
+        style: TextButton.styleFrom(
+          minimumSize: const Size(40, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
-      },
+        onPressed: () => showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            content: Text(tooltip),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text(MaterialLocalizations.of(context).closeButtonLabel),
+              ),
+            ],
+          ),
+        ),
+        child: switch (style) {
+          SessionContextMeterStyle.ring => _buildRing(context, percent, color),
+          SessionContextMeterStyle.verbose => _buildVerbose(
+            theme,
+            l10n,
+            percent,
+            color,
+            used,
+            max,
+          ),
+        },
+      ),
     );
   }
 

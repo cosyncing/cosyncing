@@ -3,6 +3,8 @@ import 'dart:ui' as ui;
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/app/app.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
@@ -24,6 +26,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_control
 import 'package:cosyncing_client/src/features/sessions/list/session_list_repository.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
+import 'package:cosyncing_client/src/features/settings/controller/theme_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
@@ -218,6 +221,31 @@ void main() {
       );
     });
 
+    testWidgets('a theme change is complete in the next frame', (tester) async {
+      // A cross-fade rebuilt every themed widget on each of its frames,
+      // retained conversations included, which is what made switching stutter.
+      final container = buildContainer(themeMode: 'light');
+      await tester.pumpWidget(buildApp(container: container));
+      await tester.pumpAndSettle();
+      final page = find.byType(Navigator).first;
+      expect(
+        Theme.of(tester.element(page)).extension<AppTokens>(),
+        same(themeSpecById(kDefaultThemeId).light),
+      );
+
+      unawaited(
+        container
+            .read(themeControllerProvider.notifier)
+            .selectTheme('teal-obsidian'),
+      );
+      await tester.pump();
+
+      expect(
+        Theme.of(tester.element(page)).extension<AppTokens>(),
+        same(themeSpecById('teal-obsidian').light),
+      );
+    });
+
     testWidgets(
       'repeated handoff failure is one localized selectable app-level notice',
       (tester) async {
@@ -363,13 +391,19 @@ void main() {
           _openSessionPayload('warm-session');
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
 
       expect(
         goRouter.routeInformationProvider.value.uri.path,
-        '/sessions/codex/warm-session',
+        '/sessions',
       );
       expect(
-        find.byType(SessionDetailPage, skipOffstage: false),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is SessionDetailPage &&
+              widget.tool == 'codex' &&
+              widget.sessionId == 'warm-session',
+        ),
         findsOneWidget,
       );
       expect(
@@ -406,13 +440,19 @@ void main() {
         await tester.pumpWidget(buildApp(container: container));
         await tester.pump();
         await tester.pump(const Duration(seconds: 1));
+        await tester.pumpAndSettle();
 
         expect(
           goRouter.routeInformationProvider.value.uri.path,
-          '/sessions/codex/cold-session',
+          '/sessions',
         );
         expect(
-          find.byType(SessionDetailPage, skipOffstage: false),
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is SessionDetailPage &&
+                widget.tool == 'codex' &&
+                widget.sessionId == 'cold-session',
+          ),
           findsOneWidget,
         );
         expect(container.read(sessionNotificationTapPayloadProvider), isNull);
@@ -472,11 +512,20 @@ void main() {
         );
         await tester.pump();
         await tester.pump(const Duration(seconds: 1));
+        await tester.pumpAndSettle();
 
-        expect(find.byType(SessionDetailPage), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is SessionDetailPage &&
+                widget.tool == 'codex' &&
+                widget.sessionId == 'session-open',
+          ),
+          findsOneWidget,
+        );
         expect(
           goRouter.routeInformationProvider.value.uri.path,
-          '/sessions/codex/session-open',
+          '/sessions',
         );
         expect(repository.markReadCallCount, 0);
         expect(repository.markDismissedCallCount, 0);

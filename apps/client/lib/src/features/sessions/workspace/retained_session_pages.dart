@@ -76,6 +76,13 @@ class _RetainedSessionPagesState extends ConsumerState<RetainedSessionPages>
     with WidgetsBindingObserver {
   /// Least recent to most recent.
   final List<String> _lru = <String>[];
+
+  /// Built pages by session key, reused while the reference and the builder
+  /// are unchanged. Without this every parent rebuild (a roster poll, a tab
+  /// reorder, an unread marker) handed each retained page a new widget, and
+  /// every transcript — hidden ones included — rebuilt and relaid out.
+  final Map<String, ({SessionRef session, Widget page})> _pages = {};
+  Object? _pagesBuilder;
   bool _branchVisible = true;
   ProviderContainer? _container;
   bool _focusPublishScheduled = false;
@@ -119,7 +126,10 @@ class _RetainedSessionPagesState extends ConsumerState<RetainedSessionPages>
     final sourceChanged = oldWidget.source != widget.source;
     final previousFocus = _focusedKeyOf(oldWidget);
     final focusChanged = previousFocus != _focusedKey;
-    if (sourceChanged) _lru.clear();
+    if (sourceChanged) {
+      _lru.clear();
+      _pages.clear();
+    }
     // Media follows focus, not visibility: a pane that is merely on screen
     // beside the focused one has not lost the microphone it was holding.
     if (sourceChanged || focusChanged) {
@@ -244,6 +254,14 @@ class _RetainedSessionPagesState extends ConsumerState<RetainedSessionPages>
     }
   }
 
+  Widget _pageFor(BuildContext context, SessionRef session) {
+    final cached = _pages[session.key];
+    if (cached != null && cached.session == session) return cached.page;
+    final page = widget.builder(context, session);
+    _pages[session.key] = (session: session, page: page);
+    return page;
+  }
+
   @override
   Widget build(BuildContext context) {
     final onscreen = _visibleKeys;
@@ -251,6 +269,11 @@ class _RetainedSessionPagesState extends ConsumerState<RetainedSessionPages>
     final byKey = <String, SessionRef>{
       for (final session in widget.open.refs) session.key: session,
     };
+    if (!identical(_pagesBuilder, widget.builder)) {
+      _pages.clear();
+      _pagesBuilder = widget.builder;
+    }
+    _pages.removeWhere((key, _) => !_lru.contains(key));
     return Stack(
       key: const Key('retained-session-pages'),
       fit: StackFit.expand,
@@ -264,7 +287,7 @@ class _RetainedSessionPagesState extends ConsumerState<RetainedSessionPages>
               pageKey: key,
               visible: onscreen.contains(key),
               focused: key == focused,
-              child: widget.builder(context, session),
+              child: _pageFor(context, session),
             ),
       ],
     );

@@ -6,6 +6,7 @@ import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/connection/model/connection_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/pairing/view/pairing_page.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_hold.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -94,7 +95,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage>
                 onPressed: () => context.go(sessionsRoute),
                 icon: const Icon(Icons.arrow_back),
               )
-            : null,
+            : WorkspaceFrameScope.menuButton(context),
         title: Text(l10n.connectionTitle),
         actions: [
           TextButton.icon(

@@ -98,7 +98,13 @@ void main() {
       await tester.pumpWidget(buildSubject());
       await tester.pumpAndSettle();
 
-      await tester.scrollUntilVisible(find.text('Spacious'), 200);
+      final densityControl = find.byType(SegmentedButton<UiDensity>);
+      await tester.scrollUntilVisible(densityControl, 200);
+      await Scrollable.ensureVisible(
+        tester.element(densityControl),
+        alignment: 0.5,
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Spacious'));
       await tester.pumpAndSettle();
 

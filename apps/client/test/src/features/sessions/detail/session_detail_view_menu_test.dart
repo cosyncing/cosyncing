@@ -265,7 +265,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const Key('session-detail-view-back')), findsNothing);
-      expect(find.text('Signal session'), findsOneWidget);
+      expect(
+        find.byKey(const Key('session-detail-context-label')),
+        findsOneWidget,
+      );
 
       await openSessionDetailTestTab(tester, 'session-detail-tab-debug');
 
@@ -289,7 +292,7 @@ void main() {
       );
     });
 
-    testWidgets('the strip is 32dp and full-width across layouts and themes', (
+    testWidgets('the context strip uses compact desktop and touch heights', (
       tester,
     ) async {
       final spec = themeSpecById(kDefaultThemeId);
@@ -314,10 +317,8 @@ void main() {
             tester
                 .getSize(find.byKey(const Key('session-detail-top-strip')))
                 .height,
-            32,
-            reason:
-                'the session strip is pinned to 32dp at ${width}px in '
-                '$brightness (owner override of the 36dp spec)',
+            width < 600 ? 40 : 32,
+            reason: '40dp touch context, 32dp desktop context',
           );
           expect(
             tester
@@ -385,9 +386,9 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.byKey(const Key('session-detail-top-row-telemetry')),
+          find.byKey(const Key('session-detail-information')),
           findsOneWidget,
-          reason: 'the fixture must actually exercise the telemetry slot',
+          reason: 'telemetry stays available through session information',
         );
         final stripRect = tester.getRect(
           find.byKey(const Key('session-detail-top-strip')),

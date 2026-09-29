@@ -8,6 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('quota identities keep provider names separate from usage sources', () {
+    expect(quotaProviderDisplayName('commandcode'), 'Command Code');
+    expect(quotaProviderDisplayName('zai'), 'Z.ai');
+    expect(quotaProviderDisplayName('opencode_go'), 'OpenCode Go');
+  });
+
   final now = DateTime(2026, 8, 1, 12);
 
   int epochSeconds(DateTime value) => value.millisecondsSinceEpoch ~/ 1000;

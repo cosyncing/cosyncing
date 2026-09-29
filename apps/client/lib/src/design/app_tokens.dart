@@ -16,6 +16,8 @@ class AppTokens extends ThemeExtension<AppTokens> {
     required this.canvas,
     required this.surface,
     required this.surface2,
+    required this.surfaceHover,
+    required this.sidebar,
     required this.separator,
     required this.textPrimary,
     required this.textSecondary,
@@ -56,6 +58,15 @@ class AppTokens extends ThemeExtension<AppTokens> {
 
   /// Secondary fill (chips, inputs, rail).
   final Color surface2;
+
+  /// Hover and selected-row fill on the [sidebar]: its destinations,
+  /// projects and sessions.
+  final Color surfaceHover;
+
+  /// The workspace sidebar and its drawer. Most themes use [surface]; a theme
+  /// whose [surface] matches [canvas] sets it one step darker so the sidebar
+  /// still reads as its own plane.
+  final Color sidebar;
 
   /// List/section division — may be a tonal shift rather than a hard border.
   final Color separator;
@@ -190,6 +201,8 @@ class AppTokens extends ThemeExtension<AppTokens> {
     Color? canvas,
     Color? surface,
     Color? surface2,
+    Color? surfaceHover,
+    Color? sidebar,
     Color? separator,
     Color? textPrimary,
     Color? textSecondary,
@@ -225,6 +238,8 @@ class AppTokens extends ThemeExtension<AppTokens> {
       canvas: canvas ?? this.canvas,
       surface: surface ?? this.surface,
       surface2: surface2 ?? this.surface2,
+      surfaceHover: surfaceHover ?? this.surfaceHover,
+      sidebar: sidebar ?? this.sidebar,
       separator: separator ?? this.separator,
       textPrimary: textPrimary ?? this.textPrimary,
       textSecondary: textSecondary ?? this.textSecondary,
@@ -267,6 +282,8 @@ class AppTokens extends ThemeExtension<AppTokens> {
       canvas: Color.lerp(canvas, other.canvas, t)!,
       surface: Color.lerp(surface, other.surface, t)!,
       surface2: Color.lerp(surface2, other.surface2, t)!,
+      surfaceHover: Color.lerp(surfaceHover, other.surfaceHover, t)!,
+      sidebar: Color.lerp(sidebar, other.sidebar, t)!,
       separator: Color.lerp(separator, other.separator, t)!,
       textPrimary: Color.lerp(textPrimary, other.textPrimary, t)!,
       textSecondary: Color.lerp(textSecondary, other.textSecondary, t)!,

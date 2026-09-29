@@ -6,6 +6,8 @@
 library;
 
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:flutter/material.dart';
 
 /// One navigation row inside a [SettingsLinkGroup].
@@ -39,18 +41,8 @@ class SettingsLinkTile {
   final VoidCallback onTap;
 }
 
-/// A set of related navigation rows sharing one card.
-///
-/// Settings used to give every destination its own [Card]. A dozen identical
-/// single-row cards read as one undifferentiated column: nothing signalled that
-/// Appearance and Tool display are the same kind of setting while Pairing is
-/// not, and each card spent its own margin and elevation to say nothing.
-/// Collapsing each category into a single card with hairline dividers gives the
-/// page a scannable shape and reclaims the inter-card gaps.
-///
-/// [title] is optional because the hub's own card needs no heading — the page
-/// title already names it. Inside a category page, where several groups stack,
-/// the heading states the shape the dividers only imply.
+/// Quiet navigation rows. Selection and hover belong to the row itself.
+/// [title] is optional when the surrounding page already names the group.
 class SettingsLinkGroup extends StatelessWidget {
   /// Creates a link group.
   const SettingsLinkGroup({required this.tiles, this.title, super.key});
@@ -64,53 +56,63 @@ class SettingsLinkGroup extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final tokens = context.tokens;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (title != null)
-          Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 8),
-            child: Text(
-              title!,
-              style: theme.textTheme.labelLarge?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+          SectionHeader(title!, padding: const EdgeInsets.only(bottom: 8)),
+        for (final tile in tiles)
+          ListTile(
+            key: tile.tileKey,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 8,
+              vertical: 4,
+            ),
+            minLeadingWidth: 20,
+            horizontalTitleGap: 12,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(tokens.radiusMd),
+            ),
+            leading: Semantics(
+              label: tile.showAttentionDot
+                  ? AppLocalizations.of(
+                      context,
+                    ).settingsClientUpdateAvailableSemantics
+                  : null,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Icon(tile.icon, size: 20, color: tokens.textSecondary),
+                  if (tile.showAttentionDot)
+                    Positioned(
+                      top: -2,
+                      right: -2,
+                      child: StatusDot(color: tokens.statusNeedsInput),
+                    ),
+                ],
               ),
             ),
+            title: Text(tile.title, style: theme.textTheme.bodyMedium),
+            subtitle: Text(
+              tile.subtitle,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: tokens.textTertiary,
+              ),
+            ),
+            trailing: Icon(
+              Icons.chevron_right,
+              size: 16,
+              color: tokens.textTertiary,
+            ),
+            onTap: tile.onTap,
           ),
-        Card(
-          margin: EdgeInsets.zero,
-          child: Column(
-            children: [
-              for (var index = 0; index < tiles.length; index++) ...[
-                if (index > 0) const Divider(height: 1, indent: 56),
-                ListTile(
-                  key: tiles[index].tileKey,
-                  leading: Semantics(
-                    label: tiles[index].showAttentionDot
-                        ? AppLocalizations.of(
-                            context,
-                          ).settingsClientUpdateAvailableSemantics
-                        : null,
-                    child: Badge(
-                      isLabelVisible: tiles[index].showAttentionDot,
-                      child: Icon(tiles[index].icon),
-                    ),
-                  ),
-                  title: Text(tiles[index].title),
-                  subtitle: Text(tiles[index].subtitle),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: tiles[index].onTap,
-                ),
-              ],
-            ],
-          ),
-        ),
       ],
     );
   }
 }
 
-/// A titled card holding one block of controls.
+/// A borderless settings block with a shared section heading.
 class SettingsSection extends StatelessWidget {
   /// Creates a settings section.
   const SettingsSection({
@@ -127,17 +129,14 @@ class SettingsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            child,
-          ],
-        ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SectionHeader(title, padding: const EdgeInsets.only(bottom: 12)),
+          child,
+        ],
       ),
     );
   }
@@ -162,7 +161,9 @@ class SettingsTechnicalDetailsDisclosure extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Theme(
-      data: theme.copyWith(dividerColor: Colors.transparent),
+      data: theme.copyWith(
+        dividerColor: context.tokens.separator.withValues(alpha: 0),
+      ),
       child: ExpansionTile(
         key: const Key('settings-technical-details'),
         tilePadding: EdgeInsets.zero,

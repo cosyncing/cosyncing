@@ -1,3 +1,4 @@
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -11,8 +12,8 @@ const String kUngroupedProjectKey = '__ungrouped__';
 /// re-pumps the same pane (for example across several widths) can call it on
 /// every iteration without toggling the group shut again.
 /// Set [settle] to false when the caller only needs one frame. The normal path
-/// advances the finite expand transition by a fixed duration because working
-/// session dots intentionally animate continuously.
+/// advances a fixed duration rather than settling, so a caller whose subject
+/// runs a spinner still gets there.
 Future<void> expandRosterProject(
   WidgetTester tester, {
   String key = kUngroupedProjectKey,
@@ -20,9 +21,9 @@ Future<void> expandRosterProject(
 }) async {
   final collapsed = find.byWidgetPredicate(
     (widget) =>
-        widget is Icon &&
+        widget is StrokeIcon &&
         widget.key == ValueKey('project-collapse-icon-$key') &&
-        widget.icon == Icons.chevron_right,
+        widget.quarterTurns != 0,
   );
   if (collapsed.evaluate().isEmpty) return;
   await tester.tap(find.byKey(ValueKey('project-header-$key')));

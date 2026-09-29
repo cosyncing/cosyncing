@@ -1021,7 +1021,7 @@
   "sessionForkAgentOwnedRefusal": "此会话由另一个 Agent 会话派生，请改为对其父会话执行 Fork。",
   "sessionRosterLoadFailed": "无法加载会话。",
   "sessionRosterUpdateFailed": "更新失败，正在显示上次的会话列表。",
-  "sessionRosterSearchHint": "搜索会话或项目…",
+  "sessionRosterSearchHint": "搜索会话",
   "sessionRosterFilterStatus": "状态",
   "sessionRosterAllStatuses": "全部状态",
   "sessionRosterStatusNeedsInput": "需要输入",
@@ -2617,5 +2617,138 @@
   "androidBackgroundConnectionSubtitle": "离开应用后 Cosyncing 仍会运行，通知能及时送达。运行期间 Android 会显示一条静默通知，耗电也会增加。",
   "androidBackgroundConnectionChannelName": "后台连接",
   "androidBackgroundConnectionNotificationTitle": "正在保持连接以接收通知",
-  "androidBackgroundConnectionNotificationText": "可在“设置 → 通知”中关闭。"
+  "androidBackgroundConnectionNotificationText": "可在“设置 → 通知”中关闭。",
+  "settingsEnhancementConversation": "对话",
+  "settingsEnhancementMessageText": "消息字号",
+  "settingsEnhancementMessageSpacing": "消息间距",
+  "settingsEnhancementFontSize": "{size} 像素",
+  "settingsEnhancementReadingWidth": "阅读宽度",
+  "settingsEnhancementReadingWidthHint": "将对话限制为 900 像素。关闭后使用全部可用宽度。",
+  "settingsEnhancementIndicators": "会话指示标记",
+  "settingsEnhancementWorking": "运行中",
+  "settingsEnhancementNeedsInput": "需要输入",
+  "settingsEnhancementReadyReview": "等待查看",
+  "settingsEnhancementIndicatorsHint": "徽标标识智能体。“运行中”表示正在执行一轮任务；“需要输入”表示等待回复。红点表示尚未阅读的完成通知。加载和重新连接是独立的连接状态。",
+  "settingsEnhancementAgentsQuota": "智能体与配额",
+  "settingsEnhancementAgentsQuotaHint": "托管运行时、配额窗口与提醒",
+  "usageEnhancementDay": "日",
+  "usageEnhancementCurrent": "当前时段",
+  "usageEnhancementIntegrations": "用量集成",
+  "usageEnhancementIntegrationsHint": "此处列出支持的数据源。是否可用取决于所选服务器及其 Tokdash 安装。",
+  "usageEnhancementNoReading": "本时段无读数",
+  "usageEnhancementExportCsv": "导出 CSV",
+  "usageEnhancementActivity": "活动",
+  "usageEnhancementDetailUnavailable": "— 表示此数据源未提供该明细。",
+  "@settingsEnhancementFontSize": {
+    "placeholders": {
+      "size": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationEnhancementMore": "更多输入操作",
+  "conversationEnhancementDetails": "会话详情",
+  "conversationEnhancementLastKnown": "上次已知数据：{reading}",
+  "@conversationEnhancementLastKnown": {
+    "placeholders": {
+      "reading": {
+        "type": "String"
+      }
+    }
+  },
+  "inboxEnhancementJumpActivity": "跳转到动态",
+  "inboxEnhancementNeedsAttention": "需要关注 · {count}",
+  "@inboxEnhancementNeedsAttention": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementAllPending": "全部待处理",
+  "inboxEnhancementInput": "需要你的回复",
+  "inboxEnhancementCompletions": "未读的完成通知",
+  "inboxEnhancementNoPending": "没有待处理请求或未读的完成通知。",
+  "inboxEnhancementRecentActivity": "最近动态 · {count} 条未读",
+  "@inboxEnhancementRecentActivity": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementUnread": "未读",
+  "inboxEnhancementActivityActions": "动态操作",
+  "inboxEnhancementMarkAllRead": "将动态标为已读",
+  "inboxEnhancementClearActivity": "清除动态",
+  "inboxEnhancementNoActivity": "没有符合此筛选条件的动态。",
+  "inboxEnhancementActivityCleared": "已清除动态",
+  "inboxEnhancementUndo": "撤销",
+  "inboxEnhancementReply": "回复",
+  "inboxEnhancementReview": "查看",
+  "inboxEnhancementMarkRead": "标为已读",
+  "workspaceOverview": "概览",
+  "sessionRosterProjectsLabel": "项目",
+  "sessionRosterFilters": "筛选会话",
+  "sessionRosterProjectAttention": "有会话需要输入，或有已完成的工作待查看",
+  "workspaceServerSessionCount": "{count, plural, other{{count} 个会话}}",
+  "workspaceHideSidebar": "隐藏侧边栏",
+  "workspaceRunningDetail": "正在推进",
+  "workspaceWaitingDetail": "需要你的输入",
+  "workspaceCompletionsDetail": "已完成本轮",
+  "workspaceOverviewHeading": "让今天的工作，同步有序。",
+  "workspaceOverviewIntro": "看看所有项目的最新进展。",
+  "workspaceNoMachine": "选择服务器",
+  "workspaceRunning": "运行中",
+  "workspaceWaiting": "等待你的回复",
+  "workspaceUnreadCompletions": "未读完成通知",
+  "workspaceCompletionReadNote": "打开会话时，完成通知会标为已读。",
+  "workspaceLoading": "正在加载最新数据…",
+  "workspaceStateUnavailable": "当前活动状态不可用。侧边栏中保留了已缓存的会话信息。",
+  "workspacePartialRoster": "会话列表尚不完整：计数仅包含服务器目前已发现的会话。",
+  "workspaceNeedsAttention": "需要关注",
+  "workspaceNothingHere": "此视图目前没有内容。",
+  "workspaceToday": "今日活动",
+  "workspaceUsageDetails": "用量详情",
+  "workspaceEstimatedTime": "估算的智能体活动时间",
+  "workspaceRuntimeUnavailable": "观测到的执行时间不可用。",
+  "workspaceConcurrentTime": "并行会话的时间会累加。",
+  "workspaceTokenBreakdownUnavailable": "此数据源未提供完整的 token 明细。",
+  "workspacePartialUsage": "用量数据不完整：{sources} 的数据不可用。",
+  "@workspacePartialUsage": {
+    "placeholders": {
+      "sources": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceCoverageUnknown": "数据源覆盖情况不可用。",
+  "workspaceCloseAllTabs": "关闭所有标签页",
+  "workspaceTabsClosed": "标签页已关闭，会话继续运行。",
+  "workspaceUndoCloseTabs": "撤销",
+  "workspaceChildAttention": "{count} 个关联会话 · {waiting} 个等待回复 · {ready} 个最近完成",
+  "@workspaceChildAttention": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "waiting": {
+        "type": "int"
+      },
+      "ready": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementSubagentOf": "{parent} 的子代理",
+  "@inboxEnhancementSubagentOf": {
+    "placeholders": {
+      "parent": {
+        "type": "String"
+      }
+    }
+  },
+  "themeQuietWorkspaceName": "宁静工作区",
+  "themeQuietWorkspaceDescription": "柔和的中性色界面，配以绿色和琥珀色状态提示。",
+  "usageEnhancementLeaders": "排行榜"
 }

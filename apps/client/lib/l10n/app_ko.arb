@@ -1016,7 +1016,7 @@
   "sessionForkAgentOwnedRefusal": "이 세션은 다른 에이전트 세션이 만든 것입니다. 상위 세션을 분기하세요.",
   "sessionRosterLoadFailed": "세션을 불러오지 못했습니다.",
   "sessionRosterUpdateFailed": "업데이트에 실패했습니다. 마지막 세션 목록을 표시합니다.",
-  "sessionRosterSearchHint": "세션 또는 프로젝트 검색…",
+  "sessionRosterSearchHint": "세션 검색",
   "sessionRosterFilterStatus": "상태",
   "sessionRosterAllStatuses": "모든 상태",
   "sessionRosterStatusNeedsInput": "입력 필요",
@@ -1599,5 +1599,104 @@
   "androidBackgroundConnectionSubtitle": "앱을 나간 뒤에도 Cosyncing이 계속 실행되어 알림이 제때 도착합니다. 실행 중에는 Android에 무음 알림이 표시되고 배터리를 더 사용합니다.",
   "androidBackgroundConnectionChannelName": "백그라운드 연결",
   "androidBackgroundConnectionNotificationTitle": "알림을 받기 위해 연결 유지 중",
-  "androidBackgroundConnectionNotificationText": "설정 → 알림에서 끌 수 있습니다."
+  "androidBackgroundConnectionNotificationText": "설정 → 알림에서 끌 수 있습니다.",
+  "themeQuietWorkspaceName": "차분한 작업 공간",
+  "themeQuietWorkspaceDescription": "중립적인 배경에 녹색과 황색 활동 표시를 사용합니다.",
+  "inboxEnhancementJumpActivity": "활동으로 이동",
+  "inboxEnhancementNeedsAttention": "확인 필요 · {count}",
+  "@inboxEnhancementNeedsAttention": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementAllPending": "모든 대기 항목",
+  "inboxEnhancementInput": "응답 필요",
+  "inboxEnhancementCompletions": "읽지 않은 완료 알림",
+  "inboxEnhancementNoPending": "대기 중인 요청이나 읽지 않은 완료 알림이 없습니다.",
+  "inboxEnhancementRecentActivity": "최근 활동 · 읽지 않음 {count}개",
+  "@inboxEnhancementRecentActivity": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "inboxEnhancementUnread": "읽지 않음",
+  "inboxEnhancementActivityActions": "활동 작업",
+  "inboxEnhancementMarkAllRead": "활동을 읽음으로 표시",
+  "inboxEnhancementClearActivity": "활동 지우기",
+  "inboxEnhancementNoActivity": "이 필터와 일치하는 활동이 없습니다.",
+  "inboxEnhancementActivityCleared": "활동을 지웠습니다",
+  "inboxEnhancementUndo": "실행 취소",
+  "inboxEnhancementReply": "응답",
+  "inboxEnhancementReview": "검토",
+  "inboxEnhancementMarkRead": "읽음으로 표시",
+  "inboxEnhancementSubagentOf": "{parent}의 하위 에이전트",
+  "@inboxEnhancementSubagentOf": {
+    "placeholders": {
+      "parent": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceOverview": "개요",
+  "sessionRosterProjectsLabel": "프로젝트",
+  "sessionRosterFilters": "세션 필터",
+  "sessionRosterProjectAttention": "입력이 필요하거나 검토할 완료된 작업이 있습니다",
+  "workspaceServerSessionCount": "{count, plural, other{세션 {count}개}}",
+  "workspaceHideSidebar": "사이드바 숨기기",
+  "workspaceRunningDetail": "진행 중",
+  "workspaceWaitingDetail": "입력이 필요합니다",
+  "workspaceCompletionsDetail": "차례를 마쳤습니다",
+  "workspaceOverviewHeading": "오늘의 작업을 한눈에.",
+  "workspaceOverviewIntro": "진행 중인 모든 프로젝트를 살펴보세요.",
+  "workspaceNoMachine": "서버 선택",
+  "workspaceRunning": "실행 중",
+  "workspaceWaiting": "입력 대기",
+  "workspaceUnreadCompletions": "읽지 않은 완료 알림",
+  "workspaceCompletionReadNote": "세션을 열면 완료 알림이 읽음으로 표시됩니다.",
+  "workspaceLoading": "최신 데이터 로드 중…",
+  "workspaceStateUnavailable": "현재 활동을 확인할 수 없습니다. 캐시된 세션 정보는 사이드바에 남아 있습니다.",
+  "workspacePartialRoster": "일부 세션만 표시: 서버가 지금까지 발견한 세션만 집계합니다.",
+  "workspaceNeedsAttention": "확인 필요",
+  "workspaceNothingHere": "현재 이 보기에 항목이 없습니다.",
+  "workspaceToday": "오늘의 활동",
+  "workspaceUsageDetails": "사용량 상세",
+  "workspaceEstimatedTime": "추정 에이전트 활동 시간",
+  "workspaceRuntimeUnavailable": "관측된 실행 시간을 확인할 수 없습니다.",
+  "workspaceConcurrentTime": "동시 실행 세션의 시간은 합산됩니다.",
+  "workspaceTokenBreakdownUnavailable": "이 소스는 전체 토큰 세부 내역을 제공하지 않습니다.",
+  "workspacePartialUsage": "일부 사용량: {sources}의 데이터를 확인할 수 없습니다.",
+  "workspaceCoverageUnknown": "데이터 소스 범위를 확인할 수 없습니다.",
+  "workspaceCloseAllTabs": "모든 탭 닫기",
+  "workspaceTabsClosed": "탭을 닫았습니다. 세션은 계속 실행됩니다.",
+  "workspaceUndoCloseTabs": "실행 취소",
+  "workspaceChildAttention": "연결된 세션 {count}개 · 입력 대기 {waiting}개 · 최근 완료 {ready}개",
+  "settingsEnhancementConversation": "대화",
+  "settingsEnhancementMessageText": "메시지 글자 크기",
+  "settingsEnhancementMessageSpacing": "메시지 간격",
+  "settingsEnhancementFontSize": "{size} px",
+  "settingsEnhancementReadingWidth": "읽기 너비",
+  "settingsEnhancementReadingWidthHint": "대화 너비를 900 px로 제한합니다. 끄면 사용 가능한 전체 너비를 사용합니다.",
+  "settingsEnhancementIndicators": "세션 표시",
+  "settingsEnhancementWorking": "실행 중",
+  "settingsEnhancementNeedsInput": "입력 필요",
+  "settingsEnhancementReadyReview": "검토 대기",
+  "settingsEnhancementIndicatorsHint": "로고는 에이전트를 식별합니다. 실행 중은 턴을 수행하는 상태이며 입력 필요는 응답을 기다리는 상태입니다. 빨간 점은 읽지 않은 완료 알림입니다. 로딩과 재연결은 별도의 연결 상태입니다.",
+  "settingsEnhancementAgentsQuota": "에이전트 및 할당량",
+  "settingsEnhancementAgentsQuotaHint": "관리형 런타임, 할당량 기간 및 경고",
+  "usageEnhancementDay": "일",
+  "usageEnhancementCurrent": "현재 기간",
+  "usageEnhancementIntegrations": "사용량 연동",
+  "usageEnhancementIntegrationsHint": "지원되는 소스를 참고용으로 표시합니다. 사용 가능 여부는 선택한 서버와 Tokdash 설치에 따라 다릅니다.",
+  "usageEnhancementNoReading": "이 기간의 데이터 없음",
+  "usageEnhancementExportCsv": "CSV 내보내기",
+  "usageEnhancementActivity": "활동",
+  "usageEnhancementDetailUnavailable": "—는 이 소스가 제공하지 않는 세부 항목을 뜻합니다.",
+  "usageEnhancementLeaders": "순위",
+  "conversationEnhancementMore": "입력창의 더 많은 작업",
+  "conversationEnhancementDetails": "세션 세부 정보",
+  "conversationEnhancementLastKnown": "마지막으로 확인된 값: {reading}"
 }

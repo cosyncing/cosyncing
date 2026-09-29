@@ -99,12 +99,14 @@ void main() {
         );
         await expandGroup(tester, groupKey);
 
-        expect(find.textContaining('GPT-4o'), findsOneWidget);
+        expect(find.textContaining('GPT-4o'), findsNothing);
         expect(find.textContaining('openai/gpt-4o'), findsNothing);
         expect(
           find.byWidgetPredicate(
             (widget) =>
-                widget is Tooltip && widget.message == 'Model: openai/gpt-4o',
+                widget is Tooltip &&
+                (widget.message?.contains('GPT-4o\nModel: openai/gpt-4o') ??
+                    false),
           ),
           findsOneWidget,
         );
@@ -326,7 +328,7 @@ void main() {
       );
       await expandGroup(tester, groupKey);
 
-      expect(find.text('Reasonix'), findsOneWidget);
+      expect(find.byTooltip('Reasonix'), findsOneWidget);
     });
 
     testWidgets('shows the localized Grok Build agent name', (tester) async {
@@ -341,7 +343,7 @@ void main() {
       );
       await expandGroup(tester, groupKey);
 
-      expect(find.text('Grok Build'), findsOneWidget);
+      expect(find.byTooltip('Grok Build'), findsOneWidget);
     });
 
     testWidgets('reads correctly in dark mode', (tester) async {

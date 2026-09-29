@@ -1,11 +1,13 @@
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_branch_screen.dart';
@@ -13,9 +15,11 @@ import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_overview.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
+import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_output_factory.dart';
 import 'package:flutter/foundation.dart';
@@ -93,17 +97,17 @@ void main() {
 
       expect(find.byType(SessionsWorkspace), findsOneWidget);
       expect(find.byType(SessionsPage), findsNothing);
-      expect(find.text('Select a session to open it here.'), findsOneWidget);
+      expect(find.byKey(const Key('workspace-overview-tab')), findsOneWidget);
     });
 
-    testWidgets('renders the single-pane page at Compact width', (
+    testWidgets('renders the workspace with a drawer at Compact width', (
       tester,
     ) async {
       await tester.pumpWidget(buildAt(const Size(400, 800)));
       await tester.pumpAndSettle();
 
-      expect(find.byType(SessionsPage), findsOneWidget);
-      expect(find.byType(SessionsWorkspace), findsNothing);
+      expect(find.byType(SessionsPage), findsNothing);
+      expect(find.byType(SessionsWorkspace), findsOneWidget);
     });
   });
 
@@ -248,10 +252,10 @@ void main() {
 
       expect(
         router.state.uri.path,
-        sessionDetailLocation(tool: 'claude', sessionId: 'a'),
-        reason: 'collapsing should push the open session, not the roster',
+        '/sessions',
+        reason: 'resizing keeps the session in the retained workspace',
       );
-      expect(find.text('detail stub'), findsOneWidget);
+      expect(find.byType(SessionDetailPage), findsOneWidget);
     });
 
     testWidgets('collapsing carries the open file, not the session under it', (
@@ -361,7 +365,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(router.state.uri.path, '/sessions');
-      expect(find.byType(SessionsPage), findsOneWidget);
+      expect(find.byType(SessionsWorkspace), findsOneWidget);
     });
 
     // Back out of the detail route and the roster must stay put. Redirecting on
@@ -388,19 +392,30 @@ void main() {
       await tester.pumpAndSettle();
       resize(tester, const Size(400, 800));
       await tester.pumpAndSettle();
-      expect(find.text('detail stub'), findsOneWidget);
+      expect(find.byType(SessionDetailPage), findsOneWidget);
 
-      router.go('/sessions');
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SessionsWorkspace)),
+      );
+      container.read(workspaceOverviewVisibleProvider.notifier).state = true;
       await tester.pumpAndSettle();
 
       expect(router.state.uri.path, '/sessions');
-      expect(find.byType(SessionsPage), findsOneWidget);
-      expect(find.text('detail stub'), findsNothing);
+      expect(find.byType(SessionsWorkspace), findsOneWidget);
+      expect(find.byType(SessionDetailPage), findsNothing);
+      expect(find.byKey(const Key('workspace-overview-tab')), findsOneWidget);
     });
   });
 }
 
 List<Override> _sessionStoreOverrides() => <Override>[
+  attentionInboxProvider.overrideWith(
+    (ref) async => AttentionInboxSections.fromEntries([]),
+  ),
+  workspaceOverviewRosterProvider.overrideWith(
+    (ref) async => const ListSessionsResponse(sessions: []),
+  ),
+  usageReportProvider.overrideWith((ref, query) async => null),
   sessionDisplayPreferencesStoreProvider.overrideWithValue(
     InMemorySessionDisplayPreferencesStore(),
   ),
