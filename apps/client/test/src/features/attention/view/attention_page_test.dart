@@ -244,6 +244,56 @@ void main() {
     },
   );
 
+  testWidgets('a session that finished several times is listed once', (
+    tester,
+  ) async {
+    final sections = AttentionInboxSections.fromEntries([
+      for (final (index, id) in ['first', 'second', 'third'].indexed)
+        _entry(
+          id,
+          'run-finished',
+          title: 'Refactor the loader',
+          state: 'resolved',
+          sessionId: 'session-1',
+          createdAt: index + 1,
+        ),
+      _entry(
+        'earlier-read',
+        'run-finished',
+        title: 'Refactor the loader',
+        state: 'resolved',
+        sessionId: 'session-1',
+        createdAt: 0,
+        readAt: 1,
+      ),
+    ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          attentionInboxProvider.overrideWith((_) async => sections),
+          attentionBadgeSeenStoreProvider.overrideWithValue(
+            _MemoryBadgeSeenStore(),
+          ),
+        ],
+        child: _localizedApp(const AttentionPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('All · 1'), findsOneWidget);
+    expect(find.byKey(const Key('attention-event-third')), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Recent activity · 0 unread'),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.pumpAndSettle();
+    for (final older in ['first', 'second', 'earlier-read']) {
+      expect(find.byKey(Key('attention-event-$older')), findsNothing);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('pending and activity filters stay independent at 320px', (
     tester,
   ) async {
@@ -646,7 +696,11 @@ AttentionInboxEntry _entry(
   String state = 'active',
   String profileId = 'profile',
   int cursor = 1,
+  String? sessionId,
+  int? createdAt,
+  int? readAt,
 }) {
+  final now = DateTime.now().millisecondsSinceEpoch;
   return AttentionInboxEntry(
     profile: BrokerProfile(
       id: profileId,
@@ -663,13 +717,20 @@ AttentionInboxEntry _entry(
       state: state,
       severity: 'informational',
       dedupeKey: id,
-      createdAt: DateTime.now().millisecondsSinceEpoch,
-      updatedAt: DateTime.now().millisecondsSinceEpoch,
-      resolvedAt: state == 'resolved'
-          ? DateTime.now().millisecondsSinceEpoch
-          : null,
+      createdAt: createdAt ?? now,
+      updatedAt: now,
+      resolvedAt: state == 'resolved' ? now : null,
+      readAt: readAt,
       title: title,
-      action: const AttentionEventAction(kind: 'open-attention-inbox'),
+      agent: sessionId == null ? null : 'claude',
+      sessionId: sessionId,
+      action: sessionId == null
+          ? const AttentionEventAction(kind: 'open-attention-inbox')
+          : AttentionEventAction(
+              kind: 'open-session',
+              tool: 'claude',
+              sessionId: sessionId,
+            ),
     ),
   );
 }

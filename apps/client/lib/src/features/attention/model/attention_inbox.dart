@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 
 /// One durable attention event together with its broker profile.
@@ -37,9 +38,12 @@ final class AttentionInboxSections {
     final actionRequired = <AttentionInboxEntry>[];
     final maintenance = <AttentionInboxEntry>[];
     final resolved = <AttentionInboxEntry>[];
+    final candidates = entries.toList(growable: false);
+    final latestOutcomes = _latestSessionOutcomes(candidates);
 
-    for (final entry in entries) {
+    for (final entry in candidates) {
       final event = entry.event;
+      if (_isSupersededOutcome(entry, latestOutcomes)) continue;
       if (event.dismissedAt != null) continue;
       if (event.resolvedAt != null || event.state != 'active') {
         resolved.add(entry);
@@ -82,6 +86,54 @@ final class AttentionInboxSections {
 
   /// Number of visible entries that have not been read.
   int get unreadCount => all.where((entry) => entry.isUnread).length;
+
+  /// The newest turn or goal outcome of each session, keyed by profile and
+  /// the notification slot the outcomes share.
+  ///
+  /// A session that finishes again replaces its earlier outcome, as it does
+  /// in the notification center, so the inbox never lists one session several
+  /// times. The newest counts even when dismissed: clearing it must not bring
+  /// back the outcome it replaced.
+  static Map<String, AttentionInboxEntry> _latestSessionOutcomes(
+    Iterable<AttentionInboxEntry> entries,
+  ) {
+    final latest = <String, AttentionInboxEntry>{};
+    for (final entry in entries) {
+      final slot = _outcomeSlot(entry);
+      if (slot == null) continue;
+      final current = latest[slot];
+      if (current == null || _isNewer(entry.event, current.event)) {
+        latest[slot] = entry;
+      }
+    }
+    return latest;
+  }
+
+  static bool _isSupersededOutcome(
+    AttentionInboxEntry entry,
+    Map<String, AttentionInboxEntry> latestOutcomes,
+  ) {
+    final slot = _outcomeSlot(entry);
+    return slot != null && !identical(latestOutcomes[slot], entry);
+  }
+
+  static String? _outcomeSlot(AttentionInboxEntry entry) {
+    final type = attentionNotificationTypeOf(entry.event);
+    if (type == null || !type.isSessionOutcome) return null;
+    final slot = attentionNotificationCollapseKey(entry.event, type);
+    // Only a session-scoped slot collapses; an outcome without a session
+    // keeps its own row.
+    if (!slot.startsWith('session-outcome:')) return null;
+    return '${entry.profile.id}\n$slot';
+  }
+
+  static bool _isNewer(AttentionEvent candidate, AttentionEvent current) {
+    if (candidate.createdAt != current.createdAt) {
+      return candidate.createdAt > current.createdAt;
+    }
+    // Same millisecond: any fixed order keeps the choice stable.
+    return candidate.id.compareTo(current.id) > 0;
+  }
 
   static bool _isActionRequired(AttentionEvent event) {
     return event.isPermissionRequired ||

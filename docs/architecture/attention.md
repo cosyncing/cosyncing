@@ -83,7 +83,10 @@ already past its first alert is never presented again after an upgrade.
   "event type only" option per type leaves the body empty.
 - Notifications collapse into slots: one per pending request, one per session
   for turn outcomes, and one per other event. A newer outcome replaces the
-  session's older one.
+  session's older one. The inbox follows the same slots: it lists only a
+  session's newest finished, failed or goal outcome, so a session that finishes
+  again appears once. Dismissing that outcome does not bring back the one it
+  replaced, and requests are never hidden this way.
 - Opening a session, or tapping its notification, marks its finished and failed
   turns read and clears them. A pending request only loses its OS notification;
   its inbox row stays until the request is answered. A request answered
