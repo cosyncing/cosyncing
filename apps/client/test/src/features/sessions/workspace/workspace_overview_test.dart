@@ -131,6 +131,13 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      // The queue opens on Waiting for you; completions list under their own
+      // count.
+      expect(find.text('Result a'), findsNothing);
+      await tester.tap(
+        find.byKey(const Key('workspace-overview-count-completions')),
+      );
+      await tester.pumpAndSettle();
       expect(find.text('Result a'), findsOneWidget);
       expect(find.text('Result b'), findsNothing);
       final container = ProviderScope.containerOf(
@@ -146,6 +153,34 @@ void main() {
       expect(opened.single.status, isNull);
     },
   );
+
+  testWidgets('the queue names one bucket at a time, with no union filter', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(events: [_completion('a', source)]));
+    await tester.pumpAndSettle();
+
+    final queueCount = find.byKey(const Key('workspace-overview-queue-count'));
+    expect(tester.widget<Text>(queueCount).data, '1');
+    expect(find.text('Needs attention'), findsNothing);
+    final filter = find.byKey(const Key('workspace-overview-filter'));
+    await tester.ensureVisible(filter);
+    await tester.pumpAndSettle();
+    await tester.tap(filter);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('workspace-overview-filter-attention')),
+      findsNothing,
+    );
+    for (final kind in ['working', 'input', 'completions']) {
+      expect(
+        find.byKey(Key('workspace-overview-filter-$kind')),
+        findsOneWidget,
+        reason: kind,
+      );
+    }
+    expect(find.text('Questions and approvals'), findsOneWidget);
+  });
 
   testWidgets('loading current counts never invents zero', (tester) async {
     final pending = Completer<ListSessionsResponse?>();
@@ -199,12 +234,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('1.2M'), findsOneWidget);
     expect(find.text('Estimated agent activity'), findsOneWidget);
+    expect(find.textContaining('Partial usage:'), findsOneWidget);
+    // How the estimate is made, where days begin and how many sources were
+    // read are the report's caveats; the summary states only its figures.
+    expect(find.textContaining('summed across agents'), findsNothing);
     expect(
       find.textContaining('Concurrent sessions add together.'),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.textContaining('Partial usage:'), findsOneWidget);
-    expect(find.textContaining('Europe/London'), findsOneWidget);
+    expect(find.textContaining('local midnight'), findsNothing);
+    expect(find.textContaining('tool sources'), findsNothing);
   });
 
   test(

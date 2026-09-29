@@ -27,6 +27,7 @@ class UsageWhenYouWork extends StatelessWidget {
     required this.locale,
     required this.totalTokens,
     this.showHourlyChart = true,
+    this.showWeekday = true,
     super.key,
   });
 
@@ -35,6 +36,10 @@ class UsageWhenYouWork extends StatelessWidget {
 
   /// Day activity already owns the hourly chart.
   final bool showHourlyChart;
+
+  /// Whether the weekday facet is drawn: its peak-day row and its Monday to
+  /// Sunday bars. A single day has exactly one weekday, so both are noise.
+  final bool showWeekday;
 
   /// Served hourly facet, or `null` if tokdash did not serve it.
   final UsageReportHourly? hourly;
@@ -52,9 +57,12 @@ class UsageWhenYouWork extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final hours = hourly?.buckets ?? const <UsageReportHourBucket>[];
-    final days = weekday?.buckets ?? const <UsageReportWeekdayBucket>[];
+    final served = weekday?.buckets ?? const <UsageReportWeekdayBucket>[];
+    final days = showWeekday ? served : const <UsageReportWeekdayBucket>[];
 
-    if (hours.isEmpty && days.isEmpty) {
+    // Keyed on what was served, not on what is shown: a hidden facet is a
+    // presentation choice, never a tokdash too old to serve it.
+    if (hours.isEmpty && served.isEmpty) {
       return Column(
         key: const Key('usage-report-when'),
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -87,17 +95,16 @@ class UsageWhenYouWork extends StatelessWidget {
             final stacked = constraints.maxWidth < 520;
             final left = _Highlights(
               hourly: hourly,
-              weekday: weekday,
+              weekday: showWeekday ? weekday : null,
               days: days,
               locale: locale,
             );
-            final right = days.isEmpty
-                ? const SizedBox.shrink()
-                : _WeekdayRows(
-                    buckets: days,
-                    locale: locale,
-                    totalTokens: totalTokens,
-                  );
+            if (days.isEmpty) return left;
+            final right = _WeekdayRows(
+              buckets: days,
+              locale: locale,
+              totalTokens: totalTokens,
+            );
             if (stacked) {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,

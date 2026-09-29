@@ -189,7 +189,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Your input is needed'), findsOneWidget);
+    expect(find.text('Waiting for you'), findsOneWidget);
     expect(find.text('Unread completions'), findsOneWidget);
     expect(find.text('Permission needed'), findsOneWidget);
     expect(find.text('Future broker notice'), findsOneWidget);
@@ -202,6 +202,47 @@ void main() {
     expect(find.text('Recent activity · 2 unread'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'the pending heading names the filter, and failures are Problems',
+    (
+      tester,
+    ) async {
+      final sections = AttentionInboxSections.fromEntries([
+        _entry('request', 'question-required', title: 'Respond to a question'),
+        _entry('finished', 'run-finished', title: 'Inspect the result'),
+        _entry('failed', 'run-failed', title: 'The run failed'),
+      ]);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            attentionInboxProvider.overrideWith((_) async => sections),
+            attentionBadgeSeenStoreProvider.overrideWithValue(
+              _MemoryBadgeSeenStore(),
+            ),
+          ],
+          child: _localizedApp(const AttentionPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // No union name: the heading is the selected filter and its count.
+      expect(find.text('All · 3'), findsOneWidget);
+      expect(find.textContaining('Needs attention'), findsNothing);
+      expect(find.text('Action required'), findsNothing);
+      // A failed run is a problem, not a request waiting for input.
+      expect(find.text('Problems'), findsOneWidget);
+      expect(find.text('Waiting for you'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('attention-pending-filter')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Problems').last);
+      await tester.pumpAndSettle();
+      expect(find.text('Problems · 1'), findsOneWidget);
+      expect(find.byKey(const Key('attention-event-failed')), findsOneWidget);
+      expect(find.byKey(const Key('attention-event-request')), findsNothing);
+    },
+  );
 
   testWidgets('pending and activity filters stay independent at 320px', (
     tester,

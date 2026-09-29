@@ -190,12 +190,6 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
                 : null,
           ),
         ],
-        const SizedBox(height: 8),
-        UsageFootnote(text: l10n.usageExportBothThemes),
-        // Two downloads from one press is exactly what a browser asks about,
-        // and this sink cannot tell whether the second one landed.
-        if (ref.watch(usageExportIsBrowserProvider))
-          UsageFootnote(text: l10n.usageExportBrowserPrompt),
         if (_status != null) ...[
           const SizedBox(height: 8),
           InlineNotice(icon: Icons.check_circle_outline, text: _status!),
@@ -315,6 +309,8 @@ class _TierGroup extends StatelessWidget {
             child: Text(
               carriesNames
                   ? l10n.usageShareProjectsBody
+                  : period == UsagePeriod.today
+                  ? l10n.usageShareOverviewBodyDay
                   : l10n.usageShareOverviewBody,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: tokens.textTertiary,

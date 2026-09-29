@@ -12,9 +12,10 @@ import 'package:intl/intl.dart' hide TextDirection;
 ///
 /// Mirrors the tokdash stats tiles: an uppercase quiet label over an extrabold
 /// figure, with an optional meta line beneath. The tile set is fixed except for
-/// the last one, which answers a different "peak" per period — day for a week,
-/// week for a month, month for a year or all time. The grid reflows from four
-/// columns to two at the compact breakpoint rather than clipping.
+/// the last two: the streak, and a "peak" that differs per period — day for a
+/// week, week for a month, month for a year or all time. A day shows neither,
+/// since both would only restate the day. The grid reflows from four columns
+/// to two at the compact breakpoint rather than clipping.
 class UsageHero extends StatelessWidget {
   /// Creates the hero.
   const UsageHero({
@@ -76,7 +77,7 @@ class UsageHero extends StatelessWidget {
           label: l10n.usageStatCacheHit,
           value: formatUsageShare(totals.cacheHitRate!, locale: locale),
         ),
-      if (streaks?.currentStreak != null)
+      if (period != UsagePeriod.today && streaks?.currentStreak != null)
         _StatTile(
           label: l10n.usageStatStreak,
           value: formatCompactCount(streaks!.currentStreak!, locale: locale),
@@ -143,7 +144,7 @@ class UsageHero extends StatelessWidget {
   /// The period-dependent peak tile, or `null` when nothing served a peak.
   _StatTile? _peakTile(AppLocalizations l10n) {
     final peak = switch (period) {
-      UsagePeriod.today ||
+      UsagePeriod.today => null,
       UsagePeriod.week => usagePeakDay(report, locale: locale),
       UsagePeriod.month => usagePeakWeek(report, locale: locale),
       UsagePeriod.year ||

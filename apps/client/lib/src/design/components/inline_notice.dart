@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 /// A quiet one-line explanation that stands in for content that is not there.
 ///
 /// The app says "this is unavailable" in several places — the quota panel, the
-/// usage card, the report's own sections — and each of them used to say it with
-/// its own private copy of the same [Row]. They must look identical, because
+/// usage report and its own sections — and each of them used to say it with its
+/// own private copy of the same [Row]. They must look identical, because
 /// they are the same statement: an icon, a short line of secondary text, and
 /// deliberately no card, border, or colour that would make absence look like an
 /// error.

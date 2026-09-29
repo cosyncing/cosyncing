@@ -114,12 +114,7 @@ void main() {
       expect(window.from, '2026-01-05');
     });
 
-    test('the two surfaces offer periods from one vocabulary', () {
-      expect(UsagePeriod.todayCard, [
-        UsagePeriod.today,
-        UsagePeriod.week,
-        UsagePeriod.month,
-      ]);
+    test('the report offers every period in display order', () {
       expect(UsagePeriod.report, [
         UsagePeriod.today,
         UsagePeriod.week,
@@ -127,13 +122,6 @@ void main() {
         UsagePeriod.year,
         UsagePeriod.allTime,
       ]);
-      // Week and month appear on both, and must resolve identically there.
-      for (final period in [UsagePeriod.week, UsagePeriod.month]) {
-        final window = resolveUsageWindow(period, wednesday);
-        expect(UsagePeriod.todayCard, contains(period));
-        expect(UsagePeriod.report, contains(period));
-        expect(window.from, resolveUsageWindow(period, wednesday).from);
-      }
     });
   });
 

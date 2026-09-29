@@ -11,13 +11,6 @@ import 'package:flutter/material.dart';
 
 /// The period's leaders: harness, model, project — five rows each.
 ///
-/// The project tile is the one that needs care. Its share is a share of the
-/// *project facet*, and the facet cannot see every source — so the tile always
-/// carries the reconciliation against the period total: named projects, the
-/// facet's own unattributed bucket, and the remainder from sources that keep
-/// no project records. Without that line a 39% leader reads as "39% of my
-/// work", which is not what the number means.
-///
 /// Each tile lists its top five in the export card's row idiom — mark, name
 /// left, figure right, a bar read against the leader — because the podium is
 /// where the reader decides whether the period looks like what they remember,
@@ -61,7 +54,6 @@ class UsagePodium extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    final reconciliation = UsageProjectReconciliation.of(projects, total);
     final tiles = <Widget>[
       if (harnesses.isNotEmpty)
         _PodiumTile(
@@ -180,28 +172,6 @@ class UsagePodium extends StatelessWidget {
             );
           },
         ),
-        if (projects != null &&
-            projectRows.isNotEmpty &&
-            reconciliation != null) ...[
-          const SizedBox(height: 8),
-          UsageFootnote(
-            text: l10n.usagePodiumProjectNote(
-              formatCompactCount(
-                (projects.attributedCount ?? projects.rows.length).toDouble(),
-                locale: locale,
-              ),
-              formatUsageShare(
-                reconciliation.unattributedShare,
-                locale: locale,
-              ),
-              formatUsageShare(reconciliation.gapShare, locale: locale),
-            ),
-          ),
-          const SizedBox(height: 4),
-          // Fragmentation the reader can see in the list is better stated than
-          // silently merged: merging two remotes would invent a total.
-          UsageFootnote(text: l10n.usageProjectGroupNote),
-        ],
         // Said, not silently omitted. A missing tile reads as "no projects",
         // which is a claim about the work rather than about this caller.
         if (report.projectsWithheld) ...[

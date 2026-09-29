@@ -129,6 +129,15 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
     final showUrgent =
         _pendingFilter == _PendingFilter.all ||
         _pendingFilter == _PendingFilter.urgent;
+    // One name per bucket, shared with the Overview's counts: waiting for you,
+    // unread completions, and problems (failed runs and security or server
+    // alerts, never requests).
+    final pendingLabels = {
+      _PendingFilter.all: l10n.inboxEnhancementAllPending,
+      _PendingFilter.input: l10n.inboxEnhancementInput,
+      _PendingFilter.completion: l10n.inboxEnhancementCompletions,
+      _PendingFilter.urgent: l10n.attentionPageProblems,
+    };
     return RefreshIndicator(
       onRefresh: () async {
         ref.invalidate(attentionInboxProvider);
@@ -170,8 +179,19 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
                   spacing: 16,
                   runSpacing: 8,
                   children: [
+                    // The selected filter and its count, as the Overview's
+                    // queue heading reads: no union name of its own.
                     SectionHeader(
-                      l10n.inboxEnhancementNeedsAttention(groups.pendingCount),
+                      l10n.inboxEnhancementPendingHeader(
+                        pendingLabels[_pendingFilter]!,
+                        switch (_pendingFilter) {
+                          _PendingFilter.all => groups.pendingCount,
+                          _PendingFilter.input => groups.requests.length,
+                          _PendingFilter.completion =>
+                            groups.completions.length,
+                          _PendingFilter.urgent => groups.urgent.length,
+                        },
+                      ),
                       color: t.textPrimary,
                       padding: EdgeInsets.zero,
                     ),
@@ -188,38 +208,15 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
                           }
                         },
                         items: [
-                          DropdownMenuItem(
-                            value: _PendingFilter.all,
-                            child: Text(
-                              l10n.inboxEnhancementAllPending,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                          for (final entry in pendingLabels.entries)
+                            DropdownMenuItem(
+                              value: entry.key,
+                              child: Text(
+                                entry.value,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                          ),
-                          DropdownMenuItem(
-                            value: _PendingFilter.input,
-                            child: Text(
-                              l10n.inboxEnhancementInput,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          DropdownMenuItem(
-                            value: _PendingFilter.completion,
-                            child: Text(
-                              l10n.inboxEnhancementCompletions,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          DropdownMenuItem(
-                            value: _PendingFilter.urgent,
-                            child: Text(
-                              l10n.attentionPageActionRequired,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
                         ],
                       ),
                     ),
@@ -247,7 +244,7 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
                   ),
                 if (showUrgent && groups.urgent.isNotEmpty)
                   _AttentionSection(
-                    title: l10n.attentionPageActionRequired,
+                    title: l10n.attentionPageProblems,
                     entries: groups.urgent,
                     accent: t.statusError,
                   ),

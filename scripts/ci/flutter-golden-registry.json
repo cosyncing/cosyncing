@@ -547,21 +547,6 @@
       "family": "read-aloud-rate"
     },
     {
-      "path": "apps/client/test/src/features/usage/view/goldens/usage_card_dark_roomy_zh.png",
-      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
-      "family": "usage-card"
-    },
-    {
-      "path": "apps/client/test/src/features/usage/view/goldens/usage_card_light_compact_en.png",
-      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
-      "family": "usage-card"
-    },
-    {
-      "path": "apps/client/test/src/features/usage/view/goldens/usage_card_unavailable_dark_compact_en.png",
-      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
-      "family": "usage-card"
-    },
-    {
       "path": "apps/client/test/src/features/usage/view/goldens/usage_enhancement_1440_light.png",
       "owner": "apps/client/test/src/features/usage/view/usage_enhancement_layout_test.dart",
       "family": "usage-enhancement"

@@ -397,35 +397,28 @@ void main() {
       );
     });
 
-    testWidgets('the project tile reconciles against the period total', (
+    testWidgets('the project tile lists projects without footnotes', (
       tester,
     ) async {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
-      // Without this line a 39% leader reads as 39% of everything, which is a
-      // share of the facet, not of the period.
       final podium = find.byKey(const Key('usage-report-podium'));
       expect(
-        find.descendant(
-          of: podium,
-          matching: find.textContaining(
-            'from sources with no project records',
-          ),
-        ),
+        find.descendant(of: podium, matching: find.text('Top project')),
         findsOneWidget,
       );
-      // The fragmentation is stated rather than merged away: merging two
-      // remotes of one codebase would invent a total nobody served.
-      expect(
-        find.descendant(
-          of: podium,
-          matching: find.textContaining(
-            'Projects are grouped by repository remote',
-          ),
-        ),
-        findsOneWidget,
-      );
+      for (final note in [
+        'ranked by tokens',
+        'from sources with no project records',
+        'Projects are grouped by repository remote',
+      ]) {
+        expect(
+          find.descendant(of: podium, matching: find.textContaining(note)),
+          findsNothing,
+          reason: note,
+        );
+      }
     });
   });
 
@@ -549,15 +542,24 @@ void main() {
   });
 
   group('footer', () {
-    testWidgets('carries every caveat the figures above depend on', (
+    testWidgets('is gone, and the agent-time rule stays on its tooltip', (
       tester,
     ) async {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('local midnight'), findsOneWidget);
-      expect(find.textContaining('idle gaps over 5 minutes'), findsOneWidget);
-      expect(find.textContaining('5 tool sources'), findsOneWidget);
+      expect(find.textContaining('local midnight'), findsNothing);
+      expect(find.textContaining('tool sources'), findsNothing);
+      expect(find.textContaining('idle gaps over 5 minutes'), findsNothing);
+      final hero = find.byKey(const Key('usage-report-hero'));
+      expect(
+        tester
+            .widgetList<Tooltip>(
+              find.descendant(of: hero, matching: find.byType(Tooltip)),
+            )
+            .map((tooltip) => tooltip.message),
+        contains(contains('idle gaps over 5 minutes')),
+      );
     });
   });
 

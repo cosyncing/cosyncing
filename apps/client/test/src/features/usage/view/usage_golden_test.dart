@@ -10,7 +10,6 @@ import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_export_card.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
-import 'package:cosyncing_client/src/features/usage/view/usage_today_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -109,47 +108,6 @@ void main() {
       matchesGoldenFile('goldens/$name.png'),
     );
   }
-
-  Widget card() => const Scaffold(
-    body: SingleChildScrollView(
-      padding: EdgeInsets.all(16),
-      child: UsageTodayCard(),
-    ),
-  );
-
-  group('today card', () {
-    testWidgets('light, compact, en', (tester) async {
-      await pumpGolden(
-        tester,
-        name: 'usage_card_light_compact_en',
-        child: card(),
-        size: const Size(420, 900),
-        data: sampleReport(),
-      );
-    });
-
-    testWidgets('dark, roomy, zh', (tester) async {
-      await pumpGolden(
-        tester,
-        name: 'usage_card_dark_roomy_zh',
-        child: card(),
-        size: const Size(900, 900),
-        locale: const Locale('zh'),
-        brightness: Brightness.dark,
-        data: sampleReport(),
-      );
-    });
-
-    testWidgets('unavailable, dark, compact, en', (tester) async {
-      await pumpGolden(
-        tester,
-        name: 'usage_card_unavailable_dark_compact_en',
-        child: card(),
-        size: const Size(420, 600),
-        brightness: Brightness.dark,
-      );
-    });
-  });
 
   group('report page', () {
     testWidgets('light, roomy, en', (tester) async {

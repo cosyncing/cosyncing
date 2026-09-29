@@ -138,6 +138,18 @@ void main() {
     );
   }
 
+  test('a day card names neither days active nor a busiest day', () {
+    bool mentions(UsagePeriod period, String text) =>
+        planFor(period: period).texts.any((line) => line.contains(text));
+    // The month card still carries both, so the day's omission is not a
+    // sample that stopped serving them.
+    for (final text in ['days active', 'Busiest day']) {
+      expect(mentions(UsagePeriod.month, text), isTrue, reason: text);
+      expect(mentions(UsagePeriod.today, text), isFalse, reason: text);
+    }
+    expect(mentions(UsagePeriod.today, 'sessions'), isTrue);
+  });
+
   group('the privacy boundary is which card, not a setting', () {
     test('the overview card carries no project name', () {
       final texts = planFor().texts;
@@ -700,10 +712,6 @@ void main() {
         find.textContaining('Two images, two privacy levels'),
         findsOneWidget,
       );
-      expect(
-        find.textContaining('Each export writes two PNGs'),
-        findsOneWidget,
-      );
     });
 
     testWidgets('each tier wears its rail, brief and captioned thumbnails', (
@@ -866,7 +874,7 @@ void main() {
   });
 
   group('platforms without a directory sink', () {
-    Widget subject({bool supported = true, bool isBrowser = false}) {
+    Widget subject({bool supported = true}) {
       final spec = themeSpecById(kDefaultThemeId);
       return ProviderScope(
         overrides: [
@@ -874,7 +882,6 @@ void main() {
           usageReportApiProvider.overrideWithValue(_StubApi()),
           usageExportCaptureProvider.overrideWithValue((key) async => null),
           usageExportSupportedProvider.overrideWithValue(supported),
-          usageExportIsBrowserProvider.overrideWithValue(isBrowser),
         ],
         child: MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -967,28 +974,15 @@ void main() {
       });
     });
 
-    testWidgets('the browser is told it may be asked about the second file', (
-      tester,
-    ) async {
-      await tester.pumpWidget(subject(isBrowser: true));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.textContaining('may ask to allow multiple downloads'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('that note is absent where the app owns the destination', (
+    testWidgets('the export buttons carry no file-count footnotes', (
       tester,
     ) async {
       await tester.pumpWidget(subject());
       await tester.pumpAndSettle();
 
-      expect(
-        find.textContaining('may ask to allow multiple downloads'),
-        findsNothing,
-      );
+      // Both notes restated what pressing the button does, at every width.
+      expect(find.textContaining('Each export writes two PNGs'), findsNothing);
+      expect(find.textContaining('multiple downloads'), findsNothing);
     });
   });
 

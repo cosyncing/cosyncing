@@ -432,13 +432,15 @@ void main() {
     }
   });
 
-  testWidgets('the footer cites the served source count, not a constant', (
+  testWidgets('the report ends on its last section, with no caveat footer', (
     tester,
   ) async {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('5 tool sources'), findsOneWidget);
+    expect(find.textContaining('local midnight'), findsNothing);
+    expect(find.textContaining('Active time excludes idle gaps'), findsNothing);
+    expect(find.textContaining('tool sources'), findsNothing);
   });
 
   testWidgets('prompt text appears nowhere in the widget tree', (tester) async {

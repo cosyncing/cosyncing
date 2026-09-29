@@ -25,6 +25,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/agents_settings_page.dart';
+import 'package:cosyncing_client/src/features/settings/view/android_client_update_prompt.dart';
 import 'package:cosyncing_client/src/features/settings/view/appearance_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/broker_devices_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/display_settings_page.dart';
@@ -674,18 +675,22 @@ class _AppCommandShell extends ConsumerWidget {
       ),
     };
 
-    final Widget shellChild = Focus(
-      autofocus: true,
-      child: FocusScope(
-        // On web the browser handles Ctrl/Cmd+wheel zoom; only install the
-        // pointer-signal text-scale step on native platforms.
-        child: browserOwnsZoom
-            ? child
-            : Listener(
-                onPointerSignal: (event) =>
-                    _handlePointerSignal(context, ref, event),
-                child: child,
-              ),
+    // The update offer sits here, below the root navigator, so it opens as a
+    // real dialog route rather than as chrome drawn over every screen.
+    final Widget shellChild = AndroidClientUpdatePrompt(
+      child: Focus(
+        autofocus: true,
+        child: FocusScope(
+          // On web the browser handles Ctrl/Cmd+wheel zoom; only install the
+          // pointer-signal text-scale step on native platforms.
+          child: browserOwnsZoom
+              ? child
+              : Listener(
+                  onPointerSignal: (event) =>
+                      _handlePointerSignal(context, ref, event),
+                  child: child,
+                ),
+        ),
       ),
     );
 

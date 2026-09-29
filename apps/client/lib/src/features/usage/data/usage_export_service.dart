@@ -215,11 +215,6 @@ final Provider<bool> usageExportSupportedProvider = Provider<bool>(
   (ref) => usageExportSupportedOn(defaultTargetPlatform),
 );
 
-/// Whether the destination is a browser. Overridable for the same reason.
-final Provider<bool> usageExportIsBrowserProvider = Provider<bool>(
-  (ref) => kIsWeb,
-);
-
 /// Whether the destination is a share sheet, which the section says out loud:
 /// "saved" names a file the reader can go and open, and a share sheet has not
 /// promised them one.

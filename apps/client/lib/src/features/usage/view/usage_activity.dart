@@ -348,6 +348,8 @@ class _UsageActivityState extends State<UsageActivity> {
             },
           ),
         ],
+        // A day's streak line only restates the day: one of one days active,
+        // and today as the busiest of them.
         if (_streakLine(
               l10n,
               report,
@@ -356,7 +358,7 @@ class _UsageActivityState extends State<UsageActivity> {
                 DateTime(widget.now.year, widget.now.month, widget.now.day),
               ),
             )
-            case final line?) ...[
+            case final line? when !dayView) ...[
           const SizedBox(height: 12),
           UsageFootnote(text: line),
         ],

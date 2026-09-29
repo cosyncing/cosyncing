@@ -12,6 +12,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_roster_disclosure.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/cached_roster_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
@@ -152,6 +153,7 @@ class SessionListPane extends ConsumerStatefulWidget {
     this.now,
     this.unreadCompletionKeys,
     this.revealRequest,
+    this.disclosure,
     super.key,
   });
 
@@ -189,6 +191,12 @@ class SessionListPane extends ConsumerStatefulWidget {
 
   /// Opens one session row.
   final ValueChanged<SessionInfo> onOpen;
+
+  /// Where the saved project and child-subtree choices live. An owner whose
+  /// pane is rebuilt while the workspace lives on — the phone drawer — passes
+  /// one that outlives the pane; without it the choices last as long as this
+  /// pane does.
+  final SessionRosterDisclosure? disclosure;
 
   /// Optional deterministic preference source for embedded/test surfaces.
   ///
@@ -245,10 +253,16 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
   DateTime? _relativeTimeNow;
   final Map<int, String> _relativeTimeLabels = <int, String>{};
 
+  final SessionRosterDisclosure _ownDisclosure = SessionRosterDisclosure();
+
+  SessionRosterDisclosure get _disclosure =>
+      widget.disclosure ?? _ownDisclosure;
+
   /// Saved per-parent child-subtree choices. Absent means "follow the global
   /// background-session preference", which is what lets an explicit collapse
   /// close a subtree that preference is already revealing.
-  final Map<String, SessionChildExpansion> _childExpansion = {};
+  Map<String, SessionChildExpansion> get _childExpansion =>
+      _disclosure.childExpansion;
 
   /// Child-subtree choices made *while* a search/filter reveal is running. It
   /// fully replaces the saved map during the reveal and is discarded when the
@@ -263,9 +277,8 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
 
   /// Project keys the user has explicitly expanded. Projects default to
   /// collapsed, so an initial or newly discovered key is closed until it is
-  /// opened here. In-memory for the mounted workspace, like the per-parent
-  /// child choices above.
-  final Set<String> _expandedProjectKeys = <String>{};
+  /// opened here. In memory only, like the per-parent child choices above.
+  Set<String> get _expandedProjectKeys => _disclosure.expandedProjectKeys;
 
   /// Project keys the user collapsed again *while* a search/filter reveal was
   /// showing them. Discarded when the filters clear, so the saved expansion set

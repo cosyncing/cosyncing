@@ -188,24 +188,9 @@ module FlutterGoldenPolicy
         "matchesGoldenFile('goldens/file_pane_strip_overflow_light_en.png')"
       ]
     },
-    # The usage surfaces. One test file owns three families because the three
+    # The usage surfaces. One test file owns two families because the two
     # subjects are separate widgets sampled on separate axes; splitting the
     # owner would only duplicate the harness.
-    'usage-card' => {
-      owner: 'apps/client/test/src/features/usage/view/usage_golden_test.dart',
-      root: 'apps/client/test/src/features/usage/view/goldens',
-      names: %w[
-        usage_card_dark_roomy_zh.png
-        usage_card_light_compact_en.png
-        usage_card_unavailable_dark_compact_en.png
-      ],
-      fragments: [
-        "matchesGoldenFile('goldens/$name.png')",
-        "name: 'usage_card_dark_roomy_zh'",
-        "name: 'usage_card_light_compact_en'",
-        "name: 'usage_card_unavailable_dark_compact_en'"
-      ]
-    },
     'usage-report' => {
       owner: 'apps/client/test/src/features/usage/view/usage_golden_test.dart',
       root: 'apps/client/test/src/features/usage/view/goldens',

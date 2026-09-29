@@ -20,7 +20,8 @@ class UsageAgentLogo extends StatelessWidget {
   /// Edge length of the badge.
   final double size;
 
-  /// Tool id to bundled asset. Mirrors tokdash's `TOOL_META`.
+  /// Tool id to bundled asset. Mirrors tokdash's `TOOL_META`, plus the vendor
+  /// marks for the sources tokdash itself draws no artwork for.
   static const Map<String, String> _marks = {
     'opencode': 'assets/agents/opencode.png',
     'codex': 'assets/agents/codex.png',
@@ -49,6 +50,8 @@ class UsageAgentLogo extends StatelessWidget {
     'qwen_code': 'assets/agents/qwen_code.png',
     'crush': 'assets/agents/crush.png',
     'minimax': 'assets/agents/minimax.png',
+    'muse': 'assets/agents/muse.png',
+    'devin': 'assets/agents/devin.png',
   };
 
   /// Marks drawn dark-on-transparent that would vanish on a dark canvas;
@@ -61,10 +64,8 @@ class UsageAgentLogo extends StatelessWidget {
     'cline',
     'zcode',
     'zed',
+    'devin',
   };
-
-  /// Wordmark marks are wider than tall and must not be squared.
-  static const Set<String> _wordmark = {'mimo'};
 
   /// CSS `invert(1) hue-rotate(180deg)` as a single color matrix: lightness
   /// flips, hue survives, so a black glyph turns white without orange going
@@ -97,13 +98,6 @@ class UsageAgentLogo extends StatelessWidget {
       image = ColorFiltered(
         colorFilter: const ColorFilter.matrix(_invertPreserveHue),
         child: image,
-      );
-    }
-    if (_wordmark.contains(id)) {
-      return SizedBox(
-        width: size * 2.5,
-        height: size,
-        child: FittedBox(child: image),
       );
     }
     return SizedBox(width: size, height: size, child: image);
