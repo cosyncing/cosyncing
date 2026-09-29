@@ -5,34 +5,50 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.13 corrects how a refused Codex takeover is explained. A session whose
-Codex daemon ownership could not be verified no longer claims that Codex
-Desktop may still control it; it reports the ownership check that failed,
-which is a different problem with a different remedy.
+0.6.0 is the largest client release to date. Session tabs stay open beside an
+overview, the sidebar follows you into Notifications and Settings, each
+notification type is configured on its own, notifications reach a browser with
+every tab closed, and reading back through a long session keeps its place.
 
-0.5.13 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.13 broker. Codex background command cards
-require a revision-26 client for safe reconnect reconciliation. A 0.4.1 or older
-client remains read-only against current brokers.
+Update the client on every device you use before, or together with, the Server.
+This release ships broker contract revisions 27 and 28 together and the
+compatibility window stays one revision wide, so a native client from 0.5.13 or
+earlier can watch a 0.6.0 Server but cannot drive it: it cannot answer a
+permission request or send a prompt. The web client needs nothing: it ships
+inside the broker package and always matches it. A 0.4.1 or older client also
+sits below the minimum accepted client contract, still revision 17, and stays
+read-only against current brokers.
 
-Update the client on every device you use before, or together with, the broker.
-The web client needs nothing: it ships inside the broker package and always
-matches it.
+## What's new in 0.6.0
 
-## What's new in 0.5.13
+- The workspace keeps session tabs visible, including a single open session,
+  and adds an overview plus Close all with Undo. Closing a tab leaves that
+  session running. Phones and other narrow screens open the same sidebar as a
+  drawer from the menu button.
+- The roster starts with every project collapsed and marks one that needs input
+  or has finished work with a single dot. Rows use the harness's own logo and
+  keep subagent hierarchy, with the parent's status and its descendants' cues
+  shown separately.
+- Conversations use a compact context header and composer, with model,
+  permissions, microphone, context usage, Send and Stop within reach.
+  Conversation text size, spacing and reading width persist on their own. Flat
+  White Minimalist is the new default palette, with the new Quiet Workspace
+  palette and bundled Lato typography.
+- Notifications are configured per event type in three families: Sessions,
+  Security and Server. On Android each type is its own system channel. Each
+  event now notifies once instead of on a ladder of reminders, opening a
+  session or tapping its notification clears it, and reading it on one device
+  clears it on your other devices.
+- Closing the window keeps Cosyncing running on macOS and Windows so
+  notifications still arrive. Android has an off-by-default switch that stays
+  connected in the background.
+- Reading back through a long session no longer loses your place. The client
+  holds up to 500 rows and about 4 MiB, unloads whole pages far from where you
+  are reading, and restores exactly those rows. Following a reply as it streams
+  in now draws almost every frame on time instead of dropping most of them.
 
-- A refused Codex takeover names its actual cause. When the daemon's ownership
-  check could not be answered, the client says so instead of naming Codex
-  Desktop or another client as a possible writer; a confirmed competing writer
-  keeps the conflict wording. Applies to manual takeover and to automatic
-  restoration, in all five locales.
-- On the broker side of the same release, `cosyncing doctor` reads a Codex
-  control socket that the runtime publishes as a symlink, and a managed Codex
-  daemon is recognized on runtimes that append a `--managed-daemon` launch
-  marker, so restarts stop refusing a daemon they already own.
-
-For Codex background-command cards, use a 0.5.12 or newer native client with a
-0.5.13 broker release. The web client ships with the matching broker.
+For notifications with every browser tab closed, per-type notification settings
+and cross-device read/clear, use a 0.6.0 client with a 0.6.0 broker release.
 
 ## Downloads
 
