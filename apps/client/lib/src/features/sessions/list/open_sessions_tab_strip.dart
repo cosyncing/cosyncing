@@ -622,7 +622,12 @@ class _Tab extends StatelessWidget {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      SessionHarnessLogo(tool: ref.tool, size: 12),
+                      // Hover names the harness; the tab's accessible name
+                      // stays its title, as the logo's label and tooltip
+                      // would otherwise read the harness twice before it.
+                      ExcludeSemantics(
+                        child: SessionHarnessLogo(tool: ref.tool, size: 12),
+                      ),
                       const SizedBox(width: 8),
                       Flexible(
                         child: Text(

@@ -136,6 +136,45 @@ void main() {
       semantics.dispose();
     });
 
+    testWidgets('a session tab is announced by its title alone', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      tester.view
+        ..physicalSize = const Size(1440, 900)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        host(
+          OpenSessionsTabStrip(
+            refs: [_ref('pi', 'a', title: 'Artifact owner')],
+            activeKey: 'pi/a',
+            onSelect: (_) {},
+            onClose: (_) {},
+            onOverview: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The harness logo carries a label and a hover tooltip; inside the tab
+      // they once made its name "Pi, Pi, Artifact owner".
+      expect(
+        tester.getSemantics(
+          find
+              .descendant(
+                of: find.byKey(const Key('open-session-tab-pi/a')),
+                matching: find.byType(InkWell),
+              )
+              .first,
+        ),
+        isSemantics(label: 'Artifact owner'),
+      );
+      expect(find.byTooltip('Pi'), findsOneWidget);
+      semantics.dispose();
+    });
+
     testWidgets('a phone swipe scrolls reorderable tabs without moving them', (
       tester,
     ) async {

@@ -166,67 +166,50 @@ async function openRosterSession(
   title: string,
   sessionId: string,
 ): Promise<void> {
-  await page.setViewportSize({ width: 800, height: 1000 });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${origin}/cosy/#/sessions`, { waitUntil: 'domcontentloaded' });
   await waitForFlutter(page);
-  // Flutter can replace a semantics row while a roster refresh is painting.
-  // Durable route restoration can also return to Detail after the initial
-  // roster navigation. Re-resolve both controls on every bounded attempt so a
-  // restored route or refreshed roster cannot strand the test on a stale node.
-  const expectedRoute = `/sessions/pi/${sessionId}`;
-  const clickDeadline = Date.now() + 30_000;
-  let clickFailure: unknown;
-  let openedExpectedRoute = false;
-  while (Date.now() < clickDeadline) {
-    if (decodeURIComponent(new URL(page.url()).hash).includes(expectedRoute)) {
-      openedExpectedRoute = true;
+  // The sidebar opens a session as a working-set tab and stays on Sessions,
+  // so the tab, not the route, shows which session opened. Each fixture title
+  // names one session per broker, and broker B's owner is asserted to reuse
+  // the same native id. Projects start collapsed, so a search reveals the
+  // row. Flutter can replace a semantics node while the roster repaints, so
+  // every bounded attempt re-resolves the search field, the row and the tab
+  // rather than holding a stale node.
+  const tab = page.locator(`[role="group"][aria-label="${title}"]`);
+  const deadline = Date.now() + 30_000;
+  let failure: unknown;
+  let opened = false;
+  while (Date.now() < deadline) {
+    if (await tab.count() > 0) {
+      opened = true;
       break;
     }
     try {
       const operationTimeout = () => Math.max(
         1,
-        Math.min(5_000, clickDeadline - Date.now()),
+        Math.min(5_000, deadline - Date.now()),
       );
-      const detailBack = page.getByRole('button', {
-        name: 'Back',
-        exact: true,
-      });
-      if (await detailBack.isVisible().catch(() => false)) {
-        await detailBack.click({ timeout: operationTimeout() });
+      const row = page.getByRole('button', { name: title, exact: false });
+      if (!(await row.first().isVisible().catch(() => false))) {
+        const search = page.getByRole('textbox', { name: 'Search sessions' });
+        await search.first().fill(title, { timeout: operationTimeout() });
+        await row.first().waitFor({
+          state: 'visible',
+          timeout: operationTimeout(),
+        });
       }
-      if (Date.now() >= clickDeadline) {
-        throw new Error('roster-session retry deadline elapsed after Back');
-      }
-
-      const rowTitle = page.getByRole('button', {
-        name: title,
-        exact: false,
-      });
-      if (!(await rowTitle.first().isVisible().catch(() => false))) {
-        throw new Error(`roster row ${JSON.stringify(title)} is not visible`);
-      }
-      await rowTitle.first().click({
-        force: true,
-        timeout: operationTimeout(),
-      });
-      await page.waitForURL(
-        (url) => decodeURIComponent(url.hash).includes(expectedRoute),
-        { timeout: operationTimeout() },
-      );
-      clickFailure = undefined;
-      openedExpectedRoute = true;
+      await row.first().click({ force: true, timeout: operationTimeout() });
+      await tab.first().waitFor({ state: 'attached', timeout: operationTimeout() });
+      failure = undefined;
+      opened = true;
       break;
     } catch (error) {
-      clickFailure = error;
-      if (decodeURIComponent(new URL(page.url()).hash).includes(expectedRoute)) {
-        clickFailure = undefined;
-        openedExpectedRoute = true;
-        break;
-      }
-      if (Date.now() < clickDeadline) await page.waitForTimeout(100);
+      failure = error;
+      if (Date.now() < deadline) await page.waitForTimeout(100);
     }
   }
-  if (!openedExpectedRoute) {
+  if (!opened) {
     const labels = await page.locator('[aria-label]').evaluateAll((elements) =>
       elements.map((element) => element.getAttribute('aria-label')).filter(Boolean)
     );
@@ -239,16 +222,14 @@ async function openRosterSession(
     );
     const text = await page.locator('body').innerText().catch(() => '');
     throw new Error(
-      `Could not open roster session ${title} (${sessionId}): ${String(clickFailure)}`
+      `Could not open roster session ${title} (${sessionId}): ${String(failure)}`
         + `\nURL ${page.url()}\nARIA ${JSON.stringify(labels)}`
         + `\nROLES ${JSON.stringify(roles)}\nTEXT ${text.slice(0, 4_000)}`,
     );
   }
-  // Session Detail records the compact destination in the durable working set.
-  // Returning to Sessions after the resize mounts that exact tab in the real
-  // expanded workspace.
+  // The working set is durable: a fresh load of Sessions mounts the tab
+  // just opened.
   await page.waitForTimeout(300);
-  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${origin}/cosy/#/sessions`, { waitUntil: 'domcontentloaded' });
   await waitForFlutter(page);
   await page.waitForTimeout(500);
@@ -518,8 +499,11 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Download', exact: true }).count(), 0,
     'broker B exposed broker A download action');
 
+  // Both fixture brokers point Tokdash at an unroutable origin, so the
+  // Overview's usage summary is refused with a 502 and shows as unavailable.
   const materialErrors = browserErrors.filter((message) =>
     !/favicon|Failed to load resource.*503/i.test(message)
+    && !/Failed to load resource.* 502 .*\/api\/tokdash\/report\?/.test(message)
   );
   assert.deepEqual(materialErrors, [], `browser errors: ${materialErrors.join(' | ')}`);
 
