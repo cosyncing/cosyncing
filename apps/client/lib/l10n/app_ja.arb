@@ -1102,6 +1102,7 @@
   "attentionPageBackToSessions": "セッションに戻る",
   "attentionPageRefresh": "受信箱を更新",
   "attentionPageClearAll": "すべて消去",
+  "attentionPageAllCleared": "通知を消去しました",
   "attentionPageClearFailed": "この通知の記録を消去できませんでした。もう一度お試しください。",
   "attentionPageActionRequired": "対応が必要",
   "attentionPageActionRequiredSubtitle": "あなたを待っているセッションや、確認が必要な実行",

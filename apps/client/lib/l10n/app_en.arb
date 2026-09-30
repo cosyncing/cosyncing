@@ -3600,6 +3600,10 @@
   "attentionPageBackToSessions": "Back to Sessions",
   "attentionPageRefresh": "Refresh inbox",
   "attentionPageClearAll": "Clear all",
+  "attentionPageAllCleared": "Notifications cleared",
+  "@attentionPageAllCleared": {
+    "description": "Snackbar after Clear all hides every notification in the inbox; Undo is offered beside it."
+  },
   "attentionPageClearFailed": "Couldn't clear this notification snapshot. Try again.",
   "attentionPageProblems": "Problems",
   "@attentionPageProblems": {

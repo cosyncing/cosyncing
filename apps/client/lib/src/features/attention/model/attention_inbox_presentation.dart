@@ -7,6 +7,9 @@ import 'package:cosyncing_client/src/features/attention/model/attention_inbox.da
 final class AttentionInboxPresentation {
   /// Projects each event exactly once, before either UI filter is applied.
   AttentionInboxPresentation(AttentionInboxSections sections) {
+    // A set, not a list lookup per row: a long history made this quadratic.
+    final actionRequired = Set<AttentionInboxEntry>.identity()
+      ..addAll(sections.actionRequired);
     for (final entry in sections.all) {
       final event = entry.event;
       final active = event.state == 'active' && event.resolvedAt == null;
@@ -15,7 +18,7 @@ final class AttentionInboxPresentation {
       } else if (entry.isUnread &&
           (event.isRunFinished || event.isGoalFinished)) {
         completions.add(entry);
-      } else if (sections.actionRequired.contains(entry)) {
+      } else if (actionRequired.contains(entry)) {
         urgent.add(entry);
       } else {
         activity.add(entry);

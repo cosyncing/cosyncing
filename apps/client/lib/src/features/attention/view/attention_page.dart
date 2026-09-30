@@ -54,8 +54,14 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
     super.dispose();
   }
 
+  static const double _maxContentWidth = 960;
+
   static String _snapshotKey(AttentionInboxEntry entry) =>
       '${RosterSource.ofProfile(entry.profile).storageKey}/${entry.event.id}/${entry.event.revision}';
+
+  /// Keeps each card's state with its event as rows above it are dismissed.
+  static Key _cardKey(AttentionInboxEntry entry) =>
+      ValueKey(('attention-card', _snapshotKey(entry)));
 
   @override
   Widget build(BuildContext context) {
@@ -97,28 +103,36 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
           ),
           onRetry: () => ref.invalidate(attentionInboxProvider),
         ),
-        data: _buildInbox,
+        data: (sections) => _buildInbox(_visible(sections)),
       ),
+    );
+  }
+
+  /// The inbox without the rows a Clear hides while its Undo is offered.
+  AttentionInboxSections _visible(AttentionInboxSections sections) {
+    if (_hiddenSnapshots.isEmpty) return sections;
+    bool shown(AttentionInboxEntry entry) =>
+        !_hiddenSnapshots.contains(_snapshotKey(entry));
+    return AttentionInboxSections(
+      actionRequired: sections.actionRequired.where(shown).toList(),
+      maintenance: sections.maintenance.where(shown).toList(),
+      resolved: sections.resolved.where(shown).toList(),
     );
   }
 
   Widget _buildInbox(AttentionInboxSections sections) {
     final l10n = AppLocalizations.of(context);
     final t = context.tokens;
-    if (sections.all.isEmpty) return const _EmptyAttentionInbox();
+    final all = sections.all;
+    if (all.isEmpty) return const _EmptyAttentionInbox();
     final groups = AttentionInboxPresentation(sections);
-    final activity = groups.activity
-        .where(
-          (entry) =>
-              !_hiddenSnapshots.contains(_snapshotKey(entry)) &&
-              (!_unreadOnly || entry.isUnread),
-        )
-        .toList(growable: false);
+    final activity = _unreadOnly
+        ? groups.activity
+              .where((entry) => entry.isUnread)
+              .toList(growable: false)
+        : groups.activity;
     final activityUnread = groups.activity
-        .where(
-          (entry) =>
-              entry.isUnread && !_hiddenSnapshots.contains(_snapshotKey(entry)),
-        )
+        .where((entry) => entry.isUnread)
         .length;
     final showInput =
         _pendingFilter == _PendingFilter.all ||
@@ -138,206 +152,286 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
       _PendingFilter.completion: l10n.inboxEnhancementCompletions,
       _PendingFilter.urgent: l10n.attentionPageProblems,
     };
+    final width = MediaQuery.sizeOf(context).width;
+    final gutter = width < 600 ? 12.0 : 24.0;
+    // Only the rows on screen are built: a long history holds thousands of
+    // events, and building every card at once froze the page.
     return RefreshIndicator(
       onRefresh: () async {
         ref.invalidate(attentionInboxProvider);
         await ref.read(attentionInboxProvider.future);
       },
-      child: SingleChildScrollView(
-        key: const Key('attention-inbox-list'),
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: EdgeInsets.fromLTRB(
-          MediaQuery.sizeOf(context).width < 600 ? 12 : 24,
-          16,
-          MediaQuery.sizeOf(context).width < 600 ? 12 : 24,
-          32,
-        ),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 960),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Align(
-                  alignment: AlignmentDirectional.centerEnd,
-                  child: TextButton.icon(
-                    key: const Key('attention-jump-activity'),
-                    onPressed: () {
-                      final target = _activityKey.currentContext;
-                      if (target != null) {
-                        Scrollable.ensureVisible(target);
-                        _activityFocus.requestFocus();
-                      }
-                    },
-                    label: Text(l10n.inboxEnhancementJumpActivity),
-                    icon: const Icon(Icons.south, size: 16),
-                  ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final side = constraints.maxWidth - 2 * gutter > _maxContentWidth
+              ? (constraints.maxWidth - _maxContentWidth) / 2
+              : gutter;
+          Widget padded(Widget sliver, {double top = 0, double bottom = 0}) =>
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(side, top, side, bottom),
+                sliver: sliver,
+              );
+          List<Widget> section(
+            String title,
+            List<AttentionInboxEntry> entries,
+            Color accent,
+          ) => [
+            padded(
+              SliverToBoxAdapter(
+                child: _AttentionSectionHeader(
+                  title: title,
+                  count: entries.length,
+                  accent: accent,
                 ),
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 16,
-                  runSpacing: 8,
-                  children: [
-                    // The selected filter and its count, as the Overview's
-                    // queue heading reads: no union name of its own.
-                    SectionHeader(
-                      l10n.inboxEnhancementPendingHeader(
-                        pendingLabels[_pendingFilter]!,
-                        switch (_pendingFilter) {
-                          _PendingFilter.all => groups.pendingCount,
-                          _PendingFilter.input => groups.requests.length,
-                          _PendingFilter.completion =>
-                            groups.completions.length,
-                          _PendingFilter.urgent => groups.urgent.length,
-                        },
-                      ),
-                      color: t.textPrimary,
-                      padding: EdgeInsets.zero,
-                    ),
-                    SizedBox(
-                      width: 280,
-                      child: DropdownButton<_PendingFilter>(
-                        isExpanded: true,
-                        key: const Key('attention-pending-filter'),
-                        value: _pendingFilter,
-                        underline: const SizedBox.shrink(),
-                        onChanged: (value) {
-                          if (value != null) {
-                            setState(() => _pendingFilter = value);
-                          }
-                        },
-                        items: [
-                          for (final entry in pendingLabels.entries)
-                            DropdownMenuItem(
-                              value: entry.key,
-                              child: Text(
-                                entry.value,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
+              ),
+            ),
+            padded(
+              SliverList.builder(
+                itemCount: entries.length,
+                itemBuilder: (_, index) => _AttentionEventCard(
+                  key: _cardKey(entries[index]),
+                  entry: entries[index],
+                  accent: accent,
+                ),
+              ),
+              bottom: 24,
+            ),
+          ];
+          return CustomScrollView(
+            key: const Key('attention-inbox-list'),
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              padded(
+                top: 16,
+                SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: 8,
+                        children: [
+                          TextButton.icon(
+                            key: const Key('attention-clear-inbox'),
+                            onPressed: _clearing
+                                ? null
+                                : () => _clear(
+                                    all,
+                                    cleared: l10n.attentionPageAllCleared,
+                                  ),
+                            label: Text(l10n.attentionPageClearAll),
+                            icon: const Icon(Icons.clear_all, size: 16),
+                          ),
+                          TextButton.icon(
+                            key: const Key('attention-jump-activity'),
+                            onPressed: () {
+                              final target = _activityKey.currentContext;
+                              if (target != null) {
+                                Scrollable.ensureVisible(target);
+                                _activityFocus.requestFocus();
+                              }
+                            },
+                            label: Text(l10n.inboxEnhancementJumpActivity),
+                            icon: const Icon(Icons.south, size: 16),
+                          ),
                         ],
                       ),
-                    ),
-                  ],
+                      Wrap(
+                        alignment: WrapAlignment.spaceBetween,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 16,
+                        runSpacing: 8,
+                        children: [
+                          // The selected filter and its count, as the
+                          // Overview's queue heading reads: no union name
+                          // of its own.
+                          SectionHeader(
+                            l10n.inboxEnhancementPendingHeader(
+                              pendingLabels[_pendingFilter]!,
+                              switch (_pendingFilter) {
+                                _PendingFilter.all => groups.pendingCount,
+                                _PendingFilter.input => groups.requests.length,
+                                _PendingFilter.completion =>
+                                  groups.completions.length,
+                                _PendingFilter.urgent => groups.urgent.length,
+                              },
+                            ),
+                            color: t.textPrimary,
+                            padding: EdgeInsets.zero,
+                          ),
+                          SizedBox(
+                            width: 280,
+                            child: DropdownButton<_PendingFilter>(
+                              isExpanded: true,
+                              key: const Key('attention-pending-filter'),
+                              value: _pendingFilter,
+                              underline: const SizedBox.shrink(),
+                              onChanged: (value) {
+                                if (value != null) {
+                                  setState(() => _pendingFilter = value);
+                                }
+                              },
+                              items: [
+                                for (final entry in pendingLabels.entries)
+                                  DropdownMenuItem(
+                                    value: entry.key,
+                                    child: Text(
+                                      entry.value,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      if (groups.pendingCount == 0)
+                        Text(
+                          l10n.inboxEnhancementNoPending,
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(color: t.textSecondary),
+                        ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 16),
-                if (groups.pendingCount == 0)
-                  Text(
-                    l10n.inboxEnhancementNoPending,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: t.textSecondary),
-                  ),
-                if (showInput && groups.requests.isNotEmpty)
-                  _AttentionSection(
-                    title: l10n.inboxEnhancementInput,
-                    entries: groups.requests,
-                    accent: t.statusNeedsInput,
-                  ),
-                if (showCompletion && groups.completions.isNotEmpty)
-                  _AttentionSection(
-                    title: l10n.inboxEnhancementCompletions,
-                    entries: groups.completions,
-                    accent: t.statusError,
-                  ),
-                if (showUrgent && groups.urgent.isNotEmpty)
-                  _AttentionSection(
-                    title: l10n.attentionPageProblems,
-                    entries: groups.urgent,
-                    accent: t.statusError,
-                  ),
-                const SizedBox(height: 24),
-                Focus(
-                  key: _activityKey,
-                  focusNode: _activityFocus,
-                  child: Semantics(
-                    header: true,
-                    child: SectionHeader(
-                      l10n.inboxEnhancementRecentActivity(activityUnread),
-                      color: t.textPrimary,
-                      padding: EdgeInsets.zero,
-                    ),
+              ),
+              if (showInput && groups.requests.isNotEmpty)
+                ...section(
+                  l10n.inboxEnhancementInput,
+                  groups.requests,
+                  t.statusNeedsInput,
+                ),
+              if (showCompletion && groups.completions.isNotEmpty)
+                ...section(
+                  l10n.inboxEnhancementCompletions,
+                  groups.completions,
+                  t.statusError,
+                ),
+              if (showUrgent && groups.urgent.isNotEmpty)
+                ...section(
+                  l10n.attentionPageProblems,
+                  groups.urgent,
+                  t.statusError,
+                ),
+              padded(
+                SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: 24),
+                      Focus(
+                        key: _activityKey,
+                        focusNode: _activityFocus,
+                        child: Semantics(
+                          header: true,
+                          child: SectionHeader(
+                            l10n.inboxEnhancementRecentActivity(
+                              activityUnread,
+                            ),
+                            color: t.textPrimary,
+                            padding: EdgeInsets.zero,
+                          ),
+                        ),
+                      ),
+                      Wrap(
+                        alignment: WrapAlignment.spaceBetween,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 8,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Checkbox(
+                                key: const Key('attention-unread-filter'),
+                                value: _unreadOnly,
+                                onChanged: (value) => setState(
+                                  () => _unreadOnly = value ?? false,
+                                ),
+                              ),
+                              GestureDetector(
+                                onTap: () => setState(
+                                  () => _unreadOnly = !_unreadOnly,
+                                ),
+                                child: Text(l10n.inboxEnhancementUnread),
+                              ),
+                            ],
+                          ),
+                          PopupMenuButton<_ActivityAction>(
+                            key: const Key('attention-activity-actions'),
+                            tooltip: l10n.inboxEnhancementActivityActions,
+                            onSelected: (action) {
+                              switch (action) {
+                                case _ActivityAction.read:
+                                  _markRead(activity);
+                                case _ActivityAction.clear:
+                                  _clear(
+                                    activity,
+                                    cleared:
+                                        l10n.inboxEnhancementActivityCleared,
+                                  );
+                                case _ActivityAction.refresh:
+                                  ref.invalidate(attentionInboxProvider);
+                              }
+                            },
+                            itemBuilder: (_) => [
+                              PopupMenuItem(
+                                value: _ActivityAction.read,
+                                enabled:
+                                    !_reading &&
+                                    activity.any((entry) => entry.isUnread),
+                                child: Text(
+                                  l10n.inboxEnhancementMarkAllRead,
+                                ),
+                              ),
+                              PopupMenuItem(
+                                key: const Key('attention-clear-all'),
+                                value: _ActivityAction.clear,
+                                enabled: !_clearing && activity.isNotEmpty,
+                                child: Text(
+                                  l10n.inboxEnhancementClearActivity,
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: _ActivityAction.refresh,
+                                child: Text(l10n.attentionPageRefresh),
+                              ),
+                            ],
+                            icon: const Icon(Icons.more_horiz),
+                          ),
+                        ],
+                      ),
+                      if (activity.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 16,
+                          ),
+                          child: Text(
+                            l10n.inboxEnhancementNoActivity,
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: t.textSecondary),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          key: const Key('attention-unread-filter'),
-                          value: _unreadOnly,
-                          onChanged: (value) =>
-                              setState(() => _unreadOnly = value ?? false),
-                        ),
-                        GestureDetector(
-                          onTap: () =>
-                              setState(() => _unreadOnly = !_unreadOnly),
-                          child: Text(l10n.inboxEnhancementUnread),
-                        ),
-                      ],
-                    ),
-                    PopupMenuButton<_ActivityAction>(
-                      key: const Key('attention-activity-actions'),
-                      tooltip: l10n.inboxEnhancementActivityActions,
-                      onSelected: (action) {
-                        switch (action) {
-                          case _ActivityAction.read:
-                            _markRead(activity);
-                          case _ActivityAction.clear:
-                            _clearActivity(activity);
-                          case _ActivityAction.refresh:
-                            ref.invalidate(attentionInboxProvider);
-                        }
-                      },
-                      itemBuilder: (_) => [
-                        PopupMenuItem(
-                          value: _ActivityAction.read,
-                          enabled:
-                              !_reading &&
-                              activity.any((entry) => entry.isUnread),
-                          child: Text(l10n.inboxEnhancementMarkAllRead),
-                        ),
-                        PopupMenuItem(
-                          key: const Key('attention-clear-all'),
-                          value: _ActivityAction.clear,
-                          enabled: !_clearing && activity.isNotEmpty,
-                          child: Text(l10n.inboxEnhancementClearActivity),
-                        ),
-                        PopupMenuItem(
-                          value: _ActivityAction.refresh,
-                          child: Text(l10n.attentionPageRefresh),
-                        ),
-                      ],
-                      icon: const Icon(Icons.more_horiz),
-                    ),
-                  ],
-                ),
-                if (activity.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    child: Text(
-                      l10n.inboxEnhancementNoActivity,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodyMedium?.copyWith(color: t.textSecondary),
-                    ),
-                  ),
-                for (final entry in activity)
-                  _AttentionEventCard(
-                    entry: entry,
+              ),
+              padded(
+                SliverList.builder(
+                  itemCount: activity.length,
+                  itemBuilder: (_, index) => _AttentionEventCard(
+                    key: _cardKey(activity[index]),
+                    entry: activity[index],
                     accent: t.accent,
                     activity: true,
                   ),
-              ],
-            ),
-          ),
-        ),
+                ),
+                bottom: 32,
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -363,7 +457,11 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
     }
   }
 
-  Future<void> _clearActivity(List<AttentionInboxEntry> snapshot) async {
+  /// Hides [snapshot] at once and dismisses it for good when Undo expires.
+  Future<void> _clear(
+    List<AttentionInboxEntry> snapshot, {
+    required String cleared,
+  }) async {
     if (_clearing || snapshot.isEmpty) return;
     final l10n = AppLocalizations.of(context);
     final actions = ref.read(attentionInboxActionsProvider);
@@ -377,7 +475,7 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
     var undone = false;
     final notice = ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(l10n.inboxEnhancementActivityCleared),
+        content: Text(cleared),
         duration: const Duration(seconds: 5),
         persist: MediaQuery.accessibleNavigationOf(context),
         showCloseIcon: true,
@@ -433,42 +531,31 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
   }
 }
 
-class _AttentionSection extends StatelessWidget {
-  const _AttentionSection({
+class _AttentionSectionHeader extends StatelessWidget {
+  const _AttentionSectionHeader({
     required this.title,
-    required this.entries,
+    required this.count,
     required this.accent,
   });
   final String title;
-  final List<AttentionInboxEntry> entries;
+  final int count;
   final Color accent;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 24),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Row(
       children: [
-        Row(
-          children: [
-            StatusDot(color: accent, size: 8),
-            const SizedBox(width: 8),
-            Expanded(
-              child: SectionHeader(
-                title,
-                padding: EdgeInsets.zero,
-                color: context.tokens.textPrimary,
-              ),
-            ),
-            Text(
-              '${entries.length}',
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
-          ],
+        StatusDot(color: accent, size: 8),
+        const SizedBox(width: 8),
+        Expanded(
+          child: SectionHeader(
+            title,
+            padding: EdgeInsets.zero,
+            color: context.tokens.textPrimary,
+          ),
         ),
-        const SizedBox(height: 12),
-        for (final entry in entries)
-          _AttentionEventCard(entry: entry, accent: accent),
+        Text('$count', style: Theme.of(context).textTheme.labelSmall),
       ],
     ),
   );
@@ -479,6 +566,7 @@ class _AttentionEventCard extends ConsumerWidget {
     required this.entry,
     required this.accent,
     this.activity = false,
+    super.key,
   });
 
   final AttentionInboxEntry entry;
@@ -601,16 +689,16 @@ class _AttentionEventCard extends ConsumerWidget {
                                 ).inboxEnhancementMarkRead,
                               ),
                             ),
-                          if (activity)
-                            TextButton.icon(
-                              onPressed: () => _dismiss(context, ref),
-                              icon: const Icon(Icons.close, size: 16),
-                              label: Text(
-                                AppLocalizations.of(
-                                  context,
-                                ).attentionPageDismiss,
-                              ),
+                          TextButton.icon(
+                            key: Key('attention-dismiss-${event.id}'),
+                            onPressed: () => _dismiss(context, ref),
+                            icon: const Icon(Icons.close, size: 16),
+                            label: Text(
+                              AppLocalizations.of(
+                                context,
+                              ).attentionPageDismiss,
                             ),
+                          ),
                         ],
                       ),
                     ],

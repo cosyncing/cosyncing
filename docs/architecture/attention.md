@@ -89,10 +89,15 @@ already past its first alert is never presented again after an upgrade.
   replaced, and requests are never hidden this way.
 - Opening a session, or tapping its notification, marks its finished and failed
   turns read and clears them. A pending request only loses its OS notification;
-  its inbox row stays until the request is answered. A request answered
-  anywhere, including in the agent's terminal, clears its notification when the
-  feed page that resolves it lands. Clearing a row never removes a slot that a
-  newer, unhandled event has taken.
+  its inbox row stays until the request is answered or the row is dismissed. A
+  request answered anywhere, including in the agent's terminal, clears its
+  notification when the feed page that resolves it lands. Clearing a row never
+  removes a slot that a newer, unhandled event has taken.
+- Every inbox row can be dismissed, a pending request included. Dismissing a
+  request hides its row and notification; it does not answer the request, which
+  the session still shows. Clear all dismisses every row in the inbox and Clear
+  activity only the Recent activity rows, each after a five-second Undo. The
+  inbox builds only the rows on screen, so a long history stays responsive.
 - Reading or dismissing an event on one device clears its notification on the
   others when their next feed page carries its `seenAt`, and an event seen
   elsewhere before a device got to it is never shown there. Requests are the
