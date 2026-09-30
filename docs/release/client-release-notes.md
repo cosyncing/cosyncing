@@ -5,50 +5,45 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.6.0 is the largest client release to date. Session tabs stay open beside an
-overview, the sidebar follows you into Notifications and Settings, each
-notification type is configured on its own, notifications reach a browser with
-every tab closed, and reading back through a long session keeps its place.
+0.6.1 is a client polish release. The usage views are quieter and stop
+explaining themselves in footnotes, pending work has one name per kind, an
+Android update offer can be set aside, and a session that finishes more than
+once is listed once.
 
 Update the client on every device you use before, or together with, the Server.
-This release ships broker contract revisions 27 and 28 together and the
-compatibility window stays one revision wide, so a native client from 0.5.13 or
-earlier can watch a 0.6.0 Server but cannot drive it: it cannot answer a
-permission request or send a prompt. The web client needs nothing: it ships
-inside the broker package and always matches it. A 0.4.1 or older client also
-sits below the minimum accepted client contract, still revision 17, and stays
-read-only against current brokers.
+The broker contract stays at revision 28 and the compatibility window stays one
+revision wide, so a native client from 0.5.13 or earlier can watch a 0.6.x
+Server but cannot drive it: it cannot answer a permission request or send a
+prompt. The web client needs nothing: it ships inside the broker package and
+always matches it. A 0.4.1 or older client also sits below the minimum accepted
+client contract, still revision 17, and stays read-only against current brokers.
 
-## What's new in 0.6.0
+## What's new in 0.6.1
 
-- The workspace keeps session tabs visible, including a single open session,
-  and adds an overview plus Close all with Undo. Closing a tab leaves that
-  session running. Phones and other narrow screens open the same sidebar as a
-  drawer from the menu button.
-- The roster starts with every project collapsed and marks one that needs input
-  or has finished work with a single dot. Rows use the harness's own logo and
-  keep subagent hierarchy, with the parent's status and its descendants' cues
-  shown separately.
-- Conversations use a compact context header and composer, with model,
-  permissions, microphone, context usage, Send and Stop within reach.
-  Conversation text size, spacing and reading width persist on their own. Flat
-  White Minimalist is the new default palette, with the new Quiet Workspace
-  palette and bundled Lato typography.
-- Notifications are configured per event type in three families: Sessions,
-  Security and Server. On Android each type is its own system channel. Each
-  event now notifies once instead of on a ladder of reminders, opening a
-  session or tapping its notification clears it, and reading it on one device
-  clears it on your other devices.
-- Closing the window keeps Cosyncing running on macOS and Windows so
-  notifications still arrive. Android has an off-by-default switch that stays
-  connected in the background.
-- Reading back through a long session no longer loses your place. The client
-  holds up to 500 rows and about 4 MiB, unloads whole pages far from where you
-  are reading, and restores exactly those rows. Following a reply as it streams
-  in now draws almost every frame on time instead of dropping most of them.
+- Agents & Quota shows only quota windows, and token usage lives in the Usage
+  overview. The overview's day view drops the day streak, peak day and weekday
+  chart that a single day cannot fill, and the report, its project leaderboard
+  and the workspace overview drop their explanatory footnotes; how agent time
+  is estimated stays on its tooltip.
+- Pending work has one name per kind on both the overview and Notifications:
+  "Waiting for you" for questions and approvals, "Unread completions", and
+  "Problems" for failed runs and security or server alerts. The "Needs
+  attention" grouping is gone, so the same filter is no longer reachable under
+  two names.
+- On Android a new app release is offered once in a dialog with Later, instead
+  of a banner that stayed over every screen and could not be dismissed. Setting
+  it aside keeps the update in Settings → General, still carrying its update
+  dot.
+- On phones and other narrow screens, reopening the sidebar after opening a
+  session from it keeps the projects and subagent groups you had open, instead
+  of collapsing every project again.
+- A session that finishes more than once is listed once in Notifications and in
+  the overview's Unread completions: its newest outcome replaces the earlier
+  ones, as it already did in the system notification center.
 
-For notifications with every browser tab closed, per-type notification settings
-and cross-device read/clear, use a 0.6.0 client with a 0.6.0 broker release.
+The 0.6.0 features that need both ends of the wire, notifications with every
+browser tab closed, per-type notification settings and cross-device read and
+clear, still need a 0.6.0 or newer Server. 0.6.1 is one.
 
 ## Downloads
 
