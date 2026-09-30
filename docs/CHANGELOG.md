@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- On Android 14 and later, dismissing the "Staying connected for notifications"
+  notification brought it back every time Cosyncing returned to the front. It
+  now stays dismissed while the background connection keeps running.
+
 ## 0.6.2 — 2026-09-30
 
 ### Fixed
