@@ -1074,6 +1074,22 @@ await test('fixture broker: key route, webpush registration, and a real dispatch
     assert.equal(byDevice.get('phone')?.state, 'delivered');
     assert.ok(webhookBodies.some((body) => body.platform === 'fcm' && body.token === 'fcm-token'), 'fcm still gets the opaque wake');
     assert.ok(webhookBodies.every((body) => body.platform === 'fcm' && Object.keys(body).sort().join() === 'platform,token,type'));
+
+    // Registered after the alert was raised: the browser reserves nothing for it, since it would
+    // only be skipped, while a native device still joins the alert (the late-device catch-up).
+    assert.equal((await register({
+      deviceId: 'web-late',
+      platform: 'webpush',
+      subscription: { endpoint: `https://127.0.0.1:${sinks[1]!.port}/push/capability-path-late`, keys: userAgent().keys },
+      presentation: { security_alert: { title: 'Security alert' } },
+    })).status, 201);
+    assert.equal((await register({ deviceId: 'tablet', platform: 'fcm', token: 'fcm-tablet' })).status, 201);
+    const lateDeadline = Date.now() + 15_000;
+    const tabletJoined = () => deliveries().some((entry) => entry.deviceId === 'tablet' && entry.state === 'delivered');
+    while (!tabletJoined() && Date.now() < lateDeadline) await Bun.sleep(50);
+    assert.ok(tabletJoined(), 'a late native device joins the alert');
+    assert.equal(deliveries().some((entry) => entry.deviceId === 'web-late'), false,
+      'a late browser reserves nothing raised before it registered');
   } finally {
     broker.kill();
     await broker.exited.catch(() => undefined);

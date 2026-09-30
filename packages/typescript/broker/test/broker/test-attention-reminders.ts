@@ -40,6 +40,7 @@ class Harness {
     setTimer?: (callback: () => void, delay: number) => TimerProbe;
     clearTimer?: (timer: TimerProbe) => void;
     dispatch?: (delivery: AttentionDelivery) => Promise<unknown> | unknown;
+    alertsStartAt?: (deviceId: string) => number | undefined;
   }) {
     if (options?.devices) this.devices = [...options.devices];
     this.store = new AttentionStore({
@@ -50,6 +51,7 @@ class Harness {
     this.scheduler = new AttentionReminderScheduler<TimerProbe>(this.store, {
       now: () => this.now,
       listDeviceIds: () => this.devices,
+      deviceAlertsStartAt: options?.alertsStartAt,
       setTimer: options?.setTimer ?? ((callback, delay) => {
         const timer = { callback, delay, unrefCount: 0, unref() { this.unrefCount += 1; } };
         this.timers.push(timer);
@@ -767,6 +769,52 @@ async function testSteadyStateTickCopiesNothingWholesale(): Promise<void> {
   }
 }
 
+async function testLateBrowserReservesNothingRaisedBeforeIt(): Promise<void> {
+  const registeredAt = new Map<string, number>();
+  const h = new Harness({ devices: [], alertsStartAt: (deviceId) => registeredAt.get(deviceId) });
+  try {
+    const count = 40;
+    const old: string[] = [];
+    for (let index = 0; index < count; index++) old.push((await h.addEvent(resolvedCompletion(`run:old:${index}`))).id);
+    const update = await h.addEvent({ kind: 'runtime-update-ready', dedupeKey: 'runtime-before-browser' });
+    await h.tick();
+
+    h.advance(10 * MINUTE);
+    registeredAt.set('browser', h.now);
+    h.devices = ['browser', 'native'];
+    await h.tick();
+    const browser = () => h.store.listDeliveries().filter((item) => item.deviceId === 'browser');
+    assert.equal(browser().length, 0,
+      'a browser never shows an alert raised before it registered, so it reserves none of them');
+    assert.equal(h.dispatches.filter((item) => item.deviceId === 'browser').length, 0);
+    assert.equal(h.dispatches.filter((item) => item.deviceId === 'native' && old.includes(item.eventId)).length, count,
+      'a device without a start time keeps the late-device catch-up');
+
+    const clone = spyOn(globalThis, 'structuredClone');
+    try {
+      await h.tick();
+      const storeCopies = clone.mock.calls.filter(([value]) =>
+        Array.isArray((value as Record<string, unknown> | undefined)?.events)).length;
+      assert.equal(storeCopies, 0, 'the skipped past stays skipped without a store write per event');
+    } finally {
+      clone.mockRestore();
+    }
+
+    const fresh = await h.addEvent(resolvedCompletion('run:after-browser'));
+    await h.tick();
+    assert.deepEqual(h.dispatches.filter((item) => item.deviceId === 'browser').map((item) => item.eventId), [fresh.id],
+      'an alert raised after registration is new');
+
+    h.now = update.createdAt + 2 * HOUR;
+    await h.tick();
+    const updateAlerts = h.dispatchesFor(update.id);
+    assert.deepEqual(updateAlerts.map((item) => `${item.deviceId}:${item.stage}`).sort(), ['browser:2h', 'native:2h'],
+      'an older event whose alert begins after registration still reaches the browser');
+  } finally {
+    h.cleanup();
+  }
+}
+
 async function testTickRequestsShareOnePendingPass(): Promise<void> {
   const h = new Harness();
   let passes = 0;
@@ -877,8 +925,9 @@ await testBrokerHealthStageContractDoesNotReAdvance();
 await testHealthEscalationBefore2hDispatchesCustomStage();
 await testHealthEscalationAfterTheAlertDispatchesOnce();
 await testSteadyStateTickCopiesNothingWholesale();
+await testLateBrowserReservesNothingRaisedBeforeIt();
 await testTickRequestsShareOnePendingPass();
 await testStoreChangesDuringAPassQueueOneFollowUp();
 await testLongPassYieldsToOtherWork();
 
-console.log('PASS broker attention reminders (19 groups)');
+console.log('PASS broker attention reminders (20 groups)');

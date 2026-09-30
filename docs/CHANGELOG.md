@@ -20,6 +20,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   already delivered without copying its whole store, combines back-to-back
   runs, and lets other work run while it checks. On a store of about 1,700
   notifications, one check fell from about 14 seconds to about 0.1 seconds.
+- Turning on notifications in a new browser no longer makes the broker spend
+  about a minute recording, and writing gigabytes to disk for, every retained
+  notification the browser would never show. A browser is only alerted to
+  what happens after it registers, so the broker now keeps no delivery record
+  for anything earlier. Native apps still receive an alert already under way
+  when they register.
 
 ## 0.6.1 — 2026-09-30
 
