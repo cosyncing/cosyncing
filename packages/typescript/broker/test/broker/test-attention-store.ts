@@ -427,7 +427,56 @@ async function main(): Promise<void> {
   await testBaselineThroughCursorOnPagination();
   await testCorruptionAndUnknownKindTolerance();
   await testNoOpReplayDoesNotCloneStore();
-  console.log('PASS broker attention store (9 groups)');
+  await testRepeatedStageReservationDoesNotCloneStore();
+  console.log('PASS broker attention store (10 groups)');
+}
+
+async function testRepeatedStageReservationDoesNotCloneStore(): Promise<void> {
+  const root = tempRoot('repeated-stage');
+  const path = join(root, 'attention-events.json');
+  const store = new AttentionStore({ path, now: clock, idFactory });
+  const row = await store.upsertEvent(event('repeat-stage'));
+  const first = await store.advancePresentationAndReserve(row.event.id, 'immediate', ['phone']);
+  assert.equal(first?.reservations[0]?.reserved, true);
+  const revision = store.getEvent(row.event.id)!.presentationRevision;
+  const writes = readFileSync(path, 'utf8');
+
+  // The reminder scheduler repeats the current stage for every retained event on every tick.
+  const clone = spyOn(globalThis, 'structuredClone');
+  try {
+    for (let index = 0; index < 1_000; index++) {
+      const repeat = await store.advancePresentationAndReserve(row.event.id, 'immediate', ['phone']);
+      assert.deepEqual(repeat?.reservations.map((item) => [item.delivery.deviceId, item.reserved]), [['phone', false]]);
+      assert.equal(repeat?.event.presentationRevision, revision);
+    }
+    assert.equal(await store.advancePresentationAndReserve('missing-event', 'immediate', ['phone']), undefined);
+    assert.equal(clone.mock.calls.filter(([value]) => Array.isArray((value as any)?.events)).length, 0,
+      'repeating a stage whose deliveries exist must not clone the entire durable store');
+  } finally {
+    clone.mockRestore();
+  }
+  assert.equal(readFileSync(path, 'utf8'), writes, 'a repeated stage writes nothing');
+
+  const repeat = await store.advancePresentationAndReserve(row.event.id, 'immediate', ['phone']);
+  repeat!.reservations[0]!.delivery.state = 'delivered';
+  repeat!.event.title = 'caller changed its copy';
+  assert.equal(store.listDeliveriesFor(row.event.id, 'immediate')[0]?.state, 'reserved');
+  assert.equal(store.getEvent(row.event.id)?.title, row.event.title);
+
+  const joined = await store.advancePresentationAndReserve(row.event.id, 'immediate', ['phone', 'tablet']);
+  assert.deepEqual(joined?.reservations.map((item) => [item.delivery.deviceId, item.reserved]),
+    [['phone', false], ['tablet', true]], 'a device without a delivery still joins the stage');
+
+  const queued = store.advancePresentationAndReserve(row.event.id, 'immediate', ['laptop']);
+  const behind = store.advancePresentationAndReserve(row.event.id, 'immediate', ['laptop']);
+  assert.equal((await queued)?.reservations[0]?.reserved, true);
+  assert.equal((await behind)?.reservations[0]?.reserved, false, 'the no-op check sees earlier queued writes');
+  assert.equal(store.listDeliveriesFor(row.event.id, 'immediate').length, 3);
+
+  const advanced = await store.advancePresentationAndReserve(row.event.id, '15m', ['phone']);
+  assert.equal(advanced?.event.presentationRevision, revision + 1, 'a new stage still publishes');
+  assert.equal(advanced?.reservations[0]?.reserved, true);
+  assert.deepEqual(store.listDeliveriesFor(row.event.id, '15m').map((item) => item.deviceId), ['phone']);
 }
 
 async function testNoOpReplayDoesNotCloneStore(): Promise<void> {

@@ -11,6 +11,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- A broker holding a long notification history no longer stops responding for
+  up to half a minute about once a minute. While it was unresponsive, sessions
+  showed Reconnecting or failed to load, and every client, request and live
+  stream waited. The notification scheduler now skips notifications it has
+  already delivered without copying its whole store, combines back-to-back
+  runs, and lets other work run while it checks. On a store of about 1,700
+  notifications, one check fell from about 14 seconds to about 0.1 seconds.
+
 ## 0.6.1 — 2026-09-30
 
 ### Changed

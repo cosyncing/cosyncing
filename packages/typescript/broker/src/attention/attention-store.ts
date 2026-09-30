@@ -730,6 +730,29 @@ export class AttentionStore {
         changed = true;
       }
       return { value: { event: structuredClone(event), reservations }, changed };
+    }, true, (current) => {
+      // The reminder scheduler calls this for every retained event on every tick, and almost every
+      // call repeats a stage whose deliveries already exist. Answer those without copying the store:
+      // at a few thousand retained events the copies alone held the event loop for 15 s and more.
+      const event = current.events.find((item) => item.id === eventId);
+      if (!event) return { value: undefined };
+      if (event.kind === 'runtime-update-ready' && event.state !== 'active') return { value: undefined };
+      if (
+        event.kind === 'runtime-update-ready'
+        && runtimePresentationStageIndex(stage)
+          < runtimePresentationStageIndex(event.presentationStage)
+      ) {
+        return { value: undefined };
+      }
+      if (event.presentationStage !== stage) return undefined;
+      const reservations: AttentionDeliveryReservation[] = [];
+      for (const deviceId of new Set(deviceIds)) {
+        const key = deliveryKey(deviceId, eventId, stage);
+        const existing = current.deliveries.find((item) => item.key === key);
+        if (!existing) return undefined;
+        reservations.push({ reserved: false, delivery: structuredClone(existing) });
+      }
+      return { value: { event: structuredClone(event), reservations } };
     });
   }
 
@@ -850,6 +873,13 @@ export class AttentionStore {
 
   listDeliveries(): AttentionDelivery[] {
     return this.state.deliveries.map((item) => structuredClone(item));
+  }
+
+  /** One event's deliveries at one stage. Copies only the matches, unlike {@link listDeliveries}. */
+  listDeliveriesFor(eventId: string, stage: string): AttentionDelivery[] {
+    return this.state.deliveries
+      .filter((item) => item.eventId === eventId && item.stage === stage)
+      .map((item) => structuredClone(item));
   }
 
   reserveDelivery(input: { deviceId: string; eventId: string; stage: string }): Promise<AttentionDeliveryReservation> {

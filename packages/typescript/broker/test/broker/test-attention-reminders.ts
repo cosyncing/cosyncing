@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /** Deterministic reminder scheduling validation for attention events. */
 import { strict as assert } from 'node:assert';
+import { spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -734,6 +735,132 @@ async function testHealthEscalationAfterTheAlertDispatchesOnce(): Promise<void> 
   }
 }
 
+function resolvedCompletion(dedupeKey: string): Pick<AttentionEventUpsert, 'kind' | 'dedupeKey'> & Partial<AttentionEventUpsert> {
+  return { kind: 'run-finished', dedupeKey, state: 'resolved', presentationRevision: 1, presentationStage: 'immediate' };
+}
+
+async function testSteadyStateTickCopiesNothingWholesale(): Promise<void> {
+  const h = new Harness();
+  try {
+    // Retained completions stay scheduled for a month; the owner's store held 1,118 of them.
+    const count = 120;
+    for (let index = 0; index < count; index++) await h.addEvent(resolvedCompletion(`run:steady:${index}`));
+    await h.tick();
+    assert.equal(h.dispatches.length, count);
+
+    const clone = spyOn(globalThis, 'structuredClone');
+    try {
+      await h.tick();
+      const copies = clone.mock.calls.map(([value]) => value as Record<string, unknown> | undefined);
+      assert.equal(copies.filter((value) => Array.isArray(value?.events)).length, 0,
+        'a tick with nothing to present must not clone the durable store');
+      const deliveryCopies = copies.filter((value) =>
+        typeof value?.key === 'string' && typeof value?.deviceId === 'string').length;
+      assert.ok(deliveryCopies <= 3 * count,
+        `delivery copies must grow with the events, not with events x deliveries (got ${deliveryCopies})`);
+    } finally {
+      clone.mockRestore();
+    }
+    assert.equal(h.dispatches.length, count, 'nothing is presented twice');
+  } finally {
+    h.cleanup();
+  }
+}
+
+async function testTickRequestsShareOnePendingPass(): Promise<void> {
+  const h = new Harness();
+  let passes = 0;
+  let dispatching = false;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const scheduler = new AttentionReminderScheduler(h.store, {
+    now: () => h.now,
+    listDeviceIds: () => { passes += 1; return ['phone']; },
+    dispatchReservation: async () => { dispatching = true; await gate; },
+  });
+  try {
+    await h.addEvent({ kind: 'permission-required', dedupeKey: 'perm:coalesce' });
+    const running = scheduler.tick();
+    while (!dispatching) await new Promise((resolve) => setImmediate(resolve));
+    const whileRunning = Array.from({ length: 25 }, () => scheduler.tick());
+    release!();
+    await Promise.all([running, ...whileRunning]);
+    assert.equal(passes, 2, 'requests made while a pass runs share one follow-up pass');
+
+    await Promise.all(Array.from({ length: 25 }, () => scheduler.tick()));
+    assert.equal(passes, 3, 'requests made before a pass starts share that pass');
+  } finally {
+    scheduler.stop();
+    h.cleanup();
+  }
+}
+
+async function testStoreChangesDuringAPassQueueOneFollowUp(): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-attention-reminders-onchange-'));
+  let now = 1_000_000;
+  let ids = 0;
+  let passes = 0;
+  let armed = false;
+  let dispatched = 0;
+  let scheduler: AttentionReminderScheduler | undefined;
+  // The broker wires every real store mutation to a tick, and a pass that presents N completions
+  // makes 2N mutations (a reservation and a completion each).
+  const store = new AttentionStore({
+    home: root,
+    now: () => now,
+    idFactory: () => `event-${++ids}`,
+    onChange: () => { if (armed) void scheduler?.tick().catch(() => {}); },
+  });
+  scheduler = new AttentionReminderScheduler(store, {
+    now: () => now,
+    listDeviceIds: () => { passes += 1; return ['phone']; },
+    dispatchReservation: () => { dispatched += 1; },
+  });
+  try {
+    for (let index = 0; index < 30; index++) {
+      await store.upsertEvent({
+        ...resolvedCompletion(`run:onchange:${index}`),
+        severity: 'informational',
+        title: 'run-finished',
+        action: { kind: 'open-attention-inbox' },
+      } as AttentionEventUpsert);
+    }
+    armed = true;
+    await scheduler.tick();
+    await scheduler.tick();
+    assert.equal(dispatched, 30);
+    assert.ok(passes <= 3, `60 mutations during one pass must not queue 60 passes (got ${passes})`);
+  } finally {
+    scheduler.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testLongPassYieldsToOtherWork(): Promise<void> {
+  const h = new Harness();
+  const otherWorkRanBeforeDispatch: boolean[] = [];
+  let otherWorkRan = false;
+  const scheduler = new AttentionReminderScheduler(h.store, {
+    now: () => h.now,
+    listDeviceIds: () => ['phone'],
+    sliceMs: 0,
+    dispatchReservation: () => { otherWorkRanBeforeDispatch.push(otherWorkRan); },
+  });
+  try {
+    for (let index = 0; index < 5; index++) {
+      await h.addEvent({ kind: 'permission-required', dedupeKey: `perm:yield:${index}` });
+    }
+    setImmediate(() => { otherWorkRan = true; });
+    await scheduler.tick();
+    assert.equal(otherWorkRanBeforeDispatch.length, 5);
+    assert.equal(otherWorkRanBeforeDispatch[0], true,
+      'a pass lets queued requests and timers run instead of holding the event loop to its end');
+  } finally {
+    scheduler.stop();
+    h.cleanup();
+  }
+}
+
 await testRuntimePollsNeverResetCadence();
 await testConcurrentRuntimePollCannotRegressSchedulerAdvance();
 await testResolvedOrSupersededRuntimeReservationNeverDispatches();
@@ -749,5 +876,9 @@ await testIgnoreReservationsForUnregisteredDevices();
 await testBrokerHealthStageContractDoesNotReAdvance();
 await testHealthEscalationBefore2hDispatchesCustomStage();
 await testHealthEscalationAfterTheAlertDispatchesOnce();
+await testSteadyStateTickCopiesNothingWholesale();
+await testTickRequestsShareOnePendingPass();
+await testStoreChangesDuringAPassQueueOneFollowUp();
+await testLongPassYieldsToOtherWork();
 
-console.log('PASS broker attention reminders (15 groups)');
+console.log('PASS broker attention reminders (19 groups)');

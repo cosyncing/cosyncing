@@ -10,11 +10,20 @@ export interface AttentionReminderSchedulerOptions<TTimer = ReturnType<typeof se
   setTimer?: (callback: () => void, delayMs: number) => TTimer;
   clearTimer?: (timer: TTimer) => void;
   fallbackTickMs?: number;
+  /** How long one reconcile may run before it lets other work in. Tests pass 0 to yield per event. */
+  sliceMs?: number;
 }
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const FALLBACK_TICK_MS = 60_000;
+// Every await in a reconcile resolves as a microtask, so without an explicit yield one pass holds the
+// broker's only event loop for its whole length: HTTP, WebSockets and timers all wait behind it.
+const SLICE_MS = 8;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 const RETRY_DELAYS_MS = [5 * MINUTE, 30 * MINUTE, 2 * HOUR];
 // Initial attempt plus all three documented retries (5m, 30m, 2h).
 const MAX_RETRY_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -242,9 +251,11 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
   private readonly setTimer: (callback: () => void, delayMs: number) => TTimer;
   private readonly clearTimer: (timer: TTimer) => void;
   private readonly fallbackTickMs: number;
+  private readonly sliceMs: number;
   private timer: TTimer | undefined;
   private stopped = true;
   private runQueue: Promise<void> = Promise.resolve();
+  private pendingTick: Promise<void> | undefined;
 
   constructor(
     private readonly store: AttentionStore,
@@ -258,6 +269,7 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
       ?? ((callback, delayMs) => setTimeout(callback, delayMs) as TTimer);
     this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer as Timer));
     this.fallbackTickMs = Math.max(1_000, options.fallbackTickMs ?? FALLBACK_TICK_MS);
+    this.sliceMs = Math.max(0, options.sliceMs ?? SLICE_MS);
   }
 
   start(): void {
@@ -274,8 +286,19 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
     }
   }
 
+  /**
+   * Requests a reconcile that starts after this call. Requests made while one is still waiting to
+   * start share it: every store mutation asks for a tick, so a pass that reserved N deliveries used
+   * to queue N further passes behind itself.
+   */
   async tick(): Promise<void> {
-    await this.queue(() => this.reconcile());
+    if (this.pendingTick) return this.pendingTick;
+    const pending = this.queue(() => {
+      if (this.pendingTick === pending) this.pendingTick = undefined;
+      return this.reconcile();
+    });
+    this.pendingTick = pending;
+    await pending;
   }
 
   private queue(task: () => Promise<void>): Promise<void> {
@@ -316,8 +339,13 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
     const isActiveForDevice = (deviceId: string, _eventId: string): boolean =>
       deviceSet.has(deviceId);
     const dispatchTasks: Promise<void>[] = [];
+    let sliceStartedAt = performance.now();
 
     for (const event of this.scheduledEvents()) {
+      if (performance.now() - sliceStartedAt >= this.sliceMs) {
+        await yieldToEventLoop();
+        sliceStartedAt = performance.now();
+      }
       const elapsed = Math.max(0, now - event.createdAt);
       const due = dueIndex(event.kind, elapsed);
       if (due <= 0) continue;
@@ -349,11 +377,8 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
       const liveEvent = this.store.getEvent(event.id);
       if (!liveEvent || !this.isScheduledEvent(liveEvent)) continue;
 
-      const deliveries = this.store.listDeliveries();
-      const dueDeliveries = deliveries.filter((delivery) =>
-        delivery.eventId === event.id
-        && delivery.stage === targetStage
-        && delivery.state === 'reserved'
+      const dueDeliveries = this.store.listDeliveriesFor(event.id, targetStage).filter((delivery) =>
+        delivery.state === 'reserved'
         && delivery.attempts < MAX_RETRY_ATTEMPTS
         && deviceSet.has(delivery.deviceId),
       );
@@ -395,7 +420,13 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
     const now = this.now();
     let next = now + this.fallbackTickMs;
     const active = this.scheduledEvents();
-    const deliveries = this.store.listDeliveries();
+    // Grouped once, so each event scans its own deliveries rather than every delivery in the store.
+    const deliveriesByEvent = new Map<string, AttentionDelivery[]>();
+    for (const delivery of this.store.listDeliveries()) {
+      const forEvent = deliveriesByEvent.get(delivery.eventId);
+      if (forEvent) forEvent.push(delivery);
+      else deliveriesByEvent.set(delivery.eventId, [delivery]);
+    }
     const listedDevices = this.listDeviceIds();
     const allDevices = normalizeList(Array.isArray(listedDevices) ? listedDevices : []);
     const deviceSet = new Set(allDevices);
@@ -430,6 +461,7 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
         continue;
       }
 
+      const deliveries = deliveriesByEvent.get(event.id) ?? [];
       const hasNow = hasReadyDeliveryNow(
         deliveries,
         event.id,
