@@ -134,8 +134,9 @@ final androidBackgroundConnectionChannelProvider =
 ///
 /// Android only lets an app start the service while it is in front, so the
 /// start is repeated whenever the app returns there: a start the OS refused
-/// (the user left during launch) is retried, and a running service only has
-/// its notification text refreshed.
+/// (the user left during launch) is retried, and a running service is left
+/// alone unless its notification text changed, so a notification the user
+/// dismissed stays dismissed.
 final androidBackgroundConnectionRuntimeProvider = Provider<void>((ref) {
   if (!androidBackgroundConnectionSupported) return;
   final enabled = ref

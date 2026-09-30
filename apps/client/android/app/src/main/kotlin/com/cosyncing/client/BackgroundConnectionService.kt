@@ -42,10 +42,19 @@ class BackgroundConnectionService : Service() {
         var isRunning = false
             private set
 
+        /** What the running service's notification shows, or null when stopped. */
+        @Volatile
+        private var shown: Content? = null
+
         /**
          * Starts the service, or updates its notification text. Returns false
          * when Android refuses, which it does while the app is in the
          * background.
+         *
+         * A running service already showing this text is left alone. Every
+         * start posts the notification again, and since Android 14 the user
+         * can dismiss it, so repeating the start each time the app returns to
+         * the front would bring back a notification the user closed.
          */
         fun start(
             context: Context,
@@ -54,6 +63,7 @@ class BackgroundConnectionService : Service() {
             title: String,
             text: String,
         ): Boolean {
+            if (isRunning && shown == Content(channelName, groupName, title, text)) return true
             val intent = Intent(context, BackgroundConnectionService::class.java)
                 .putExtra(EXTRA_CHANNEL_NAME, channelName)
                 .putExtra(EXTRA_GROUP_NAME, groupName)
@@ -90,12 +100,13 @@ class BackgroundConnectionService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val notification = buildNotification(
+        val content = Content(
             channelName = intent.getStringExtra(EXTRA_CHANNEL_NAME) ?: "Background connection",
             groupName = intent.getStringExtra(EXTRA_GROUP_NAME) ?: "Server",
             title = intent.getStringExtra(EXTRA_TITLE) ?: "Cosyncing",
             text = intent.getStringExtra(EXTRA_TEXT) ?: "",
         )
+        val notification = buildNotification(content)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
@@ -105,6 +116,7 @@ class BackgroundConnectionService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        shown = content
         isRunning = true
         // Not sticky: if Android kills the process, the engine is gone with
         // it, and the next launch of the app starts the service again.
@@ -113,15 +125,19 @@ class BackgroundConnectionService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        shown = null
         super.onDestroy()
     }
 
-    private fun buildNotification(
-        channelName: String,
-        groupName: String,
-        title: String,
-        text: String,
-    ): Notification {
+    private data class Content(
+        val channelName: String,
+        val groupName: String,
+        val title: String,
+        val text: String,
+    )
+
+    private fun buildNotification(content: Content): Notification {
+        val (channelName, groupName, title, text) = content
         val open = PendingIntent.getActivity(
             this,
             0,

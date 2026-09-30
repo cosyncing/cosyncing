@@ -13,6 +13,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- On Android 14 and later, dismissing the "Staying connected for notifications"
+  notification brought it back every time Cosyncing returned to the front. It
+  now stays dismissed while the background connection keeps running.
 - Notifications that need a response, unread completions, and problems can now
   be dismissed from their row, and Clear all at the top of Notifications clears
   every notification at once, with Undo. Before, only Recent activity could be
