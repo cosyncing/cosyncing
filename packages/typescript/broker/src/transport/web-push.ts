@@ -523,6 +523,15 @@ export interface WebPushDeliveryDependencies extends WebPushSendOptions {
 }
 
 /**
+ * When a registration's web push alerts begin. {@link planWebPushNotification} never shows an alert
+ * raised before its browser registered, so the reminder scheduler reserves none for it either.
+ * Other platforms keep the scheduler's catch-up for a late device.
+ */
+export function webPushAlertsStartAt(registration: Pick<WakeRegistration, 'platform' | 'createdAt'>): number | undefined {
+  return registration.platform === 'webpush' ? Date.parse(registration.createdAt) : undefined;
+}
+
+/**
  * Deliver one attention reservation to a `webpush` registration. Returning completes the delivery;
  * throwing leaves it for the scheduler's retry backoff.
  */
@@ -538,7 +547,7 @@ export async function deliverWebPush(
     presentation: registration.presentation,
     context: registration.context,
     deviceState: deps.store.getClientState(delivery.deviceId, delivery.eventId),
-    registeredAt: Date.parse(registration.createdAt),
+    registeredAt: webPushAlertsStartAt(registration),
   });
   if ('skip' in plan) return { kind: 'skipped', reason: plan.skip };
   const result = await sendWebPush(registration.subscription, plan.notification, deps);

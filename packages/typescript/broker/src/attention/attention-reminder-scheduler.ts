@@ -5,6 +5,13 @@ type Timer = ReturnType<typeof setTimeout>;
 export interface AttentionReminderSchedulerOptions<TTimer = ReturnType<typeof setTimeout>> {
   now?: () => number;
   listDeviceIds?: () => string[] | Promise<string[]>;
+  /**
+   * When a device's alerts begin (epoch ms), for a transport that never shows an alert raised before
+   * then. Such an alert gets no reservation for that device. Otherwise a device that registers beside
+   * a month of retained events reserves, dispatches and completes one delivery per event, each a
+   * durable store write, only for the transport to skip every one. Undefined keeps the catch-up.
+   */
+  deviceAlertsStartAt?: (deviceId: string) => number | undefined;
   dispatchReservation: (delivery: AttentionDelivery) => Promise<unknown> | unknown;
   onError?: (error: unknown) => void;
   setTimer?: (callback: () => void, delayMs: number) => TTimer;
@@ -246,6 +253,7 @@ function hasReadyDeliveryNow(
 export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> {
   private readonly now: () => number;
   private readonly listDeviceIds: () => string[] | Promise<string[]>;
+  private readonly deviceAlertsStartAt: (deviceId: string) => number | undefined;
   private readonly dispatchReservation: (delivery: AttentionDelivery) => Promise<unknown> | unknown;
   private readonly onError?: (error: unknown) => void;
   private readonly setTimer: (callback: () => void, delayMs: number) => TTimer;
@@ -263,6 +271,7 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
   ) {
     this.now = options.now ?? Date.now;
     this.listDeviceIds = options.listDeviceIds ?? (() => []);
+    this.deviceAlertsStartAt = options.deviceAlertsStartAt ?? (() => undefined);
     this.dispatchReservation = options.dispatchReservation;
     this.onError = options.onError;
     this.setTimer = options.setTimer
@@ -338,6 +347,7 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
     const deviceSet = new Set(allDevices);
     const isActiveForDevice = (deviceId: string, _eventId: string): boolean =>
       deviceSet.has(deviceId);
+    const alertsStartAt = allDevices.map((deviceId) => [deviceId, this.deviceAlertsStartAt(deviceId)] as const);
     const dispatchTasks: Promise<void>[] = [];
     let sliceStartedAt = performance.now();
 
@@ -364,10 +374,15 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
       const targetStage = escalationPending
         ? event.presentationStage!
         : current < due ? dueStage : (event.presentationStage ?? dueStage);
+      const raisedAt = presentationStageStartedAt(event, targetStage);
+      const devices = raisedAt === undefined
+        ? allDevices
+        : alertsStartAt.filter(([, startsAt]) => !(startsAt !== undefined && raisedAt < startsAt))
+          .map(([deviceId]) => deviceId);
       const advanceResult = await this.store.advancePresentationAndReserve(
         event.id,
         targetStage,
-        allDevices,
+        devices,
       );
       if (!advanceResult) continue;
 

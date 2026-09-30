@@ -192,7 +192,12 @@ import {
   WakePushError,
   WakePushRegistry,
 } from '../transport/push-wake.ts';
-import { deliverWebPush, type WebPushDeliveryDependencies, WebPushVapidKeyStore } from '../transport/web-push.ts';
+import {
+  deliverWebPush,
+  type WebPushDeliveryDependencies,
+  WebPushVapidKeyStore,
+  webPushAlertsStartAt,
+} from '../transport/web-push.ts';
 import { authorizeBrokerRoute } from '../security/route-authorization.ts';
 import { completeAuthorizationProvenanceMigration } from '../security/authorization-provenance-migration.ts';
 import {
@@ -1252,6 +1257,10 @@ brokerHealthAttention = new BrokerHealthAttentionReconciler({
 });
 attentionScheduler = new AttentionReminderScheduler(attentionService.store, {
   listDeviceIds: () => wakePush.listForDispatch().map((registration) => registration.deviceId),
+  deviceAlertsStartAt: (deviceId) => {
+    const registration = wakePush.listForDispatch().find((item) => item.deviceId === deviceId);
+    return registration ? webPushAlertsStartAt(registration) : undefined;
+  },
   dispatchReservation: async (delivery) => {
     const registration = wakePush.getForDispatch(delivery.deviceId);
     if (registration.platform === 'webpush') await deliverWebPush(delivery, registration, webPushDelivery);
