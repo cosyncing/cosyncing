@@ -17,7 +17,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Durable attention repository shared by polling and inbox presentation.
 final attentionRepositoryProvider = Provider<AttentionRepository>((ref) {
-  return DriftAttentionRepository(ref.watch(appDatabaseProvider));
+  return DriftAttentionRepository(
+    ref.watch(appDatabaseProvider),
+    retention: attentionEventRetention,
+  );
 });
 
 /// Stable app-installation identity shared across broker profiles.
@@ -70,7 +73,10 @@ final attentionUnreadCountProvider = StateProvider<int>((_) => 0);
 final attentionBadgeSeenStoreProvider = Provider<AttentionBadgeSeenStore>((
   ref,
 ) {
-  return DriftAttentionBadgeSeenStore(ref.watch(appDatabaseProvider));
+  return DriftAttentionBadgeSeenStore(
+    ref.watch(appDatabaseProvider),
+    retention: attentionEventRetention,
+  );
 });
 
 /// Actual number of events received since the last successful inbox open.

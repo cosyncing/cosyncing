@@ -322,6 +322,10 @@ class AttentionFeedWorker implements AttentionFeedRunner {
             if (_isStopped(cancelToken)) return null;
             await _deliveryProcessor.clearSeenElsewhere(page.events);
             if (_isStopped(cancelToken)) return null;
+            await _deliveryProcessor.clearExpired(
+              await repository.deleteExpired(brokerScopeKey),
+            );
+            if (_isStopped(cancelToken)) return null;
             await onPagePersisted?.call(page);
             if (_isStopped(cancelToken)) return null;
             final durableCursor = await repository.loadCursor(brokerScopeKey);

@@ -1,8 +1,18 @@
 import 'dart:convert';
 
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/drift.dart';
+
+/// How long a notification is kept after it last changed. Older ones leave
+/// the inbox, and their rows and system notifications are deleted.
+const Duration attentionEventRetention = Duration(hours: 24);
+
+/// The earliest `updatedAt` (epoch ms) still kept at [now], or null when
+/// [retention] keeps every event.
+int? attentionRetainedSince(DateTime now, Duration? retention) =>
+    retention == null ? null : now.subtract(retention).millisecondsSinceEpoch;
 
 /// Durable feed persistence contract for broker attention events.
 abstract interface class AttentionRepository {
@@ -14,6 +24,11 @@ abstract interface class AttentionRepository {
 
   /// Loads durable rows for one broker profile, newest first.
   Future<List<AttentionEventView>> loadEvents(String brokerProfileId);
+
+  /// Deletes the rows that outlived the retention and returns them, so their
+  /// system notifications can be cleared too. Returns nothing when every
+  /// event is kept.
+  Future<List<AttentionEventView>> deleteExpired(String brokerProfileId);
 
   /// Loads event rows with local and broker state for delivery reconciliation.
   Future<List<AttentionDeliveryState>> loadDeliveryStates(
@@ -155,10 +170,22 @@ final class AttentionEventSnapshot {
 /// Drift-backed durable repository for the attention feed.
 class DriftAttentionRepository implements AttentionRepository {
   /// Creates a repository bound to [database].
-  const DriftAttentionRepository(this.database);
+  const DriftAttentionRepository(
+    this.database, {
+    this.retention,
+    this.now = DateTime.now,
+  });
 
   /// App-local durable database.
   final AppDatabase database;
+
+  /// How long an event is kept after it last changed; null keeps every event.
+  final Duration? retention;
+
+  /// Clock for [retention].
+  final DateTime Function() now;
+
+  int? get _retainedSince => attentionRetainedSince(now(), retention);
 
   @override
   Future<void> persistAttentionEventsPage({
@@ -204,10 +231,16 @@ class DriftAttentionRepository implements AttentionRepository {
         );
       }
 
+      final retainedSince = _retainedSince;
       for (final event in incomingEvents) {
         final existing = existingRows[event.id];
         if (!page.reset &&
             _isStaleIncomingEvent(event: event, existing: existing)) {
+          continue;
+        }
+        // An expired event comes back when another device reads it. Storing
+        // it again would lose its presentation state and show it anew.
+        if (retainedSince != null && event.updatedAt < retainedSince) {
           continue;
         }
         await database
@@ -251,15 +284,46 @@ class DriftAttentionRepository implements AttentionRepository {
 
   @override
   Future<List<AttentionEventView>> loadEvents(String brokerProfileId) async {
+    final retainedSince = _retainedSince;
     final rows =
         await (database.select(database.attentionEventRows)
               ..where((row) => row.brokerProfileId.equals(brokerProfileId))
+              ..where(
+                (row) => retainedSince == null
+                    ? const Constant(true)
+                    : row.updatedAt.isBiggerOrEqualValue(retainedSince),
+              )
               ..orderBy([
                 (row) => OrderingTerm.desc(row.updatedAt),
                 (row) => OrderingTerm.desc(row.cursor),
               ]))
             .get();
     return rows.map(_fromRow).toList(growable: false);
+  }
+
+  @override
+  Future<List<AttentionEventView>> deleteExpired(
+    String brokerProfileId,
+  ) async {
+    final retainedSince = _retainedSince;
+    if (retainedSince == null) return const [];
+    return database.transaction(() async {
+      final rows =
+          await (database.select(database.attentionEventRows)..where(
+                (row) =>
+                    row.brokerProfileId.equals(brokerProfileId) &
+                    row.updatedAt.isSmallerThanValue(retainedSince),
+              ))
+              .get();
+      if (rows.isEmpty) return const <AttentionEventView>[];
+      await (database.delete(database.attentionEventRows)..where(
+            (row) =>
+                row.brokerProfileId.equals(brokerProfileId) &
+                row.updatedAt.isSmallerThanValue(retainedSince),
+          ))
+          .go();
+      return rows.map(_fromRow).toList(growable: false);
+    });
   }
 
   @override
@@ -317,6 +381,7 @@ class DriftAttentionRepository implements AttentionRepository {
   Future<List<AttentionDeliveryState>> loadPendingPresentations(
     String brokerProfileId,
   ) async {
+    final retainedSince = _retainedSince;
     final rows =
         await (database.select(database.attentionEventRows)
               ..where((row) => row.brokerProfileId.equals(brokerProfileId))
@@ -327,6 +392,11 @@ class DriftAttentionRepository implements AttentionRepository {
                   'AND broker_dismissed_at IS NULL '
                   'AND presentation_revision > local_presented_revision',
                 ),
+              )
+              ..where(
+                (row) => retainedSince == null
+                    ? const Constant(true)
+                    : row.updatedAt.isBiggerOrEqualValue(retainedSince),
               )
               ..orderBy([
                 (row) => OrderingTerm.desc(row.updatedAt),
@@ -350,6 +420,7 @@ class DriftAttentionRepository implements AttentionRepository {
   Future<int> loadUnreadCount(String brokerProfileId) async {
     // Count in SQLite without materializing retained event payloads.
     final unreadExpression = countAll();
+    final retainedSince = _retainedSince;
     final row =
         await (database.selectOnly(database.attentionEventRows)
               ..addColumns([unreadExpression])
@@ -357,6 +428,12 @@ class DriftAttentionRepository implements AttentionRepository {
                 database.attentionEventRows.brokerProfileId.equals(
                   brokerProfileId,
                 ),
+              )
+              ..where(
+                retainedSince == null
+                    ? const Constant(true)
+                    : database.attentionEventRows.updatedAt
+                          .isBiggerOrEqualValue(retainedSince),
               )
               ..where(
                 database.attentionEventRows.localReadAt.isNull() &
@@ -656,7 +733,7 @@ class DriftAttentionRepository implements AttentionRepository {
       actionTool: Value(event.action.tool),
       actionSessionId: Value(event.action.sessionId),
       actionAgent: Value(event.action.agent),
-      brokerReadAt: Value(event.readAt),
+      brokerReadAt: Value(event.readAt ?? _readElsewhereAt(event)),
       brokerDismissedAt: Value(event.dismissedAt),
       createdAt: Value(event.createdAt),
       updatedAt: Value(event.updatedAt),
@@ -747,6 +824,18 @@ class DriftAttentionRepository implements AttentionRepository {
       historicalBaseline: row.historicalBaseline,
       raw: brokerEvent.raw,
     );
+  }
+
+  /// When another device read or dismissed [event] ([AttentionEvent.seenAt]).
+  ///
+  /// Read state is shared across a Server's devices, so that counts as read
+  /// here too. A security alert is the exception: it stays unread on each
+  /// device until it is read there.
+  static int? _readElsewhereAt(AttentionEventView event) {
+    final seenAt = event.seenAt;
+    if (seenAt == null) return null;
+    final family = attentionNotificationTypeOf(event)?.family;
+    return family == AttentionNotificationFamily.security ? null : seenAt;
   }
 
   static int? _mergeReadOrDismiss(int? brokerValue, int? localValue) {

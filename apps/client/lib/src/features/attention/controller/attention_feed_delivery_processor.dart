@@ -551,6 +551,27 @@ class AttentionFeedDeliveryProcessor {
     }
   }
 
+  /// Clears the OS notification of every event in [expired], whose rows the
+  /// retention just deleted, unless a newer event has taken its slot since.
+  Future<void> clearExpired(Iterable<AttentionEventView> expired) async {
+    if (expired.isEmpty || !await _isAdmitted()) return;
+    final current = await repository.loadEvents(brokerScopeKey);
+    final ids = <String>{
+      for (final event in expired)
+        ...attentionNotificationIdsToClear(
+          brokerProfileId: brokerProfileId,
+          event: event,
+          current: current,
+        ),
+    };
+    if (ids.isEmpty) return;
+    try {
+      await notificationSink.clearMany(ids);
+    } on Object {
+      // Best effort: the rows are already gone.
+    }
+  }
+
   /// Clears the OS notification of every event in [events] that another
   /// client has read or dismissed ([AttentionEvent.seenAt]) and this one has
   /// not handled, unless a newer event has taken its slot since.
