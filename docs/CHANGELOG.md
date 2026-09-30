@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.6.2 — 2026-09-30
+
 ### Fixed
 
 - A broker holding a long notification history no longer stops responding for
