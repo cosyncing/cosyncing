@@ -1102,6 +1102,7 @@
   "attentionPageBackToSessions": "Volver a Sesiones",
   "attentionPageRefresh": "Actualizar la bandeja",
   "attentionPageClearAll": "Borrar todo",
+  "attentionPageAllCleared": "Notificaciones borradas",
   "attentionPageClearFailed": "No se pudo borrar este registro de notificaciones. Inténtalo de nuevo.",
   "attentionPageActionRequired": "Requiere tu intervención",
   "attentionPageActionRequiredSubtitle": "Sesiones que te esperan o ejecuciones que hay que revisar",

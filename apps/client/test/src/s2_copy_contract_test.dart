@@ -171,7 +171,7 @@ const _reviewedLiteralByLocation = <String>{
   'lib/src/features/sessions/workspace/workspace_sidebar.dart::cosyncing',
   // Count and compositions of already-localized labels with session data.
   'lib/src/features/attention/view/attention_page.dart::'
-      r'${entries.length}',
+      r'$count',
   'lib/src/features/sessions/detail/session_detail_view_chrome.dart::'
       r'${l10n.conversationEnhancementDetails}\n$title',
   'lib/src/features/sessions/list/session_list_pane.dart::'

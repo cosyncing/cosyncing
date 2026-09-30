@@ -192,7 +192,6 @@ void main() {
     expect(find.text('Waiting for you'), findsOneWidget);
     expect(find.text('Unread completions'), findsOneWidget);
     expect(find.text('Permission needed'), findsOneWidget);
-    expect(find.text('Future broker notice'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('Recent activity · 2 unread'),
       300,
@@ -200,6 +199,13 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Recent activity · 2 unread'), findsOneWidget);
+    // Rows are built as they scroll into view.
+    await tester.scrollUntilVisible(
+      find.text('Future broker notice'),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    expect(find.text('Future broker notice'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -325,9 +331,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('attention-event-request')), findsNothing);
     expect(find.byKey(const Key('attention-event-finished')), findsOneWidget);
-    expect(find.byKey(const Key('attention-event-other')), findsOneWidget);
     await tester.tap(find.byKey(const Key('attention-jump-activity')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('attention-event-other')), findsOneWidget);
     await tester.tap(find.byKey(const Key('attention-unread-filter')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('attention-event-request')), findsNothing);
@@ -524,6 +530,180 @@ void main() {
     },
   );
 
+  testWidgets(
+    'Clear all dismisses every notification, requests included, after Undo',
+    (tester) async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repository = DriftAttentionRepository(database);
+      final entries = [
+        _entry('request', 'question-required', title: 'Question waiting'),
+        _entry('finished', 'run-finished', title: 'Inspect the result'),
+        _entry('failed', 'run-failed', title: 'The run failed'),
+        _entry(
+          'update',
+          'runtime-update-ready',
+          title: 'Runtime update',
+          state: 'resolved',
+        ),
+      ];
+      final profile = entries.first.profile;
+      await repository.persistAttentionEventsPage(
+        brokerProfileId: _scope(profile),
+        page: AttentionEventsPage(
+          events: [for (final entry in entries) entry.event],
+          cursor: 1,
+          reset: false,
+          hasMore: false,
+        ),
+      );
+      final client = _PageBrokerClient();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            attentionInboxProvider.overrideWith(
+              (ref) => _repositoryInbox(ref, repository, profile),
+            ),
+            attentionBadgeSeenStoreProvider.overrideWithValue(
+              _MemoryBadgeSeenStore(),
+            ),
+            attentionRepositoryProvider.overrideWithValue(repository),
+            attentionProfileClientProvider.overrideWith((_, _) async => client),
+            attentionClientIdProvider.overrideWith((_) async => 'page-client'),
+            sessionLocalNotificationSinkProvider.overrideWithValue(
+              _PageNotificationSink(),
+            ),
+          ],
+          child: _localizedApp(const AttentionPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('attention-clear-inbox')));
+      await tester.pumpAndSettle();
+      expect(find.text('Nothing needs your attention'), findsOneWidget);
+      expect(find.text('Notifications cleared'), findsOneWidget);
+      expect(client.bulkRequests, isEmpty, reason: 'Undo precedes dismissal');
+      await tester.tap(find.text('Undo'));
+      await tester.pumpAndSettle();
+      expect(client.bulkRequests, isEmpty);
+      expect(find.byKey(const Key('attention-event-request')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('attention-clear-inbox')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pumpAndSettle();
+
+      expect(
+        client.bulkRequests.expand((request) => request).toSet(),
+        {('request', 1), ('finished', 1), ('failed', 1), ('update', 1)},
+      );
+      final after = AttentionInboxSections.fromEntries(
+        (await repository.loadEvents(_scope(profile))).map(
+          (event) => AttentionInboxEntry(profile: profile, event: event),
+        ),
+      );
+      expect(after.all, isEmpty);
+      expect(find.text('Nothing needs your attention'), findsOneWidget);
+    },
+  );
+
+  testWidgets('a pending request can be dismissed from its row', (
+    tester,
+  ) async {
+    final database = AppDatabase(NativeDatabase.memory());
+    addTearDown(database.close);
+    final repository = DriftAttentionRepository(database);
+    final request = _entry(
+      'request',
+      'permission-required',
+      title: 'Permission needed',
+    );
+    final keep = _entry('keep', 'run-failed', title: 'The run failed');
+    await repository.persistAttentionEventsPage(
+      brokerProfileId: _scope(request.profile),
+      page: AttentionEventsPage(
+        events: [request.event, keep.event],
+        cursor: 1,
+        reset: false,
+        hasMore: false,
+      ),
+    );
+    final client = _PageBrokerClient();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          attentionInboxProvider.overrideWith(
+            (ref) => _repositoryInbox(ref, repository, request.profile),
+          ),
+          attentionBadgeSeenStoreProvider.overrideWithValue(
+            _MemoryBadgeSeenStore(),
+          ),
+          attentionRepositoryProvider.overrideWithValue(repository),
+          attentionProfileClientProvider.overrideWith((_, _) async => client),
+          attentionClientIdProvider.overrideWith((_) async => 'page-client'),
+          sessionLocalNotificationSinkProvider.overrideWithValue(
+            _PageNotificationSink(),
+          ),
+        ],
+        child: _localizedApp(const AttentionPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('attention-dismiss-request')));
+    await tester.pumpAndSettle();
+
+    expect(client.dismissed, ['request']);
+    expect(find.byKey(const Key('attention-event-request')), findsNothing);
+    expect(find.byKey(const Key('attention-event-keep')), findsOneWidget);
+  });
+
+  testWidgets('a long history builds only the rows on screen', (tester) async {
+    tester.view
+      ..physicalSize = const Size(390, 844)
+      ..devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final sections = AttentionInboxSections.fromEntries([
+      for (var i = 0; i < 1000; i += 1)
+        _entry(
+          'history-$i',
+          i.isEven ? 'permission-required' : 'runtime-update-ready',
+          title: 'Event $i',
+          state: i.isEven ? 'active' : 'resolved',
+        ),
+    ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          attentionInboxProvider.overrideWith((_) async => sections),
+          attentionBadgeSeenStoreProvider.overrideWithValue(
+            _MemoryBadgeSeenStore(),
+          ),
+        ],
+        child: _localizedApp(const AttentionPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final built = find
+        .byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'attention-event-',
+              ),
+          skipOffstage: false,
+        )
+        .evaluate()
+        .length;
+    expect(built, inInclusiveRange(1, 40));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('classifies inbox failures without showing exception text', (
     tester,
   ) async {
@@ -658,6 +838,19 @@ void main() {
 String _scope(BrokerProfile profile) =>
     RosterSource.ofProfile(profile).storageKey;
 
+/// The inbox as the app loads it: from the store, again after each mutation.
+Future<AttentionInboxSections> _repositoryInbox(
+  Ref ref,
+  AttentionRepository repository,
+  BrokerProfile profile,
+) async {
+  ref.watch(attentionInboxRevisionProvider);
+  final events = await repository.loadEvents(_scope(profile));
+  return AttentionInboxSections.fromEntries(
+    events.map((event) => AttentionInboxEntry(profile: profile, event: event)),
+  );
+}
+
 Widget _localizedApp(Widget home, {Locale? locale}) {
   return MaterialApp(
     locale: locale,
@@ -739,6 +932,16 @@ final class _PageBrokerClient extends BrokerClient {
   _PageBrokerClient() : super(baseUrl: 'http://127.0.0.1:7734');
 
   final bulkRequests = <List<(String, int)>>[];
+  final dismissed = <String>[];
+
+  @override
+  Future<Map<String, dynamic>> dismissAttentionEvent(
+    String eventId, {
+    required String clientId,
+  }) async {
+    dismissed.add(eventId);
+    return const {};
+  }
 
   @override
   Future<AttentionBulkDismissResponse> dismissAttentionEvents(

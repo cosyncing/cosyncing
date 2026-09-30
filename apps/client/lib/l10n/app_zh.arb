@@ -1115,6 +1115,7 @@
   "attentionPageBackToSessions": "返回会话",
   "attentionPageRefresh": "刷新收件箱",
   "attentionPageClearAll": "全部清除",
+  "attentionPageAllCleared": "已清除通知",
   "attentionPageClearFailed": "无法清除当前通知快照，请重试。",
   "attentionPageProblems": "异常",
   "@attentionPageProblems": {

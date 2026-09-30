@@ -1102,6 +1102,7 @@
   "attentionPageBackToSessions": "세션으로 돌아가기",
   "attentionPageRefresh": "수신함 새로고침",
   "attentionPageClearAll": "모두 지우기",
+  "attentionPageAllCleared": "알림을 지웠습니다",
   "attentionPageClearFailed": "이 알림 기록을 지우지 못했습니다. 다시 시도하세요.",
   "attentionPageActionRequired": "조치 필요",
   "attentionPageActionRequiredSubtitle": "응답을 기다리는 세션이나 확인이 필요한 실행",
