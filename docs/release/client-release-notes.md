@@ -5,12 +5,14 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.6.1 is a client polish release. The usage views are quieter and stop
-explaining themselves in footnotes, pending work has one name per kind, an
-Android update offer can be set aside, and a session that finishes more than
-once is listed once.
+0.6.2 fixes the Server, not the client. Two notification defects are closed on
+the broker side: a Server holding a long notification history no longer stalls
+for up to half a minute about once a minute, and turning notifications on in a
+new browser no longer makes it record every retained notification that browser
+would never show.
 
-Update the client on every device you use before, or together with, the Server.
+Nothing in the app behaves differently, so a 0.6.1 client can stay as it is.
+Clients are rebuilt here so the Server can ship its matching desktop archives.
 The broker contract stays at revision 28 and the compatibility window stays one
 revision wide, so a native client from 0.5.13 or earlier can watch a 0.6.x
 Server but cannot drive it: it cannot answer a permission request or send a
@@ -18,32 +20,22 @@ prompt. The web client needs nothing: it ships inside the broker package and
 always matches it. A 0.4.1 or older client also sits below the minimum accepted
 client contract, still revision 17, and stays read-only against current brokers.
 
-## What's new in 0.6.1
+## What's new in 0.6.2
 
-- Agents & Quota shows only quota windows, and token usage lives in the Usage
-  overview. The overview's day view drops the day streak, peak day and weekday
-  chart that a single day cannot fill, and the report, its project leaderboard
-  and the workspace overview drop their explanatory footnotes; how agent time
-  is estimated stays on its tooltip.
-- Pending work has one name per kind on both the overview and Notifications:
-  "Waiting for you" for questions and approvals, "Unread completions", and
-  "Problems" for failed runs and security or server alerts. The "Needs
-  attention" grouping is gone, so the same filter is no longer reachable under
-  two names.
-- On Android a new app release is offered once in a dialog with Later, instead
-  of a banner that stayed over every screen and could not be dismissed. Setting
-  it aside keeps the update in Settings → General, still carrying its update
-  dot.
-- On phones and other narrow screens, reopening the sidebar after opening a
-  session from it keeps the projects and subagent groups you had open, instead
-  of collapsing every project again.
-- A session that finishes more than once is listed once in Notifications and in
-  the overview's Unread completions: its newest outcome replaces the earlier
-  ones, as it already did in the system notification center.
+- A broker holding a long notification history stays responsive. It used to stop
+  answering for up to half a minute about once a minute, and while it was out
+  sessions showed Reconnecting or failed to load and every client, request and
+  live stream waited. On a store of about 1,700 notifications one check fell
+  from about 14 seconds to about 0.1 seconds.
+- Turning notifications on in a new browser no longer makes the broker record,
+  and write gigabytes to disk for, every retained notification that browser
+  would never show. A browser is alerted only to what happens after it
+  registers; a native app still receives an alert that was already under way
+  when it registered.
 
 The 0.6.0 features that need both ends of the wire, notifications with every
 browser tab closed, per-type notification settings and cross-device read and
-clear, still need a 0.6.0 or newer Server. 0.6.1 is one.
+clear, still need a 0.6.0 or newer Server. 0.6.2 is one.
 
 ## Downloads
 
