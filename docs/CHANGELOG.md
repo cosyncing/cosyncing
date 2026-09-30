@@ -13,6 +13,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- On Android 14 and later, dismissing the "Staying connected for notifications"
+  notification brought it back every time Cosyncing returned to the front. It
+  now stays dismissed while the background connection keeps running.
 - A broker holding a long notification history no longer stops responding for
   up to half a minute about once a minute. While it was unresponsive, sessions
   showed Reconnecting or failed to load, and every client, request and live
