@@ -16,10 +16,6 @@
   "@appearanceTitle": {
     "description": "Title of the Appearance settings screen and its settings row."
   },
-  "appearanceSubtitle": "Theme, text size, appearance mode, and language",
-  "@appearanceSubtitle": {
-    "description": "Subtitle for the Appearance settings row. Names 'text size' explicitly so the Settings root is scannable for the control that lives one tap in — users could not find it otherwise."
-  },
   "themeLabel": "Theme",
   "@themeLabel": {
     "description": "Label for the theme picker."
@@ -107,18 +103,6 @@
   "densitySpacious": "Spacious",
   "@densitySpacious": {
     "description": "Spacious interface-density option."
-  },
-  "appearancePreviewLabel": "Preview",
-  "@appearancePreviewLabel": {
-    "description": "Label for the live UI-size preview in Appearance settings."
-  },
-  "appearancePreviewSessionTitle": "Refactor auth module",
-  "@appearancePreviewSessionTitle": {
-    "description": "Sample session title shown in the Appearance size preview."
-  },
-  "appearancePreviewSessionMeta": "Working now",
-  "@appearancePreviewSessionMeta": {
-    "description": "Sample session status line shown in the Appearance size preview."
   },
   "refresh": "Refresh",
   "@refresh": {
@@ -708,22 +692,6 @@
   "brokerProfileUse": "Use",
   "brokerProfileEditTooltip": "Edit server",
   "brokerProfileDeleteTooltip": "Delete server",
-  "brokerProfileCreated": "Created: {date}",
-  "@brokerProfileCreated": {
-    "placeholders": {
-      "date": {
-        "type": "String"
-      }
-    }
-  },
-  "brokerProfileLastUsed": "Last used: {date}",
-  "@brokerProfileLastUsed": {
-    "placeholders": {
-      "date": {
-        "type": "String"
-      }
-    }
-  },
   "brokerProfileEmptyTitle": "No saved servers yet",
   "brokerProfileEmptyBody": "Open Connection and connect once to save a server. Return here to edit it or switch servers.",
   "brokerProfileOpenConnection": "Open Connection",
@@ -897,10 +865,6 @@
   "@serversAddTitle": {
     "description": "Action on the Servers page that starts direct connection or pairing."
   },
-  "serversAddSubtitle": "Connect directly or pair this device",
-  "@serversAddSubtitle": {
-    "description": "Subtitle for the Add server action."
-  },
   "settingsCategoryAgentsTitle": "Agents & usage",
   "@settingsCategoryAgentsTitle": {
     "description": "Settings hub category, and the title of its page: managed runtimes and usage."
@@ -965,7 +929,7 @@
   "@settingsQuotaWarningsTitle": {
     "description": "Title of the quota-warning toggle."
   },
-  "settingsQuotaWarningsSubtitle": "Warn me when 25% is left on the five-hour or weekly limit. This reads usage data already cached on this machine — it doesn't request or send anything.",
+  "settingsQuotaWarningsSubtitle": "Warn me when 25% is left on the 5-hour or weekly limit. This reads usage data already cached on this machine — it doesn't request or send anything.",
   "@settingsQuotaWarningsSubtitle": {
     "description": "Subtitle of the quota-warning toggle. Replaces copy that named the internal 'Tokdash' tool, which is never introduced to the user anywhere in the UI."
   },
@@ -1599,21 +1563,13 @@
   "@settingsBackToSessions": {
     "description": "Tooltip on the back button shown when Settings was opened from the wide Sessions workspace."
   },
-  "settingsSectionBrokerCredentials": "Server Credentials",
+  "settingsSectionBrokerCredentials": "Server credentials",
   "@settingsSectionBrokerCredentials": {
     "description": "Title of the Broker Credentials section on the Settings root."
   },
   "settingsSectionAttentionDelivery": "Notification delivery",
   "@settingsSectionAttentionDelivery": {
     "description": "Title of the Attention Delivery section on the Settings root."
-  },
-  "settingsToolDisplayTitle": "Tool display",
-  "@settingsToolDisplayTitle": {
-    "description": "Title of the Tool display link tile in the Display settings group."
-  },
-  "settingsToolDisplaySubtitle": "Responsive detail, compact cards, or final messages",
-  "@settingsToolDisplaySubtitle": {
-    "description": "Subtitle of the Tool display link tile, naming the available display modes."
   },
   "settingsSessionVisibilityTitle": "Session visibility",
   "@settingsSessionVisibilityTitle": {
@@ -1675,7 +1631,7 @@
   "@settingsKeyboardShortcutsSubtitle": {
     "description": "Subtitle of the Keyboard Shortcuts link tile in the Broker & device settings group."
   },
-  "settingsManagedAgentRuntimesTitle": "Managed Agent Runtimes",
+  "settingsManagedAgentRuntimesTitle": "Managed agent runtimes",
   "@settingsManagedAgentRuntimesTitle": {
     "description": "Title of the Managed Agent Runtimes section on the Settings root."
   },
@@ -2087,15 +2043,15 @@
   },
   "settingsQuotaWindowFiveHour": "5-hour",
   "@settingsQuotaWindowFiveHour": {
-    "description": "Label for the five-hour quota window row."
+    "description": "Label for every 5-hour quota window row, whatever the provider calls it."
   },
   "settingsQuotaWindowWeekly": "Weekly",
   "@settingsQuotaWindowWeekly": {
     "description": "Label for the weekly quota window row."
   },
-  "settingsQuotaWindowScopedFiveHour": "{model} 5h",
+  "settingsQuotaWindowScopedFiveHour": "{model} 5-hour",
   "@settingsQuotaWindowScopedFiveHour": {
-    "description": "Label for a five-hour quota window scoped to one model, e.g. 'Sparks 5h'.",
+    "description": "Label for a 5-hour quota window scoped to one model, e.g. 'Sparks 5-hour'.",
     "placeholders": {
       "model": {
         "type": "String"
@@ -2118,16 +2074,6 @@
   "settingsQuotaPercentRemaining": "{percent}% remaining",
   "@settingsQuotaPercentRemaining": {
     "description": "Accessibility wording for the remaining percentage of a quota window.",
-    "placeholders": {
-      "percent": {
-        "type": "String",
-        "example": "42"
-      }
-    }
-  },
-  "settingsQuotaPercentCompact": "{percent}%",
-  "@settingsQuotaPercentCompact": {
-    "description": "Compact visual label for a quota percentage.",
     "placeholders": {
       "percent": {
         "type": "String",
@@ -2169,37 +2115,51 @@
       }
     }
   },
-  "settingsQuotaUpdatedJustNow": "Updated just now",
-  "@settingsQuotaUpdatedJustNow": {
-    "description": "Freshness copy when the newest quota reading is under a minute old."
+  "settingsQuotaResetCredits": "Reset credits",
+  "@settingsQuotaResetCredits": {
+    "description": "Label for a provider's reset credits under its quota windows: one-off resets of the subscription's usage windows (Codex reset credits, Claude Code limit resets)."
   },
-  "settingsQuotaUpdatedMinutesAgo": "{count, plural, =1{Updated 1 min ago} other{Updated {count} min ago}}",
-  "@settingsQuotaUpdatedMinutesAgo": {
-    "description": "Freshness copy when the newest quota reading is under an hour old.",
-    "placeholders": {
-      "count": {
-        "type": "int",
-        "example": "12"
-      }
-    }
-  },
-  "settingsQuotaUpdatedHoursAgo": "{count, plural, =1{Updated 1 h ago} other{Updated {count} h ago}}",
-  "@settingsQuotaUpdatedHoursAgo": {
-    "description": "Freshness copy when the newest quota reading is under a day old.",
-    "placeholders": {
-      "count": {
-        "type": "int",
-        "example": "5"
-      }
-    }
-  },
-  "settingsQuotaUpdatedDaysAgo": "{count, plural, =1{Updated 1 day ago} other{Updated {count} days ago}}",
-  "@settingsQuotaUpdatedDaysAgo": {
-    "description": "Freshness copy when the newest quota reading is a day old or older.",
+  "settingsQuotaResetCreditsAvailable": "{count} available",
+  "@settingsQuotaResetCreditsAvailable": {
+    "description": "How many reset credits can still be spent.",
     "placeholders": {
       "count": {
         "type": "int",
         "example": "2"
+      }
+    }
+  },
+  "settingsQuotaResetCreditsExpireInDays": "{count, plural, =1{Expires in {days} days} other{Next expires in {days} days}}",
+  "@settingsQuotaResetCreditsExpireInDays": {
+    "description": "When the soonest reset credit expires, two or more whole days from now. count is how many credits are available; with more than one, the line names the next to expire.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      },
+      "days": {
+        "type": "int",
+        "example": "22"
+      }
+    }
+  },
+  "settingsQuotaResetCreditsExpireTomorrow": "{count, plural, =1{Expires tomorrow} other{Next expires tomorrow}}",
+  "@settingsQuotaResetCreditsExpireTomorrow": {
+    "description": "The soonest reset credit expires between one and two days from now.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
+      }
+    }
+  },
+  "settingsQuotaResetCreditsExpireToday": "{count, plural, =1{Expires today} other{Next expires today}}",
+  "@settingsQuotaResetCreditsExpireToday": {
+    "description": "The soonest reset credit expires within a day.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
       }
     }
   },
@@ -6087,6 +6047,10 @@
   "workspaceOverviewHeading": "Your day, in sync.",
   "workspaceOverviewIntro": "A little perspective on everything you’re building.",
   "workspaceNoMachine": "Choose a server",
+  "workspaceServerManage": "Manage servers",
+  "@workspaceServerManage": {
+    "description": "Server switcher action that opens Settings → Servers."
+  },
   "workspaceRunning": "Running",
   "workspaceWaiting": "Waiting for you",
   "workspaceUnreadCompletions": "Unread completions",

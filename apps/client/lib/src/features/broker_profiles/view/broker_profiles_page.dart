@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
@@ -210,105 +212,125 @@ class _ProfileListSection extends StatelessWidget {
     );
   }
 
-  Widget _buildProfileCard(BuildContext context, BrokerProfile profile) {
-    final l10n = AppLocalizations.of(context);
-    final isActive = profile.id == activeProfileId;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ListTile(
-        key: Key('broker-profile-row-${_sanitizeProfileId(profile.id)}'),
-        title: SelectionArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(profile.displayName),
-              const SizedBox(height: 4),
-              _ProfileSubtitle(profile: profile),
-            ],
-          ),
-        ),
-        leading: Icon(
-          isActive ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-          color: isActive
-              ? Theme.of(context).colorScheme.primary
-              : Theme.of(context).colorScheme.outline,
-        ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (isActive)
-              Chip(
-                label: Text(l10n.brokerProfileActive),
-                visualDensity: VisualDensity.compact,
-                side: BorderSide.none,
-              )
-            else
-              FilledButton(
-                key: Key(
-                  'broker-profile-activate-'
-                  '${_sanitizeProfileId(profile.id)}',
-                ),
-                onPressed: () => onActivate(profile),
-                child: Text(l10n.brokerProfileUse),
-              ),
-            const SizedBox(width: 8),
-            IconButton(
-              key: Key(
-                'broker-profile-edit-${_sanitizeProfileId(profile.id)}',
-              ),
-              icon: const Icon(Icons.edit_outlined),
-              onPressed: () => onEdit(profile),
-              tooltip: l10n.brokerProfileEditTooltip,
-            ),
-            IconButton(
-              key: Key(
-                'broker-profile-delete-${_sanitizeProfileId(profile.id)}',
-              ),
-              icon: const Icon(Icons.delete_outline),
-              onPressed: () => onDelete(profile),
-              tooltip: l10n.brokerProfileDeleteTooltip,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget _buildProfileCard(BuildContext context, BrokerProfile profile) =>
+      _ProfileRow(
+        profile: profile,
+        isActive: profile.id == activeProfileId,
+        onActivate: () => onActivate(profile),
+        onEdit: () => onEdit(profile),
+        onDelete: () => onDelete(profile),
+      );
 }
 
-class _ProfileSubtitle extends StatelessWidget {
-  const _ProfileSubtitle({required this.profile});
+/// One saved server: what it is called and where it lives, with its actions
+/// on the right. The server in use carries a check instead of a Use button.
+class _ProfileRow extends StatelessWidget {
+  const _ProfileRow({
+    required this.profile,
+    required this.isActive,
+    required this.onActivate,
+    required this.onEdit,
+    required this.onDelete,
+  });
 
   final BrokerProfile profile;
+  final bool isActive;
+  final VoidCallback onActivate;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final metadata = <String>[
-      l10n.brokerProfileCreated(_formatDate(profile.createdAt)),
-    ];
-
-    if (profile.lastUsedAt != null) {
-      metadata.add(
-        l10n.brokerProfileLastUsed(_formatDate(profile.lastUsedAt!)),
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          profile.baseUri.toString(),
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const SizedBox(height: 4),
-        Text(
-          metadata.join(' · '),
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final id = _sanitizeProfileId(profile.id);
+    final iconStyle = IconButton.styleFrom(
+      foregroundColor: tokens.textSecondary,
+      hoverColor: tokens.surfaceHover,
+      minimumSize: const Size.square(40),
+      padding: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(tokens.radiusMd),
+      ),
+    );
+    return Padding(
+      key: Key('broker-profile-row-$id'),
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          StrokeIcon(
+            StrokeGlyph.monitor,
+            color: isActive ? tokens.textPrimary : tokens.textTertiary,
           ),
-          maxLines: 2,
-        ),
-      ],
+          const SizedBox(width: 12),
+          Expanded(
+            child: SelectionArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    profile.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: tokens.textPrimary,
+                      fontWeight: isActive ? FontWeight.w700 : null,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    profile.displayAddress,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: tokens.textTertiary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (isActive)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.check, size: 16, color: tokens.textSecondary),
+                  const SizedBox(width: 4),
+                  Text(
+                    l10n.brokerProfileActive,
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: tokens.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            TextButton(
+              key: Key('broker-profile-activate-$id'),
+              onPressed: onActivate,
+              child: Text(l10n.brokerProfileUse),
+            ),
+          IconButton(
+            key: Key('broker-profile-edit-$id'),
+            style: iconStyle,
+            icon: const Icon(Icons.edit_outlined, size: 18),
+            onPressed: onEdit,
+            tooltip: l10n.brokerProfileEditTooltip,
+          ),
+          IconButton(
+            key: Key('broker-profile-delete-$id'),
+            style: iconStyle,
+            icon: const Icon(Icons.delete_outline, size: 18),
+            onPressed: onDelete,
+            tooltip: l10n.brokerProfileDeleteTooltip,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -321,45 +343,39 @@ class _EmptyProfileState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 560),
-        child: Card(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SelectionArea(
-                  child: Column(
-                    children: [
-                      Text(
-                        l10n.brokerProfileEmptyTitle,
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        l10n.brokerProfileEmptyBody,
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SelectionArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                l10n.brokerProfileEmptyTitle,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: tokens.textPrimary,
                 ),
-                const SizedBox(height: 16),
-                FilledButton.icon(
-                  key: const Key('broker-profile-empty-open-connection'),
-                  onPressed: onOpenConnection,
-                  icon: const Icon(Icons.link),
-                  label: Text(l10n.brokerProfileOpenConnection),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                l10n.brokerProfileEmptyBody,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: tokens.textTertiary,
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
-      ),
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          key: const Key('broker-profile-empty-open-connection'),
+          onPressed: onOpenConnection,
+          icon: const Icon(Icons.link),
+          label: Text(l10n.brokerProfileOpenConnection),
+        ),
+      ],
     );
   }
 }
@@ -534,12 +550,6 @@ class _EditProfileDialogState extends ConsumerState<_EditProfileDialog> {
       ],
     );
   }
-}
-
-String _formatDate(DateTime dateTime) {
-  return '${dateTime.month.toString().padLeft(2, '0')}/'
-      '${dateTime.day.toString().padLeft(2, '0')}/'
-      '${dateTime.year}';
 }
 
 String _sanitizeProfileId(String id) {

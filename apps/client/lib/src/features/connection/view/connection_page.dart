@@ -95,7 +95,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage>
                 onPressed: () => context.go(sessionsRoute),
                 icon: const Icon(Icons.arrow_back),
               )
-            : WorkspaceFrameScope.menuButton(context),
+            : WorkspaceFrameScope.leadingButton(context),
         title: Text(l10n.connectionTitle),
         actions: [
           TextButton.icon(

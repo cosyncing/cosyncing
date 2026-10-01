@@ -151,6 +151,94 @@ void main() {
       expect(response.message, contains('Codex failed'));
     });
 
+    test('reads reset credits in both expiry shapes', () {
+      // Codex credits carry an ISO 8601 expiry; Claude's limit resets carry
+      // epoch seconds. Both read as epoch milliseconds.
+      Map<String, dynamic> provider(String id, Object? resetCredits) => {
+        'provider': id,
+        'network_enabled': true,
+        'buckets': const <Object>[],
+        'status': 'ok',
+        'sources': const <Object>[],
+        'estimated': false,
+        'reset_credits': resetCredits,
+      };
+      final response = TokdashQuotaResponse.fromJson({
+        'ok': true,
+        'data': {
+          'enabled': true,
+          'timestamp': 1730022222,
+          'providers': {
+            'codex': provider('codex', {
+              'available_count': 2,
+              'credits': [
+                {
+                  'id': 'rc-1',
+                  'title': 'Full reset',
+                  'expires_at': '2026-10-22T20:48:12Z',
+                },
+                {'id': 'rc-2', 'expires_at': 1792684800},
+              ],
+            }),
+            'claude': provider('claude', null),
+          },
+        },
+      });
+
+      final credits = response.data!.providers['codex']!.resetCredits!;
+      expect(credits.availableCount, 2);
+      expect(credits.credits.map((credit) => credit.id), ['rc-1', 'rc-2']);
+      expect(credits.credits.first.title, 'Full reset');
+      expect(
+        credits.credits.first.expiresAt,
+        DateTime.utc(2026, 10, 22, 20, 48, 12).millisecondsSinceEpoch,
+      );
+      expect(credits.credits.last.expiresAt, 1792684800000);
+      expect(response.data!.providers['claude']!.resetCredits, isNull);
+      expect(
+        response.data!.providers['codex']!.toJson()['reset_credits'],
+        containsPair('available_count', 2),
+      );
+    });
+
+    test('dates reset credits by the soonest expiry still ahead', () {
+      final credits = TokdashResetCredits.tryParse({
+        'available_count': 3,
+        'credits': [
+          {'id': 'spent', 'expires_at': 1000},
+          {'id': 'later', 'expires_at': 3000},
+          {'id': 'sooner', 'expires_at': 2000},
+          {'id': 'open'},
+        ],
+      })!;
+
+      expect(
+        credits.nextExpiry(DateTime.fromMillisecondsSinceEpoch(1500 * 1000)),
+        DateTime.fromMillisecondsSinceEpoch(2000 * 1000),
+      );
+      expect(
+        credits.nextExpiry(DateTime.fromMillisecondsSinceEpoch(3000 * 1000)),
+        isNull,
+      );
+    });
+
+    test('a malformed reset-credits block never costs the provider', () {
+      expect(TokdashResetCredits.tryParse('none'), isNull);
+      expect(TokdashResetCredits.tryParse({'available_count': 'one'}), isNull);
+      expect(TokdashResetCredits.tryParse({'available_count': -1}), isNull);
+
+      final credits = TokdashResetCredits.tryParse({
+        'available_count': 1,
+        'credits': [
+          'not a credit',
+          {'id': 7, 'expires_at': 'next week'},
+        ],
+      })!;
+      expect(credits.credits, hasLength(1));
+      expect(credits.credits.single.id, isNull);
+      expect(credits.credits.single.expiresAt, isNull);
+    });
+
     test('parses tokdash quota and estimated buckets', () {
       final response = TokdashQuotaResponse.fromJson({
         'ok': true,

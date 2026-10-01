@@ -49,53 +49,49 @@ class NotificationSettingsPage extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.settingsCategoryNotificationsTitle)),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            SettingsSection(
-              title: l10n.settingsSystemNotificationsTitle,
-              child: _SystemNotificationsSection(
-                enabled: masterState.valueOrNull ?? false,
-                isLoading: masterState.isLoading,
-                error: masterState.hasError
-                    ? localizedFailureMessage(
-                        l10n,
-                        masterState.error!,
-                        lead: l10n.notificationSettingsLoadFailed,
-                      )
-                    : null,
-              ),
+      body: SettingsPageBody(
+        children: [
+          SettingsSection(
+            title: l10n.settingsSystemNotificationsTitle,
+            child: _SystemNotificationsSection(
+              enabled: masterState.valueOrNull ?? false,
+              isLoading: masterState.isLoading,
+              error: masterState.hasError
+                  ? localizedFailureMessage(
+                      l10n,
+                      masterState.error!,
+                      lead: l10n.notificationSettingsLoadFailed,
+                    )
+                  : null,
             ),
-            const SizedBox(height: 16),
-            SettingsSection(
-              title: l10n.settingsNotificationTypesTitle,
-              child: const _NotificationTypesSection(),
+          ),
+          const SizedBox(height: 16),
+          SettingsSection(
+            title: l10n.settingsNotificationTypesTitle,
+            child: const _NotificationTypesSection(),
+          ),
+          const SizedBox(height: 16),
+          SettingsSection(
+            title: l10n.settingsSectionAttentionDelivery,
+            child: _AttentionDeliverySection(
+              state: attentionDeliveryState,
+              profiles: brokerProfilesState,
+              support: attentionSupport,
+              remoteWakeAvailable: remoteWakeAvailable,
+              onProfileChanged: ({required profileId, required enabled}) => ref
+                  .read(
+                    attentionDeliverySettingsControllerProvider.notifier,
+                  )
+                  .setProfileEnabled(
+                    brokerProfileId: profileId,
+                    enabled: enabled,
+                  ),
+              onRemoteWakeChanged: ({required enabled}) => ref
+                  .read(attentionDeliverySettingsControllerProvider.notifier)
+                  .setRemoteWakeEnabled(enabled: enabled),
             ),
-            const SizedBox(height: 16),
-            SettingsSection(
-              title: l10n.settingsSectionAttentionDelivery,
-              child: _AttentionDeliverySection(
-                state: attentionDeliveryState,
-                profiles: brokerProfilesState,
-                support: attentionSupport,
-                remoteWakeAvailable: remoteWakeAvailable,
-                onProfileChanged: ({required profileId, required enabled}) =>
-                    ref
-                        .read(
-                          attentionDeliverySettingsControllerProvider.notifier,
-                        )
-                        .setProfileEnabled(
-                          brokerProfileId: profileId,
-                          enabled: enabled,
-                        ),
-                onRemoteWakeChanged: ({required enabled}) => ref
-                    .read(attentionDeliverySettingsControllerProvider.notifier)
-                    .setRemoteWakeEnabled(enabled: enabled),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

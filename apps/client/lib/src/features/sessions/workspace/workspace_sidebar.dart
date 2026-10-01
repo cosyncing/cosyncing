@@ -20,6 +20,7 @@ import 'package:cosyncing_client/src/features/sessions/roster/session_roster_pro
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_reveal_request.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_overview.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_server_switcher.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -59,7 +60,8 @@ class WorkspaceSidebar extends ConsumerStatefulWidget {
     required this.onOverview,
     required this.onNotifications,
     required this.onSettings,
-    required this.onServer,
+    required this.onAddServer,
+    required this.onManageServers,
     required this.onOpenSession,
     required this.onRefresh,
     super.key,
@@ -110,8 +112,11 @@ class WorkspaceSidebar extends ConsumerStatefulWidget {
   /// Opens Settings.
   final VoidCallback onSettings;
 
-  /// Opens the server settings.
-  final VoidCallback onServer;
+  /// Starts adding a server from the footer's switcher.
+  final VoidCallback onAddServer;
+
+  /// Opens the server settings from the footer's switcher.
+  final VoidCallback onManageServers;
 
   /// Opens a roster session.
   final ValueChanged<SessionRef> onOpenSession;
@@ -243,7 +248,8 @@ class _WorkspaceSidebarState extends ConsumerState<WorkspaceSidebar> {
             _SidebarFooter(
               settingsAttention: widget.settingsAttention,
               selected: widget.destination == WorkspaceDestination.settings,
-              onServer: widget.onServer,
+              onAddServer: widget.onAddServer,
+              onManageServers: widget.onManageServers,
               onSettings: widget.onSettings,
             ),
           ],
@@ -454,17 +460,20 @@ class _SidebarNavRow extends StatelessWidget {
 }
 
 /// The footer: the server this client is showing, and Settings, on one row.
+/// The server row opens the switcher above it.
 class _SidebarFooter extends ConsumerWidget {
   const _SidebarFooter({
     required this.settingsAttention,
     required this.selected,
-    required this.onServer,
+    required this.onAddServer,
+    required this.onManageServers,
     required this.onSettings,
   });
 
   final bool settingsAttention;
   final bool selected;
-  final VoidCallback onServer;
+  final VoidCallback onAddServer;
+  final VoidCallback onManageServers;
   final VoidCallback onSettings;
 
   @override
@@ -494,55 +503,76 @@ class _SidebarFooter extends ConsumerWidget {
       child: Row(
         children: [
           Expanded(
-            child: Material(
-              color: Colors.transparent,
-              borderRadius: radius,
-              child: InkWell(
-                key: const Key('workspace-server-row'),
+            child: WorkspaceServerSwitcher(
+              activeSubtitle: subtitle,
+              onAddServer: onAddServer,
+              onManageServers: onManageServers,
+              builder: (context, toggle) => Material(
+                color: Colors.transparent,
                 borderRadius: radius,
-                hoverColor: tokens.surfaceHover,
-                onTap: onServer,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 44),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 4,
-                    ),
-                    child: Row(
-                      children: [
-                        StrokeIcon(
-                          StrokeGlyph.monitor,
-                          color: tokens.textPrimary,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                profile?.displayName ?? l10n.workspaceNoMachine,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.labelMedium?.copyWith(
-                                  color: tokens.textPrimary,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              if (subtitle != null)
-                                Text(
-                                  subtitle,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    color: tokens.textTertiary,
+                child: InkWell(
+                  key: const Key('workspace-server-row'),
+                  borderRadius: radius,
+                  hoverColor: tokens.surfaceHover,
+                  onTap: toggle,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: 44),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
+                      child: LayoutBuilder(
+                        builder: (context, row) => Row(
+                          children: [
+                            StrokeIcon(
+                              StrokeGlyph.monitor,
+                              color: tokens.textPrimary,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    profile?.displayName ??
+                                        l10n.workspaceNoMachine,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color: tokens.textPrimary,
+                                          fontWeight: FontWeight.w700,
+                                        ),
                                   ),
-                                ),
+                                  if (subtitle != null)
+                                    Text(
+                                      subtitle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.labelSmall
+                                          ?.copyWith(
+                                            color: tokens.textTertiary,
+                                          ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                            // Points the way the switcher opens, when the
+                            // row is wide enough to name the server as well.
+                            if (row.maxWidth >= 96) ...[
+                              const SizedBox(width: 8),
+                              StrokeIcon(
+                                StrokeGlyph.chevronDown,
+                                size: 14,
+                                quarterTurns: 2,
+                                color: tokens.textTertiary,
+                              ),
                             ],
-                          ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),

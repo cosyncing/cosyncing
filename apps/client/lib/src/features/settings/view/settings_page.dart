@@ -112,7 +112,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onPressed: () => context.go(sessionsRoute),
                 icon: const Icon(Icons.arrow_back),
               )
-            : WorkspaceFrameScope.menuButton(context),
+            : WorkspaceFrameScope.leadingButton(context),
         title: Text(l10n.settingsTitle),
       ),
       body: SafeArea(
@@ -173,8 +173,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
                 ],
               )
-            : ListView(
-                padding: const EdgeInsets.all(16),
+            : SettingsPageBody(
                 children: [SettingsLinkGroup(tiles: categories)],
               ),
       ),

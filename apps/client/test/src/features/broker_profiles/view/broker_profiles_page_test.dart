@@ -206,7 +206,7 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.tap(
-        find.widgetWithText(FilledButton, 'Use'),
+        find.widgetWithText(TextButton, 'Use'),
       );
       await tester.pumpAndSettle();
 
@@ -239,7 +239,7 @@ void main() {
         find.descendant(
           of: find.ancestor(
             of: find.text('Remote'),
-            matching: find.byType(ListTile),
+            matching: _profileRow,
           ),
           matching: find.byIcon(Icons.edit_outlined),
         ),
@@ -326,7 +326,7 @@ void main() {
         find.descendant(
           of: find.ancestor(
             of: find.text('Local'),
-            matching: find.byType(ListTile),
+            matching: _profileRow,
           ),
           matching: find.byIcon(Icons.delete_outline),
         ),
@@ -368,7 +368,7 @@ void main() {
           find.descendant(
             of: find.ancestor(
               of: find.text('Local'),
-              matching: find.byType(ListTile),
+              matching: _profileRow,
             ),
             matching: find.byIcon(Icons.delete_outline),
           ),
@@ -440,3 +440,12 @@ class _SpyActiveBrokerProfileStore implements ActiveBrokerProfileStore {
     wasCleared = true;
   }
 }
+
+/// A saved server's row, found by the key every row carries.
+final Finder _profileRow = find.byWidgetPredicate(
+  (widget) =>
+      widget.key is ValueKey<String> &&
+      (widget.key! as ValueKey<String>).value.startsWith(
+        'broker-profile-row-',
+      ),
+);
