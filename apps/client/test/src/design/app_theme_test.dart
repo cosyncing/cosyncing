@@ -24,6 +24,34 @@ void main() {
       }
     }
 
+    // A track the same color as its fill draws every determinate bar full,
+    // which is how a download read as finished from its first byte.
+    for (final spec in kAppThemes) {
+      for (final brightness in Brightness.values) {
+        final tokens = brightness == Brightness.dark ? spec.dark : spec.light;
+        testWidgets('${spec.id} ${brightness.name} progress track is not its '
+            'fill', (tester) async {
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: buildAppTheme(tokens, brightness),
+              home: const Scaffold(
+                body: LinearProgressIndicator(value: 0.4),
+              ),
+            ),
+          );
+          final context = tester.element(find.byType(LinearProgressIndicator));
+          final fill = Theme.of(context).colorScheme.primary;
+          final track = ProgressIndicatorTheme.of(context).linearTrackColor;
+          expect(track, isNotNull);
+          expect(track, isNot(fill));
+          expect(
+            track,
+            isNot(Theme.of(context).colorScheme.secondaryContainer),
+          );
+        });
+      }
+    }
+
     test('the scrollbar thumb strengthens while dragged', () {
       final spec = themeSpecById(kDefaultThemeId);
       final thumb = buildAppTheme(
