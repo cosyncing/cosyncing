@@ -11,8 +11,19 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- An Android update keeps downloading after you leave the app, with its
+  progress in a notification. If it finishes while you are away, a
+  notification says it is ready, and Android's installer opens when you come
+  back to Cosyncing.
+
 ### Fixed
 
+- Progress bars drew full from the start, so the Android update download,
+  the context bar in a session's details and the artifact preview's loading
+  bar never showed how far they had got. The bar now fills over a visible
+  track.
 - Picking another server from the switcher at the bottom of the sidebar did
   nothing: the menu closed and the client stayed on the server it was on. It
   now switches, and says so when a server can no longer be selected.
