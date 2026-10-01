@@ -1104,6 +1104,66 @@ void main() {
     });
   });
 
+  group('expired by the retention', () {
+    String slotOf(AttentionEventView event) => attentionNotificationSlotId(
+      brokerProfileId: _profileId,
+      event: event,
+    )!;
+
+    AttentionEventView outcome(String id, {int createdAt = 1}) =>
+        _attentionEvent(
+          id: id,
+          tool: 'codex',
+          sessionId: 'session-$id',
+          extra: {'createdAt': createdAt},
+        );
+
+    test('clears the notification of every deleted event', () async {
+      final expired = outcome('expired');
+      final request = _attentionEvent(
+        id: 'ask',
+        kind: 'permission-required',
+        severity: 'action-required',
+        dedupeKey: 'permission-required:codex:session-ask:ask',
+        tool: 'codex',
+        sessionId: 'session-ask',
+        requestId: 'ask',
+      );
+
+      await makeProcessor().clearExpired([expired, request]);
+
+      expect(notificationSink.clearedIds, contains(slotOf(expired)));
+      expect(notificationSink.clearedIds, contains(slotOf(request)));
+    });
+
+    test('leaves the slot to a newer event still kept', () async {
+      final expired = _attentionEvent(
+        id: 'older',
+        tool: 'codex',
+        sessionId: 'session-1',
+        extra: {'createdAt': 1},
+      );
+      final newer = _attentionEvent(
+        id: 'newer',
+        tool: 'codex',
+        sessionId: 'session-1',
+        extra: {'createdAt': 5},
+      );
+      await persist([newer]);
+
+      await makeProcessor().clearExpired([expired]);
+
+      expect(slotOf(expired), slotOf(newer));
+      expect(notificationSink.clearedIds, isNot(contains(slotOf(expired))));
+    });
+
+    test('does nothing when nothing expired', () async {
+      await makeProcessor().clearExpired(const []);
+
+      expect(notificationSink.clearedIds, isEmpty);
+    });
+  });
+
   test(
     'clearResolvedRequests clears requests resolved elsewhere, and only them',
     () async {
@@ -1343,6 +1403,11 @@ class _InMemoryDeliveryRepository implements AttentionRepository {
       localPresentedRevision.putIfAbsent(event.id, () => 0);
     }
   }
+
+  @override
+  Future<List<AttentionEventView>> deleteExpired(
+    String brokerProfileId,
+  ) async => const [];
 
   @override
   Future<List<AttentionEventView>> loadEvents(String brokerProfileId) async {

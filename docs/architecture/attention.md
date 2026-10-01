@@ -101,8 +101,14 @@ already past its first alert is never presented again after an upgrade.
 - Reading or dismissing an event on one device clears its notification on the
   others when their next feed page carries its `seenAt`, and an event seen
   elsewhere before a device got to it is never shown there. Requests are the
-  exception: they clear when answered. Each device keeps its own inbox read
-  state.
+  exception: they clear when answered. The event also shows as read there:
+  read state is shared across a Server's devices. A security alert is the
+  exception and stays unread on each device until it is read there. Dismissal
+  stays per device.
+- Notifications leave the inbox 24 hours after they last changed. The app
+  deletes their rows, clears their system notifications, and does not store an
+  expired event again when the broker resends it, so it never returns as new.
+  The broker keeps its own history; this bounds only what devices keep.
 - With a broker that serves `notificationType` and `collapseKey`, the client
   presents by those, and a type it does not know is never shown. With an older
   broker it maps the kind itself, the same way.

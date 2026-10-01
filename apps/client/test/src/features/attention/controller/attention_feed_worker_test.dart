@@ -1110,6 +1110,59 @@ void main() {
     );
 
     test(
+      'each page deletes expired rows and clears their notifications',
+      () async {
+        final sink = _CollectingNotificationSink();
+        final finished = _attentionEvent(
+          id: 'evt-old',
+          kind: 'run-finished',
+          actionTool: 'codex',
+          actionSessionId: 'session-o',
+        );
+        _stubGetAttentionEvents(
+          client: brokerClient,
+          outcomes: [
+            AttentionEventsPage(
+              events: [finished],
+              cursor: 1,
+              reset: false,
+              hasMore: false,
+            ),
+            const AttentionEventsPage(
+              events: [],
+              cursor: 1,
+              reset: false,
+              hasMore: false,
+            ),
+          ],
+        );
+        final worker = AttentionFeedWorker(
+          brokerClient: brokerClient,
+          repository: repository,
+          brokerProfileId: _brokerProfileId,
+          clientId: _clientId,
+          lifecycleMonitor: _StubLifecycleMonitor(
+            currentState: BrokerAppLifecycleState.hidden,
+          ),
+          notificationSink: sink,
+          onForegroundEvent: (_) async {},
+          sleep: (_) async {},
+        );
+
+        worker.start();
+        await advanceToProcess();
+        final shownId = sink.shown.single.id;
+        expect(sink.cleared, isNot(contains(shownId)));
+        repository.expireNext.add(finished);
+        await advanceToProcess();
+        await worker.stop();
+
+        expect(sink.cleared, contains(shownId));
+        expect(repository.deleteExpiredCalls, greaterThanOrEqualTo(2));
+      },
+    );
+
+    test(
       'an outcome read on another device loses its notification when its page lands',
       () async {
         final sink = _CollectingNotificationSink();
@@ -1790,6 +1843,20 @@ class _InMemoryAttentionRepository implements AttentionRepository {
       );
     }
     _cursorByProfile[_profileId] = page.cursor;
+  }
+
+  /// Events the next [deleteExpired] reports as deleted.
+  final List<AttentionEventView> expireNext = [];
+  int deleteExpiredCalls = 0;
+
+  @override
+  Future<List<AttentionEventView>> deleteExpired(
+    String brokerProfileId,
+  ) async {
+    deleteExpiredCalls += 1;
+    final expired = [...expireNext];
+    expireNext.clear();
+    return expired;
   }
 
   @override

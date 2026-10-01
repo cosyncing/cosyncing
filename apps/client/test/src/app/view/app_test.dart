@@ -760,6 +760,11 @@ class _RecordingAttentionRepository implements AttentionRepository {
   ) async => const [];
 
   @override
+  Future<List<AttentionEventView>> deleteExpired(
+    String brokerProfileId,
+  ) async => const [];
+
+  @override
   Future<List<AttentionEventView>> loadEvents(String brokerProfileId) async =>
       const [];
 

@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/attention/data/attention_badge_seen_store.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/native.dart';
@@ -1040,6 +1041,120 @@ void main() {
       });
     });
   });
+
+  group('read state shared across devices, and the retention', () {
+    const hour = 60 * 60 * 1000;
+    late AppDatabase database;
+
+    setUp(() => database = AppDatabase(NativeDatabase.memory()));
+    tearDown(() => database.close());
+
+    Future<void> persist(
+      AttentionRepository repository,
+      List<AttentionEventView> events,
+    ) => repository.persistAttentionEventsPage(
+      brokerProfileId: 'profile',
+      page: AttentionEventsPage(
+        events: events,
+        cursor: events.length,
+        reset: false,
+        hasMore: false,
+      ),
+    );
+
+    test('an event another device read or dismissed is read here', () async {
+      final repository = DriftAttentionRepository(database);
+      await persist(repository, [
+        _event(id: 'seen', cursor: 1, seenAt: 50),
+        _event(id: 'unseen', cursor: 2),
+      ]);
+
+      final events = {
+        for (final event in await repository.loadEvents('profile'))
+          event.id: event,
+      };
+      expect(events['seen']!.readAt, 50);
+      expect(events['unseen']!.readAt, isNull);
+      expect(await repository.loadUnreadCount('profile'), 1);
+      expect(
+        await DriftAttentionBadgeSeenStore(database).loadUnseenCount('profile'),
+        1,
+        reason: 'a read elsewhere is not a new arrival',
+      );
+    });
+
+    test('a security alert read elsewhere stays unread here', () async {
+      final repository = DriftAttentionRepository(database);
+      await persist(repository, [
+        _event(
+          id: 'alert',
+          cursor: 1,
+          kind: 'security-alert',
+          severity: 'action-required',
+          seenAt: 50,
+        ),
+      ]);
+
+      expect((await repository.loadEvents('profile')).single.readAt, isNull);
+      expect(await repository.loadUnreadCount('profile'), 1);
+    });
+
+    test('an event leaves once it has not changed for the retention', () async {
+      var now = DateTime.fromMillisecondsSinceEpoch(100 * hour);
+      final repository = DriftAttentionRepository(
+        database,
+        retention: const Duration(hours: 24),
+        now: () => now,
+      );
+      final badge = DriftAttentionBadgeSeenStore(
+        database,
+        retention: const Duration(hours: 24),
+        now: () => now,
+      );
+      await persist(repository, [
+        _event(id: 'fresh', cursor: 1, updatedAt: 99 * hour),
+        _event(id: 'stale', cursor: 2, updatedAt: 75 * hour),
+      ]);
+
+      expect((await repository.loadEvents('profile')).map((e) => e.id), [
+        'fresh',
+      ]);
+      // An expired event is not stored, so it cannot come back as new.
+      expect(
+        (await DriftAttentionRepository(
+          database,
+        ).loadEvents('profile')).map((e) => e.id),
+        ['fresh'],
+      );
+      expect(
+        await repository.loadPendingPresentations('profile'),
+        hasLength(1),
+      );
+      expect(await badge.loadUnseenCount('profile'), 1);
+
+      now = now.add(const Duration(hours: 24));
+      expect(await repository.loadEvents('profile'), isEmpty);
+      expect(await repository.loadUnreadCount('profile'), 0);
+      expect(await repository.loadPendingPresentations('profile'), isEmpty);
+      expect(await badge.loadUnseenCount('profile'), 0);
+
+      final deleted = await repository.deleteExpired('profile');
+      expect(deleted.map((e) => e.id), ['fresh']);
+      expect(
+        await DriftAttentionRepository(database).loadEvents('profile'),
+        isEmpty,
+      );
+      expect(await repository.deleteExpired('profile'), isEmpty);
+    });
+
+    test('without a retention every event is kept', () async {
+      final repository = DriftAttentionRepository(database);
+      await persist(repository, [_event(id: 'old', cursor: 1)]);
+
+      expect(await repository.deleteExpired('profile'), isEmpty);
+      expect((await repository.loadEvents('profile')).single.id, 'old');
+    });
+  });
 }
 
 AppDatabase _seedV4Database() {
@@ -1253,6 +1368,8 @@ AttentionEventView _event({
   String title = 'test',
   String summary = 'summary',
   String? sessionTitle,
+  int updatedAt = 2,
+  int? seenAt,
 }) {
   return AttentionEventView.fromJson(<String, dynamic>{
     'id': id,
@@ -1264,7 +1381,8 @@ AttentionEventView _event({
     'severity': severity,
     'dedupeKey': '$id-de-dupe',
     'createdAt': 1,
-    'updatedAt': 2,
+    'updatedAt': updatedAt,
+    if (seenAt != null) 'seenAt': seenAt,
     'title': title,
     'summary': summary,
     'sessionId': 'session-id',

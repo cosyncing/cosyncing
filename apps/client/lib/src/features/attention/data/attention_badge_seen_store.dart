@@ -1,3 +1,4 @@
+import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/drift.dart';
 
@@ -21,10 +22,20 @@ abstract interface class AttentionBadgeSeenStore {
 /// Drift-backed [AttentionBadgeSeenStore].
 class DriftAttentionBadgeSeenStore implements AttentionBadgeSeenStore {
   /// Creates a badge store backed by the shared app database.
-  const DriftAttentionBadgeSeenStore(this.database);
+  const DriftAttentionBadgeSeenStore(
+    this.database, {
+    this.retention,
+    this.now = DateTime.now,
+  });
 
   /// Shared app database.
   final AppDatabase database;
+
+  /// How long an event counts after it last changed; null counts every event.
+  final Duration? retention;
+
+  /// Clock for [retention].
+  final DateTime Function() now;
 
   /// Counts visible events received after the last successful inbox open.
   @override
@@ -39,6 +50,7 @@ class DriftAttentionBadgeSeenStore implements AttentionBadgeSeenStore {
         ? feedCursor.baselineThroughCursor ?? 0
         : persistedSeenThrough;
     final countExpression = countAll();
+    final retainedSince = attentionRetainedSince(now(), retention);
     final row =
         await (database.selectOnly(database.attentionEventRows)
               ..addColumns([countExpression])
@@ -46,6 +58,12 @@ class DriftAttentionBadgeSeenStore implements AttentionBadgeSeenStore {
                 database.attentionEventRows.brokerProfileId.equals(
                   brokerProfileId,
                 ),
+              )
+              ..where(
+                retainedSince == null
+                    ? const Constant(true)
+                    : database.attentionEventRows.updatedAt
+                          .isBiggerOrEqualValue(retainedSince),
               )
               ..where(
                 database.attentionEventRows.cursor.isBiggerThanValue(

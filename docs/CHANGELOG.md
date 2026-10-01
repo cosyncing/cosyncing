@@ -11,6 +11,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- Reading a notification on one device now marks it read on your other
+  devices too; security alerts stay unread on each device until read there.
+  Notifications also clear themselves 24 hours after they last changed, along
+  with their system notifications, so the inbox holds about a day of history.
+
 ### Fixed
 
 - On Android 14 and later, dismissing the "Staying connected for notifications"
