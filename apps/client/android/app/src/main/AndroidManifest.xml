@@ -7,6 +7,8 @@
     <!-- The opt-in background connection (BackgroundConnectionService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- An update download the user started (UpdateDownloadService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:label="Cosyncing"
@@ -46,6 +48,13 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps a user-enabled connection to the user's self-hosted Cosyncing server, so notifications about the user's coding sessions arrive without a third-party push service." />
         </service>
+        <!-- Keeps the app running while an update APK the user asked for
+             downloads, with its progress in a notification, so leaving the
+             app does not stop the download. -->
+        <service
+            android:name=".UpdateDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

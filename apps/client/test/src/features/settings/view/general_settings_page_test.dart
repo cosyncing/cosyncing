@@ -385,6 +385,16 @@ final class _FakeAndroidPlatform implements AndroidUpdatePlatform {
     required int versionCode,
     required String signerSha256,
   }) async => AndroidInstallLaunchResult.launched;
+
+  @override
+  Future<bool> startDownloadService(AndroidUpdateDownloadNotice notice) async =>
+      true;
+
+  @override
+  Future<void> showDownloadProgress(int percent) async {}
+
+  @override
+  Future<void> stopDownloadService({AndroidUpdateReadyNotice? ready}) async {}
 }
 
 class _InMemoryUiPreferencesStore implements UiPreferencesStore {

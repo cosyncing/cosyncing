@@ -542,6 +542,29 @@
   "@androidUpdateSettingsHint": {
     "description": "Quiet line in the Android update dialog saying where the offer can be found after closing it."
   },
+  "androidUpdateChannelName": "应用更新",
+  "@androidUpdateChannelName": {
+    "description": "Android notification channel for app update downloads."
+  },
+  "androidUpdateNotificationDownloadingTitle": "正在下载 Cosyncing {version}",
+  "@androidUpdateNotificationDownloadingTitle": {
+    "description": "Android notification title while the update APK downloads.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
+  "androidUpdateNotificationReadyTitle": "Cosyncing {version} 已可安装",
+  "@androidUpdateNotificationReadyTitle": {
+    "description": "Android notification title when the update finished downloading while the app was in the background.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
+  "androidUpdateNotificationReadyText": "点按以安装更新。",
+  "@androidUpdateNotificationReadyText": {
+    "description": "Android notification text under the ready-to-install title; tapping opens the app, which opens the installer."
+  },
+  "androidUpdateReadyBody": "版本 {version} 已下载，可以安装。",
+  "@androidUpdateReadyBody": {
+    "description": "Android update body once the download is verified and waits for the app to return to the front.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
   "settingsQuotaPanelTitle": "额度用量",
   "settingsQuotaAntigravityGeminiModels": "Gemini 模型",
   "settingsQuotaAntigravityClaudeGptModels": "Claude 和 GPT 模型",

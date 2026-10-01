@@ -2029,6 +2029,29 @@
   "@androidUpdateSettingsHint": {
     "description": "Quiet line in the Android update dialog saying where the offer can be found after closing it."
   },
+  "androidUpdateChannelName": "App updates",
+  "@androidUpdateChannelName": {
+    "description": "Android notification channel for app update downloads."
+  },
+  "androidUpdateNotificationDownloadingTitle": "Downloading Cosyncing {version}",
+  "@androidUpdateNotificationDownloadingTitle": {
+    "description": "Android notification title while the update APK downloads.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
+  "androidUpdateNotificationReadyTitle": "Cosyncing {version} is ready to install",
+  "@androidUpdateNotificationReadyTitle": {
+    "description": "Android notification title when the update finished downloading while the app was in the background.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
+  "androidUpdateNotificationReadyText": "Tap to install the update.",
+  "@androidUpdateNotificationReadyText": {
+    "description": "Android notification text under the ready-to-install title; tapping opens the app, which opens the installer."
+  },
+  "androidUpdateReadyBody": "Version {version} is downloaded and ready to install.",
+  "@androidUpdateReadyBody": {
+    "description": "Android update body once the download is verified and waits for the app to return to the front.",
+    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+  },
   "settingsQuotaPanelTitle": "Usage limits",
   "@settingsQuotaPanelTitle": {
     "description": "Heading above the Tokdash quota status bars."

@@ -24,6 +24,7 @@ class MainActivity : FlutterActivity() {
     private val notificationsChannel = "com.cosyncing.client/notifications"
     private val installAction = "com.cosyncing.client.APK_INSTALL_RESULT"
     private val backgroundConnectionChannel = "com.cosyncing.client/background_connection"
+    private val updateDownloadChannel = "com.cosyncing.client/update_download"
     private var installReceiver: BroadcastReceiver? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,8 +39,12 @@ class MainActivity : FlutterActivity() {
      */
     override fun provideFlutterEngine(context: Context): FlutterEngine? = RetainedEngine.engine
 
-    /** The engine outlives this activity while the background connection runs. */
-    override fun shouldDestroyEngineWithHost(): Boolean = !BackgroundConnectionService.isRunning
+    /**
+     * The engine outlives this activity while the background connection runs,
+     * or while an update downloads: the download runs in the engine.
+     */
+    override fun shouldDestroyEngineWithHost(): Boolean =
+        !BackgroundConnectionService.isRunning && !UpdateDownloadService.isActive
 
     /**
      * A notification tapped after this activity was closed starts a new one.
@@ -74,6 +79,35 @@ class MainActivity : FlutterActivity() {
                     )
                     "stop" -> {
                         BackgroundConnectionService.stop(application)
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        // Bound to the application too: a download outlives an activity the
+        // user swiped away, and reports its progress and end from there.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateDownloadChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> result.success(
+                        UpdateDownloadService.start(
+                            application,
+                            channelName = call.argument<String>("channelName") ?: "",
+                            title = call.argument<String>("title") ?: "",
+                        ),
+                    )
+                    "progress" -> {
+                        UpdateDownloadService.progress(application, call.argument<Int>("percent") ?: 0)
+                        result.success(null)
+                    }
+                    "stop" -> {
+                        val title = call.argument<String>("title")
+                        val ready = if (title == null) null else UpdateDownloadService.Ready(
+                            channelName = call.argument<String>("channelName") ?: "",
+                            title = title,
+                            text = call.argument<String>("text") ?: "",
+                        )
+                        UpdateDownloadService.stop(application, ready)
                         result.success(null)
                     }
                     else -> result.notImplemented()

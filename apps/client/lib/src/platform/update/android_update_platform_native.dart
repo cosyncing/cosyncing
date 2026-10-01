@@ -15,6 +15,12 @@ final class _MethodChannelAndroidUpdatePlatform
 
   static const _channel = MethodChannel('com.cosyncing.client/android_update');
 
+  /// Bound to the application rather than the activity: the download, and so
+  /// its notification, outlives an activity the user swiped away.
+  static const _downloadChannel = MethodChannel(
+    'com.cosyncing.client/update_download',
+  );
+
   @override
   bool get supported => Platform.isAndroid;
 
@@ -59,4 +65,27 @@ final class _MethodChannelAndroidUpdatePlatform
       _ => throw const FormatException('Android installer result is malformed'),
     };
   }
+
+  @override
+  Future<bool> startDownloadService(AndroidUpdateDownloadNotice notice) async {
+    final started = await _downloadChannel.invokeMethod<bool>('start', {
+      'channelName': notice.channelName,
+      'title': notice.title,
+    });
+    return started ?? false;
+  }
+
+  @override
+  Future<void> showDownloadProgress(int percent) =>
+      _downloadChannel.invokeMethod<void>('progress', {'percent': percent});
+
+  @override
+  Future<void> stopDownloadService({AndroidUpdateReadyNotice? ready}) =>
+      _downloadChannel.invokeMethod<void>('stop', {
+        if (ready != null) ...{
+          'channelName': ready.channelName,
+          'title': ready.title,
+          'text': ready.text,
+        },
+      });
 }

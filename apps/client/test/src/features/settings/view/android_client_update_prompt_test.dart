@@ -54,6 +54,9 @@ void main() {
         if (downloader != null)
           androidApkDownloaderProvider.overrideWithValue(downloader),
         androidUpdatePromptStoreProvider.overrideWithValue(store),
+        androidUpdateNoticeLocalizationsProvider.overrideWithValue(
+          lookupAppLocalizations(const Locale('en')),
+        ),
       ],
       child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -203,4 +206,14 @@ final class _FakeAndroidPlatform implements AndroidUpdatePlatform {
     installCalls += 1;
     return AndroidInstallLaunchResult.launched;
   }
+
+  @override
+  Future<bool> startDownloadService(AndroidUpdateDownloadNotice notice) async =>
+      true;
+
+  @override
+  Future<void> showDownloadProgress(int percent) async {}
+
+  @override
+  Future<void> stopDownloadService({AndroidUpdateReadyNotice? ready}) async {}
 }

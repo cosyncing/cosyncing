@@ -24,4 +24,14 @@ final class _UnsupportedAndroidUpdatePlatform implements AndroidUpdatePlatform {
     required int versionCode,
     required String signerSha256,
   }) => throw UnsupportedError('Android updates are unavailable');
+
+  @override
+  Future<bool> startDownloadService(AndroidUpdateDownloadNotice notice) async =>
+      false;
+
+  @override
+  Future<void> showDownloadProgress(int percent) async {}
+
+  @override
+  Future<void> stopDownloadService({AndroidUpdateReadyNotice? ready}) async {}
 }
