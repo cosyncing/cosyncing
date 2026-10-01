@@ -15,6 +15,10 @@ const double quotaWarningRemainingPercent = 25;
 /// critical — a presentation-only escalation of the same warning signal.
 const double quotaCriticalRemainingPercent = 10;
 
+/// How close to its expiry a reset credit is use-or-lose. Tokdash arms its
+/// own expiry notice inside the last 48 hours, the edge included.
+const Duration quotaResetCreditsUseOrLose = Duration(hours: 48);
+
 /// Tokdash-style quota status bars for Settings → Agents & Quota.
 ///
 /// Renders the normalized [TokdashQuotaResponse] already held by
@@ -22,7 +26,9 @@ const double quotaCriticalRemainingPercent = 10;
 /// every five-hour window whatever the provider calls it, weekly and other
 /// windows by name, percentage remaining, a thin bar that stays neutral until
 /// the window runs low, the reset time, and estimated/stale/unavailable
-/// status. Wide layouts set providers two to a row. Antigravity's per-model
+/// status. Under a provider's windows sit the reset credits it holds, when
+/// Tokdash reports any (Codex, Claude Code): how many, and when the soonest
+/// expires. Wide layouts set providers two to a row. Antigravity's per-model
 /// readings collapse into its two shared quota pools, matching Tokdash's own
 /// quota page. Viewing is independent of the quota-warnings opt-in, and the
 /// panel never shows raw payloads, endpoints, bucket ids, or API errors.
@@ -250,7 +256,102 @@ class _QuotaProviderGroup extends StatelessWidget {
               now: now,
             ),
           ],
+        if (_spendableResetCredits(provider) case final credits?) ...[
+          const SizedBox(height: 16),
+          _QuotaResetCreditsRow(
+            providerName: providerName,
+            providerId: providerId,
+            credits: credits,
+            now: now,
+          ),
+        ],
       ],
+    );
+  }
+}
+
+/// A provider's reset credits when at least one can be spent. Tokdash keeps
+/// the block on an account that has spent its last, with a count of 0.
+TokdashResetCredits? _spendableResetCredits(TokdashQuotaProvider provider) {
+  final credits = provider.resetCredits;
+  return credits != null && credits.availableCount >= 1 ? credits : null;
+}
+
+/// A provider's reset credits, under its windows: how many can be spent and
+/// when the soonest expires. A count, not a window, so it carries no bar. The
+/// expiry turns amber once a credit is use-or-lose.
+class _QuotaResetCreditsRow extends StatelessWidget {
+  const _QuotaResetCreditsRow({
+    required this.providerName,
+    required this.providerId,
+    required this.credits,
+    required this.now,
+  });
+
+  final String providerName;
+  final String providerId;
+  final TokdashResetCredits credits;
+  final DateTime now;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final count = credits.availableCount;
+    final available = l10n.settingsQuotaResetCreditsAvailable(count);
+    final expiry = credits.nextExpiry(now);
+    final expiryCopy = expiry == null
+        ? null
+        : quotaResetCreditsExpiryCopy(l10n, now, expiry, count);
+    final useOrLose =
+        expiry != null && expiry.difference(now) <= quotaResetCreditsUseOrLose;
+
+    return Semantics(
+      key: Key('settings-quota-reset-credits-$providerId'),
+      container: true,
+      label: [
+        '$providerName ${l10n.settingsQuotaResetCredits}',
+        available,
+        ?expiryCopy,
+      ].join(', '),
+      child: ExcludeSemantics(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    l10n.settingsQuotaResetCredits,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: tokens.textPrimary,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  available,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: tokens.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+            if (expiryCopy != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                expiryCopy,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: useOrLose
+                      ? tokens.statusNeedsInput
+                      : tokens.textTertiary,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
@@ -632,6 +733,21 @@ Color quotaSeverityColor(AppTokens tokens, num remainingPercent) {
     return tokens.statusNeedsInput;
   }
   return tokens.textSecondary;
+}
+
+/// When the soonest of [count] reset credits expires, by Tokdash's companion
+/// rule: whole days remaining from two up, "tomorrow" inside two days,
+/// "today" inside one.
+String quotaResetCreditsExpiryCopy(
+  AppLocalizations l10n,
+  DateTime now,
+  DateTime expiresAt,
+  int count,
+) {
+  final days = expiresAt.difference(now).inDays;
+  if (days < 1) return l10n.settingsQuotaResetCreditsExpireToday(count);
+  if (days < 2) return l10n.settingsQuotaResetCreditsExpireTomorrow(count);
+  return l10n.settingsQuotaResetCreditsExpireInDays(count, days);
 }
 
 /// Relative reset-time copy ("Resets in 3 h" / "Resets soon").

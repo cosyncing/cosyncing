@@ -51,8 +51,10 @@ void main() {
     String? statusDetail,
     DateTime? statusAt,
     DateTime? updatedAt,
+    Map<String, dynamic>? resetCredits,
   }) {
     return {
+      if (resetCredits != null) 'reset_credits': resetCredits,
       'provider': id,
       'network_enabled': networkEnabled,
       'buckets': buckets ?? const [],
@@ -62,6 +64,28 @@ void main() {
       'updated_at': updatedAt == null ? null : epochSeconds(updatedAt),
       'sources': const ['test'],
       'estimated': estimated,
+    };
+  }
+
+  /// A `reset_credits` block in the shape the broker forwards: expiries in
+  /// epoch seconds, or as Codex's ISO 8601 strings when [iso] is set.
+  Map<String, dynamic> resetCreditsJson({
+    required int count,
+    required List<DateTime> expiries,
+    bool iso = false,
+  }) {
+    return {
+      'available_count': count,
+      'credits': [
+        for (final (index, expiry) in expiries.indexed)
+          {
+            'id': 'rc-$index',
+            'title': 'Full reset',
+            'expires_at': iso
+                ? expiry.toUtc().toIso8601String()
+                : epochSeconds(expiry),
+          },
+      ],
     };
   }
 
@@ -120,6 +144,11 @@ void main() {
         'codex': providerJson(
           id: 'codex',
           updatedAt: now.subtract(const Duration(minutes: 12)),
+          resetCredits: resetCreditsJson(
+            count: 1,
+            expiries: [now.add(const Duration(days: 11, hours: 3))],
+            iso: true,
+          ),
           buckets: [
             bucketJson(
               resetsAt: now.add(const Duration(hours: 3)),
@@ -720,6 +749,173 @@ void main() {
       expect(semantics.label, contains('Resets in 3 h'));
     });
 
+    testWidgets('reset credits sit under the windows of the providers that '
+        'hold them', (tester) async {
+      final response = quota(
+        providers: {
+          'codex': providerJson(
+            id: 'codex',
+            resetCredits: resetCreditsJson(
+              count: 2,
+              expiries: [
+                now.add(const Duration(days: 29, hours: 2)),
+                now.add(const Duration(days: 22, hours: 8)),
+              ],
+              iso: true,
+            ),
+            buckets: [
+              bucketJson(),
+              bucketJson(id: '7d', label: 'Weekly', remaining: 80),
+            ],
+          ),
+          'claude': providerJson(
+            id: 'claude',
+            resetCredits: resetCreditsJson(
+              count: 1,
+              expiries: [now.add(const Duration(days: 16, hours: 1))],
+            ),
+            buckets: [bucketJson(id: 'session')],
+          ),
+          'zai': providerJson(id: 'zai', buckets: [bucketJson()]),
+        },
+      );
+      await tester.pumpWidget(buildSubject(response: response));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Reset credits'), findsNWidgets(2));
+      expect(find.text('2 available'), findsOneWidget);
+      expect(find.text('Next expires in 22 days'), findsOneWidget);
+      expect(find.text('1 available'), findsOneWidget);
+      expect(find.text('Expires in 16 days'), findsOneWidget);
+      expect(
+        find.byKey(const Key('settings-quota-reset-credits-zai')),
+        findsNothing,
+      );
+      expect(
+        tester
+            .getTopLeft(
+              find.byKey(const Key('settings-quota-reset-credits-codex')),
+            )
+            .dy,
+        greaterThan(
+          tester
+              .getBottomLeft(
+                find.byKey(const Key('settings-quota-row-codex-7d')),
+              )
+              .dy,
+        ),
+      );
+
+      final semantics = tester.getSemantics(
+        find.byKey(const Key('settings-quota-reset-credits-codex')),
+      );
+      expect(semantics.label, contains('Codex Reset credits'));
+      expect(semantics.label, contains('2 available'));
+      expect(semantics.label, contains('Next expires in 22 days'));
+    });
+
+    testWidgets('no reset credits row without one to spend', (tester) async {
+      final response = quota(
+        providers: {
+          'codex': providerJson(
+            id: 'codex',
+            resetCredits: resetCreditsJson(count: 0, expiries: const []),
+            buckets: [bucketJson()],
+          ),
+          'claude': providerJson(id: 'claude', buckets: [bucketJson()]),
+        },
+      );
+      await tester.pumpWidget(buildSubject(response: response));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Reset credits'), findsNothing);
+    });
+
+    testWidgets('a credit in its last two days turns amber; expired ones are '
+        'ignored', (tester) async {
+      Future<Text> expiryLine(List<DateTime> expiries, String text) async {
+        await tester.pumpWidget(
+          buildSubject(
+            response: quota(
+              providers: {
+                'codex': providerJson(
+                  id: 'codex',
+                  resetCredits: resetCreditsJson(count: 1, expiries: expiries),
+                  buckets: [bucketJson()],
+                ),
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        return tester.widget<Text>(find.text(text));
+      }
+
+      final tokens = themeSpecById(kDefaultThemeId).light;
+
+      final tomorrow = await expiryLine([
+        now.add(const Duration(hours: 30)),
+      ], 'Expires tomorrow');
+      expect(tomorrow.style?.color, tokens.statusNeedsInput);
+
+      final today = await expiryLine([
+        now.add(const Duration(hours: 5)),
+      ], 'Expires today');
+      expect(today.style?.color, tokens.statusNeedsInput);
+
+      final later = await expiryLine([
+        now.subtract(const Duration(days: 1)),
+        now.add(const Duration(days: 10, hours: 1)),
+      ], 'Expires in 10 days');
+      expect(later.style?.color, tokens.textTertiary);
+
+      // No future expiry: the count stands alone.
+      await tester.pumpWidget(
+        buildSubject(
+          response: quota(
+            providers: {
+              'codex': providerJson(
+                id: 'codex',
+                resetCredits: resetCreditsJson(
+                  count: 1,
+                  expiries: [now.subtract(const Duration(hours: 1))],
+                ),
+                buckets: [bucketJson()],
+              ),
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('1 available'), findsOneWidget);
+      expect(find.textContaining('Expires'), findsNothing);
+    });
+
+    testWidgets("reset credit copy follows the locale's plurals", (
+      tester,
+    ) async {
+      final response = quota(
+        providers: {
+          'codex': providerJson(
+            id: 'codex',
+            resetCredits: resetCreditsJson(
+              count: 1,
+              expiries: [now.add(const Duration(days: 5, hours: 1))],
+            ),
+            buckets: [bucketJson()],
+          ),
+        },
+      );
+      await tester.pumpWidget(
+        buildSubject(response: response, locale: const Locale('es')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Créditos de reinicio'), findsOneWidget);
+      expect(find.text('1 disponible'), findsOneWidget);
+      expect(find.text('Caduca en 5 días'), findsOneWidget);
+    });
+
     testWidgets('lays out without overflow at narrow phone width', (
       tester,
     ) async {
@@ -803,6 +999,10 @@ void main() {
             'claude': providerJson(
               id: 'claude',
               updatedAt: now.subtract(const Duration(minutes: 12)),
+              resetCredits: resetCreditsJson(
+                count: 1,
+                expiries: [now.add(const Duration(days: 16, hours: 1))],
+              ),
               buckets: [
                 bucketJson(
                   id: 'session',
@@ -822,6 +1022,15 @@ void main() {
             'codex': providerJson(
               id: 'codex',
               updatedAt: now.subtract(const Duration(minutes: 12)),
+              // Two credits, the sooner in its use-or-lose window.
+              resetCredits: resetCreditsJson(
+                count: 2,
+                expiries: [
+                  now.add(const Duration(hours: 30)),
+                  now.add(const Duration(days: 20)),
+                ],
+                iso: true,
+              ),
               buckets: [
                 bucketJson(
                   resetsAt: now.add(const Duration(hours: 3)),
@@ -860,6 +1069,14 @@ void main() {
             'codex': providerJson(
               id: 'codex',
               updatedAt: now.subtract(const Duration(minutes: 12)),
+              resetCredits: resetCreditsJson(
+                count: 2,
+                expiries: [
+                  now.add(const Duration(days: 22, hours: 8)),
+                  now.add(const Duration(days: 29)),
+                ],
+                iso: true,
+              ),
               buckets: [
                 bucketJson(
                   remaining: 20,

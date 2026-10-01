@@ -10,6 +10,7 @@ import {
   TokdashQuotaEvaluator,
   fetchTokdashQuota,
   normalizeTokdashQuotaBaseUrl,
+  parseTokdashQuotaState,
   quotaWarningIdentity,
   TOKDASH_DEFAULT_BASE_URL,
   type TokdashQuotaState,
@@ -128,6 +129,78 @@ await test('fetch rejects malformed quota fields instead of coercing them', asyn
   } finally {
     server.stop(true);
   }
+});
+
+await test('reset credits reach the client with both expiry shapes read as epoch seconds', () => {
+  // The shapes Tokdash forwards today: Codex's credits verbatim from OpenAI (ISO 8601 expiry and extra
+  // keys), Claude's limit resets as Tokdash summarizes them (epoch seconds).
+  const state = parseTokdashQuotaState(quotaState({
+    codex: {
+      ...provider('codex', [bucket('7d', 40)]),
+      reset_credits: {
+        available_count: 2,
+        credits: [
+          {
+            id: 'RateLimitResetCredit_1',
+            title: 'Full reset',
+            expires_at: '2026-10-22T20:48:12.396262Z',
+            status: 'available',
+            description: 'Thanks for using Codex!',
+          },
+          { id: 'RateLimitResetCredit_2', title: 'Full reset', expires_at: '2026-10-29T19:17:38Z' },
+        ],
+      },
+    } as never,
+    claude: {
+      ...provider('claude', [bucket('session', 86, { source: 'claude_api' })]),
+      reset_credits: {
+        available_count: 1,
+        credits: [{ id: 'launch', title: 'Launch reset', expires_at: 1_792_684_800, resets_left: 1, clears: ['five_hour'] }],
+      },
+    } as never,
+  }));
+
+  assert.deepEqual(state.providers.codex?.reset_credits, {
+    available_count: 2,
+    credits: [
+      { id: 'RateLimitResetCredit_1', title: 'Full reset', expires_at: Math.floor(Date.parse('2026-10-22T20:48:12.396262Z') / 1000) },
+      { id: 'RateLimitResetCredit_2', title: 'Full reset', expires_at: Math.floor(Date.parse('2026-10-29T19:17:38Z') / 1000) },
+    ],
+  });
+  assert.deepEqual(state.providers.claude?.reset_credits, {
+    available_count: 1,
+    credits: [{ id: 'launch', title: 'Launch reset', expires_at: 1_792_684_800 }],
+  });
+});
+
+await test('a malformed reset-credits block never fails the quota read', () => {
+  const state = parseTokdashQuotaState(quotaState({
+    codex: {
+      ...provider('codex', [bucket('5h', 60)]),
+      reset_credits: {
+        available_count: 3,
+        credits: ['not a credit', null, { id: 7, title: '  ', expires_at: 'next week' }, { expires_at: 1_792_684_800_000 }],
+      },
+    } as never,
+    claude: { ...provider('claude', [bucket('session', 50)]), reset_credits: { available_count: 'one', credits: [] } } as never,
+    zai: { ...provider('zai', [bucket('5h', 50)]), reset_credits: 'none' } as never,
+  }));
+
+  assert.deepEqual(state.providers.codex?.reset_credits, {
+    available_count: 3,
+    credits: [
+      { id: null, title: null, expires_at: null },
+      { id: null, title: null, expires_at: 1_792_684_800 },
+    ],
+  });
+  assert.equal(state.providers.codex?.buckets[0]?.remaining_percent, 60);
+  assert.equal('reset_credits' in (state.providers.claude ?? {}), false);
+  assert.equal('reset_credits' in (state.providers.zai ?? {}), false);
+});
+
+await test('a provider without reset credits carries no reset_credits key', () => {
+  const state = parseTokdashQuotaState(quotaState({ codex: provider('codex', [bucket('5h', 60)]) }));
+  assert.equal('reset_credits' in (state.providers.codex ?? {}), false);
 });
 
 await test('fetch timeout is bounded and reported without calling a mutation', async () => {

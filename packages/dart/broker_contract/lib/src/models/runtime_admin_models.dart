@@ -1181,6 +1181,7 @@ class TokdashQuotaProvider {
     this.statusDetail,
     this.statusAt,
     this.updatedAt,
+    this.resetCredits,
   });
 
   /// Creates an intentionally minimal fallback provider from unknown shape.
@@ -1225,6 +1226,7 @@ class TokdashQuotaProvider {
           ? sourcesJson.whereType<String>().toList()
           : const <String>[],
       estimated: json['estimated'] as bool? ?? false,
+      resetCredits: TokdashResetCredits.tryParse(json['reset_credits']),
       raw: Map<String, dynamic>.of(json),
     );
   }
@@ -1256,12 +1258,16 @@ class TokdashQuotaProvider {
   /// Whether quota numbers are estimated.
   final bool estimated;
 
+  /// Reset credits the subscription holds, when Tokdash reports any.
+  final TokdashResetCredits? resetCredits;
+
   /// Raw payload for future fields.
   final Map<String, dynamic> raw;
 
   /// Converts to JSON.
   Map<String, dynamic> toJson() => {
     ...raw,
+    if (resetCredits != null) 'reset_credits': resetCredits!.toJson(),
     'provider': provider,
     'network_enabled': networkEnabled,
     'buckets': buckets.map((bucket) => bucket.toJson()).toList(),
@@ -1271,6 +1277,117 @@ class TokdashQuotaProvider {
     if (statusDetail != null) 'status_detail': statusDetail,
     if (statusAt != null) 'status_at': statusAt,
     if (updatedAt != null) 'updated_at': updatedAt,
+  };
+}
+
+/// The reset credits a subscription holds, as Tokdash's quota cards show
+/// them: each resets the subscription's usage windows once. Codex has had
+/// them since Tokdash 1.0 and Claude Code's limit resets since 2.6.3.
+class TokdashResetCredits {
+  /// Creates a [TokdashResetCredits].
+  const TokdashResetCredits({
+    required this.availableCount,
+    required this.credits,
+    this.raw = const <String, dynamic>{},
+  });
+
+  /// Reads a `reset_credits` block, or returns null when [value] is not one.
+  ///
+  /// Lenient by design, as Tokdash's companion contract asks: one malformed
+  /// credit must never cost the rest of the quota. A block without a usable
+  /// count is dropped whole; an entry that is not a credit is skipped.
+  static TokdashResetCredits? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final json = value.cast<String, dynamic>();
+    final count = json['available_count'];
+    if (count is! num || !count.isFinite || count < 0) return null;
+    final creditsJson = json['credits'];
+    return TokdashResetCredits(
+      availableCount: count.floor(),
+      credits: creditsJson is List
+          ? [
+              for (final credit in creditsJson)
+                if (credit is Map)
+                  TokdashResetCredit.fromJson(credit.cast<String, dynamic>()),
+            ]
+          : const <TokdashResetCredit>[],
+      raw: Map<String, dynamic>.of(json),
+    );
+  }
+
+  /// How many resets can still be spent.
+  final int availableCount;
+
+  /// The credits holding them, with their expiry.
+  final List<TokdashResetCredit> credits;
+
+  /// Raw payload for future fields.
+  final Map<String, dynamic> raw;
+
+  /// The soonest expiry still ahead of [now], or null when no credit names
+  /// one. Expired credits are ignored.
+  DateTime? nextExpiry(DateTime now) {
+    DateTime? soonest;
+    for (final credit in credits) {
+      final expiresAt = credit.expiresAt;
+      if (expiresAt == null) continue;
+      final expiry = DateTime.fromMillisecondsSinceEpoch(expiresAt.toInt());
+      if (!expiry.isAfter(now)) continue;
+      if (soonest == null || expiry.isBefore(soonest)) soonest = expiry;
+    }
+    return soonest;
+  }
+
+  /// Converts to JSON.
+  Map<String, dynamic> toJson() => {
+    ...raw,
+    'available_count': availableCount,
+    'credits': credits.map((credit) => credit.toJson()).toList(),
+  };
+}
+
+/// One reset credit in [TokdashResetCredits].
+class TokdashResetCredit {
+  /// Creates a [TokdashResetCredit].
+  const TokdashResetCredit({
+    this.id,
+    this.title,
+    this.expiresAt,
+    this.raw = const <String, dynamic>{},
+  });
+
+  /// Creates a [TokdashResetCredit] from JSON. The expiry arrives as epoch
+  /// seconds or milliseconds, or as the ISO 8601 string Codex uses.
+  factory TokdashResetCredit.fromJson(Map<String, dynamic> json) {
+    final expires = json['expires_at'];
+    return TokdashResetCredit(
+      id: json['id'] is String ? json['id'] as String : null,
+      title: json['title'] is String ? json['title'] as String : null,
+      expiresAt: expires is String
+          ? DateTime.tryParse(expires)?.millisecondsSinceEpoch
+          : _toEpochMs(expires),
+      raw: Map<String, dynamic>.of(json),
+    );
+  }
+
+  /// Provider's credit id.
+  final String? id;
+
+  /// Provider's name for the credit.
+  final String? title;
+
+  /// Expiry epoch in milliseconds, if the credit names one.
+  final num? expiresAt;
+
+  /// Raw payload for future fields.
+  final Map<String, dynamic> raw;
+
+  /// Converts to JSON.
+  Map<String, dynamic> toJson() => {
+    ...raw,
+    'id': id,
+    'title': title,
+    'expires_at': expiresAt,
   };
 }
 

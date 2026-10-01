@@ -2115,6 +2115,54 @@
       }
     }
   },
+  "settingsQuotaResetCredits": "Reset credits",
+  "@settingsQuotaResetCredits": {
+    "description": "Label for a provider's reset credits under its quota windows: one-off resets of the subscription's usage windows (Codex reset credits, Claude Code limit resets)."
+  },
+  "settingsQuotaResetCreditsAvailable": "{count} available",
+  "@settingsQuotaResetCreditsAvailable": {
+    "description": "How many reset credits can still be spent.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
+  "settingsQuotaResetCreditsExpireInDays": "{count, plural, =1{Expires in {days} days} other{Next expires in {days} days}}",
+  "@settingsQuotaResetCreditsExpireInDays": {
+    "description": "When the soonest reset credit expires, two or more whole days from now. count is how many credits are available; with more than one, the line names the next to expire.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      },
+      "days": {
+        "type": "int",
+        "example": "22"
+      }
+    }
+  },
+  "settingsQuotaResetCreditsExpireTomorrow": "{count, plural, =1{Expires tomorrow} other{Next expires tomorrow}}",
+  "@settingsQuotaResetCreditsExpireTomorrow": {
+    "description": "The soonest reset credit expires between one and two days from now.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
+      }
+    }
+  },
+  "settingsQuotaResetCreditsExpireToday": "{count, plural, =1{Expires today} other{Next expires today}}",
+  "@settingsQuotaResetCreditsExpireToday": {
+    "description": "The soonest reset credit expires within a day.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
+      }
+    }
+  },
   "settingsQuotaEstimated": "Estimated",
   "@settingsQuotaEstimated": {
     "description": "Pill on a quota provider whose readings come from local data rather than the provider API."

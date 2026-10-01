@@ -31,6 +31,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   reads "5-hour", and scoped windows read "Sparks 5-hour". Each window shows
   what remains and when it resets; the per-provider "Updated … ago" line is
   gone, and a bar stays neutral until the window runs low.
+- Agents & Quota shows the reset credits Codex and Claude Code hold, under
+  their windows: how many are available and when the soonest expires, in amber
+  in its last two days. The broker now forwards Tokdash's reset-credit block
+  (Codex credits, and Claude Code limit resets from Tokdash 2.6.3); an older
+  broker or Tokdash simply shows none.
 - Settings → Display is one page, from the broadest choice to the finest:
   Appearance (mode, theme, text size, density, language), Conversation
   (message text, spacing, reading width, tool display), Session visibility

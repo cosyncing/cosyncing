@@ -18,6 +18,23 @@ export interface TokdashQuotaBucket {
   status: string;
 }
 
+/** One reset credit: a single, one-off reset of a subscription's usage windows. */
+export interface TokdashResetCredit {
+  id: string | null;
+  title: string | null;
+  /** Epoch seconds, or null when the credit names no readable expiry. */
+  expires_at: number | null;
+}
+
+/**
+ * The reset credits a subscription holds, as Tokdash's quota cards show them: Codex's since Tokdash 1.0,
+ * Claude Code's limit resets since 2.6.3. Present only on a provider whose Tokdash payload carries them.
+ */
+export interface TokdashResetCredits {
+  available_count: number;
+  credits: TokdashResetCredit[];
+}
+
 export interface TokdashQuotaProvider {
   provider: string;
   network_enabled: boolean;
@@ -28,6 +45,7 @@ export interface TokdashQuotaProvider {
   updated_at: number | null;
   sources: string[];
   estimated: boolean;
+  reset_credits?: TokdashResetCredits;
 }
 
 export interface TokdashQuotaState {
@@ -127,10 +145,54 @@ function parseBucket(value: unknown, path: string): TokdashQuotaBucket {
   };
 }
 
+/**
+ * An expiry in epoch seconds. Tokdash forwards two shapes: Codex credits carry an ISO 8601 string and Claude
+ * limit resets carry epoch seconds.
+ */
+function expiryEpochSeconds(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    // Epoch seconds stay under 1e11 until the year 5138; anything larger is milliseconds.
+    return Math.floor(value >= 1e11 ? value / 1000 : value);
+  }
+  if (typeof value === 'string' && value) {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : null;
+  }
+  return null;
+}
+
+function optionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/**
+ * A provider's reset credits, or undefined when the block is absent or has no usable count.
+ *
+ * Unlike the windows, this block is read leniently. It is an optional extra beside the windows that quota
+ * warnings depend on, and Tokdash's companion contract says one malformed credit must never fail the whole
+ * quota read: a credit whose expiry cannot be read keeps a null expiry, and an entry that is not a credit
+ * is dropped. Only what a client shows is kept; Tokdash's dashboard-only keys are not forwarded.
+ */
+function parseResetCredits(value: unknown): TokdashResetCredits | undefined {
+  if (!isRecord(value)) return undefined;
+  const count = value.available_count;
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) return undefined;
+  const credits = Array.isArray(value.credits) ? value.credits.filter(isRecord) : [];
+  return {
+    available_count: Math.floor(count),
+    credits: credits.map((credit) => ({
+      id: optionalText(credit.id),
+      title: optionalText(credit.title),
+      expires_at: expiryEpochSeconds(credit.expires_at),
+    })),
+  };
+}
+
 function parseProvider(value: unknown, path: string): TokdashQuotaProvider {
   if (!isRecord(value)) invalid(path, 'an object');
   if (!Array.isArray(value.buckets)) invalid(`${path}.buckets`, 'an array');
   if (!Array.isArray(value.sources)) invalid(`${path}.sources`, 'an array');
+  const resetCredits = parseResetCredits(value.reset_credits);
   return {
     provider: stringField(value.provider, `${path}.provider`),
     network_enabled: booleanField(value.network_enabled, `${path}.network_enabled`),
@@ -141,6 +203,7 @@ function parseProvider(value: unknown, path: string): TokdashQuotaProvider {
     updated_at: nullableNumber(value.updated_at, `${path}.updated_at`),
     sources: value.sources.map((entry, index) => stringField(entry, `${path}.sources[${index}]`)),
     estimated: booleanField(value.estimated, `${path}.estimated`),
+    ...(resetCredits ? { reset_credits: resetCredits } : {}),
   };
 }
 
