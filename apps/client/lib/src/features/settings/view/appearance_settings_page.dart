@@ -1,19 +1,33 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
-import 'package:cosyncing_client/src/design/components.dart';
-import 'package:cosyncing_client/src/design/theme_spec.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/theme_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
+import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Settings → Appearance: pick the theme, the light/dark mode, and the language.
-class AppearanceSettingsPage extends ConsumerWidget {
+/// Settings → Appearance, reachable on its own at its published route. The
+/// same section heads Settings → Display.
+class AppearanceSettingsPage extends StatelessWidget {
   /// Creates the appearance settings screen.
   const AppearanceSettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(AppLocalizations.of(context).appearanceTitle)),
+      body: const SettingsPageBody(children: [AppearanceSettingsSection()]),
+    );
+  }
+}
+
+/// Theme, light or dark, text size, density and language: one select each.
+class AppearanceSettingsSection extends ConsumerWidget {
+  /// Creates the appearance section.
+  const AppearanceSettingsSection({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -26,147 +40,140 @@ class AppearanceSettingsPage extends ConsumerWidget {
     final uiScale =
         ref.watch(uiScaleControllerProvider).valueOrNull ??
         kDefaultUiScaleSettings;
+    final brightness = Theme.of(context).brightness;
 
-    return Scaffold(
-      appBar: AppBar(title: Text(l10n.appearanceTitle)),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+    return SettingsSection(
+      title: l10n.appearanceTitle,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SectionHeader(l10n.themeModeLabel),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-            child: SegmentedButton<ThemeMode>(
-              segments: [
-                ButtonSegment(
+          SettingsRow(
+            stackTrailing: true,
+            title: Text(l10n.themeModeLabel),
+            trailing: SettingsSelect<ThemeMode>(
+              key: const Key('appearance-theme-mode'),
+              value: selection.mode,
+              options: [
+                SettingsSelectOption(
                   value: ThemeMode.system,
-                  label: Text(l10n.themeModeSystem),
+                  label: l10n.themeModeSystem,
                 ),
-                ButtonSegment(
+                SettingsSelectOption(
                   value: ThemeMode.light,
-                  label: Text(l10n.themeModeLight),
+                  label: l10n.themeModeLight,
                 ),
-                ButtonSegment(
+                SettingsSelectOption(
                   value: ThemeMode.dark,
-                  label: Text(l10n.themeModeDark),
+                  label: l10n.themeModeDark,
                 ),
               ],
-              selected: {selection.mode},
-              onSelectionChanged: (selected) => ref
-                  .read(themeControllerProvider.notifier)
-                  .setMode(selected.first),
+              onChanged: (mode) =>
+                  ref.read(themeControllerProvider.notifier).setMode(mode),
             ),
           ),
-          const Divider(height: 1),
-          SectionHeader(l10n.themeLabel),
-          for (final theme in kAppThemes)
-            _ThemeTile(
-              spec: theme,
-              name: _themeName(l10n, theme.id),
-              description: _themeDescription(l10n, theme.id),
-              selected: theme.id == selection.themeId,
-              onTap: () => ref
-                  .read(themeControllerProvider.notifier)
-                  .selectTheme(theme.id),
+          SettingsRow(
+            stackTrailing: true,
+            title: Text(l10n.themeLabel),
+            subtitle: Text(
+              _themeDescription(l10n, selection.themeId),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
-          const Divider(height: 1),
-          SectionHeader(l10n.textSizeLabel),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-            child: Wrap(
-              spacing: 8,
-              children: [
-                for (final scale in UiTextScale.values)
-                  ChoiceChip(
-                    key: Key('appearance-text-scale-${scale.name}'),
-                    label: Text(_textScaleLabel(l10n, scale)),
-                    selected: uiScale.textScale == scale,
-                    onSelected: (_) => ref
-                        .read(uiScaleControllerProvider.notifier)
-                        .setTextScale(scale),
+            trailing: SettingsSelect<String>(
+              key: const Key('appearance-theme'),
+              value: selection.themeId,
+              options: [
+                for (final theme in kAppThemes)
+                  SettingsSelectOption(
+                    value: theme.id,
+                    label: _themeName(l10n, theme.id),
+                    leading: _ThemeSwatch(
+                      tokens: brightness == Brightness.dark
+                          ? theme.dark
+                          : theme.light,
+                    ),
                   ),
               ],
+              onChanged: (id) =>
+                  ref.read(themeControllerProvider.notifier).selectTheme(id),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-            child: _SizePreview(
-              title: l10n.appearancePreviewSessionTitle,
-              meta: l10n.appearancePreviewSessionMeta,
-              label: l10n.appearancePreviewLabel,
+          SettingsRow(
+            stackTrailing: true,
+            title: Text(l10n.textSizeLabel),
+            trailing: SettingsSelect<UiTextScale>(
+              key: const Key('appearance-text-scale'),
+              value: uiScale.textScale,
+              options: [
+                for (final scale in UiTextScale.values)
+                  SettingsSelectOption(
+                    value: scale,
+                    label: _textScaleLabel(l10n, scale),
+                  ),
+              ],
+              onChanged: (scale) => ref
+                  .read(uiScaleControllerProvider.notifier)
+                  .setTextScale(scale),
             ),
           ),
-          const Divider(height: 1),
-          SectionHeader(l10n.densityLabel),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-            child: SegmentedButton<UiDensity>(
-              // The selected segment's leading checkmark takes ~26px out of an
-              // already-tight third of a 420px screen, which pushed
-              // "Comfortable" into a mid-word wrap ("Comfortabl / e"). Selection
-              // is already carried by the segment's fill colour, so the tick is
-              // redundant as well as expensive.
-              showSelectedIcon: false,
-              segments: [
-                ButtonSegment(
+          SettingsRow(
+            stackTrailing: true,
+            title: Text(l10n.densityLabel),
+            trailing: SettingsSelect<UiDensity>(
+              key: const Key('appearance-density'),
+              value: uiScale.density,
+              options: [
+                SettingsSelectOption(
                   value: UiDensity.compact,
-                  label: _SegmentLabel(l10n.densityCompact),
+                  label: l10n.densityCompact,
                 ),
-                ButtonSegment(
+                SettingsSelectOption(
                   value: UiDensity.comfortable,
-                  label: _SegmentLabel(l10n.densityComfortable),
+                  label: l10n.densityComfortable,
                 ),
-                ButtonSegment(
+                SettingsSelectOption(
                   value: UiDensity.spacious,
-                  label: _SegmentLabel(l10n.densitySpacious),
+                  label: l10n.densitySpacious,
                 ),
               ],
-              selected: {uiScale.density},
-              onSelectionChanged: (selected) => ref
+              onChanged: (density) => ref
                   .read(uiScaleControllerProvider.notifier)
-                  .setDensity(selected.first),
+                  .setDensity(density),
             ),
           ),
-          const Divider(height: 1),
-          SectionHeader(l10n.languageLabel),
-          _ChoiceTile(
-            title: l10n.languageSystem,
-            selected: activeLanguage == _systemLanguageValue,
-            onTap: () =>
-                ref.read(localeControllerProvider.notifier).setLocale(null),
-          ),
-          // Driven by `kSupportedLocales` so adding a locale changes one loop
-          // input rather than duplicating a tile. `_languageName` owns the
-          // corresponding native-language label.
-          for (final locale in kSupportedLocales)
-            _ChoiceTile(
-              title: _languageName(l10n, locale.languageCode),
-              selected: activeLanguage == locale.languageCode,
-              onTap: () =>
-                  ref.read(localeControllerProvider.notifier).setLocale(locale),
+          SettingsRow(
+            stackTrailing: true,
+            title: Text(l10n.languageLabel),
+            trailing: SettingsSelect<String>(
+              key: const Key('appearance-language'),
+              value: activeLanguage,
+              options: [
+                SettingsSelectOption(
+                  value: _systemLanguageValue,
+                  label: l10n.languageSystem,
+                ),
+                // Driven by `kSupportedLocales` so adding a locale changes one
+                // loop input rather than duplicating an option. `_languageName`
+                // owns the corresponding native-language label.
+                for (final locale in kSupportedLocales)
+                  SettingsSelectOption(
+                    value: locale.languageCode,
+                    label: _languageName(l10n, locale.languageCode),
+                  ),
+              ],
+              onChanged: (code) => ref
+                  .read(localeControllerProvider.notifier)
+                  .setLocale(
+                    code == _systemLanguageValue
+                        ? null
+                        : kSupportedLocales.firstWhere(
+                            (locale) => locale.languageCode == code,
+                          ),
+                  ),
             ),
+          ),
         ],
       ),
-    );
-  }
-}
-
-/// A segmented-button label that shrinks rather than wrapping.
-///
-/// A three-up [SegmentedButton] gets about a third of the screen per segment,
-/// which at 420px is narrower than "Comfortable" renders at the app's label
-/// scale. The default behaviour breaks the line inside the word
-/// ("Comfortabl / e"); scaling the glyphs down keeps the three options
-/// readable and comparable at a glance, which is the point of the control.
-class _SegmentLabel extends StatelessWidget {
-  const _SegmentLabel(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return FittedBox(
-      fit: BoxFit.scaleDown,
-      child: Text(text, maxLines: 1, softWrap: false),
     );
   }
 }
@@ -206,128 +213,8 @@ String _themeDescription(AppLocalizations l10n, String id) => switch (id) {
   _ => '',
 };
 
-/// A representative "session row" that reflects the active text size and theme
-/// so the user can see the effect of their choice in place.
-class _SizePreview extends StatelessWidget {
-  const _SizePreview({
-    required this.title,
-    required this.meta,
-    required this.label,
-  });
-
-  final String title;
-  final String meta;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tokens = context.tokens;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label.toUpperCase(),
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: tokens.textTertiary,
-            letterSpacing: 0.8,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: tokens.surface,
-            borderRadius: BorderRadius.circular(tokens.radiusLg),
-            border: Border.all(color: tokens.separator),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 10,
-                height: 10,
-                decoration: BoxDecoration(
-                  color: tokens.statusWorking,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        color: tokens.textPrimary,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      meta,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: tokens.textSecondary,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ThemeTile extends StatelessWidget {
-  const _ThemeTile({
-    required this.spec,
-    required this.name,
-    required this.description,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final ThemeSpec spec;
-  final String name;
-  final String description;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      onTap: onTap,
-      leading: _ThemeSwatch(tokens: spec.dark),
-      title: SelectionArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(name),
-            Text(
-              description,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-          ],
-        ),
-      ),
-      trailing: selected
-          ? Icon(
-              Icons.check_circle,
-              color: Theme.of(context).colorScheme.primary,
-            )
-          : null,
-    );
-  }
-}
-
+/// A theme's canvas with its accent and attention colors, small enough to
+/// sit beside the theme's name in the select.
 class _ThemeSwatch extends StatelessWidget {
   const _ThemeSwatch({required this.tokens});
 
@@ -336,59 +223,29 @@ class _ThemeSwatch extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 44,
-      height: 30,
+      width: 28,
+      height: 18,
       decoration: BoxDecoration(
         color: tokens.canvas,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: tokens.separator),
+        borderRadius: BorderRadius.circular(tokens.radiusXs),
+        border: Border.all(color: context.tokens.separator),
       ),
-      child: Center(
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _dot(tokens.accent),
-            const SizedBox(width: 3),
-            _dot(tokens.statusNeedsInput),
-            const SizedBox(width: 3),
-            _dot(tokens.textSecondary),
-          ],
-        ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          _dot(tokens.accent),
+          const SizedBox(width: 2),
+          _dot(tokens.statusNeedsInput),
+        ],
       ),
     );
   }
 
   Widget _dot(Color color) => Container(
-    width: 8,
-    height: 8,
+    width: 6,
+    height: 6,
     decoration: BoxDecoration(color: color, shape: BoxShape.circle),
   );
-}
-
-class _ChoiceTile extends StatelessWidget {
-  const _ChoiceTile({
-    required this.title,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String title;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      onTap: onTap,
-      title: Text(title),
-      trailing: selected
-          ? Icon(
-              Icons.check_circle,
-              color: Theme.of(context).colorScheme.primary,
-            )
-          : null,
-    );
-  }
 }
 
 /// The name of [languageCode], written in that language.

@@ -11,6 +11,7 @@ class SectionHeader extends StatelessWidget {
     this.title, {
     this.padding = const EdgeInsets.fromLTRB(16, 16, 16, 8),
     this.color,
+    this.fontWeight,
     super.key,
   });
 
@@ -23,6 +24,10 @@ class SectionHeader extends StatelessWidget {
   /// Optional resolved semantic color for a quiet or status-specific heading.
   final Color? color;
 
+  /// Optional weight, for a heading that must stand apart from rows set in
+  /// the same size.
+  final FontWeight? fontWeight;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -32,6 +37,7 @@ class SectionHeader extends StatelessWidget {
         title,
         style: theme.textTheme.titleSmall?.copyWith(
           color: color ?? context.tokens.accent,
+          fontWeight: fontWeight,
         ),
       ),
     );

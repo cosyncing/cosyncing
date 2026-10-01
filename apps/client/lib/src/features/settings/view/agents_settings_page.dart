@@ -114,42 +114,42 @@ class AgentsSettingsPage extends ConsumerWidget {
     final quotaState = ref.watch(managedRuntimeQuotaProvider);
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(l10n.settingsEnhancementAgentsQuota),
-        actions: [
-          IconButton(
+      appBar: AppBar(title: Text(l10n.settingsEnhancementAgentsQuota)),
+      body: SettingsPageBody(
+        children: [
+          _ManagedRuntimeSection(
+            state: managedRuntimeState,
+            quota: quotaState.valueOrNull,
+            quotaLoading: quotaState.isLoading,
+            onRefresh: () => ref
+                .read(managedRuntimeControllerProvider.notifier)
+                .refresh(freshRuntimeProbe: true),
+            onPolicyChanged: (value) =>
+                _changeRuntimePolicy(context, ref, value),
+            onRestartRuntime: (update) => _restartRuntime(context, ref, update),
+            onRestartEverything: () => _restartEverything(context, ref),
+            onQuotaChanged: ({required enabled}) => ref
+                .read(managedRuntimeControllerProvider.notifier)
+                .setQuotaWarningsEnabled(enabled: enabled),
+          ),
+          const SizedBox(height: 16),
+          SettingsRow(
             key: const Key('settings-agents-usage-report'),
-            tooltip: l10n.usageHubTileTitle,
-            icon: const Icon(Icons.query_stats_outlined),
-            onPressed: () => context.push(usageReportRoute),
+            leading: Icon(
+              Icons.query_stats_outlined,
+              size: 18,
+              color: context.tokens.textSecondary,
+            ),
+            title: Text(l10n.usageHubTileTitle),
+            subtitle: Text(l10n.usageHubTileSubtitle),
+            trailing: Icon(
+              Icons.chevron_right,
+              size: 16,
+              color: context.tokens.textTertiary,
+            ),
+            onTap: () => context.push(usageReportRoute),
           ),
         ],
-      ),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            SettingsSection(
-              title: l10n.settingsManagedAgentRuntimesTitle,
-              child: _ManagedRuntimeSection(
-                state: managedRuntimeState,
-                quota: quotaState.valueOrNull,
-                quotaLoading: quotaState.isLoading,
-                onRefresh: () => ref
-                    .read(managedRuntimeControllerProvider.notifier)
-                    .refresh(freshRuntimeProbe: true),
-                onPolicyChanged: (value) =>
-                    _changeRuntimePolicy(context, ref, value),
-                onRestartRuntime: (update) =>
-                    _restartRuntime(context, ref, update),
-                onRestartEverything: () => _restartEverything(context, ref),
-                onQuotaChanged: ({required enabled}) => ref
-                    .read(managedRuntimeControllerProvider.notifier)
-                    .setQuotaWarningsEnabled(enabled: enabled),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -180,116 +180,96 @@ class _ManagedRuntimeSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return Column(
-      key: const Key('settings-managed-runtimes'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        state.when(
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (error, _) => _RuntimeError(error: error, onRetry: onRefresh),
-          data: (data) {
-            if (!data.connected) {
-              return Text(l10n.settingsConnectToInspectRuntimes);
-            }
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (data.ownerOperationsAvailable) ...[
-                  const _RuntimeOwnershipStrip(),
-                  const SizedBox(height: 16),
-                  _RuntimePolicyControl(
-                    value: data.codexUpdatePolicy,
-                    onChanged: onPolicyChanged,
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                for (final update in data.updates) ...[
-                  _RuntimeStatusRow(
-                    update: update,
-                    onRestart: data.ownerOperationsAvailable
-                        ? () => onRestartRuntime(update)
-                        : null,
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                // Only what remains in each quota window. What was used lives
-                // in the usage report, reached from the app bar.
-                QuotaStatusPanel(quota: quota, loading: quotaLoading),
-                if (data.ownerOperationsAvailable) ...[
-                  const SizedBox(height: 12),
-                  SwitchListTile(
-                    key: const Key('settings-quota-warnings'),
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(l10n.settingsQuotaWarningsTitle),
-                    subtitle: Text(l10n.settingsQuotaWarningsSubtitle),
-                    value: data.quotaWarningsEnabled,
-                    onChanged: (value) =>
-                        unawaited(onQuotaChanged(enabled: value)),
-                  ),
-                  const SizedBox(height: 12),
-                  OutlinedButton.icon(
-                    key: const Key('settings-restart-everything'),
-                    onPressed: () => unawaited(onRestartEverything()),
-                    icon: const Icon(Icons.restart_alt),
-                    label: Text(l10n.settingsRestartEverythingAction),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                ],
-                if (data.actionMessage != null) ...[
-                  const SizedBox(height: 8),
-                  SelectableText(
-                    data.actionMessage!,
-                    key: const Key('settings-runtime-action-message'),
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-                if (data.actionError != null) ...[
-                  const SizedBox(height: 8),
-                  SelectableText(
-                    l10n.settingsRuntimeActionFailed(data.actionError!),
-                    key: const Key('settings-runtime-action-error'),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                ],
-              ],
-            );
-          },
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    Widget runtimes({required Widget child, String? description}) =>
+        SettingsSection(
+          key: const Key('settings-managed-runtimes'),
+          title: l10n.settingsManagedAgentRuntimesTitle,
+          description: description,
+          child: child,
+        );
+    return state.when(
+      loading: () => runtimes(
+        child: const Padding(
+          padding: EdgeInsets.symmetric(vertical: 16),
+          child: Center(child: CircularProgressIndicator()),
         ),
-      ],
-    );
-  }
-}
-
-class _RuntimeOwnershipStrip extends StatelessWidget {
-  const _RuntimeOwnershipStrip();
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: colors.secondaryContainer.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(context.tokens.radiusMd),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      error: (error, _) => runtimes(
+        child: _RuntimeError(error: error, onRetry: onRefresh),
+      ),
+      data: (data) {
+        if (!data.connected) {
+          return runtimes(child: Text(l10n.settingsConnectToInspectRuntimes));
+        }
+        final owner = data.ownerOperationsAvailable;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Icon(Icons.shield_outlined, color: colors.secondary),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                AppLocalizations.of(context).settingsRuntimeOwnershipNotice,
+            runtimes(
+              // Ownership explains the policy and restart controls, so it is
+              // said only where those controls are shown.
+              description: owner ? l10n.settingsRuntimeOwnershipNotice : null,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (owner)
+                    _RuntimePolicyControl(
+                      value: data.codexUpdatePolicy,
+                      onChanged: onPolicyChanged,
+                    ),
+                  for (final update in data.updates)
+                    _RuntimeStatusRow(
+                      update: update,
+                      onRestart: owner ? () => onRestartRuntime(update) : null,
+                    ),
+                  if (owner)
+                    SettingsRow(
+                      key: const Key('settings-restart-everything'),
+                      leading: Icon(
+                        Icons.restart_alt,
+                        size: 18,
+                        color: tokens.statusError,
+                      ),
+                      title: Text(
+                        l10n.settingsRestartEverythingAction,
+                        style: TextStyle(color: tokens.statusError),
+                      ),
+                      onTap: () => unawaited(onRestartEverything()),
+                    ),
+                  if (data.actionMessage != null)
+                    SelectableText(
+                      data.actionMessage!,
+                      key: const Key('settings-runtime-action-message'),
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  if (data.actionError != null)
+                    SelectableText(
+                      l10n.settingsRuntimeActionFailed(data.actionError!),
+                      key: const Key('settings-runtime-action-error'),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: tokens.statusError,
+                      ),
+                    ),
+                ],
               ),
             ),
+            const SizedBox(height: 8),
+            // Only what remains in each quota window. What was used lives in
+            // the usage report, linked below.
+            QuotaStatusPanel(quota: quota, loading: quotaLoading),
+            if (owner)
+              SettingsSwitchRow(
+                tileKey: const Key('settings-quota-warnings'),
+                title: l10n.settingsQuotaWarningsTitle,
+                subtitle: l10n.settingsQuotaWarningsSubtitle,
+                value: data.quotaWarningsEnabled,
+                onChanged: (value) => unawaited(onQuotaChanged(enabled: value)),
+              ),
           ],
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -306,40 +286,25 @@ class _RuntimePolicyControl extends StatelessWidget {
     final selected = knownCodexUpdatePolicies.contains(value)
         ? value
         : 'when-detached';
-    return Row(
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(l10n.settingsAutomaticUpdatePolicyLabel),
-              const SizedBox(height: 4),
-              Text(
-                l10n.settingsAutomaticUpdatePolicyHint,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
+    return SettingsRow(
+      stackTrailing: true,
+      title: Text(l10n.settingsAutomaticUpdatePolicyLabel),
+      subtitle: Text(l10n.settingsAutomaticUpdatePolicyHint),
+      trailing: SettingsSelect<String>(
+        key: const Key('settings-runtime-policy'),
+        value: selected!,
+        options: [
+          SettingsSelectOption(
+            value: 'when-detached',
+            label: l10n.settingsPolicyWhenDetached,
           ),
-        ),
-        const SizedBox(width: 12),
-        DropdownButton<String>(
-          key: const Key('settings-runtime-policy'),
-          value: selected,
-          items: [
-            DropdownMenuItem(
-              value: 'when-detached',
-              child: Text(l10n.settingsPolicyWhenDetached),
-            ),
-            DropdownMenuItem(
-              value: 'when-idle',
-              child: Text(l10n.settingsPolicyWhenIdle),
-            ),
-          ],
-          onChanged: (next) {
-            if (next != null && next != selected) unawaited(onChanged(next));
-          },
-        ),
-      ],
+          SettingsSelectOption(
+            value: 'when-idle',
+            label: l10n.settingsPolicyWhenIdle,
+          ),
+        ],
+        onChanged: (next) => unawaited(onChanged(next)),
+      ),
     );
   }
 }
@@ -353,85 +318,84 @@ class _RuntimeStatusRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final colors = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
     final pending = _runtimeRestartIsPending(update);
+    final detail = theme.textTheme.bodySmall?.copyWith(
+      color: tokens.textTertiary,
+    );
+    final restart = onRestart;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Padding(
-        padding: EdgeInsets.zero,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SelectionArea(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: UsageAgentLogo(
+              tool: switch (update.agent) {
+                'pi' => 'pi_agent',
+                _ => update.agent,
+              },
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: SelectionArea(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      UsageAgentLogo(
-                        tool: switch (update.agent) {
-                          'pi' => 'pi_agent',
-                          _ => update.agent,
-                        },
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          update.displayName,
-                          style: Theme.of(context).textTheme.bodyMedium,
+                      Text(
+                        update.displayName,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: tokens.textPrimary,
                         ),
                       ),
-                      StatusPill(
-                        label: pending
-                            ? l10n.settingsUpdateReady
-                            : update.state,
-                        color: pending ? colors.tertiary : colors.primary,
-                      ),
+                      if (pending)
+                        StatusPill(
+                          label: l10n.settingsUpdateReady,
+                          color: tokens.statusNeedsInput,
+                          dense: true,
+                        ),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  Text(_runtimePendingChangeCopy(update, l10n)),
-                  const SizedBox(height: 4),
-                  Text(
-                    _runtimeBlockerCopy(update, l10n),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
+                  const SizedBox(height: 2),
+                  Text(_runtimePendingChangeCopy(update, l10n), style: detail),
+                  Text(_runtimeBlockerCopy(update, l10n), style: detail),
                 ],
               ),
             ),
-            // The recovery control stays reachable with nothing pending: a
-            // wedged daemon reports no pending change, and gating the button on
-            // one left the only escape hatch behind a failure it cannot see.
-            // `managed` still gates it, because that is the broker's own claim
-            // to this runtime's lifecycle. Without it the restart route can
-            // only refuse, and that refusal caches an error state onto every
-            // connected client.
-            if (onRestart != null && update.managed) ...[
-              const SizedBox(height: 12),
-              Align(
-                alignment: Alignment.centerRight,
-                child: pending
-                    ? FilledButton.tonalIcon(
-                        key: Key('settings-restart-runtime-${update.agent}'),
-                        onPressed: () => unawaited(onRestart!()),
-                        icon: const Icon(Icons.restart_alt, size: 18),
-                        label: Text(l10n.settingsRestartNow),
-                      )
-                    : OutlinedButton.icon(
-                        key: Key('settings-restart-runtime-${update.agent}'),
-                        onPressed: () => unawaited(onRestart!()),
-                        icon: const Icon(Icons.restart_alt, size: 18),
-                        label: Text(l10n.settingsForceRestartRuntimeAction),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: colors.error,
-                        ),
-                      ),
+          ),
+          // The recovery control stays reachable with nothing pending: a
+          // wedged daemon reports no pending change, and gating the button on
+          // one left the only escape hatch behind a failure it cannot see.
+          // `managed` still gates it, because that is the broker's own claim
+          // to this runtime's lifecycle. Without it the restart route can
+          // only refuse, and that refusal caches an error state onto every
+          // connected client.
+          if (restart != null && update.managed) ...[
+            const SizedBox(width: 8),
+            TextButton(
+              key: Key('settings-restart-runtime-${update.agent}'),
+              onPressed: () => unawaited(restart()),
+              style: TextButton.styleFrom(
+                foregroundColor: pending
+                    ? tokens.textPrimary
+                    : tokens.statusError,
               ),
-            ],
+              child: Text(
+                pending
+                    ? l10n.settingsRestartNow
+                    : l10n.settingsForceRestartRuntimeAction,
+              ),
+            ),
           ],
-        ),
+        ],
       ),
     );
   }

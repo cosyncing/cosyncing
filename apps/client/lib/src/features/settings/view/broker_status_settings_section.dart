@@ -151,18 +151,14 @@ class WorkspaceBrowsingSettingsSection extends ConsumerWidget {
     final owner = data!.ownerOperationsAvailable;
     return SettingsSection(
       title: l10n.settingsWorkspaceBrowsingSection,
-      child: SwitchListTile(
-        key: const Key('settings-workspace-browsing'),
-        contentPadding: EdgeInsets.zero,
-        secondary: const Icon(Icons.folder_open_outlined),
-        title: Text(l10n.settingsWorkspaceBrowsingTitle),
-        subtitle: Text(
-          owner
-              ? enabled
-                    ? l10n.settingsWorkspaceBrowsingOn
-                    : l10n.settingsWorkspaceBrowsingOff
-              : l10n.settingsWorkspaceBrowsingOwnerOnly,
-        ),
+      child: SettingsSwitchRow(
+        tileKey: const Key('settings-workspace-browsing'),
+        title: l10n.settingsWorkspaceBrowsingTitle,
+        subtitle: owner
+            ? enabled
+                  ? l10n.settingsWorkspaceBrowsingOn
+                  : l10n.settingsWorkspaceBrowsingOff
+            : l10n.settingsWorkspaceBrowsingOwnerOnly,
         value: enabled,
         onChanged: owner && !state.isLoading
             ? (value) => unawaited(_change(context, ref, enabled: value))
@@ -188,16 +184,12 @@ class _BrokerHealthRow extends StatelessWidget {
       'critical' => l10n.settingsBrokerHealthCritical,
       _ => l10n.settingsBrokerHealthUnknown,
     };
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        healthy ? Icons.monitor_heart_outlined : Icons.warning_amber_rounded,
-        color: healthy
-            ? context.tokens.statusWorking
-            : context.tokens.statusError,
-      ),
+    return SettingsRow(
       title: Text(l10n.settingsBrokerHealthTitle),
-      subtitle: SelectableText(statusText),
+      subtitle: SelectableText(
+        statusText,
+        style: healthy ? null : TextStyle(color: context.tokens.statusError),
+      ),
     );
   }
 }
@@ -242,13 +234,9 @@ class _DesktopBuildUpdateRow extends ConsumerWidget {
     );
     if (!available) return const SizedBox.shrink();
     final l10n = AppLocalizations.of(context);
-    return ListTile(
+    return SettingsRow(
       key: const Key('settings-desktop-build-update'),
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        Icons.download_for_offline_outlined,
-        color: context.tokens.accent,
-      ),
+      stackTrailing: true,
       title: SelectableText(l10n.settingsDesktopBuildUpdateTitle),
       subtitle: SelectableText(
         l10n.settingsDesktopBuildUpdateBody(brokerVersion!),
@@ -336,10 +324,8 @@ class _BrokerVersionRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ListTile(
+        SettingsRow(
           key: const Key('settings-broker-version'),
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.system_update_alt),
           title: SelectableText(
             l10n.settingsBrokerVersionTitle(
               health?.version ?? l10n.settingsBrokerVersionUnknown,
@@ -372,7 +358,15 @@ class _BrokerVersionRow extends StatelessWidget {
           ExpansionTile(
             key: const Key('settings-broker-contract-details'),
             tilePadding: EdgeInsets.zero,
-            title: Text(l10n.settingsBrokerTechnicalDetails),
+            shape: const Border(),
+            collapsedShape: const Border(),
+            dense: true,
+            title: Text(
+              l10n.settingsBrokerTechnicalDetails,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),
+            ),
             children: [
               Align(
                 alignment: AlignmentDirectional.centerStart,

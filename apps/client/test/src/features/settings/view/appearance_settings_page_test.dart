@@ -29,34 +29,41 @@ void main() {
   }
 
   group('AppearanceSettingsPage', () {
-    testWidgets('renders the text-size and density controls', (tester) async {
+    Future<void> choose(WidgetTester tester, Key select, String option) async {
+      await tester.scrollUntilVisible(find.byKey(select), 200);
+      await tester.tap(find.byKey(select));
+      await tester.pumpAndSettle();
+      // The open menu repeats the selected label; its entries come last.
+      await tester.tap(find.text(option).last);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('offers one select per appearance choice', (tester) async {
       await tester.pumpWidget(buildSubject());
       await tester.pumpAndSettle();
 
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('appearance-text-scale-system')),
-        200,
-      );
-      for (final scale in UiTextScale.values) {
-        expect(
-          find.byKey(Key('appearance-text-scale-${scale.name}')),
-          findsOneWidget,
-        );
+      for (final key in const [
+        'appearance-theme-mode',
+        'appearance-theme',
+        'appearance-text-scale',
+        'appearance-density',
+        'appearance-language',
+      ]) {
+        await tester.scrollUntilVisible(find.byKey(Key(key)), 200);
+        expect(find.byKey(Key(key)), findsOneWidget);
       }
-
-      await tester.scrollUntilVisible(find.text('Spacious'), 200);
-      expect(find.text('Spacious'), findsOneWidget);
+      // Chips, segmented buttons and radio lists all gave way to selects.
+      expect(find.byType(ChoiceChip), findsNothing);
+      expect(find.byType(SegmentedButton<UiDensity>), findsNothing);
     });
 
-    // Regression: at phone width the selected segment's leading checkmark stole
-    // enough of the third column that "Comfortable" wrapped mid-word
-    // ("Comfortabl / e"). Compare against a label that has always fit, so this
-    // measures wrapping rather than pinning an exact pixel height.
-    testWidgets('density labels stay on one line at 420px width', (
+    // At phone width a select moves under its label at the row's full width
+    // instead of squeezing the label; nothing may overflow.
+    testWidgets('selects stack under their labels at phone width', (
       tester,
     ) async {
       tester.view
-        ..physicalSize = const Size(420, 850)
+        ..physicalSize = const Size(390, 844)
         ..devicePixelRatio = 1;
       addTearDown(() {
         tester.view
@@ -67,29 +74,21 @@ void main() {
       await tester.pumpWidget(buildSubject());
       await tester.pumpAndSettle();
 
-      await tester.scrollUntilVisible(find.text('Comfortable'), 200);
-
-      final comfortable = tester.getSize(find.text('Comfortable'));
-      final compact = tester.getSize(find.text('Compact'));
-
+      final density = find.byKey(const Key('appearance-density'));
+      await tester.scrollUntilVisible(density, 200);
+      expect(tester.getSize(density).width, greaterThan(300));
       expect(
-        comfortable.height,
-        compact.height,
-        reason:
-            '"Comfortable" wrapped to a second line while "Compact" did not',
+        tester.getTopLeft(density).dy,
+        greaterThan(tester.getTopLeft(find.text('Density')).dy + 8),
       );
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('selecting a text size persists it', (tester) async {
       await tester.pumpWidget(buildSubject());
       await tester.pumpAndSettle();
 
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('appearance-text-scale-large')),
-        200,
-      );
-      await tester.tap(find.byKey(const Key('appearance-text-scale-large')));
-      await tester.pumpAndSettle();
+      await choose(tester, const Key('appearance-text-scale'), 'Large');
 
       expect(store.values[uiTextScaleSettingKey], UiTextScale.large.token);
     });
@@ -98,17 +97,24 @@ void main() {
       await tester.pumpWidget(buildSubject());
       await tester.pumpAndSettle();
 
-      final densityControl = find.byType(SegmentedButton<UiDensity>);
-      await tester.scrollUntilVisible(densityControl, 200);
-      await Scrollable.ensureVisible(
-        tester.element(densityControl),
-        alignment: 0.5,
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Spacious'));
-      await tester.pumpAndSettle();
+      await choose(tester, const Key('appearance-density'), 'Spacious');
 
       expect(store.values[uiDensitySettingKey], UiDensity.spacious.token);
+    });
+
+    testWidgets('selecting a theme and a mode persists both', (tester) async {
+      await tester.pumpWidget(buildSubject());
+      await tester.pumpAndSettle();
+
+      await choose(
+        tester,
+        const Key('appearance-theme'),
+        'Graphite Minimalist',
+      );
+      await choose(tester, const Key('appearance-theme-mode'), 'Dark');
+
+      expect(store.values[uiThemeIdSettingKey], 'graphite-minimalist');
+      expect(store.values[uiThemeModeSettingKey], 'dark');
     });
   });
 }

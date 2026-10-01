@@ -173,8 +173,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
                 ],
               )
-            : ListView(
-                padding: const EdgeInsets.all(16),
+            : SettingsPageBody(
                 children: [SettingsLinkGroup(tiles: categories)],
               ),
       ),

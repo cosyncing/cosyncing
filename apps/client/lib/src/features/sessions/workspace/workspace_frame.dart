@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/view/add_server_sheet.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/new_session_launch.dart';
@@ -353,6 +354,11 @@ class _WorkspaceFrameState extends ConsumerState<WorkspaceFrame>
     GoRouter.maybeOf(context)?.go(route);
   }
 
+  void _addServer() {
+    _closeDrawer();
+    unawaited(showAddServerChoices(context));
+  }
+
   Future<void> _startNewSession({SessionProjectGroup? project}) async {
     _closeDrawer();
     final result = await showNewSessionSheet(
@@ -498,7 +504,8 @@ class _WorkspaceFrameState extends ConsumerState<WorkspaceFrame>
           onOverview: _showOverview,
           onNotifications: () => _go(attentionRoute),
           onSettings: () => _go(settingsRoute),
-          onServer: () => _go(brokerDevicesSettingsRoute),
+          onAddServer: _addServer,
+          onManageServers: () => _go(brokerDevicesSettingsRoute),
           onOpenSession: _openSession,
           onRefresh: _refreshRequested,
         );

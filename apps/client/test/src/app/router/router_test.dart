@@ -29,6 +29,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_sideb
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
+import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/foundation.dart';
@@ -571,7 +572,7 @@ void main() {
         tester,
         const Key('settings-category-general'),
       );
-      final transfersTile = find.widgetWithText(ListTile, 'Transfers');
+      final transfersTile = find.widgetWithText(SettingsRow, 'Transfers');
       await tester.scrollUntilVisible(
         transfersTile,
         400,

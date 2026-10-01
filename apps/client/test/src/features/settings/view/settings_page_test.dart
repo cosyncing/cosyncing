@@ -28,6 +28,7 @@ import 'package:cosyncing_client/src/features/settings/view/agents_settings_page
 import 'package:cosyncing_client/src/features/settings/view/broker_devices_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/general_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/notification_settings_page.dart';
+import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
 import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
 import 'package:cosyncing_client/src/platform/android/android_background_connection.dart';
@@ -253,7 +254,7 @@ void main() {
         ('settings-category-general', 'General'),
       ]) {
         expect(find.byKey(Key(entry.$1)), findsOneWidget);
-        expect(find.widgetWithText(ListTile, entry.$2), findsOneWidget);
+        expect(find.widgetWithText(SettingsRow, entry.$2), findsOneWidget);
       }
 
       expect(find.byKey(const Key('servers-remove-credential')), findsNothing);
@@ -430,7 +431,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Managed Agent Runtimes'), findsOneWidget);
+      expect(find.text('Managed agent runtimes'), findsOneWidget);
       expect(
         find.textContaining('cosyncing owns the managed server'),
         findsOneWidget,
@@ -633,7 +634,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Managed Agent Runtimes'), findsOneWidget);
+      expect(find.text('Managed agent runtimes'), findsOneWidget);
       expect(find.text('Update ready'), findsOneWidget);
       expect(find.byKey(const Key('settings-runtime-policy')), findsNothing);
       expect(
@@ -707,7 +708,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.descendant(of: panel, matching: find.text('42%')),
+        find.descendant(of: panel, matching: find.text('42% remaining')),
         findsOneWidget,
       );
     });
@@ -1936,7 +1937,7 @@ void main() {
         find.byKey(const Key('broker-gate-credential-missing')),
         findsNothing,
       );
-      expect(find.text('Server Credentials'), findsOneWidget);
+      expect(find.text('Server credentials'), findsOneWidget);
     });
 
     testWidgets('gate reports an offline broker without asking for a token', (

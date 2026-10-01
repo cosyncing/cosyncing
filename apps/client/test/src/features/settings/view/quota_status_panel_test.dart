@@ -190,7 +190,7 @@ void main() {
     });
 
     testWidgets(
-      'fresh readings render window rows with bars, reset, and freshness',
+      'fresh readings render window rows with bars and reset',
       (tester) async {
         await tester.pumpWidget(buildSubject(response: freshQuota()));
         await tester.pumpAndSettle();
@@ -198,22 +198,25 @@ void main() {
         expect(find.text('Codex'), findsOneWidget);
         expect(find.text('5-hour'), findsOneWidget);
         expect(find.text('Weekly'), findsOneWidget);
-        expect(find.text('42%'), findsOneWidget);
-        expect(find.text('80%'), findsOneWidget);
+        expect(find.text('42% remaining'), findsOneWidget);
+        expect(find.text('80% remaining'), findsOneWidget);
         // The fixtures carry epoch-second wire timestamps; correct reset and
         // freshness copy proves the model boundary normalized them to the
         // documented milliseconds.
         expect(find.text('Resets in 3 h'), findsOneWidget);
         expect(find.text('Resets in 4 days'), findsOneWidget);
-        expect(find.text('Updated 12 min ago'), findsOneWidget);
+        // Freshness is not repeated on every provider: a failed refresh is
+        // what matters, and the Stale pill says so.
+        expect(find.textContaining('Updated'), findsNothing);
 
         final tokens = themeSpecById(kDefaultThemeId).light;
         final bars = tester.widgetList<LinearProgressIndicator>(
           find.byType(LinearProgressIndicator),
         );
         expect(bars.map((bar) => bar.value), [0.42, 0.8]);
+        // A healthy window is not news: its bar stays neutral.
         for (final bar in bars) {
-          expect(bar.color, tokens.statusWorking);
+          expect(bar.color, tokens.textSecondary);
         }
         expect(find.text('Estimated'), findsNothing);
         expect(find.text('Stale'), findsNothing);
@@ -273,8 +276,7 @@ void main() {
       expect(find.text('Estimated'), findsOneWidget);
       expect(find.text('Stale'), findsOneWidget);
       // Last-known readings stay visible while the refresh is failing.
-      expect(find.text('55%'), findsOneWidget);
-      expect(find.text('Updated 2 h ago'), findsOneWidget);
+      expect(find.text('55% remaining'), findsOneWidget);
     });
 
     testWidgets(
@@ -318,6 +320,42 @@ void main() {
       },
     );
 
+    testWidgets('every five-hour window reads "5-hour", whatever its id', (
+      tester,
+    ) async {
+      // OpenCode Go reports its five-hour window as `rolling`, labelled
+      // "Rolling (5h)"; Tokdash-style labels elsewhere say "5-hour window".
+      // One label keeps the providers comparable at a glance.
+      final response = quota(
+        providers: {
+          'opencode_go': providerJson(
+            id: 'opencode_go',
+            buckets: [
+              bucketJson(id: 'rolling', label: 'Rolling (5h)', remaining: 73),
+              bucketJson(id: 'monthly', label: 'Monthly', remaining: 62),
+            ],
+          ),
+          'zai': providerJson(
+            id: 'zai',
+            buckets: [
+              // Labelled "5-hour window", the default.
+              bucketJson(id: 'primary', remaining: 92),
+              bucketJson(id: 'win_15h', label: '15h burst', remaining: 50),
+            ],
+          ),
+        },
+      );
+      await tester.pumpWidget(buildSubject(response: response));
+      await tester.pumpAndSettle();
+
+      expect(find.text('5-hour'), findsNWidgets(2));
+      expect(find.text('Rolling (5h)'), findsNothing);
+      expect(find.text('5-hour window'), findsNothing);
+      // Only a whole "5h" is a five-hour window.
+      expect(find.text('15h burst'), findsOneWidget);
+      expect(find.text('Monthly'), findsOneWidget);
+    });
+
     testWidgets(
       'Claude keeps a scoped Fable quota distinct from the weekly-all quota',
       (tester) async {
@@ -347,8 +385,8 @@ void main() {
         expect(find.text('Weekly'), findsOneWidget);
         expect(find.text('Fable Weekly'), findsOneWidget);
         expect(find.text('Weekly All'), findsNothing);
-        expect(find.text('80%'), findsOneWidget);
-        expect(find.text('60%'), findsOneWidget);
+        expect(find.text('80% remaining'), findsOneWidget);
+        expect(find.text('60% remaining'), findsOneWidget);
       },
     );
 
@@ -404,11 +442,11 @@ void main() {
         expect(find.text('Gemini models'), findsOneWidget);
         expect(find.text('Claude and GPT models'), findsOneWidget);
         expect(find.text('5-hour'), findsNWidgets(2));
-        expect(find.text('41%'), findsOneWidget);
-        expect(find.text('24%'), findsOneWidget);
-        expect(find.text('73%'), findsNothing);
-        expect(find.text('82%'), findsNothing);
-        expect(find.text('3%'), findsNothing);
+        expect(find.text('41% remaining'), findsOneWidget);
+        expect(find.text('24% remaining'), findsOneWidget);
+        expect(find.text('73% remaining'), findsNothing);
+        expect(find.text('82% remaining'), findsNothing);
+        expect(find.text('3% remaining'), findsNothing);
         expect(find.text('Gemini 3 Pro'), findsNothing);
         expect(find.text('Experimental model'), findsNothing);
 
@@ -602,9 +640,9 @@ void main() {
       await tester.pumpWidget(buildSubject(response: response));
       await tester.pumpAndSettle();
 
-      // The Spark-scoped Codex rows read "Sparks 5h" / "Sparks Weekly", and
+      // The Spark-scoped Codex rows read "Sparks 5-hour" / "Sparks Weekly", and
       // the pooled windows keep their generic labels beside them.
-      expect(find.text('Sparks 5h'), findsOneWidget);
+      expect(find.text('Sparks 5-hour'), findsOneWidget);
       expect(find.text('Sparks Weekly'), findsOneWidget);
       expect(
         find.text('5-hour'),
@@ -644,7 +682,7 @@ void main() {
       await tester.pumpWidget(buildSubject(response: response));
       await tester.pumpAndSettle();
 
-      expect(find.text('GPT-6-Codex-Nova 5h'), findsOneWidget);
+      expect(find.text('GPT-6-Codex-Nova 5-hour'), findsOneWidget);
     });
 
     testWidgets('unconfigured shells alone render the global unavailable', (

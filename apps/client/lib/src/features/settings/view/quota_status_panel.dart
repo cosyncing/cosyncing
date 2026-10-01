@@ -3,6 +3,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/settings/view/quota_provider_logo.dart';
+import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:flutter/material.dart';
 
 /// Remaining-percent threshold at or under which a quota row reads as a
@@ -14,12 +15,14 @@ const double quotaWarningRemainingPercent = 25;
 /// critical — a presentation-only escalation of the same warning signal.
 const double quotaCriticalRemainingPercent = 10;
 
-/// Tokdash-style quota status bars for Settings → Agents & usage.
+/// Tokdash-style quota status bars for Settings → Agents & Quota.
 ///
 /// Renders the normalized [TokdashQuotaResponse] already held by
-/// `ManagedRuntimeController` as provider/window rows: 5-hour and weekly
-/// labels, percentage remaining, a compact progress bar, reset time,
-/// freshness, and estimated/stale/unavailable status. Antigravity's per-model
+/// `ManagedRuntimeController` as provider/window rows: one "5-hour" label for
+/// every five-hour window whatever the provider calls it, weekly and other
+/// windows by name, percentage remaining, a thin bar that stays neutral until
+/// the window runs low, the reset time, and estimated/stale/unavailable
+/// status. Wide layouts set providers two to a row. Antigravity's per-model
 /// readings collapse into its two shared quota pools, matching Tokdash's own
 /// quota page. Viewing is independent of the quota-warnings opt-in, and the
 /// panel never shows raw payloads, endpoints, bucket ids, or API errors.
@@ -41,46 +44,30 @@ class QuotaStatusPanel extends StatelessWidget {
   /// Whether the first snapshot is still being read.
   final bool loading;
 
-  /// Reference clock for relative reset/freshness copy.
+  /// Reference clock for relative reset copy.
   final DateTime? now;
+
+  /// Content width from which providers sit two to a row.
+  static const double twoColumnWidth = 600;
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
-    final tokens = context.tokens;
     final now = this.now ?? DateTime.now();
 
+    // Everything below is REMAINING allowance in rolling windows, never a sum
+    // of what was used; the usage report owns that figure.
     return SelectionArea(
-      child: Column(
+      child: SettingsSection(
         key: const Key('settings-quota-panel'),
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Everything below is REMAINING allowance in rolling windows, never
-          // a sum of what was used; the usage report owns that figure.
-          Text(
-            l10n.settingsQuotaPanelTitle,
-            style: theme.textTheme.titleMedium?.copyWith(
-              color: tokens.textSecondary,
-            ),
-          ),
-          const SizedBox(height: 8),
-          if (loading)
-            _QuotaNotice(
-              icon: null,
-              text: l10n.settingsQuotaLoading,
-              showSpinner: true,
-            )
-          else
-            _buildContent(context, l10n, now),
-          const SizedBox(height: 8),
-          Text(
-            l10n.settingsQuotaReadOnlyNote,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: tokens.textTertiary,
-            ),
-          ),
-        ],
+        title: l10n.settingsQuotaPanelTitle,
+        description: l10n.settingsQuotaReadOnlyNote,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: loading
+              ? InlineNotice(text: l10n.settingsQuotaLoading, showSpinner: true)
+              : _buildContent(context, l10n, now),
+        ),
       ),
     );
   }
@@ -93,13 +80,13 @@ class QuotaStatusPanel extends StatelessWidget {
     final quota = this.quota;
     final data = quota?.data;
     if (quota == null || quota.ok == false || data == null) {
-      return _QuotaNotice(
+      return InlineNotice(
         icon: Icons.cloud_off_outlined,
         text: l10n.settingsQuotaUnavailable,
       );
     }
     if (!data.enabled) {
-      return _QuotaNotice(
+      return InlineNotice(
         icon: Icons.toggle_off_outlined,
         text: l10n.settingsQuotaMonitoringOff,
       );
@@ -128,19 +115,38 @@ class QuotaStatusPanel extends StatelessWidget {
       );
     }
     if (groups.isEmpty) {
-      return _QuotaNotice(
+      return InlineNotice(
         icon: Icons.cloud_off_outlined,
         text: l10n.settingsQuotaUnavailable,
       );
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (var index = 0; index < groups.length; index++) ...[
-          if (index > 0) const SizedBox(height: 16),
-          groups[index],
-        ],
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= twoColumnWidth ? 2 : 1;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var start = 0; start < groups.length; start += columns) ...[
+              if (start > 0) const SizedBox(height: 24),
+              if (columns == 1)
+                groups[start]
+              else
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: groups[start]),
+                    const SizedBox(width: 32),
+                    Expanded(
+                      child: start + 1 < groups.length
+                          ? groups[start + 1]
+                          : const SizedBox.shrink(),
+                    ),
+                  ],
+                ),
+            ],
+          ],
+        );
+      },
     );
   }
 }
@@ -168,7 +174,6 @@ class _QuotaProviderGroup extends StatelessWidget {
     final failed =
         provider.status != 'ok' || (provider.statusDetail?.isNotEmpty ?? false);
     final providerName = quotaProviderDisplayName(provider.provider);
-    final freshness = _freshnessCopy(l10n, now);
 
     final buckets = _quotaBucketsForPresentation(
       providerId,
@@ -186,7 +191,10 @@ class _QuotaProviderGroup extends StatelessWidget {
             Expanded(
               child: Text(
                 providerName,
-                style: theme.textTheme.labelLarge,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: tokens.textPrimary,
+                  fontWeight: FontWeight.w700,
+                ),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -204,16 +212,7 @@ class _QuotaProviderGroup extends StatelessWidget {
               ),
           ],
         ),
-        if (freshness != null) ...[
-          const SizedBox(height: 4),
-          Text(
-            freshness,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: tokens.textTertiary,
-            ),
-          ),
-        ],
-        const SizedBox(height: 8),
+        const SizedBox(height: 12),
         if (buckets.isEmpty)
           Text(
             l10n.settingsQuotaNoReadings,
@@ -223,7 +222,7 @@ class _QuotaProviderGroup extends StatelessWidget {
           )
         else
           for (var index = 0; index < buckets.length; index++) ...[
-            if (index > 0) const SizedBox(height: 12),
+            if (index > 0) const SizedBox(height: 16),
             if (buckets[index].groupLabel case final groupLabel?) ...[
               Text(
                 groupLabel,
@@ -253,20 +252,6 @@ class _QuotaProviderGroup extends StatelessWidget {
           ],
       ],
     );
-  }
-
-  /// Freshness is computed client-side from the newest reading stamp
-  /// (provider `updated_at` or the newest bucket `captured_at`), already
-  /// normalized to epoch milliseconds by the contract model.
-  String? _freshnessCopy(AppLocalizations l10n, DateTime now) {
-    final stamps = <num>[
-      if (provider.updatedAt != null) provider.updatedAt!,
-      for (final bucket in provider.buckets) bucket.capturedAt,
-    ].where((stamp) => stamp > 0);
-    if (stamps.isEmpty) return null;
-    final newest = stamps.reduce((a, b) => a > b ? a : b);
-    final captured = DateTime.fromMillisecondsSinceEpoch(newest.toInt());
-    return quotaUpdatedCopy(l10n, now, captured);
   }
 }
 
@@ -312,8 +297,8 @@ List<_QuotaBucketPresentation> _quotaBucketsForPresentation(
     final buckets = [...source]
       ..sort((a, b) {
         final kindOrder = _quotaWindowKind(
-          a.bucket,
-        ).index.compareTo(_quotaWindowKind(b.bucket).index);
+          a,
+        ).index.compareTo(_quotaWindowKind(b).index);
         if (kindOrder != 0) return kindOrder;
         // Pooled windows above model-scoped ones within each kind, so the
         // shared limit always leads its group.
@@ -438,7 +423,9 @@ class _QuotaBucketRow extends StatelessWidget {
                 Expanded(
                   child: Text(
                     windowLabel,
-                    style: theme.textTheme.bodyMedium,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: tokens.textPrimary,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -451,10 +438,9 @@ class _QuotaBucketRow extends StatelessWidget {
                 ],
                 if (remaining != null)
                   Text(
-                    l10n.settingsQuotaPercentCompact('${remaining.round()}'),
+                    l10n.settingsQuotaPercentRemaining('${remaining.round()}'),
                     style: theme.textTheme.labelMedium?.copyWith(
                       color: severityColor,
-                      fontWeight: FontWeight.w600,
                     ),
                   )
                 else
@@ -467,20 +453,20 @@ class _QuotaBucketRow extends StatelessWidget {
               ],
             ),
             if (remaining != null) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: 8),
               LinearProgressIndicator(
                 value: (remaining.clamp(0, 100)) / 100,
-                minHeight: 8,
+                minHeight: 4,
                 borderRadius: BorderRadius.circular(tokens.radiusXs),
                 color: severityColor,
                 backgroundColor: tokens.surface2,
               ),
             ],
             if (resetCopy != null) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: 8),
               Text(
                 resetCopy,
-                style: theme.textTheme.bodySmall?.copyWith(
+                style: theme.textTheme.labelSmall?.copyWith(
                   color: tokens.textTertiary,
                 ),
               ),
@@ -492,7 +478,7 @@ class _QuotaBucketRow extends StatelessWidget {
   }
 
   String _windowLabel(AppLocalizations l10n) {
-    switch (_quotaWindowKind(bucket.bucket)) {
+    switch (_quotaWindowKind(bucket)) {
       case _QuotaWindowKind.fiveHour:
         return l10n.settingsQuotaWindowFiveHour;
       case _QuotaWindowKind.weekly:
@@ -514,55 +500,18 @@ class _QuotaBucketRow extends StatelessWidget {
   }
 }
 
-/// Neutral notice row for loading, unavailable, and monitoring-off states.
-class _QuotaNotice extends StatelessWidget {
-  const _QuotaNotice({
-    required this.icon,
-    required this.text,
-    this.showSpinner = false,
-  });
-
-  final IconData? icon;
-  final String text;
-  final bool showSpinner;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tokens = context.tokens;
-    return Row(
-      children: [
-        if (showSpinner)
-          const SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
-        else
-          Icon(icon, size: 16, color: tokens.textTertiary),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            text,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: tokens.textSecondary,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 enum _QuotaWindowKind { fiveHour, weekly, other }
 
-/// Canonical window kind from a Tokdash bucket id. Mirrors Tokdash's own
-/// client convention (`session`/`five_hour`/`5h` → 5-hour,
+/// Canonical window kind of a Tokdash bucket. Mirrors Tokdash's own client
+/// convention by id (`session`/`five_hour`/`5h` → 5-hour,
 /// `weekly_all`/`seven_day`/`7d`/`plan` → weekly) without branching on
-/// provider names. Scoped weekly buckets such as `weekly_scoped_fable` are
-/// distinct quota pools and fall through to their server-provided label.
-_QuotaWindowKind _quotaWindowKind(String bucketId) {
-  final id = bucketId.toLowerCase();
+/// provider names. A five-hour window under any other id is recognized by
+/// the label its provider gives it — OpenCode Go reports `rolling` as
+/// "Rolling (5h)" — so every five-hour window reads "5-hour". Scoped weekly
+/// buckets such as `weekly_scoped_fable` are distinct quota pools and fall
+/// through to their server-provided label.
+_QuotaWindowKind _quotaWindowKind(TokdashQuotaBucket bucket) {
+  final id = bucket.bucket.toLowerCase();
   if (id == '5h' ||
       id == 'five_hour' ||
       id == 'session' ||
@@ -577,15 +526,25 @@ _QuotaWindowKind _quotaWindowKind(String bucketId) {
       id.endsWith('_7d')) {
     return _QuotaWindowKind.weekly;
   }
+  if (_fiveHourLabel.hasMatch(bucket.bucketLabel)) {
+    return _QuotaWindowKind.fiveHour;
+  }
   return _QuotaWindowKind.other;
 }
+
+/// "5h", "5 h", "5-hour", "5 hours", "five-hour", "five hour" as a whole
+/// word, in any case; never "15h" or "25-hour".
+final RegExp _fiveHourLabel = RegExp(
+  r'(?<![\w.])(?:5\s*-?\s*h(?:ours?|rs?)?|five[\s-]*hours?)\b',
+  caseSensitive: false,
+);
 
 /// Window label for a MODEL-SCOPED quota pool, or `null` for the pooled
 /// windows. Tokdash reports per-model limits beside the shared ones — Codex
 /// ships `codex_<model>_5h`/`codex_<model>_7d` and Claude ships
 /// `weekly_scoped_<model>` — and rendering those through the generic
 /// "5-hour"/"Weekly" labels produced two indistinguishable rows per window.
-/// The scoped row names its model instead: "Sparks 5h", "Sparks Weekly".
+/// The scoped row names its model instead: "Sparks 5-hour", "Sparks Weekly".
 String? _scopedWindowLabel(
   String providerId,
   TokdashQuotaBucket bucket,
@@ -662,8 +621,9 @@ String quotaProviderDisplayName(String providerId) {
   }
 }
 
-/// Severity color for a remaining-percent reading: critical at or under 10%,
-/// warning at or under 25%, otherwise healthy.
+/// Color for a remaining-percent reading: critical at or under 10%, warning
+/// at or under 25%, otherwise neutral. A healthy window is not news, so only a
+/// low one draws the eye.
 Color quotaSeverityColor(AppTokens tokens, num remainingPercent) {
   if (remainingPercent <= quotaCriticalRemainingPercent) {
     return tokens.statusError;
@@ -671,7 +631,7 @@ Color quotaSeverityColor(AppTokens tokens, num remainingPercent) {
   if (remainingPercent <= quotaWarningRemainingPercent) {
     return tokens.statusNeedsInput;
   }
-  return tokens.statusWorking;
+  return tokens.textSecondary;
 }
 
 /// Relative reset-time copy ("Resets in 3 h" / "Resets soon").
@@ -687,23 +647,4 @@ String quotaResetCopy(AppLocalizations l10n, DateTime now, DateTime resetsAt) {
     return l10n.settingsQuotaResetsInHours(delta.inHours);
   }
   return l10n.settingsQuotaResetsInDays(delta.inDays);
-}
-
-/// Relative freshness copy ("Updated 12 min ago").
-String quotaUpdatedCopy(
-  AppLocalizations l10n,
-  DateTime now,
-  DateTime captured,
-) {
-  final age = now.difference(captured);
-  if (age.isNegative || age.inSeconds < 60) {
-    return l10n.settingsQuotaUpdatedJustNow;
-  }
-  if (age.inHours < 1) {
-    return l10n.settingsQuotaUpdatedMinutesAgo(age.inMinutes);
-  }
-  if (age.inDays < 1) {
-    return l10n.settingsQuotaUpdatedHoursAgo(age.inHours);
-  }
-  return l10n.settingsQuotaUpdatedDaysAgo(age.inDays);
 }

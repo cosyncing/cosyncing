@@ -17,6 +17,25 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   devices too; security alerts stay unread on each device until read there.
   Notifications also clear themselves 24 hours after they last changed, along
   with their system notifications, so the inbox holds about a day of history.
+- Settings drop their remaining cards, outlines and tinted boxes for plain
+  rows under bold section headings, in one reading-width column. Choices
+  that were chips, segmented buttons or radio lists are now a single select
+  beside their label, moving under it on phones.
+- The server row at the bottom of the sidebar opens a switcher listing every
+  saved server, with Add server and Manage servers, instead of jumping to
+  Settings. Settings → Servers lists saved servers as quiet rows with their
+  address; the created and last-used dates are gone.
+- Agents & Quota shows runtimes as single rows with a text Restart action and
+  sets quota providers two to a row on wide screens. Every five-hour window,
+  whatever the provider calls it ("Session", "Rolling (5h)", "5-hour window"),
+  reads "5-hour", and scoped windows read "Sparks 5-hour". Each window shows
+  what remains and when it resets; the per-provider "Updated … ago" line is
+  gone, and a bar stays neutral until the window runs low.
+- Settings → Display is one page, from the broadest choice to the finest:
+  Appearance (mode, theme, text size, density, language), Conversation
+  (message text, spacing, reading width, tool display), Session visibility
+  and the indicator legend. Appearance and Tool display no longer need a
+  separate page.
 
 ### Fixed
 

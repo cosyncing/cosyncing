@@ -83,3 +83,14 @@ class BrokerProfile {
   String toString() =>
       'BrokerProfile(id: $id, displayName: $displayName, baseUri: $baseUri)';
 }
+
+/// How a saved server's address reads in a list.
+extension BrokerProfileDisplayAddress on BrokerProfile {
+  /// [baseUri] as people write it: no trailing slash on a bare host.
+  String get displayAddress {
+    final text = baseUri.toString();
+    return baseUri.path == '/' && text.endsWith('/')
+        ? text.substring(0, text.length - 1)
+        : text;
+  }
+}

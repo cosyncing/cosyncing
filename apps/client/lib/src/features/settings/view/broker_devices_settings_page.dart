@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/view/add_server_sheet.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/view/broker_profiles_page.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -21,7 +21,6 @@ import 'package:cosyncing_client/src/platform/update/web_handoff_hold.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 /// Settings → Broker & devices: which broker this device talks to, and how it
 /// authenticated with it.
@@ -75,39 +74,6 @@ class _BrokerDevicesSettingsPageState
     }
   }
 
-  Future<void> _showAddServerChoices() async {
-    final l10n = AppLocalizations.of(context);
-    final choice = await showModalBottomSheet<_AddServerChoice>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              key: const Key('servers-add-direct'),
-              leading: const Icon(Icons.link),
-              title: Text(l10n.connectionDirectTitle),
-              subtitle: Text(l10n.connectionDirectBody),
-              onTap: () => Navigator.pop(context, _AddServerChoice.direct),
-            ),
-            ListTile(
-              key: const Key('servers-add-pair'),
-              leading: const Icon(Icons.qr_code_scanner),
-              title: Text(l10n.connectionPairTitle),
-              subtitle: Text(l10n.connectionPairBody),
-              onTap: () => Navigator.pop(context, _AddServerChoice.pair),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (!mounted || choice == null) return;
-    await context.push(
-      choice == _AddServerChoice.direct ? connectionRoute : pairingRoute,
-    );
-  }
-
   Future<void> _signOut() async {
     final l10n = AppLocalizations.of(context);
     final confirmed = await showDialog<bool>(
@@ -144,13 +110,18 @@ class _BrokerDevicesSettingsPageState
         Row(
           children: [
             Icon(
-              isError ? Icons.error : Icons.check_circle,
+              isError ? Icons.error_outline : Icons.check_circle_outline,
               color: color,
-              size: 20,
+              size: 16,
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: SelectableText(message, style: TextStyle(color: color)),
+              child: SelectableText(
+                message,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: color),
+              ),
             ),
           ],
         ),
@@ -170,56 +141,58 @@ class _BrokerDevicesSettingsPageState
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.settingsCategoryBrokerTitle)),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            SettingsSection(
-              title: l10n.savedServers,
-              child: const BrokerProfilesPage(embedded: true),
+      body: SettingsPageBody(
+        children: [
+          SettingsSection(
+            title: l10n.savedServers,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const BrokerProfilesPage(embedded: true),
+                const SizedBox(height: 8),
+                FilledButton.tonalIcon(
+                  key: const Key('servers-add'),
+                  onPressed: () => unawaited(showAddServerChoices(context)),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: Text(l10n.serversAddTitle),
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
-            Card(
-              margin: EdgeInsets.zero,
-              child: ListTile(
-                key: const Key('servers-add'),
-                leading: const Icon(Icons.add_circle_outline),
-                title: Text(l10n.serversAddTitle),
-                subtitle: Text(l10n.serversAddSubtitle),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => unawaited(_showAddServerChoices()),
-              ),
+          ),
+          const BrokerConnectionGate(),
+          const _ClientCompatibilityFallback(),
+          const BrokerStatusSettingsSection(),
+          const WorkspaceBrowsingSettingsSection(),
+          SettingsSection(
+            title: l10n.settingsSectionBrokerCredentials,
+            // No loopback branch: a broker on 127.0.0.1 still requires a
+            // token once one is provisioned, so it needs the same credential
+            // controls as any other host. See broker_credentials_controller.
+            description: activeProfile == null
+                ? null
+                : l10n.settingsRemoteCredentialDescription,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (activeProfile == null)
+                  const _EmptyCredentialSection()
+                else
+                  _RemoteCredentialSection(
+                    tokenController: _tokenController,
+                    onSave: () => unawaited(_saveToken()),
+                    isBusy: credentialState.isBusy,
+                  ),
+                _buildCredentialStateMessage(context, credentialState),
+                const SizedBox(height: 8),
+                _ServerCredentialRemoval(
+                  isBusy: credentialState.isBusy,
+                  hasCredential: activeProfile?.credentialKey != null,
+                  onSignOut: () => unawaited(_signOut()),
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
-            const BrokerConnectionGate(),
-            const _ClientCompatibilityFallback(),
-            const BrokerStatusSettingsSection(),
-            const SizedBox(height: 16),
-            const WorkspaceBrowsingSettingsSection(),
-            const SizedBox(height: 16),
-            SettingsSection(
-              title: l10n.settingsSectionBrokerCredentials,
-              // No loopback branch: a broker on 127.0.0.1 still requires a
-              // token once one is provisioned, so it needs the same credential
-              // controls as any other host. See broker_credentials_controller.
-              child: activeProfile == null
-                  ? const _EmptyCredentialSection()
-                  : _RemoteCredentialSection(
-                      tokenController: _tokenController,
-                      onSave: () => unawaited(_saveToken()),
-                      isBusy: credentialState.isBusy,
-                    ),
-            ),
-            const SizedBox(height: 16),
-            _buildCredentialStateMessage(context, credentialState),
-            const SizedBox(height: 16),
-            _ServerCredentialRemoval(
-              isBusy: credentialState.isBusy,
-              hasCredential: activeProfile?.credentialKey != null,
-              onSignOut: () => unawaited(_signOut()),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -332,57 +305,59 @@ class _RemoteCredentialSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          l10n.settingsRemoteCredentialDescription,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
+    final tokens = context.tokens;
+    final radius = BorderRadius.circular(tokens.radiusMd);
+    final field = TextFormField(
+      key: const Key('settings-broker-token-field'),
+      controller: tokenController,
+      obscureText: true,
+      decoration: InputDecoration(
+        filled: true,
+        fillColor: tokens.surface2,
+        border: OutlineInputBorder(
+          borderRadius: radius,
+          borderSide: BorderSide.none,
         ),
-        const SizedBox(height: 12),
-        TextFormField(
-          key: const Key('settings-broker-token-field'),
-          controller: tokenController,
-          obscureText: true,
-          decoration: InputDecoration(
-            border: const OutlineInputBorder(),
-            labelText: l10n.brokerGateTokenFieldLabel,
-          ),
-          keyboardType: TextInputType.visiblePassword,
-          textInputAction: TextInputAction.done,
-          onFieldSubmitted: (_) => onSave(),
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 12,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            FilledButton.icon(
-              key: const Key('settings-save-token'),
-              onPressed: isBusy ? null : onSave,
-              icon: isBusy
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.save),
-              label: Text(
-                isBusy
-                    ? l10n.brokerGateSavingToken
-                    : l10n.settingsSaveTokenAction,
+        isDense: true,
+        hintText: l10n.brokerGateTokenFieldLabel,
+      ),
+      keyboardType: TextInputType.visiblePassword,
+      textInputAction: TextInputAction.done,
+      onFieldSubmitted: (_) => onSave(),
+    );
+    final save = FilledButton.tonalIcon(
+      key: const Key('settings-save-token'),
+      onPressed: isBusy ? null : onSave,
+      icon: isBusy
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.save_outlined, size: 18),
+      label: Text(
+        isBusy ? l10n.brokerGateSavingToken : l10n.settingsSaveTokenAction,
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: LayoutBuilder(
+        builder: (context, constraints) => constraints.maxWidth < 440
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [field, const SizedBox(height: 8), save],
+              )
+            : Row(
+                children: [
+                  Expanded(child: field),
+                  const SizedBox(width: 12),
+                  save,
+                ],
               ),
-            ),
-          ],
-        ),
-      ],
+      ),
     );
   }
 }
-
-enum _AddServerChoice { direct, pair }
 
 class _ServerCredentialRemoval extends StatelessWidget {
   const _ServerCredentialRemoval({
@@ -398,24 +373,27 @@ class _ServerCredentialRemoval extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final colors = Theme.of(context).colorScheme;
-    return Card(
-      margin: EdgeInsets.zero,
-      child: ListTile(
-        key: const Key('servers-remove-credential'),
-        leading: Icon(Icons.logout, color: colors.error),
-        title: Text(
-          l10n.settingsSignOutAction,
-          style: TextStyle(color: colors.error),
-        ),
-        subtitle: Text(
-          hasCredential
-              ? l10n.settingsSignOutSubtitleHasCredential
-              : l10n.settingsSignOutSubtitleNoCredential,
-        ),
-        enabled: !isBusy && hasCredential,
-        onTap: isBusy || !hasCredential ? null : onSignOut,
+    final tokens = context.tokens;
+    final enabled = !isBusy && hasCredential;
+    return SettingsRow(
+      key: const Key('servers-remove-credential'),
+      leading: Icon(
+        Icons.logout,
+        size: 18,
+        color: enabled ? tokens.statusError : tokens.textTertiary,
       ),
+      title: Text(
+        l10n.settingsSignOutAction,
+        style: TextStyle(
+          color: enabled ? tokens.statusError : tokens.textTertiary,
+        ),
+      ),
+      subtitle: Text(
+        hasCredential
+            ? l10n.settingsSignOutSubtitleHasCredential
+            : l10n.settingsSignOutSubtitleNoCredential,
+      ),
+      onTap: enabled ? onSignOut : null,
     );
   }
 }

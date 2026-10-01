@@ -1512,8 +1512,8 @@ async function reconcileTokdashQuota(): Promise<void> {
       severity: 'maintenance',
       title: 'Quota running low',
       summary: warning.estimated
-        ? 'A five-hour or weekly quota is low (estimated from local data).'
-        : 'A five-hour or weekly quota is low.',
+        ? 'A 5-hour or weekly quota is low (estimated from local data).'
+        : 'A 5-hour or weekly quota is low.',
       action: { kind: 'open-quota-settings' },
       presentationRevision: 1,
       presentationStage: 'immediate',
