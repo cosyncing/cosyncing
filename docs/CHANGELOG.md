@@ -39,6 +39,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Back on Android no longer closes the app from Settings, Notifications or
+  Connection. It returns to the page they were opened from, through Settings
+  first when you are on one of its pages. On phones and other narrow windows
+  these screens now fill the window with a Close button in place of the menu
+  button.
 - On Android 14 and later, dismissing the "Staying connected for notifications"
   notification brought it back every time Cosyncing returned to the front. It
   now stays dismissed while the background connection keeps running.

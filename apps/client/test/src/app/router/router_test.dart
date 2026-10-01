@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:broker_contract/broker_contract.dart';
@@ -770,7 +771,7 @@ void main() {
         );
 
         expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
-        expect(find.byKey(const Key('workspace-frame-menu')), findsOneWidget);
+        expect(find.byKey(const Key('workspace-frame-close')), findsOneWidget);
         expect(find.widgetWithText(AppBar, 'Settings'), findsOneWidget);
 
         await _sendAppShortcut(
@@ -974,7 +975,7 @@ void main() {
     // collapsed rail are covered in sessions_workspace_test; this is the
     // compact layout, where the drawer is the route to Attention.
     Future<void> openFrameDrawer(WidgetTester tester) async {
-      await tester.tap(find.byKey(const Key('workspace-frame-menu')));
+      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
       await tester.pumpAndSettle();
     }
 
@@ -984,7 +985,6 @@ void main() {
       await pumpApp(
         tester,
         surfaceSize: const Size(600, 900),
-        initialLocation: attentionRoute,
         overrides: [
           attentionUnreadCountProvider.overrideWith((ref) => 3),
         ],
@@ -1006,7 +1006,6 @@ void main() {
       await pumpApp(
         tester,
         surfaceSize: const Size(600, 900),
-        initialLocation: attentionRoute,
         overrides: [
           attentionUnreadCountProvider.overrideWith((ref) => 0),
         ],
@@ -1029,7 +1028,6 @@ void main() {
       await pumpApp(
         tester,
         surfaceSize: const Size(600, 900),
-        initialLocation: attentionRoute,
         overrides: [
           nativeClientUpdateAvailableProvider.overrideWithValue(true),
         ],
@@ -1059,7 +1057,7 @@ void main() {
           initialLocation: '/settings',
         );
 
-        expect(find.byKey(const Key('workspace-frame-menu')), findsOneWidget);
+        expect(find.byKey(const Key('workspace-frame-close')), findsOneWidget);
 
         await _invokeMenuSelection(tester, label: 'Sessions');
         await tester.pumpAndSettle();
@@ -1131,7 +1129,12 @@ void main() {
 
       expect(router.state.uri.path, connectionRoute);
       expect(find.widgetWithText(AppBar, 'Connection'), findsOneWidget);
-      await tester.tap(find.byKey(const Key('workspace-frame-menu')));
+      // Connection opens over Sessions: Close leaves it for Sessions, whose
+      // drawer reaches Settings.
+      await tester.tap(find.byKey(const Key('workspace-frame-close')));
+      await tester.pumpAndSettle();
+      expect(router.state.uri.path, sessionsRoute);
+      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('sessions-workspace-settings')));
       await tester.pumpAndSettle();
@@ -1696,6 +1699,149 @@ void main() {
 
       expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
       expect(find.byKey(const Key('workspace-open-drawer')), findsOneWidget);
+    });
+
+    group('destinations opened over Sessions', () {
+      // Notifications, Connection and Settings are shell branch roots with
+      // nothing below them to pop. System Back used to fall through to the
+      // platform there and close the app.
+      Future<void> openFromDrawer(WidgetTester tester, Key destination) async {
+        await tester.tap(find.byKey(const Key('workspace-open-drawer')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(destination));
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> systemBack(WidgetTester tester) async {
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('compact Settings fills the window with Close, and Close '
+          'and Back return to Sessions', (tester) async {
+        final router = await pumpApp(tester, surfaceSize: const Size(500, 900));
+        await openFromDrawer(tester, const Key('sessions-workspace-settings'));
+
+        expect(router.state.uri.path, settingsRoute);
+        expect(find.byKey(const Key('workspace-frame-close')), findsOneWidget);
+        expect(find.byKey(const Key('workspace-frame-menu')), findsNothing);
+
+        await tester.tap(find.byKey(const Key('workspace-frame-close')));
+        await tester.pumpAndSettle();
+        expect(router.state.uri.path, sessionsRoute);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+
+        await openFromDrawer(tester, const Key('sessions-workspace-settings'));
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+        expect(
+          await router.routerDelegate.popRoute(),
+          isFalse,
+          reason: 'only Sessions hands Back to the platform',
+        );
+      });
+
+      testWidgets('Back from a Settings page steps to Settings, then to '
+          'where Settings was opened from', (tester) async {
+        final router = await pumpApp(tester, surfaceSize: const Size(500, 900));
+        await openFromDrawer(tester, const Key('sessions-workspace-settings'));
+        await tester.tap(find.byKey(const Key('settings-category-broker')));
+        await tester.pumpAndSettle();
+        expect(router.state.uri.path, brokerDevicesSettingsRoute);
+
+        await systemBack(tester);
+        expect(router.state.uri.path, settingsRoute);
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+      });
+
+      testWidgets('a Settings page reached directly, as Manage servers does, '
+          'still returns through Settings', (tester) async {
+        final router = await pumpApp(tester, surfaceSize: const Size(500, 900));
+        router.go(brokerDevicesSettingsRoute);
+        await tester.pumpAndSettle();
+
+        await systemBack(tester);
+        expect(router.state.uri.path, settingsRoute);
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+      });
+
+      testWidgets('compact Notifications fills the window the same way', (
+        tester,
+      ) async {
+        final router = await pumpApp(tester, surfaceSize: const Size(500, 900));
+        await openFromDrawer(
+          tester,
+          const Key('sessions-workspace-attention'),
+        );
+
+        expect(router.state.uri.path, attentionRoute);
+        expect(find.byKey(const Key('workspace-frame-close')), findsOneWidget);
+        expect(find.byKey(const Key('workspace-frame-menu')), findsNothing);
+
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+      });
+
+      testWidgets('Back retraces Notifications then Settings to Sessions', (
+        tester,
+      ) async {
+        final router = await pumpApp(tester, surfaceSize: const Size(500, 900));
+        await openFromDrawer(
+          tester,
+          const Key('sessions-workspace-attention'),
+        );
+        // Settings opened from Notifications, as the inbox's gear does.
+        router.go(settingsRoute);
+        await tester.pumpAndSettle();
+        expect(router.state.uri.path, settingsRoute);
+
+        await systemBack(tester);
+        expect(router.state.uri.path, attentionRoute);
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+      });
+
+      testWidgets('Connection pushed over Sessions returns there', (
+        tester,
+      ) async {
+        final router = await pumpApp(tester, surfaceSize: const Size(500, 900));
+        unawaited(router.push<void>(connectionRoute));
+        await tester.pumpAndSettle();
+        expect(router.state.uri.path, connectionRoute);
+
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+      });
+
+      testWidgets('a deep-linked Settings leaves for Sessions', (tester) async {
+        final router = await pumpApp(
+          tester,
+          surfaceSize: const Size(500, 900),
+          initialLocation: settingsRoute,
+        );
+
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+      });
+
+      testWidgets('wide Settings keeps the sidebar and no Close, and Back '
+          'still returns to Sessions', (tester) async {
+        final router = await pumpApp(
+          tester,
+          surfaceSize: const Size(1200, 900),
+        );
+        await tester.tap(find.byKey(const Key('sessions-workspace-settings')));
+        await tester.pumpAndSettle();
+        expect(router.state.uri.path, settingsRoute);
+        expect(find.byKey(const Key('workspace-frame-close')), findsNothing);
+
+        await systemBack(tester);
+        expect(router.state.uri.path, sessionsRoute);
+      });
     });
 
     testWidgets('wide session detail is unchanged by the compact nav rule', (

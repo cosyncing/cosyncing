@@ -37,7 +37,12 @@ import 'package:go_router/go_router.dart';
 /// session flow. See `docs/architecture/client-ui.md`.
 class WorkspaceFrame extends ConsumerStatefulWidget {
   /// Creates the frame around [child].
-  const WorkspaceFrame({required this.child, this.location, super.key});
+  const WorkspaceFrame({
+    required this.child,
+    this.location,
+    this.onClose,
+    super.key,
+  });
 
   /// The routed page shown in the main pane.
   final Widget child;
@@ -45,6 +50,12 @@ class WorkspaceFrame extends ConsumerStatefulWidget {
   /// The current router path, used to mark the active destination. Null
   /// outside the router (widget tests), where Sessions is assumed.
   final String? location;
+
+  /// Leaves the destination shown for the one it was opened from. Set for the
+  /// destinations that open over Sessions — Notifications, Connection and
+  /// Settings — which, where the sidebar is a drawer, fill the window with
+  /// Close in place of the drawer button.
+  final VoidCallback? onClose;
 
   /// Widest window that still uses the modal drawer, tablet portrait included.
   static const double drawerBreakpoint = 900;
@@ -518,6 +529,7 @@ class _WorkspaceFrameState extends ConsumerState<WorkspaceFrame>
               ? () => unawaited(_startNewSession())
               : null,
           showOverview: _showOverview,
+          close: widget.onClose,
           child: PopScope<Object?>(
             canPop: !_drawerOpen,
             onPopInvokedWithResult: (didPop, result) {
@@ -528,6 +540,9 @@ class _WorkspaceFrameState extends ConsumerState<WorkspaceFrame>
               child: Scaffold(
                 key: _scaffoldKey,
                 onDrawerChanged: (open) => setState(() => _drawerOpen = open),
+                // Opened over Sessions, a destination is left through Close or
+                // Back, not by swiping the drawer out over it.
+                drawerEnableOpenDragGesture: widget.onClose == null,
                 backgroundColor: tokens.canvas,
                 drawer: drawerLayout
                     ? Drawer(
@@ -637,6 +652,7 @@ class WorkspaceFrameScope extends InheritedWidget {
     required this.startNewSession,
     required this.showOverview,
     required super.child,
+    this.close,
     super.key,
   });
 
@@ -658,15 +674,28 @@ class WorkspaceFrameScope extends InheritedWidget {
   /// Shows the Overview in the Sessions pane.
   final VoidCallback showOverview;
 
+  /// Leaves a destination opened over Sessions; null on Sessions.
+  final VoidCallback? close;
+
   /// The nearest frame, or null outside one.
   static WorkspaceFrameScope? maybeOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<WorkspaceFrameScope>();
 
-  /// The drawer button a top-level page puts in its app bar, or null where the
-  /// sidebar is already on screen (or there is no frame).
-  static Widget? menuButton(BuildContext context) {
+  /// The button a top-level page leads its app bar with where the sidebar is
+  /// a drawer: Close on a destination opened over Sessions, otherwise the
+  /// drawer button. Null where the sidebar is already on screen (or there is
+  /// no frame).
+  static Widget? leadingButton(BuildContext context) {
     final frame = maybeOf(context);
     if (frame == null || !frame.drawerLayout) return null;
+    if (frame.close case final close?) {
+      return IconButton(
+        key: const Key('workspace-frame-close'),
+        tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+        onPressed: close,
+        icon: const StrokeIcon(StrokeGlyph.close),
+      );
+    }
     return IconButton(
       key: const Key('workspace-frame-menu'),
       tooltip: MaterialLocalizations.of(context).openAppDrawerTooltip,
@@ -680,5 +709,6 @@ class WorkspaceFrameScope extends InheritedWidget {
       oldWidget.drawerLayout != drawerLayout ||
       oldWidget.drawerOpen != drawerOpen ||
       oldWidget.sidebarFootprint != sidebarFootprint ||
-      (oldWidget.startNewSession == null) != (startNewSession == null);
+      (oldWidget.startNewSession == null) != (startNewSession == null) ||
+      (oldWidget.close == null) != (close == null);
 }

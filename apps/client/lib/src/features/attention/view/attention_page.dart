@@ -77,7 +77,7 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
                 onPressed: () => context.go(sessionsRoute),
                 icon: const Icon(Icons.arrow_back),
               )
-            : WorkspaceFrameScope.menuButton(context),
+            : WorkspaceFrameScope.leadingButton(context),
         title: SelectionArea(child: Text(l10n.attentionPageTitle)),
         actions: [
           IconButton(

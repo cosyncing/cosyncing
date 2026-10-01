@@ -153,15 +153,20 @@ final GoRouter goRouter = createGoRouter();
 /// Widget tests should use a fresh router instance to avoid carrying navigation
 /// state across tests.
 GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
+  final trail = _DestinationTrail();
   return GoRouter(
     initialLocation: initialLocation,
     routes: [
       ShellRoute(
-        builder: (context, state, child) => _AppCommandShell(child: child),
+        builder: (context, state, child) =>
+            _AppCommandShell(trail: trail, child: child),
         routes: [
           StatefulShellRoute.indexedStack(
             builder: (context, state, navigationShell) {
-              return _ScaffoldWithNav(navigationShell: navigationShell);
+              return _ScaffoldWithNav(
+                navigationShell: navigationShell,
+                trail: trail,
+              );
             },
             branches: [
               StatefulShellBranch(
@@ -573,8 +578,9 @@ class _LatchedKeyboardStateGuardState
 ///
 /// See `docs/architecture/client-ui.md`.
 class _AppCommandShell extends ConsumerWidget {
-  const _AppCommandShell({required this.child});
+  const _AppCommandShell({required this.trail, required this.child});
 
+  final _DestinationTrail trail;
   final Widget child;
 
   /// Steps the app text size, sharing one implementation with the keyboard and
@@ -716,18 +722,26 @@ class _AppCommandShell extends ConsumerWidget {
 
     // The pinned router selects the root navigator when a shell branch cannot
     // pop. Register the workspace's first Back step on that root route too.
+    final path = GoRouterState.of(context).uri.path;
     final isCompactWorkspace =
-        GoRouterState.of(context).uri.path == sessionsRoute &&
-        MediaQuery.sizeOf(context).width <= 900;
+        path == sessionsRoute && MediaQuery.sizeOf(context).width <= 900;
     final returnToOverview =
         isCompactWorkspace &&
         !ref.watch(workspaceOverviewVisibleProvider) &&
         ref.watch(openSessionsControllerProvider).valueOrNull?.active != null;
+    // Back reaches this route from a destination opened over Sessions only
+    // once its branch has nothing left to pop: Settings' own pages step back
+    // to Settings first. From there it returns to where that destination was
+    // opened from, rather than closing the app.
+    final leaveDestination = _opensOverSessions(path);
     return PopScope<Object?>(
-      canPop: !returnToOverview,
+      canPop: !returnToOverview && !leaveDestination,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && returnToOverview) {
+        if (didPop) return;
+        if (returnToOverview) {
           ref.read(workspaceOverviewVisibleProvider.notifier).state = true;
+        } else if (leaveDestination) {
+          trail.back();
         }
       },
       child: _LatchedKeyboardStateGuard(child: menuBar),
@@ -735,17 +749,90 @@ class _AppCommandShell extends ConsumerWidget {
   }
 }
 
+/// The shell branch Sessions lives in. Every other branch opens over it.
+const int _sessionsBranch = 0;
+
+/// Whether [path] belongs to a destination that opens over Sessions:
+/// Notifications, Connection or Settings.
+bool _opensOverSessions(String path) =>
+    path.startsWith(attentionRoute) ||
+    path.startsWith(connectionRoute) ||
+    path.startsWith(settingsRoute);
+
+/// Where Back and Close lead from Notifications, Connection and Settings: the
+/// destination each was opened from, so leaving one returns to the page the
+/// user was on instead of closing the app.
+///
+/// Reaching Sessions clears the trail, and returning to a destination already
+/// on it drops everything opened after it, so the trail never loops. With no
+/// trail — a deep link, or a restored location — leaving goes to Sessions.
+class _DestinationTrail {
+  /// Branches left for another destination, oldest first.
+  final List<int> _openedFrom = [];
+
+  int? _current;
+  StatefulNavigationShell? _shell;
+
+  /// Notes the branch [shell] now shows.
+  void record(StatefulNavigationShell shell) {
+    _shell = shell;
+    final from = _current;
+    final to = shell.currentIndex;
+    _current = to;
+    if (from == null || from == to) return;
+    if (to == _sessionsBranch) {
+      _openedFrom.clear();
+      return;
+    }
+    final earlier = _openedFrom.indexOf(to);
+    if (earlier >= 0) {
+      _openedFrom.removeRange(earlier, _openedFrom.length);
+      return;
+    }
+    _openedFrom.add(from);
+  }
+
+  /// Leaves the current destination for the one it was opened from.
+  void back() => _shell?.goBranch(
+    _openedFrom.isEmpty ? _sessionsBranch : _openedFrom.last,
+  );
+}
+
 /// Shell for the top-level destinations: every branch renders in the shared
 /// [WorkspaceFrame], so the sidebar (or, on narrow windows, its drawer) is the
-/// one way between Sessions, Notifications and Settings at every width.
-class _ScaffoldWithNav extends StatelessWidget {
-  const _ScaffoldWithNav({required this.navigationShell});
+/// one way between Sessions, Notifications and Settings at every width. Where
+/// it is a drawer, a destination opened over Sessions is left through Close or
+/// Back instead, along the [_DestinationTrail].
+class _ScaffoldWithNav extends StatefulWidget {
+  const _ScaffoldWithNav({required this.navigationShell, required this.trail});
 
   final StatefulNavigationShell navigationShell;
+  final _DestinationTrail trail;
 
   @override
-  Widget build(BuildContext context) => WorkspaceFrame(
-    location: GoRouterState.of(context).uri.path,
-    child: navigationShell,
-  );
+  State<_ScaffoldWithNav> createState() => _ScaffoldWithNavState();
+}
+
+class _ScaffoldWithNavState extends State<_ScaffoldWithNav> {
+  @override
+  void initState() {
+    super.initState();
+    widget.trail.record(widget.navigationShell);
+  }
+
+  @override
+  void didUpdateWidget(_ScaffoldWithNav oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    widget.trail.record(widget.navigationShell);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final overSessions = widget.navigationShell.currentIndex != _sessionsBranch;
+    return WorkspaceFrame(
+      location: GoRouterState.of(context).uri.path,
+      onClose: overSessions ? widget.trail.back : null,
+      child: widget.navigationShell,
+    );
+  }
 }

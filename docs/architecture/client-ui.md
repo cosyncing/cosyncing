@@ -13,8 +13,10 @@ top-level destination — Sessions, Notifications, Settings, and the Connection
 recovery page — renders inside one shared frame, so the sidebar is the one way
 between them at every width and there is no bottom navigation bar. Wider
 surfaces keep the sidebar beside the page, resizable. At widths up to 900
-logical pixels it becomes a modal drawer, opened from the session strip or from
-each page's app bar. Session tabs remain visible even with one open session.
+logical pixels it becomes a modal drawer, opened from the session strip.
+Notifications, Settings, and Connection open over Sessions there: they fill the
+window, and their app bar leads with Close instead of the drawer button. Session
+tabs remain visible even with one open session.
 Layout depends on window size and platform capability, not hard-coded device
 names.
 
@@ -78,7 +80,10 @@ last tab returns to the overview; closing all tabs offers source-scoped Undo.
 These actions only change the working set and never stop or delete sessions.
 Drafts cross the existing durability barrier before a tab closes. Phone and tablet
 system Back closes an open drawer, then returns an active conversation to the
-overview without closing its tab.
+overview without closing its tab. From Notifications, Settings, or Connection,
+Back and Close return to the destination each was opened from, stepping out of
+a Settings page to Settings first, and to Sessions when there is no such
+destination, as after a deep link. Only Sessions hands Back to the platform.
 
 The overview reads current counts from the complete roster, independent of the
 sidebar's activity-window filter. Unread completion notifications use the
