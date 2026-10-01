@@ -17,7 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// so on a phone's drawer and a desktop sidebar alike it reads as the row
 /// unfolding rather than as a dialog somewhere else. Saved servers are read
 /// only while the menu is open: the footer itself stays as cheap as a label.
-class WorkspaceServerSwitcher extends StatelessWidget {
+class WorkspaceServerSwitcher extends ConsumerWidget {
   /// Creates the switcher around the footer row [builder] draws.
   const WorkspaceServerSwitcher({
     required this.activeSubtitle,
@@ -39,8 +39,31 @@ class WorkspaceServerSwitcher extends StatelessWidget {
   /// Draws the anchor; call `toggle` to open or close the menu.
   final Widget Function(BuildContext context, VoidCallback toggle) builder;
 
+  /// Switches to [profile] from the switcher's own [context] and [ref].
+  ///
+  /// Never from an entry's: [MenuItemButton] closes the menu, unmounting
+  /// every entry, a frame before it calls `onPressed`. An entry that switched
+  /// for itself looked its ancestors up from a defunct element, and the tap
+  /// silently did nothing.
+  Future<void> _activate(
+    BuildContext context,
+    WidgetRef ref,
+    BrokerProfile profile,
+  ) async {
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final failed = AppLocalizations.of(context).brokerProfileActivateFailed;
+    try {
+      await ref
+          .read(brokerProfileManagerControllerProvider)
+          .setActiveProfile(profile.id, expectedProfile: profile);
+    } on BrokerProfileManagerException {
+      messenger?.showSnackBar(SnackBar(content: Text(failed)));
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final tokens = context.tokens;
@@ -102,7 +125,11 @@ class WorkspaceServerSwitcher extends StatelessWidget {
                 ),
               ),
             ),
-            _ServerOptions(activeSubtitle: activeSubtitle),
+            _ServerOptions(
+              activeSubtitle: activeSubtitle,
+              onSelect: (profile) =>
+                  unawaited(_activate(context, ref, profile)),
+            ),
             const SizedBox(height: 8),
             action(
               key: const Key('workspace-server-add'),
@@ -129,25 +156,12 @@ class WorkspaceServerSwitcher extends StatelessWidget {
 
 /// One menu entry per saved server, the one in use checked.
 class _ServerOptions extends ConsumerWidget {
-  const _ServerOptions({required this.activeSubtitle});
+  const _ServerOptions({required this.activeSubtitle, required this.onSelect});
 
   final String? activeSubtitle;
 
-  Future<void> _activate(
-    BuildContext context,
-    WidgetRef ref,
-    BrokerProfile profile,
-  ) async {
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    final failed = AppLocalizations.of(context).brokerProfileActivateFailed;
-    try {
-      await ref
-          .read(brokerProfileManagerControllerProvider)
-          .setActiveProfile(profile.id, expectedProfile: profile);
-    } on BrokerProfileManagerException {
-      messenger?.showSnackBar(SnackBar(content: Text(failed)));
-    }
-  }
+  /// Switches to a server that is not the one in use.
+  final ValueChanged<BrokerProfile> onSelect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -178,9 +192,7 @@ class _ServerOptions extends ConsumerWidget {
               ? Icon(Icons.check, size: 16, color: tokens.textPrimary)
               : null,
         ),
-        onPressed: active
-            ? () {}
-            : () => unawaited(_activate(context, ref, profile)),
+        onPressed: active ? () {} : () => onSelect(profile),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: Column(

@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Picking another server from the switcher at the bottom of the sidebar did
+  nothing: the menu closed and the client stayed on the server it was on. It
+  now switches, and says so when a server can no longer be selected.
+
 ## 0.6.3 — 2026-10-01
 
 ### Changed
