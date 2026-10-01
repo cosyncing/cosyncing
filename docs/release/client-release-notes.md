@@ -5,14 +5,13 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.6.2 fixes the Server, not the client. Two notification defects are closed on
-the broker side: a Server holding a long notification history no longer stalls
-for up to half a minute about once a minute, and turning notifications on in a
-new browser no longer makes it record every retained notification that browser
-would never show.
+0.6.3 changes the app. Notifications, Settings, Agents & Quota and Android's
+Back button are reworked, and reading or clearing a notification on one device
+now carries to your other devices. Update the Server first if you use the quota
+page: the reset credits shown under Codex and Claude Code need a 0.6.3 Server,
+and behind Tokdash older than 2.6.3 the row stays empty. Everything else in this
+client works against a Server it could already reach.
 
-Nothing in the app behaves differently, so a 0.6.1 client can stay as it is.
-Clients are rebuilt here so the Server can ship its matching desktop archives.
 The broker contract stays at revision 28 and the compatibility window stays one
 revision wide, so a native client from 0.5.13 or earlier can watch a 0.6.x
 Server but cannot drive it: it cannot answer a permission request or send a
@@ -20,22 +19,36 @@ prompt. The web client needs nothing: it ships inside the broker package and
 always matches it. A 0.4.1 or older client also sits below the minimum accepted
 client contract, still revision 17, and stays read-only against current brokers.
 
-## What's new in 0.6.2
+## What's new in 0.6.3
 
-- A broker holding a long notification history stays responsive. It used to stop
-  answering for up to half a minute about once a minute, and while it was out
-  sessions showed Reconnecting or failed to load and every client, request and
-  live stream waited. On a store of about 1,700 notifications one check fell
-  from about 14 seconds to about 0.1 seconds.
-- Turning notifications on in a new browser no longer makes the broker record,
-  and write gigabytes to disk for, every retained notification that browser
-  would never show. A browser is alerted only to what happens after it
-  registers; a native app still receives an alert that was already under way
-  when it registered.
+- The Notifications page is usable at any length. Notifications that need a
+  response, unread completions and problems now dismiss from their row, Clear
+  all clears the page in one tap with Undo, and only the rows on screen are
+  drawn, so a long history no longer freezes it. Reading one device's
+  notification marks it read on your other devices — security alerts excepted,
+  which stay unread until read there — and notifications plus their system
+  notifications clear themselves 24 hours after they last changed.
+- Settings is one reading-width column of plain rows under bold headings. The
+  remaining cards, outlines and tinted boxes are gone, chip and segmented
+  choices are selects beside their label, and Display is a single page running
+  from Appearance through Conversation to Session visibility and the legend.
+  The server row at the bottom of the sidebar opens a switcher with Add server
+  and Manage servers, and Settings → Servers drops the created and last-used
+  dates.
+- Agents & Quota lists runtimes as rows with a text Restart action and puts
+  providers two to a row on wide screens. Every five-hour window reads "5-hour"
+  whatever the provider calls it, shows what remains and when it resets, and
+  stays neutral until it runs low. Below the windows, Codex and Claude Code show
+  the reset credits they hold and when the soonest expires, in amber in its last
+  two days.
+- On Android, Back returns to the page Settings, Notifications or Connection was
+  opened from instead of closing the app, and on Android 14 and later a dismissed
+  "Staying connected for notifications" notification stays dismissed while the
+  background connection keeps running.
 
 The 0.6.0 features that need both ends of the wire, notifications with every
 browser tab closed, per-type notification settings and cross-device read and
-clear, still need a 0.6.0 or newer Server. 0.6.2 is one.
+clear, still need a 0.6.0 or newer Server. 0.6.3 is one.
 
 ## Downloads
 

@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.6.3 — 2026-10-01
+
 ### Changed
 
 - Reading a notification on one device now marks it read on your other
