@@ -64,6 +64,12 @@ ThemeData buildAppTheme(
       surfaceTintColor: Colors.transparent,
       elevation: 0,
     ),
+    // The scheme leaves secondaryContainer to default to secondary, the
+    // accent, which is also the bar's fill: every determinate bar drew full
+    // whatever its value. The separator is the unfilled hairline instead.
+    progressIndicatorTheme: ProgressIndicatorThemeData(
+      linearTrackColor: t.separator,
+    ),
     scrollbarTheme: ScrollbarThemeData(
       thickness: const WidgetStatePropertyAll(4),
       radius: Radius.circular(t.radiusXs),

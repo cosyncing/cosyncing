@@ -84,8 +84,9 @@ class _AndroidClientUpdatePromptState
 
 /// The update offer, following the download through to Android's installer.
 ///
-/// Every state keeps a way out. Closing mid-download leaves the download
-/// running, and Settings → General shows its progress.
+/// Every state keeps a way out. Closing mid-download, or leaving the app,
+/// leaves the download running under its own notification, and Settings →
+/// General shows its progress.
 class AndroidClientUpdateDialog extends ConsumerStatefulWidget {
   /// Creates the dialog.
   const AndroidClientUpdateDialog({super.key});
@@ -132,10 +133,13 @@ class _AndroidClientUpdateDialogState
     final candidate = update?.candidate;
     final status = update?.status;
     final downloading = status == AndroidClientUpdateStatus.downloading;
+    // Downloaded while the app was out of sight: the installer opens as soon
+    // as it is back in front, so there is nothing left to press.
+    final ready = status == AndroidClientUpdateStatus.readyToInstall;
     final opening = status == AndroidClientUpdateStatus.openingInstaller;
     final permission = status == AndroidClientUpdateStatus.permissionRequired;
     final failed = status == AndroidClientUpdateStatus.failed;
-    final busy = downloading || opening;
+    final busy = downloading || ready || opening;
 
     final message = candidate == null
         ? ''
@@ -143,6 +147,8 @@ class _AndroidClientUpdateDialogState
         ? l10n.androidUpdatePermissionBody
         : downloading
         ? l10n.androidUpdateDownloadingBody(candidate.version)
+        : ready
+        ? l10n.androidUpdateReadyBody(candidate.version)
         : opening
         ? l10n.androidUpdateOpeningBody
         : failed
@@ -162,7 +168,11 @@ class _AndroidClientUpdateDialogState
             const SizedBox(height: 12),
             LinearProgressIndicator(
               key: const Key('android-client-update-progress'),
-              value: downloading ? update?.progress : null,
+              value: downloading
+                  ? update?.progress
+                  : ready
+                  ? 1
+                  : null,
             ),
           ],
           const SizedBox(height: 12),

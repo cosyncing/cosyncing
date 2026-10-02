@@ -5,8 +5,12 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:broker_crypto/broker_crypto.dart';
+import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
+import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:cosyncing_client/src/platform/update/android_update_platform.dart';
 import 'package:cosyncing_client/src/platform/update/android_update_platform_contract.dart';
 import 'package:cosyncing_client/src/platform/update/stable_release_manifest.dart';
@@ -29,6 +33,7 @@ enum AndroidClientUpdateStatus {
   current,
   available,
   downloading,
+  readyToInstall,
   openingInstaller,
   permissionRequired,
   installerLaunched,
@@ -134,6 +139,12 @@ final androidApkDownloaderProvider = Provider<AndroidApkDownloader>((ref) {
   };
 });
 
+/// The language the download's notifications speak: the app's own.
+final androidUpdateNoticeLocalizationsProvider = Provider<AppLocalizations>(
+  (ref) =>
+      resolveAppLocalizations(ref.watch(localeControllerProvider).valueOrNull),
+);
+
 final androidClientUpdateControllerProvider =
     AsyncNotifierProvider<
       AndroidClientUpdateController,
@@ -159,6 +170,9 @@ final class AndroidClientUpdateController
     if (!platform.supported) {
       return const AndroidClientUpdateState.unsupported();
     }
+    // A ready-to-install notice left by a process Android has since ended
+    // names an APK this process never verified.
+    unawaited(_quietly(platform.stopDownloadService));
     return _runCheck(platform);
   }
 
@@ -291,10 +305,35 @@ final class AndroidClientUpdateController
         progress: 0,
       ),
     );
+    final platform = ref.read(androidUpdatePlatformProvider);
+    final l10n = ref.read(androidUpdateNoticeLocalizationsProvider);
+    // Without a foreground service Android freezes the app soon after the
+    // user leaves it, and the download stops with it. Not awaited: the
+    // download need not wait for it, and channel calls keep their order, so
+    // Android sees the start before any progress or stop.
+    unawaited(
+      _quietly(
+        () => platform.startDownloadService(
+          AndroidUpdateDownloadNotice(
+            channelName: l10n.androidUpdateChannelName,
+            title: l10n.androidUpdateNotificationDownloadingTitle(
+              candidate.version,
+            ),
+          ),
+        ),
+      ),
+    );
+    final File file;
     try {
-      final file = await ref.read(androidApkDownloaderProvider)(candidate, (
+      var shownPercent = -1;
+      file = await ref.read(androidApkDownloaderProvider)(candidate, (
         progress,
       ) {
+        // The download reports every chunk it receives; the bar and the
+        // notification need each percent once.
+        final percent = (progress * 100).floor();
+        if (percent == shownPercent) return;
+        shownPercent = percent;
         state = AsyncData(
           AndroidClientUpdateState(
             status: AndroidClientUpdateStatus.downloading,
@@ -302,11 +341,11 @@ final class AndroidClientUpdateController
             progress: progress,
           ),
         );
+        unawaited(_quietly(() => platform.showDownloadProgress(percent)));
       });
-      _verifiedApk = file;
-      await _openInstaller(candidate, file);
     } on Object {
       _discardVerifiedApk();
+      await _quietly(platform.stopDownloadService);
       state = AsyncData(
         AndroidClientUpdateState(
           status: AndroidClientUpdateStatus.failed,
@@ -314,7 +353,39 @@ final class AndroidClientUpdateController
           detailCode: 'install-failed',
         ),
       );
+      return;
     }
+    _verifiedApk = file;
+    final lifecycle = ref.read(sessionNotificationLifecycleMonitorProvider);
+    if (lifecycle.currentState != BrokerAppLifecycleState.resumed) {
+      // Android opens an installer only for an app in front, so the
+      // download that finished out of sight waits for the user to return,
+      // with a notification that brings them back.
+      state = AsyncData(
+        AndroidClientUpdateState(
+          status: AndroidClientUpdateStatus.readyToInstall,
+          candidate: candidate,
+        ),
+      );
+      await _quietly(
+        () => platform.stopDownloadService(
+          ready: AndroidUpdateReadyNotice(
+            channelName: l10n.androidUpdateChannelName,
+            title: l10n.androidUpdateNotificationReadyTitle(candidate.version),
+            text: l10n.androidUpdateNotificationReadyText,
+          ),
+        ),
+      );
+      final back = await lifecycle.stateChanges.firstWhere(
+        (value) => value == BrokerAppLifecycleState.resumed,
+        // The monitor closed: the app is shutting down, and the next launch
+        // offers the update again.
+        orElse: () => BrokerAppLifecycleState.detached,
+      );
+      if (back != BrokerAppLifecycleState.resumed) return;
+    }
+    await _quietly(platform.stopDownloadService);
+    await _openInstaller(candidate, file);
   }
 
   Future<void> _openInstaller(
@@ -384,6 +455,16 @@ Future<bool> verifyAndroidReleaseManifestSignature({
 
 Map<String, Object?> decodeAndroidReleaseManifest(List<int> bytes) =>
     decodeStableReleaseManifest(bytes);
+
+/// Runs a notification call whose failure must never cost the update: the
+/// download and the installer work without it.
+Future<void> _quietly(Future<Object?> Function() call) async {
+  try {
+    await call();
+  } on Object {
+    // Best effort by design.
+  }
+}
 
 void _deleteIfPresent(File file) {
   try {

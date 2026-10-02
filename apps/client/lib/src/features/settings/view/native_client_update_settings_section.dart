@@ -125,6 +125,7 @@ class _AndroidUpdateRow extends ConsumerWidget {
     final candidate = state?.candidate;
     final checking = update.isLoading;
     final downloading = status == AndroidClientUpdateStatus.downloading;
+    final ready = status == AndroidClientUpdateStatus.readyToInstall;
     final opening = status == AndroidClientUpdateStatus.openingInstaller;
     final permission = status == AndroidClientUpdateStatus.permissionRequired;
     final retryInstall =
@@ -138,6 +139,8 @@ class _AndroidUpdateRow extends ConsumerWidget {
               l10n.androidUpdateAvailableBody(candidate!.version),
             AndroidClientUpdateStatus.downloading =>
               l10n.androidUpdateDownloadingBody(candidate!.version),
+            AndroidClientUpdateStatus.readyToInstall =>
+              l10n.androidUpdateReadyBody(candidate!.version),
             AndroidClientUpdateStatus.openingInstaller =>
               l10n.androidUpdateOpeningBody,
             AndroidClientUpdateStatus.permissionRequired =>
@@ -150,7 +153,7 @@ class _AndroidUpdateRow extends ConsumerWidget {
               l10n.settingsAndroidAppUpdateCheckFailed,
             _ => l10n.settingsAndroidAppUpdateChecking,
           };
-    final busy = checking || downloading || opening;
+    final busy = checking || downloading || ready || opening;
     final canInstall =
         !checking &&
         (status == AndroidClientUpdateStatus.available ||
