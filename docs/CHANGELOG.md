@@ -27,6 +27,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Picking another server from the switcher at the bottom of the sidebar did
   nothing: the menu closed and the client stayed on the server it was on. It
   now switches, and says so when a server can no longer be selected.
+- A Codex session whose model no longer matches its profile no longer offers a
+  terminal-sync command that would silently relabel it. Rollouts record the
+  provider but never the profile name, so when the recorded model stops
+  resolving to a profile the command now selects the provider by name when the
+  daemon can resolve it from `config.toml`; when the provider lives only inside
+  the profile's own file the app explains why no terminal can join it instead
+  of offering a command the daemon refuses. Driving the session from
+  Cosyncing still works in both cases.
 
 ## 0.6.3 — 2026-10-01
 

@@ -121,6 +121,7 @@ import {
   codexBaseHasCustomModelCatalog,
   codexModelCatalogSources,
   codexThreadConfigOverride,
+  resolveCodexModelProvider,
   resolveCodexProfile,
 } from './provider-resolver.ts';
 import {
@@ -1602,7 +1603,9 @@ export function codexControlState(opts: {
         presence: terminalSyncPresence ?? (terminalSyncActive ? 'shared' : undefined),
         action: opts.terminalSyncAction,
         label: terminalSyncActive ? 'Synced with Codex terminal' : opts.terminalSyncHint?.label ?? 'Sync with Codex terminal',
-        command: terminalSyncActive ? undefined : opts.terminalSyncHint?.command,
+        // A profile-only-provider hint carries no runnable command (empty string) — render that as
+        // "nothing to copy", not an empty copy-field.
+        command: terminalSyncActive ? undefined : (opts.terminalSyncHint?.command || undefined),
         note: terminalSyncActive
           ? 'A terminal is attached to this thread on the shared Codex daemon; it and the app share the same live session.'
           : opts.terminalSyncHint?.note,
@@ -1629,14 +1632,44 @@ function codexTerminalSyncHint(
   const remote = codexRemoteAddr();
   const cd = cwd ? `cd ${shellQuote(cwd)} && ` : '';
   const resolvedProfile = profile ?? resolveCodexProfile(provider, model)?.name;
-  const profileArg = resolvedProfile ? ` -p ${shellQuote(resolvedProfile)}` : '';
+  let profileArg = resolvedProfile ? ` -p ${shellQuote(resolvedProfile)}` : '';
+  // Rollouts never record the profile name, so the profile is inferred (resolveCodexProfile). When the
+  // inference finds nothing but the provider is known and non-default, branch on WHERE the provider is
+  // defined (resolveCodexModelProvider). Materializing the provider TABLE here is forbidden either way:
+  // the hint renders on the phone and lands in shell history and `ps`, and provider entries can carry
+  // bearer tokens (same rule as the thread config-injection comment in this file).
+  const carriedProvider = !resolvedProfile && provider && provider !== 'openai' && provider !== 'default' ? provider : undefined;
+  let carriedNote: string | undefined;
+  if (carriedProvider) {
+    const where = resolveCodexModelProvider(carriedProvider);
+    if (where?.source === 'base') {
+      // A `-c` value is TOML-parsed, so quote the name as a string — a provider literally named
+      // `true` or `123` must not arrive as a boolean or integer.
+      profileArg = ` -c ${shellQuote(`model_provider="${carriedProvider}"`)}`;
+      carriedNote = ' The owning profile could not be identified, so this selects the provider by name; the daemon resolves it from base config.toml.';
+    } else {
+      // Profile-only (or undefined): `--remote` forwards the name only (upstream #49161) and the
+      // shared daemon loads base config.toml alone, so the join would be refused outright
+      // ("Model provider `x` not found" — measured on 0.160 against a daemonless app-server).
+      // Explain instead of emitting a command that cannot work; Drive still works because the
+      // broker injects the definition over its own stdio.
+      return {
+        label: 'Sync with your terminal (unavailable)',
+        command: '',
+        note: where
+          ? `This session's provider \`${carriedProvider}\` is defined only inside the Codex profile \`${where.file}\`, which the shared Codex daemon does not load — a terminal could join only after the provider moves into base config.toml. ${PRODUCT_IDENTITY.productName} can still Drive this session.`
+          : `This session's provider \`${carriedProvider}\` is not defined anywhere in this machine's Codex configuration, so no terminal can join it. ${PRODUCT_IDENTITY.productName} can still Drive this session.`,
+      };
+    }
+  }
   // Carry the session's recorded model: a bare resume falls back to the user's default model and
   // codex warns "recorded with X but resuming with Y" (maintainer hit spark→sol drift on this hint).
   const modelArg = model ? ` -m ${shellQuote(model)}` : '';
+  const baseNote = `Optional — this joins the same Codex app-server daemon as ${PRODUCT_IDENTITY.productName}. Plain Codex sessions on the same machine can auto-connect after daemon startup; use this exact command when you need manual fallback behavior.`;
   return {
     label: 'Sync with your terminal (optional)',
     command: `${cd}codex${profileArg} resume --remote ${shellQuote(remote)}${modelArg} ${shellQuote(threadId)}`,
-    note: `Optional — this joins the same Codex app-server daemon as ${PRODUCT_IDENTITY.productName}. Plain Codex sessions on the same machine can auto-connect after daemon startup; use this exact command when you need manual fallback behavior.`,
+    note: carriedNote ? `${baseNote}${carriedNote}` : baseNote,
   };
 }
 
@@ -4240,7 +4273,7 @@ class CodexResumeConnection implements SessionConnection {
     );
     if (!hint) return;
     this.info.terminalSyncHint = hint;
-    if (ts?.supported && !ts.active && ts.command) ts.command = hint.command;
+    if (ts?.supported && !ts.active && ts.command && hint.command) ts.command = hint.command;
   }
 
   private write(obj: unknown): void {
