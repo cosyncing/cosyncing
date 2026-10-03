@@ -4413,7 +4413,11 @@ async function withLoadedDaemon<T>(
 }
 
 await test('CR6 private Codex Drive preserves terminal handoff through refresh and closes before confirmation', async () => {
-  return withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => withLoadedDaemon(dir, [], async () => {
+  // The handoff command's provider must be resolvable: `fake-provider` is defined in BASE config here
+  // (the syncable case). A provider defined nowhere gets no join command at all — see the drift tests.
+  return withCodexHome(
+    { 'config.toml': '[model_providers.fake-provider]\nname = "Fake"\nbase_url = "http://fake.invalid/v1"\nwire_api = "responses"\n' },
+    () => withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => withLoadedDaemon(dir, [], async () => {
     const diagnostics: CodexAttachDiagnostic[] = [];
     const adapter = new CodexAdapter({
       queryLoadedThreadIds: async () => new Set(),
@@ -4460,7 +4464,7 @@ await test('CR6 private Codex Drive preserves terminal handoff through refresh a
     } finally {
       await hub.dispose();
     }
-  }));
+  })));
 });
 
 const CR4_CHILD_THREAD = '00000000-0000-4000-8000-0000000000c4';
@@ -5019,6 +5023,137 @@ await test('profile-only provider: an unresolvable provider sends no override an
         refused && resume !== undefined && resume.config === null,
         `refused=${refused} resume=${JSON.stringify(resume)}`,
       ];
+    });
+  });
+});
+
+// Same gate as PROFILE_RESUME_FAKE (override required), but the resumed thread reports a model the
+// profile does NOT know — model drift after the user edited the profile. Profile inference misses;
+// the provider is PROFILE-ONLY here, so the hint must offer no command (the daemon cannot resolve
+// an overlay provider by name — measured refusal on 0.160) and its note must name the overlay file.
+const DRIFT_RESUME_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') {
+      mark({ kind: 'thread/settings/update', params: msg.params });
+      send({ id: msg.id, result: {} });
+    } else if (msg.method === 'thread/resume') {
+      const config = msg.params && msg.params.config ? msg.params.config : null;
+      mark({ kind: 'thread/resume', config });
+      const providers = config && config.model_providers ? config.model_providers : {};
+      if (!providers['vllm-hpc']) {
+        send({ id: msg.id, error: { code: -32600, message: "Model provider 'vllm-hpc' not found" } });
+      } else {
+        send({ id: msg.id, result: { thread: { name: 'drifted profile session' }, model: 'qwen3.8-27B-FP8-drift', modelProvider: 'vllm-hpc' } });
+      }
+    }
+  }
+}
+`;
+
+await test('profile-only provider drift: resume still injects, and the hint offers NO command — only the explanation', async () => {
+  // Rollouts record provider (session_meta) but never the profile name, and a drifted model breaks the
+  // model→profile inference. Here the provider lives ONLY in the profile overlay: `--remote` forwards
+  // the name and the daemon loads base config.toml alone, so ANY join command would be refused
+  // (measured on 0.160: "Model provider `x` not found"). Rev 2 S3: explain, do not emit.
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML, 'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML }, async () => {
+    return await withFakeCodex(DRIFT_RESUME_FAKE, async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'vllm-hpc', 'qwen3.8-27B-FP8-drift').join('\n'));
+      const messages: any[] = [];
+      const adapter = new CodexAdapter();
+      const conn = await adapter.attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      conn.subscribe((m: any) => messages.push(m));
+      try {
+        const records = readMarkers(marker);
+        const resume = records.find((r) => r.kind === 'thread/resume');
+        const hint = conn.info.terminalSyncHint;
+        const sync = conn.info.control?.terminalSync;
+        const surfaced = JSON.stringify({ hint, sync, messages, info: conn.info });
+        return [
+          // Injection by provider name is independent of profile inference: resume still succeeds.
+          resume?.config?.model_providers?.['vllm-hpc']?.base_url === 'http://hpc.invalid:8000/v1' &&
+            conn.info.currentModel?.providerID === 'vllm-hpc' &&
+            conn.info.currentModel?.modelID === 'qwen3.8-27B-FP8-drift' &&
+            conn.info.currentModel?.variant === undefined &&
+            // No runnable command exists: the hint is empty and the control surfaces nothing to copy.
+            hint?.command === '' &&
+            sync?.command === undefined &&
+            // The explanation names the overlay that holds the provider.
+            hint.note?.includes('vllm-hpc.config.toml') === true &&
+            !hint.command.includes(FIXTURE_PROFILE_TOKEN) &&
+            !surfaced.includes(FIXTURE_PROFILE_TOKEN),
+          `resumeInjected=${JSON.stringify(resume?.config?.model_providers?.['vllm-hpc']?.base_url)} hint=${JSON.stringify(hint)} syncCmd=${JSON.stringify(sync?.command)} current=${JSON.stringify(conn.info.currentModel)}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    });
+  });
+});
+
+// A drifted model on a provider the BASE config defines: the daemon can resolve the name itself,
+// so the fallback command is real — `-c model_provider="<name>"` (TOML-quoted, name only, no table).
+const BASE_DRIFT_RESUME_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/resume') {
+      mark({ kind: 'thread/resume', config: msg.params && msg.params.config ? msg.params.config : null });
+      send({ id: msg.id, result: { thread: { name: 'drifted base session' }, model: 'volc-model-drift', modelProvider: 'volcengine-coding-plan' } });
+    }
+  }
+}
+`;
+
+await test('base-provider drift (no profile match): hint carries the provider name, TOML-quoted, note names base config', async () => {
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML }, async () => {
+    return await withFakeCodex(BASE_DRIFT_RESUME_FAKE, async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'volcengine-coding-plan', 'volc-model-drift').join('\n'));
+      const adapter = new CodexAdapter();
+      const conn = await adapter.attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      try {
+        const resume = readMarkers(marker).find((r) => r.kind === 'thread/resume');
+        const hint = conn.info.terminalSyncHint;
+        return [
+          // Base-defined provider: no override needed, and the join command is real.
+          resume?.config === null &&
+            conn.info.currentModel?.providerID === 'volcengine-coding-plan' &&
+            conn.info.currentModel?.modelID === 'volc-model-drift' &&
+            // shellQuote single-quotes the value because of the embedded double quotes.
+            hint?.command.includes(`-c 'model_provider="volcengine-coding-plan"'`) === true &&
+            !hint.command.includes('-p ') &&
+            hint.command.includes('-m volc-model-drift') &&
+            hint.note?.includes('base config.toml') === true,
+          `resumeConfig=${JSON.stringify(resume?.config)} hint=${JSON.stringify(hint)} current=${JSON.stringify(conn.info.currentModel)}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
     });
   });
 });

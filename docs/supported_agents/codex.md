@@ -67,6 +67,61 @@ the terminal can resume through the shared daemon. A session already on that
 daemon can be joined directly. If another foreground app client still drives
 the session, close that client before handing off.
 
+### Codex profiles (`codex -p`)
+
+<details>
+<summary>Using a separate Codex profile with its own model provider</summary>
+
+cosyncing drives and syncs Codex through one shared Codex daemon, and that
+daemon reads only your base `~/.codex/config.toml`, never a profile file such
+as `~/.codex/my-profile.config.toml`. cosyncing does not edit your Codex
+configuration for you.
+
+If a profile uses a model provider of its own, define the provider in the base
+file and keep only the selection in the profile:
+
+```toml
+# ~/.codex/config.toml: the provider definition
+[model_providers.my-provider]
+name = "My provider"
+base_url = "https://llm.example.com/v1"
+wire_api = "responses"
+env_key = "MY_PROVIDER_API_KEY"   # read the key from the environment
+```
+
+```toml
+# ~/.codex/my-profile.config.toml: what the profile selects
+model_provider = "my-provider"
+model = "my-model"
+model_reasoning_effort = "high"
+```
+
+Prefer `env_key` over writing a token into the file. If you do keep a token in
+`config.toml`, make the file readable only by you (`chmod 600`).
+
+With the provider defined only in the profile file you can still drive the
+session from cosyncing, but no terminal can sync with it: the app shows
+**Sync with your terminal (unavailable)** and says why.
+
+The daemon reads the base file when it starts. cosyncing notices the change
+and restarts the managed Codex runtime when it is safe to (by default, once no
+session is attached), or restart it yourself while nothing is running:
+`codex app-server daemon restart`.
+
+To work on a profile session from a terminal, use the **Sync with a
+terminal** command cosyncing shows and run it: it includes `-p <profile>` and
+the session's model. On Codex 0.160 a fresh `codex -p <profile>` launch does
+not attach to the shared daemon by itself: the TUI shows the startup warning
+"Running without the shared background server: --profile requires embedded
+mode."
+
+If a profile sets `approvals_reviewer = "auto_review"`, Codex sends permission
+escalations to a reviewer model, and a provider that does not serve that model
+rejects every escalation. Set `approvals_reviewer = "user"`, or pick **Ask
+permission** in cosyncing, to answer them yourself.
+
+</details>
+
 ## Questions from Codex
 
 Codex can ask two kinds of questions, and cosyncing renders both as the same
