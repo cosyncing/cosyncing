@@ -14,9 +14,12 @@
  *
  * So nothing here is mocked at the seam. The adapter is the shipped one, with
  * the broker's real file-backed credential store; the host is a Bun.serve
- * listener speaking the captured 0.2 exchange contract over real HTTP; the only
- * fake is the process table, which has to be — the child is not a real `dsh`,
- * and a test must never start a binary it cannot clean up.
+ * listener speaking the captured 0.2 exchange contract over real HTTP. What is
+ * supplied by hand is the machine around it: the process table, because a test
+ * must never start a binary it cannot clean up, and the two facts a real install
+ * would otherwise be probed for — where the executable is, and the version it
+ * reports — because a suite that reads its own machine passes or fails on
+ * whoever happened to install the host there.
  *
  *   bun run packages/typescript/broker/test/dsh/test-dsh-managed-launch.ts   (exit 0 = all pass)
  */
@@ -25,7 +28,7 @@ export {};
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dshCredentialScope } from '@cosyncing/adapter-dsh';
+import { DshAdapter, dshCredentialScope } from '@cosyncing/adapter-dsh';
 import {
   ensureManagedHost,
   HOST_ABSENT,
@@ -39,7 +42,7 @@ import {
   type ManagedHostEffects,
   type ManagedHostLaunch,
 } from '../../src/runtime/managed-host.ts';
-import { shippedDshAdapter } from '../../src/installation/shipped-adapters.ts';
+import { dshAdapterOptions } from '../../src/installation/shipped-adapters.ts';
 import { dshSessionsPath, loadDshCookie } from '../../src/security/dsh-credentials.ts';
 
 const results: Array<{ name: string; ok: boolean }> = [];
@@ -48,8 +51,35 @@ function check(name: string, ok: boolean, detail = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
+// The version the launch plan is qualified for, stated rather than probed: the
+// runner that executes this suite has no dsh installed, and the host here is a
+// fixture listener, so neither the PATH nor an installed binary may be asked.
+const MANAGED_VERSION = '0.2.0-rc.2';
+const FAKE_EXECUTABLE = '/fixture/bin/dsh';
 const TOKEN = 'launch-token-not-a-real-one-but-shaped-like-one';
 const SPAWN_PID = 41500;
+
+/**
+ * The adapter the running broker builds, with this machine's two dsh facts
+ * supplied by hand.
+ *
+ * The shipped options carry the broker's real file-backed credential store,
+ * which is the thing this suite exists to exercise. The executable path and the
+ * version it reports are the two facts a real install would be probed for, and
+ * probing them here made the suite answer differently depending on whether
+ * whoever ran it had installed the host: on a runner with no `dsh` the launch
+ * descriptor came back with no command and every scenario below reported
+ * `not-launchable` while the code under test was fine. Stating them leaves the
+ * seam under test untouched and makes the suite describe one machine rather than
+ * whichever it happened to land on.
+ */
+function adapterWithAHostInstalled(): DshAdapter {
+  return new DshAdapter({
+    ...dshAdapterOptions(),
+    resolveExecutable: () => FAKE_EXECUTABLE,
+    readExecutableVersion: () => MANAGED_VERSION,
+  });
+}
 
 // ── a host that answers the way 0.2 was captured answering ─────────────────
 
@@ -202,7 +232,7 @@ try {
       COSYNCING_DSH_MANAGED_HOST: '1',
     });
 
-    const adapter = shippedDshAdapter();
+    const adapter = adapterWithAHostInstalled();
     // The child prints the line the real host prints, prefixed with its own
     // label and only AFTER a couple of polls: the announcement is not in the
     // buffer at spawn, and a start that reads once reads nothing.
@@ -252,7 +282,7 @@ try {
     // announcement and has no reason to, because the cookie outlived the process
     // that earned it. This is the difference between "logged in" and "must be
     // handed a new URL every time the service restarts".
-    const restarted = shippedDshAdapter();
+    const restarted = adapterWithAHostInstalled();
     const restartedAvailable = await restarted.isAvailable();
     check('a restarted broker is still logged in, with nothing re-typed',
       restartedAvailable === true
@@ -286,7 +316,7 @@ try {
       DSH_HOME: dshHome,
       COSYNCING_DSH_MANAGED_HOST: '1',
     });
-    const adapter = shippedDshAdapter();
+    const adapter = adapterWithAHostInstalled();
     const descriptor = await adapter.describeManagedHost?.();
     if (!descriptor?.launch) throw new Error('the fixture adapter stopped describing its own host');
 
