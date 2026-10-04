@@ -71,6 +71,7 @@ import {
 } from '@cosyncing/adapter-codex';
 import { ClaudeAdapter, claudeSessionId, installClaudeHooks, uninstallClaudeHooks, claudeHooksInstalled, claudeHooksSettingsPath, isClaudeTranscriptPathAllowed, readLatestModel, readLatestPermissionMode, modelAlias } from '@cosyncing/adapter-claude';
 import { KimiAdapter } from '@cosyncing/adapter-kimi';
+import { DshAdapter } from '@cosyncing/adapter-dsh';
 import { AgyAdapter } from '@cosyncing/adapter-antigravity';
 import { Hub, liveOverlapKey, liveOverlapTextLength, type Client, type ManagedConn, type WireEvent } from '../sessions/hub.ts';
 import { authoritativeLiveOwners, overlayAuthoritativeOwner } from '../roster/roster-overlay.ts';
@@ -301,7 +302,7 @@ import {
   MANAGED_HOST_SUPERVISION_INTERVAL_MS,
   releaseManagedHost,
 } from './managed-host.ts';
-import { shippedDshAdapter } from '../installation/shipped-adapters.ts';
+import { dshAdapterOptions } from '../installation/shipped-adapters.ts';
 import {
   mutationFingerprint,
   ProtocolJournal,
@@ -1010,7 +1011,7 @@ registry.register(new KimiAdapter());
 // not a registration question. An operator who has not started `dsh web` is
 // better served by an agent that says so than by one that stays invisible
 // unless they already knew to set a variable.
-registry.register(shippedDshAdapter());
+registry.register(new DshAdapter(dshAdapterOptions()));
 // Antigravity — observe (transcript-JSONL replay + tail) for every conversation,
 // plus Drive on an explicit `?mode=resume`: a broker-owned
 // `agy --conversation <id> --input-format stream-json` child that starts on the

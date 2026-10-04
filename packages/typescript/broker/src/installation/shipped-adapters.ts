@@ -20,7 +20,7 @@ import { ClineAdapter } from '@cosyncing/adapter-cline';
 import { KiloAdapter } from '@cosyncing/adapter-kilocode';
 import { ClaudeAdapter } from '@cosyncing/adapter-claude';
 import { KimiAdapter } from '@cosyncing/adapter-kimi';
-import { DshAdapter } from '@cosyncing/adapter-dsh';
+import { DshAdapter, type DshAdapterOptions } from '@cosyncing/adapter-dsh';
 import { AgyAdapter } from '@cosyncing/adapter-antigravity';
 import { managedHostGateEnv } from '../runtime/managed-host.ts';
 import { createDshCredentialStore } from '../security/dsh-credentials.ts';
@@ -41,13 +41,13 @@ export function shippedAdapters(): readonly AgentBackend[] {
     new CodexAdapter(),
     new ClaudeAdapter(),
     new KimiAdapter(),
-    shippedDshAdapter(),
+    new DshAdapter(dshAdapterOptions()),
     new AgyAdapter(),
   ];
 }
 
 /**
- * The DeepSeek Harness adapter with the broker's cookie store attached.
+ * The DeepSeek Harness adapter, and the cookie store it needs, decided once.
  *
  * Exported rather than inlined twice because the RUNNING broker and the read-only
  * inspection paths have to resolve the same credential for the same host. An
@@ -57,9 +57,18 @@ export function shippedAdapters(): readonly AgentBackend[] {
  * A doctor that built its own instead would report "not enrolled" about a host
  * the operator is logged into. One construction site is the only thing keeping
  * those three answers identical.
+ *
+ * The running broker spells the constructor out itself, because the
+ * cross-adapter conformance roster scrapes `registry.register(new XAdapter(...))`
+ * and fails closed on an indirect registration. What has to match therefore lives
+ * here: the options.
  */
+export function dshAdapterOptions(): DshAdapterOptions {
+  return { credentialStore: createDshCredentialStore() };
+}
+
 export function shippedDshAdapter(): AgentBackend {
-  return new DshAdapter({ credentialStore: createDshCredentialStore() });
+  return new DshAdapter(dshAdapterOptions());
 }
 
 /**

@@ -119,7 +119,8 @@ re-enrolling when what actually went wrong is something else.
 The 0.2 contract was captured from a running 0.2.0-rc.2 host and re-checked
 against one: starting a host without a browser window opening, becoming
 authenticated to it with nothing typed, reading its session roster, opening a
-session and reading its history through the snapshot cut, creating a session on a
+session and reading its history through the snapshot cut, holding a live follow
+subscription open on it while a client reconnects, creating a session on a
 host that has no workspace registered, keeping the credential across a broker
 restart, and enrolling a host cosyncing does not own without touching that host's
 process.

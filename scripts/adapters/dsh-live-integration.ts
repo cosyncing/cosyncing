@@ -296,6 +296,44 @@ try {
       return { detail: `${String(history.length)} message(s) for ${target.id} (a new session has none; the read is what is proven)` };
     });
 
+  // The live half of that read, against the same real host rather than a fixture:
+  // a follow stream opens on a verified event generation, a session with nothing
+  // in it invents nothing, and a client that goes away while its replacement is
+  // already attached does not take the replacement with it. A model turn would
+  // cost money and needs a credential this pass does not hold, so no live
+  // TRANSCRIPT is claimed here — only the shape of the path it would ride.
+  await attempt('a live subscription rides the real host, and a superseded close is inert',
+    async () => {
+      const listed = await adapter.discoverSessions();
+      const target = listed[0];
+      if (!target) throw new Error('the host lists no session to open');
+      const first = await adapter.attach(target.id, 'live');
+      let delivered = 0;
+      const unsubscribe = first.subscribe(() => { delivered += 1; });
+      const history = await first.getHistory({});
+      // Attaching the same session twice is what a client reconnect does. The
+      // second attach supersedes the first, whose close then arrives late.
+      const second = await adapter.attach(target.id, 'live');
+      await first.close();
+      const readAt = Date.now();
+      const after = await second.getHistory({});
+      const elapsed = Date.now() - readAt;
+      unsubscribe();
+      await second.close();
+      if (delivered > 0) throw new Error(`a session with no turn delivered ${String(delivered)} live message(s)`);
+      if (after.length !== history.length) {
+        throw new Error(`history changed across the reconnect: ${String(history.length)} then ${String(after.length)}`);
+      }
+      // A late close that took the CURRENT runtime with it would leave no follow
+      // stream, and the read would sit out the 15 s snapshot timeout before
+      // answering empty. Promptness is what proves the live session survived.
+      if (elapsed > 2_000) {
+        throw new Error(`the surviving connection took ${String(elapsed)} ms to reread history`);
+      }
+      return {
+        detail: `${String(history.length)} message(s), stable across a reconnect and a late close, reread in ${String(elapsed)} ms`,
+      };
+    });
   // ── 4. broker restart: the cookie outlives the process that earned it ─────
   await attempt('a fresh adapter, with no launch announcement, is still authenticated',
     async () => {
