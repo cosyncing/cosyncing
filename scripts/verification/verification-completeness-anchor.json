@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "25e418c253e59a6f294524fc592e2cba249b21d0",
+  "acceptedBase": "e35146eb24ada4334f5a543c0970a7b8715f14ce",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -66,12 +66,17 @@
     "broker.drive-restore",
     "broker.dsh-attach-priming",
     "broker.dsh-attachments",
+    "broker.dsh-contract-capture",
     "broker.dsh-create-generation-race",
+    "broker.dsh-credential-lifetime",
     "broker.dsh-diagnosis",
     "broker.dsh-drive",
+    "broker.dsh-event-generation",
+    "broker.dsh-launch-qualification",
     "broker.dsh-mapping",
     "broker.dsh-observe",
     "broker.dsh-registration-gate",
+    "broker.dsh-stream-carrier",
     "broker.dsh-transport",
     "broker.echo-correlation",
     "broker.fatal-startup-exit",
@@ -200,7 +205,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:e6754179eb46134d06989b4feb06a0dbd3004fa7c821d0fa964874b9f473283c"
+      "fingerprint": "sha256:e250232f0e9c648e4e5bc75897f4d4da3d75816081e466d7536af85d86cd2551"
     },
     {
       "id": "capabilities",
@@ -609,6 +614,30 @@
       "fingerprint": "sha256:757c3d2f8f9690724e0dd7acb05f2067a05182956e054e85877583cdb9ceab76"
     },
     {
+      "id": "dsh-auth",
+      "fingerprint": "sha256:fedbe0587853c7242c637b3299ac4d5e3b4866c4a1098b3c05ad6b61b68591ed"
+    },
+    {
+      "id": "dsh-capture-prompt",
+      "fingerprint": "sha256:da4365b9a206cfe7e0585226e530ef1733fb7abbd4ad7d6cd0260bb73e74984e"
+    },
+    {
+      "id": "dsh-capture-runner",
+      "fingerprint": "sha256:87836ec6fcd8d64130da9dcac748f79d0952277f29f3c1a7e415540168c033d6"
+    },
+    {
+      "id": "dsh-capture-sandbox",
+      "fingerprint": "sha256:1b241cfbefcf4e9021211a904e5c6ca01a830e4a34c4b9796daf07e4957a9bc2"
+    },
+    {
+      "id": "dsh-capture-turn",
+      "fingerprint": "sha256:5801bc015405262d503d364050e1a15f37561c98df2c6af352fefca2e6e00e20"
+    },
+    {
+      "id": "dsh-compatibility",
+      "fingerprint": "sha256:653dc78e64f3f145fceaad7212a44e96247b3d9e67af8c76a9dde681fcd911e1"
+    },
+    {
       "id": "dsh-create-generation-race",
       "fingerprint": "sha256:8e22c9258086ab68840e758aff7211064839fa5405d489e919bf9f2f8174c6c4"
     },
@@ -621,8 +650,16 @@
       "fingerprint": "sha256:f5d50a04dc227a068c91e09b7fa1ba3918815a59a83a60856a21d78777d027c4"
     },
     {
+      "id": "dsh-event-link",
+      "fingerprint": "sha256:f6c196da3e564385ff563ebb18774fa98348e35bac9afc5aebc08db53479cfd4"
+    },
+    {
       "id": "dsh-mapping",
       "fingerprint": "sha256:a2d91ec60b9e4d46b8e40ef3fae479468abcc8b50d1fa357f183704927112595"
+    },
+    {
+      "id": "dsh-mux",
+      "fingerprint": "sha256:b2c511e3a8547534d2a9dbb186a5efb110624ad9aed74874d83538dc74ff1594"
     },
     {
       "id": "dsh-observe",
@@ -631,6 +668,10 @@
     {
       "id": "dsh-registration-gate",
       "fingerprint": "sha256:f4980f2cd33fd7ea8b9818550d09fb4c4a9a963092f5d9cf523ffe4e3b20b986"
+    },
+    {
+      "id": "dsh-remote",
+      "fingerprint": "sha256:8dab222b67c8e2ca0e0a2fd969fac5feb4fdfc85cdf6ae4c1a3f35601d7e33fa"
     },
     {
       "id": "dsh-server",

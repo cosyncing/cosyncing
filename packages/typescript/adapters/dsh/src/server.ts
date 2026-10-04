@@ -1,31 +1,48 @@
 /**
- * Everything this package knows about reaching a DeepSeek Harness host: where it
- * listens, which `/api` routes may be produced at all, how one unary RPC is
- * enveloped and correlated, and how the two push-only downlink sockets are
- * opened, generation-tracked, and reconnected.
+ * The LEGACY (0.1.0-rc.6) web transport: where that host listens, which `/api`
+ * routes it may be asked for at all, how one unary RPC is enveloped and
+ * correlated, and how its two push-only downlink sockets are opened,
+ * generation-tracked, and reconnected.
+ *
+ * The 0.2 carrier is a different module ({@link ./remote.ts}) and a different
+ * route shape; the envelope they share is in {@link ./envelope.ts}. Nothing in
+ * here reaches 0.2 and nothing there reaches 0.1. What survives in both
+ * directions is the base-URL resolver, because the address of a host is not a
+ * property of its protocol.
  *
  * Two structural postures are enforced HERE rather than by review:
  *
- *  1. ONE PATH BUILDER. {@link dshApiPath} is the only function in the package
- *     that produces an `/api/...` string, and it refuses any route outside
- *     {@link DSH_API_ROUTES}. That surface is eleven unary methods
+ *  1. ONE PATH BUILDER PER FAMILY. {@link dshApiPath} is the only function in
+ *     this module that produces an `/api/...` string, and it refuses any route
+ *     outside {@link DSH_API_ROUTES}. That surface is eleven unary methods
  *     ({@link DSH_RPC_METHODS}), the two `commands/*` Typert Remote endpoints
  *     ({@link DSH_REMOTE_METHODS}), `respond`, and the two streams; every other
- *     method the host serves (settings, credentials, agent presets, directory
+ *     method that host serves (settings, credentials, agent presets, directory
  *     access, fork, queue mutation, subagents, skills, goals, export) is listed
- *     in {@link DSH_DEFERRED_RPC_METHODS} and is unreachable from here. A later
- *     round widens the allowlist on purpose, not by a stray fetch.
+ *     in {@link DSH_DEFERRED_RPC_METHODS} and is unreachable from here. The 0.2
+ *     family enforces the same posture with its own allowlist, and widening
+ *     either is an edit to a frozen list rather than a stray fetch.
  *
- *  2. PUSH-ONLY SOCKETS. {@link DshSocketLike} has no `send`, so the downlink
- *     manager physically cannot write to the mux or host stream. The dsh
+ *  2. PUSH-ONLY SOCKETS. {@link DshSocketLike} has no `send`, so the legacy
+ *     downlink manager physically cannot write to the mux or host stream. That
  *     protocol never expects a client frame on those sockets; every answer —
  *     including question and approval answers — travels over `POST /api/respond`
- *     instead.
+ *     instead. The 0.2 carrier is the opposite: one socket, many logical
+ *     streams, and `open`/`cancel` frames the client MUST be able to send.
  *
- * Captured against dsh 0.1.0-rc.6 (see `test/fixtures/dsh-0.1.0-rc.6.json`) and
- * checked against the upstream contract at
- * `packages/host/apiproxy/src/api/{rpc,events,sessions}.ts`.
+ * Captured against dsh 0.1.0-rc.6 (see `test/fixtures/dsh-0.1.0-rc.6.json`).
+ * Retained as a live contract, not as history: an operator still running that
+ * host keeps working, and retiring it is its own documented compatibility
+ * decision rather than a side effect of adding the new one.
  */
+import {
+  DshUnaryTransport,
+  transportFailure,
+  type DshFetch,
+  type DshGenerationLossPolicy,
+  type DshOutcome,
+  type DshTransportReason,
+} from './envelope.ts';
 
 // ── Where the host listens ──────────────────────────────────────────────────
 
@@ -251,28 +268,25 @@ export function dshApiPath(route: string): string {
 }
 
 // ── Failures ────────────────────────────────────────────────────────────────
+//
+// The envelope, its failure taxonomy, and the byte-bounded reader live in
+// `envelope.ts`, shared verbatim with the 0.2 Remote transport in `remote.ts`.
+// They are re-exported here because this module was, and remains, the package's
+// transport surface: nothing outside it constructs an `/api` path.
 
-/** Why a call did not produce a business value, in machine terms. */
-export type DshTransportReason =
-  | 'route-not-allowed'
-  | 'unreachable'
-  | 'timeout'
-  | 'http-status'
-  | 'invalid-envelope'
-  | 'rpc-id-mismatch'
-  | 'generation-lost';
-
-/**
- * Envelope-shape reasons. dsh is a developer preview whose rc train may change
- * the wire contract between releases, so an unrecognized envelope FAILS CLOSED
- * with a drift diagnostic instead of being interpreted optimistically.
- */
-export const DSH_VERSION_DRIFT_REASONS: readonly DshTransportReason[] =
-  Object.freeze(['invalid-envelope', 'rpc-id-mismatch']);
-
-export function isDshVersionDrift(failure: DshFailure): boolean {
-  return failure.kind === 'transport' && DSH_VERSION_DRIFT_REASONS.includes(failure.reason);
-}
+export {
+  describeDshFailure,
+  isDshVersionDrift,
+  DSH_UNARY_MAX_BYTES,
+  DSH_UNARY_TIMEOUT_MS,
+  DSH_VERSION_DRIFT_REASONS,
+  type DshFailure,
+  type DshFetch,
+  type DshFetchResponse,
+  type DshGenerationLossPolicy,
+  type DshOutcome,
+  type DshTransportReason,
+} from './envelope.ts';
 
 /**
  * Operator-facing account of an envelope mismatch. Names the rc train, because
@@ -284,13 +298,6 @@ export function dshVersionDriftDiagnostic(detail: string): string {
     + `cosyncing was verified against dsh ${DSH_FIXTURE_VERSION}; the developer-preview rc train can change the `
     + 'protocol between releases, so the adapter fails closed rather than guessing at the payload.';
 }
-
-export type DshFailure =
-  /** The host answered, and answered with a typed business error. */
-  | { kind: 'rpc'; code: string; message: string; details?: unknown }
-  | { kind: 'transport'; reason: DshTransportReason; retryable: boolean; status?: number; detail?: string };
-
-export type DshOutcome<T> = { ok: true; value: T } | { ok: false; failure: DshFailure };
 
 /** Carrier receipt for an answered server-request; `accepted:false` is not an error. */
 export type DshReceipt =
@@ -304,42 +311,7 @@ export type DshReceipt =
    */
   | { accepted: false; reason: 'not-pending' | 'bad-response' };
 
-export function describeDshFailure(failure: DshFailure): string {
-  if (failure.kind === 'rpc') return `${failure.code}: ${failure.message}`;
-  if (isDshVersionDrift(failure)) return dshVersionDriftDiagnostic(failure.detail ?? failure.reason);
-  return failure.detail ? `${failure.reason} (${failure.detail})` : failure.reason;
-}
-
 // ── Unary RPC ───────────────────────────────────────────────────────────────
-
-/**
- * The product's unary timeout convention. A dsh RPC either answers or the host
- * is wedged; waiting past this only holds a broker request open.
- */
-export const DSH_UNARY_TIMEOUT_MS = 30_000;
-
-/** Decoded-body ceiling. A history page is large; anything past this is not one. */
-const DEFAULT_MAX_BYTES = 24 * 1024 * 1024;
-
-export interface DshFetchResponse {
-  status: number;
-  text(): Promise<string>;
-  /**
-   * The body as a byte stream, when the underlying fetch exposes one. The
-   * client stops reading once MORE than maxBytes bytes have arrived, so
-   * retention is bounded by the ceiling plus one transport chunk (a chunk
-   * straddling the limit is held whole). The production fetch always provides
-   * this stream. Injected fetches may omit it; the text() fallback then
-   * enforces the same byte ceiling but only AFTER the body is fully allocated
-   * — acceptable for tests, not a production path.
-   */
-  body?: AsyncIterable<Uint8Array> | null;
-}
-
-export type DshFetch = (
-  url: string,
-  init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal },
-) => Promise<DshFetchResponse>;
 
 export interface DshRpcClientOptions {
   baseUrl: string;
@@ -352,73 +324,47 @@ export interface DshRpcClientOptions {
   clearTimeout?: (handle: unknown) => void;
 }
 
-/**
- * Why a call does or does not die when a downlink generation ends.
- *
- * An enum rather than a boolean because the two survival reasons are NOT the
- * same claim, and collapsing them would let a future caller inherit an argument
- * that does not apply to it:
- *
- * - `epoch-bound` — the answer describes session state read under this
- *   generation. Mixing it with a re-baselined picture is the hazard
- *   {@link DshRpcClient.abortInFlight} exists to prevent, so it dies. The
- *   DEFAULT, because a call whose category nobody has thought about is safest
- *   re-issued.
- * - `host-scoped` — the answer describes the HOST (is it alive, what does it
- *   serve, which workspaces exist). A generation rotating underneath it does
- *   not make it wrong, and aborting it turns an unrelated rotation into a
- *   failure of whatever asked.
- * - `non-idempotent-write` — the outcome is already being decided upstream and
- *   aborting locally cannot undo it. Abandoning the answer does not cancel the
- *   write; it only loses the receipt, and a caller that retries on the
- *   resulting "retryable" failure duplicates the effect.
- *
- * Note the asymmetry: `host-scoped` survives because abandoning it is
- * needlessly destructive, `non-idempotent-write` because abandoning it is
- * UNSAFE. "Abort by default" is the right default for reads and is not a
- * general safety argument for writes.
- */
-export type DshGenerationLossPolicy = 'epoch-bound' | 'host-scoped' | 'non-idempotent-write';
-
-interface InFlight {
-  controller: AbortController;
-  cause?: 'timeout' | 'generation-lost';
-  /** Absent means {@link DshGenerationLossPolicy} `epoch-bound`. */
+export interface DshUnaryCallOptions {
+  onRpcId?: (rpcId: string) => void;
+  signal?: AbortSignal;
   generationLoss?: DshGenerationLossPolicy;
 }
 
 /**
- * One unary caller for one host.
+ * The 0.1.0-rc.6 unary surface: one caller over {@link DSH_API_ROUTES}.
  *
- * Correlation is checked, not assumed: the client mints the `rpcId`, and a
- * response echoing a different one is drift rather than a late answer to reuse.
- * The method also travels inside the envelope (the host rejects a body whose
- * `method` disagrees with the path), so both halves come from the same
- * allowlisted constant.
+ * A thin typed shell over {@link DshUnaryTransport}, which carries everything
+ * that is actually load-bearing — minted correlation ids, the checked
+ * `rpcId` echo, byte-bounded reads, caller deadlines, the generation-loss
+ * policy, and the fail-closed envelope taxonomy. What this shell adds is the
+ * allowlist and the two dialects the 0.1 host distinguishes: a bare business
+ * payload for an `RpcMethodMap` method, and `{args:{…}}` for a Typert Remote.
  */
 export class DshRpcClient {
-  private readonly baseUrl: string;
-  private readonly timeoutMs: number;
-  private readonly maxBytes: number;
-  private readonly fetchImpl: DshFetch;
-  private readonly newRpcId: () => string;
-  private readonly setTimeoutImpl: (handler: () => void, ms: number) => unknown;
-  private readonly clearTimeoutImpl: (handle: unknown) => void;
-  private readonly inFlight = new Set<InFlight>();
+  private readonly transport: DshUnaryTransport;
 
   constructor(options: DshRpcClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
-    this.timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : DSH_UNARY_TIMEOUT_MS;
-    this.maxBytes = options.maxBytes && options.maxBytes > 0 ? options.maxBytes : DEFAULT_MAX_BYTES;
-    this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init) as unknown as ReturnType<DshFetch>);
-    this.newRpcId = options.newRpcId ?? (() => crypto.randomUUID());
-    this.setTimeoutImpl = options.setTimeout ?? ((handler, ms) => setTimeout(handler, ms));
-    this.clearTimeoutImpl = options.clearTimeout ?? ((handle) => clearTimeout(handle as never));
+    this.transport = new DshUnaryTransport({
+      baseUrl: options.baseUrl,
+      pathFor: (route) => {
+        try {
+          return dshApiPath(route);
+        } catch {
+          return null;
+        }
+      },
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
+      ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+      ...(options.newRpcId === undefined ? {} : { newRpcId: options.newRpcId }),
+      ...(options.setTimeout === undefined ? {} : { setTimeout: options.setTimeout }),
+      ...(options.clearTimeout === undefined ? {} : { clearTimeout: options.clearTimeout }),
+    });
   }
 
   /** The origin this client talks to. Safe to log; carries no credential. */
   get origin(): string {
-    return this.baseUrl;
+    return this.transport.origin;
   }
 
   /**
@@ -426,57 +372,24 @@ export class DshRpcClient {
    *
    * A downlink generation ending means the client's picture of the host is
    * stale, and a unary answer that arrives after that point describes a session
-   * state nothing has re-baselined yet. Callers get a typed retryable failure
-   * and re-issue after the re-baseline instead of mixing epochs.
-   *
-   * That reasoning holds only for `epoch-bound` answers. A liveness probe or a
-   * workspace listing describes the host, not the epoch, and aborting one turns
-   * an unrelated generation rotation into a failure of whatever issued it —
-   * which is how a session create landing next to a live attach became
-   * "DeepSeek Harness is temporarily unavailable", intermittently and with no
-   * recorded cause. A non-idempotent write survives for a different and stronger
-   * reason: the abort cannot reach the host, so dropping the answer loses the
-   * receipt for an effect that already happened. See
-   * {@link DshGenerationLossPolicy}.
+   * state nothing has re-baselined yet. Host-scoped and non-idempotent calls
+   * survive; see {@link DshGenerationLossPolicy} for why those two are not the
+   * same claim.
    */
   abortInFlight(): void {
-    for (const entry of this.inFlight) {
-      if (entry.generationLoss && entry.generationLoss !== 'epoch-bound') continue;
-      entry.cause = 'generation-lost';
-      entry.controller.abort();
-    }
+    this.transport.abortInFlight();
   }
 
   /**
+   * Call one `RpcMethodMap` method with a bare business payload.
+   *
    * `options.onRpcId` hands the caller the id this call was minted with. dsh
-   * stamps that exact id onto the `user/message` a prompt produces, so it is the
-   * only handle an adapter has for correlating a send with its own echo.
-   *
-   * `options.signal` lets a caller that has stopped waiting take the request
-   * down with it — the discovery budget is the case it exists for. It reports
-   * as a RETRYABLE `timeout`, which is what it is: the caller's deadline rather
-   * than the transport's, expiring on a host that had not answered either way.
-   *
-   * `options.generationLoss` declares what a downlink generation ending means
-   * for THIS call; see {@link DshGenerationLossPolicy}. Omitted means
-   * `epoch-bound`, deliberately: an unclassified call is safest re-issued.
+   * stamps that exact id onto the `user/message` a prompt produces, so it is
+   * the only handle an adapter has for correlating a send with its own echo.
    */
-  async call<T>(
-    method: DshRpcMethod,
-    payload: unknown,
-    options?: {
-      onRpcId?: (rpcId: string) => void;
-      signal?: AbortSignal;
-      generationLoss?: DshGenerationLossPolicy;
-    },
-  ): Promise<DshOutcome<T>> {
-    if (!isDshRpcMethod(method)) {
-      return {
-        ok: false,
-        failure: { kind: 'transport', reason: 'route-not-allowed', retryable: false, detail: String(method) },
-      };
-    }
-    return this.dispatch<T>(method, payload, options);
+  call<T>(method: DshRpcMethod, payload: unknown, options?: DshUnaryCallOptions): Promise<DshOutcome<T>> {
+    if (!isDshRpcMethod(method)) return refused<T>(method);
+    return this.transport.call<T>(method, method, payload, options);
   }
 
   /**
@@ -492,74 +405,13 @@ export class DshRpcClient {
    * `args` is typed as a record because the gateway matches FIELD NAMES against
    * its descriptor; a positional array is refused.
    */
-  async callRemote<T>(
+  callRemote<T>(
     method: DshRemoteMethod,
     args: Readonly<Record<string, unknown>>,
     options?: { signal?: AbortSignal },
   ): Promise<DshOutcome<T>> {
-    if (!isDshRemoteMethod(method)) {
-      return {
-        ok: false,
-        failure: { kind: 'transport', reason: 'route-not-allowed', retryable: false, detail: String(method) },
-      };
-    }
-    return this.dispatch<T>(method, { args }, options);
-  }
-
-  /** The shared envelope: mint an id, post, and decode `server-response`. */
-  private async dispatch<T>(
-    method: string,
-    payload: unknown,
-    options?: {
-      onRpcId?: (rpcId: string) => void;
-      signal?: AbortSignal;
-      generationLoss?: DshGenerationLossPolicy;
-    },
-  ): Promise<DshOutcome<T>> {
-    const rpcId = this.newRpcId();
-    options?.onRpcId?.(rpcId);
-    const body = JSON.stringify({ type: 'client-request', rpcId, method, payload });
-    const raw = await this.post(method, body, options?.signal, options?.generationLoss);
-    if (!raw.ok) return raw;
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw.value);
-    } catch {
-      return this.drift('invalid-envelope', 'response body is not JSON');
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return this.drift('invalid-envelope', 'response body is not an object');
-    }
-    const envelope = parsed as { type?: unknown; rpcId?: unknown; result?: unknown };
-    if (envelope.type !== 'server-response') {
-      return this.drift('invalid-envelope', `type "${String(envelope.type)}"`);
-    }
-    if (envelope.rpcId !== rpcId) {
-      return this.drift('rpc-id-mismatch', `expected "${rpcId}", got "${String(envelope.rpcId)}"`);
-    }
-    const result = envelope.result;
-    if (!result || typeof result !== 'object' || Array.isArray(result)) {
-      return this.drift('invalid-envelope', 'result is not an object');
-    }
-    const outcome = result as { ok?: unknown; value?: unknown; error?: unknown };
-    if (outcome.ok === true) return { ok: true, value: outcome.value as T };
-    if (outcome.ok === false) {
-      const error = (outcome.error ?? {}) as { code?: unknown; message?: unknown; details?: unknown };
-      if (typeof error.code !== 'string') {
-        return this.drift('invalid-envelope', 'error branch carries no code');
-      }
-      return {
-        ok: false,
-        failure: {
-          kind: 'rpc',
-          code: error.code,
-          message: typeof error.message === 'string' ? error.message : error.code,
-          ...(error.details !== undefined ? { details: error.details } : {}),
-        },
-      };
-    }
-    return this.drift('invalid-envelope', 'result has no ok discriminant');
+    if (!isDshRemoteMethod(method)) return refused<T>(method);
+    return this.transport.call<T>(method, method, { args }, options);
   }
 
   /**
@@ -571,13 +423,13 @@ export class DshRpcClient {
    */
   async respond(rpcId: string, value: unknown): Promise<DshOutcome<DshReceipt>> {
     const body = JSON.stringify({ type: 'client-response', rpcId, result: { ok: true, value } });
-    const raw = await this.post(DSH_RESPOND_ROUTE, body);
+    const raw = await this.transport.postJson(DSH_RESPOND_ROUTE, body);
     if (!raw.ok) return raw;
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw.value);
     } catch {
-      return this.drift('invalid-envelope', 'receipt body is not JSON');
+      return transportFailure('invalid-envelope', { retryable: false, detail: 'receipt body is not JSON' });
     }
     const receipt = (parsed ?? {}) as { accepted?: unknown; reason?: unknown };
     if (receipt.accepted === true) return { ok: true, value: { accepted: true } };
@@ -587,127 +439,18 @@ export class DshRpcClient {
       // one is drift, because only `not-pending` may ever be read as "settled
       // elsewhere".
       if (reason !== 'not-pending' && reason !== 'bad-response') {
-        return this.drift('invalid-envelope', `receipt reason "${String(reason)}"`);
+        return transportFailure('invalid-envelope', { retryable: false, detail: `receipt reason "${String(reason)}"` });
       }
       return { ok: true, value: { accepted: false, reason } };
     }
-    return this.drift('invalid-envelope', 'receipt has no accepted discriminant');
-  }
-
-  private drift<T>(reason: DshTransportReason, detail: string): DshOutcome<T> {
-    return { ok: false, failure: { kind: 'transport', reason, retryable: false, detail } };
-  }
-
-  /**
-   * The single network operation. `POST` and the JSON media type are literals:
-   * the host answers 415 to anything else, and no caller may choose a verb.
-   */
-  private async post(
-    route: string,
-    body: string,
-    cancel?: AbortSignal,
-    generationLoss?: DshGenerationLossPolicy,
-  ): Promise<DshOutcome<string>> {
-    let url: string;
-    try {
-      url = `${this.baseUrl}${dshApiPath(route)}`;
-    } catch {
-      return {
-        ok: false,
-        failure: { kind: 'transport', reason: 'route-not-allowed', retryable: false, detail: route },
-      };
-    }
-    // Checked before the socket is opened, not only linked to it: a caller whose
-    // deadline has already passed must not spend a connection on this host.
-    if (cancel?.aborted) {
-      return { ok: false, failure: { kind: 'transport', reason: 'timeout', retryable: true } };
-    }
-    const entry: InFlight = {
-      controller: new AbortController(),
-      ...(generationLoss ? { generationLoss } : {}),
-    };
-    this.inFlight.add(entry);
-    const onCancel = () => {
-      entry.cause ??= 'timeout';
-      entry.controller.abort();
-    };
-    cancel?.addEventListener('abort', onCancel, { once: true });
-    const timer = this.setTimeoutImpl(() => {
-      entry.cause ??= 'timeout';
-      entry.controller.abort();
-    }, this.timeoutMs);
-    let status: number;
-    let text: string;
-    try {
-      const response = await this.fetchImpl(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body,
-        signal: entry.controller.signal,
-      });
-      status = response.status;
-      const read = await this.readBodyLimited(response);
-      if (!read.ok) {
-        return {
-          ok: false,
-          failure: { kind: 'transport', reason: 'http-status', retryable: false, status, detail: 'response too large' },
-        };
-      }
-      text = read.text;
-    } catch {
-      const reason: DshTransportReason = entry.cause === 'generation-lost'
-        ? 'generation-lost'
-        : entry.cause === 'timeout' ? 'timeout' : 'unreachable';
-      return { ok: false, failure: { kind: 'transport', reason, retryable: true } };
-    } finally {
-      this.clearTimeoutImpl(timer);
-      cancel?.removeEventListener('abort', onCancel);
-      this.inFlight.delete(entry);
-    }
-    // The host puts BUSINESS outcomes in the envelope and keeps HTTP for carrier
-    // faults, so a non-200 is a carrier fault with no envelope to decode.
-    if (status !== 200) {
-      return { ok: false, failure: { kind: 'transport', reason: 'http-status', retryable: status >= 500, status } };
-    }
-    return { ok: true, value: text };
-  }
-
-  /**
-   * Read the response under the byte ceiling BEFORE it is decoded. The size
-   * limit exists to bound allocation, so checking `text().length` afterwards
-   * would be both too late (the body is already fully read) and wrong (a
-   * character count is not a byte count).
-   *
-   * The real guarantee, stated plainly: with a byte stream, retention is
-   * bounded by maxBytes PLUS ONE TRANSPORT CHUNK — a chunk straddling the
-   * ceiling is held whole, then the stream is abandoned (leaving the for-await
-   * loop cancels it). The text() fallback exists for injected fetches without
-   * a stream; it measures encoded BYTES but only after the full body is
-   * allocated, and production fetch never takes it.
-   */
-  private async readBodyLimited(response: DshFetchResponse): Promise<{ ok: true; text: string } | { ok: false }> {
-    if (response.body) {
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for await (const chunk of response.body) {
-        total += chunk.byteLength;
-        if (total > this.maxBytes) return { ok: false };
-        chunks.push(chunk);
-      }
-      const merged = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      return { ok: true, text: new TextDecoder().decode(merged) };
-    }
-    const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > this.maxBytes) return { ok: false };
-    return { ok: true, text };
+    return transportFailure('invalid-envelope', { retryable: false, detail: 'receipt has no accepted discriminant' });
   }
 }
 
+/** The refusal a caller gets for a name outside the allowlist, before any I/O. */
+function refused<T>(route: string): Promise<DshOutcome<T>> {
+  return Promise.resolve(transportFailure('route-not-allowed', { retryable: false, detail: String(route) }));
+}
 // ── Readiness / identity ────────────────────────────────────────────────────
 
 export interface DshHostDescribe {

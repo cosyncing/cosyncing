@@ -192,30 +192,75 @@ function check(name: string, ok: boolean, detail = ''): void {
     );
   }
 
-  // One builder, proven over the source text: outside server.ts no adapter
-  // source may embed an /api/ path literal (a quote or backtick immediately
-  // before it), so a later edit cannot smuggle a route past the allowlist.
-  const sources = ['index.ts', 'implementation.ts', 'mapping.ts', 'observe.ts', 'drive.ts', 'diagnostics.ts'];
+  // One path builder PER contract family, proven over the source text. Outside
+  // the transport modules no adapter source may embed an /api/ path literal (a
+  // quote or backtick immediately before it), so a later edit cannot smuggle a
+  // route past an allowlist. The module list is exhaustive on purpose: a new
+  // file in src/ fails this check until someone decides which side it belongs
+  // on, which is the decision that matters.
+  const domainSources = ['index.ts', 'implementation.ts', 'mapping.ts', 'observe.ts', 'drive.ts', 'diagnostics.ts'];
+  // event-link.ts belongs on the transport side: it owns the carrier's socket
+  // lifecycle and the generation read off it, which is exactly what a domain
+  // module must not get hold of.
+  const transportSources = ['server.ts', 'envelope.ts', 'remote.ts', 'mux.ts', 'auth.ts', 'compatibility.ts', 'event-link.ts'];
   let stray = '';
-  for (const name of sources) {
+  for (const name of domainSources) {
     const text = await Bun.file(new URL(`../src/${name}`, import.meta.url)).text();
     if (/['"`]\/api\//.test(text)) stray = name;
   }
-  check('only server.ts embeds an /api path literal', stray === '', stray);
+  check('no domain module embeds an /api path literal', stray === '', stray);
 
-  const serverSource = await Bun.file(new URL('../src/server.ts', import.meta.url)).text();
-  const verbs = serverSource.match(/method:\s*'([A-Z]+)'/g) ?? [];
+  const srcDir = new URL('../src/', import.meta.url);
+  const listed = new Set([...domainSources, ...transportSources]);
+  let unlisted = '';
+  for await (const entry of Bun.spawnSync(['ls', '-1', srcDir.pathname]).stdout.toString().trim().split('\n')) {
+    if (entry.endsWith('.ts') && !listed.has(entry)) unlisted = `${unlisted} ${entry}`;
+  }
+  check('every src module is classified as domain or transport', unlisted === '', unlisted);
+
+  // Unary is POST-only in both families: the host answers any other verb with
+  // 415 or 405, and a client that could choose a verb could choose a method
+  // that mutates. The two read-only modules are asserted GET-only for the same
+  // reason — a diagnosis that can write is not a diagnosis.
+  const unarySources = ['server.ts', 'envelope.ts', 'remote.ts'];
+  const readOnlySources = ['auth.ts', 'compatibility.ts'];
+  const unaryVerbs: string[] = [];
+  for (const name of unarySources) {
+    const text = await Bun.file(new URL(`../src/${name}`, import.meta.url)).text();
+    unaryVerbs.push(...(text.match(/method:\s*'([A-Z]+)'/g) ?? []));
+  }
+  const readVerbs: string[] = [];
+  for (const name of readOnlySources) {
+    const text = await Bun.file(new URL(`../src/${name}`, import.meta.url)).text();
+    readVerbs.push(...(text.match(/method:\s*'([A-Z]+)'/g) ?? []));
+  }
   check(
-    'the unary client names only the POST method',
-    verbs.length > 0 && verbs.every((verb) => verb.includes("'POST'")),
-    verbs.join(' '),
+    'every unary transport names only the POST method',
+    unaryVerbs.length > 0 && unaryVerbs.every((verb) => verb.includes("'POST'")),
+    unaryVerbs.join(' '),
+  );
+  check(
+    'the probe and the token exchange name only the GET method',
+    readVerbs.length > 0 && readVerbs.every((verb) => verb.includes("'GET'")),
+    readVerbs.join(' '),
   );
 
-  // The downlink socket type has no send: the client writes nothing on either
-  // stream, and answers travel over the respond route instead.
+  const serverSource = await Bun.file(new URL('../src/server.ts', import.meta.url)).text();
+  const muxSource = await Bun.file(new URL('../src/mux.ts', import.meta.url)).text();
+
+  // The LEGACY downlink socket type has no send: the client writes nothing on
+  // either 0.1 stream, and answers travel over the respond route instead.
   check(
-    'the downlink socket surface exposes no send path',
+    'the legacy downlink socket surface exposes no send path',
     !/interface DshSocketLike \{[^}]*send/s.test(serverSource),
+  );
+  // And the MIRROR of it, which is the assertion that keeps the 0.2 carrier from
+  // being quietly rebuilt on the old push-only shape: without `open` and
+  // `cancel` writes this client cannot attach to a single 0.2 stream.
+  check(
+    'the 0.2 carrier socket surface can open and cancel a logical stream',
+    /interface DshMuxSocketLike \{[^}]*send/s.test(muxSource)
+      && muxSource.includes("type: 'open'") && muxSource.includes("type: 'cancel'"),
   );
 }
 

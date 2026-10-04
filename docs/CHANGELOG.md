@@ -480,6 +480,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   running command still shows a card with its status and elapsed time; a session
   holding many long-lived jobs at once no longer sends a preview for each of
   them on every history load.
+- Managed DeepSeek Harness 0.2 launches include `--no-open`, preventing browser
+  tabs during automatic startup and retries. Automatic launch is disabled for
+  0.1.x until a browser-suppression flag is verified; existing user-started 0.1
+  hosts retain their integration. The new 0.2 transport and isolated contract
+  capture tooling are foundations for the migration; session synchronization
+  and Drive against 0.2 hosts remain unfinished.
 
 ### Fixed
 
