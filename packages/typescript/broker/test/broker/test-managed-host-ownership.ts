@@ -2621,6 +2621,10 @@ try {
       baseUrl: 'http://127.0.0.1:3080',
       homeDir: '/fixture/agent-root',
       resolveExecutable: (command) => (command === 'dsh' ? '/usr/bin/dsh' : undefined),
+      // Qualified unless a case overrides it: these checks are about the
+      // locator, the port and the home, and a fixture executable has to answer
+      // with the build cosyncing will actually start.
+      readExecutableVersion: () => '0.2.0-rc.2',
       ...overrides,
     });
     const dshDescribed = await dsh().describeManagedHost();
@@ -2628,7 +2632,7 @@ try {
       dshDescribed?.locator.kind === 'tcp-port' && dshDescribed.locator.port === 3080
         && dshDescribed.identityKey === 'http://127.0.0.1:3080'
         && dshDescribed.launch?.command === '/usr/bin/dsh'
-        && dshDescribed.launch.args.join(' ') === 'web --port 3080',
+        && dshDescribed.launch.args.join(' ') === 'web --port 3080 --no-open',
       JSON.stringify(dshDescribed));
     // The launch must NAME the config root the adapter resolved, for the same
     // reason Kimi's does: the adapter's environment is not required to be the
@@ -2651,6 +2655,7 @@ try {
       env: {},
       baseUrl: 'http://127.0.0.1:3080',
       resolveExecutable: (command) => (command === 'dsh' ? '/usr/bin/dsh' : undefined),
+      readExecutableVersion: () => '0.2.0-rc.2',
     }).describeManagedHost();
     check('a dsh adapter with nothing in its environment still resolves an absolute home',
       typeof rootless?.launch?.cwd === 'string' && isAbsolute(rootless.launch.cwd)
@@ -2668,14 +2673,14 @@ try {
     const shifted = await dsh({ baseUrl: 'http://127.0.0.1:3999' }).describeManagedHost();
     check('a dsh host configured off the default port is launched AT that port',
       shifted?.locator.kind === 'tcp-port' && shifted.locator.port === 3999
-        && shifted.launch?.args.join(' ') === 'web --port 3999',
+        && shifted.launch?.args.join(' ') === 'web --port 3999 --no-open',
       JSON.stringify(shifted));
     check('the default port is named too, so there is one launch shape rather than two',
-      dshDescribed?.launch?.args.join(' ') === 'web --port 3080',
+      dshDescribed?.launch?.args.join(' ') === 'web --port 3080 --no-open',
       JSON.stringify(dshDescribed?.launch?.args));
     check('localhost is launchable and resolves to the same watched port',
       (await dsh({ baseUrl: 'http://localhost:4123' }).describeManagedHost())
-        ?.launch?.args.join(' ') === 'web --port 4123',
+        ?.launch?.args.join(' ') === 'web --port 4123 --no-open',
       'localhost');
     // `--host` is never passed, so only the forms dsh's own default bind already
     // resolves to may be launched. An invented `--host ::1` is exactly the kind
@@ -2693,6 +2698,32 @@ try {
       JSON.stringify(dshDescribed?.launch));
     // A remote address is another machine's process: not startable, and not even
     // locatable, so no ownership opinion can form about it.
+    // The browser guard is a launch-time rule, so it is asserted at the
+    // descriptor the broker actually consumes. An unattended start that popped a
+    // browser is visible to the operator as a stray window on the broker's
+    // desktop, which is not something a log line recovers.
+    check('the managed dsh launch suppresses the browser handoff',
+      dshDescribed?.launch?.args.includes('--no-open') === true,
+      JSON.stringify(dshDescribed?.launch?.args));
+    const unqualified = await dsh({ readExecutableVersion: () => '0.1.0-rc.6' }).describeManagedHost();
+    check('a dsh build with no verified no-browser flag is described but never started',
+      unqualified?.launch === null && unqualified.locator.kind === 'tcp-port'
+        && unqualified.serving?.port === 3080,
+      JSON.stringify(unqualified));
+    const unreadable = await dsh({ readExecutableVersion: () => undefined }).describeManagedHost();
+    check('a version that cannot be read is not a licence to start unattended',
+      unreadable?.launch === null, JSON.stringify(unreadable?.launch));
+    // The default reader runs against a real path here: /usr/bin/dsh does not
+    // exist on the review host, and a describe during discovery must answer
+    // "cannot start" rather than surface a spawn error.
+    const missingBinary = await new DshAdapter({
+      env: {}, baseUrl: 'http://127.0.0.1:3080', homeDir: '/fixture/agent-root',
+      resolveExecutable: () => '/usr/bin/dsh',
+    }).describeManagedHost();
+    check('an executable that cannot be spawned describes rather than throws',
+      missingBinary?.launch === null && missingBinary.serving?.port === 3080,
+      JSON.stringify(missingBinary));
+
     const remote = await dsh({ baseUrl: 'http://dsh-host.invalid:3080' }).describeManagedHost();
     check('a dsh host on another machine is neither launched nor located',
       remote?.locator.kind === 'unknown' && remote.launch === null, JSON.stringify(remote));

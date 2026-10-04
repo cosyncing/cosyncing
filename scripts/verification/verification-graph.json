@@ -880,6 +880,26 @@
     {
       "id": "broker.windows-lane",
       "description": "The measured Windows broker suites pass on a native Windows host."
+    },
+    {
+      "id": "broker.dsh-contract-capture",
+      "description": "The contract capture that the 0.2 fixture is built from cannot touch the machine it runs on and cannot claim more than it saw. The child host is handed a disposable HOME plus pinned DSH_HOME, DSH_AGENTS_HOME and XDG roots rather than an inherited environment, because the installed host resolves DSH_HOME before ~/.dsh and an operator's own export used to redirect an 'isolated' capture into real sessions; provider keys reach it only by an explicitly named --credential-env, never by inheritance, and a name that relocates storage is refused. Every root the child can write is proved contained before it starts. The model turn's provenance is derived from the host's own frames: an unaccepted prompt, a turn that streamed only whitespace, or a turn that stalled on an approval the capture refused is reported as not model-backed and says where it stalled."
+    },
+    {
+      "id": "broker.dsh-launch-qualification",
+      "description": "A 0.2 host is adopted only on evidence. The contract probe distinguishes the 0.2 carrier from the legacy route and from an ordinary 404, a launch plan carries the no-browser guard and the bound address, and the token exchange is qualified before anything is asked of it."
+    },
+    {
+      "id": "broker.dsh-credential-lifetime",
+      "description": "The exchanged 0.2 session survives what it should and gives up only when it is told to. A transport failure during the initial exchange or a renewal keeps both the cookie and the launch token and reports an unreachable host rather than a refused token; renewal is retried on a bounded backoff. Only an authoritative refusal or an ownership change retires a token: releasing or replacing the launch token fences an exchange already in flight, so a late success publishes no state and no credential-store write. A credential store that refuses to answer is reported as storage, never as missing enrollment, and a superseded load failure cannot dismantle the session that replaced it."
+    },
+    {
+      "id": "broker.dsh-stream-carrier",
+      "description": "One WebSocket carries many 0.2 logical streams and every release path reaches the host. Queue accounting charges the serialized frame and refunds exactly what it charged, so a stream that is drained as fast as it fills never overflows on envelope residue; overflow, iterator break, explicit cancel and early release all cancel the upstream subscription once and send nothing after a host terminal frame; a frame that is oversized, undecodable, or outside the grammar ends the carrier generation instead of leaving a live-looking stream with a hole in it, while an unknown stream id stays contained to itself."
+    },
+    {
+      "id": "broker.dsh-event-generation",
+      "description": "Nothing is answered to a 0.2 host until its event generation is proven, and the proof is revoked the moment the stream stops earning it. Readiness is the ready frame alone, with a deadline that exists without an injected clock; a logical end or error on the event stream ends the generation, clears its pending interactions and drives a real reconnect even while the socket stays open, and an old reader cannot invalidate a newer generation. Answering claims the pending entry atomically, so concurrent callers produce one request to the host, a receipt that lands after a reconnect cannot delete the new generation's pending entry, a failed send puts the request back and a host refusal does not."
     }
   ],
   "executionGroups": [
@@ -1526,7 +1546,12 @@
         "broker.kilocode-drive",
         "broker.kilocode-diagnostics",
         "broker.kilocode-registration-gate",
-        "broker.session-truth-conformance"
+        "broker.session-truth-conformance",
+        "broker.dsh-launch-qualification",
+        "broker.dsh-credential-lifetime",
+        "broker.dsh-stream-carrier",
+        "broker.dsh-event-generation",
+        "broker.dsh-contract-capture"
       ],
       "command": [
         "bun",
@@ -1725,7 +1750,16 @@
             "kilocode-observe",
             "kilocode-drive",
             "kilocode-diagnostics",
-            "kilocode-registration-gate"
+            "kilocode-registration-gate",
+            "dsh-compatibility",
+            "dsh-auth",
+            "dsh-mux",
+            "dsh-event-link",
+            "dsh-remote",
+            "dsh-capture-sandbox",
+            "dsh-capture-prompt",
+            "dsh-capture-turn",
+            "dsh-capture-runner"
           ]
         },
         {
@@ -3988,6 +4022,124 @@
             "packages/typescript/adapters/kilocode/src/implementation.ts",
             "packages/typescript/broker/test/kilocode/test-kilocode-registration-gate.ts",
             "packages/typescript/broker/test/helpers/isolated-broker-fixture.ts"
+          ]
+        },
+        {
+          "id": "dsh-compatibility",
+          "claimId": "broker.dsh-launch-qualification",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-compatibility"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/dsh/src/compatibility.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-compatibility.ts",
+            "packages/typescript/adapters/dsh/src/implementation.ts"
+          ]
+        },
+        {
+          "id": "dsh-auth",
+          "claimId": "broker.dsh-credential-lifetime",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-auth"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/dsh/src/auth.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-auth.ts"
+          ]
+        },
+        {
+          "id": "dsh-mux",
+          "claimId": "broker.dsh-stream-carrier",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-mux"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/dsh/src/mux.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-mux.ts"
+          ]
+        },
+        {
+          "id": "dsh-event-link",
+          "claimId": "broker.dsh-event-generation",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-event-link"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/dsh/src/event-link.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-event-link.ts"
+          ]
+        },
+        {
+          "id": "dsh-remote",
+          "claimId": "broker.dsh-transport",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-remote"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/dsh/src/remote.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-remote.ts"
+          ]
+        },
+        {
+          "id": "dsh-capture-sandbox",
+          "claimId": "broker.dsh-contract-capture",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-capture-sandbox"
+          ],
+          "sourceOwners": [
+            "scripts/adapters/dsh-capture-sandbox.ts",
+            "scripts/adapters/tests/test-dsh-capture-sandbox.ts"
+          ]
+        },
+        {
+          "id": "dsh-capture-prompt",
+          "claimId": "broker.dsh-contract-capture",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-capture-prompt"
+          ],
+          "sourceOwners": [
+            "scripts/adapters/dsh-capture-prompt.ts",
+            "scripts/adapters/tests/test-dsh-capture-prompt.ts"
+          ]
+        },
+        {
+          "id": "dsh-capture-turn",
+          "claimId": "broker.dsh-contract-capture",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-capture-turn"
+          ],
+          "sourceOwners": [
+            "scripts/adapters/dsh-capture-turn.ts",
+            "scripts/adapters/tests/test-dsh-capture-turn.ts"
+          ]
+        },
+        {
+          "id": "dsh-capture-runner",
+          "claimId": "broker.dsh-contract-capture",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-capture-runner"
+          ],
+          "sourceOwners": [
+            "scripts/adapters/dsh-contract-capture.ts",
+            "scripts/adapters/tests/test-dsh-capture-runner.ts"
           ]
         }
       ]

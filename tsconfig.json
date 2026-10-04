@@ -8,6 +8,8 @@
     "packages/typescript/*/test/**/*.ts",
     "packages/typescript/adapters/*/src/**/*.ts",
     "packages/typescript/adapters/*/test/**/*.ts",
-    "scripts/broker/**/*.ts"
+    "scripts/broker/**/*.ts",
+    "scripts/adapters/dsh-*.ts",
+    "scripts/adapters/tests/test-dsh-*.ts"
   ]
 }

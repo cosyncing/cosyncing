@@ -43,6 +43,7 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { diagnoseDshSetup, DSH_AGENT_ID, DSH_DISPLAY_NAME, resolveDshHome } from './diagnostics.ts';
+import { decideManagedLaunch } from './compatibility.ts';
 import { homedir } from 'node:os';
 import { DshDriver, dshModelDisplayName, dshModelOptions } from './drive.ts';
 import { mapDshSession, type DshSessionSummary, type DshWorkspaceSummary } from './mapping.ts';
@@ -134,6 +135,14 @@ export interface DshAdapterOptions {
    * describe a machine with or without dsh installed without having either.
    */
   resolveExecutable?: (command: string) => string | undefined;
+  /**
+   * What the installed executable says about its own version.
+   *
+   * Injected so a suite can describe a machine with or without a given dsh
+   * installed. The default reads `<executable> --version`, which the installed
+   * host answers with a bare version and nothing else.
+   */
+  readExecutableVersion?: (command: string) => string | undefined;
   /** The user's home directory; injected so a suite never depends on the real one. */
   homeDir?: string;
   /**
@@ -579,18 +588,42 @@ export class DshAdapter implements AgentBackend {
       && Number.isInteger(port) && port > 0 && port <= 65_535;
     const resolve = this.options.resolveExecutable ?? ((command: string) => Bun.which(command) ?? undefined);
     const executable = launchable ? resolve('dsh') : undefined;
+    // A binary on PATH is not yet a binary that may be started. The invocation
+    // comes from the compatibility module's plan, which is the only place the
+    // per-family launch flags are verified, so the no-browser guard cannot be
+    // bypassed by a caller that builds its own argv. An executable whose family
+    // has no verified unattended launch describes itself as startable-but-not-
+    // launchable (launch: null) and stays connectable, which is the same shape
+    // the adapter already uses for a host on an address it does not own.
+    const readVersion = this.options.readExecutableVersion ?? ((command: string) => {
+      // A missing or unusable executable is an absent fact, not an exception:
+      // the describe path runs during discovery, where a throw would surface as
+      // an adapter failure rather than as a host that cannot be started. Bun
+      // raises ENOENT here instead of reporting a failed spawn, so it is caught
+      // rather than inspected.
+      try {
+        const probe = Bun.spawnSync([command, '--version'], { stdout: 'pipe', stderr: 'pipe' });
+        if (!probe.success) return undefined;
+        return `${probe.stdout.toString()}${probe.stderr.toString()}`.trim() || undefined;
+      } catch {
+        return undefined;
+      }
+    });
+    const launchDecision = executable === undefined
+      ? { allowed: false as const }
+      : decideManagedLaunch(readVersion(executable), port);
     return {
       identityKey: baseUrl,
       locator: loopback && Number.isInteger(port) && port > 0
         ? { kind: 'tcp-port', port }
         : { kind: 'unknown' },
-      launch: executable
+      launch: (executable !== undefined && launchDecision.allowed)
         ? {
           command: executable,
-          // Passed even when it IS the default, so there is one launch shape
-          // rather than two, and the port the descriptor advertises is always
-          // the port the child was told to serve.
-          args: ['web', '--port', String(port)],
+          // Family-qualified, including `--no-open` for the remote family: the
+          // installed 0.2 web bundle opens a browser by default, and a broker
+          // starting a host unattended must not be the thing that pops one.
+          args: [...launchDecision.plan.args],
           // Watching files by polling instead of inotify. The physical DSH
           // qualification on this platform found the host needs it — inotify
           // instances were exhausted host-wide (121/128 in use), and a `dsh web`

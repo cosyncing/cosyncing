@@ -1,0 +1,936 @@
+{
+  "sourceRef": "dsh-0.2.0-rc.2",
+  "capturedAt": "2026-10-03",
+  "provenance": {
+    "upstreamTag": "dsh-v0.2.0-rc.2",
+    "packageVersion": "0.2.0-rc.2",
+    "versionReadFrom": "`dsh -V` reported by the exact executable captured",
+    "captureRun": "2026-10-03T00-44-55-030Z",
+    "captureRunner": "scripts/adapters/dsh-contract-capture.ts",
+    "hostPlatform": "linux/x64",
+    "isolatedHome": true,
+    "mutatedHost": true,
+    "modelBacked": false,
+    "sanitized": "session ids, cookie name, event clientId, timestamps and every path are synthetic"
+  },
+  "notes": "Captured from a live `dsh web --no-open` host on a loopback port with a disposable home. No model turn was requested, so no provider credit was spent; every sample below is the host's own answer to a real request. `args` are the bytes that were sent, and `streams.written` the exact carrier frames this client wrote.",
+  "probe": {
+    "probe.remoteMuxUnauthenticated": {
+      "status": 401,
+      "body": "unauthorized"
+    },
+    "probe.remoteMuxAuthenticatedNoUpgrade": {
+      "status": 404,
+      "body": "not found"
+    },
+    "probe.legacyMux": {
+      "status": 404,
+      "body": "not found"
+    }
+  },
+  "auth": {
+    "auth.exchange": {
+      "status": 303,
+      "location": "./",
+      "cacheControl": "no-store",
+      "cookieName": "dsh-auth-FIXTURECOOKIEVALUE",
+      "cookieAttributes": "dsh-auth-FIXTURECOOKIEVALUE=<redacted-cookie-value>; Max-Age=2592000; Path=/; Expires=Mon, 02 Nov 2026 00:44:56 GMT; HttpOnly; SameSite=Strict",
+      "body": ""
+    },
+    "auth.refusedToken": {
+      "status": 401,
+      "body": "dsh web authentication required; reopen the URL printed by dsh web.\n"
+    }
+  },
+  "unary": {
+    "unary.unknownRoute": {
+      "endpoint": "nonsense/nonsense",
+      "path": "/api/nonsense/nonsense",
+      "args": {},
+      "status": 404,
+      "envelope": {
+        "nonJsonBody": "not found"
+      }
+    },
+    "unary.streamViaPost": {
+      "endpoint": "session/follow",
+      "path": "/api/session/follow",
+      "args": {
+        "request": {
+          "address": {
+            "kind": "session",
+            "sessionId": "nope"
+          }
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-2",
+        "result": {
+          "ok": false,
+          "error": {
+            "code": "gateway/signature-invalid",
+            "message": "typert gateway: session/follow: stream Remote methods must be opened through the stream carrier",
+            "details": {
+              "endpoint": "session/follow"
+            }
+          }
+        }
+      }
+    },
+    "unary.wrongArgName": {
+      "endpoint": "session/list",
+      "path": "/api/session/list",
+      "args": {
+        "request": {}
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-3",
+        "result": {
+          "ok": false,
+          "error": {
+            "code": "gateway/arguments-invalid",
+            "message": "typert gateway: session/list: args fields do not match the descriptor: missing \"_request\"; unexpected \"request\"",
+            "details": {
+              "endpoint": "session/list"
+            }
+          }
+        }
+      }
+    },
+    "unary.missingArgs": {
+      "endpoint": "session/list",
+      "path": "/api/session/list",
+      "args": {},
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-4",
+        "result": {
+          "ok": false,
+          "error": {
+            "code": "gateway/internal",
+            "message": "Remote payload must contain exactly one plain-object args field",
+            "details": {}
+          }
+        }
+      }
+    },
+    "unary.sessionList": {
+      "endpoint": "session/list",
+      "path": "/api/session/list",
+      "args": {
+        "_request": {}
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-5",
+        "result": {
+          "ok": true,
+          "value": {
+            "items": []
+          }
+        }
+      }
+    },
+    "unary.modelCatalog": {
+      "endpoint": "session/modelCatalog",
+      "path": "/api/session/modelCatalog",
+      "args": {},
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-6",
+        "result": {
+          "ok": true,
+          "value": {
+            "default": {
+              "provider": "deepseek-official",
+              "model": "deepseek-flash"
+            },
+            "routableProviders": [
+              "deepseek-official"
+            ],
+            "groups": [
+              {
+                "id": "deepseek-official",
+                "name": "DeepSeek",
+                "models": [
+                  {
+                    "id": "deepseek-flash",
+                    "name": "DeepSeek-V41-Flash",
+                    "reasoning": {
+                      "efforts": [
+                        {
+                          "id": "off",
+                          "name": "Off",
+                          "description": "Use for simple tasks that do not need reasoning."
+                        },
+                        {
+                          "id": "low",
+                          "name": "Low",
+                          "description": "Prefer for routine or latency-sensitive tasks."
+                        },
+                        {
+                          "id": "high",
+                          "name": "High",
+                          "description": "The default balance for most tasks."
+                        },
+                        {
+                          "id": "max",
+                          "name": "Max",
+                          "description": "Reserve for the hardest quality-first tasks."
+                        }
+                      ],
+                      "defaultEffort": "high"
+                    }
+                  },
+                  {
+                    "id": "deepseek-v4-pro",
+                    "name": "DeepSeek-V4-Pro",
+                    "description": "Stronger agentic coding, knowledge, and difficult reasoning; suited to complex or quality-critical tasks at higher cost.",
+                    "reasoning": {
+                      "efforts": [
+                        {
+                          "id": "off",
+                          "name": "Off",
+                          "description": "Use for simple tasks that do not need reasoning."
+                        },
+                        {
+                          "id": "low",
+                          "name": "Low",
+                          "description": "Prefer for routine or latency-sensitive tasks."
+                        },
+                        {
+                          "id": "high",
+                          "name": "High",
+                          "description": "The default balance for most tasks."
+                        },
+                        {
+                          "id": "max",
+                          "name": "Max",
+                          "description": "Reserve for the hardest quality-first tasks."
+                        }
+                      ],
+                      "defaultEffort": "high"
+                    }
+                  }
+                ]
+              }
+            ],
+            "failures": []
+          }
+        }
+      }
+    },
+    "unary.permissionPresets": {
+      "endpoint": "permissionPresets/catalog",
+      "path": "/api/permissionPresets/catalog",
+      "args": {},
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-7",
+        "result": {
+          "ok": true,
+          "value": {
+            "options": [
+              {
+                "value": "read-only",
+                "name": "read-only"
+              },
+              {
+                "value": "workspace-write",
+                "name": "workspace-write"
+              },
+              {
+                "value": "danger-full-access",
+                "name": "danger-full-access"
+              }
+            ],
+            "defaultOptions": [
+              {
+                "value": "read-only",
+                "name": "read-only"
+              },
+              {
+                "value": "workspace-write",
+                "name": "workspace-write"
+              },
+              {
+                "value": "danger-full-access",
+                "name": "danger-full-access"
+              }
+            ],
+            "defaultPreset": "workspace-write"
+          }
+        }
+      }
+    }
+  },
+  "events": {
+    "frames": [
+      {
+        "type": "item",
+        "streamId": "cap-events",
+        "value": {
+          "type": "ready",
+          "clientId": "00000000-0000-4000-8000-000000000001",
+          "host": {
+            "home": "/fixture/home"
+          }
+        }
+      }
+    ]
+  },
+  "session": {
+    "session.create": {
+      "endpoint": "session/create",
+      "path": "/api/session/create",
+      "args": {
+        "request": {}
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-8",
+        "result": {
+          "ok": true,
+          "value": {
+            "sessionId": "session-fixture-001",
+            "agentPreset": "standard"
+          }
+        }
+      }
+    },
+    "session.page": {
+      "endpoint": "session/page",
+      "path": "/api/session/page",
+      "args": {
+        "request": {
+          "address": {
+            "kind": "session",
+            "sessionId": "session-fixture-001"
+          },
+          "throughSeq": 0,
+          "maxMessages": 20
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-9",
+        "result": {
+          "ok": true,
+          "value": {
+            "records": [
+              {
+                "type": "event",
+                "event": {
+                  "type": "permission/preset",
+                  "seq": 0,
+                  "time": 1759449600007,
+                  "data": {
+                    "preset": "workspace-write"
+                  }
+                }
+              }
+            ],
+            "hasMore": false
+          }
+        }
+      }
+    },
+    "session.projections": {
+      "endpoint": "session/projections",
+      "path": "/api/session/projections",
+      "args": {
+        "request": {
+          "sessionId": "session-fixture-001"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-10",
+        "result": {
+          "ok": true,
+          "value": {
+            "asOfSeq": 2,
+            "values": {
+              "title": null,
+              "goal": null,
+              "tokenUsage": {
+                "uncachedInputTokens": 0,
+                "outputTokens": 0,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0
+              },
+              "contextPressure": {},
+              "contextBreakdown": {
+                "systemTokens": 0,
+                "toolsTokens": 0,
+                "messageTokens": 0
+              },
+              "inbox": {
+                "next-turn": [],
+                "next-step": []
+              },
+              "sessionStats": {
+                "turns": 0,
+                "steps": 0,
+                "llmMs": 0,
+                "toolMs": 0,
+                "ttftMs": 0,
+                "ttftSteps": 0,
+                "decodeMs": 0,
+                "decodeTokens": 0
+              },
+              "turnOutline": [],
+              "agentPreset": "standard",
+              "userQuestions": {
+                "active": [],
+                "settled": []
+              },
+              "subagentCatalog": [],
+              "subagentTiming": {
+                "settledMs": 0
+              },
+              "subagent": null,
+              "permissions": {
+                "currentValue": "workspace-write"
+              },
+              "todos": null,
+              "plan": {
+                "active": false,
+                "pending": false
+              },
+              "modelSelection": {
+                "lastUsed": null,
+                "next": null
+              },
+              "sessionListMetadata": {
+                "blank": true,
+                "lastPromptAt": null
+              },
+              "imageLimits": {
+                "maxImageBytes": 20971520,
+                "maxImagesPerMessage": 20,
+                "maxMessageImageBytes": 209715200,
+                "maxImagePixels": 64000000,
+                "maxImageDimension": 8192,
+                "mediaTypes": [
+                  "image/png",
+                  "image/jpeg",
+                  "image/webp",
+                  "image/gif"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "session.listAfterCreate": {
+      "endpoint": "session/list",
+      "path": "/api/session/list",
+      "args": {
+        "_request": {}
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-11",
+        "result": {
+          "ok": true,
+          "value": {
+            "items": [
+              {
+                "sessionId": "session-fixture-001",
+                "updatedAt": 1759449600000,
+                "agentAvailable": true,
+                "running": false,
+                "blank": true,
+                "cwd": "/fixture/workspace",
+                "projections": {
+                  "kind": "sequenced",
+                  "asOfSeq": 2,
+                  "values": {
+                    "title": null,
+                    "goal": null,
+                    "tokenUsage": {
+                      "uncachedInputTokens": 0,
+                      "outputTokens": 0,
+                      "cacheReadTokens": 0,
+                      "cacheWriteTokens": 0
+                    },
+                    "contextPressure": {},
+                    "contextBreakdown": {
+                      "systemTokens": 0,
+                      "toolsTokens": 0,
+                      "messageTokens": 0
+                    },
+                    "inbox": {
+                      "next-turn": [],
+                      "next-step": []
+                    },
+                    "sessionStats": {
+                      "turns": 0,
+                      "steps": 0,
+                      "llmMs": 0,
+                      "toolMs": 0,
+                      "ttftMs": 0,
+                      "ttftSteps": 0,
+                      "decodeMs": 0,
+                      "decodeTokens": 0
+                    },
+                    "turnOutline": [],
+                    "agentPreset": "standard",
+                    "userQuestions": {
+                      "active": [],
+                      "settled": []
+                    },
+                    "subagentCatalog": [],
+                    "subagentTiming": {
+                      "settledMs": 0
+                    },
+                    "subagent": null,
+                    "permissions": {
+                      "currentValue": "workspace-write"
+                    },
+                    "todos": null,
+                    "plan": {
+                      "active": false,
+                      "pending": false
+                    },
+                    "modelSelection": {
+                      "lastUsed": null,
+                      "next": null
+                    },
+                    "sessionListMetadata": {
+                      "blank": true,
+                      "lastPromptAt": null
+                    },
+                    "imageLimits": {
+                      "maxImageBytes": 20971520,
+                      "maxImagesPerMessage": 20,
+                      "maxMessageImageBytes": 209715200,
+                      "maxImagePixels": 64000000,
+                      "maxImageDimension": 8192,
+                      "mediaTypes": [
+                        "image/png",
+                        "image/jpeg",
+                        "image/webp",
+                        "image/gif"
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "session.followMissing": {
+      "endpoint": "session/follow",
+      "path": "/api/session/follow",
+      "args": {
+        "request": {
+          "address": {
+            "kind": "session",
+            "sessionId": "session-does-not-exist"
+          }
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-14",
+        "result": {
+          "ok": false,
+          "error": {
+            "code": "gateway/signature-invalid",
+            "message": "typert gateway: session/follow: stream Remote methods must be opened through the stream carrier",
+            "details": {
+              "endpoint": "session/follow"
+            }
+          }
+        }
+      }
+    }
+  },
+  "streams": {
+    "sessionId": "session-fixture-001",
+    "frames": {
+      "follow": [
+        {
+          "type": "item",
+          "streamId": "cap-follow",
+          "value": {
+            "type": "snapshot",
+            "header": {
+              "version": 4,
+              "id": "session-fixture-001",
+              "createdAt": 1759449600000,
+              "cwd": "/fixture/workspace",
+              "isSeeded": false,
+              "agentPreset": "standard"
+            },
+            "cursor": 2,
+            "records": [
+              {
+                "type": "event",
+                "event": {
+                  "type": "permission/preset",
+                  "seq": 0,
+                  "time": 1759449600007,
+                  "data": {
+                    "preset": "workspace-write"
+                  }
+                }
+              },
+              {
+                "type": "event",
+                "event": {
+                  "type": "sandbox/mode",
+                  "seq": 1,
+                  "time": 1759449600009,
+                  "data": {
+                    "mode": "workspace-write"
+                  }
+                }
+              },
+              {
+                "type": "event",
+                "event": {
+                  "type": "approval/policy",
+                  "seq": 2,
+                  "time": 1759449600010,
+                  "data": {
+                    "policy": "ask"
+                  }
+                }
+              }
+            ],
+            "hasMore": false,
+            "projections": {
+              "asOfSeq": 2,
+              "values": {
+                "title": null,
+                "goal": null,
+                "tokenUsage": {
+                  "uncachedInputTokens": 0,
+                  "outputTokens": 0,
+                  "cacheReadTokens": 0,
+                  "cacheWriteTokens": 0
+                },
+                "contextPressure": {},
+                "contextBreakdown": {
+                  "systemTokens": 0,
+                  "toolsTokens": 0,
+                  "messageTokens": 0
+                },
+                "inbox": {
+                  "next-turn": [],
+                  "next-step": []
+                },
+                "sessionStats": {
+                  "turns": 0,
+                  "steps": 0,
+                  "llmMs": 0,
+                  "toolMs": 0,
+                  "ttftMs": 0,
+                  "ttftSteps": 0,
+                  "decodeMs": 0,
+                  "decodeTokens": 0
+                },
+                "turnOutline": [],
+                "agentPreset": "standard",
+                "userQuestions": {
+                  "active": [],
+                  "settled": []
+                },
+                "subagentCatalog": [],
+                "subagentTiming": {
+                  "settledMs": 0
+                },
+                "subagent": null,
+                "permissions": {
+                  "currentValue": "workspace-write"
+                },
+                "todos": null,
+                "plan": {
+                  "active": false,
+                  "pending": false
+                },
+                "modelSelection": {
+                  "lastUsed": null,
+                  "next": null
+                },
+                "sessionListMetadata": {
+                  "blank": true,
+                  "lastPromptAt": null
+                },
+                "imageLimits": {
+                  "maxImageBytes": 20971520,
+                  "maxImagesPerMessage": 20,
+                  "maxMessageImageBytes": 209715200,
+                  "maxImagePixels": 64000000,
+                  "maxImageDimension": 8192,
+                  "mediaTypes": [
+                    "image/png",
+                    "image/jpeg",
+                    "image/webp",
+                    "image/gif"
+                  ]
+                }
+              }
+            },
+            "assistantStream": {
+              "revision": 0
+            }
+          }
+        }
+      ],
+      "control": [
+        {
+          "type": "item",
+          "streamId": "cap-control",
+          "value": {
+            "type": "baseline",
+            "value": {
+              "projections": {
+                "session-fixture-001": {
+                  "asOfSeq": 2,
+                  "values": {
+                    "title": null,
+                    "goal": null,
+                    "tokenUsage": {
+                      "uncachedInputTokens": 0,
+                      "outputTokens": 0,
+                      "cacheReadTokens": 0,
+                      "cacheWriteTokens": 0
+                    },
+                    "contextPressure": {},
+                    "contextBreakdown": {
+                      "systemTokens": 0,
+                      "toolsTokens": 0,
+                      "messageTokens": 0
+                    },
+                    "inbox": {
+                      "next-turn": [],
+                      "next-step": []
+                    },
+                    "sessionStats": {
+                      "turns": 0,
+                      "steps": 0,
+                      "llmMs": 0,
+                      "toolMs": 0,
+                      "ttftMs": 0,
+                      "ttftSteps": 0,
+                      "decodeMs": 0,
+                      "decodeTokens": 0
+                    },
+                    "turnOutline": [],
+                    "agentPreset": "standard",
+                    "userQuestions": {
+                      "active": [],
+                      "settled": []
+                    },
+                    "subagentCatalog": [],
+                    "subagentTiming": {
+                      "settledMs": 0
+                    },
+                    "subagent": null,
+                    "permissions": {
+                      "currentValue": "workspace-write"
+                    },
+                    "todos": null,
+                    "plan": {
+                      "active": false,
+                      "pending": false
+                    },
+                    "modelSelection": {
+                      "lastUsed": null,
+                      "next": null
+                    },
+                    "sessionListMetadata": {
+                      "blank": true,
+                      "lastPromptAt": null
+                    },
+                    "imageLimits": {
+                      "maxImageBytes": 20971520,
+                      "maxImagesPerMessage": 20,
+                      "maxMessageImageBytes": 209715200,
+                      "maxImagePixels": 64000000,
+                      "maxImageDimension": 8192,
+                      "mediaTypes": [
+                        "image/png",
+                        "image/jpeg",
+                        "image/webp",
+                        "image/gif"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "workspace": [
+        {
+          "type": "item",
+          "streamId": "cap-ws",
+          "value": {
+            "type": "baseline",
+            "value": {
+              "items": [],
+              "archivedSessionIds": [],
+              "pinnedSessionIds": []
+            }
+          }
+        }
+      ]
+    },
+    "written": [
+      {
+        "type": "open",
+        "streamId": "cap-follow",
+        "endpoint": "session/follow",
+        "payload": {
+          "args": {
+            "request": {
+              "address": {
+                "kind": "session",
+                "sessionId": "session-fixture-001"
+              },
+              "assistantStream": true
+            }
+          }
+        }
+      },
+      {
+        "type": "open",
+        "streamId": "cap-control",
+        "endpoint": "session/control",
+        "payload": {
+          "args": {}
+        }
+      },
+      {
+        "type": "open",
+        "streamId": "cap-ws",
+        "endpoint": "workspace/follow",
+        "payload": {
+          "args": {}
+        }
+      }
+    ]
+  },
+  "catalogs": {
+    "agentPresets": {
+      "endpoint": "agentPresets/list",
+      "path": "/api/agentPresets/list",
+      "args": {},
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-12",
+        "result": {
+          "ok": true,
+          "value": {
+            "presets": [
+              {
+                "id": "standard",
+                "order": 1,
+                "isDefault": true
+              },
+              {
+                "id": "ptc",
+                "order": 2,
+                "isDefault": false
+              },
+              {
+                "id": "minimal",
+                "order": 3,
+                "isDefault": false
+              },
+              {
+                "id": "cordis",
+                "order": 4,
+                "isDefault": false
+              }
+            ]
+          }
+        }
+      }
+    },
+    "commands": {
+      "endpoint": "commands/list",
+      "path": "/api/commands/list",
+      "args": {
+        "agentId": "session-fixture-001"
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "capture-13",
+        "result": {
+          "ok": true,
+          "value": [
+            {
+              "definitionId": "@deepseek-ai/dsh-command-compact",
+              "name": "compact",
+              "description": "Compact older conversation history"
+            },
+            {
+              "definitionId": "@deepseek-ai/dsh-session-log-export",
+              "name": "export",
+              "description": "Download this Session log as a ZIP archive"
+            },
+            {
+              "definitionId": "@deepseek-ai/dsh-command-feedback",
+              "name": "feedback",
+              "description": "Record feedback about this session",
+              "input": {
+                "hint": "<text>"
+              }
+            },
+            {
+              "definitionId": "@deepseek-ai/dsh-command-goal",
+              "name": "goal",
+              "description": "Set or view the goal for a long-running task",
+              "input": {
+                "hint": "[<objective>|clear|edit <objective>|pause|resume]",
+                "attachments": true
+              }
+            },
+            {
+              "definitionId": "@deepseek-ai/dsh-permission-presets",
+              "name": "permission",
+              "description": "Switch the permission preset (sandbox mode + approval policy)",
+              "input": {
+                "hint": "<preset>"
+              }
+            },
+            {
+              "definitionId": "@deepseek-ai/dsh-plan-mode",
+              "name": "plan",
+              "description": "Enter or leave plan mode",
+              "input": {
+                "hint": "[off|message]",
+                "attachments": true
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
