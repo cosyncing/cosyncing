@@ -1,9 +1,15 @@
 # DeepSeek Harness (experimental)
 
 The provisional DeepSeek Harness adapter is intended for source contributors.
-It was verified against `@deepseek-ai/dsh` 0.1.0-rc.6 and connects to a `dsh
-web` host. cosyncing never installs or configures that host, but it can start,
-supervise, and stop one it owns — see [Managed hosts](#managed-hosts).
+It connects to a `dsh web` host and was verified against two versions of it:
+`@deepseek-ai/dsh` 0.1.0-rc.6 and 0.2.0-rc.2. Those are two different wire
+contracts, not one contract with an older build behind it, and cosyncing selects
+between them by reading the host rather than by trusting a version string. A
+version that is neither of those two is recognized as one of the two families and
+reported as unverified; nothing about it is assumed.
+
+cosyncing never installs or configures that host, but it can start, supervise,
+and stop one it owns — see [Managed hosts](#managed-hosts).
 
 The adapter is registered by default. It has nothing to talk to until you start
 a `dsh web` host, and it reports that rather than disappearing. Point it at a
@@ -17,6 +23,13 @@ bun run broker
 ## Install the host
 
 Install it globally with npm, so that `dsh` lands on your PATH:
+
+```bash
+npm install -g @deepseek-ai/dsh@0.2.0-rc.2
+```
+
+Or pin the older contract instead; both are verified, and each selects its own
+code path:
 
 ```bash
 npm install -g @deepseek-ai/dsh@0.1.0-rc.6
@@ -43,13 +56,49 @@ Do not start a full source broker alongside an installed broker that owns the
 same native agents. Stop the installed service for the review window and
 restore it afterward.
 
+## Signing in to a 0.2 host
+
+A 0.2 host protects its API. The address of a host you started yourself answers
+nothing until you present the one-time URL that `dsh web` printed when it
+started, so cosyncing asks you for that URL once and keeps the session cookie the
+host issues for it.
+
+```bash
+cosyncing dsh connect
+# Paste the URL dsh printed. It is read silently and never stored.
+
+printf '%s' "$DSH_LAUNCH_URL" | cosyncing dsh connect
+cosyncing dsh status
+cosyncing dsh disconnect
+```
+
+The URL is a credential that grants full control of that host, so it is accepted
+only from a hidden prompt or from stdin — never from the command line, where it
+would sit in your shell history and in the process list. What cosyncing stores is
+the cookie the host issued, in its own credential file, scoped to that address and
+that host's profile: a second host does not share it, a second cosyncing install
+does not read it, and the file is written owner-only.
+
+The cookie outlives both processes. Restart the broker, or restart the host, and
+cosyncing is still signed in — no re-paste, and no new launch URL to go hunting
+for. A host cosyncing starts for itself needs no `dsh connect` at all: the launch
+URL it prints goes straight from the child process to the adapter that configured
+that address, and the exchange runs on its own.
+
+`cosyncing doctor` reads the same enrollment the running broker uses, so it never
+reports "not enrolled" about a host you are logged into, and it never suggests
+re-enrolling when what actually went wrong is something else.
+
 ## Current behavior
 
 - Existing sessions and history are discovered from the host.
 - Multiple active foreground cosyncing clients share the ordered transcript
   and live control surface.
 - Session creation and rename, text prompts, permission and question replies,
-  interruption, reconnect, and removal are supported.
+  interruption, reconnect, and removal are supported. On 0.2, creating a session
+  without naming a directory lets the host choose where it lands — which is what
+  a host with no registered workspace does anyway — while naming a directory that
+  the host has not registered stays a refusal rather than a silent relocation.
 - Model selection, including per-model reasoning effort where the provider
   offers it. DSH stores the choice on the session, so it persists past the
   prompt it was picked for and is what the DSH browser UI shows next.
@@ -64,6 +113,26 @@ restore it afterward.
   reattaches and catches up from history.
 - The adapter fails closed when host identity cannot be verified or a session
   has been removed.
+
+## What is verified on 0.2, and what is not
+
+The 0.2 contract was captured from a running 0.2.0-rc.2 host and re-checked
+against one: starting a host without a browser window opening, becoming
+authenticated to it with nothing typed, reading its session roster, opening a
+session and reading its history through the snapshot cut, creating a session on a
+host that has no workspace registered, keeping the credential across a broker
+restart, and enrolling a host cosyncing does not own without touching that host's
+process.
+
+What has NOT been verified against 0.2 is anything that needs a real model turn on
+that host: prompt echoes, streamed replies, tool output cards, approval and
+question payloads, and image attachments. The 0.2 wire carries the same durable-log
+format that 0.1 did, and the mappings are shared, but shared code is not shared
+evidence — treat those surfaces as unverified on 0.2 until a capture says
+otherwise. Two further 0.2 limits are the host's own, not gaps in cosyncing: its
+roster carries no model column (its model catalog is host-wide and names no
+current selection), and its launch-token exchange is the only sign-in route, so
+there is no read-only credential to ask for.
 
 Still deferred: non-image file attachments, background resident subscriptions,
 session fork and search, subagents, workspace and settings mutation, goals as a
@@ -86,6 +155,12 @@ read-only Observe credential, so cosyncing accepts only an explicit foreground
 An installed cosyncing service starts `dsh web` when none is running, restarts
 it if it crashes, and stops it when the service stops. A foreground broker does
 the same when `COSYNCING_DSH_MANAGED_HOST=1` is set in its environment.
+
+The start passes `--no-open`, verified against a real 0.2 host, and the child runs
+without a display handoff, so a managed launch does not pop a browser window every
+time the broker restarts. On 0.2 the launch URL that child prints is what signs
+cosyncing in, automatically; the token in it is held in memory only, and the
+cookie it earns is what persists.
 
 Only a locally launchable configuration is managed. Point the adapter at a host
 on another machine and cosyncing observes it without ever trying to start or

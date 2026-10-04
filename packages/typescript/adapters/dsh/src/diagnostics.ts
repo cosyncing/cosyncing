@@ -24,6 +24,14 @@ import {
   type SetupCheck,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
+import { dshCredentialScope, type DshCookie, type DshCredentialStore } from './auth.ts';
+import {
+  probeDshContract,
+  DSH_CURRENT_VERSION,
+  DSH_QUALIFIED_VERSION_LIST,
+  DSH_UPGRADE_REQUIRED_STATUS,
+  type DshContractProbe,
+} from './compatibility.ts';
 import {
   DSH_BASE_URL_ENV,
   DSH_DEFAULT_BASE_URL,
@@ -36,8 +44,12 @@ import {
 export const DSH_AGENT_ID = 'dsh';
 export const DSH_DISPLAY_NAME = 'DeepSeek Harness';
 
-/** Status a real host answers to a plain GET on an upgrade-only stream route. */
-export const DSH_UPGRADE_REQUIRED_STATUS = 426;
+/**
+ * Status a real 0.1 host answers to a plain GET on an upgrade-only stream route.
+ * Re-exported from the contract module, which owns the number: doctor and the
+ * adapter must not be able to disagree about what the fingerprint is.
+ */
+export { DSH_UPGRADE_REQUIRED_STATUS };
 
 /**
  * Says CONFIGURED TO MANAGE rather than "owns this host": the posture is a fact
@@ -180,9 +192,209 @@ function hostPort(baseUrl: string): { host: string; port: number } | undefined {
   }
 }
 
+
+/** The command that enrolls an external host, as the operator types it. */
+export const DSH_ENROLL_COMMAND = 'cosy dsh connect';
+
+/**
+ * The contract probe's verdict, turned into what an operator should do.
+ *
+ * THIS TABLE IS THE WHOLE CHECK, and it is a table over the adapter's own
+ * verdict union rather than a second fingerprint. What a 0.2 host answers to an
+ * anonymous request (401 unauthorized on its carrier, 404 on the legacy route)
+ * is not what a 0.1 host answers, so a doctor that looked only for the 0.1
+ * upgrade-required fingerprint reported a healthy, correctly installed 0.2 host
+ * as "an unexpected status" and sent the operator off to work out which program
+ * owns their own port. Exhaustive over the union: a new verdict fails the build
+ * here rather than reading as an unknown server.
+ */
+function contractCheck(probe: DshContractProbe, baseUrl: string): SetupCheck {
+  if (probe.family === 'legacy-0.1') {
+    return {
+      id: 'dsh.contract',
+      status: 'pass',
+      detailCode: 'downlink-upgrade-required',
+      summary: 'The host answers the DeepSeek Harness downlink contract.',
+      evidence: { baseUrl, verifiedAgainst: DSH_FIXTURE_VERSION },
+    };
+  }
+  if (probe.family === 'remote-0.2') {
+    if (probe.reason === 'host-or-origin-refused') {
+      return {
+        id: 'dsh.contract',
+        status: 'fail',
+        detailCode: 'remote-carrier-refused',
+        summary: 'The DeepSeek Harness host refused this request before routing it.',
+        evidence: { baseUrl, verifiedAgainst: DSH_CURRENT_VERSION },
+        remediation: {
+          kind: 'manual',
+          message: 'The host fences on the address a request claims. Confirm '
+            + DSH_BASE_URL_ENV + ' names the address the host itself serves, and that any proxy '
+            + 'in front of it forwards it.',
+        },
+      };
+    }
+    return {
+      id: 'dsh.contract',
+      status: 'pass',
+      detailCode: probe.authenticated ? 'remote-carrier-answered' : 'remote-carrier-requires-credential',
+      summary: probe.authenticated
+        ? 'The host answers the 0.2 DeepSeek Harness carrier contract.'
+        : 'The host answers the 0.2 DeepSeek Harness carrier and authenticates every request.',
+      evidence: { baseUrl, verifiedAgainst: DSH_CURRENT_VERSION },
+    };
+  }
+  const unreachable = probe.reason === 'no-listener' || probe.reason === 'probe-failed';
+  return {
+    id: 'dsh.contract',
+    status: 'fail',
+    detailCode: unreachable ? 'downlink-unreachable' : 'downlink-unexpected-status',
+    summary: unreachable
+      ? 'The server on this address did not answer the DeepSeek Harness routes.'
+      : 'The server on this address answered the DeepSeek Harness routes with an unexpected status.',
+    evidence: { baseUrl, verifiedAgainst: DSH_QUALIFIED_VERSION_LIST },
+    remediation: {
+      kind: 'manual',
+      message: 'Confirm a DeepSeek Harness host (verified against ' + DSH_QUALIFIED_VERSION_LIST
+        + ') owns this address, or set ' + DSH_BASE_URL_ENV + ' if it listens elsewhere.',
+    },
+  };
+}
+
 export interface DshDiagnosisOptions {
   /** Explicit base URL, when the adapter was configured with one. */
   baseUrl?: string;
+  /**
+   * The broker's own credential store, read and never written.
+   *
+   * Doctor and the running adapter must look in the same place for the same
+   * scope, which is what makes an answer like "cosyncing holds a credential and
+   * the host refused it" a fact rather than a guess about a file someone else
+   * owns. Without a store there is nothing to report about enrollment, and this
+   * module says so instead of implying the operator is logged out.
+   */
+  credentialStore?: DshCredentialStore;
+  /** The DSH_HOME the credential scope is derived from. Defaults to the resolved home. */
+  dshHome?: string;
+  now?: () => number;
+}
+
+/**
+ * What cosyncing itself holds for this endpoint, as an operator can act on it.
+ *
+ * Deliberately NOT a network test. The probe above is anonymous on purpose (a
+ * 0.2 host answers a credential-free request with 401, and that anonymous
+ * refusal is the fingerprint), and re-running it with the stored cookie proves
+ * nothing: past that fence the carrier route is not a GET-able route at all, so
+ * a request that IS accepted answers 404. The store is the only place the
+ * enrollment question has a real answer, and even then the honest claim is
+ * "cosyncing holds a credential that has not expired" — whether the host still
+ * agrees is settled by the first real request, whose failure the adapter
+ * already classifies.
+ */
+async function enrollmentCheck(
+  options: DshDiagnosisOptions,
+  context: SetupDiagnosisContext,
+  baseUrl: string,
+  home: string,
+  now: number,
+): Promise<SetupCheck> {
+  // The same posture rule as every other remediation here. When cosyncing starts
+  // this host IT reads the launch announcement itself, so an operator handed
+  // `cosy dsh connect` would have to start a SECOND host to obtain a URL — and
+  // the manual enrollment would then be pointed at whichever of the two answers
+  // the address first.
+  const managed = managedHere(context, baseUrl);
+  const evidence = { baseUrl };
+  if (!options.credentialStore) {
+    return {
+      id: 'dsh.enrollment',
+      status: 'fail',
+      detailCode: 'credential-store-missing',
+      summary: 'cosyncing has no credential store for DeepSeek Harness, so it cannot hold a session with this host.',
+      evidence,
+      remediation: {
+        kind: 'manual',
+        message: 'Repair this cosyncing installation so its credential store is available, then rerun doctor.',
+      },
+    };
+  }
+
+  let cookie: DshCookie | null;
+  try {
+    cookie = await options.credentialStore.load(dshCredentialScope(baseUrl, home));
+  } catch {
+    // A store that will not answer is a storage problem. Reporting it as "not
+    // enrolled" invites the operator to re-enroll, and enrolling writes to the
+    // file whose safety the store just refused — the exact sequence a
+    // group-writable or symlinked credential file must never see.
+    return {
+      id: 'dsh.enrollment',
+      status: 'fail',
+      detailCode: 'credential-store-unusable',
+      summary: 'cosyncing could not read its DeepSeek Harness credential store, so the enrollment state is unknown.',
+      evidence,
+      remediation: {
+        kind: 'manual',
+        message: 'Check the permissions and file type of the cosyncing session store; do not re-enroll until it reads cleanly.',
+      },
+    };
+  }
+
+  const expiresAt = cookie?.expiresAt;
+  // Typed as a number map so an unknown expiry cannot widen the evidence value
+  // union with `undefined`.
+  const expiry: Record<string, number> = expiresAt !== undefined ? { expiresAt } : {};
+  if (cookie === null) {
+    if (managed) {
+      return {
+        id: 'dsh.enrollment',
+        status: 'fail',
+        detailCode: 'enrollment-required-by-managed-host',
+        summary: 'The DeepSeek Harness host cosyncing starts has not given cosyncing a session credential.',
+        evidence,
+        remediation: {
+          kind: 'manual',
+          message: 'Restart the cosyncing service so it starts the host again and reads its own launch '
+            + 'announcement. Do not start a second host by hand: its credential would belong to a host '
+            + 'nothing here is addressing.',
+        },
+      };
+    }
+    return {
+      id: 'dsh.enrollment',
+      status: 'fail',
+      detailCode: 'enrollment-required',
+      summary: 'This DeepSeek Harness host requires a session credential that cosyncing does not have.',
+      evidence,
+      remediation: {
+        kind: 'command',
+        message: 'Enroll this host with its one-time launch URL; cosyncing needs no restart afterwards.',
+        command: DSH_ENROLL_COMMAND,
+      },
+    };
+  }
+  if (expiresAt !== undefined && expiresAt <= now) {
+    return {
+      id: 'dsh.enrollment',
+      status: 'fail',
+      detailCode: 'credential-expired',
+      summary: 'The stored DeepSeek Harness session credential is past the expiry the host gave it.',
+      evidence: { ...evidence, ...expiry },
+      remediation: {
+        kind: 'command',
+        message: 'Re-enroll this host with a fresh launch URL; cosyncing needs no restart afterwards.',
+        command: DSH_ENROLL_COMMAND,
+      },
+    };
+  }
+  return {
+    id: 'dsh.enrollment',
+    status: 'pass',
+    detailCode: 'credential-held',
+    summary: 'cosyncing holds a session credential for this host that has not expired.',
+    evidence: { ...evidence, ...expiry },
+  };
 }
 
 export async function diagnoseDshSetup(
@@ -280,39 +492,29 @@ export async function diagnoseDshSetup(
     evidence: { baseUrl },
   });
 
-  // Contract fingerprint. A real host answers a plain GET on the mux route with
-  // 426 (the route exists, but only over an upgrade). Anything else on that port
-  // is either not dsh or is an rc whose stream routing changed — both are
-  // reasons to fail closed rather than to attach and misread frames.
-  const probe = await context.fetchJson(`${baseUrl}${dshApiPath(DSH_MUX_ROUTE)}`);
-  if (probe.statusCode === DSH_UPGRADE_REQUIRED_STATUS) {
-    checks.push({
-      id: 'dsh.contract',
-      status: 'pass',
-      detailCode: 'downlink-upgrade-required',
-      summary: 'The host answers the DeepSeek Harness downlink contract.',
-      evidence: { baseUrl, verifiedAgainst: DSH_FIXTURE_VERSION },
-    });
-  } else {
-    checks.push({
-      id: 'dsh.contract',
-      status: 'fail',
-      detailCode: probe.statusCode === undefined ? 'downlink-unreachable' : 'downlink-unexpected-status',
-      summary: probe.statusCode === undefined
-        ? 'The server on this address did not answer the DeepSeek Harness downlink route.'
-        : 'The server on this address answered the DeepSeek Harness downlink route with an unexpected status.',
-      evidence: {
-        baseUrl,
-        verifiedAgainst: DSH_FIXTURE_VERSION,
-        ...(probe.statusCode !== undefined ? { statusCode: probe.statusCode } : {}),
-      },
-      remediation: {
-        kind: 'manual',
-        message:
-          `Confirm a DeepSeek Harness host (verified against ${DSH_FIXTURE_VERSION}) owns this address; `
-          + `set ${DSH_BASE_URL_ENV} if it listens elsewhere.`,
-      },
-    });
+  // The adapter's OWN contract probe, so doctor can never report a host the
+  // broker is able to drive as an unrecognised server. Two anonymous GETs at
+  // most, and no POST anywhere in sight: the probe refuses to carry a credential
+  // on purpose, because past a 0.2 host's auth fence the carrier route is not a
+  // GET-able route at all, and an authenticated probe would read a healthy 0.2
+  // host as a 404.
+  const probe = await probeDshContract(baseUrl, async (url) => {
+    const answer = await context.fetchJson(url);
+    if (answer.status === 'unreachable') throw new Error('dsh diagnosis: route unreachable');
+    return { status: answer.statusCode ?? 0 };
+  });
+  checks.push(contractCheck(probe, baseUrl));
+  // Enrollment is a 0.2 question only. A 0.1 host has no credential to hold, and
+  // an address that refused the request on its Host/Origin fence was refused for
+  // a reason a credential does not answer.
+  if (probe.family === 'remote-0.2' && probe.reason !== 'host-or-origin-refused') {
+    checks.push(await enrollmentCheck(
+      options,
+      context,
+      baseUrl,
+      options.dshHome ?? resolveDshHome(context.env, context.homeDir),
+      (options.now ?? Date.now)(),
+    ));
   }
 
   return { agent: DSH_AGENT_ID, displayName: DSH_DISPLAY_NAME, minimumVersion: DSH_MINIMUM_VERSION, checks };

@@ -141,6 +141,14 @@ export class DshEventLink {
    * one that is actually running.
    */
   private readonly claims = new Map<string, Promise<DshAnswerReceipt>>();
+  /**
+   * Callers that did not construct the link, waiting for a verified generation.
+   *
+   * Handlers are fixed at construction, so without this a host-level write could
+   * only poll `isVerified` — and a poll has no way to name the generation whose
+   * `clientId` it means to answer with, which is the one thing it needs.
+   */
+  private readonly verifiedListeners = new Set<(generation: DshEventGeneration) => void>();
   /** Events the host withdrew. Restoring one would resurrect a dead card. */
   private readonly cancelled = new Set<string>();
   private verifyHandle?: unknown;
@@ -189,6 +197,19 @@ export class DshEventLink {
       onLost: (carrier, reason) => this.onCarrierLost(carrier, reason),
       onDiagnostic: (diagnostic: DshMuxDiagnostic) => this.note({ code: 'mux-diagnostic', detail: diagnostic.code }),
     });
+  }
+
+  /**
+   * Watch for a verified generation.
+   *
+   * Fires immediately for a listener registered while one is already current — a
+   * caller that asks after the fact still wants the `clientId` — and never twice
+   * for the same generation.
+   */
+  onVerified(listener: (generation: DshEventGeneration) => void): () => void {
+    this.verifiedListeners.add(listener);
+    if (this.generation) listener(this.generation);
+    return () => { this.verifiedListeners.delete(listener); };
   }
 
   get isVerified(): boolean {
@@ -391,6 +412,7 @@ export class DshEventLink {
           this.generation = { carrier, clientId: frame.clientId, hostHome: frame.host.home };
           this.clearVerifyTimer();
           this.handlers.onVerified?.(this.generation);
+          for (const listener of [...this.verifiedListeners]) listener(this.generation);
           continue;
         }
         this.deliver(frame);

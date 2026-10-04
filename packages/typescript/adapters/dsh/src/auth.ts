@@ -49,6 +49,7 @@ export type DshAuthReason =
   | 'cookie-expired'
   | 'storage-unavailable'
   | 'exchange-unreachable'
+  | 'credential-refused'
   | 'cancelled';
 
 /**
@@ -58,6 +59,7 @@ export type DshAuthReason =
  */
 export const DSH_AUTH_BLOCKED_REASONS: readonly DshAuthReason[] = Object.freeze([
   'host-or-origin-refused',
+  'credential-refused',
   'storage-unavailable',
 ]);
 
@@ -425,6 +427,36 @@ export class DshAuthSession {
     this.cookie = undefined;
     this.launchToken = undefined;
     this.setState('absent', 'cancelled', 'the credential scope for this endpoint was replaced');
+  }
+
+  /**
+   * Record that the host refused a request that ALREADY CARRIED our credential.
+   *
+   * This is not a retry and not a re-exchange. A cookie the host declines is
+   * worthless for every future request, so it is dropped, and the stored copy
+   * goes with it — leaving it would make the next broker start reload the same
+   * dead value and call the host broken. A Host/Origin refusal (`403`) keeps the
+   * stored cookie, because that refusal is about the address the request named,
+   * not about the credential: an operator who repoints the adapter at the address
+   * the host does accept should find their enrollment still there.
+   */
+  reportCredentialRefused(reason: 'credential-refused' | 'host-or-origin-refused' = 'credential-refused'): void {
+    this.generation += 1;
+    this.ownership += 1;
+    this.inFlight = undefined;
+    if (reason === 'credential-refused') {
+      const cookie = this.cookie;
+      this.cookie = undefined;
+      this.loaded = false;
+      if (cookie) void this.clearStored();
+      this.setState('rejected', 'credential-refused',
+        `the DeepSeek Harness host refused the session cookie cosyncing holds for ${new URL(this.baseUrl).host}. `
+        + 'Run `cosy dsh connect` again to enroll a fresh one.');
+      return;
+    }
+    this.setState('blocked', 'host-or-origin-refused',
+      `the DeepSeek Harness host refused requests addressed to ${new URL(this.baseUrl).host} `
+      + '(the Host/Origin fence). Point cosyncing at the address the host itself printed.');
   }
 
   /**

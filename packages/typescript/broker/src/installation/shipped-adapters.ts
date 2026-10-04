@@ -23,6 +23,7 @@ import { KimiAdapter } from '@cosyncing/adapter-kimi';
 import { DshAdapter } from '@cosyncing/adapter-dsh';
 import { AgyAdapter } from '@cosyncing/adapter-antigravity';
 import { managedHostGateEnv } from '../runtime/managed-host.ts';
+import { createDshCredentialStore } from '../security/dsh-credentials.ts';
 
 /**
  * Fresh instances per call, never a shared array: adapters carry per-instance
@@ -40,9 +41,25 @@ export function shippedAdapters(): readonly AgentBackend[] {
     new CodexAdapter(),
     new ClaudeAdapter(),
     new KimiAdapter(),
-    new DshAdapter(),
+    shippedDshAdapter(),
     new AgyAdapter(),
   ];
+}
+
+/**
+ * The DeepSeek Harness adapter with the broker's cookie store attached.
+ *
+ * Exported rather than inlined twice because the RUNNING broker and the read-only
+ * inspection paths have to resolve the same credential for the same host. An
+ * adapter built without the store can still authenticate for the life of its own
+ * process — and then has to be re-enrolled after every restart, which for an
+ * external host means the operator goes hunting for a URL the host printed once.
+ * A doctor that built its own instead would report "not enrolled" about a host
+ * the operator is logged into. One construction site is the only thing keeping
+ * those three answers identical.
+ */
+export function shippedDshAdapter(): AgentBackend {
+  return new DshAdapter({ credentialStore: createDshCredentialStore() });
 }
 
 /**

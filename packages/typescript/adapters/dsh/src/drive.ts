@@ -143,7 +143,7 @@ export interface DshCommandDescriptor {
  * Malformed rows are skipped, not fatal: a single bad provider entry must not
  * cost the user every other model on the host.
  */
-function parseModelGroups(raw: unknown): DshModelProviderGroup[] {
+export function parseDshModelGroups(raw: unknown): DshModelProviderGroup[] {
   const groups: DshModelProviderGroup[] = [];
   for (const entry of Array.isArray(raw) ? raw : []) {
     if (!entry || typeof entry !== 'object') continue;
@@ -202,7 +202,7 @@ function parseModelGroups(raw: unknown): DshModelProviderGroup[] {
  *  - NOT provider-qualified. `currentModel` already carries `providerID`, and
  *    the client strips the model id out of the label before showing it, so a
  *    `"Name (Provider)"` label would render as the leftover `"(Provider)"`.
- *  - Absent when the name EQUALS the id. `parseModelGroups` defaults a missing
+ *  - Absent when the name EQUALS the id. `parseDshModelGroups` defaults a missing
  *    `name` to the id, and forwarding that would publish a raw id as if it were
  *    an authored name. No name is reported as no name.
  */
@@ -317,186 +317,21 @@ export class DshDriver {
     if (!outcome.ok) throw new DshDriveError('prompt', outcome.failure);
   }
 
-  /**
-   * Read broker-staged attachments into inline image bytes.
-   *
-   * The app has one attachment affordance and it stages everything as a FILE,
-   * so without this the host's image intake would be unreachable from the
-   * product — the only client that could use it would be one that sends
-   * `images` directly, which the first-party client never does.
-   *
-   * THE TRUST BOUNDARY. The broker is the only writer of `brokerPath`, and the
-   * protocol forbids a client from supplying one (`upload-staging.ts` rejects
-   * `path`/`brokerPath` on the wire outright). This function nonetheless
-   * re-establishes the boundary itself rather than inheriting it, because it is
-   * the last code that turns a path into bytes.
-   *
-   * The boundary is ONE directory: `<session cwd>/<repo dir>/inbox`. Both
-   * intake routes land there — an inline attachment is written into it, and a
-   * chunked upload is MOVED into it by `complete()`, which rewrites the
-   * record's `dataPath` and is the only thing that can mark a staged reference
-   * `ready`. So a prompt-time staged path is an inbox path regardless of size,
-   * and the size at which the client switches from inline to staged is not a
-   * boundary this code has to know about.
-   *
-   * Two checks, and it is worth being exact about what each one buys, because
-   * an earlier version of this comment claimed more than the code delivered:
-   *
-   *  - The PARENT is compared on real paths (`realpathSync` on the directory,
-   *    never on the file — resolving the leaf is itself a follow and would
-   *    report the target's location instead of the link's).
-   *  - The LEAF is refused by the kernel, not by us: `O_NOFOLLOW` fails the
-   *    open with ELOOP if the final component is a symlink AT THE MOMENT IT IS
-   *    OPENED. That is what makes it a real defence rather than a check with a
-   *    gap after it — resolve-then-open is two resolutions, and a link swapped
-   *    into the gap would be followed silently, with `fstat` reporting the
-   *    attacker's target as an ordinary regular file.
-   *
-   * What is NOT closed: the parent directory itself could be replaced between
-   * resolving it and the open. Node exposes no `openat`, so closing that would
-   * need a directory handle this code cannot hold, and winning it requires
-   * write access to the session's own `<repo dir>` — the same access that would
-   * let an attacker simply place a file in the inbox and skip the race.
-   * `O_NOFOLLOW` is available on every platform the broker ships for (linux and
-   * darwin; see `supported-hosts.ts`).
-   *
-   * The file is then opened once and every subsequent decision is made from the
-   * FILE DESCRIPTOR — it must be a regular file (a fifo would block the broker;
-   * a device is not an attachment), and its size is checked against the host's
-   * own per-image bound BEFORE a byte is read, so an oversized file costs a
-   * stat rather than a read into memory.
-   *
-   * NOT enforced here: `maxImagePixels`. Cosyncing never decodes the image, so
-   * it has no honest pixel count to check, and guessing one from a header it
-   * does not otherwise parse would reject valid images on malformed metadata.
-   * The host enforces it authoritatively at admission.
-   */
+  /** Delegates to {@link dshStagedImages}, the family-neutral attachment reader. */
   private stagedImages(
     files: NonNullable<PromptInput['files']>,
     limits: DshImageLimits | undefined,
     sessionCwd: string | undefined,
   ): { data: string; mimeType: string; name?: string }[] {
-    if (files.length === 0) return [];
-    const refuse = (message: string): never => {
-      throw new DshDriveError('prompt', { kind: 'rpc', code: 'attachment-unsupported', message });
-    };
-    const allowed = limits?.mediaTypes;
-    const isImage = (mimeType: string): boolean =>
-      allowed && allowed.length > 0
-        ? allowed.includes(mimeType)
-        : mimeType.startsWith('image/');
-    for (const file of files) {
-      if (!isImage(file.mimeType.trim().toLowerCase())) refuse(DSH_FILE_UNSUPPORTED);
-    }
-    if (!sessionCwd) refuse('this DeepSeek Harness session has no workspace to stage an attachment in');
-    let inbox: string;
-    try {
-      inbox = realpathSync(resolve(sessionCwd!, PRODUCT_IDENTITY.repositoryDirectoryName, 'inbox'));
-    } catch {
-      return refuse(DSH_FILE_UNTRUSTED);
-    }
-    const maxBytes = limits?.maxImageBytes;
-    return files.map((file) => {
-      if (!file.brokerPath) refuse(DSH_FILE_UNSTAGED);
-      const staged = resolve(file.brokerPath!);
-      // Resolve the PARENT, never the leaf. Calling `realpathSync` on the file
-      // itself is already a follow — it would report the target's location and
-      // hide exactly the substitution being defended against.
-      let parent: string;
-      try {
-        parent = realpathSync(dirname(staged));
-      } catch {
-        return refuse(DSH_FILE_UNTRUSTED);
-      }
-      if (parent !== inbox) refuse(DSH_FILE_UNTRUSTED);
-      // O_NOFOLLOW makes the leaf decision ATOMIC WITH THE OPEN: the kernel
-      // fails with ELOOP if the final component is a symlink at the instant it
-      // is opened, so there is no window in which a checked path can be swapped
-      // for a link. Checking first and opening second cannot achieve this — the
-      // fd would then be the attacker's target and `fstat` would call it a
-      // perfectly ordinary regular file. Every staged file the broker writes is
-      // a real file, so refusing links outright costs nothing.
-      let fd: number;
-      try {
-        fd = openSync(staged, constants.O_RDONLY | constants.O_NOFOLLOW);
-      } catch {
-        return refuse(DSH_FILE_UNTRUSTED);
-      }
-      try {
-        const stat = fstatSync(fd);
-        if (!stat.isFile()) refuse(DSH_FILE_UNTRUSTED);
-        if (typeof maxBytes === 'number' && stat.size > maxBytes) {
-          refuse(`"${file.name ?? 'image'}" is larger than the ${maxBytes} bytes this DeepSeek Harness host accepts for one image.`);
-        }
-        // The broker recorded the size it staged. Bytes that disagree with the
-        // record are not the attachment the user picked.
-        if (typeof file.size === 'number' && file.size !== stat.size) refuse(DSH_FILE_UNTRUSTED);
-        const bytes = Buffer.alloc(stat.size);
-        let read = 0;
-        while (read < stat.size) {
-          const chunk = readSync(fd, bytes, read, stat.size - read, read);
-          if (chunk <= 0) break;
-          read += chunk;
-        }
-        if (read !== stat.size) refuse(DSH_FILE_UNTRUSTED);
-        return {
-          data: bytes.toString('base64'),
-          mimeType: file.mimeType.trim().toLowerCase(),
-          ...(file.name ? { name: file.name } : {}),
-        };
-      } finally {
-        closeSync(fd);
-      }
-    });
+    return dshStagedImages(files, limits, sessionCwd);
   }
 
-  /**
-   * Convert prompt images to host content parts, refusing what this host says
-   * it will not take.
-   *
-   * Every refusal quotes the host's OWN number, because the user's next action
-   * depends on which bound they hit: a smaller image, fewer images, or a
-   * different format are three different remedies. A refusal also fails the
-   * whole prompt rather than dropping one image — a silently shortened prompt
-   * is the failure mode this guard exists to prevent.
-   */
+  /** Delegates to {@link dshImageParts}, the family-neutral part builder. */
   private imageParts(
     images: readonly { data: string; mimeType: string; name?: string }[],
     limits?: DshImageLimits,
   ): unknown[] {
-    if (images.length === 0) return [];
-    const refuse = (message: string): never => {
-      throw new DshDriveError('prompt', { kind: 'rpc', code: 'attachment-rejected', message });
-    };
-    const maxCount = limits?.maxImagesPerMessage;
-    if (typeof maxCount === 'number' && images.length > maxCount) {
-      refuse(`The DeepSeek Harness host accepts at most ${maxCount} images per message; this prompt has ${images.length}.`);
-    }
-    const allowed = limits?.mediaTypes;
-    let total = 0;
-    const parts = images.map((image) => {
-      const mediaType = image.mimeType.trim().toLowerCase();
-      if (allowed && allowed.length > 0 && !allowed.includes(mediaType)) {
-        refuse(`The DeepSeek Harness host does not accept ${mediaType || 'that image type'}; it accepts ${allowed.join(', ')}.`);
-      }
-      const bytes = base64Bytes(image.data);
-      total += bytes;
-      const maxBytes = limits?.maxImageBytes;
-      if (typeof maxBytes === 'number' && bytes > maxBytes) {
-        refuse(`"${image.name ?? 'image'}" is larger than the ${maxBytes} bytes this DeepSeek Harness host accepts for one image.`);
-      }
-      return {
-        type: 'image',
-        mediaType,
-        data: image.data,
-        ...(image.name ? { name: image.name } : {}),
-      };
-    });
-    const maxTotal = limits?.maxMessageImageBytes;
-    if (typeof maxTotal === 'number' && total > maxTotal) {
-      refuse(`These images total more than the ${maxTotal} bytes this DeepSeek Harness host accepts in one message.`);
-    }
-    return parts;
+    return dshImageParts(images, limits);
   }
 
   /**
@@ -530,7 +365,7 @@ export class DshDriver {
       // A non-boolean `routable` fails CLOSED. It gates whether a turn can start
       // at all, and guessing `true` would offer a composer the host will refuse.
       routable: row.routable === true,
-      groups: parseModelGroups(row.groups),
+      groups: parseDshModelGroups(row.groups),
       ...(current && typeof current.provider === 'string' && typeof current.model === 'string'
         ? {
             current: {
@@ -567,7 +402,7 @@ export class DshDriver {
         detail: 'llm.models did not return an object',
       });
     }
-    return parseModelGroups((value as { groups?: unknown }).groups);
+    return parseDshModelGroups((value as { groups?: unknown }).groups);
   }
 
   /**
@@ -618,32 +453,7 @@ export class DshDriver {
   async listCommands(sessionId: string): Promise<DshCommandDescriptor[]> {
     const outcome = await this.rpc.callRemote<unknown>('commands/list', { agentId: sessionId });
     if (!outcome.ok) throw new DshDriveError('command list', outcome.failure);
-    if (!Array.isArray(outcome.value)) {
-      throw new DshDriveError('command list', {
-        kind: 'transport',
-        reason: 'invalid-envelope',
-        retryable: false,
-        detail: 'commands/list did not return an array',
-      });
-    }
-    // One malformed row does not blank the roster: the rest are still real
-    // commands the user can run.
-    const descriptors: DshCommandDescriptor[] = [];
-    for (const entry of outcome.value) {
-      if (!entry || typeof entry !== 'object') continue;
-      const row = entry as { name?: unknown; description?: unknown; input?: unknown };
-      if (typeof row.name !== 'string' || row.name.length === 0) continue;
-      const hint =
-        row.input && typeof row.input === 'object' && typeof (row.input as { hint?: unknown }).hint === 'string'
-          ? (row.input as { hint: string }).hint
-          : undefined;
-      descriptors.push({
-        name: row.name,
-        description: typeof row.description === 'string' ? row.description : '',
-        ...(hint ? { input: { hint } } : {}),
-      });
-    }
-    return descriptors;
+    return parseDshCommandDescriptors(outcome.value, 'command list');
   }
 
   /**
@@ -663,34 +473,7 @@ export class DshDriver {
       line,
     });
     if (!outcome.ok) throw new DshDriveError('command', outcome.failure);
-    const value = outcome.value;
-    if (value === undefined || value === null) return undefined;
-    if (typeof value !== 'object') {
-      throw new DshDriveError('command', {
-        kind: 'transport',
-        reason: 'invalid-envelope',
-        retryable: false,
-        detail: 'commands/execute returned a non-object',
-      });
-    }
-    const row = value as { commandId?: unknown; result?: unknown };
-    const result = row.result as { kind?: unknown; text?: unknown; sourceEventSeq?: unknown } | undefined;
-    if (!result || (result.kind !== 'success' && result.kind !== 'error')) {
-      throw new DshDriveError('command', {
-        kind: 'transport',
-        reason: 'invalid-envelope',
-        retryable: false,
-        detail: 'commands/execute returned no recognizable result',
-      });
-    }
-    return {
-      commandId: typeof row.commandId === 'string' ? row.commandId : '',
-      result: {
-        kind: result.kind,
-        ...(typeof result.text === 'string' ? { text: result.text } : {}),
-        ...(typeof result.sourceEventSeq === 'number' ? { sourceEventSeq: result.sourceEventSeq } : {}),
-      },
-    };
+    return parseDshCommandExecution(outcome.value, 'command');
   }
 
   async cancel(sessionId: string): Promise<void> {
@@ -798,4 +581,215 @@ export class DshDriver {
     if (!outcome.ok) throw new DshDriveError(action, outcome.failure);
     return outcome.value;
   }
+}
+
+/**
+ * The family-neutral attachment reader.
+ *
+ * Exported rather than left private because BOTH contract families need it
+ * verbatim: the attachment trust boundary is about broker-staged bytes, not about
+ * which route the prompt travels, and a second copy would be a second place to
+ * get the symlink and size checks wrong. The long contract note below is the one
+ * the 0.1 driver has carried since that boundary was established.
+ */
+export function dshStagedImages(
+  files: NonNullable<PromptInput['files']>,
+  limits: DshImageLimits | undefined,
+  sessionCwd: string | undefined,
+): { data: string; mimeType: string; name?: string }[] {
+  if (files.length === 0) return [];
+    const refuse = (message: string): never => {
+      throw new DshDriveError('prompt', { kind: 'rpc', code: 'attachment-unsupported', message });
+    };
+    const allowed = limits?.mediaTypes;
+    const isImage = (mimeType: string): boolean =>
+      allowed && allowed.length > 0
+        ? allowed.includes(mimeType)
+        : mimeType.startsWith('image/');
+    for (const file of files) {
+      if (!isImage(file.mimeType.trim().toLowerCase())) refuse(DSH_FILE_UNSUPPORTED);
+    }
+    if (!sessionCwd) refuse('this DeepSeek Harness session has no workspace to stage an attachment in');
+    let inbox: string;
+    try {
+      inbox = realpathSync(resolve(sessionCwd!, PRODUCT_IDENTITY.repositoryDirectoryName, 'inbox'));
+    } catch {
+      return refuse(DSH_FILE_UNTRUSTED);
+    }
+    const maxBytes = limits?.maxImageBytes;
+    return files.map((file) => {
+      if (!file.brokerPath) refuse(DSH_FILE_UNSTAGED);
+      const staged = resolve(file.brokerPath!);
+      // Resolve the PARENT, never the leaf. Calling `realpathSync` on the file
+      // itself is already a follow — it would report the target's location and
+      // hide exactly the substitution being defended against.
+      let parent: string;
+      try {
+        parent = realpathSync(dirname(staged));
+      } catch {
+        return refuse(DSH_FILE_UNTRUSTED);
+      }
+      if (parent !== inbox) refuse(DSH_FILE_UNTRUSTED);
+      // O_NOFOLLOW makes the leaf decision ATOMIC WITH THE OPEN: the kernel
+      // fails with ELOOP if the final component is a symlink at the instant it
+      // is opened, so there is no window in which a checked path can be swapped
+      // for a link. Checking first and opening second cannot achieve this — the
+      // fd would then be the attacker's target and `fstat` would call it a
+      // perfectly ordinary regular file. Every staged file the broker writes is
+      // a real file, so refusing links outright costs nothing.
+      let fd: number;
+      try {
+        fd = openSync(staged, constants.O_RDONLY | constants.O_NOFOLLOW);
+      } catch {
+        return refuse(DSH_FILE_UNTRUSTED);
+      }
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile()) refuse(DSH_FILE_UNTRUSTED);
+        if (typeof maxBytes === 'number' && stat.size > maxBytes) {
+          refuse(`"${file.name ?? 'image'}" is larger than the ${maxBytes} bytes this DeepSeek Harness host accepts for one image.`);
+        }
+        // The broker recorded the size it staged. Bytes that disagree with the
+        // record are not the attachment the user picked.
+        if (typeof file.size === 'number' && file.size !== stat.size) refuse(DSH_FILE_UNTRUSTED);
+        const bytes = Buffer.alloc(stat.size);
+        let read = 0;
+        while (read < stat.size) {
+          const chunk = readSync(fd, bytes, read, stat.size - read, read);
+          if (chunk <= 0) break;
+          read += chunk;
+        }
+        if (read !== stat.size) refuse(DSH_FILE_UNTRUSTED);
+        return {
+          data: bytes.toString('base64'),
+          mimeType: file.mimeType.trim().toLowerCase(),
+          ...(file.name ? { name: file.name } : {}),
+        };
+      } finally {
+        closeSync(fd);
+      }
+    });
+}
+
+/**
+ * The family-neutral image-part builder: the same policy the 0.1 driver applies,
+ * reached by the 0.2 write path through the exported name.
+ *
+ * Every refusal quotes the host's OWN number, because the user's next action
+ * depends on which bound they hit: a smaller image, fewer images, or a different
+ * format are three different remedies. A refusal also fails the whole prompt
+ * rather than dropping one image — a silently shortened prompt is the failure
+ * mode this guard exists to prevent.
+ */
+export function dshImageParts(
+  images: readonly { data: string; mimeType: string; name?: string }[],
+  limits?: DshImageLimits,
+): unknown[] {
+  if (images.length === 0) return [];
+    if (images.length === 0) return [];
+    const refuse = (message: string): never => {
+      throw new DshDriveError('prompt', { kind: 'rpc', code: 'attachment-rejected', message });
+    };
+    const maxCount = limits?.maxImagesPerMessage;
+    if (typeof maxCount === 'number' && images.length > maxCount) {
+      refuse(`The DeepSeek Harness host accepts at most ${maxCount} images per message; this prompt has ${images.length}.`);
+    }
+    const allowed = limits?.mediaTypes;
+    let total = 0;
+    const parts = images.map((image) => {
+      const mediaType = image.mimeType.trim().toLowerCase();
+      if (allowed && allowed.length > 0 && !allowed.includes(mediaType)) {
+        refuse(`The DeepSeek Harness host does not accept ${mediaType || 'that image type'}; it accepts ${allowed.join(', ')}.`);
+      }
+      const bytes = base64Bytes(image.data);
+      total += bytes;
+      const maxBytes = limits?.maxImageBytes;
+      if (typeof maxBytes === 'number' && bytes > maxBytes) {
+        refuse(`"${image.name ?? 'image'}" is larger than the ${maxBytes} bytes this DeepSeek Harness host accepts for one image.`);
+      }
+      return {
+        type: 'image',
+        mediaType,
+        data: image.data,
+        ...(image.name ? { name: image.name } : {}),
+      };
+    });
+    const maxTotal = limits?.maxMessageImageBytes;
+    if (typeof maxTotal === 'number' && total > maxTotal) {
+      refuse(`These images total more than the ${maxTotal} bytes this DeepSeek Harness host accepts in one message.`);
+    }
+    return parts;
+}
+
+/**
+ * `commands/list` rows -> descriptors, shared by both contract families.
+ *
+ * One malformed row does not blank the roster: the rest are still real commands
+ * the user can run, and a picker that disappears because a plugin published one
+ * odd entry is worse than one odd entry.
+ */
+export function parseDshCommandDescriptors(raw: unknown, action = 'command list'): DshCommandDescriptor[] {
+  if (!Array.isArray(raw)) {
+    throw new DshDriveError(action, {
+      kind: 'transport',
+      reason: 'invalid-envelope',
+      retryable: false,
+      detail: `${action} did not return an array`,
+    });
+  }
+  const descriptors: DshCommandDescriptor[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const row = entry as { name?: unknown; description?: unknown; input?: unknown };
+    if (typeof row.name !== 'string' || row.name.length === 0) continue;
+    const hint =
+      row.input && typeof row.input === 'object' && typeof (row.input as { hint?: unknown }).hint === 'string'
+        ? (row.input as { hint: string }).hint
+        : undefined;
+    descriptors.push({
+      name: row.name,
+      description: typeof row.description === 'string' ? row.description : '',
+      ...(hint ? { input: { hint } } : {}),
+    });
+  }
+  return descriptors;
+}
+
+/**
+ * `commands/execute`'s answer -> the execution result.
+ *
+ * `undefined` is a legitimate value: a command whose effect is entirely a state
+ * change streams back as ordinary session events and settles with no result slot.
+ */
+export function parseDshCommandExecution(
+  value: unknown,
+  action = 'command',
+): DshCommandExecution | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object') {
+    throw new DshDriveError(action, {
+      kind: 'transport',
+      reason: 'invalid-envelope',
+      retryable: false,
+      detail: `${action} returned a non-object`,
+    });
+  }
+  const row = value as { commandId?: unknown; result?: unknown };
+  const result = row.result as { kind?: unknown; text?: unknown; sourceEventSeq?: unknown } | undefined;
+  if (!result || (result.kind !== 'success' && result.kind !== 'error')) {
+    throw new DshDriveError(action, {
+      kind: 'transport',
+      reason: 'invalid-envelope',
+      retryable: false,
+      detail: `${action} returned no recognizable result`,
+    });
+  }
+  return {
+    commandId: typeof row.commandId === 'string' ? row.commandId : '',
+    result: {
+      kind: result.kind,
+      ...(typeof result.text === 'string' ? { text: result.text } : {}),
+      ...(typeof result.sourceEventSeq === 'number' ? { sourceEventSeq: result.sourceEventSeq } : {}),
+    },
+  };
 }

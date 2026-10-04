@@ -206,6 +206,34 @@ export interface AgentBackend {
    * and only after deciding it is allowed to.
    */
   describeManagedHost?(): Promise<import('./integration.ts').ManagedHostDescriptor | null>;
+
+  /**
+   * Raw output from a managed host THIS broker just started, forwarded while the
+   * start is in flight.
+   *
+   * Optional and narrow on purpose. Some hosts print something only their own
+   * client can use — DeepSeek Harness prints an authenticated URL whose token is
+   * the only credential that exists until it is exchanged — and the broker cannot
+   * interpret it, so the alternative to handing it over is a broker that starts a
+   * host it can never log into.
+   *
+   * The text is the cumulative capture so far, not a delta: it is bounded, and a
+   * receiver that dedupes is simpler and more robust than a caller that has to
+   * slice correctly. It is also why this is a lifecycle hook and not a log
+   * subscription: the bytes are the child's real output, which makes them a
+   * credential carrier, and this channel hands them to exactly one adapter for
+   * exactly one owned launch.
+   */
+  observeManagedOutput?(chunk: string): void;
+
+  /**
+   * The owned launch is over — stopped, exited, abandoned, or no longer ours.
+   *
+   * The counterpart to {@link observeManagedOutput}: whatever the adapter derived
+   * from those bytes has a lifetime no longer than the launch that produced them,
+   * and this is the notification that lets it let go.
+   */
+  managedLaunchEnded?(reason: string): void;
   /**
    * WHICH host a given environment points this adapter at, as an opaque identity
    * key — the same key {@link import('./integration.ts').ManagedHostDescriptor}

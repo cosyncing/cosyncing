@@ -41,6 +41,18 @@ export const DSH_QUALIFIED_VERSIONS: Readonly<Record<DshContractFamily, readonly
 export const DSH_CURRENT_VERSION = '0.2.0-rc.2';
 
 /**
+ * Every version this build was verified against, spelled out.
+ *
+ * For messages that would otherwise quote one version and imply the other is
+ * equally known. The 0.1 and 0.2 hosts are different contracts, so a floor and a
+ * current version are two facts and not a range.
+ */
+export const DSH_QUALIFIED_VERSION_LIST = [
+  ...DSH_QUALIFIED_VERSIONS['legacy-0.1'],
+  ...DSH_QUALIFIED_VERSIONS['remote-0.2'],
+].join(', ');
+
+/**
  * A parsed `dsh` version. Prerelease and build parts are kept because the whole
  * product ships as release candidates, and `0.2.0-rc.2` is a different contract
  * from a hypothetical `0.2.0-rc.9`.

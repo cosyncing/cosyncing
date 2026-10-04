@@ -11,7 +11,33 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- DeepSeek Harness hosts on the 0.2 contract can be signed in to.
+  `cosyncing dsh connect` takes the one-time URL that `dsh web` printed for a
+  host you started yourself, exchanges it, and keeps the session cookie the host
+  issues; `dsh status` shows what is held, and `dsh disconnect` forgets it. The
+  URL is accepted from a hidden prompt or stdin only, never as an argument, so a
+  host credential cannot land in shell history or the process list. The cookie
+  lives in an owner-only file scoped to that address and that host's profile, and
+  outlives a broker restart, so signing in is a one-time act for a host you keep.
+  A host cosyncing starts for itself signs itself in from its own launch output.
+  `cosyncing doctor` reports the same enrollment the running broker sees, and
+  names the fix for each state it finds instead of recommending a re-enrollment
+  for an unrelated problem.
+- The DeepSeek Harness adapter now speaks the 0.2 contract as well as 0.1:
+  roster, session open and history, live output, creation and rename, prompts,
+  interruptions, and reconnect. The contract is chosen by what the host answers,
+  not by a version string, and both `0.1.0-rc.6` and `0.2.0-rc.2` are qualified.
+  Behavior needing a real model turn on a 0.2 host is not yet verified against
+  one, and the support page says so.
+
 ### Changed
+
+- A DeepSeek Harness host that has no workspace registered is no longer told it
+  cannot create a session. A 0.2 host with an empty workspace registry creates
+  sessions anyway, so the registry no longer answers the creation question;
+  naming a directory the host has not registered is still refused.
 
 - An Android update keeps downloading after you leave the app, with its
   progress in a notification. If it finishes while you are away, a
@@ -19,6 +45,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   back to Cosyncing.
 
 ### Fixed
+
+- A DeepSeek Harness host started by cosyncing is now reachable. The managed
+  start read the child's output once, before waiting for the host to come up, so
+  a 0.2 host that printed its sign-in URL a moment later was never signed in to,
+  and a healthy host was reported as having failed to start in time.
 
 - Progress bars drew full from the start, so the Android update download,
   the context bar in a session's details and the artifact preview's loading

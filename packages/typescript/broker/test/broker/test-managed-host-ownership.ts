@@ -32,6 +32,7 @@ import {
   managedHostGateEnv,
   managedHostOwnerPath,
   MANAGED_HOST_ACTIONS,
+  MANAGED_HOST_RESTART_BUDGET,
   managedHostRestartLedger,
   managedHostStartupReport,
   managedHostStore,
@@ -86,6 +87,10 @@ const RECYCLED: HostProcessIdentity = { pid: HOST_PID, start: '990000', boot: BO
  */
 const RECYCLED_SAME_NAME: HostProcessIdentity = { ...RECYCLED, comm: OWNED.comm };
 
+/** The pid this suite's fake `spawn` hands out by default, and what it reads as. */
+const SPAWN_PID = 5150;
+const SPAWNED: HostProcessIdentity = { pid: SPAWN_PID, start: '777', boot: BOOT, comm: 'host' };
+
 function ownership(overrides: Partial<ManagedHostOwnership> = {}): ManagedHostOwnership {
   return {
     schemaVersion: 3,
@@ -130,6 +135,14 @@ function fakeEffects(options: {
    * on every platform but Windows.
    */
   descendants?: Map<number, number>;
+  /**
+   * What the child's capture reads as, call by call; the last entry sticks.
+   *
+   * A real host prints its announcement some time AFTER the spawn, so a fixture
+   * whose output never changes cannot tell a start that re-reads the capture
+   * from one that read it once, early, and gave up.
+   */
+  outputScript?: string[];
 }): {
   effects: ManagedHostEffects;
   signals: Array<{ pid: number; signal: string }>;
@@ -168,11 +181,14 @@ function fakeEffects(options: {
       spawns.push(launch);
       const pid = options.spawnPid ?? 5150;
       child = { exitCode: null };
+      const script = options.outputScript ? [...options.outputScript] : undefined;
       const spawned: ManagedHostChild = {
         pid,
         exited: Promise.resolve(0),
         get exitCode() { return child!.exitCode; },
-        readOutput: () => 'stdout:\nfixture\nstderr:\n',
+        readOutput: () => (script
+          ? (script.length > 1 ? script.shift()! : script[0]!)
+          : 'stdout:\nfixture\nstderr:\n'),
       };
       return spawned;
     },
@@ -1055,6 +1071,142 @@ try {
       outcome.action === 'undescribed' && spawns.length === 0, JSON.stringify(outcome));
   }
   {
+    // The child prints its one credential SOME TIME AFTER the spawn, which is
+    // the only fact that separates "forwards the capture while the host boots"
+    // from "read it once, while it was empty, and never looked again". A start
+    // built on the second reads as `host-not-ready-in-time` against a host that
+    // came up fine, because the adapter was never told the address its own child
+    // chose and so never spent the token inside it. The fixture therefore starts
+    // silent and answers only on the third read.
+    const announcement = 'stdout:\ndsh web: http://127.0.0.1:59999/?token=late-arrival\nstderr:\n';
+    const forwarded: string[] = [];
+    const ended: string[] = [];
+    let probes = 0;
+    const { effects, spawns } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT]]),
+      outputScript: ['stdout:\nstderr:\n', 'stdout:\nstderr:\n', announcement],
+    });
+    const { store } = memoryStore();
+    const outcome = await ensureManagedHost(backend({
+      // A wider window than the fixture default, so a poll count this high is a
+      // scripted fact rather than a start that timed out on its virtual clock.
+      describeManagedHost: async () => ({
+        identityKey: KEY,
+        locator: { kind: 'tcp-port' as const, port: 59999 },
+        launch: { command: '/fixture/bin/host', args: ['web'] },
+        readyTimeoutMs: 3_000,
+        stopGraceMs: 100,
+      }),
+      isAvailable: async () => {
+        probes += 1;
+        return probes > 5;
+      },
+      observeManagedOutput: (text: string) => { forwarded.push(text); },
+      managedLaunchEnded: (reason: string) => { ended.push(reason); },
+    }) as never, effects, store, AUTHORIZED);
+    check('an announcement printed after the first poll still reaches the adapter',
+      outcome.action === 'started' && spawns.length === 1 && probes > 5
+        && forwarded.length > 2
+        && forwarded.some((text) => text.includes('late-arrival'))
+        && ended.length === 0,
+      JSON.stringify({
+        outcome, probes, forwards: forwarded.length,
+        got: forwarded.some((text) => text.includes('late-arrival')),
+      }));
+  }
+  {
+    // Cumulative, not delta: what the child hands back is the whole buffer, and
+    // an adapter that de-duplicates depends on being shown it that way. Repeating
+    // the same bytes must be safe, which is what lets the loop forward freely.
+    const announcement = 'stdout:\ndsh web: http://127.0.0.1:59999/?token=once-only\nstderr:\n';
+    const forwarded: string[] = [];
+    let ready = false;
+    const { effects } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT]]),
+      outputScript: [announcement],
+    });
+    const { store } = memoryStore();
+    const outcome = await ensureManagedHost(backend({
+      isAvailable: async () => ready,
+      observeManagedOutput: (text: string) => { forwarded.push(text); ready = true; },
+    }) as never, effects, store, AUTHORIZED);
+    check('the capture is re-forwarded whole, so the adapter sees a state and not a diff',
+      outcome.action === 'started' && forwarded.length >= 1
+        && forwarded.every((text) => text === announcement),
+      JSON.stringify({ outcome, forwards: forwarded.length }));
+  }
+  {
+    // The mirror image: no spawn, no forwarding. A host this broker did not
+    // start has an output stream this broker is not holding, and the rule that
+    // lets raw child bytes reach an adapter at all rests entirely on that.
+    const forwarded: string[] = [];
+    const { effects, spawns } = fakeEffects({
+      identities: new Map([[HOST_PID, OWNED]]),
+      listeners: new Map([[59999, hostAt(HOST_PID)]]),
+    });
+    const { store } = memoryStore();
+    const outcome = await ensureManagedHost(backend({
+      isAvailable: async () => true,
+      observeManagedOutput: (text: string) => { forwarded.push(text); },
+    }) as never, effects, store, AUTHORIZED);
+    check('nothing is forwarded for a host this broker did not spawn',
+      outcome.action === 'already-serving' && spawns.length === 0 && forwarded.length === 0,
+      JSON.stringify({ outcome, spawns: spawns.length, forwards: forwarded.length }));
+  }
+  {
+    // A launch that ends — here, one that ran out of time — ends the adapter's
+    // claim on the token too. The token dies with the process, and an adapter
+    // that kept it would spend a credential on a host that no longer exists.
+    const ended: string[] = [];
+    const forwarded: string[] = [];
+    const { effects } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT]]),
+      outputScript: ['stdout:\nstill booting\nstderr:\n'],
+      childDiesOn: 'SIGKILL',
+    });
+    const { store } = memoryStore();
+    const outcome = await ensureManagedHost(backend({
+      isAvailable: async () => false,
+      observeManagedOutput: (text: string) => { forwarded.push(text); },
+      managedLaunchEnded: (reason: string) => { ended.push(reason); },
+    }) as never, effects, store, AUTHORIZED);
+    check('a start that ran out of time tells the adapter its launch is over',
+      outcome.action === 'start-failed'
+        && (outcome as { detailCode: string }).detailCode === 'host-not-ready-in-time'
+        && forwarded.length > 1 && ended.length === 1,
+      JSON.stringify({ outcome, forwards: forwarded.length, ended }));
+  }
+  {
+    // Read-only by construction: an adapter that throws on its own intake must
+    // not be able to turn a healthy host into a failed start.
+    const { effects, spawns } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT]]),
+    });
+    const { store } = memoryStore();
+    let ready = false;
+    const outcome = await ensureManagedHost(backend({
+      isAvailable: async () => ready,
+      observeManagedOutput: () => {
+        ready = true;
+        throw new Error('adapter blew up on a url it did not like');
+      },
+    }) as never, effects, store, AUTHORIZED);
+    check('an adapter choking on child output does not fail a host that is ready',
+      outcome.action === 'started' && spawns.length === 1, JSON.stringify(outcome));
+  }
+  {
     // Authorized, and a stranger is already serving on the described port. The
     // authorization is to START a host, never to replace one.
     const { effects, spawns, signals } = fakeEffects({
@@ -1322,6 +1474,154 @@ try {
         && started.action === 'recovered'
         && spawns.length === 1,
       JSON.stringify({ inactive, started, spawns: spawns.length }));
+  }
+  {
+    // THE SECOND CLOCK, AND THE ONLY REASON IT EXISTS. The window ages, which is
+    // right on its own terms: a host that crash-looped at midnight deserves an
+    // attempt by noon. But the window used to be the whole ledger, so ageing it
+    // out handed three MORE attempts to a host that had died on every start it
+    // ever had, and the warning that said it would not be restarted again was
+    // merely pausing. A suspension that expires by itself is not a suspension.
+    const ledger = managedHostRestartLedger();
+    const { effects, spawns } = fakeEffects({
+      identities: new Map(), spawnPid: 6020, missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT]]),
+    });
+    const { store } = memoryStore();
+    const spent: string[] = [];
+    for (let round = 0; round < 3; round += 1) {
+      const outcome = await recoverManagedHost(
+        backend({ isAvailable: async () => false }) as never,
+        effects, store, ledger, AUTHORIZED);
+      spent.push(outcome.action);
+    }
+    // Two full windows pass. Nobody has fixed anything.
+    await effects.sleep(MANAGED_HOST_RESTART_BUDGET.windowMs * 2);
+    const later = await recoverManagedHost(
+      backend({ isAvailable: async () => false }) as never,
+      effects, store, ledger, AUTHORIZED);
+    check('a suspension does not quietly expire into another three attempts',
+      spent.every((entry) => entry === 'recovery-failed')
+        && later.action === 'declined'
+        && (later as { reason: string }).reason === 'budget-exhausted'
+        && spawns.length === 3
+        && ledger.suspension(AGENT)?.failures === MANAGED_HOST_RESTART_BUDGET.limit,
+      JSON.stringify({ spent, later, spawns: spawns.length, suspension: ledger.suspension(AGENT) }));
+  }
+  {
+    // Three things lift a suspension, and a serving host is the first: the crash
+    // loop stopped. This is the same `forget` the healthy tick has always done,
+    // now load-bearing — it is the only ordinary way back for a host that
+    // recovered on its own, because nothing else about it changed.
+    const ledger = managedHostRestartLedger();
+    const listeners = new Map([[59999, HOST_ABSENT]]);
+    const spawnPid = 6021;
+    // The replacement is never proven live: the host comes up dead, which is the
+    // only shape that makes "it died again" readable after a healthy tick.
+    const { effects, spawns } = fakeEffects({
+      identities: new Map(), spawnPid, missingProcess: PROCESS_ABSENT, listeners,
+    });
+    const { store } = memoryStore();
+    let down = true;
+    const back = async () => {
+      if (down) return false;
+      listeners.set(59999, HOST_ABSENT);
+      return true;
+    };
+    for (let round = 0; round < 3; round += 1) {
+      await recoverManagedHost(backend({ isAvailable: back }) as never, effects, store, ledger, AUTHORIZED);
+    }
+    down = false;
+    const healthy = await recoverManagedHost(
+      backend({ isAvailable: back }) as never, effects, store, ledger, AUTHORIZED);
+    // And it really is a fresh start: the host dies again and gets its attempt.
+    down = true;
+    listeners.set(59999, HOST_ABSENT);
+    const afterCrash = await recoverManagedHost(
+      backend({ isAvailable: async () => false }) as never, effects, store, ledger, AUTHORIZED);
+    check('a host that is serving again is forgiven, and the next crash is a fresh problem',
+      healthy.action === 'healthy' && ledger.suspension(AGENT) === undefined
+        && afterCrash.action === 'recovery-failed' && spawns.length === 4,
+      JSON.stringify({ healthy, afterCrash, spawns: spawns.length, suspension: ledger.suspension(AGENT) }));
+  }
+  {
+    // A suspension belongs to the CONFIGURATION that earned it. Repointing the
+    // managed host at another address is another host, and refusing to start it
+    // because the LAST one crash-looped would be a policy with no premise behind
+    // it — the operator has just done the thing doctor told them to do.
+    const ledger = managedHostRestartLedger();
+    const { effects, spawns } = fakeEffects({
+      identities: new Map(), spawnPid: 6022, missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT], [59998, HOST_ABSENT]]),
+    });
+    const { store } = memoryStore();
+    let identityKey = KEY;
+    const described = async () => ({
+      identityKey,
+      locator: { kind: 'tcp-port' as const, port: identityKey.endsWith('59998') ? 59998 : 59999 },
+      launch: { command: '/fixture/bin/host', args: ['web'] },
+      readyTimeoutMs: 300,
+      stopGraceMs: 100,
+    });
+    for (let round = 0; round < 3; round += 1) {
+      await recoverManagedHost(
+        backend({ isAvailable: async () => false, describeManagedHost: described }) as never,
+        effects, store, ledger, AUTHORIZED);
+    }
+    const suspended = await recoverManagedHost(
+      backend({ isAvailable: async () => false, describeManagedHost: described }) as never,
+      effects, store, ledger, AUTHORIZED);
+    identityKey = 'http://127.0.0.1:59998';
+    const repointed = await recoverManagedHost(
+      backend({ isAvailable: async () => false, describeManagedHost: described }) as never,
+      effects, store, ledger, AUTHORIZED);
+    check('a changed host identity is a different host, not a continued crash loop',
+      suspended.action === 'declined'
+        && (suspended as { reason: string }).reason === 'budget-exhausted'
+        && repointed.action === 'recovery-failed' && spawns.length === 4,
+      JSON.stringify({ suspended, repointed, spawns: spawns.length }));
+  }
+  {
+    // An unlaunchable tick withdraws its WINDOW attempt and leaves the streak
+    // alone. Both halves matter: charging absence spent the budget of a host that
+    // was never installed, and forgiving it — which is what the old `forget` did —
+    // let a CLI that went momentarily off PATH cancel a suspension that two real
+    // crashes had already bought.
+    const ledger = managedHostRestartLedger();
+    const { effects, spawns } = fakeEffects({
+      identities: new Map(), spawnPid: 6023, missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT]]),
+    });
+    const { store } = memoryStore();
+    let launchable = true;
+    const described = async () => ({
+      identityKey: KEY,
+      locator: { kind: 'tcp-port' as const, port: 59999 },
+      launch: launchable ? { command: '/fixture/bin/host', args: ['web'] } : null,
+      readyTimeoutMs: 300,
+      stopGraceMs: 100,
+    });
+    const failing = () => backend({ isAvailable: async () => false, describeManagedHost: described }) as never;
+    const ticks: string[] = [];
+    for (let round = 0; round < 2; round += 1) {
+      const outcome = await recoverManagedHost(failing(), effects, store, ledger, AUTHORIZED);
+      ticks.push(outcome.action === 'declined' ? outcome.reason : outcome.action);
+    }
+    launchable = false;
+    const absent = await recoverManagedHost(failing(), effects, store, ledger, AUTHORIZED);
+    launchable = true;
+    const third = await recoverManagedHost(failing(), effects, store, ledger, AUTHORIZED);
+    const fourth = await recoverManagedHost(failing(), effects, store, ledger, AUTHORIZED);
+    check('an unlaunchable tick neither spends the streak nor forgives it',
+      ticks.every((entry) => entry === 'recovery-failed')
+        && absent.action === 'declined' && absent.reason === 'not-launchable'
+        && third.action === 'recovery-failed'
+        && fourth.action === 'declined' && fourth.reason === 'budget-exhausted'
+        && spawns.length === 3,
+      JSON.stringify({
+        ticks, absent: absent.action, third: third.action,
+        fourth: (fourth as { reason?: string }).reason, spawns: spawns.length,
+      }));
   }
   {
     // The supervisor is behind the same gate as the start: an unauthorized agent

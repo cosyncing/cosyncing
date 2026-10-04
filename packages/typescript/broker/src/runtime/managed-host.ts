@@ -398,6 +398,18 @@ export interface ManagedHostPlan {
    * and losing it must never turn a working start into a failed one.
    */
   observe?(): Promise<{ port?: number; version?: string; profile?: string }>;
+  /**
+   * The owned child's output, forwarded while the start is in flight.
+   *
+   * Called with the CUMULATIVE capture each poll, not a delta. Supplied by the
+   * adapter through {@link ensureManagedHost} and only ever reached for a process
+   * this broker spawned a moment ago — the one situation where handing raw child
+   * output to another component is defensible, because the alternative is a broker
+   * that can start a host it cannot authenticate to.
+   */
+  observeOutput?(text: string): void;
+  /** This launch is over and its process is gone or disowned: drop anything derived from its output. */
+  launchEnded?(reason: string): void;
   /** How long a freshly spawned host has to become ready before it is a failure. */
   readyTimeoutMs: number;
   /** Poll interval while waiting for readiness. */
@@ -638,6 +650,29 @@ export async function startManagedHost(
       capturedOutput: child.readOutput(),
     };
   }
+  // The child's announcement of its own address (and, for one host, its only
+  // credential) is printed while this loop is running, so the loop is where the
+  // adapter gets it. Read-only and failure-proof by construction: nothing the
+  // adapter does with these bytes may turn a start that is going well into one
+  // that failed, which is why the call is wrapped.
+  const forwardOutput = (): void => {
+    if (!plan.observeOutput) return;
+    try {
+      plan.observeOutput(child.readOutput());
+    } catch {
+      /* an adapter's intake is never a reason to fail a host that is booting */
+    }
+  };
+  let launchEnded = false;
+  const endLaunch = (reason: string): void => {
+    if (launchEnded) return;
+    launchEnded = true;
+    try {
+      plan.launchEnded?.(reason);
+    } catch {
+      /* same: the broker's own bookkeeping wins over an adapter's reaction */
+    }
+  };
   // Written BEFORE readiness, deliberately. The record's claim is "this broker
   // spawned this process", which is proven right now; it is not a claim about
   // which process serves the address. Writing it here is what makes a child
@@ -770,12 +805,27 @@ export async function startManagedHost(
         store.write(record);
       }
     }
+    // The launch is over: the child is being terminated or abandoned, so
+    // anything the adapter derived from its output dies here too.
+    endLaunch(detailCode);
     return { action: 'start-failed', detailCode, capturedOutput: child.readOutput() };
   };
 
   const pollMs = plan.readyPollMs ?? 150;
   let polls = 0;
   for (;;) {
+    // Forwarded on EVERY poll, which is what "each poll" in the contract means.
+    //
+    // One call before the loop hands the adapter a buffer that is empty by
+    // construction — the child was spawned microseconds ago — and then never
+    // looks again. The announcement arrives during the second poll, so the
+    // adapter never learns the address its own host chose, never adopts the
+    // credential inside it, and a launch that was going perfectly dies as
+    // `host-not-ready-in-time`: a start that fails because nobody told the one
+    // component that could authenticate it. The capture is cumulative and the
+    // adapter's scanner de-duplicates, so re-reading the same bytes is cheap
+    // and idempotent, and the first poll still primes the exchange.
+    forwardOutput();
     if (await probeReady(plan, effects, deadline - effects.now())) {
       const serving = await plan.locate();
       // Ours if it IS the child, or if two fresh walks both prove it descends
@@ -832,6 +882,7 @@ export async function startManagedHost(
       // Nothing of ours was ever proven to be serving, so the record describes
       // a process that has exited and is safe to drop.
       store.clear(plan.agent);
+      endLaunch('host-exited-during-start');
       return { action: 'start-failed', detailCode: 'host-exited-during-start', capturedOutput: child.readOutput() };
     }
     if (effects.now() >= deadline) {
@@ -1342,6 +1393,8 @@ export async function ensureManagedHost(
     } | null>;
     isManagedHostReady?(options?: { signal?: AbortSignal }): Promise<boolean>;
     isAvailable(options?: { signal?: AbortSignal }): Promise<boolean>;
+    observeManagedOutput?(chunk: string): void;
+    managedLaunchEnded?(reason: string): void;
   },
   effects: ManagedHostEffects,
   store: ManagedHostStore,
@@ -1401,6 +1454,13 @@ export async function ensureManagedHost(
       // point of this evidence is what the host chose once it was running, and
       // the description taken before it started cannot contain that.
       observe: async () => (await backend.describeManagedHost?.())?.serving ?? {},
+      // Passed through, never interpreted. The broker forwards the bytes of a
+      // process it started a second ago to the adapter that described it and
+      // understands them; it does not look inside, quote them, or persist them,
+      // which is what keeps a credential-bearing announcement from becoming a log
+      // line. An adapter with no use for them simply does not implement the hook.
+      observeOutput: (text) => backend.observeManagedOutput?.(text),
+      launchEnded: (reason) => backend.managedLaunchEnded?.(reason),
       launch: descriptor.launch,
       readyTimeoutMs: descriptor.readyTimeoutMs,
       stopGraceMs: descriptor.stopGraceMs,
@@ -1425,6 +1485,7 @@ export async function releaseManagedHost(
       locator: DescribedLocator;
       stopGraceMs: number;
     } | null>;
+    managedLaunchEnded?(reason: string): void;
   },
   effects: ManagedHostEffects,
   store: ManagedHostStore,
@@ -1500,13 +1561,54 @@ export interface ManagedHostRestartLedger {
    *  {@link ManagedHostRestartLedger.forget}, which clears an agent's whole
    *  history because a host is serving again. */
   withdraw(agent: string, now: number): void;
+  /**
+   * A restart attempt that ended without THIS broker's host serving.
+   *
+   * Separate from {@link record} because the two are counted differently on
+   * purpose: the window counts WHEN attempts happened, and this counts whether
+   * they WORKED. See {@link managedHostRestartLedger} for why only one of them
+   * is allowed to expire.
+   */
+  fail(agent: string): void;
+  /** Why an agent is suspended, or `undefined` when it may be restarted again. */
+  suspension(agent: string): { failures: number; limit: number } | undefined;
+  /**
+   * Note the configuration the host was described with, and lift a suspension
+   * that belongs to a DIFFERENT configuration.
+   */
+  noteConfiguration(agent: string, identityKey: string): void;
 }
 
-/** In-memory, and deliberately so: a broker restart is itself a fresh chance. */
+/**
+ * In-memory, and deliberately so: a broker restart is itself a fresh chance.
+ *
+ * TWO CLOCKS, BECAUSE ONE WAS NOT ENOUGH. The window (`limit` per `windowMs`)
+ * answers "how often may this be tried", and it ages out — correctly, because a
+ * host that recovered and crashed again months later deserves its allowance.
+ * What it could not answer was "how many times in a row has this FAILED", and
+ * that gap was load-bearing: a host that dies on every start spent its three
+ * attempts, was warned it would not be restarted again, and then quietly got
+ * three MORE attempts as soon as ten quiet minutes had passed. Across a night
+ * that is a slow relaunch loop the warning message flatly contradicted, and a
+ * broker restart wiped the ledger as well.
+ *
+ * So a streak of failures that reaches the limit SUSPENDS the agent and does not
+ * expire on its own. Three things lift it: the host serving again (the readiness
+ * check calls {@link ManagedHostRestartLedger.forget}), a relevant configuration
+ * change ({@link ManagedHostRestartLedger.noteConfiguration}), and an explicit
+ * broker restart, which builds a fresh ledger. A tick where nothing was
+ * launchable withdraws its WINDOW attempt and neither charges nor forgives the
+ * streak: an agent that is not installed is an absence, not a crash.
+ */
 export function managedHostRestartLedger(): ManagedHostRestartLedger {
   const attempts = new Map<string, number[]>();
+  const failures = new Map<string, number>();
+  const configurations = new Map<string, string>();
   return {
     allow: (agent, now, budget) => {
+      // Checked first, and NOT time-based. Everything below this line ages; this
+      // line is the whole reason there are two clocks.
+      if ((failures.get(agent) ?? 0) >= budget.limit) return false;
       const recent = (attempts.get(agent) ?? []).filter((at) => now - at < budget.windowMs);
       attempts.set(agent, recent);
       return recent.length < budget.limit;
@@ -1514,7 +1616,10 @@ export function managedHostRestartLedger(): ManagedHostRestartLedger {
     record: (agent, now) => {
       attempts.set(agent, [...(attempts.get(agent) ?? []), now]);
     },
-    forget: (agent) => { attempts.delete(agent); },
+    forget: (agent) => {
+      attempts.delete(agent);
+      failures.delete(agent);
+    },
     withdraw: (agent, now) => {
       const recent = attempts.get(agent);
       if (!recent) return;
@@ -1522,6 +1627,23 @@ export function managedHostRestartLedger(): ManagedHostRestartLedger {
       if (index < 0) return;
       recent.splice(index, 1);
       if (recent.length === 0) attempts.delete(agent);
+    },
+    fail: (agent) => {
+      failures.set(agent, (failures.get(agent) ?? 0) + 1);
+    },
+    suspension: (agent) => {
+      const count = failures.get(agent);
+      return count === undefined || count < MANAGED_HOST_RESTART_BUDGET.limit
+        ? undefined
+        : { failures: count, limit: MANAGED_HOST_RESTART_BUDGET.limit };
+    },
+    noteConfiguration: (agent, identityKey) => {
+      const seen = configurations.get(agent);
+      configurations.set(agent, identityKey);
+      if (seen !== undefined && seen !== identityKey) {
+        attempts.delete(agent);
+        failures.delete(agent);
+      }
     },
   };
 }
@@ -1615,6 +1737,10 @@ export async function recoverManagedHost(
   }
   const descriptor = await backend.describeManagedHost();
   if (!descriptor) return { action: 'undescribed' };
+  // A suspension belongs to the configuration that earned it. Another address,
+  // home or port is another host, and refusing to start it because the LAST one
+  // crash-looped would be a policy with no premise behind it.
+  ledger.noteConfiguration(backend.id, descriptor.identityKey);
 
   const record = store.read(backend.id);
   if (!record) {
@@ -1681,9 +1807,13 @@ async function restart(
   // that failed, a predecessor that would not stop, an address that could not
   // be located, a descriptor with nothing to launch — and reporting those as
   // 'recovered' told the operator the host was back while it was still down.
-  return isManagedHostRecovered(outcome)
-    ? { action: 'recovered', outcome }
-    : { action: 'recovery-failed', outcome };
+  if (!isManagedHostRecovered(outcome)) {
+    // Charged to the streak as well as the window. This call is what turns
+    // "three attempts every ten minutes, forever" into "three attempts, then stop".
+    ledger.fail(backend.id);
+    return { action: 'recovery-failed', outcome };
+  }
+  return { action: 'recovered', outcome };
 }
 
 /**

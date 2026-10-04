@@ -47,6 +47,7 @@ import type {
 } from '@cosyncing/adapter-api';
 import type { DshDownlinkFrame, DshRpcClient } from './server.ts';
 import { DshDriver, dshModelOptions, type DshImageLimits } from './drive.ts';
+import { DshLegacySessionChannel, type DshHistoryPage, type DshSessionChannel } from './protocol.ts';
 import {
   createDshMapState,
   dshMessageKey,
@@ -140,8 +141,24 @@ function dshModeCategory(value: string): ModeOption['category'] {
 }
 
 export interface DshConnectionOptions {
-  rpc: DshRpcClient;
+  /**
+   * The legacy transport. Kept as the default construction path so the whole
+   * qualified 0.1 suite keeps exercising the real driver; a caller that supplies
+   * a `channel` (the 0.2 link) does not need one.
+   */
+  rpc?: DshRpcClient;
   driver?: DshDriver;
+  /**
+   * Everything this connection reads and writes, behind one seam.
+   *
+   * The connection is transcript machinery, not a transport: the admit gate, the
+   * priming boundary, the projection store and the pending cards were qualified
+   * against a real 0.1 host and are correct for any host that can hand them the
+   * same frame vocabulary and the same page-shaped history read. Both families go
+   * through here, which is what lets the same connection serve a 0.2 host without
+   * a second copy of that logic to keep in step.
+   */
+  channel?: DshSessionChannel;
   /** Injected clock, so the priming timeout is testable without real waiting. */
   now?: () => number;
   historyMaxPages?: number;
@@ -168,8 +185,7 @@ interface HistoryPage {
 
 export class DshSessionConnection implements SessionConnection {
   private readonly handlers = new Set<AgentMessageHandler>();
-  private readonly rpc: DshRpcClient;
-  private readonly driver: DshDriver;
+  private readonly channel: DshSessionChannel;
   private readonly nowImpl: () => number;
   private readonly historyMaxPages: number;
   private readonly historyPageMessages: number;
@@ -199,8 +215,12 @@ export class DshSessionConnection implements SessionConnection {
   private removed = false;
 
   constructor(readonly info: SessionInfo, options: DshConnectionOptions) {
-    this.rpc = options.rpc;
-    this.driver = options.driver ?? new DshDriver(options.rpc);
+    if (options.channel) {
+      this.channel = options.channel;
+    } else {
+      if (!options.rpc) throw new Error('a DeepSeek Harness connection needs either a channel or an rpc client');
+      this.channel = new DshLegacySessionChannel(options.rpc, options.driver);
+    }
     this.nowImpl = options.now ?? (() => Date.now());
     this.historyMaxPages = options.historyMaxPages ?? DSH_HISTORY_MAX_PAGES;
     this.historyPageMessages = options.historyPageMessages ?? DSH_HISTORY_PAGE_MESSAGES;
@@ -229,7 +249,7 @@ export class DshSessionConnection implements SessionConnection {
     let reachedCeiling = false;
 
     for (let page = 0; page < this.historyMaxPages; page += 1) {
-      const outcome = await this.rpc.call<HistoryPage>('session.history', {
+      const outcome = await this.channel.history({
         sessionId: this.info.id,
         maxMessages: this.historyPageMessages,
         ...(beforeSeq !== undefined ? { beforeSeq } : {}),
@@ -576,6 +596,27 @@ export class DshSessionConnection implements SessionConnection {
   }
 
   /**
+   * The host withdrew a pending approval or question by id.
+   *
+   * 0.2 says only "this event id is cancelled", with no statement of which kind
+   * it was, so the connection decides from the card it is actually holding. A
+   * resolved frame of the wrong kind would be worse than nothing: a question
+   * settled with a `permission-resolved` leaves the question card on screen while
+   * telling the broker the interaction is over.
+   */
+  noteCancellation(eventId: string): void {
+    const entry = this.pending.get(eventId);
+    if (!entry) return;
+    this.pending.delete(eventId);
+    if (entry.kind === 'approval') {
+      this.approvalIndex.delete(entry.approvalId);
+      this.deliver({ type: 'permission-resolved', requestId: eventId, decision: 'external' });
+      return;
+    }
+    this.deliver({ type: 'question-resolved', requestId: eventId });
+  }
+
+  /**
    * The transient inbox, as an authoritative whole snapshot. Queued and steering
    * items render as dimmed user bubbles; `context` items are invisible until the
    * agent claims them, exactly as the host describes.
@@ -678,7 +719,7 @@ export class DshSessionConnection implements SessionConnection {
     // can be lost while a catalog read or a switch command is parked, and this
     // send would then land on an epoch nothing has re-baselined.
     this.assertMutable('send a prompt');
-    await this.driver.prompt(this.info.id, input, {
+    await this.channel.prompt(this.info.id, input, {
       mode: 'queue',
       imageLimits: this.imageLimits(),
       ...(this.info.cwd ? { sessionCwd: this.info.cwd } : {}),
@@ -716,7 +757,7 @@ export class DshSessionConnection implements SessionConnection {
   private async applyModelSelection(model: PromptInput['model']): Promise<void> {
     if (!model) return;
     this.assertMutable('select a model');
-    const catalog = await this.driver.models(this.info.id);
+    const catalog = await this.channel.models(this.info.id);
     const wanted = {
       provider: model.providerID,
       model: model.modelID,
@@ -735,7 +776,7 @@ export class DshSessionConnection implements SessionConnection {
     // the generation may have ended while that request was parked, and a
     // selection is durable session state, not a retryable read.
     this.assertMutable('select a model');
-    await this.driver.selectModel(this.info.id, wanted);
+    await this.channel.selectModel(this.info.id, wanted);
   }
 
   /**
@@ -762,7 +803,7 @@ export class DshSessionConnection implements SessionConnection {
       throw new Error(`the DeepSeek Harness host does not offer the permission mode "${mode}"`);
     }
     if (select.currentValue === mode) return;
-    const roster = await this.driver.listCommands(this.info.id);
+    const roster = await this.channel.listCommands(this.info.id);
     if (!roster.some((command) => command.name === DSH_PERMISSION_COMMAND)) {
       throw new Error(
         'this DeepSeek Harness host advertises permission modes but no command to switch them, so the mode was not changed',
@@ -773,7 +814,7 @@ export class DshSessionConnection implements SessionConnection {
     // generation would change how the session approves tools while this
     // connection no longer speaks for it.
     this.assertMutable('select a permission mode');
-    const execution = await this.driver.executeCommand(this.info.id, `/${DSH_PERMISSION_COMMAND} ${mode}`);
+    const execution = await this.channel.executeCommand(this.info.id, `/${DSH_PERMISSION_COMMAND} ${mode}`);
     if (execution?.result.kind === 'error') {
       throw new Error(
         execution.result.text
@@ -817,7 +858,7 @@ export class DshSessionConnection implements SessionConnection {
     if (!entry || entry.kind !== 'approval') {
       throw new Error(`dsh approval ${requestId} is no longer pending`);
     }
-    const receipt = await this.driver.respondApproval(entry, decision !== 'reject');
+    const receipt = await this.channel.respondApproval(entry, decision !== 'reject');
     // The receipt reason is one of exactly two (the decoder fails anything
     // else closed as drift). `bad-response`: OUR payload was malformed, the
     // card is still pending on the host, and swallowing it would leave the
@@ -842,7 +883,7 @@ export class DshSessionConnection implements SessionConnection {
     if (!entry || entry.kind !== 'question') {
       throw new Error(`dsh question ${requestId} is no longer pending`);
     }
-    const receipt = await this.driver.answerQuestion(entry, answers);
+    const receipt = await this.channel.answerQuestion(entry, answers);
     // Same receipt discipline as respondPermission: `bad-response` throws and
     // keeps the card; `not-pending` — the only other reason the decoder admits
     // — settles the card as resolved-elsewhere.
@@ -868,7 +909,7 @@ export class DshSessionConnection implements SessionConnection {
    * exactly as the host ordered them — advertised order is picker order.
    */
   async listModels(): Promise<ModelOption[]> {
-    const catalog = await this.driver.models(this.info.id);
+    const catalog = await this.channel.models(this.info.id);
     if (!catalog.routable) return [];
     // Flattened through the shared mapper, so the attached picker shows the
     // same rows the pre-session catalog (`DshAdapter.listModels`) offered.
@@ -904,7 +945,7 @@ export class DshSessionConnection implements SessionConnection {
     const local: SlashCommand[] = [{ name: 'stop', description: 'Stop the running turn', kind: 'action' }];
     let roster: Awaited<ReturnType<DshDriver['listCommands']>>;
     try {
-      roster = await this.driver.listCommands(this.info.id);
+      roster = await this.channel.listCommands(this.info.id);
     } catch {
       return local;
     }
@@ -936,11 +977,11 @@ export class DshSessionConnection implements SessionConnection {
   async runCommand(name: string, args?: string, _input?: CommandInput): Promise<CommandResult | void> {
     if (DSH_LOCAL_COMMANDS.includes(name)) {
       this.assertMutable(`run "${name}"`);
-      await this.driver.cancel(this.info.id);
+      await this.channel.cancel(this.info.id);
       return;
     }
     this.assertMutable(`run "${name}"`);
-    const roster = await this.driver.listCommands(this.info.id);
+    const roster = await this.channel.listCommands(this.info.id);
     if (!roster.some((command) => command.name === name)) {
       throw new Error(`dsh has no command "${name}"`);
     }
@@ -948,7 +989,7 @@ export class DshSessionConnection implements SessionConnection {
     // it was issued under may have ended while it was in flight.
     this.assertMutable(`run "${name}"`);
     const trimmed = args?.trim() ?? '';
-    const execution = await this.driver.executeCommand(
+    const execution = await this.channel.executeCommand(
       this.info.id,
       trimmed ? `/${name} ${trimmed}` : `/${name}`,
     );
@@ -965,6 +1006,7 @@ export class DshSessionConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
+    this.channel.close?.();
     if (this.closed) return;
     this.closed = true;
     this.handlers.clear();

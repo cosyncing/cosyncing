@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "e35146eb24ada4334f5a543c0970a7b8715f14ce",
+  "acceptedBase": "98ed08fbaf2e94ad84ba359f5816a400263cf303",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -69,13 +69,18 @@
     "broker.dsh-contract-capture",
     "broker.dsh-create-generation-race",
     "broker.dsh-credential-lifetime",
+    "broker.dsh-credential-store",
     "broker.dsh-diagnosis",
     "broker.dsh-drive",
+    "broker.dsh-enrollment",
     "broker.dsh-event-generation",
     "broker.dsh-launch-qualification",
+    "broker.dsh-managed-launch",
     "broker.dsh-mapping",
     "broker.dsh-observe",
+    "broker.dsh-product-integration",
     "broker.dsh-registration-gate",
+    "broker.dsh-session-link",
     "broker.dsh-stream-carrier",
     "broker.dsh-transport",
     "broker.echo-correlation",
@@ -205,7 +210,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:e250232f0e9c648e4e5bc75897f4d4da3d75816081e466d7536af85d86cd2551"
+      "fingerprint": "sha256:da836a737e55a7cca5009cdcc6ff7b866bdf74c800164ddeeb365d7cd0d5ab0f"
     },
     {
       "id": "capabilities",
@@ -642,6 +647,10 @@
       "fingerprint": "sha256:8e22c9258086ab68840e758aff7211064839fa5405d489e919bf9f2f8174c6c4"
     },
     {
+      "id": "dsh-credentials",
+      "fingerprint": "sha256:eba9717e71db69d64bc5af4de4ae07720814e4e65f9c0edf928f8187b8680cce"
+    },
+    {
       "id": "dsh-diagnostics",
       "fingerprint": "sha256:fd372dec8f47ff6b34403e45edeb5fa2d5301bd0989080db781e133d23a168bc"
     },
@@ -650,8 +659,20 @@
       "fingerprint": "sha256:f5d50a04dc227a068c91e09b7fa1ba3918815a59a83a60856a21d78777d027c4"
     },
     {
+      "id": "dsh-enrollment",
+      "fingerprint": "sha256:7e6410f3c04430973c68509b1de5313094b6ad057a7982d0a1a2450ea72cfc5d"
+    },
+    {
       "id": "dsh-event-link",
       "fingerprint": "sha256:f6c196da3e564385ff563ebb18774fa98348e35bac9afc5aebc08db53479cfd4"
+    },
+    {
+      "id": "dsh-integration",
+      "fingerprint": "sha256:bd22d489be5e59e4f49c145f5e78eb8658f2cea558bcdfc9b1fb0d2ed3c79add"
+    },
+    {
+      "id": "dsh-managed-launch",
+      "fingerprint": "sha256:586af728ec533515fac5551000fba46f605053d66a4ca91d92af83519ee26fb7"
     },
     {
       "id": "dsh-mapping",
@@ -672,6 +693,10 @@
     {
       "id": "dsh-remote",
       "fingerprint": "sha256:8dab222b67c8e2ca0e0a2fd969fac5feb4fdfc85cdf6ae4c1a3f35601d7e33fa"
+    },
+    {
+      "id": "dsh-remote-host",
+      "fingerprint": "sha256:c35bf403c0c14ce11ca5b56dd049325ee778ee1d38895c1106cfa09e193b5e38"
     },
     {
       "id": "dsh-server",

@@ -21,6 +21,7 @@ import type {
   SetupPathInspection,
 } from '@cosyncing/adapter-api';
 import { DSH_DEFAULT_BASE_URL } from '../src/server.ts';
+import { dshCredentialScope, type DshCookie, type DshCredentialStore } from '../src/auth.ts';
 import {
   diagnoseDshSetup,
   npxCacheRoot,
@@ -31,6 +32,27 @@ import {
 
 const FIXTURE = await Bun.file(new URL('./fixtures/dsh-0.1.0-rc.6.json', import.meta.url)).json() as {
   muxPlainGetStatus: number;
+};
+
+/**
+ * The 0.2 answers, read from the capture rather than typed in here, because the
+ * whole point of these cases is that a 0.2 host's fingerprint is a REFUSAL on a
+ * different route: an anonymous 401 on its carrier and a 404 where the 0.1
+ * downlink used to be.
+ */
+const REMOTE_FIXTURE = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2.json', import.meta.url)).json() as {
+  probe: {
+    'probe.remoteMuxUnauthenticated': { status: number };
+    'probe.legacyMux': { status: number };
+  };
+};
+const REMOTE_ROUTES: Record<string, SetupHttpProbe> = {
+  '/api/remote.mux': { status: 'http-error', statusCode: REMOTE_FIXTURE.probe['probe.remoteMuxUnauthenticated'].status },
+  '/api/events.mux': { status: 'http-error', statusCode: REMOTE_FIXTURE.probe['probe.legacyMux'].status },
+};
+/** A 0.1 host has no Remote carrier route; only a 404 there lets the legacy fingerprint be read. */
+const LEGACY_ROUTES: Record<string, SetupHttpProbe> = {
+  '/api/remote.mux': { status: 'http-error', statusCode: 404 },
 };
 
 const results: Array<{ name: string; ok: boolean }> = [];
@@ -45,7 +67,14 @@ interface FakeWorld {
   version?: string;
   paths?: Record<string, SetupPathInspection['status']>;
   tcp?: 'open' | 'closed' | 'unknown';
+  /** Answer for any path not listed in `routes`. */
   http?: SetupHttpProbe;
+  /** Answer per path, for the hosts whose two probe routes answer differently. */
+  routes?: Record<string, SetupHttpProbe>;
+  /** What the broker's credential store answers for THIS endpoint's scope. */
+  credential?: DshCookie | null | 'throws' | 'no-store';
+  /** The DSH_HOME the credential scope is derived from, when a credential is seeded. */
+  dshHome?: string;
 }
 
 const HOME = '/fixture/home';
@@ -71,7 +100,7 @@ function context(world: FakeWorld): { context: SetupDiagnosisContext; urls: stri
       runReadOnly: async (): Promise<SetupCommandProbe> => ({ status: 'unavailable', stdout: '', stderr: '' }),
       fetchJson: async (url): Promise<SetupHttpProbe> => {
         urls.push(url);
-        return world.http ?? { status: 'unreachable' };
+        return world.routes?.[new URL(url).pathname] ?? world.http ?? { status: 'unreachable' };
       },
       probeTcp: async () => world.tcp ?? 'closed',
       listDirectory: () => ({ ok: false, reason: 'missing' }),
@@ -86,6 +115,7 @@ function checkOf(
     checks: Array<{
       id: string; status: string; detailCode: string;
       remediation?: { command?: string; message?: string };
+      evidence?: Record<string, unknown>;
     }>;
   },
   id: string,
@@ -208,6 +238,7 @@ function checkOf(
     tcp: 'open',
     // A real host answers the upgrade-only route with 426 and a non-JSON body,
     // which the probe reports as invalid-response WITH the status.
+    routes: LEGACY_ROUTES,
     http: { status: 'invalid-response', statusCode: FIXTURE.muxPlainGetStatus },
   });
   const diagnosis = await diagnoseDshSetup(world.context);
@@ -219,8 +250,10 @@ function checkOf(
     JSON.stringify(checkOf(diagnosis, 'dsh.contract')),
   );
   check(
-    'the fingerprint is taken from the mux route on the configured base URL',
-    world.urls.length === 1 && world.urls[0] === 'http://127.0.0.1:3080/api/events.mux',
+    'the carrier route is asked first, and the legacy route only behind a 404 there',
+    world.urls.length === 2
+      && world.urls[0] === 'http://127.0.0.1:3080/api/remote.mux'
+      && world.urls[1] === 'http://127.0.0.1:3080/api/events.mux',
     world.urls.join(' '),
   );
 
@@ -392,12 +425,15 @@ function checkOf(
     version: '0.1.0-rc.6',
     env: { COSYNCING_DSH_BASE_URL: 'http://127.0.0.1:4444' },
     tcp: 'open',
+    routes: LEGACY_ROUTES,
     http: { status: 'invalid-response', statusCode: DSH_UPGRADE_REQUIRED_STATUS },
   });
   await diagnoseDshSetup(configured.context);
   check(
     'the environment override moves the probe to the configured address',
-    configured.urls[0] === 'http://127.0.0.1:4444/api/events.mux',
+    configured.urls.length > 1
+      && configured.urls.every((url) => url.startsWith('http://127.0.0.1:4444/'))
+      && configured.urls[1] === 'http://127.0.0.1:4444/api/events.mux',
     configured.urls.join(' '),
   );
 
@@ -408,12 +444,13 @@ function checkOf(
     version: '0.1.0-rc.6',
     env: { COSYNCING_DSH_BASE_URL: 'http://user:secret@127.0.0.1:5555' },
     tcp: 'open',
+    routes: LEGACY_ROUTES,
     http: { status: 'invalid-response', statusCode: DSH_UPGRADE_REQUIRED_STATUS },
   });
   const credentialedDiagnosis = await diagnoseDshSetup(credentialed.context);
   check(
     'a credentialed base URL is probed and reported with the credential redacted',
-    credentialed.urls[0] === 'http://127.0.0.1:5555/api/events.mux'
+    credentialed.urls[0] === 'http://127.0.0.1:5555/api/remote.mux'
       && !JSON.stringify(credentialedDiagnosis.checks).includes('secret'),
     credentialed.urls.join(' '),
   );
@@ -431,6 +468,172 @@ function checkOf(
       && withQuery.urls.length === 0
       && !JSON.stringify(queryDiagnosis.checks).includes('abc123'),
     JSON.stringify(checkOf(queryDiagnosis, 'dsh.server')),
+  );
+}
+
+// ── 5b. The 0.2 host: its fingerprint is a refusal, and the remedy is enrollment ─
+//
+// A 0.2 host authenticates every route before it dispatches, so the answer that
+// PROVES it is a DeepSeek Harness host is the one the 0.1-era fingerprint called
+// a failure. Doctor has to read that refusal as a contract match and then answer
+// the only question left, which is what cosyncing itself holds — a local fact,
+// from the local store, never a second guess from the same anonymous GET.
+
+function storeAnswering(answer: DshCookie | null | 'throws'): DshCredentialStore {
+  return {
+    async load() {
+      if (answer === 'throws') throw new Error('the session store refuses an unsafe file');
+      return answer;
+    },
+    async save() { throw new Error('diagnosis must not write to the credential store'); },
+    async clear() { throw new Error('diagnosis must not write to the credential store'); },
+  };
+}
+
+const REMOTE_COOKIE: DshCookie = {
+  name: 'dsh-auth-fixture',
+  value: 'v1.a-credential-that-must-never-be-printed',
+  expiresAt: 1_800_000_000_000,
+};
+const REMOTE_HOME = `${HOME}/.dsh`;
+/** The scope is derived, never typed: it is what makes doctor and adapter read one file. */
+const REMOTE_SCOPE = dshCredentialScope(DSH_DEFAULT_BASE_URL, REMOTE_HOME);
+
+function remoteWorld(overrides: Record<string, unknown> = {}): FakeWorld {
+  return {
+    executable: '/usr/local/bin/dsh',
+    version: '0.2.0-rc.2',
+    paths: { [REMOTE_HOME]: 'directory' },
+    tcp: 'open',
+    routes: REMOTE_ROUTES,
+    ...overrides,
+  } as FakeWorld;
+}
+
+{
+  const noCookie = await diagnoseDshSetup(
+    context(remoteWorld()).context,
+    { credentialStore: storeAnswering(null), dshHome: REMOTE_HOME },
+  );
+  const contract = checkOf(noCookie, 'dsh.contract');
+  const enrollment = checkOf(noCookie, 'dsh.enrollment');
+  check(
+    'a 0.2 host behind its auth fence is recognized, not reported as an unexpected server',
+    contract?.status === 'pass' && contract.detailCode === 'remote-carrier-requires-credential',
+    JSON.stringify(contract),
+  );
+  check(
+    '...and the missing enrollment is its own actionable failure',
+    enrollment?.status === 'fail'
+      && enrollment.detailCode === 'enrollment-required'
+      && enrollment.remediation?.command === 'cosy dsh connect',
+    JSON.stringify(enrollment),
+  );
+
+  const held = await diagnoseDshSetup(
+    context(remoteWorld({ credential: REMOTE_COOKIE })).context,
+    { credentialStore: storeAnswering(REMOTE_COOKIE), dshHome: REMOTE_HOME },
+  );
+  const heldEnrollment = checkOf(held, 'dsh.enrollment');
+  check(
+    'a held, unexpired credential passes as HELD, which is the most a local fact can claim',
+    heldEnrollment?.status === 'pass'
+      && heldEnrollment.detailCode === 'credential-held'
+      && heldEnrollment.evidence?.expiresAt === REMOTE_COOKIE.expiresAt,
+    JSON.stringify(heldEnrollment),
+  );
+  check(
+    '...and neither the cookie value nor its name reaches the report',
+    !JSON.stringify(held.checks).includes(REMOTE_COOKIE.value)
+      && !JSON.stringify(held.checks).includes(REMOTE_COOKIE.name),
+    JSON.stringify(heldEnrollment),
+  );
+
+  const expired = await diagnoseDshSetup(
+    context(remoteWorld()).context,
+    {
+      credentialStore: storeAnswering({ ...REMOTE_COOKIE, expiresAt: 1_000 }),
+      dshHome: REMOTE_HOME,
+      now: () => 2_000,
+    },
+  );
+  check(
+    'a credential past the expiry the host gave it is a named failure with the same remedy',
+    checkOf(expired, 'dsh.enrollment')?.detailCode === 'credential-expired'
+      && checkOf(expired, 'dsh.enrollment')?.remediation?.command === 'cosy dsh connect',
+    JSON.stringify(checkOf(expired, 'dsh.enrollment')),
+  );
+
+  const unusable = await diagnoseDshSetup(
+    context(remoteWorld()).context,
+    { credentialStore: storeAnswering('throws'), dshHome: REMOTE_HOME },
+  );
+  const unusableEnrollment = checkOf(unusable, 'dsh.enrollment');
+  check(
+    'a store that will not answer is a storage failure, never an invitation to re-enroll',
+    unusableEnrollment?.status === 'fail'
+      && unusableEnrollment.detailCode === 'credential-store-unusable'
+      && unusableEnrollment.remediation?.command === undefined
+      && !/dsh connect/.test(unusableEnrollment.remediation?.message ?? ''),
+    JSON.stringify(unusableEnrollment),
+  );
+
+  const managed = await diagnoseDshSetup(
+    { ...context(remoteWorld()).context, managedExternalHostIdentities: [DSH_DEFAULT_BASE_URL] },
+    { credentialStore: storeAnswering(null), dshHome: REMOTE_HOME },
+  );
+  const managedEnrollment = checkOf(managed, 'dsh.enrollment');
+  check(
+    'a managed host with no credential is never told to enroll by hand, because that needs a second host',
+    managedEnrollment?.status === 'fail'
+      && managedEnrollment.detailCode === 'enrollment-required-by-managed-host'
+      && managedEnrollment.remediation?.command === undefined
+      && /second host/.test(managedEnrollment.remediation?.message ?? ''),
+    JSON.stringify(managedEnrollment),
+  );
+
+  const refused = await diagnoseDshSetup(
+    context(remoteWorld({
+      routes: {
+        ...REMOTE_ROUTES,
+        '/api/remote.mux': { status: 'http-error', statusCode: 403 },
+      },
+    })).context,
+    { credentialStore: storeAnswering(null), dshHome: REMOTE_HOME },
+  );
+  check(
+    'a host that refuses the request address is a fence problem, and no enrollment question is asked',
+    checkOf(refused, 'dsh.contract')?.detailCode === 'remote-carrier-refused'
+      && checkOf(refused, 'dsh.enrollment') === undefined,
+    JSON.stringify(refused.checks.map((entry) => `${entry.id}=${entry.detailCode ?? ''}`)),
+  );
+
+  const scopeIsEndpointScoped = dshCredentialScope('http://127.0.0.1:3080', REMOTE_HOME) === REMOTE_SCOPE
+    && dshCredentialScope('http://127.0.0.1:3081', REMOTE_HOME) !== REMOTE_SCOPE
+    && dshCredentialScope(DSH_DEFAULT_BASE_URL, `${REMOTE_HOME}-other`) !== REMOTE_SCOPE;
+  check(
+    'the scope doctor reads is the scope the adapter writes: same address and profile, same file',
+    scopeIsEndpointScoped,
+    REMOTE_SCOPE,
+  );
+}
+
+{
+  // A 0.1 host has nothing to enroll, and asking implies a contract it does not
+  // have. The legacy fingerprint stays exactly as it was.
+  const legacy = await diagnoseDshSetup(context({
+    executable: '/usr/local/bin/dsh',
+    version: '0.1.0-rc.6',
+    paths: { [REMOTE_HOME]: 'directory' },
+    tcp: 'open',
+    routes: LEGACY_ROUTES,
+    http: { status: 'invalid-response', statusCode: FIXTURE.muxPlainGetStatus },
+  }).context, { credentialStore: storeAnswering(null), dshHome: REMOTE_HOME });
+  check(
+    'a 0.1 host is never asked about an enrollment it cannot have',
+    checkOf(legacy, 'dsh.contract')?.detailCode === 'downlink-upgrade-required'
+      && checkOf(legacy, 'dsh.enrollment') === undefined,
+    JSON.stringify(legacy.checks.map((entry) => entry.id)),
   );
 }
 

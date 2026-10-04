@@ -15,6 +15,11 @@ import {
   renderUninstallPlan,
   renderUninstallResult,
 } from './cli-i18n.ts';
+import {
+  runDshConnectCommand,
+  runDshDisconnectCommand,
+  runDshStatusCommand,
+} from './dsh-commands.ts';
 
 export interface BrokerRuntimeHandle {
   closed: Promise<void>;
@@ -175,6 +180,9 @@ Usage:
   ${command} pair [--broker-url <client-reachable-url>] [--label <device>] [--wait] [--json]
   ${command} pair --status <pairing-id> [--timeout <seconds>] [--json]
   ${command} devices list [--json]
+  ${command} dsh connect [--url <host-address>] [--json]
+  ${command} dsh disconnect [--url <host-address>] [--json]
+  ${command} dsh status [--url <host-address>] [--json]
   ${command} devices revoke <id> [--yes] [--json]
   ${command} status [--json] [--readiness]
   ${command} start | stop | restart
@@ -191,6 +199,7 @@ Commands:
   setup    Inspect, confirm, and transactionally configure the broker
   pair     Render a five-minute, one-use client pairing QR
   devices  List or immediately revoke paired-device access
+  dsh      Enroll, forget, or inspect a DeepSeek Harness host you started yourself
   status   Summarize installation, service, endpoints, agents, sessions, and updates
   start    Start the owned durable user service (systemd or launchd)
   stop     Stop the owned durable user service
@@ -1028,6 +1037,52 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     return (await (dependencies.runUninstall ?? ((options) => defaultRunUninstall({ ...options, buildInfo })))(
       { yes, allowLegacyIntegrations, purgeData, confirmPurgeData, json, interactive: process.stdin.isTTY, invocation: command, stdout, stderr },
+    )).exitCode;
+  }
+
+  if (requested === 'dsh') {
+    const [subcommand, ...rest] = args;
+    const runners: Record<string, typeof runDshConnectCommand | typeof runDshDisconnectCommand | typeof runDshStatusCommand> = {
+      connect: runDshConnectCommand,
+      disconnect: runDshDisconnectCommand,
+      status: runDshStatusCommand,
+    };
+    const run = subcommand === undefined ? undefined : runners[subcommand];
+    if (!run) {
+      stderr.write(`${command} dsh: expected connect, disconnect, or status\n`);
+      return 2;
+    }
+    let json = false;
+    let baseUrl: string | undefined;
+    for (let index = 0; index < rest.length; index += 1) {
+      const arg = rest[index]!;
+      if (arg === '--json' && !json) { json = true; continue; }
+      if (arg === '--url' && baseUrl === undefined) {
+        const value = rest[index + 1];
+        try {
+          const parsed = value ? new URL(value) : undefined;
+          // A credential in the address is refused here as everywhere else: this
+          // command exists partly so a credential never travels in argv, and
+          // accepting `http://user:token@host` would defeat that in one line.
+          if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+            || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error('invalid');
+        } catch {
+          stderr.write(`${command} dsh ${subcommand}: --url requires a credential-free http(s) address\n`);
+          return 2;
+        }
+        baseUrl = value;
+        index += 1;
+        continue;
+      }
+      stderr.write(`${command} dsh ${subcommand}: unknown or duplicate option ${JSON.stringify(arg)}\n`);
+      return 2;
+    }
+    if (json && subcommand === 'connect' && !process.stdin.pipe && process.stdin.isTTY) {
+      stderr.write(`${command} dsh connect: --json needs the URL on stdin, since nothing may be prompted\n`);
+      return 2;
+    }
+    return (await run(
+      { json, invocation: command, stdout, stderr, ...(baseUrl ? { baseUrl } : {}) },
     )).exitCode;
   }
 
