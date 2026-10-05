@@ -8354,6 +8354,8 @@ const managedHostStartup = Promise.allSettled(registry.list().map(async (backend
  */
 /** Agents already told about, so the give-up notice is said once rather than once per tick. */
 const announcedRestartGiveUp = new Set<string>();
+/** Agents whose host is running but unusable by us, told once rather than once per tick. */
+const announcedReadinessBlock = new Set<string>();
 const managedHostSupervisor = new ManagedHostSupervisor({
   backends: () => registry.list(),
   effects: managedHostEffects,
@@ -8400,6 +8402,26 @@ const managedHostSupervisor = new ManagedHostSupervisor({
           ? { capturedOutput: outcome.outcome.capturedOutput }
           : {}),
       });
+    } else if (outcome.action === 'blocked') {
+      // The adapter says the host is fine and cosyncing is not, so recovery
+      // stopped before signalling anything. This is the one supervision outcome
+      // where the correct action is NO action, which makes it the easiest one to
+      // lose: a healthy host sitting unauthenticated for three days produces no
+      // log line and no journal entry at all, and the operator's only clue is
+      // that the sessions stopped appearing. So it is said once, and journalled
+      // durably, with the remedy in the sentence rather than implied by a code.
+      if (!announcedReadinessBlock.has(agent)) {
+        announcedReadinessBlock.add(agent);
+        console.warn(`${LOG_PREFIX} left the managed ${agent} host running: ${outcome.detail}`);
+      }
+      recordManagedRuntimeFailure({
+        agent,
+        detailCode: `host-readiness-${outcome.remedy}`,
+      });
+    } else if (outcome.action === 'healthy' && announcedReadinessBlock.delete(agent)) {
+      // Recovered, so the next block is news again -- and the durable record an
+      // earlier one wrote is false now, so it goes.
+      clearManagedRuntimeFailure(agent);
     } else if (outcome.action === 'declined' && outcome.reason === 'budget-exhausted') {
       // Once per agent, not once per tick. The supervisor keeps declining for as long as the broker runs,
       // and repeating this every interval buried every other line in the log with a fact that had not

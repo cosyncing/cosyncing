@@ -98,6 +98,19 @@ export type DshCredentialLoad =
   | { kind: 'loaded'; cookie: DshCookie | null }
   | { kind: 'unavailable' };
 
+/**
+ * How the credential this session would put on the wire just changed identity.
+ *
+ * Reported to whoever is holding a connection open, because a WebSocket is
+ * authenticated at handshake time and keeps that credential for its life. An
+ * operator's `cosy dsh disconnect` withdraws the credential the carrier is
+ * riding, and a re-enrollment replaces it; in both cases the live stream is now
+ * speaking with a credential that no longer describes this enrollment, and the
+ * only honest response is to end that generation rather than keep streaming on
+ * the strength of a handshake nobody would authorize today.
+ */
+export type DshCredentialChange = 'adopted' | 'replaced' | 'removed';
+
 export interface DshAuthResponseLike {
   status: number;
   headers: {
@@ -168,6 +181,17 @@ function readExpiry(setCookie: string, now: number): number | undefined {
   if (expires === undefined) return undefined;
   const parsed = Date.parse(expires);
   return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+/**
+ * Whether two records name the same credential.
+ *
+ * Name and value only: an expiry the host restated for the same session is not a
+ * new enrollment, and treating it as one would lift a refusal the same cookie
+ * still deserves.
+ */
+function sameCookie(left: DshCookie, right: DshCookie | null): boolean {
+  return right !== null && left.name === right.name && left.value === right.value;
 }
 
 /**
@@ -290,7 +314,29 @@ export class DshAuthSession {
    */
   private ownership = 0;
   private inFlight?: Promise<DshAuthOutcome>;
-  private loaded = false;
+  /**
+   * The credential a refusal was about, for as long as that refusal stands.
+   *
+   * A refusal is an opinion about ONE credential, not a life sentence on the
+   * scope: `credential-refused` means the value the host looked at is dead, and
+   * the store may already hold a fresh one because `cosy dsh connect` runs in
+   * another process. The block therefore survives only while the store still
+   * answers with the very cookie that was refused, which is what stops a
+   * refusal from becoming a request loop without also making a repair inert.
+   */
+  private refusedCookie?: DshCookie;
+  /**
+   * Whether the held credential is the enrolment's own record.
+   *
+   * Set when the credential came out of the store, or went into it and the write
+   * completed. It is what makes an empty read mean "the enrolment was withdrawn"
+   * rather than "my own write never landed", and those two need opposite
+   * remedies: withdraw the credential, or keep serving with the one in hand.
+   */
+  private storeBacked = false;
+  /** Bumped every time the usable credential changes identity; see {@link onCredentialChange}. */
+  private revisionValue = 0;
+  private readonly credentialHandlers = new Set<(change: DshCredentialChange, revision: number) => void>();
   /**
    * Store mutations, in order, one at a time.
    *
@@ -355,6 +401,51 @@ export class DshAuthSession {
     return this.launchToken !== undefined;
   }
 
+  /**
+   * Identity of the credential this session would currently send.
+   *
+   * A monotonic counter, not a value: two enrollments can legitimately produce
+   * the same cookie bytes, and a holder that compared bytes would conclude
+   * nothing changed when the enrollment underneath it did.
+   */
+  get credentialRevision(): number {
+    return this.revisionValue;
+  }
+
+  /**
+   * Watch the usable credential change. Fires for adoption, replacement and
+   * removal, and only on an actual identity change.
+   */
+  onCredentialChange(handler: (change: DshCredentialChange, revision: number) => void): () => void {
+    this.credentialHandlers.add(handler);
+    return () => { this.credentialHandlers.delete(handler); };
+  }
+
+  /**
+   * The one way this session's credential changes identity.
+   *
+   * Every write to the held cookie goes through here so a live carrier cannot be
+   * left holding a credential that the store no longer supports. The identity of
+   * the object itself is preserved when nothing changed, because the store-write
+   * fences below compare held credentials by reference.
+   */
+  private publishCredential(next: DshCookie | undefined): void {
+    const previous = this.cookie;
+    const unchanged = (previous === undefined && next === undefined)
+      || (previous !== undefined && next !== undefined
+        && previous.name === next.name
+        && previous.value === next.value
+        && previous.expiresAt === next.expiresAt);
+    this.cookie = next;
+    if (unchanged) return;
+    // No credential, no record: whatever the store holds afterwards is a new
+    // fact rather than the absence of an old one.
+    if (next === undefined) this.storeBacked = false;
+    this.revisionValue += 1;
+    const change: DshCredentialChange = previous === undefined ? 'adopted' : next === undefined ? 'removed' : 'replaced';
+    for (const handler of [...this.credentialHandlers]) handler(change, this.revisionValue);
+  }
+
   /** The `Cookie` header value for this endpoint, or null when unauthenticated. */
   cookieHeader(now = this.now()): string | null {
     if (!this.cookie || this.stateValue !== 'authenticated') return null;
@@ -388,8 +479,10 @@ export class DshAuthSession {
       // that ended the attempt is the only other party that knows what the
       // session is now. A still-valid cookie survives; an unearned one does not.
       if (!(this.stateValue === 'authenticated' && this.cookieHeader() !== null)) {
-        this.cookie = undefined;
-        this.loaded = false;
+        this.publishCredential(undefined);
+        // A new launch is a new fact. Whatever this scope was refused for
+        // belongs to the launch that has just been replaced.
+        this.refusedCookie = undefined;
         this.renewalRetryAfter = 0;
         this.setState('absent', 'no-credential', this.noCredentialDetail());
       }
@@ -411,7 +504,7 @@ export class DshAuthSession {
     this.inFlight = undefined;
     this.launchToken = undefined;
     if (keepCookie) return;
-    this.cookie = undefined;
+    this.publishCredential(undefined);
     this.setState('absent', 'no-credential', 'no DeepSeek Harness credential has been exchanged for this endpoint yet');
   }
 
@@ -423,8 +516,8 @@ export class DshAuthSession {
     this.generation += 1;
     this.ownership += 1;
     this.inFlight = undefined;
-    this.loaded = false;
-    this.cookie = undefined;
+    this.refusedCookie = undefined;
+    this.publishCredential(undefined);
     this.launchToken = undefined;
     this.setState('absent', 'cancelled', 'the credential scope for this endpoint was replaced');
   }
@@ -446,14 +539,18 @@ export class DshAuthSession {
     this.inFlight = undefined;
     if (reason === 'credential-refused') {
       const cookie = this.cookie;
-      this.cookie = undefined;
-      this.loaded = false;
+      this.publishCredential(undefined);
       if (cookie) void this.clearStored();
+      // Remembered so a later readiness attempt can tell "this enrollment was
+      // refused" from "this endpoint was never enrolled", and so the block
+      // lifts the moment the store holds anything OTHER than this cookie.
+      this.refusedCookie = cookie;
       this.setState('rejected', 'credential-refused',
         `the DeepSeek Harness host refused the session cookie cosyncing holds for ${new URL(this.baseUrl).host}. `
         + 'Run `cosy dsh connect` again to enroll a fresh one.');
       return;
     }
+    this.refusedCookie = this.cookie;
     this.setState('blocked', 'host-or-origin-refused',
       `the DeepSeek Harness host refused requests addressed to ${new URL(this.baseUrl).host} `
       + '(the Host/Origin fence). Point cosyncing at the address the host itself printed.');
@@ -461,8 +558,16 @@ export class DshAuthSession {
 
   /**
    * Get to an authenticated state by the cheapest honest route: the credential
-   * we already have, then an exchange with the token we already have, then
-   * whatever the store holds.
+   * the enrollment holds, then an exchange with the token we already have.
+   *
+   * The enrollment is READ ON EVERY CALL, because it lives in a file another
+   * process writes. `cosy dsh connect` and `cosy dsh disconnect` are the whole
+   * reason that file exists, and a copy memoized here would make both of them
+   * inert until the next broker restart: the operator enrolls, the running
+   * broker carries on saying it has nothing, and the operator learns that the
+   * CLI is a lie with a restart requirement nobody documented. What the read
+   * costs is one small owner-only file behind a coalescing gate; what it buys is
+   * that a warm adapter means exactly what a cold one does.
    *
    * Concurrent callers share one attempt. That is not an optimisation: two
    * exchanges spent from one launch is two `GET /` requests, and a host that
@@ -470,11 +575,8 @@ export class DshAuthSession {
    * cookie the second has replaced.
    */
   ensure(): Promise<DshAuthOutcome> {
-    if (this.stateValue === 'authenticated' && this.cookieHeader() !== null && !this.needsRenewal(this.now())) {
-      return Promise.resolve(this.outcome());
-    }
-    if (this.stateValue === 'blocked') return Promise.resolve(this.outcome());
     if (this.inFlight) return this.inFlight;
+    if (this.refusalStands()) return Promise.resolve(this.outcome());
     const generation = this.generation;
     let attempt!: Promise<DshAuthOutcome>;
     // Cleared by IDENTITY rather than by generation. A token can be replaced
@@ -489,9 +591,23 @@ export class DshAuthSession {
     return attempt;
   }
 
+  /**
+   * The one block that reading the enrollment again cannot lift.
+   *
+   * A Host/Origin refusal is a statement about the ADDRESS, and the address is
+   * fixed for the life of this session, so firing the same request again is a
+   * loop with no premise behind it. Every other block is a statement about a
+   * credential or about being able to read it, and both are re-observable —
+   * which is precisely how a repaired enrollment recovers a blocked session
+   * without anyone restarting the broker.
+   */
+  private refusalStands(): boolean {
+    return this.stateValue === 'blocked' && this.reasonValue === 'host-or-origin-refused';
+  }
+
   private async attempt(generation: number): Promise<DshAuthOutcome> {
     // Both revisions are captured HERE, at entry, and every publication below
-    // — including the `loaded` flag and the store writes — is authorized by
+    // — including the held credential and the store writes — is authorized by
     // them. Ownership changes without touching the scope generation, so an
     // attempt fenced on generation alone still publishes a credential the
     // release of its launch token had already disowned.
@@ -501,11 +617,13 @@ export class DshAuthSession {
     // a background refresh is in flight would withdraw the very header the
     // caller is about to send. Only a session with nothing usable has to claim
     // it is on its way to something.
-    if (!(this.stateValue === 'authenticated' && this.cookieHeader() !== null)) {
+    const usableBefore = this.stateValue === 'authenticated' && this.cookieHeader() !== null;
+    if (!usableBefore) {
       this.setState('exchanging', 'no-credential', 'authenticating with the DeepSeek Harness host');
     }
-    // 1. A persisted cookie is the cheapest credential there is, and the one
-    //    that survives a broker restart while the host stays up.
+    // 1. The enrollment, read fresh. It is the cheapest credential there is, the
+    //    one that survives a broker restart while the host stays up, and the
+    //    authority on whether this endpoint is enrolled at all right now.
     const load = await this.loadStored();
     // The load is only a value until this point. A slow read that failed while
     // the scope was replaced must be able to do nothing at all, rather than
@@ -517,25 +635,65 @@ export class DshAuthSession {
         + 'not usable as-is; run `cosyncing repair`.');
       return this.outcome();
     }
-    // Only now is the scope considered read. Marking it before the fence means a
-    // superseded read can stop a later attempt from ever consulting the store.
-    this.loaded = true;
     const stored = load.cookie;
+    // A refusal was about ONE cookie, so a DIFFERENT cookie in the store is the
+    // news that ends it — that is `cosy dsh connect` having done its job. An
+    // EMPTY store is not that news. The refusal's own cleanup empties the store,
+    // so treating empty as "new fact" would erase the one part of the diagnosis
+    // an operator cannot reconstruct afterwards: that the cookie they enrolled
+    // was the one the host threw back. It survives until something replaces it.
+    if (this.refusedCookie !== undefined && stored !== null && !sameCookie(this.refusedCookie, stored)) {
+      this.refusedCookie = undefined;
+    }
+    if (stored !== null && this.refusedCookie !== undefined) {
+      // The refused cookie is still what the store holds, which means the
+      // refusal's own cleanup did not take. Say the same thing again rather than
+      // put a refused credential back on the wire.
+      this.setState('blocked', 'credential-refused',
+        `the DeepSeek Harness host refused the stored session cookie for ${new URL(this.baseUrl).host}. `
+        + 'Run `cosy dsh connect` again to enroll a fresh one.');
+      return this.outcome();
+    }
     if (stored) {
       if (stored.expiresAt !== undefined && stored.expiresAt <= this.now()) {
-        this.cookie = undefined;
+        this.publishCredential(undefined);
+        this.storeBacked = false;
         await this.clearStored(current);
         if (!current()) return this.outcome();
         this.setState('absent', 'cookie-expired', 'the stored DeepSeek Harness session has expired');
       } else {
-        this.cookie = stored;
-        this.setState('authenticated', 'token-exchanged', 'authenticated with the stored DeepSeek Harness session');
-        // A reused cookie still gets a renewal when the token is in hand: this
-        // is the broker-restart-onto-a-surviving-host case, where the cookie was
-        // earned days ago and the current launch has its own.
-        if (this.launchToken) await this.exchange(generation);
+        this.publishCredential(stored);
+        // From here the held credential IS the enrollment's record, so a later
+        // empty read of that record means the enrollment was withdrawn.
+        this.storeBacked = true;
+        // A session that was blocked, refused or simply not yet authenticated
+        // republishes; a warm one does not, so a routine re-read of the
+        // enrollment cannot flicker readiness through "exchanging" on every call.
+        if (this.stateValue !== 'authenticated') {
+          this.setState('authenticated', 'token-exchanged', 'authenticated with the stored DeepSeek Harness session');
+        }
+        // A reused cookie still gets a renewal when the token is in hand AND the
+        // cookie is nearing expiry: this is the broker-restart-onto-a-surviving-host
+        // case, where the cookie was earned days ago and the current launch has
+        // its own token. Renewal is bounded by the expiry window rather than by
+        // "is a token in hand", because this path now runs on every readiness
+        // call and an unconditional exchange would be a request loop.
+        if (this.needsRenewal(this.now())) await this.exchange(generation);
         return this.outcome();
       }
+    } else if (this.storeBacked) {
+      // The store is the record of an enrollment THIS credential was written
+      // into, and the record is gone: `cosy dsh disconnect` from another
+      // process, or a repair that cleared a bad file. Carrying on authenticating
+      // would have the broker serve a session its owner has just disconnected,
+      // which is the one thing the CLI's no-restart promise has to get right in
+      // both directions.
+      //
+      // A credential this process earned from a launch token and could NOT write
+      // into the store (`storeBacked` false) is not such a record, and dropping
+      // it would turn a broken credential file into a re-enrollment loop.
+      this.storeBacked = false;
+      this.publishCredential(undefined);
     }
     // 2. The launch token, when we own the process that printed it.
     if (this.launchToken) {
@@ -557,6 +715,14 @@ export class DshAuthSession {
   }
 
   private noCredentialDetail(): string {
+    // The two states read differently to an operator even though the remedy
+    // rhymes: "enroll this host" versus "the cookie you enrolled is dead". Only
+    // the second is news, and it stops being news once the refused credential
+    // has been replaced.
+    if (this.refusedCookie !== undefined) {
+      return `the DeepSeek Harness session cookie cosyncing held for ${new URL(this.baseUrl).host} was refused `
+        + 'and has been dropped. Run `cosy dsh connect` with a URL from that host to enroll a fresh one.';
+    }
     return this.store
       ? `cosyncing has no DeepSeek Harness session for ${new URL(this.baseUrl).host}. `
         + 'For a host you started, run `cosy dsh connect` and paste the URL dsh printed. '
@@ -610,13 +776,15 @@ export class DshAuthSession {
     }
     if (!current()) return { ok: false };
     this.renewalRetryAfter = 0;
-    this.cookie = cookie;
+    // A fresh credential outranks whatever this scope was refused for.
+    this.refusedCookie = undefined;
+    this.publishCredential(cookie);
     this.setState('authenticated', 'token-exchanged', 'authenticated with the DeepSeek Harness host');
     // The write is authorized at its own commit boundary (see queueStore), so a
     // save that waits behind an earlier one and only reaches the file after the
     // scope has moved on never lands. Checking after the await would be too
     // late by then: the stale cookie would already be the persisted one.
-    await this.persist(cookie, current);
+    this.storeBacked = await this.persist(cookie, current);
     if (!current()) return { ok: false };
     return { ok: true };
   }
@@ -715,12 +883,8 @@ export class DshAuthSession {
 
   private async loadStored(): Promise<DshCredentialLoad> {
     if (!this.store) return { kind: 'loaded', cookie: null };
-    if (this.loaded) return { kind: 'loaded', cookie: this.cookie ?? null };
     try {
       const stored = await this.store.load(this.scope);
-      // `loaded` is NOT set here. The caller sets it once the attempt's fence
-      // still holds, so a read that arrives after its attempt was superseded
-      // cannot mark the scope as settled on someone else's evidence.
       return { kind: 'loaded', cookie: stored };
     } catch {
       return { kind: 'unavailable' };
@@ -750,13 +914,15 @@ export class DshAuthSession {
     return next;
   }
 
-  private persist(cookie: DshCookie, authorized: () => boolean): Promise<void> {
-    if (!this.store) return Promise.resolve();
+  private persist(cookie: DshCookie, authorized: () => boolean): Promise<boolean> {
+    if (!this.store) return Promise.resolve(false);
+    let written = false;
     return this.queueStore(
       () => authorized() && this.cookie === cookie,
       async (store) => {
         try {
           await store.save(this.scope, cookie);
+          written = true;
         } catch {
           // Authentication WORKED; only remembering it failed. Saying so is worth
           // more than pretending it did not, and worth more than blocking a
@@ -764,7 +930,7 @@ export class DshAuthSession {
           this.detailValue = 'the DeepSeek Harness session is active but could not be stored for the next start';
         }
       },
-    );
+    ).then(() => written);
   }
 
   private clearStored(authorized: () => boolean = () => true): Promise<void> {

@@ -50,6 +50,26 @@ export interface DshHistoryPage {
 }
 
 /**
+ * One permission preset, in the shape the host's own catalog published it.
+ *
+ * `value` is what a switch command takes; `name` is what the host labels it
+ * with, which on the captured build happens to be the same string. Neither half
+ * is inferred: a preset the host did not advertise is not offered.
+ */
+export interface DshPermissionOption {
+  value: string;
+  name?: string;
+  description?: string;
+}
+
+/** A host's answer to `permissionPresets/catalog`. */
+export interface DshPermissionCatalog {
+  options: readonly DshPermissionOption[];
+  /** The preset a NEW session starts on. Not this session's current value. */
+  defaultPreset?: string;
+}
+
+/**
  * What one session's connection needs, and nothing else.
  *
  * Kept deliberately narrow (the history read plus the driver's write surface) so
@@ -68,6 +88,17 @@ export interface DshSessionChannel {
   cancel(sessionId: string): Promise<void>;
   answerQuestion(pending: DshPendingQuestion, answers: string[][]): Promise<DshReceipt>;
   respondApproval(pending: DshPendingApproval, allow: boolean): Promise<DshReceipt>;
+  /**
+   * The host's permission-preset catalog, when the deployment composes one.
+   *
+   * Optional because the families split this surface differently rather than
+   * because a caller may skip it. On 0.2 the per-session `permissions`
+   * projection carries only the CURRENT value and the roster lives on a separate
+   * host-wide route, so a picker built from the projection alone is empty on a
+   * host that has three presets. On 0.1 the projection carries both. A read
+   * that cannot answer returns undefined, which is "no roster", never a guess.
+   */
+  permissionCatalog?(): Promise<DshPermissionCatalog | undefined>;
   /** A dropped carrier generation: cancel this session's stream reads and force a re-baseline. */
   onGenerationLost?(): void;
   /** Release any stream this channel holds for the session. */

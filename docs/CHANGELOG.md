@@ -34,6 +34,34 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- Enrollment takes effect without restarting the broker. `cosyncing dsh connect`
+  and `cosyncing dsh disconnect` are read by a running broker the next time it
+  needs the credential, so signing a host in connects it and disconnecting it
+  withdraws the access rather than leaving a warm connection streaming on an
+  authorization nobody holds any more. A replaced credential re-handshakes; a
+  withdrawn one does not reconnect.
+- A DeepSeek Harness host that cosyncing cannot sign in to is left running.
+  Missing, expired and refused credentials, an address the host will not answer,
+  and an unreadable credential store are reported as their own diagnosis with
+  the command that fixes them, instead of being read as a crashed host and
+  answered by stopping a process that was working.
+- `cosyncing dsh connect`, `dsh status` and `dsh disconnect` honour
+  `COSYNCING_DSH_BASE_URL`. They previously targeted the default address even
+  when the broker was configured for another one, which made them operate on the
+  wrong host.
+- Permission presets on a 0.2 host are read from the host's preset catalog.
+  The per-session state carries only the preset in force, so the picker was
+  empty and selecting the preset a session was already running was refused.
+- A DeepSeek Harness session that a host stops following reports that instead of
+  waiting out a timeout, and a stream the host keeps refusing is retried on a
+  bounded backoff rather than reopened as fast as the process can spin.
+- Reopening a DeepSeek Harness session keeps an approval or question that was
+  still open on it, and an interaction no client is left to show is handed back
+  to the host rather than answered on the user's behalf.
+- Reading a DeepSeek Harness session's history twice returns the current
+  transcript. A repeated read previously returned the snapshot taken when the
+  session was first opened, so a compacted session kept showing its old
+  conversation.
 - A DeepSeek Harness host that has no workspace registered is no longer told it
   cannot create a session. A 0.2 host with an empty workspace registry creates
   sessions anyway, so the registry no longer answers the creation question;

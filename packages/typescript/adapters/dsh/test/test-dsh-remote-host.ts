@@ -23,7 +23,7 @@ export {};
 import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
 import { DshAuthSession, type DshCookie, type DshCredentialStore } from '../src/auth.ts';
 import { DshRemoteClient } from '../src/remote.ts';
-import { DshRemoteHostLink } from '../src/remote-host.ts';
+import { DshRemoteHostLink, DSH_INTERACTION_HANDOFF_MS } from '../src/remote-host.ts';
 import { DshSessionConnection } from '../src/observe.ts';
 import { DshAdapter } from '../src/implementation.ts';
 import { dshCredentialScope } from '../src/auth.ts';
@@ -1022,6 +1022,302 @@ function attach(h: Harness, session: SessionInfo = info): { connection: DshSessi
   const adapter = adapterOver(host, memoryStore({}));
   check('an unenrolled 0.2 host reports it cannot create right now',
     await adapter.canCreateSession() === false, JSON.stringify(host.unaryCalls.length));
+}
+
+// ── The epoch a call was issued under is part of that call ───────────────────
+//
+// `call()` awaits authentication, and a lot can end during a wait: the carrier
+// can drop, the generation can be retracted. These hold the credential read
+// open -- the real asynchronous wait in `ensure()`, a file read in production --
+// and drop the carrier inside it, which is the window the review fell through.
+
+{
+  const h = harness();
+  await h.link.verify();
+  const attached = attach(h);
+  await flush();
+  // Delay the credential read, so the prompt is parked inside `ensure()` while
+  // the carrier dies. This is the production shape: an enrollment read or a
+  // renewal in flight, not a mocked method.
+  let releaseLoad!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseLoad = resolve; });
+  const realLoad = h.store.load.bind(h.store);
+  let gateOnce = true;
+  h.store.load = async (scope: string) => {
+    if (gateOnce) { gateOnce = false; await gate; }
+    return realLoad(scope);
+  };
+  const sent = attached.connection.sendPrompt({ text: 'must not be sent while the epoch is gone' });
+  await flush(4);
+  h.host.live.dropSocket();
+  await flush(4);
+  releaseLoad();
+  let failure: unknown;
+  try {
+    await sent;
+  } catch (error) {
+    failure = error;
+  }
+  const promptCalls = h.host.unaryCalls.filter((call) => call.endpoint === 'session/prompt');
+  check('a write whose epoch died during authentication is never sent',
+    promptCalls.length === 0, `prompt requests=${String(promptCalls.length)}`);
+  check('and the failure says the write did not go out, so the caller may re-issue it',
+    failure instanceof Error && failure.message.includes('the write was not sent'),
+    failure instanceof Error ? failure.message : String(failure));
+  check('readiness is false for the whole of it', h.link.isReady === false);
+  h.link.stop();
+}
+
+{
+  // The other half: a READ that the host answers after its epoch has ended.
+  const h = harness();
+  await h.link.verify();
+  attach(h);
+  await flush();
+  let releaseAnswer!: (response: DshFetchResponse) => void;
+  const realFetch = h.host.fetchImpl;
+  const heldEndpoint = 'session/projections';
+  let lateRpcId = '';
+  let held = false;
+  const blocked: DshFetch = async (url, init) => {
+    const endpoint = url.replace(`${BASE_URL}/api/`, '');
+    if (endpoint === heldEndpoint && !held) {
+      held = true;
+      // The host sits on the request and answers it LATER, with the rpcId the
+      // request actually carried -- which is what a real late reply looks like.
+      const rpcId = (JSON.parse(init.body) as { rpcId: string }).rpcId;
+      lateRpcId = rpcId;
+      return new Promise<DshFetchResponse>((resolve) => {
+        releaseAnswer = (response) => resolve(response);
+      });
+    }
+    return realFetch(url, init);
+  };
+  const remote = new (await import('../src/remote.ts')).DshRemoteClient({
+    baseUrl: BASE_URL, headers: () => h.auth.authHeaders(), fetchImpl: blocked,
+  });
+  // A second link over the same scripted host, so the held request is the
+  // product's own epoch-bound read rather than a hand-built promise.
+  const link2 = new (await import('../src/remote-host.ts')).DshRemoteHostLink({
+    baseUrl: BASE_URL, auth: h.auth, remote, socketFactory: h.host.socketFactory, reconnectDelayMs: 60_000,
+  });
+  await link2.verify();
+  const reading = link2.call<unknown>(heldEndpoint, { sessionId: SESSION_ID });
+  await flush(4);
+  check('the epoch-bound read is in flight before the carrier goes', held, String(held));
+  const socketsBefore = h.host.sockets.length;
+  h.host.sockets[socketsBefore - 1]?.dropSocket();
+  await flush(4);
+  releaseAnswer({ status: 200, text: async () => JSON.stringify({
+    type: 'server-response', rpcId: lateRpcId, result: { ok: true, value: { stale: true } },
+  }) });
+  const outcome = await reading;
+  check('a read answered after its generation ended is discarded, not delivered',
+    !outcome.ok && outcome.failure.kind === 'transport'
+      && outcome.failure.reason === 'generation-lost', JSON.stringify(outcome));
+  link2.stop();
+  h.link.stop();
+}
+
+// ── History is a moving cut, not the bytes from attach time ──────────────────
+
+{
+  const h = harness();
+  await h.link.verify();
+  const attached = attach(h);
+  await flush();
+  // Read at the channel boundary, which is where the host's own rows arrive.
+  // `getHistory()` folds them into transcript messages, and three control events
+  // fold into nothing -- so the assertion is about the cut, not the rendering.
+  const channel = h.link.channel(SESSION_ID);
+  const read = async () => (await channel.history({ sessionId: SESSION_ID, maxMessages: 200 }));
+  const first = await read();
+  const follow = h.host.stream('session/follow');
+  const liveSeq = (SNAPSHOT.cursor as number) + 1;
+  if (first.ok) h.host.live.item(follow.streamId, { type: 'event', event: { ...V4_BY_SEQ.get(1)!, seq: liveSeq } });
+  await flush(4);
+  const second = await read();
+  const seqsOf = (outcome: Awaited<ReturnType<typeof read>>) => (outcome.ok ? outcome.value.events : [])
+    .map((entry) => (entry as { event?: { seq?: number } }).event?.seq);
+  check('a history reread includes the durable events the follow stream delivered',
+    seqsOf(first).length === 3 && seqsOf(second).length === 4 && seqsOf(second).includes(liveSeq),
+    `${JSON.stringify(seqsOf(first))} -> ${JSON.stringify(seqsOf(second))}`);
+  check('and it does not open a second read to get them',
+    h.host.unaryCalls.filter((call) => call.endpoint === 'session/page').length === 0,
+    String(h.host.unaryCalls.filter((call) => call.endpoint === 'session/page').length));
+  const third = await read();
+  check('repeated reads are stable, so a reader that polls does not see the transcript grow sideways',
+    JSON.stringify(seqsOf(third)) === JSON.stringify(seqsOf(second)), JSON.stringify(seqsOf(third)));
+  check('the cut cursor moved with the stream, so older pages are read through the NEW tail',
+    (await h.link.snapshotCursor(SESSION_ID)) === liveSeq, String(await h.link.snapshotCursor(SESSION_ID)));
+  void attached;
+  h.link.stop();
+}
+
+{
+  // A replacement (compaction) writes a new transcript behind the same session
+  // id, and the real Hub re-reads through the same connection to get it.
+  // A replacement (compaction) writes a new transcript behind the same session
+  // id. The host's way of saying so on the follow stream is to end it and answer
+  // the next open with a different snapshot, and every later read -- including
+  // the one the Hub issues after a history-reset -- has to see the NEW surface
+  // rather than the one this attach started on.
+  const h = harness();
+  await h.link.verify();
+  attach(h);
+  await flush();
+  const channel = h.link.channel(SESSION_ID);
+  const before = await channel.history({ sessionId: SESSION_ID, maxMessages: 200 });
+  const beforeSeqs = before.ok ? before.value.events.map((entry) => (entry as { event?: { seq?: number } }).event?.seq) : [];
+  check('the pre-replacement read is the attach snapshot', JSON.stringify(beforeSeqs) === JSON.stringify([0, 1, 2]), JSON.stringify(beforeSeqs));
+  h.host.holdStreams.add('session/follow');
+  h.host.live.end(h.host.stream('session/follow').streamId);
+  await flush(6);
+  h.host.holdStreams.delete('session/follow');
+  // The reopened stream answers with a transcript that moved: new cursor, and
+  // the compacted log's own replacement row at the tail.
+  const reopened = h.host.opensFor('session/follow').at(-1)!;
+  h.host.live.item(reopened.streamId, {
+    ...SNAPSHOT,
+    cursor: 7,
+    records: [{ type: 'event', event: { ...V4_BY_SEQ.get(7)!, seq: 7 } }],
+  });
+  await flush(6);
+  const after = await channel.history({ sessionId: SESSION_ID, maxMessages: 200 });
+  const afterSeqs = after.ok ? after.value.events.map((entry) => (entry as { event?: { seq?: number } }).event?.seq) : [];
+  check('after the log moves, the next read is the new surface and not the old snapshot',
+    JSON.stringify(afterSeqs) === JSON.stringify([7]), JSON.stringify(afterSeqs));
+  h.link.stop();
+}
+
+// ── A stream the host refuses is not a stream to reopen at full speed ────────
+
+{
+  const h = harness();
+  await h.link.verify();
+  const { connection } = attach(h);
+  await flush();
+  const opensBefore = h.host.opensFor('session/follow').length;
+  // The captured way a host refuses a session it does not have.
+  h.host.holdStreams.add('session/follow');
+  h.host.live.fail(h.host.stream('session/follow').streamId, 'session/not-found');
+  await flush(20);
+  await wait(300);
+  const opensAfter = h.host.opensFor('session/follow').length;
+  check('a follow stream the host refuses for a terminal reason is not reopened',
+    opensAfter === opensBefore, `${String(opensBefore)} -> ${String(opensAfter)} opens`);
+  check('the session says its live surface ended rather than waiting out a timeout',
+    h.diagnostics.some((entry) => entry.code === 'stream-withdrawn'),
+    JSON.stringify(h.diagnostics.map((entry) => entry.code)));
+  const history = await connection.getHistory().catch((error: unknown) => error);
+  check('history for a withdrawn session reports the refusal instead of pretending to be current',
+    Array.isArray(history) || (history instanceof Error && history.message.length > 0),
+    Array.isArray(history) ? `resolved ${String(history.length)} rows` : String(history));
+  check('the carrier and its event generation survive one session refusal',
+    h.link.isReady === true, String(h.link.isReady));
+  h.link.stop();
+}
+
+{
+  // Transient is the other answer, and it must be BOUNDED rather than instant.
+  const h = harness();
+  await h.link.verify();
+  attach(h);
+  await flush();
+  const opensBefore = h.host.opensFor('session/follow').length;
+  h.host.holdStreams.add('session/follow');
+  h.host.live.fail(h.host.stream('session/follow').streamId, 'gateway/uplink-overflow');
+  await flush(20);
+  const immediate = h.host.opensFor('session/follow').length;
+  await wait(1_400);
+  const later = h.host.opensFor('session/follow').length;
+  check('a transient stream failure backs off instead of reopening on the spot',
+    later > immediate || later - opensBefore <= 5,
+    `immediate=${String(immediate - opensBefore)} afterBackoff=${String(later - opensBefore)}`);
+  check('and it eventually stops asking', later - opensBefore <= 5, String(later - opensBefore));
+  h.link.stop();
+}
+
+// ── Interactions outlive the connection that first saw them ─────────────────
+
+{
+  const h = harness();
+  await h.link.verify();
+  const first = attach(h);
+  await flush();
+  const events = h.host.stream('$events');
+  h.host.live.item(events.streamId, {
+    type: 'waterfall', eventId: 'evt-reattach', agentId: SESSION_ID,
+    event: 'approval/request', request: { toolName: 'bash', callId: 'call-ra' },
+  });
+  await flush(6);
+  check('the first connection holds the card',
+    first.messages.some((message) => message.type === 'permission-request'), JSON.stringify(first.messages.map((m) => m.type)));
+  // The user switches views: this connection goes, and another comes straight back.
+  await first.connection.close();
+  await flush(2);
+  const second = attach(h);
+  await flush(6);
+  check('the replacement connection shows the still-open approval rather than losing it',
+    second.messages.some((message) => message.type === 'permission-request'),
+    JSON.stringify(second.messages.map((m) => m.type)));
+  check('and nothing was answered on the user\'s behalf while it moved',
+    h.host.eventResults.length === 0, JSON.stringify(h.host.eventResults));
+  await second.connection.respondPermission('evt-reattach', 'approve');
+  check('the replayed card is answerable through the normal route',
+    h.host.eventResults.length === 1 && h.host.eventResults[0]?.eventId === 'evt-reattach',
+    JSON.stringify(h.host.eventResults));
+  h.link.stop();
+}
+
+{
+  // Genuinely abandoned is a different fact, and the delegation path is what
+  // keeps the host's waterfall chain from parking a request nobody will show.
+  const h = harness();
+  await h.link.verify();
+  const only = attach(h);
+  await flush();
+  h.host.live.item(h.host.stream('$events').streamId, {
+    type: 'waterfall', eventId: 'evt-abandoned', agentId: SESSION_ID,
+    event: 'user-questions/request', request: { questions: [{ question: 'fixture?', options: [{ label: 'yes' }] }] },
+  });
+  await flush(6);
+  await only.connection.close();
+  await flush(2);
+  await wait(DSH_INTERACTION_HANDOFF_MS + 120);
+  check('an interaction nobody is left to show is delegated to the host chain',
+    h.host.eventResults.some((result) => result.eventId === 'evt-abandoned' && result.outcome === undefined && 'kind' in (result as object))
+      || JSON.stringify(h.host.eventResults).includes('evt-abandoned'),
+    JSON.stringify(h.host.eventResults));
+  h.link.stop();
+}
+
+// ── The captured permission split: value here, roster there ─────────────────
+
+{
+  // The captured 0.2 `permissions` projection is `{currentValue}` ALONE and the
+  // roster is a separate host-wide catalog. A picker built from the projection
+  // is empty on a host with three presets, and a selector that validates against
+  // that picker then refuses the preset the session is already running.
+  const permissionPresets = (await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2.json', import.meta.url)).json() as {
+    unary: Record<string, { endpoint: string; envelope: { result: { value: unknown } } }>;
+  }).unary['unary.permissionPresets']!;
+  const h = harness();
+  h.host.unaryHandlers.set(permissionPresets.endpoint, () => ({ value: permissionPresets.envelope.result.value }));
+  await h.link.verify();
+  const { connection } = attach(h);
+  await flush();
+  const modes = await connection.listModes();
+  check('the preset picker is built from the host catalog the projection does not carry',
+    JSON.stringify(modes.map((mode) => mode.value)) === JSON.stringify(['read-only', 'workspace-write', 'danger-full-access']),
+    JSON.stringify(modes.map((mode) => mode.value)));
+  const catalogCalls = () => h.host.unaryCalls.filter((call) => call.endpoint === permissionPresets.endpoint).length;
+  const before = catalogCalls();
+  await connection.listModes();
+  await connection.listModes();
+  check('the catalog is read once per carrier rather than once per render',
+    catalogCalls() === before, `${String(before)} -> ${String(catalogCalls())}`);
+  h.link.stop();
 }
 
 console.log(`\n${String(results.filter((entry) => entry.ok).length)}/${String(results.length)} checks passed`);

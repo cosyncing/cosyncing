@@ -793,7 +793,7 @@ export class DshSessionConnection implements SessionConnection {
   private async applyPermissionMode(mode: string | undefined): Promise<void> {
     if (mode === undefined) return;
     this.assertMutable('select a permission mode');
-    const select = this.permissionSelect();
+    const select = await this.permissionSelect();
     if (!select) {
       throw new Error(
         'this DeepSeek Harness deployment composes no permission service, so it has no permission mode to select',
@@ -824,29 +824,67 @@ export class DshSessionConnection implements SessionConnection {
     }
   }
 
-  /** The permission roster the host last published for this session. */
-  private permissionSelect(): { options: ModeOption[]; currentValue: string } | undefined {
+  /**
+   * The presets this session can be switched to, and the one it is on.
+   *
+   * Two sources, because the captured build splits them across two routes: the
+   * per-session `permissions` projection carries the CURRENT value, and the
+   * roster of what may be chosen lives on a host-wide catalog endpoint. Reading
+   * only the projection gives a picker with a selection and no choices, and a
+   * selector that validates a request against that picker then refuses the
+   * preset the session is already running. Reading only the catalog would offer
+   * the host's DEFAULT preset as though the session had said so.
+   *
+   * The catalog read is bounded by the link's per-carrier cache, so a picker
+   * that re-renders does not re-request it; an unavailable roster returns
+   * undefined rather than a guessed one.
+   */
+  private async permissionSelect(): Promise<{ options: ModeOption[]; currentValue: string } | undefined> {
+    const fromProjection = this.permissionProjection();
+    // A projection that carries its own roster is self-describing, which is what
+    // the 0.1 family does. Trust it and ask the host nothing.
+    if (fromProjection && fromProjection.options.length > 0) return fromProjection;
+    const catalog = await this.channel.permissionCatalog?.();
+    if (!catalog || catalog.options.length === 0) return undefined;
+    const options: ModeOption[] = catalog.options.map((option) => ({
+      value: option.value,
+      label: option.name && option.name.length > 0 ? option.name : option.value,
+      ...(option.description ? { description: option.description } : {}),
+      category: dshModeCategory(option.value),
+    }));
+    // The session's own value outranks the catalog's default, and a current
+    // preset the catalog does not list is still listed: hiding the state a
+    // session is actually in is how a picker ends up showing the wrong thing
+    // as the one the user chose.
+    const currentValue = fromProjection?.currentValue ?? '';
+    if (currentValue && !options.some((option) => option.value === currentValue)) {
+      options.push({ value: currentValue, label: currentValue, category: dshModeCategory(currentValue) });
+    }
+    return { options, currentValue };
+  }
+
+  /** The roster and current value the `permissions` projection itself carries. */
+  private permissionProjection(): { options: ModeOption[]; currentValue: string } | undefined {
     const value = this.projections.get(DSH_PERMISSIONS_PROJECTION);
     if (!value || typeof value !== 'object') return undefined;
     const row = value as { options?: unknown; currentValue?: unknown };
-    if (!Array.isArray(row.options)) return undefined;
     const options: ModeOption[] = [];
-    for (const entry of row.options) {
-      if (!entry || typeof entry !== 'object') continue;
-      const option = entry as { value?: unknown; name?: unknown; description?: unknown };
-      if (typeof option.value !== 'string' || option.value.length === 0) continue;
-      options.push({
-        value: option.value,
-        label: typeof option.name === 'string' && option.name ? option.name : option.value,
-        ...(typeof option.description === 'string' ? { description: option.description } : {}),
-        category: dshModeCategory(option.value),
-      });
+    if (Array.isArray(row.options)) {
+      for (const entry of row.options) {
+        if (!entry || typeof entry !== 'object') continue;
+        const option = entry as { value?: unknown; name?: unknown; description?: unknown };
+        if (typeof option.value !== 'string' || option.value.length === 0) continue;
+        options.push({
+          value: option.value,
+          label: typeof option.name === 'string' && option.name ? option.name : option.value,
+          ...(typeof option.description === 'string' ? { description: option.description } : {}),
+          category: dshModeCategory(option.value),
+        });
+      }
     }
-    if (options.length === 0) return undefined;
-    return {
-      options,
-      currentValue: typeof row.currentValue === 'string' ? row.currentValue : '',
-    };
+    const currentValue = typeof row.currentValue === 'string' ? row.currentValue : '';
+    if (options.length === 0 && currentValue === '') return undefined;
+    return { options, currentValue };
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
@@ -919,13 +957,16 @@ export class DshSessionConnection implements SessionConnection {
   /**
    * The permission presets this deployment offers.
    *
-   * Read from the `permissions` projection the connection already holds — no
-   * request at all, so a mode picker costs nothing and stays correct as the
-   * host pushes updates. An absent key means no permission service is composed
-   * and the control is hidden, which is exactly what an empty list does.
+ * Read from the `permissions` projection the connection already holds wherever
+   * that projection carries its own roster, so a mode picker costs nothing and
+   * stays correct as the host pushes updates. Where the projection carries only
+   * the current value — the captured 0.2 shape — the roster comes from the
+   * host-wide catalog endpoint, cached per carrier. No roster at all means no
+   * permission service is composed and the control is hidden, which is exactly
+   * what an empty list does.
    */
   async listModes(): Promise<ModeOption[]> {
-    return this.permissionSelect()?.options ?? [];
+    return (await this.permissionSelect())?.options ?? [];
   }
 
   /**

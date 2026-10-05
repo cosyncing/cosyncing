@@ -35,6 +35,7 @@ import {
   type AvailabilityOptions,
   type ManagedHostDescriptor,
   type ManagedHostIdentityInputs,
+  type ManagedHostReadinessFault,
   type ModelOption,
   type PromptInput,
   type SessionConnection,
@@ -865,6 +866,97 @@ export class DshAdapter implements AgentBackend {
   /** Whether the 0.2 remote family is in force for this endpoint right now. */
   private async usingRemoteHost(signal?: AbortSignal): Promise<boolean> {
     return (await this.protocolFamily(signal)) === 'remote-0.2';
+  }
+
+  /**
+   * Whether an unready managed host is the host's problem or ours.
+   *
+   * Asked after readiness fails and BEFORE supervision touches the process, and
+   * answered with one GET plus one file read. The distinction matters more than
+   * the diagnosis does: 0.2 puts an authentication fence in front of every route
+   * a readiness probe uses, so an unenrolled cookie and a dead host produce the
+   * SAME `false` from `isAvailable`. Recovery's answer to `false` is to stop the
+   * process it owns and start another, which against a host that is running
+   * perfectly well and simply does not know us yet is not a repair but a
+   * killing -- and the replacement cannot authenticate either, so the cycle
+   * repeats until the crash-loop budget runs out, with the operator's own
+   * `dsh web` dead in the middle of it.
+   *
+   * So the question is asked the only way it can be answered: is anything at
+   * that address speaking the 0.2 contract at all? The fingerprint probe is
+   * credential-free by design, and a 0.2 host that is alive answers it with 401
+   * whether or not we are enrolled. Hearing that means the host is up, which
+   * ends the matter: no signal, no restart, and the remedy named instead.
+   *
+   * A `{ kind: 'host' }` answer is deliberately the common case. Nothing here
+   * may prevent recovery from restarting a host that really has died, so the
+   * adapter claims the fault only on positive evidence of its own inability.
+   */
+  async managedHostReadinessFault(): Promise<ManagedHostReadinessFault> {
+    const baseUrl = this.baseUrlOrUndefined();
+    if (baseUrl === undefined) {
+      return {
+        kind: 'adapter',
+        remedy: 'address',
+        detail: 'the configured DeepSeek Harness address cannot be resolved, so no host at it can be reached',
+      };
+    }
+    // Forced re-probe: this is asked precisely because something changed, and a
+    // five-minute-old family decision is not evidence about the present.
+    this.protocolChoice = undefined;
+    const decision = await selectDshProtocol({
+      baseUrl,
+      ...(this.options.fetchImpl
+        ? { fetchImpl: this.options.fetchImpl as unknown as DshProbeFetch }
+        : {}),
+    });
+    if (decision.family !== 'remote-0.2') return { kind: 'host' };
+    // Something is answering the 0.2 contract. Now: can WE talk to it?
+    const auth = this.authSession(baseUrl);
+    if (auth.reason === 'host-or-origin-refused') {
+      return {
+        kind: 'adapter',
+        remedy: 'address',
+        detail: `${auth.detail} The host is running; cosyncing is pointed at an address it does not answer.`,
+      };
+    }
+    const credential = await this.enrollmentState(baseUrl);
+    if (credential === 'unreachable') {
+      return {
+        kind: 'adapter',
+        remedy: 'storage',
+        detail: 'cosyncing could not read its DeepSeek Harness credential store, so it cannot authenticate '
+          + `to the running host at ${new URL(baseUrl).host}. Run \`${PRODUCT_IDENTITY.primaryBinary} repair\`.`,
+      };
+    }
+    if (credential === 'absent') {
+      return {
+        kind: 'adapter',
+        remedy: 'credential',
+        detail: `the DeepSeek Harness host at ${new URL(baseUrl).host} is running, but cosyncing has no `
+          + `session for it. Run \`${PRODUCT_IDENTITY.primaryBinary} dsh connect\` and paste the URL dsh printed.`,
+      };
+    }
+    // A credential is held and the host still will not have us. Refused is
+    // refused: still the host's own process, still not ours to restart.
+    return {
+      kind: 'adapter',
+      remedy: 'credential',
+      detail: `${auth.detail} The host at ${new URL(baseUrl).host} is running and is being left alone.`,
+    };
+  }
+
+  /** Whether this endpoint's enrollment is present, absent, or unreadable. */
+  private async enrollmentState(baseUrl: string): Promise<'present' | 'absent' | 'unreachable'> {
+    const store = this.options.credentialStore;
+    if (!store) return 'absent';
+    try {
+      const stored = await store.load(this.credentialScope(baseUrl));
+      if (!stored) return 'absent';
+      return stored.expiresAt !== undefined && stored.expiresAt <= Date.now() ? 'absent' : 'present';
+    } catch {
+      return 'unreachable';
+    }
   }
 
   /**

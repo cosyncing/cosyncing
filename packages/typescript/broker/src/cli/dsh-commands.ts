@@ -29,7 +29,6 @@ import {
   parseDshLaunchUrl,
   resolveDshBaseUrl,
   resolveDshHome,
-  DSH_DEFAULT_BASE_URL,
 } from '@cosyncing/adapter-dsh';
 import { homedir } from 'node:os';
 import { setupStateHome } from '../installation/setup-state.ts';
@@ -75,9 +74,18 @@ function hostOf(url: string): string {
   }
 }
 
+/**
+ * The address this command should act on, by the same rule the running broker uses.
+ *
+ * Only an explicit `--url` may outrank the environment. Handing the resolver the
+ * default as its `configured` argument made it win over
+ * `COSYNCING_DSH_BASE_URL`, so `status` reported port 3080 to an operator who had
+ * configured 19844, `connect` refused the host they meant as an origin mismatch,
+ * and `disconnect` removed a different enrollment from the one in use.
+ */
 function configuredBaseUrl(options: DshCommandOptions): string {
   if (options.baseUrl) return options.baseUrl;
-  return resolveDshBaseUrl(options.env ?? process.env, DSH_DEFAULT_BASE_URL);
+  return resolveDshBaseUrl(options.env ?? process.env);
 }
 
 function scopeFor(options: DshCommandOptions, baseUrl: string): string {

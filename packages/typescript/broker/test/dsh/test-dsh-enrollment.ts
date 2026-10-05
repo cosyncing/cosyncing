@@ -245,6 +245,62 @@ async function callCli(args: string[]): Promise<{ code: number; stdout: string; 
   rmSync(home, { recursive: true, force: true });
 }
 
+// ── The address the operator configured ─────────────────────────────────────
+
+{
+  // These commands exist to act on the same host the running broker acts on.
+  // Handing the resolver the documented default as an explicit value made it win
+  // over COSYNCING_DSH_BASE_URL, so all three talked to 3080 while the broker
+  // talked to wherever the operator had pointed it: connect refused the intended
+  // host as an origin mismatch, and disconnect removed a different enrollment
+  // from the one in use.
+  const home = tempHome();
+  process.env.COSYNCING_HOME = home;
+  const host = await startHost();
+  const configured = { COSYNCING_DSH_BASE_URL: host.baseUrl, HOME: home };
+  const authority = host.baseUrl.replace('http://', '');
+
+  const io = writers();
+  const connected = await runDshConnectCommand(
+    { ...io.options, env: configured },
+    { readLaunchUrl: async () => `${host.baseUrl}/?token=${TOKEN}` },
+  );
+  check('connect follows the configured host instead of the default port',
+    connected.exitCode === 0 && io.out.includes(authority),
+    JSON.stringify({ code: connected.exitCode, out: io.out, err: io.err }));
+
+  const status = writers();
+  await runDshStatusCommand(
+    { ...status.options, env: configured, json: true },
+    { now: () => 1_760_000_000_000 },
+  );
+  check('status reports the configured host, not 3080, and finds that enrollment',
+    status.out.includes(new URL(host.baseUrl).host)
+      && status.out.includes('3080') === false
+      && status.out.includes('"enrolled": true'),
+    JSON.stringify(status.out));
+
+  const gone = writers();
+  const removed = await runDshDisconnectCommand({ ...gone.options, env: configured });
+  const forgotten = listDshEnrollments(dshSessionsPath(home));
+  check('disconnect withdraws the enrollment for the configured host',
+    removed.exitCode === 0 && gone.out.includes(authority) && forgotten.length === 0,
+    JSON.stringify({ code: removed.exitCode, out: gone.out, left: forgotten.length }));
+
+  const quiet = writers();
+  await runDshStatusCommand({
+    ...quiet.options,
+    json: true,
+    env: { COSYNCING_DSH_BASE_URL: 'http://127.0.0.1:19844', HOME: home },
+  });
+  check('a configured alternate with nothing enrolled is still reported as itself',
+    quiet.out.includes('127.0.0.1:19844') && quiet.out.includes('3080') === false,
+    JSON.stringify(quiet.out));
+
+  host.stop();
+  rmSync(home, { recursive: true, force: true });
+}
+
 // ── The argument surface ────────────────────────────────────────────────────
 
 {

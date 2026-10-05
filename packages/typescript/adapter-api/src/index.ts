@@ -256,6 +256,25 @@ export interface AgentBackend {
   managedHostIdentity?(inputs: import('./integration.ts').ManagedHostIdentityInputs): string | null;
   /** Exact readiness of the described managed host; defaults to isAvailable. */
   isManagedHostReady?(options?: AvailabilityOptions): Promise<boolean>;
+  /**
+   * WHY the described managed host failed its readiness probe, before anything
+   * is done to the process.
+   *
+   * Readiness is a boolean, and one boolean covers two unrelated facts: the
+   * host is not answering, and the host is answering fine but this broker cannot
+   * ask it anything. Recovery acts on the first and must not act on the second,
+   * because the remedy for an unauthenticated broker is a credential, not a
+   * SIGTERM to a healthy host that is minding its own business. Without this
+   * seam, an operator's `cosy dsh disconnect` -- or an expired cookie, or a
+   * credential file the owner is repairing -- reads to supervision as a crashed
+   * host, and supervision "fixes" it by killing and replacing a process the
+   * operator started themselves.
+   *
+   * Called only after a failed readiness probe and only before any process
+   * effect. Answer `{ kind: 'host' }` to let recovery proceed as if this hook
+   * did not exist, which is what an adapter with no such distinction should do.
+   */
+  managedHostReadinessFault?(options?: AvailabilityOptions): Promise<ManagedHostReadinessFault>;
   /** Is the tool installed / its server reachable right now? */
   isAvailable(options?: AvailabilityOptions): Promise<boolean>;
   /** Read-only setup/doctor checks. This path must not call discovery or start/install any runtime. */
@@ -344,6 +363,23 @@ export interface AvailabilityOptions {
    */
   signal?: AbortSignal;
 }
+
+/**
+ * What a failed managed-host readiness probe actually means, as answered by the
+ * adapter whose host it is.
+ *
+ * The split is deliberately narrow, and it is about who has to act. `host` means
+ * the process or the address is the problem, which is what managed-host recovery
+ * exists for. `adapter` means the host is being left alone and cosyncing is the
+ * party holding the wrong end: an enrollment nobody issued, a credential that
+ * expired or was refused, a Host/Origin fence that says this address is not the
+ * one the host printed, or a credential store that cannot be read or written.
+ * `remedy` is the short, stable code the operator-facing message and doctor pick
+ * up; `detail` is the sentence.
+ */
+export type ManagedHostReadinessFault =
+  | { kind: 'host' }
+  | { kind: 'adapter'; remedy: 'credential' | 'address' | 'storage'; detail: string };
 
 export interface SessionDiscoveryOptions {
   /** Inclusive UTC epoch-millisecond cutoff for idle historical sessions. */

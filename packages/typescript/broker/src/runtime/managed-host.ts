@@ -83,6 +83,7 @@ import {
   bunSpawnResolvedInvocation,
   resolveInvocation,
   terminateHostProcessTree,
+  type ManagedHostReadinessFault,
 } from '@cosyncing/adapter-api';
 import { atomicWriteJsonOwnerOnly } from '../security/secure-files.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
@@ -1392,6 +1393,7 @@ export async function ensureManagedHost(
       stopGraceMs: number;
     } | null>;
     isManagedHostReady?(options?: { signal?: AbortSignal }): Promise<boolean>;
+    managedHostReadinessFault?(options?: { signal?: AbortSignal }): Promise<ManagedHostReadinessFault>;
     isAvailable(options?: { signal?: AbortSignal }): Promise<boolean>;
     observeManagedOutput?(chunk: string): void;
     managedLaunchEnded?(reason: string): void;
@@ -1648,6 +1650,17 @@ export function managedHostRestartLedger(): ManagedHostRestartLedger {
   };
 }
 
+/**
+ * The stable, operator-facing code for an adapter-side readiness fault.
+ *
+ * Re-exported under a broker-local name so a detail code written into the
+ * runtime-failure journal is comparable across adapters without importing the
+ * adapter package's types into a broker module.
+ */
+export type ManagedHostReadinessRemedy = ManagedHostReadinessFault extends infer fault
+  ? fault extends { remedy: infer remedy } ? remedy : never
+  : never;
+
 export type ManagedHostRecoveryOutcome =
   /** A host is serving. Nothing to do, which is the overwhelmingly common answer. */
   | { action: 'healthy' }
@@ -1675,6 +1688,18 @@ export type ManagedHostRecoveryOutcome =
   | { action: 'recovery-failed'; outcome: ManagedHostStartOutcome }
   /** Something is wrong but nothing here is provably ours to act on. */
   | { action: 'declined'; reason: 'unproven' | 'foreign' | 'budget-exhausted' | 'not-launchable' }
+  /**
+   * The host is not the problem: the adapter said so, and said what is.
+   *
+   * Reached when the readiness probe fails but the adapter can name a reason
+   * restarting cannot fix -- no enrollment, an expired or refused cookie, an
+   * address the host itself would not answer, an unreadable credential store. No
+   * process effect of any kind has happened by the time this returns, which is
+   * the entire point: the healthy host a broker cannot authenticate against is
+   * left exactly as the operator left it, and the operator gets told the remedy
+   * instead of watching it get cycled once a minute.
+   */
+  | { action: 'blocked'; remedy: ManagedHostReadinessRemedy; detail: string }
   | ManagedHostSkip;
 
 /**
@@ -1734,6 +1759,32 @@ export async function recoverManagedHost(
     // fails again months later gets its full allowance back.
     ledger.forget(backend.id);
     return { action: 'healthy' };
+  }
+  // NOT READY, and why? Asked HERE, before the descriptor, the ownership record,
+  // and above all before anything is signalled, because the two possible answers
+  // need opposite treatments. An adapter fault is a fact about cosyncing -- the
+  // host is answering and simply will not talk to us -- and the one response
+  // that cannot help is restarting the host, which for an externally started
+  // process means destroying a running thing the operator owns in order to fix
+  // our own missing cookie. A host fault falls through to the ownership machine
+  // exactly as it did before this seam existed.
+  //
+  // The hook is allowed to be wrong about the boundary in only one direction:
+  // it may clear a host that recovery would otherwise have stopped, and any
+  // answer other than an adapter fault -- including a throw, and including no
+  // hook at all -- continues down the proven-ownership path.
+  if (backend.managedHostReadinessFault) {
+    let fault: ManagedHostReadinessFault;
+    try {
+      fault = await backend.managedHostReadinessFault();
+    } catch {
+      fault = { kind: 'host' };
+    }
+    if (fault.kind === 'adapter') {
+      // No `ledger.fail`, and no restart recorded: nothing crashed, so nothing
+      // may spend the crash-loop budget. The attempts already spent stay spent.
+      return { action: 'blocked', remedy: fault.remedy, detail: fault.detail };
+    }
   }
   const descriptor = await backend.describeManagedHost();
   if (!descriptor) return { action: 'undescribed' };

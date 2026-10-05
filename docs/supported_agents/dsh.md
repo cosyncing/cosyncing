@@ -116,14 +116,19 @@ re-enrolling when what actually went wrong is something else.
 
 ## What is verified on 0.2, and what is not
 
-The 0.2 contract was captured from a running 0.2.0-rc.2 host and re-checked
-against one: starting a host without a browser window opening, becoming
-authenticated to it with nothing typed, reading its session roster, opening a
-session and reading its history through the snapshot cut, holding a live follow
-subscription open on it while a client reconnects, creating a session on a
-host that has no workspace registered, keeping the credential across a broker
-restart, and enrolling a host cosyncing does not own without touching that host's
-process.
+"0.2" here means one build: `0.2.0-rc.2`, the version the contract was captured
+from and the version every 0.2 result below was re-checked against. Recognition
+of a 0.2 host and its contract family covers the 0.2 line, but qualification
+does not: a different 0.2 build, including a later release candidate, has not
+been exercised and is not covered by the statements in this section.
+
+What was captured from a running `0.2.0-rc.2` host and re-checked against one:
+starting a host without a browser window opening, becoming authenticated to it
+with nothing typed, reading its session roster, opening a session and reading
+its history through the snapshot cut, holding a live follow subscription open on
+it while a client reconnects, creating a session on a host that has no workspace
+registered, keeping the credential across a broker restart, and enrolling a host
+cosyncing does not own without touching that host's process.
 
 What has NOT been verified against 0.2 is anything that needs a real model turn on
 that host: prompt echoes, streamed replies, tool output cards, approval and
@@ -140,12 +145,15 @@ session fork and search, subagents, workspace and settings mutation, goals as a
 first-class surface, credential and agent-preset management, and some
 DSH-specific message presentation.
 
-Non-image attachments are a host limit rather than a scheduling decision. A DSH
-prompt carries text and images and nothing else, and the host has no general
-file intake, so cosyncing refuses other types outright instead of sending a
-prompt that mentions a file the agent never received. A path is not a
-substitute: DSH may run on another machine, where a broker-local path names
-nothing it can open.
+Non-image file attachments are cosyncing's limitation, not the host's. The 0.2
+host takes files: its prompt content parts include a `file` part that references
+a receipt minted by an upload endpoint, so the intake exists upstream. The
+cosyncing adapter ships images and nothing else, and refuses other types
+outright rather than sending a prompt that mentions a file the agent never
+received. That refusal is the correct behaviour for the types it does not
+support and should not be read as a statement about DSH. A path is not a
+substitute for uploading either way: DSH may run on another machine, where a
+broker-local path names nothing it can open.
 
 The upstream host exposes one writable client contract rather than a separate
 read-only Observe credential, so cosyncing accepts only an explicit foreground

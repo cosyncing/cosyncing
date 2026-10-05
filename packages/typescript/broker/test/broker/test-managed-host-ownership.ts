@@ -1624,6 +1624,108 @@ try {
       }));
   }
   {
+    // An adapter that cannot authenticate is not a host that has crashed.
+    //
+    // The 0.2 host answers NOTHING until it is enrolled, so a missing cookie and
+    // a dead process look identical to `isAvailable`. Without a seam to split
+    // them, recovery proved the process was its own, stopped it, and tried to
+    // replace a host that was running perfectly well -- the replacement could not
+    // authenticate either, and the cycle ran until the crash budget expired with
+    // the operator's own host dead in the middle. So: ask the adapter first, and
+    // when it says the fault is ours, do nothing to the process at all.
+    const spawnPid = 6101;
+    const liveIdentity = new Map([[spawnPid, { pid: spawnPid, start: '5', boot: BOOT, comm: 'host' }]]);
+    const { effects, spawns, signals } = fakeEffects({
+      identities: liveIdentity,
+      listeners: new Map([[59999, hostAt(spawnPid)]]),
+    });
+    const { store, records } = memoryStore();
+    records.set(AGENT, ownership({ pid: spawnPid }));
+    const ledger = managedHostRestartLedger();
+    for (let round = 0; round < 3; round += 1) {
+      await recoverManagedHost(
+        backend({
+          isAvailable: async () => false,
+          managedHostReadinessFault: async () => ({
+            kind: 'adapter' as const, remedy: 'credential' as const,
+            detail: 'the host is running, but cosyncing has no session for it',
+          }),
+        }) as never,
+        effects, store, ledger, AUTHORIZED);
+    }
+    const outcome = await recoverManagedHost(
+      backend({
+        isAvailable: async () => false,
+        managedHostReadinessFault: async () => ({
+          kind: 'adapter' as const, remedy: 'credential' as const,
+          detail: 'the host is running, but cosyncing has no session for it',
+        }),
+      }) as never,
+      effects, store, ledger, AUTHORIZED);
+    check('a host the broker cannot log in to is left running, untouched',
+      signals.length === 0 && spawns.length === 0, JSON.stringify({ signals, spawns: spawns.length }));
+    check('and the answer names the remedy instead of pretending a restart was tried',
+      outcome.action === 'blocked'
+        && (outcome as { remedy?: string }).remedy === 'credential'
+        && (outcome as { detail?: string }).detail?.includes('no session for it') === true,
+      JSON.stringify(outcome));
+    check('an enrollment fault never spends the crash-loop budget, however long it lasts',
+      ledger.suspension(AGENT) === undefined, JSON.stringify(ledger.suspension(AGENT)));
+    check('and the ownership record is left in place, because the host IS still ours',
+      records.get(AGENT)?.pid === spawnPid, JSON.stringify(records.get(AGENT)?.pid));
+  }
+  {
+    // The seam may clear a host recovery would otherwise have stopped, so the
+    // OTHER answer has to keep working exactly as before: a proven-dead process
+    // gets replaced no matter what the adapter thinks about its own credentials.
+    const spawnPid = 6102;
+    const listeners = new Map([[59999, HOST_ABSENT]]);
+    const { effects, spawns } = fakeEffects({
+      identities: new Map([[spawnPid, { pid: spawnPid, start: '5', boot: BOOT, comm: 'host' }]]),
+      spawnPid, missingProcess: PROCESS_ABSENT, listeners,
+    });
+    const { store, records } = memoryStore();
+    records.set(AGENT, ownership());
+    const serving = () => {
+      if (spawns.length === 0) return false;
+      listeners.set(59999, hostAt(spawnPid));
+      return true;
+    };
+    const outcome = await recoverManagedHost(
+      backend({
+        isAvailable: async () => serving(),
+        managedHostReadinessFault: async () => ({ kind: 'host' as const }),
+      }) as never,
+      effects, store, managedHostRestartLedger(), AUTHORIZED);
+    check('a host fault still reaches the ordinary crash recovery',
+      outcome.action === 'recovered' && spawns.length === 1, JSON.stringify({ outcome, spawns: spawns.length }));
+  }
+  {
+    // An adapter that cannot answer the question is not an excuse to leave a dead
+    // host down: the hook failing must fall THROUGH to the proven-ownership path.
+    const spawnPid = 6103;
+    const listeners = new Map([[59999, HOST_ABSENT]]);
+    const { effects, spawns } = fakeEffects({
+      identities: new Map([[spawnPid, { pid: spawnPid, start: '5', boot: BOOT, comm: 'host' }]]),
+      spawnPid, missingProcess: PROCESS_ABSENT, listeners,
+    });
+    const { store, records } = memoryStore();
+    records.set(AGENT, ownership());
+    const serving = () => {
+      if (spawns.length === 0) return false;
+      listeners.set(59999, hostAt(spawnPid));
+      return true;
+    };
+    const outcome = await recoverManagedHost(
+      backend({
+        isAvailable: async () => serving(),
+        managedHostReadinessFault: async () => { throw new Error('adapter could not tell'); },
+      }) as never,
+      effects, store, managedHostRestartLedger(), AUTHORIZED);
+    check('a readiness classifier that throws recovers the host anyway',
+      outcome.action === 'recovered' && spawns.length === 1, JSON.stringify({ outcome, spawns: spawns.length }));
+  }
+  {
     // The supervisor is behind the same gate as the start: an unauthorized agent
     // is not supervised into existence.
     const { effects, spawns } = fakeEffects({});
