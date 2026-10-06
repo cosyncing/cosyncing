@@ -331,6 +331,24 @@ function postsTo(posts: Posted[], fragment: string): Posted[] {
     turn.answers.length === 1, String(turn.answers.length));
 }
 
+{
+  const h = harness();
+  const content = [{ type: 'image', mediaType: 'image/png', data: 'fixture-bytes' }];
+  const done = runPromptTurn(h.transport, { ...request, replaceFollowDuringTurn: true, content });
+  h.socket.fireOpen(); h.socket.frame(ready); h.socket.frame(snapshot); await tick();
+  const prompt = postsTo(h.posts, '/api/session/prompt')[0]!;
+  check('explicit image content reaches the capture prompt unchanged',
+    JSON.stringify(JSON.parse(prompt.body).payload.args.request.content) === JSON.stringify(content));
+  prompt.settle({ status: 200, body: acceptedPrompt });
+  const chunk = { streamId: TURN_FOLLOW_STREAM, type: 'assistant-stream', frame: { type: 'chunk', chunk: { type: 'text-delta', text: 'partial' } } };
+  h.socket.frame(chunk); h.socket.frame(chunk); await tick();
+  const followOpens = h.socket.sent.filter((f) => f['type'] === 'open' && f['endpoint'] === 'session/follow');
+  check('the bounded reconnect scenario replaces follow once while retaining the event authority',
+    followOpens.length === 2 && h.socket.sent.filter((f) => f['type'] === 'cancel').length === 1
+      && h.socket.sent.filter((f) => f['type'] === 'open' && f['endpoint'] === '$events').length === 1);
+  h.socket.frame(turnEnd); await done;
+}
+
 const failed = results.filter((entry) => !entry.ok);
 console.log('\n' + String(results.length - failed.length) + ' passed, ' + String(failed.length) + ' failed');
 if (failed.length > 0) process.exit(1);

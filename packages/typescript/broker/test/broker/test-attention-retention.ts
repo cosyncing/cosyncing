@@ -2,6 +2,7 @@
 import { strict as assert } from 'node:assert';
 import { AgentRegistry, type AgentMessage, type AgentMessageHandler, type SessionConnection, type SessionInfo } from '../../../adapter-api/src/index.ts';
 import { Hub, ManagedConn } from '../../src/sessions/hub.ts';
+import { DshAdapter } from '@cosyncing/adapter-dsh';
 
 let failures = 0;
 async function run(name: string, fn: () => Promise<void> | void): Promise<void> {
@@ -206,6 +207,59 @@ await run('Hub caps zero-client leases without TTL or evicting existing leases',
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(hub.getConn('fake', 'one'), undefined);
   assert.ok(hub.getConn('fake', 'two'), 'clearing one lease must not evict another');
+});
+
+await run('actual DSH integration releases active zero-client owners after grace while preserving foreground sharing', async () => {
+  const closed = new Set<string>();
+  const fake = fakeConnection('dsh-foreground-only', closed);
+  fake.conn.info.tool = 'dsh';
+  fake.conn.info.attachMode = 'live';
+  fake.conn.info.control = {
+    drive: { supported: true, state: 'driving', handoffAvailable: false },
+    terminalSync: { supported: false, syncAvailable: false, active: false },
+  };
+  const adapter = new DshAdapter();
+  // Keep the actual shipped integration declaration and capabilities; only
+  // the native session transport is replaced by this deterministic fixture.
+  adapter.attach = async () => fake.conn;
+  const registry = new AgentRegistry();
+  registry.register(adapter);
+  const hub = new Hub(registry, 20);
+  try {
+    const owner = await hub.ensure('dsh', fake.conn.info.id, 'live');
+    const first = () => {}; const second = () => {};
+    owner.addClient(first); owner.addClient(second);
+    fake.emit({ type: 'permission-request', requestId: 'pending-native', title: 'Decision', options: ['approve', 'reject'] });
+    fake.emit({ type: 'status', status: 'running' });
+    assert.equal(owner.requiresAttentionRetention, true, 'the scenario really has live attention to retain');
+    owner.removeClient(first);
+    hub.releaseAttached('dsh', fake.conn.info.id, 'live', owner);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(hub.getConn('dsh', fake.conn.info.id), owner, 'a second foreground client keeps the shared native owner');
+    assert.equal(closed.size, 0);
+    owner.removeClient(second);
+    hub.releaseAttached('dsh', fake.conn.info.id, 'live', owner);
+    // A refresh returning inside the grace window keeps exactly one owner.
+    const rejoined = await hub.ensure('dsh', fake.conn.info.id, 'live');
+    rejoined.addClient(first);
+    assert.equal(rejoined, owner);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(closed.size, 0);
+    owner.removeClient(first);
+    hub.releaseAttached('dsh', fake.conn.info.id, 'live', owner);
+    // New active/queued surfaces during grace must not acquire an indefinite
+    // zero-client lease or restart its deadline.
+    fake.emit({ type: 'permission-resolved', requestId: 'pending-native', decision: 'approve' });
+    fake.emit({ type: 'status', status: 'idle' });
+    assert.equal(owner.requiresAttentionRetention, false);
+    fake.emit({ type: 'question-request', requestId: 'new-native-question', questions: [] });
+    fake.emit({ type: 'goal-state', key: 'native-goal', title: 'Native goal', status: 'active' });
+    fake.emit({ type: 'user-message', key: 'native-queue', text: 'Queued native input', queued: true });
+    assert.equal(owner.requiresAttentionRetention, true);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(hub.getConn('dsh', fake.conn.info.id), undefined, 'no foreground viewer means the adapter subscription is released despite pending decisions');
+    assert.deepEqual([...closed], [fake.conn.info.id]);
+  } finally { await hub.dispose(); }
 });
 
 if (failures) {

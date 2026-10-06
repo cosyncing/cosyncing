@@ -28,12 +28,43 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - The DeepSeek Harness adapter now speaks the 0.2 contract as well as 0.1:
   roster, session open and history, live output, creation and rename, prompts,
   interruptions, and reconnect. The contract is chosen by what the host answers,
-  not by a version string, and both `0.1.0-rc.6` and `0.2.0-rc.2` are qualified.
-  Behavior needing a real model turn on a 0.2 host is not yet verified against
-  one, and the support page says so.
+  not by a version string, with recorded targets `0.1.0-rc.6` and `0.2.0-rc.2`.
+  The support page distinguishes captured contracts and provider-backed adapter
+  outcomes from outstanding browser and platform acceptance.
 
 ### Changed
 
+- DeepSeek Harness `0.2.0-rc.2` now consumes captured assistant streams and
+  timed/continued questions, retains pending decisions through follow-only
+  recovery, and resumes already attached sessions after re-enrollment. A fresh
+  carrier resets exhausted transient follow retries while terminal session
+  refusals remain withdrawn. Authenticated service faults follow owned-host
+  recovery instead of being misclassified as enrollment faults.
+- DSH current-model and workspace information now reaches cold and attached
+  sessions. Native queue cancellation and archive changes converge without
+  treating an inactive agent as a deleted durable session. Malformed roster
+  responses cannot falsely prove removal or healthy service readiness. Image-only echoes,
+  bounded durable image previews, and rc.2 tool-result content are preserved.
+  The local `/steer` command sends text to a running rc.2 turn's next step. Native
+  settings and plugin changes automatically refresh attached model, permission
+  and command choices without reconnecting. Empty catalogs retract stale choices;
+  a failed read preserves the last successful value for that surface.
+  Cold discovery refreshes durable metadata beyond stale roster hints without
+  activating an agent. Initial history waits for the authenticated event handshake,
+  and native compaction removes shadowed messages while retaining its checkpoint. Provider-backed adapter turns supplement the scripted
+  captures; visible browser, shared-client, and remaining platform acceptance
+  are tracked separately.
+- DSH tabs release live transport while offstage or hidden and explicitly
+  reattach after a fresh foreground roster read, retaining their cached
+  transcript and unsent draft. Foreground attachment fences a superseded queued
+  background attach and waits for an in-progress transport close.
+  Visible windows retain their subscriptions across input focus changes.
+  The last foreground client's departure also releases the broker subscription
+  after its reconnect grace, allowing pending decisions to return to the native
+  host instead of retaining an invisible attention lease.
+- Native DSH commands apply the selected permission preset before executing;
+  a refused preset prevents the requested command. Managed startup keeps launch
+  output flowing through enrollment while retaining fresh ownership proof.
 - Enrollment takes effect without restarting the broker. `cosyncing dsh connect`
   and `cosyncing dsh disconnect` are read by a running broker the next time it
   needs the credential, so signing a host in connects it and disconnecting it

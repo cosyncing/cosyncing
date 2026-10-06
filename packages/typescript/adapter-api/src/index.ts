@@ -350,6 +350,9 @@ export interface AgentBackend {
    *  state changes that are visible without opening a second driver, such as a terminal-sync bridge
    *  socket appearing/disappearing. The broker pushes the returned SessionInfo to attached clients. */
   watchSessionInfo?(onChange: (info: SessionInfo) => void): Unsubscribe;
+  /** Native model, permission, agent or command catalog invalidation for an attached session.
+   * The broker rereads catalogs; this watcher grants no mutation authority. */
+  watchSessionCatalog?(sessionId: string, onChange: () => void): Unsubscribe;
 }
 
 /** Per-call context for an availability probe. */
@@ -379,7 +382,7 @@ export interface AvailabilityOptions {
  */
 export type ManagedHostReadinessFault =
   | { kind: 'host' }
-  | { kind: 'adapter'; remedy: 'credential' | 'address' | 'storage'; detail: string };
+  | { kind: 'adapter'; remedy: 'credential' | 'address' | 'storage' | 'contract'; detail: string };
 
 export interface SessionDiscoveryOptions {
   /** Inclusive UTC epoch-millisecond cutoff for idle historical sessions. */

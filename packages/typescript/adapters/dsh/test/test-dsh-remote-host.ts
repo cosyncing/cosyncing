@@ -5,11 +5,10 @@
  * follow snapshot, its cursor, the projection baseline, the `$events` ready
  * frame, and the v4 event records all come out of
  * `test/fixtures/dsh-0.2.0-rc.2.json` (and, for the v4 event bodies, the
- * captured 0.1 fixture, which is the same durable log format). Model-backed
- * frames are NOT invented here: no assistant delta, tool event, approval
- * payload or question payload appears that a host has not actually produced.
- * What is asserted about those three surfaces is therefore what the capture
- * proved — routing, correlation, delegation — not the shape of a turn.
+ * captured 0.1 fixture, which is the same durable log format). Additional
+ * assistant, tool, question and image records come from disposable rc.2 hosts
+ * with a local scripted provider. These prove adapter behavior with
+ * modelBacked=false and no provider spend; real-model acceptance is separate.
  *
  * The scripted host answers the real envelopes: `POST /api/<endpoint>` with a
  * `{type:'client-request'}` body, and `/api/remote.mux` frames on a fake
@@ -27,6 +26,7 @@ import { DshRemoteHostLink, DSH_INTERACTION_HANDOFF_MS } from '../src/remote-hos
 import { DshSessionConnection } from '../src/observe.ts';
 import { DshAdapter } from '../src/implementation.ts';
 import { dshCredentialScope } from '../src/auth.ts';
+import { DshAssistantStream } from '../src/assistant-stream.ts';
 import type { DshMuxSocketLike } from '../src/mux.ts';
 import type { DshFetch, DshFetchResponse } from '../src/envelope.ts';
 import type { DshAuthFetch, DshAuthResponseLike } from '../src/auth.ts';
@@ -144,6 +144,7 @@ class ScriptedHost {
    * shortcut, and the adapter's create rule has to be read against it.
    */
   workspaces: unknown[] = [{ workspaceId: 'ws-1', path: '/fixture/workspace', title: 'fixture', sessionIds: [SESSION_ID] }];
+  controlBaseline: unknown = CONTROL_BASELINE;
 
   constructor() {
     // The defaults are the captured free-capture responses, so a test that does
@@ -211,7 +212,7 @@ class ScriptedHost {
       return;
     }
     if (endpoint === 'session/control') {
-      socket.item(streamId, CONTROL_BASELINE);
+      socket.item(streamId, this.controlBaseline);
       return;
     }
     if (endpoint === 'workspace/follow') {
@@ -276,6 +277,8 @@ function harness(options: {
   snapshotTimeoutMs?: number;
   authFetch?: DshAuthFetch;
   reconnectDelayMs?: number;
+  setTimeout?: (handler: () => void, ms: number) => unknown;
+  clearTimeout?: (handle: unknown) => void;
 } = {}): Harness {
   const host = new ScriptedHost();
   const cookies: Record<string, DshCookie> = {};
@@ -299,6 +302,8 @@ function harness(options: {
     reconnectDelayMs: options.reconnectDelayMs ?? 60_000,
     snapshotTimeoutMs: options.snapshotTimeoutMs ?? 2_000,
     onDiagnostic: (diagnostic) => diagnostics.push({ code: diagnostic.code, ...(diagnostic.detail ? { detail: diagnostic.detail } : {}) }),
+    ...(options.setTimeout ? { setTimeout: options.setTimeout } : {}),
+    ...(options.clearTimeout ? { clearTimeout: options.clearTimeout } : {}),
   });
   return { host, link, auth, store, diagnostics };
 }
@@ -343,6 +348,45 @@ function attach(h: Harness, session: SessionInfo = info): { connection: DshSessi
   connection.subscribe((message) => { messages.push(message); });
   h.link.register(connection, channel);
   return { connection, messages };
+}
+
+{
+  // Follow and $events are independent logical streams. An initial snapshot
+  // may arrive first. If the first older-page POST races the initial ready
+  // frame, its answer must not be discarded as a replacement generation.
+  const h = harness();
+  h.host.holdStreams.add('$events');
+  h.host.holdStreams.add('session/follow');
+  // Adapter discovery has already loaded enrollment before a real attach.
+  // Authenticate here without verifying the independently delayed event link.
+  await h.auth.ensure();
+  const { connection } = attach(h);
+  await flush();
+  h.host.live.item(h.host.stream('session/follow').streamId, {
+    ...SNAPSHOT, cursor: 20,
+    records: [18, 19, 20].map((seq) => ({ type: 'event', event: V4_BY_SEQ.get(seq) })),
+    hasMore: true,
+  });
+  h.host.unaryHandlers.set('session/page', () => {
+    if (!h.link.isReady) queueMicrotask(() => h.host.live.item(h.host.stream('$events').streamId, READY));
+    return { value: { records: [...V4_BY_SEQ.entries()].filter(([seq]) => seq < 18)
+      .map(([, event]) => ({ type: 'event', event })), hasMore: false } };
+  });
+  let settled = false;
+  const historyRead = connection.getHistory().then((history) => { settled = true; return history; });
+  await flush();
+  check('initial history waits for event readiness before issuing older pages instead of racing the first handshake',
+    !settled && h.host.unaryCalls.every((call) => call.endpoint !== 'session/page'));
+  if (!h.link.isReady) h.host.live.item(h.host.stream('$events').streamId, READY);
+  const history = await historyRead;
+  check('follow-before-ready history preserves the earlier user and final assistant without an incomplete notice or replacement socket',
+    history.some((row) => row.type === 'user-message' && row.text === 'Reply with exactly: OK')
+      && history.some((row) => row.type === 'model-output' && row.final === true && row.text === 'OK')
+      && !history.some((row) => row.type === 'notice' && /incomplete/i.test(row.message))
+      && h.host.socketOpens === 1
+      && h.host.unaryCalls.filter((call) => call.endpoint === 'session/page').length === 1,
+    JSON.stringify({rows:history.filter(row => ['user-message','model-output','notice'].includes(row.type)),opens:h.host.socketOpens,pages:h.host.unaryCalls.filter(call=>call.endpoint==='session/page')}));
+  h.link.stop();
 }
 
 // ── Readiness ───────────────────────────────────────────────────────────────
@@ -418,9 +462,12 @@ function attach(h: Harness, session: SessionInfo = info): { connection: DshSessi
 
 {
   const h = harness();
-  const missing = await h.link.workspaces();
-  check('a stream read against a link that was never started reports the gap, not an empty registry',
-    !missing.ok && h.host.socketOpens === 0, JSON.stringify(missing));
+  const cold = await h.link.workspaces();
+  check('cold discovery reads membership on a bounded authenticated carrier and leaves no event registration',
+    cold.ok && cold.value.sessionIds.get('ws-1')?.join() === SESSION_ID
+      && h.host.socketOpens === 1 && h.host.sockets[0]?.closed === 1
+      && !h.link.carrierRunning && h.host.opensFor('$events').length === 0,
+    JSON.stringify(cold));
   await h.link.verify();
   const workspaces = await h.link.workspaces();
   const items = workspaces.ok ? workspaces.value.items as Array<Record<string, unknown>> : [];
@@ -429,12 +476,26 @@ function attach(h: Harness, session: SessionInfo = info): { connection: DshSessi
       && (workspaces.ok ? workspaces.value.sessionIds.get('ws-1') : [])?.join() === SESSION_ID,
     JSON.stringify(workspaces));
   check('a bounded baseline read closes the stream it opened',
-    h.host.cancelled.length === 1 && h.host.cancelled[0] === h.host.stream('workspace/follow').streamId,
+    h.host.cancelled.length === 2 && h.host.cancelled.includes(h.host.stream('workspace/follow').streamId),
     JSON.stringify(h.host.cancelled));
   h.link.stop();
 }
 
 // ── History: one stream, one boundary ───────────────────────────────────────
+
+for (const cause of ['abort', 'credential'] as const) {
+  const h = harness(); h.host.holdStreams.add('workspace/follow');
+  const abort = new AbortController(); const pending = h.link.workspaces(abort.signal);
+  await flush();
+  if (cause === 'abort') abort.abort();
+  else { await h.store.clear('scope'); await h.auth.ensure(); }
+  const outcome = await pending;
+  check(`a cold workspace read ends on ${cause} without adopting stale membership or starting events`,
+    !outcome.ok && outcome.failure.kind === 'transport'
+      && outcome.failure.reason === (cause === 'abort' ? 'timeout' : 'generation-lost')
+      && h.host.sockets[0]?.closed === 1 && h.host.opensFor('$events').length === 0);
+  h.link.stop();
+}
 
 {
   const h = harness();
@@ -443,7 +504,7 @@ function attach(h: Harness, session: SessionInfo = info): { connection: DshSessi
   await flush();
   const follow = h.host.stream('session/follow');
   check('a session attach opens session/follow with the captured address shape',
-    JSON.stringify(follow.args) === JSON.stringify({ request: { address: { kind: 'session', sessionId: SESSION_ID } } }),
+    JSON.stringify(follow.args) === JSON.stringify({ request: { address: { kind: 'session', sessionId: SESSION_ID }, assistantStream: true } }),
     JSON.stringify(follow.args));
   await connection.getHistory();
   check('the follow snapshot is the first history page, without a second read for it',
@@ -1013,6 +1074,8 @@ function attach(h: Harness, session: SessionInfo = info): { connection: DshSessi
   check('a named directory is created in that registered workspace',
     JSON.stringify(create?.args ?? {}) === '{"request":{"workspaceId":"ws-1"}}' && created.id === 'session-fixture-010',
     JSON.stringify(create?.args ?? {}));
+  check('named-workspace creation returns its actual cwd for attachment staging',
+    created.cwd === '/fixture/workspace', String(created.cwd));
 }
 
 {
@@ -1317,6 +1380,621 @@ function attach(h: Harness, session: SessionInfo = info): { connection: DshSessi
   await connection.listModes();
   check('the catalog is read once per carrier rather than once per render',
     catalogCalls() === before, `${String(before)} -> ${String(catalogCalls())}`);
+  h.link.stop();
+}
+
+// Selection intent comes from the session projection, not the host catalog.
+{
+  const h = harness(); await h.link.verify();
+  const { connection, messages } = attach(h); await flush();
+  h.host.live.item(h.host.stream('session/control').streamId, {
+    type: 'projection', sessionId: SESSION_ID, key: 'modelSelection', seq: 3,
+    value: { lastUsed: { provider: 'previous', model: 'previous' }, next: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } },
+  });
+  await flush();
+  const models = await h.link.channel(SESSION_ID).models();
+  check('the picker gets this session\'s next model and reasoning while the catalog remains host-wide',
+    models.current?.provider === 'deepseek-official' && models.current?.model === 'deepseek-v4-flash' && models.current?.reasoningEffort === 'high');
+  check('a native selection republishes visible session metadata before the next prompt',
+    messages.some((message) => message.type === 'metadata-update' && message.key === 'sessionInfo'
+      && (message.value as { currentModel?: { modelID?: string } }).currentModel?.modelID === 'deepseek-v4-flash'));
+  const sends = h.host.unaryCalls.length;
+  h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+  await connection.sendPrompt({ text: 'use selected model', model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' } });
+  check('prompting with the already-selected model does not submit a redundant selection',
+    !h.host.unaryCalls.slice(sends).some((call) => call.endpoint === 'session/selectModel'));
+  h.link.stop();
+}
+
+// Enrollment repairs an existing attach through normal roster reads alone.
+for (const withdrawal of ['removed', 'refused'] as const) {
+  const h = harness();
+  await h.link.verify();
+  const { connection } = attach(h);
+  await flush();
+  if (withdrawal === 'removed') await h.store.clear('scope');
+  else h.host.refuse = { status: 401, body: 'unauthorized' };
+  await h.link.roster();
+  await flush();
+  check(`${withdrawal} enrollment closes the attached carrier`, !h.link.carrierRunning && !h.link.isReady);
+  await expectRejection(`${withdrawal} enrollment refuses an attached prompt`, () => connection.sendPrompt({ text: 'blocked' }));
+  await h.link.roster();
+  await flush();
+  check(`${withdrawal} enrollment stays disconnected without a fresh credential`, h.host.sockets.length === 1);
+  h.host.refuse = undefined;
+  await h.store.save('scope', { ...COOKIE, value: `v1.fresh-${withdrawal}` });
+  await Promise.all([h.link.roster(), h.link.roster(), h.link.roster()]);
+  await flush();
+  check(`${withdrawal} enrollment opens exactly one fresh authenticated handshake`,
+    h.host.sockets.length === 2 && h.host.live.headers.cookie === `${COOKIE.name}=v1.fresh-${withdrawal}`);
+  check(`${withdrawal} enrollment recovers follow and authority without reattach or verify`,
+    h.link.isReady && h.host.opensFor('session/follow').length === 2 && await h.link.snapshotCursor(SESSION_ID) === SNAPSHOT.cursor);
+  h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+  await connection.sendPrompt({ text: 'resumed' });
+  check(`${withdrawal} enrollment makes the same connection writable`,
+    h.host.unaryCalls.filter((call) => call.endpoint === 'session/prompt').length === 1);
+  h.link.stop();
+}
+
+{
+  let exchanges = 0;
+  const h = harness({
+    cookie: { ...COOKIE, expiresAt: Date.now() + 60000 },
+    authFetch: async () => {
+      exchanges += 1;
+      return { status: 303, headers: { get: (key) => key === 'set-cookie'
+        ? `${COOKIE.name}=v1.renewed; Max-Age=2592000; Path=/; HttpOnly`
+        : key === 'location' ? './' : null } };
+    },
+  });
+  await h.link.verify(); attach(h); await flush();
+  h.auth.adoptLaunchToken('fixture-owned-launch');
+  await h.link.roster(); await flush();
+  await h.link.roster(); await flush();
+  check('an owned renewal refreshes the attached handshake once and keeps the retry bounded',
+    exchanges === 1 && h.host.sockets.length === 2 && h.host.live.headers.cookie === `${COOKIE.name}=v1.renewed` && h.link.isReady);
+  h.link.stop();
+  await h.store.save('scope', { ...COOKIE, value: 'v1.after-stop' }); await h.auth.ensure(); await flush();
+  check('an enrollment after deliberate link shutdown cannot resurrect its sessions', h.host.sockets.length === 2 && !h.link.carrierRunning);
+}
+
+// A follow-only loss must leave decisions with their still-live event owner.
+for (const kind of ['approval', 'question'] as const) {
+  const h = harness();
+  await h.link.verify();
+  const { connection, messages } = attach(h);
+  await flush();
+  const events = h.host.stream('$events');
+  const eventId = `evt-follow-${kind}`;
+  h.host.live.item(events.streamId, {
+    type: 'waterfall', eventId, agentId: SESSION_ID,
+    event: kind === 'approval' ? 'approval/request' : 'user-questions/request',
+    request: kind === 'approval' ? { toolName: 'bash', callId: 'call-follow' }
+      : { questions: [{ id: 'q1', question: 'Continue?', options: [{ label: 'yes' }] }] },
+  });
+  await flush();
+  const requests = () => messages.filter((message) => message.type === (kind === 'approval' ? 'permission-request' : 'question-request'));
+  check(`${kind} was displayed before follow recovery`, requests().length === 1);
+  h.host.live.end(h.host.stream('session/follow').streamId);
+  await flush();
+  check(`${kind} stays actionable across a fresh follow snapshot`,
+    !messages.some((message) => message.type === (kind === 'approval' ? 'permission-resolved' : 'question-resolved'))
+      && h.host.eventResults.length === 0 && h.host.stream('$events').streamId === events.streamId && h.host.sockets.length === 1);
+  if (kind === 'approval') {
+    await connection.respondPermission(eventId, 'approve');
+    await expectRejection('follow recovery cannot decide the approval twice', () => connection.respondPermission(eventId, 'approve'));
+    check('follow recovery sends exactly one decision to the original event owner',
+      h.host.eventResults.length === 1 && h.host.eventResults[0]?.eventId === eventId);
+    h.host.live.item(events.streamId, { type: 'cancel', eventId }); await flush();
+    check('an accepted approval receipt resolves its visible card exactly once despite late cancellation',
+      messages.filter((m) => m.type === 'permission-resolved' && m.requestId === eventId).length === 1
+      && messages.some((m) => m.type === 'permission-resolved' && m.requestId === eventId && m.decision === 'approve'));
+  } else {
+    h.host.live.item(events.streamId, { type: 'cancel', eventId });
+    await flush();
+    check('a question cancelled after follow recovery resolves without an answer',
+      messages.some((message) => message.type === 'question-resolved' && message.requestId === eventId) && h.host.eventResults.length === 0);
+  }
+  h.link.stop();
+}
+
+{
+  const h = harness(); await h.link.verify();
+  const { connection, messages } = attach(h); await flush();
+  const events = h.host.stream('$events'); const eventId = 'accepted-question';
+  h.host.live.item(events.streamId, { type: 'waterfall', eventId, agentId: SESSION_ID,
+    event: 'user-questions/request', request: { questions: [{ id: 'q1', question: 'Continue?', options: [{ label: 'yes' }] }] } });
+  await flush();
+  await Promise.all([connection.answerQuestion(eventId, [['yes']]), connection.answerQuestion(eventId, [['yes']])]);
+  h.host.live.item(events.streamId, { type: 'cancel', eventId }); await flush();
+  check('a blocking question receipt resolves its visible card exactly once and coalesces concurrent answers',
+    h.host.eventResults.length === 1 && messages.filter((m) => m.type === 'question-resolved' && m.requestId === eventId).length === 1);
+  h.link.stop();
+}
+
+// Exhaust the entire ladder with a virtual clock, then recover on a new carrier.
+{
+  const timers = new Map<object, { handler: () => void; ms: number }>();
+  const h = harness({
+    reconnectDelayMs: 7,
+    setTimeout: (handler, ms) => { const id = {}; timers.set(id, { handler, ms }); return id; },
+    clearTimeout: (id) => { timers.delete(id as object); },
+  });
+  const fire = (ms: number) => {
+    const timer = [...timers].find(([, value]) => value.ms === ms);
+    if (!timer) throw new Error(`missing retry timer ${String(ms)}`);
+    timers.delete(timer[0]); timer[1].handler();
+  };
+  await h.link.verify();
+  attach(h); await flush();
+  h.host.holdStreams.add('session/follow');
+  const before = h.host.opensFor('session/follow').length;
+  const ladder = [0, 50, 200, 800, 2000];
+  for (let index = 0; index <= ladder.length; index += 1) {
+    h.host.live.fail(h.host.stream('session/follow').streamId, 'gateway/uplink-overflow');
+    await flush();
+    if (index < ladder.length && ladder[index] !== 0) { fire(ladder[index]!); await flush(); }
+    check(`follow ladder attempt ${String(index)} has its exact open count`,
+      h.host.opensFor('session/follow').length === before + Math.min(index + 1, ladder.length));
+  }
+  check('the fully exhausted ladder withdraws and leaves no follow retry timer',
+    h.link.streamWithdrawn(SESSION_ID) === 'session/follow retried 5 times'
+      && ![...timers.values()].some((timer) => ladder.includes(timer.ms)));
+  h.host.holdStreams.delete('session/follow');
+  h.host.live.dropSocket(); await flush(); fire(7); await flush();
+  check('a fresh carrier resets transient withdrawal and delivers a follow baseline',
+    h.host.sockets.length === 2 && h.host.opensFor('session/follow').length === before + 6
+      && h.link.streamWithdrawn(SESSION_ID) === undefined && h.link.isReady
+      && await h.link.snapshotCursor(SESSION_ID) === SNAPSHOT.cursor);
+  const terminalOpens = h.host.opensFor('session/follow').length;
+  h.host.live.fail(h.host.stream('session/follow').streamId, 'session/not-found'); await flush();
+  h.host.live.dropSocket(); await flush(); fire(7); await flush();
+  check('a terminal session refusal survives a new carrier while its siblings remain usable',
+    h.host.opensFor('session/follow').length === terminalOpens
+      && h.link.streamWithdrawn(SESSION_ID) === 'session/not-found' && h.link.isReady);
+  h.link.stop();
+}
+
+// A real timed waterfall becomes a durable continued question. The fake clock
+// controls the host-computed claim duration; answer routes remain distinct.
+{
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-questions.json', import.meta.url)).json() as {
+    waterfall: Record<string, unknown>; continued: unknown; inbox: unknown;
+  };
+  const timers: Array<{ handler: () => void; ms: number; cleared: boolean }> = [];
+  const h = harness({ setTimeout: (handler, ms) => {
+    const timer = { handler, ms, cleared: false }; timers.push(timer); return timer;
+  }, clearTimeout: (raw) => { (raw as { cleared: boolean }).cleared = true; } });
+  h.host.holdStreams.add('userQuestions/attachWait');
+  await h.link.verify(); const { connection, messages } = attach(h); await flush(); await connection.getHistory();
+  h.host.live.item(h.host.stream('$events').streamId, fixture.waterfall); await flush();
+  const waitStream = h.host.opensFor('userQuestions/attachWait').at(-1)!;
+  check('a timed foreground card holds the source-defined wait claim by agent and call identity',
+    JSON.stringify(waitStream.args) === JSON.stringify({ agentId: SESSION_ID, callId: 'call-fixture' })
+      && connection.getPending().some((m) => m.type === 'question-request' && m.blocking !== false));
+  h.host.live.item(waitStream.streamId, { remainingMs: 1000 }); await flush();
+  const deadline = timers.findLast((timer) => timer.ms === 1000 && !timer.cleared)!;
+  deadline.handler(); await flush();
+  const timeout = h.host.unaryCalls.filter((c) => c.endpoint === '$events/result').at(-1);
+  check('the wait deadline rejects only the foreground waterfall and releases its claim',
+    (timeout?.args.outcome as { kind?: string; error?: { code?: string } })?.error?.code === 'ASK_TIMED_OUT'
+      && h.host.cancelled.includes(waitStream.streamId));
+  const control = h.host.stream('session/control');
+  h.host.live.item(control.streamId, { type: 'projection', sessionId: SESSION_ID, key: 'userQuestions', seq: 23, value: fixture.continued });
+  await flush();
+  const late = connection.getPending().find((m) => m.type === 'question-request' && m.blocking === false);
+  check('the durable continued projection exposes a nonblocking late-answer card', late?.type === 'question-request');
+  const before = h.host.unaryCalls.filter((c) => c.endpoint === '$events/result').length;
+  h.host.unaryHandlers.set('userQuestions/answer', () => ({ value: true }));
+  if (late?.type === 'question-request') await Promise.all([
+    connection.answerQuestion(late.requestId, [['yes']]), connection.answerQuestion(late.requestId, [['no']]),
+  ]);
+  const replies = h.host.unaryCalls.filter((c) => c.endpoint === 'userQuestions/answer');
+  check('concurrent late answers submit exactly one complete batch through the dedicated route and no waterfall result',
+    replies.length === 1 && JSON.stringify(replies[0]?.args) === JSON.stringify({ agentId: SESSION_ID, callId: 'call-fixture', answer: { answers: [{ id: 'q-fixture', selected: ['yes'] }] } })
+      && h.host.unaryCalls.filter((c) => c.endpoint === '$events/result').length === before);
+  h.host.live.item(control.streamId, { type: 'projection', sessionId: SESSION_ID, key: 'userQuestions', seq: 24, value: fixture.continued }); await flush();
+  check('an unchanged continued projection cannot resurrect a locally accepted reply', connection.getPending().length === 0);
+  check('transitioning from foreground to durable clears the old card', messages.some((m) => m.type === 'question-resolved' && m.requestId === 'question-fixture-timed'));
+  // Canceling a queued continued reply makes that durable question answerable
+  // again; a native-client queue claim must not resurrect it briefly.
+  h.host.live.item(control.streamId, { type: 'projection', sessionId: SESSION_ID, key: 'inbox', seq: 25, value: {
+    'next-turn': [{ id: 'late-reply', source: { kind: 'user-question-reply', callId: 'call-fixture' } }], 'next-step': [],
+  } }); await flush();
+  check('a native queued reply keeps the continued card settled', connection.getPending().length === 0);
+  const follow = h.host.stream('session/follow');
+  h.host.live.item(follow.streamId, { type: 'event', event: { type: 'agent/inbox/spliced', seq: 26, time: 1, data: {
+    target: 'next-turn', start: 0, inserted: [{ id: 'late-reply', source: { kind: 'user-question-reply', callId: 'call-fixture' } }],
+  } } });
+  h.host.live.item(follow.streamId, { type: 'event', event: { type: 'agent/inbox/spliced', seq: 27, time: 1, data: {
+    target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled',
+  } } });
+  h.host.live.item(control.streamId, { type: 'projection', sessionId: SESSION_ID, key: 'inbox', seq: 28, value: { 'next-turn': [], 'next-step': [] } }); await flush();
+  const canceled = connection.getPending().find((m) => m.type === 'question-request');
+  check('canceling a queued late reply makes the durable question answerable again', canceled?.type === 'question-request' && canceled.blocking === false);
+  if (canceled?.type === 'question-request') await connection.answerQuestion(canceled.requestId, [['no']]);
+  check('a replacement decision after explicit cancellation has one new dedicated RPC', h.host.unaryCalls.filter((c) => c.endpoint === 'userQuestions/answer').length === 2);
+  h.host.controlBaseline = { type: 'baseline', value: { projections: { [SESSION_ID]: { asOfSeq: 29, values: { userQuestions: fixture.continued, inbox: { 'next-turn': [], 'next-step': [] } } } } } };
+  await h.store.save('scope', { ...COOKIE, value: 'v1.renewed-timed-fixture' }); await h.link.roster(); await flush();
+  check('a credential renewal cannot resurrect an already accepted continued answer', connection.getPending().length === 0 && h.link.isReady);
+  // Authoritative native settlement removes the call before any later replay.
+  h.host.live.item(h.host.stream('session/control').streamId, { type: 'projection', sessionId: SESSION_ID, key: 'userQuestions', seq: 30, value: { active: [] } }); await flush();
+  check('external durable settlement leaves no continued card or duplicate answer', connection.getPending().length === 0 && h.host.unaryCalls.filter((c) => c.endpoint === 'userQuestions/answer').length === 2);
+  h.link.stop();
+}
+
+// Ordered transient frames and the process-local reconnect baseline captured
+
+{
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-assistant-stream.json', import.meta.url)).json() as {
+    reasoning: Array<{ type: string; frame?: unknown; event?: { data: { turn: number; step: number } } }>;
+  };
+  const h = harness(); await h.link.verify(); const { connection, messages } = attach(h); await flush(); await connection.getHistory();
+  const follow = h.host.stream('session/follow');
+  for (const item of fixture.reasoning) h.host.live.item(follow.streamId, item);
+  await flush();
+  const reasoning = messages.filter((m) => m.type === 'thinking' && m.text === 'Fixture reasoning.');
+  check('captured streamed reasoning and its durable settlement replace the same identity without a stale overlay',
+    reasoning.length >= 2 && new Set(reasoning.map((m) => m.type === 'thinking' ? m.key : undefined)).size === 1
+      && !(await connection.getHistoryOverlays()).some((m) => m.type === 'thinking'));
+  h.link.stop();
+}
+// from rc.2 with a local scripted provider. These prove the adapter fold, not
+// provider-backed or UI acceptance.
+{
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-assistant-stream.json', import.meta.url)).json() as {
+    follow: Array<Record<string, unknown>>;
+  };
+  const h = harness(); h.host.holdStreams.add('session/follow'); await h.link.verify();
+  const { connection, messages } = attach(h); await flush();
+  const follow = h.host.stream('session/follow');
+  const initial = fixture.follow[0]!;
+  h.host.live.item(follow.streamId, { ...initial, records: [], hasMore: false }); await flush();
+  await connection.getHistory();
+  const baselinePosition = fixture.follow.findIndex((v, i) => i > 0 && v.type === 'snapshot');
+  for (const item of fixture.follow.slice(1, baselinePosition)) h.host.live.item(follow.streamId, item);
+  await flush();
+  check('real assistant frames render text before durable settlement',
+    messages.some((m) => m.type === 'model-output' && m.text === 'Fixture ' && m.final === false));
+  h.host.live.end(follow.streamId); await flush();
+  const replacement = h.host.opensFor('session/follow').at(-1)!;
+  h.host.live.item(replacement.streamId, { ...fixture.follow[baselinePosition], records: [], hasMore: false }); await flush();
+  await connection.getHistory();
+  const overlay = await connection.getHistoryOverlays();
+  check('a replacement baseline supplies the partial assistant as a full overlay without doubling text',
+    overlay.some((m) => m.type === 'model-output' && m.text === 'Fixture '));
+  for (const item of fixture.follow.slice(baselinePosition + 1)) h.host.live.item(replacement.streamId, item);
+  await flush();
+  const outputs = messages.filter((m) => m.type === 'model-output');
+  check('dense continuation settles the same key exactly once with the durable complete message',
+    outputs.some((m) => m.type === 'model-output' && m.text === 'Fixture reply.' && m.final === false)
+      && outputs.filter((m) => m.type === 'model-output' && m.final === true).length === 1
+      && new Set(outputs.map((m) => m.type === 'model-output' ? m.key : undefined)).size === 1
+      && !(await connection.getHistoryOverlays()).some((m) => m.type === 'model-output'));
+  h.link.stop();
+
+  const fold = new DshAssistantStream(SESSION_ID);
+  fold.baseline(initial.assistantStream);
+  for (const item of fixture.follow.slice(1, baselinePosition)) fold.frame(item.frame);
+  const duplicate = fold.frame(fixture.follow[baselinePosition - 1]!.frame);
+  check('a duplicate revision changes no text', duplicate.length === 0 && fold.messages().some((m) => m.type === 'model-output' && m.text === 'Fixture '));
+  check('a missing revision retracts the uncommitted attempt through an authoritative history reload',
+    fold.frame({ type: 'chunk', attemptId: 'session-fixture-stream:1', revision: 9, index: 2,
+      chunk: { type: 'text-delta', index: 0, text: 'lost' } }).some((m) => m.type === 'history-reset')
+      && fold.messages().length === 0);
+  fold.baseline(fixture.follow[baselinePosition]!.assistantStream);
+  check('an abandoned attempt clears its provisional rows',
+    fold.frame({ type: 'end', attemptId: 'session-fixture-stream:1', revision: 4, index: 2, outcome: { kind: 'abandoned' } })
+      .some((m) => m.type === 'history-reset') && fold.messages().length === 0);
+  fold.baseline(fixture.follow[baselinePosition]!.assistantStream);
+  check('an out-of-order chunk index also retracts incomplete text',
+    fold.frame({ type: 'chunk', attemptId: 'session-fixture-stream:1', revision: 4, index: 3,
+      chunk: { type: 'text-delta', index: 0, text: 'bad' } }).some((m) => m.type === 'history-reset'));
+}
+
+// Source-defined lifecycle events reconcile durable roster truth; inactivity
+// alone cannot delete a cold session. Workspace archives remain reversible.
+{
+  const h = harness(); await h.link.verify();
+  const { connection, messages } = attach(h, structuredClone(info)); await flush(); await connection.getHistory();
+  const event = (event: string, args: unknown[]) => h.host.live.item(h.host.stream('$events').streamId, { type: 'emit', event, args });
+  const row = (available: boolean) => ({ sessionId: SESSION_ID, agentAvailable: available, running: false, blank: false, updatedAt: 5, projections: { kind: 'sequenced', asOfSeq: 0, values: {} } });
+  h.host.unaryHandlers.set('session/list', () => ({ value: { items: [row(false)] } }));
+  event('api-session/removed', [SESSION_ID]); await flush();
+  check('disposing an inactive agent preserves its durable cold session and history',
+    !messages.some((m) => m.type === 'notice' && m.message.includes('removed from'))
+      && connection.info.control?.drive.supported === true && !(await connection.getHistory()).some((m) => m.type === 'notice' && m.message.includes('unavailable')));
+  h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+  await connection.sendPrompt({ text: 'resume the ordinary cold session' });
+  check('an inactive ordinary session can reach the native prompt route that resumes it', h.host.unaryCalls.some((c) => c.endpoint === 'session/prompt'));
+  event('api-session/added', [row(true)]); await flush();
+  check('a native agent becoming available restores attached Drive metadata', connection.info.control?.drive.supported === true);
+  event('api-session/activity', [SESSION_ID, 42]); event('api-session/status', [SESSION_ID, true]); await flush();
+  check('forwarded status and activity update the attached session', connection.info.updatedAt === 42 && connection.info.status === 'working');
+  const ws = h.host.stream('workspace/follow');
+  h.host.unaryHandlers.set('session/list', () => ({ value: { items: [row(true)] } }));
+  h.host.live.item(ws.streamId, { type: 'upsert', workspace: { workspaceId: 'ws-1', title: 'Renamed', path: '/fixture/moved', sessionIds: [SESSION_ID] } });
+  h.host.live.item(ws.streamId, { type: 'archived', archivedSessionIds: [SESSION_ID] }); await flush();
+  check('workspace deltas update association and archive admission without deleting the transcript',
+    connection.info.projectName === 'Renamed' && connection.info.cwd === '/fixture/moved'
+      && connection.info.control?.drive.reason?.includes('archived') === true && h.link.isReady);
+  await expectRejection('archived sessions refuse new prompts', () => connection.sendPrompt({ text: 'must refuse' }));
+  event('api-session/status', [SESSION_ID, true]); await flush();
+  check('a late running event cannot re-latch an archived session', connection.info.status === 'idle'
+    && messages.filter((m) => m.type === 'status').at(-1)?.status === 'idle');
+  h.host.live.item(ws.streamId, { type: 'archived', archivedSessionIds: [] }); await flush();
+  check('unarchive reconciles native availability and restores the existing connection', connection.info.control?.drive.supported === true);
+  h.host.unaryHandlers.set('session/list', () => ({ error: { code: 'SERVICE_UNAVAILABLE', message: 'fixture service failure' } }));
+  event('api-session/removed', [SESSION_ID]); await flush();
+  check('a failed roster read cannot declare an attached session deleted', connection.info.control?.drive.supported === true);
+  h.host.unaryHandlers.set('session/list', () => ({ value: { items: [], cursor: 'repeated' } }));
+  event('api-session/removed', [SESSION_ID]); await flush();
+  check('a truncated or repeated-cursor roster cannot declare deletion', connection.info.control?.drive.supported === true);
+  h.host.unaryHandlers.set('session/list', () => ({ value: { items: [] } }));
+  event('api-session/removed', [SESSION_ID]); await flush();
+  check('an exhaustive successful roster absence withdraws only that durable session',
+    connection.info.control?.drive.reason?.includes('removed from') === true && h.link.isReady);
+  h.link.stop();
+}
+
+// Ordered native queue splices distinguish normal delivery from cancellation.
+{
+  const h = harness(); await h.link.verify();
+  const { connection, messages } = attach(h, { ...info, control: undefined }); await flush(); await connection.getHistory();
+  const follow = h.host.stream('session/follow'); let seq = Number(SNAPSHOT.cursor);
+  const emit = (type: string, data: unknown) => h.host.live.item(follow.streamId, { type: 'event', event: { type, seq: ++seq, time: 1, data } });
+  const queued = { id: 'queued-image', source: { kind: 'user' }, content: [{ type: 'image', attachment: { attachmentId: 'opaque-image-id' } }] };
+  emit('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [queued] }); await flush();
+  check('an image-only queued input appears as a stable queued user echo',
+    messages.some((m) => m.type === 'user-message' && m.queued && m.imageCount === 1 && m.key?.endsWith('queued-image')));
+  check('queue overlays retain image-only inputs on history refresh', (await connection.getHistoryOverlays()).some((m) => m.type === 'user-message' && m.queued && m.imageCount === 1));
+  const resets = messages.filter((m) => m.type === 'history-reset').length;
+  emit('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] });
+  emit('user/message', queued); await flush();
+  check('a normal queue claim settles the same bubble without resetting history',
+    messages.filter((m) => m.type === 'history-reset').length === resets
+      && messages.some((m) => m.type === 'user-message' && !m.queued && m.key?.endsWith('queued-image'))
+      && !(await connection.getHistoryOverlays()).some((m) => m.type === 'user-message' && m.queued));
+  emit('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [{ id: 'steer', source: { kind: 'user' }, content: [{ type: 'text', text: 'steer' }] }] });
+  emit('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' }); await flush();
+  check('a canceled steering item retracts through one history reset and leaves no stale overlay',
+    messages.filter((m) => m.type === 'history-reset').length === resets + 1
+      && !(await connection.getHistoryOverlays()).some((m) => m.type === 'user-message' && m.queued));
+  h.link.stop();
+}
+
+// Session-authorized durable image readback stays behind the adapter boundary.
+{
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-images.json', import.meta.url)).json() as {
+    userEvents: Array<Record<string, unknown>>; readback: { attachment: Record<string, unknown>; data: string };
+  };
+  const h = harness(); h.host.holdStreams.add('session/follow'); await h.link.verify();
+  h.host.unaryHandlers.set('session/attachment', () => ({ value: fixture.readback }));
+  const { connection } = attach(h, { ...info, control: undefined }); await flush();
+  const event = fixture.userEvents[0]!;
+  h.host.live.item(h.host.stream('session/follow').streamId, { ...SNAPSHOT, cursor: event.seq, records: [{ type: 'event', event }], hasMore: false }); await flush();
+  const history = await connection.getHistory();
+  const artifact = history.find((m) => m.type === 'file-artifact');
+  const request = h.host.unaryCalls.find((c) => c.endpoint === 'session/attachment');
+  check('captured durable images become user-linked artifacts through the authorized readback route',
+    artifact?.type === 'file-artifact' && artifact.url === `data:image/png;base64,${fixture.readback.data}`
+      && !!artifact.userMessageKey && JSON.stringify(request?.args) === JSON.stringify({ request: { sessionId: SESSION_ID, attachmentId: fixture.readback.attachment.attachmentId } })
+      && request?.cookie === `${COOKIE.name}=${COOKIE.value}`);
+  await connection.getHistory();
+  check('history refresh reuses one bounded image read without exposing a DSH cookie or endpoint',
+    h.host.unaryCalls.filter((c) => c.endpoint === 'session/attachment').length === 1
+      && artifact?.type === 'file-artifact' && !artifact.url?.includes('dsh-auth') && !artifact.url?.includes(BASE_URL));
+  connection.onGenerationLost();
+  h.host.unaryHandlers.set('session/attachment', () => ({ value: { ...fixture.readback, attachment: { ...fixture.readback.attachment, attachmentId: 'wrong-image' } } }));
+  const refused = await connection.getHistory();
+  check('a mismatched image identity cannot supply preview bytes after generation invalidation',
+    refused.some((m) => m.type === 'file-artifact' && !m.url) && refused.some((m) => m.type === 'notice' && m.message.includes('preview')));
+  h.link.stop();
+}
+
+{
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-assistant-stream.json', import.meta.url)).json() as {
+    interruptedFollow: unknown[];
+  };
+  const h = harness(); h.host.holdStreams.add('session/follow'); await h.link.verify();
+  const { connection, messages } = attach(h, { ...info, control: undefined }); await flush();
+  const follow = h.host.stream('session/follow');
+  h.host.live.item(follow.streamId, { ...SNAPSHOT, cursor: 0, records: [], hasMore: false, assistantStream: { revision: 0 } }); await flush(); await connection.getHistory();
+  for (const item of fixture.interruptedFollow) h.host.live.item(follow.streamId, item); await flush();
+  const outputs = messages.filter((m) => m.type === 'model-output');
+  check('a real interrupted message settles the partial stream on the same identity',
+    outputs.some((m) => m.type === 'model-output' && m.text === 'Fixture ' && m.final === false)
+      && outputs.filter((m) => m.type === 'model-output' && m.final === true && m.text === 'Fixture ').length === 1
+      && new Set(outputs.map((m) => m.type === 'model-output' ? m.key : undefined)).size === 1
+      && messages.some((m) => m.type === 'run-summary' && m.status === 'cancelled')
+      && !(await connection.getHistoryOverlays()).some((m) => m.type === 'model-output'));
+  h.link.stop();
+}
+
+
+// Exercise the steering product caller, not just the channel's mode builder.
+{
+  const h = harness(); await h.link.verify();
+  const { connection } = attach(h); await flush();
+  h.host.unaryHandlers.set('commands/list', () => ({ value: [{ name: 'steer', description: 'native collision' }, { name: 'compact' }] }));
+  h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+  h.host.unaryHandlers.set('session/selectModel', () => ({ value: { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } } }));
+  const commands = await connection.listCommands();
+  check('rc.2 offers one local steering command alongside its native registry', commands.filter(c => c.name === 'steer').length === 1 && commands.find(c => c.name === 'steer')?.description?.includes('next step') === true && commands.some(c => c.name === 'compact'));
+  const mark = h.host.unaryCalls.length;
+  let error: unknown;
+  await connection.runCommand('steer', '  steering witness  ', { model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' } }).catch(e => { error = e; });
+  const calls = h.host.unaryCalls.slice(mark);
+  const prompt = calls.find(c => c.endpoint === 'session/prompt');
+  const request = prompt?.args.request as Record<string, unknown> | undefined;
+  check('local steer selects its model then submits one authenticated next-step prompt', error === undefined
+    && calls.filter(c => c.endpoint === 'session/prompt').length === 1
+    && calls.findIndex(c => c.endpoint === 'session/selectModel') >= 0
+    && calls.findIndex(c => c.endpoint === 'session/selectModel') < calls.findIndex(c => c.endpoint === 'session/prompt')
+    && request?.mode === 'steer' && request.sessionId === SESSION_ID && typeof request.requestId === 'string'
+    && JSON.stringify(request.content) === JSON.stringify([{ type: 'text', text: 'steering witness' }])
+    && prompt?.cookie === `${COOKIE.name}=${COOKIE.value}` && !calls.some(c => c.endpoint === 'commands/execute'));
+  const emptyMark = h.host.unaryCalls.length;
+  await expectRejection('empty steering text is refused', () => connection.runCommand('steer', '  '));
+  check('empty steer issues no request or selectors', h.host.unaryCalls.length === emptyMark);
+  let failures = 0;
+  h.host.unaryHandlers.set('session/prompt', () => { failures++; return { error: { code: 'session/writer-held', message: 'other owner' } }; });
+  await expectRejection('steering surfaces a native writer refusal', () => connection.runCommand('steer', 'refused steering'));
+  check('an ambiguous or refused steer is never retried', failures === 1);
+  h.link.stop();
+  const stoppedMark = h.host.unaryCalls.length;
+  await expectRejection('steering refuses an unverified generation', () => connection.runCommand('steer', 'stale steering'));
+  check('unverified steering issues no requests', h.host.unaryCalls.length === stoppedMark);
+}
+{
+  const h = harness(); await h.link.verify();
+  const { connection } = attach(h); await flush();
+  h.host.unaryHandlers.set('session/selectModel', () => {
+    h.link.stop();
+    return { value: { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } };
+  });
+  let refused: unknown;
+  await connection.runCommand('steer', 'generation fence', { model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash' } }).catch(e => { refused = e; });
+  check('steering lost during model selection cannot submit to the stale generation', refused instanceof Error && !h.host.unaryCalls.some(c => c.endpoint === 'session/prompt'));
+  h.link.stop();
+}
+
+
+// These names are the rc.2 forwarded allowlist and native catalog listeners;
+// the old settings/change spelling is never emitted by that host.
+for (const event of ['settings/document-updated', 'plugin-manager/changed', 'llm/adapters-updated', 'permission-presets/catalog-changed', 'commands/change', 'agent-preset/selected', 'credentials/record-updated', 'credentials/reference-updated']) {
+  const h = harness(); await h.link.verify();
+  const { connection } = attach(h); await flush();
+  let catalog = ['before-change'];
+  h.host.unaryHandlers.set('permissionPresets/catalog', () => ({ value: { options: catalog.map(value => ({ value, name: value })), defaultPreset: catalog[0] } }));
+  const before = await connection.listModes();
+  catalog = ['after-change'];
+  h.host.live.item(h.host.stream('$events').streamId, { type: 'emit', event, args: event === 'settings/document-updated' ? ['models', 2] : [SESSION_ID] });
+  await flush();
+  const after = await connection.listModes();
+  check(`${event} refreshes the live catalog without replacing carrier or event authority`,
+    before.some(m => m.value === 'before-change') && after.some(m => m.value === 'after-change')
+      && !after.some(m => m.value === 'before-change') && h.host.sockets.length === 1 && h.link.isReady
+      && !h.diagnostics.some(d => d.code === 'forwarded-event-unmapped' && d.detail === event));
+  h.link.stop();
+}
+
+const commandPermissionCatalog = (await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2.json', import.meta.url)).json() as {
+  unary: Record<string, { envelope: { result: { value: unknown } } }>;
+}).unary['unary.permissionPresets']!.envelope.result.value;
+// Ordinary command permission selectors use the native registry, not prompt admission.
+{
+  const h = harness(); await h.link.verify();
+  const { connection } = attach(h); await flush();
+  h.host.unaryHandlers.set('permissionPresets/catalog', () => ({ value: commandPermissionCatalog }));
+  h.host.unaryHandlers.set('commands/list', () => ({ value: [{ name: 'goal' }, { name: 'permission' }] }));
+  h.host.unaryHandlers.set('commands/execute', () => ({ value: { commandId: 'fixture-command', result: { kind: 'success' } } }));
+  await connection.runCommand('goal', undefined, { permissionMode: 'read-only' });
+  const calls = h.host.unaryCalls.filter(c => c.endpoint === 'commands/execute');
+  check('rc.2 applies command permission before exactly one requested registry execution',
+    JSON.stringify(calls.map(c => c.args.line)) === JSON.stringify(['/permission read-only', '/goal']));
+  check('rc.2 command permission and target retain captured argument names and empty attachments',
+    calls.every(c => c.args.agentId === SESSION_ID && JSON.stringify(c.args.submittedAttachments) === '[]'));
+  const mark = h.host.unaryCalls.length;
+  await expectRejection('rc.2 refuses an unadvertised command permission before target execution',
+    () => connection.runCommand('goal', undefined, { permissionMode: 'unknown-preset' }));
+  check('rc.2 refused command permission sends no registry execution',
+    !h.host.unaryCalls.slice(mark).some(c => c.endpoint === 'commands/execute'));
+  h.link.stop();
+}
+{
+  const h = harness(); await h.link.verify();
+  const { connection } = attach(h); await flush();
+  h.host.unaryHandlers.set('permissionPresets/catalog', () => ({ value: commandPermissionCatalog }));
+  h.host.unaryHandlers.set('commands/list', () => ({ value: [{ name: 'goal' }, { name: 'permission' }] }));
+  h.host.unaryHandlers.set('commands/execute', args => {
+    if (args.line === '/permission read-only') h.link.stop();
+    return { value: { commandId: 'fixture-command', result: { kind: 'success' } } };
+  });
+  let refused: unknown;
+  await connection.runCommand('goal', undefined, { permissionMode: 'read-only' }).catch(e => { refused = e; });
+  check('rc.2 generation lost after accepted command permission blocks the target without retry',
+    refused instanceof Error && h.host.unaryCalls.filter(c => c.endpoint === 'commands/execute').length === 1
+      && !h.host.unaryCalls.some(c => c.endpoint === 'commands/execute' && c.args.line === '/goal'));
+  h.link.stop();
+}
+
+{
+  const host = new ScriptedHost();
+  const scope = dshCredentialScope(BASE_URL, '/fixture/dsh-home');
+  const adapter = adapterOver(host, memoryStore({ [scope]: COOKIE }));
+  const connection = await adapter.attach(SESSION_ID, 'live');
+  await connection.getHistory();
+  const link = (adapter as unknown as { remoteHost: DshRemoteHostLink }).remoteHost;
+  const beforeGeneration = link.generation;
+  const beforeSockets = host.sockets.length;
+  check('the adapter catalog scenario starts with a verified attached carrier', link.isReady && link.carrierRunning);
+  let notifications = 0;
+  const watch = (adapter as unknown as {
+    watchSessionCatalog?: (id: string, notify: () => void) => () => void;
+  }).watchSessionCatalog?.bind(adapter);
+  const stopBroken = watch?.(SESSION_ID, () => { throw new Error('retired fixture listener'); });
+  const stop = watch?.(SESSION_ID, () => { notifications++; });
+  let catalog = ['before-change'];
+  host.unaryHandlers.set('permissionPresets/catalog', () => ({ value: { options: catalog.map(value => ({ value, name: value })), defaultPreset: catalog[0] } }));
+  await connection.listModes!();
+  catalog = ['after-change'];
+  host.live.item(host.stream('$events').streamId, { type: 'emit', event: 'permission-presets/catalog-changed', args: [] });
+  await flush();
+  const after = await connection.listModes!();
+  check('the actual adapter forwards native catalog invalidation to its attached-client watcher',
+    notifications === 1 && after.some(mode => mode.value === 'after-change'));
+  check('a failed catalog listener cannot suppress another listener or replace event authority',
+    notifications === 1 && link.generation === beforeGeneration && link.isReady && host.sockets.length === beforeSockets);
+  stop?.(); stopBroken?.();
+  host.live.item(host.stream('$events').streamId, { type: 'emit', event: 'commands/change', args: [] });
+  await flush();
+  check('unsubscribed attached clients receive no later command catalog notification', notifications === 1);
+  await connection.close(); link.stop();
+}
+
+// A native disposal can precede a roster reread. Only an actual complete
+// session list, not a malformed successful RPC, can prove durable removal.
+for (const [name, value] of [
+  ['absent-items', {}], ['null-items', { items: null }],
+  ['invalid-identity', { items: [{}] }], ['invalid-cursor', { items: [], cursor: 42 }],
+] as const) {
+  const h = harness(); await h.link.verify();
+  h.host.unaryHandlers.set('session/list', () => ({ value }));
+  const outcome = await h.link.roster();
+  check(`malformed ${name} roster is a contract refusal, never an exhaustive empty list`,
+    !outcome.ok && outcome.failure.kind === 'transport' && outcome.failure.reason === 'invalid-envelope');
+  h.link.stop();
+}
+{
+  const h = harness(); await h.link.verify();
+  const { connection } = attach(h); await connection.getHistory();
+  h.host.unaryHandlers.set('session/list', () => ({ value: { accepted: true } }));
+  h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+  const notify = () => h.host.live.item(h.host.stream('$events').streamId,
+    { type: 'emit', event: 'api-session/removed', args: [SESSION_ID] });
+  notify(); await flush();
+  let refused: unknown;
+  await connection.sendPrompt({ text: 'durable session still exists' }).catch(error => { refused = error; });
+  check('malformed reconciliation after native disposal preserves the attached durable session',
+    refused === undefined && h.link.isReady && h.host.sockets.length === 1
+      && h.host.unaryCalls.filter(call => call.endpoint === 'session/prompt').length === 1);
+  h.host.unaryHandlers.set('session/list', () => ({ value: { items: [] } }));
+  notify(); await flush();
+  await expectRejection('a subsequent valid exhaustive empty roster proves actual removal',
+    () => connection.sendPrompt({ text: 'must not be submitted' }));
+  check('proved removal issues no extra native prompt',
+    h.host.unaryCalls.filter(call => call.endpoint === 'session/prompt').length === 1);
+  h.link.stop();
+}
+{
+  const h = harness(); await h.link.verify();
+  h.host.unaryHandlers.set('session/list', args => (args._request as { cursor?: string }).cursor === 'next-page'
+    ? { value: { broken: true } }
+    : { value: { items: [{ sessionId: SESSION_ID }], cursor: 'next-page' } });
+  const outcome = await h.link.roster();
+  check('a malformed later roster page cannot turn a partial read into deletion authority',
+    !outcome.ok && h.host.unaryCalls.filter(call => call.endpoint === 'session/list').length === 2);
   h.link.stop();
 }
 

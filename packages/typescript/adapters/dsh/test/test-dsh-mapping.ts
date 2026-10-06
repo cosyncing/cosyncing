@@ -332,6 +332,41 @@ function typesOf(messages: Array<{ type: string }>): string {
   );
 }
 
+{
+  // Captured from rc.2's native /compact command. Its range fields differ from
+  // the retained rc.6 form above, and a checkpoint is injected context, not a
+  // human prompt. Log-only rows inside the range survive the surface rewrite.
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-compaction.json', import.meta.url)).json() as {
+    replacement: DshHistoryEntry;
+  };
+  const entries: DshHistoryEntry[] = [
+    { event: { type: 'user/message', seq: 11, time: 1, data: { id: 'old-human', source: { kind: 'user' }, content: [{ type: 'text', text: 'old prompt' }] }, surfaceOp: 'append' } },
+    { event: { type: 'turn/start', seq: 13, time: 1, data: { turn: 1 } } },
+    { event: { type: 'assistant/message', seq: 15, time: 1, data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'old reply' }] } }, surfaceOp: 'append' } },
+    { event: { type: 'user/message', seq: 25, time: 1, data: { id: 'old-human-2', source: { kind: 'user' }, content: [{ type: 'text', text: 'another old prompt' }] }, surfaceOp: 'append' } },
+    fixture.replacement,
+    { event: { type: 'user/message', seq: 36, time: 1, data: { id: 'new-human', source: { kind: 'user' }, content: [{ type: 'text', text: 'after compaction' }] }, surfaceOp: 'append' } },
+  ];
+  const folded = foldDshSurface(entries).map((entry) => entry.event.seq);
+  check('captured rc.2 startSeq/endSeq shadows the inclusive surface range while retaining log-only rows',
+    JSON.stringify(folded) === JSON.stringify([34, 13, 36]), JSON.stringify(folded));
+  const rows = mapDshHistory(entries, createDshMapState(SESSION_ID, false));
+  const checkpoint = rows.filter((row) => row.type === 'event' && row.name === CONTEXT_INJECTION_EVENT) as Array<{ type: 'event'; payload?: { source?: string; body?: string } }>;
+  check('rc.2 compacted transcript has one checkpoint context, no shadowed prompt/reply, and its later prompt',
+    checkpoint.length === 1 && checkpoint[0]?.type === 'event'
+      && checkpoint[0].payload?.source === 'compact-checkpoint'
+      && checkpoint[0].payload?.body === 'Compaction fixture checkpoint.'
+      && !rows.some((row) => (row.type === 'user-message' || row.type === 'model-output') && row.text?.startsWith('old'))
+      && rows.filter((row) => row.type === 'user-message').length === 1,
+    JSON.stringify(rows.map((row) => row.type)));
+  const nested: DshHistoryEntry = {
+    event: { ...fixture.replacement.event, seq: 37,
+      surfaceOp: { op: 'replace', startSeq: 34, endSeq: 36 } },
+  };
+  check('later rc.2 replacements shadow an earlier checkpoint across concatenated pages',
+    JSON.stringify(foldDshSurface([...entries, nested]).map((entry) => entry.event.seq)) === JSON.stringify([37, 13]));
+}
+
 // ── 4. Tool views: one vocabulary, generic fallback always ──────────────────
 
 {
@@ -653,6 +688,15 @@ function typesOf(messages: Array<{ type: string }>): string {
 {
   const summary = FIXTURE.sessionList.body.result.value.items[0]!;
   const session = mapDshSession(summary)!;
+  const selected = mapDshSession({ ...summary, projections: { asOfSeq: 10, values: {
+    modelSelection: { lastUsed: { provider: 'old', model: 'previous' },
+      next: { provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'high' } },
+  } } })!;
+  check('cached selection seeds the cold roster and next intent takes precedence over lastUsed',
+    selected.currentModel?.providerID === 'deepseek'
+      && selected.currentModel.modelID === 'deepseek-flash'
+      && selected.currentModel.reasoningEffort === 'high'
+      && selected.model === 'deepseek-flash');
   check(
     "the summary's permissions projection seeds currentMode on the row — the chip is set before the first session frame",
     session.currentMode === 'workspace-write'
@@ -1511,6 +1555,44 @@ function typesOf(messages: Array<{ type: string }>): string {
       && (unknownKind[0]!.payload as { source: string }).source === 'skill-catalog',
     JSON.stringify(unknownKind),
   );
+}
+
+// rc.2 carries tool content and error state on the tool message itself.
+{
+  const images = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-images.json', import.meta.url)).json() as { userEvents: DshHistoryEntry['event'][] };
+  check('both image-only and captioned native echoes were captured', images.userEvents.length === 2);
+  for (const event of images.userEvents) {
+    const row = mapDshEvent({ event }, createDshMapState(SESSION_ID, true))[0];
+    check('a captured durable image echo retains its image count and native identity', row?.type === 'user-message' && row.imageCount === 1 && !!row.key);
+  }
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-tool.json', import.meta.url)).json() as {
+    follow: Array<{ event: DshHistoryEntry['event'] }>;
+  };
+  const state = createDshMapState(SESSION_ID, true);
+  mapDshEvent(fixture.follow[0]!, state);
+  const result = mapDshEvent(fixture.follow[1]!, state)[0];
+  check('the real rc.2 read result retains its visible content and call correlation',
+    result?.type === 'tool-result' && result.callId === 'call-fixture' && result.toolName === 'read'
+      && typeof result.result === 'string' && result.result.includes('Local fixture content.') && !result.isError);
+  const failed = structuredClone(fixture.follow[1]!);
+  (failed.event.data as { message: { isError: boolean } }).message.isError = true;
+  const error = mapDshEvent(failed, state)[0];
+  check('native rc.2 tool failures keep their error flag on the visible result', error?.type === 'tool-result' && error.isError === true);
+  const legacy = mapDshEvent({ event: { type: 'tool/result', seq: 100, time: 1,
+    data: { message: { role: 'tool', source: { kind: 'tool', callId: 'legacy' }, content: [{ toolCallId: 'legacy', content: 'legacy output' }] } } } }, state)[0];
+  check('legacy nested tool results retain their old content path', legacy?.type === 'tool-result' && String(legacy.result).includes('legacy output'));
+
+  for (const text of ['', 'Caption']) {
+    const rows = mapDshEvent({ event: { type: 'user/message', seq: 101, time: 1, data: {
+      id: 'image-echo', source: { kind: 'user' }, content: [
+        ...(text ? [{ type: 'text', text }] : []),
+        { type: 'image', attachment: { attachmentId: 'opaque-image-id', mediaType: 'image/png', bytes: 68, width: 1, height: 1 } },
+      ],
+    } } }, state);
+    check(`a ${text ? 'captioned' : 'textless'} native image echo retains its user identity and image count`,
+      rows.length === 1 && rows[0]?.type === 'user-message' && rows[0].text === text
+        && rows[0].imageCount === 1 && rows[0].key === dshMessageKey(SESSION_ID, 'image-echo'));
+  }
 }
 
 const failed = results.filter((result) => !result.ok).length;

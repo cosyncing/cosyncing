@@ -12,6 +12,11 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+// Capture before any runner pins HOME/USERPROFILE. On native Windows homedir()
+// follows USERPROFILE, so a later lookup would mistake the disposable home for
+// the real account and lose the original account's protection.
+const CAPTURE_ACCOUNT_HOME = homedir();
+
 /**
  * Refuse a home that could reach the owner's real sessions or their credentials.
  *
@@ -25,7 +30,7 @@ export function assertDisposableHome(
   home: string,
   options: { cosyncingHome?: string } = {},
 ): void {
-  const realHome = homedir();
+  const realHome = CAPTURE_ACCOUNT_HOME;
   if (resolve(home) === resolve(realHome)) {
     throw new Error('refusing to hand the child the real account home as its home');
   }
@@ -143,7 +148,7 @@ export function assertRootsContained(
   workspace: string,
 ): void {
   const roots = [env['DSH_HOME'], env['HOME'], env['DSH_AGENTS_HOME'], env['XDG_STATE_HOME'], env['XDG_CACHE_HOME'], workspace];
-  const realHome = resolve(homedir());
+  const realHome = resolve(CAPTURE_ACCOUNT_HOME);
   for (const root of roots) {
     if (root === undefined) continue;
     // The home itself counts as contained: HOME is legitimately the home, and

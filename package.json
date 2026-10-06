@@ -92,6 +92,7 @@
     "test:broker-roster-window": "bun run packages/typescript/broker/test/broker/test-roster-http.ts",
     "test:broker-adapter-discovery-bounds": "bun run packages/typescript/broker/test/broker/test-adapter-discovery-bounds.ts",
     "test:broker-managed-host-ownership": "bun run packages/typescript/broker/test/broker/test-managed-host-ownership.ts",
+    "test:broker-session-options": "bun run packages/typescript/broker/test/broker/test-session-options.ts",
     "test:broker-sync-degraded-integration": "bun run packages/typescript/broker/test/broker/test-sync-degraded-integration.ts",
     "test:broker-control-boundaries": "bun run packages/typescript/broker/test/broker/test-control-boundaries.ts",
     "test:broker-artifact-session-isolation": "bun run packages/typescript/broker/test/broker/test-artifact-session-isolation.ts",

@@ -58,6 +58,7 @@ import { brokerManagedHostIdentities } from '../../src/installation/managed-host
 import { shippedAdapters } from '../../src/installation/shipped-adapters.ts';
 import { brokerServiceEnvironmentEntries } from '../../src/installation/service-manager.ts';
 import { writeInstallState } from '../../src/installation/install-state.ts';
+import { DshAdapter } from '@cosyncing/adapter-dsh';
 
 /** A live process, as the effects report one. */
 const running = (identity: HostProcessIdentity): LiveProcess => ({ state: 'running', identity });
@@ -1117,6 +1118,111 @@ try {
         got: forwarded.some((text) => text.includes('late-arrival')),
       }));
   }
+  {
+    // The native Windows reproduction had a launch URL waiting in the pipe
+    // while a synchronous fresh identity probe held the event loop. Before
+    // the first cooperative yield, readOutput is empty. Starting ancestry
+    // proofs first spends the entire advertised readiness budget.
+    const servingPid = 5151;
+    const servingIdentity = { ...SPAWNED, pid: servingPid, start: '778', comm: 'node' };
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[SPAWN_PID, SPAWNED], [servingPid, servingIdentity]]),
+      missingProcess: PROCESS_ABSENT,
+      childDiesOn: 'SIGTERM',
+      descendants: new Map([[servingPid, SPAWN_PID]]),
+    });
+    const now = effects.now.bind(effects); let blockedMs = 0;
+    effects.now = () => now() + blockedMs;
+    const read = effects.liveProcess.bind(effects);
+    effects.liveProcess = (pid, options) => { if (options?.fresh) blockedMs += 4_000; return read(pid, options); };
+    const ancestry = effects.descendsFrom!.bind(effects); let walks = 0;
+    effects.descendsFrom = (pid, parent, options) => { blockedMs += 4_000; walks += 1; return ancestry(pid, parent, options); };
+    let pipeDrained = false; let announced = false; let spawned = false;
+    const sleep = effects.sleep.bind(effects);
+    effects.sleep = async (ms) => { if (ms === 0) pipeDrained = true; await sleep(ms); };
+    const spawn = effects.spawn.bind(effects);
+    effects.spawn = (launch) => {
+      spawned = true; const child = spawn(launch);
+      return { ...child, get exitCode() { return child.exitCode; },
+        readOutput: () => pipeDrained ? 'stdout:\ndsh web: http://127.0.0.1:59999/?token=pipe-fixture\nstderr:\n' : '' };
+    };
+    const { store, records } = memoryStore();
+    const outcome = await startManagedHost(plan({
+      readyTimeoutMs: 20_000,
+      ready: async () => announced,
+      locate: async () => { if (!spawned) return HOST_ABSENT; blockedMs += 4_000; return hostAt(servingPid); },
+      observeOutput: (text) => { announced = text.includes('pipe-fixture'); },
+    }), effects, store);
+    check('buffered launch output reaches authentication before slow fresh ownership walks consume the startup budget',
+      outcome.action === 'started' && outcome.pid === servingPid && outcome.servingProven
+        && records.get(AGENT)?.start === servingIdentity.start && walks === 2
+        && blockedMs >= 20_000 && signals.length === 0,
+      JSON.stringify({ outcome, walks, blockedMs, signals }));
+  }
+// A foreground launch must leave startup polls free to receive late pipe output.
+{
+  const servingPid = 5151;
+  const servingIdentity = { ...SPAWNED, pid: servingPid, start: '778', comm: 'node' };
+  const { effects, signals } = fakeEffects({
+    identities: new Map([[SPAWN_PID, SPAWNED], [servingPid, servingIdentity]]),
+    missingProcess: PROCESS_ABSENT, childDiesOn: 'SIGTERM',
+    descendants: new Map([[servingPid, SPAWN_PID]]),
+  });
+  const now = effects.now.bind(effects); let blockedMs = 0; let positivePolls = 0;
+  effects.now = () => now() + blockedMs;
+  const read = effects.liveProcess.bind(effects);
+  effects.liveProcess = (pid, options) => { if (options?.fresh) blockedMs += 4_000; return read(pid, options); };
+  const ancestry = effects.descendsFrom!.bind(effects); let walks = 0;
+  effects.descendsFrom = (pid, parent, options) => { blockedMs += 4_000; walks += 1; return ancestry(pid, parent, options); };
+  const sleep = effects.sleep.bind(effects);
+  effects.sleep = async (ms) => { if (ms > 0) positivePolls++; await sleep(ms); };
+  let announced = false; let spawned = false; let authenticatedAt: number | undefined;
+  const spawn = effects.spawn.bind(effects);
+  effects.spawn = (launch) => {
+    spawned = true; const child = spawn(launch);
+    return { ...child, get exitCode() { return child.exitCode; },
+      readOutput: () => positivePolls >= 3 ? 'stdout:\ndsh web: http://127.0.0.1:59999/?token=late-pipe-fixture\nstderr:\n' : 'starting' };
+  };
+  effects.listener = () => { if (!spawned) return HOST_ABSENT; blockedMs += 4_000; return hostAt(servingPid); };
+  const startedAt = effects.now(); const { store, records } = memoryStore();
+  const outcome = await ensureManagedHost(backend({
+    describeManagedHost: async () => ({ identityKey: KEY, locator: { kind: 'tcp-port', port: 59999 },
+      launch: { command: '/fixture/bin/host', args: ['web'] }, launchKeepsServerForeground: true, readyTimeoutMs: 20_000 }),
+    isAvailable: async () => { if (announced) authenticatedAt ??= effects.now(); return announced; },
+    observeManagedOutput: (text: string) => { announced = text.includes('late-pipe-fixture'); },
+  }) as never, effects, store, AUTHORIZED);
+  check('a foreground launcher receives a late announcement within its unchanged readiness budget',
+    outcome.action === 'started' && authenticatedAt !== undefined && authenticatedAt - startedAt < 20_000
+      && positivePolls === 3 && signals.length === 0,
+    JSON.stringify({ outcome, authenticatedAt, positivePolls, blockedMs, signals }));
+  check('foreground readiness still requires two fresh ancestry proofs and the serving identity',
+    outcome.action === 'started' && outcome.pid === servingPid && outcome.servingProven
+      && walks === 2 && records.get(AGENT)?.start === servingIdentity.start);
+}
+{
+  const servingPid = 5151;
+  const servingIdentity = { ...SPAWNED, pid: servingPid, start: '779', comm: 'node' };
+  const { effects, signals } = fakeEffects({
+    identities: new Map([[SPAWN_PID, SPAWNED], [servingPid, servingIdentity]]),
+    missingProcess: PROCESS_ABSENT, childDiesOn: 'SIGTERM',
+    descendants: new Map([[servingPid, SPAWN_PID]]),
+    onSignal: (pid, signal, table) => { if (signal === 'SIGTERM') table.delete(pid); },
+  });
+  let spawned = false; const spawn = effects.spawn.bind(effects);
+  effects.spawn = launch => { spawned = true; return spawn(launch); };
+  let walks = 0; const ancestry = effects.descendsFrom!.bind(effects);
+  effects.descendsFrom = (pid, parent, options) => { walks++; return ancestry(pid, parent, options); };
+  const { store, records } = memoryStore();
+  const outcome = await startManagedHost(plan({
+    launchKeepsServerForeground: true, readyTimeoutMs: 300,
+    ready: async () => false, locate: async () => spawned ? hostAt(servingPid) : HOST_ABSENT,
+  }), effects, store);
+  check('an unready foreground host preserves the deadline and proves its descendant before cleanup',
+    outcome.action === 'start-failed' && outcome.detailCode === 'host-not-ready-in-time'
+      && walks === 2 && signals.some(s => s.pid === SPAWN_PID) && signals.some(s => s.pid === servingPid)
+      && !records.has(AGENT), JSON.stringify({ outcome, walks, signals }));
+}
+
   {
     // Cumulative, not delta: what the child hands back is the whole buffer, and
     // an adapter that de-duplicates depends on being shown it that way. Repeating
@@ -3030,6 +3136,13 @@ try {
       ...overrides,
     });
     const dshDescribed = await dsh().describeManagedHost();
+    check('only the qualified rc.2 launch declares verified foreground serving',
+      dshDescribed?.launchKeepsServerForeground === true);
+    for (const version of ['0.2.0', '0.2.0-rc.9', '0.1.0-rc.6']) {
+      const other = await dsh({ readExecutableVersion: () => version }).describeManagedHost();
+      check(`${version} does not inherit a foreground-launch declaration`,
+        other?.launchKeepsServerForeground !== true);
+    }
     check('dsh locates its host by the configured loopback port',
       dshDescribed?.locator.kind === 'tcp-port' && dshDescribed.locator.port === 3080
         && dshDescribed.identityKey === 'http://127.0.0.1:3080'
@@ -3191,6 +3304,72 @@ try {
   }
 } finally {
   rmSync(home, { recursive: true, force: true });
+}
+
+// The actual DSH adapter/recovery seam: an anonymous 401 is not readiness.
+for (const scenario of ['503', 'rpc-service', 'timeout', 'missing', 'refused', 'storage', 'address', 'contract', 'malformed-roster', 'optional-capability'] as const) {
+  const listeners = new Map([[59999, hostAt(HOST_PID)]]);
+  const { effects, signals, spawns } = fakeEffects({
+    identities: new Map([[HOST_PID, OWNED], [SPAWN_PID, SPAWNED]]),
+    listeners, missingProcess: PROCESS_ABSENT,
+    onSignal: (pid, _signal, table) => { table.delete(pid); listeners.set(59999, HOST_ABSENT); },
+  });
+  let credential = scenario === 'missing' ? null : {
+    name: 'dsh-auth-fixture', value: 'v1.fixture-only', expiresAt: Date.now() + 30 * 86400000,
+  };
+  const adapter = new DshAdapter({
+    baseUrl: KEY, env: {}, dshHome: '/fixture/dsh-home', homeDir: '/fixture',
+    resolveExecutable: () => '/fixture/bin/dsh', readExecutableVersion: () => '0.2.0-rc.2',
+    credentialStore: {
+      async load() { if (scenario === 'storage') throw new Error('unsafe storage'); return credential; },
+      async save(_scope, next) { credential = next as typeof credential; },
+      async clear() { credential = null; },
+    },
+    // Exercise the real unary timeout without a 30-second wall-clock delay.
+    setTimeout: (handler, ms) => { const timer = setTimeout(handler, ms === 30000 ? 1 : ms); return timer; },
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    fetchImpl: async (_url, init) => {
+      if ((init as { method: string }).method === 'GET') return { status: 401, text: async () => 'unauthorized' };
+      const request = JSON.parse(init.body) as { rpcId: string; method: string };
+      if (spawns.length > 0) listeners.set(59999, hostAt(SPAWN_PID));
+      const failure = spawns.length === 0;
+      if (failure && scenario === 'timeout') {
+        return await new Promise<never>((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      }
+      if (failure && ['503', 'refused', 'address'].includes(scenario)) {
+        return { status: scenario === '503' ? 503 : scenario === 'refused' ? 401 : 403, text: async () => 'fixture refusal' };
+      }
+      const code = failure && scenario === 'rpc-service' ? 'gateway/service-unavailable'
+        : failure && scenario === 'contract' ? 'gateway/method-unavailable'
+          : scenario === 'optional-capability' && request.method !== 'session/list' ? 'gateway/method-unavailable' : undefined;
+      return { status: 200, text: async () => JSON.stringify({
+        type: 'server-response', rpcId: request.rpcId,
+        result: code ? { ok: false, error: { code, message: 'fixture RPC failure' } } : { ok: true, value: failure && scenario === 'malformed-roster' ? { accepted: true } : { items: [] } },
+      }) };
+    },
+  });
+  const { store, records } = memoryStore();
+  records.set('dsh', ownership({ agent: 'dsh' }));
+  const ledger = managedHostRestartLedger();
+  const outcome = await recoverManagedHost(adapter, effects, store, ledger, { COSYNCING_DSH_MANAGED_HOST: '1' });
+  if (['503', 'rpc-service', 'timeout'].includes(scenario)) {
+    check(`DSH authenticated ${scenario} follows owned-host recovery through successful replacement`,
+      outcome.action === 'recovered' && outcome.outcome.action === 'started'
+        && signals.length === 1 && signals[0]?.pid === HOST_PID && spawns.length === 1
+        && records.get('dsh')?.pid === SPAWN_PID, JSON.stringify({ outcome, signals, spawns: spawns.length }));
+  } else if (scenario === 'optional-capability') {
+    check('DSH absence of an individual optional capability leaves roster readiness healthy',
+      outcome.action === 'healthy' && signals.length === 0 && spawns.length === 0, JSON.stringify(outcome));
+  } else {
+    const remedy = scenario === 'storage' ? 'storage' : scenario === 'address' ? 'address' : ['contract', 'malformed-roster'].includes(scenario) ? 'contract' : 'credential';
+    check(`DSH ${scenario} blocks process effects with the actual remedy`,
+      outcome.action === 'blocked' && outcome.remedy === remedy && signals.length === 0 && spawns.length === 0,
+      JSON.stringify(outcome));
+    check(`DSH ${scenario} preserves ownership and recovery budget`,
+      records.get('dsh')?.pid === HOST_PID && ledger.suspension('dsh') === undefined);
+  }
 }
 
 const failed = results.filter((result) => !result.ok);

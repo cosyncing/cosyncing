@@ -415,6 +415,8 @@ export interface ManagedHostPlan {
   readyTimeoutMs: number;
   /** Poll interval while waiting for readiness. */
   readyPollMs?: number;
+  /** A verified foreground launcher retains its serving child until shutdown. */
+  launchKeepsServerForeground?: boolean;
   /** How long a stop waits after SIGTERM before escalating to SIGKILL. */
   stopGraceMs: number;
 }
@@ -812,6 +814,11 @@ export async function startManagedHost(
     return { action: 'start-failed', detailCode, capturedOutput: child.readOutput() };
   };
 
+  // A fresh OS identity proof can block while the child has already written
+  // its launch URL. Let the pipe reader run before forwarding output and
+  // probing readiness; otherwise slow ancestry proofs can spend the remaining
+  // startup budget before authentication has even received that URL.
+  if (plan.observeOutput) await effects.sleep(0);
   const pollMs = plan.readyPollMs ?? 150;
   let polls = 0;
   for (;;) {
@@ -897,7 +904,12 @@ export async function startManagedHost(
     // budget that would be two hundred of them for a fact that does not change
     // once true. Every eighth is ~1.2s — far inside the window between a server
     // binding the address and a daemonising launcher exiting.
-    if (polls % ADOPT_PROBE_EVERY_POLLS === 0) await tryAdoptServing();
+    // A verified foreground launch cannot leave a serving daemon behind while
+    // its launcher exits. Let pipe output and readiness progress before slow
+    // process-table walks; success and timeout cleanup still prove ownership.
+    if (!plan.launchKeepsServerForeground && polls % ADOPT_PROBE_EVERY_POLLS === 0) {
+      await tryAdoptServing();
+    }
     polls += 1;
     await effects.sleep(pollMs);
   }
@@ -1388,6 +1400,7 @@ export async function ensureManagedHost(
       identityKey: string;
       locator: DescribedLocator;
       launch: { command: string; args: readonly string[]; env?: Readonly<Record<string, string>>; cwd?: string } | null;
+      launchKeepsServerForeground?: boolean;
       serving?: { port?: number; version?: string; profile?: string };
       readyTimeoutMs: number;
       stopGraceMs: number;
@@ -1464,6 +1477,7 @@ export async function ensureManagedHost(
       observeOutput: (text) => backend.observeManagedOutput?.(text),
       launchEnded: (reason) => backend.managedLaunchEnded?.(reason),
       launch: descriptor.launch,
+      ...(descriptor.launchKeepsServerForeground ? { launchKeepsServerForeground: true } : {}),
       readyTimeoutMs: descriptor.readyTimeoutMs,
       stopGraceMs: descriptor.stopGraceMs,
     },

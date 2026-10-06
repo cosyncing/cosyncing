@@ -202,7 +202,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   // socket: it decides which family to speak and hands the domain a channel whose
   // methods are reads and writes, which is why it sits with the callers rather
   // than with the carriers.
-  const domainSources = ['index.ts', 'implementation.ts', 'mapping.ts', 'observe.ts', 'drive.ts', 'diagnostics.ts', 'protocol.ts'];
+  const domainSources = ['index.ts', 'implementation.ts', 'mapping.ts', 'observe.ts', 'drive.ts', 'diagnostics.ts', 'protocol.ts', 'assistant-stream.ts'];
   // event-link.ts belongs on the transport side: it owns the carrier's socket
   // lifecycle and the generation read off it, which is exactly what a domain
   // module must not get hold of.

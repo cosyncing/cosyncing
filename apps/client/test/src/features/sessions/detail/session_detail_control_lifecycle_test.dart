@@ -317,6 +317,47 @@ void main() {
     );
 
     test(
+      'foreground supersedes a queued background attach before it starts',
+      () async {
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Live owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        // No await between these calls: the background body is still queued on
+        // its predecessor while foreground admission starts immediately.
+        final background = controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        final foreground = controller.attach();
+        await Future.wait([background, foreground]);
+        expect(
+          fakeConnection.connectCount,
+          0,
+          reason: 'a superseded queue entry must not issue a bare attach',
+        );
+        expect(fakeConnection.reattachModes, ['live']);
+        expect(fakeConnection.reattachReasons, [null]);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .bootstrapState
+              .hasFailed,
+          isFalse,
+        );
+      },
+    );
+
+    test(
       'fresh live roster row requests live only for interactive attach',
       () async {
         container.read(sessionListControllerProvider);
@@ -639,6 +680,261 @@ void main() {
         expect(fakeConnection.reattachReadOnly, contains(true));
       },
     );
+
+    test(
+      'known live-only background retains state without a bare socket',
+      () async {
+        fakeBrokerClient.agents = [
+          fakeControllerAgentInfo(supportsObserve: false),
+        ];
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Live owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        expect(fakeConnection.connectCount, 0);
+        expect(fakeConnection.reattachModes, isEmpty);
+        final retained = container.read(sessionDetailControllerProvider(key));
+        expect(retained.agentActions?.supportsObserve, isFalse);
+        expect(retained.connectionStatus, SessionDetailConnectionStatus.closed);
+        expect(retained.bootstrapState.hasFailed, isFalse);
+        expect(retained.error, isNull);
+        await controller.attach();
+        expect(fakeConnection.connectCount, 0);
+        expect(fakeConnection.reattachModes, ['live']);
+      },
+    );
+
+    test('foreground supersedes a held background capability read', () async {
+      final client = _HeldBackgroundCapabilities();
+      fakeBrokerClient = client;
+      container.read(sessionListControllerProvider);
+      fakeSessionListController.setSessions(const [
+        SessionInfo(
+          id: 'session-1',
+          tool: 'claude',
+          title: 'Live owner',
+          status: SessionStatus.idle,
+          attachMode: AttachMode.live,
+        ),
+      ]);
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      final background = controller.attach(
+        intent: SessionDetailAttachIntent.backgroundObserve,
+      );
+      await client.started.future;
+      await controller.attach();
+      await background;
+      expect(fakeConnection.connectCount, 0);
+      expect(fakeConnection.reattachModes, ['live']);
+      client.held.complete([fakeControllerAgentInfo(supportsObserve: false)]);
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeConnection.reattachModes, ['live']);
+      expect(
+        container.read(sessionDetailControllerProvider(key)).connectionStatus,
+        SessionDetailConnectionStatus.connected,
+      );
+    });
+
+    test(
+      'foreground waits for the shared suspension close before reopening',
+      () async {
+        final connection = _HeldSuspensionConnection();
+        fakeConnection = connection;
+        fakeBrokerClient.agents = [
+          fakeControllerAgentInfo(supportsObserve: false),
+        ];
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Live owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach();
+        final suspension = controller.suspendTransport();
+        expect(identical(suspension, controller.suspendTransport()), isTrue);
+        await connection.closeStarted.future;
+        final foreground = controller.attach();
+        await Future<void>.delayed(Duration.zero);
+        expect(connection.reattachModes, ['live']);
+        connection.releaseClose.complete();
+        await Future.wait([suspension, foreground]);
+        expect(connection.closeCount, 1);
+        expect(connection.reattachModes, ['live', 'live']);
+        expect(
+          container.read(sessionDetailControllerProvider(key)).connectionStatus,
+          SessionDetailConnectionStatus.connected,
+        );
+      },
+    );
+
+    test(
+      'hidden live-only credential rebind cannot regain foreground authority',
+      () async {
+        fakeBrokerClient.agents = [
+          fakeControllerAgentInfo(supportsObserve: false),
+        ];
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Live owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach();
+        final previous = fakeConnection;
+        await controller.suspendTransport();
+        await controller.rebindBrokerClient(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        expect(previous.reattachModes, ['live']);
+        expect(previous.disposeCount, 1);
+        expect(
+          container.read(sessionDetailControllerProvider(key)).connectionStatus,
+          SessionDetailConnectionStatus.closed,
+        );
+        fakeConnection = FakeSessionDetailConnection();
+        await controller.attach();
+        expect(fakeConnection.connectCount, 0);
+        expect(fakeConnection.reattachModes, ['live']);
+      },
+    );
+
+    test(
+      'superseded credential rebind cannot start an obsolete live attach',
+      () async {
+        fakeBrokerClient.agents = [
+          fakeControllerAgentInfo(supportsObserve: false),
+        ];
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        final obsolete = controller.rebindBrokerClient();
+        final hidden = controller.rebindBrokerClient(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        await Future.wait([obsolete, hidden]);
+        expect(fakeConnection.connectCount, 0);
+        expect(fakeConnection.reattachModes, isEmpty);
+        expect(
+          container.read(sessionDetailControllerProvider(key)).connectionStatus,
+          SessionDetailConnectionStatus.closed,
+        );
+      },
+    );
+
+    test(
+      'suspension cancels a queued live attach before its body starts',
+      () async {
+        fakeBrokerClient.agents = [
+          fakeControllerAgentInfo(supportsObserve: false),
+        ];
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Live owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach();
+        await controller.suspendTransport();
+        final queued = controller.attach();
+        final hidden = controller.suspendTransport();
+        await Future.wait([queued, hidden]);
+        expect(fakeConnection.reattachModes, ['live']);
+        expect(fakeConnection.connectCount, 0);
+        expect(
+          container.read(sessionDetailControllerProvider(key)).connectionStatus,
+          SessionDetailConnectionStatus.closed,
+        );
+        await controller.attach();
+        expect(fakeConnection.reattachModes, ['live', 'live']);
+      },
+    );
+
+    for (final failedRead in [false, true]) {
+      test(
+        'unavailable capabilities retain foreground-only restriction: '
+        '$failedRead',
+        () async {
+          final client = _UnavailableCapabilities();
+          fakeBrokerClient = client;
+          client.agents = [fakeControllerAgentInfo(supportsObserve: false)];
+          container.read(sessionListControllerProvider);
+          fakeSessionListController.setSessions(const [
+            SessionInfo(
+              id: 'session-1',
+              tool: 'claude',
+              title: 'Live owner',
+              status: SessionStatus.idle,
+              attachMode: AttachMode.live,
+            ),
+          ]);
+          keepSessionDetailAlive(container, key);
+          final controller = container.read(
+            sessionDetailControllerProvider(key).notifier,
+          );
+          await controller.attach();
+          await controller.suspendTransport();
+          client
+            ..missing = true
+            ..fail = failedRead;
+          await controller.attach(
+            intent: SessionDetailAttachIntent.backgroundObserve,
+          );
+          expect(fakeConnection.connectCount, 0);
+          expect(fakeConnection.reattachModes, ['live']);
+          final state = container.read(sessionDetailControllerProvider(key));
+          expect(state.agentActions?.loaded, isFalse);
+          expect(state.agentActions?.canAttachFiles, isFalse);
+          expect(state.agentActions?.supportsObserve, isFalse);
+          expect(state.connectionStatus, SessionDetailConnectionStatus.closed);
+          client
+            ..missing = false
+            ..fail = false;
+          await controller.attach();
+          expect(fakeConnection.reattachModes, ['live', 'live']);
+        },
+      );
+    }
 
     test('fresh live roster row cannot arm a background attach', () async {
       container.read(sessionListControllerProvider);
@@ -3011,4 +3307,42 @@ void main() {
       },
     );
   });
+}
+
+final class _HeldBackgroundCapabilities extends FakeControllerBrokerClient {
+  final started = Completer<void>();
+  final held = Completer<List<AgentInfo>>();
+
+  @override
+  Future<List<AgentInfo>> listAgents() {
+    if (!started.isCompleted) {
+      listAgentsCount++;
+      started.complete();
+      return held.future;
+    }
+    return super.listAgents();
+  }
+}
+
+final class _HeldSuspensionConnection extends FakeSessionDetailConnection {
+  final closeStarted = Completer<void>();
+  final releaseClose = Completer<void>();
+
+  @override
+  Future<void> close({bool reconnect = false}) async {
+    if (!closeStarted.isCompleted) closeStarted.complete();
+    await releaseClose.future;
+    await super.close(reconnect: reconnect);
+  }
+}
+
+final class _UnavailableCapabilities extends FakeControllerBrokerClient {
+  bool missing = false;
+  bool fail = false;
+  @override
+  Future<List<AgentInfo>> listAgents() async {
+    if (fail) throw StateError('unavailable fixture registry');
+    if (missing) return [];
+    return super.listAgents();
+  }
 }

@@ -20,6 +20,7 @@ export {};
 export interface PromptScenarioRequest {
   sessionId: string;
   text: string;
+  content?: readonly unknown[];
   /** How to answer an approval that the turn raises. */
   approval: 'allow-once' | 'deny';
   /** How long to wait for the turn to say something before giving up. */
@@ -205,7 +206,8 @@ function observeSessionEvent(
   }
   if (name === 'user/message') {
     const counted = textOf(payload?.['content']);
-    if (counted.bytes > 0) next.userMessageEchoed = true;
+    const content = payload?.['content'];
+    if (counted.bytes > 0 || (Array.isArray(content) && content.some((part) => record(part)?.['type'] === 'image'))) next.userMessageEchoed = true;
     return;
   }
   if (name === 'assistant/message') {
@@ -346,7 +348,7 @@ export function modelBackedVerdict(
       reason: 'the turn is waiting on an approval this capture did not answer',
     };
   }
-  if (evidence.questionsRequested > 0) {
+  if (evidence.questionsRequested > 0 && evidence.turnEnded?.reason !== 'completed') {
     return {
       modelBacked: false, attempted: true, stalledOn: 'user-question',
       reason: 'the turn is waiting on a question this capture cannot answer',
@@ -517,7 +519,7 @@ export function promptRequest(request: PromptScenarioRequest): Record<string, un
       requestId: `capture-${randomId()}`,
       sessionId: request.sessionId,
       mode: 'queue',
-      content: [{ type: 'text', text: request.text }],
+      content: request.content ?? [{ type: 'text', text: request.text }],
     },
   };
 }

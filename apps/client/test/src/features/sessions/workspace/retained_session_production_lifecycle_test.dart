@@ -96,7 +96,7 @@ void main() {
         () =>
             connections.forSession(_a.key).length == 1 &&
             connections.forSession(_b.key).length == 1 &&
-            connections.latest(_a.key).attachCount == 2 &&
+            connections.latest(_a.key).attachCount == 1 &&
             connections.latest(_b.key).attachCount == 1,
       );
       final container = ProviderScope.containerOf(
@@ -118,8 +118,10 @@ void main() {
       expect(providers.adds[bKey], 1);
       expect(originalA.reattachModes, ['resume']);
       expect(originalA.reattachReasons, [kDriveAttachReasonAppRestore]);
-      expect(originalA.connectCount, 1);
-      expect(originalA.attachCount, 2);
+      // Foreground supersedes the queued background lane before a bare socket
+      // opens. The one explicit app-restore still establishes Drive below.
+      expect(originalA.connectCount, 0);
+      expect(originalA.attachCount, 1);
       expect(originalB.reattachModes, isEmpty);
       expect(originalB.attachCount, 1);
       expect(_canMutate(container, aKey), isTrue);
@@ -156,7 +158,7 @@ void main() {
       expect(onstage(_b), isFalse);
       expect(connections.latest(_a.key), same(originalA));
       expect(connections.latest(_b.key), same(originalB));
-      expect(originalA.attachCount, 2);
+      expect(originalA.attachCount, 1);
       expect(originalB.attachCount, 1);
       expect(providers.adds[aKey], 1);
       expect(providers.adds[bKey], 1);
@@ -207,7 +209,7 @@ void main() {
         same(originalAProvider),
       );
       expect(originalA.closeCount, 0);
-      expect(originalA.attachCount, 2);
+      expect(originalA.attachCount, 1);
 
       // Returning to evicted A cold-mounts only its page tree. The same
       // provider, socket, and Drive authority are adopted without reattach.
@@ -218,7 +220,7 @@ void main() {
         findsOneWidget,
       );
       expect(connections.latest(_a.key), same(originalA));
-      expect(originalA.attachCount, 2);
+      expect(originalA.attachCount, 1);
       expect(providers.adds[aKey], 1);
       expect(
         container.read(sessionDetailControllerProvider(aKey).notifier),

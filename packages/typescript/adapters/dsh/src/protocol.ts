@@ -80,6 +80,8 @@ export interface DshPermissionCatalog {
 export interface DshSessionChannel {
   readonly family: DshContractFamily;
   history(request: { sessionId: string; maxMessages: number; beforeSeq?: number }): Promise<DshOutcome<DshHistoryPage>>;
+  /** rc.2 authorizes durable image readback against this session's own log. */
+  attachment?(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<DshOutcome<{ attachment: unknown; data: unknown }>>;
   prompt(sessionId: string, input: PromptInput, options?: DshPromptOptions): Promise<void>;
   models(sessionId: string): Promise<DshSessionModels>;
   selectModel(sessionId: string, selection: DshModelSelection): Promise<DshModelSelection>;

@@ -164,6 +164,35 @@ extension _SessionDetailBootstrap on SessionDetailController {
     }
 
     final existingConnection = _connection;
+    if (intent == SessionDetailAttachIntent.backgroundObserve) {
+      // Live-only adapters require an explicit foreground join. Retaining a
+      // controller and cached transcript must not open a bare socket or grant
+      // authority merely because the session remains in the open set.
+      await _refreshAgentActions(
+        loadAgents: client.listAgents,
+        bootstrapAttempt: attempt,
+        source: source,
+        abort: actionAbort.future,
+      );
+      if (!_isCurrentBootstrapAttempt(attempt) ||
+          RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
+        return;
+      }
+      if (state.agentActions?.supportsObserve == false) {
+        state = state.copyWith(
+          connectionStatus: SessionDetailConnectionStatus.closed,
+          bootstrapState: SessionDetailBootstrapState(
+            attempt: attempt,
+            hasCachedMessages: hasCachedMessages,
+          ),
+          clearError: true,
+        );
+        if (identical(_bootstrapActionAbort, actionAbort)) {
+          _bootstrapActionAbort = null;
+        }
+        return;
+      }
+    }
     final connection = _connection ??=
         ref.read(sessionDetailConnectionFactoryProvider)(
           resolver: client.resolver,
@@ -295,12 +324,14 @@ extension _SessionDetailBootstrap on SessionDetailController {
           _startInitialSessionTimeout(attempt);
         }
       }
-      await _refreshAgentActions(
-        loadAgents: client.listAgents,
-        bootstrapAttempt: attempt,
-        source: source,
-        abort: actionAbort.future,
-      );
+      if (intent != SessionDetailAttachIntent.backgroundObserve) {
+        await _refreshAgentActions(
+          loadAgents: client.listAgents,
+          bootstrapAttempt: attempt,
+          source: source,
+          abort: actionAbort.future,
+        );
+      }
       if (identical(_bootstrapActionAbort, actionAbort)) {
         _bootstrapActionAbort = null;
       }

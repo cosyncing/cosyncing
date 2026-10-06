@@ -773,7 +773,11 @@ const COOKIE_NAME = dshCookieNameForOrigin(BASE);
   const store = memoryStore();
   const { session } = harness(() => response(401, {}), { store });
   const changes: Array<{ change: string; revision: number }> = [];
-  session.onCredentialChange((change, revision) => { changes.push({ change, revision }); });
+  const headersAtPublication: Array<string | null> = [];
+  session.onCredentialChange((change, revision) => {
+    changes.push({ change, revision });
+    headersAtPublication.push(session.cookieHeader());
+  });
   const first = session.credentialRevision;
   store.records.set('scope-test', { name: COOKIE_NAME, value: 'v1.a', expiresAt: 1_700_000_000_000 + 3_600_000 });
   await session.ensure();
@@ -784,6 +788,9 @@ const COOKIE_NAME = dshCookieNameForOrigin(BASE);
   check('adoption, replacement and removal are each reported, once and in order',
     JSON.stringify(changes.map((entry) => entry.change)) === JSON.stringify(['adopted', 'replaced', 'removed']),
     JSON.stringify(changes));
+  check('adoption is published with a usable header and removal without one',
+    JSON.stringify(headersAtPublication) === JSON.stringify([`${COOKIE_NAME}=v1.a`, `${COOKIE_NAME}=v2.b`, null]),
+    JSON.stringify(headersAtPublication));
   check('the revision moves for every identity change and only for those',
     changes.every((entry, index) => entry.revision === first + index + 1), JSON.stringify(changes));
   const steady = session.credentialRevision;

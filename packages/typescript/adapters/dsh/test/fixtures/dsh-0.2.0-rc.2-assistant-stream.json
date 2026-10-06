@@ -1,0 +1,775 @@
+{
+  "provenance": {
+    "version": "0.2.0-rc.2",
+    "source": "disposable web host with a local scripted Messages provider",
+    "modelBacked": false,
+    "providerSpending": 0,
+    "scenario": "follow replacement after the first text chunk"
+  },
+  "follow": [
+    {
+      "type": "snapshot",
+      "cursor": 2,
+      "assistantStream": {
+        "revision": 0
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "start",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 1,
+        "turn": 1,
+        "step": 1,
+        "startedAfterSeq": 11
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 2,
+        "index": 0,
+        "time": 1791223848666,
+        "chunk": {
+          "type": "block-start",
+          "index": 0,
+          "blockType": "text"
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 3,
+        "index": 1,
+        "time": 1791223848666,
+        "chunk": {
+          "type": "text-delta",
+          "index": 0,
+          "text": "Fixture "
+        }
+      }
+    },
+    {
+      "type": "snapshot",
+      "cursor": 13,
+      "assistantStream": {
+        "revision": 3,
+        "activeAttempt": {
+          "attemptId": "session-fixture-stream:1",
+          "startedAfterSeq": 11,
+          "turn": 1,
+          "step": 1,
+          "nextIndex": 2,
+          "stream": [
+            {
+              "type": "chunk",
+              "time": 1791223848666,
+              "chunk": {
+                "type": "block-start",
+                "index": 0,
+                "blockType": "text"
+              }
+            },
+            {
+              "type": "text-chunks",
+              "time0": 1791223848666,
+              "index": 0,
+              "dt": [],
+              "texts": [
+                "Fixture "
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 4,
+        "index": 2,
+        "time": 1791223849160,
+        "chunk": {
+          "type": "text-delta",
+          "index": 0,
+          "text": "reply."
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 5,
+        "index": 3,
+        "time": 1791223849162,
+        "chunk": {
+          "type": "block-end",
+          "index": 0,
+          "block": {
+            "type": "text",
+            "text": "Fixture reply."
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 6,
+        "index": 4,
+        "time": 1791223849163,
+        "chunk": {
+          "type": "usage",
+          "usage": {
+            "inputTokens": 10,
+            "outputTokens": 4,
+            "totalTokens": 14
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 7,
+        "index": 5,
+        "time": 1791223849163,
+        "chunk": {
+          "type": "finish",
+          "reason": {
+            "kind": "stop"
+          },
+          "replayState": {
+            "response": {
+              "kind": "deepseek-messages",
+              "version": 1,
+              "model": "deepseek-flash"
+            },
+            "blocks": [
+              {
+                "type": "text"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "event",
+      "event": {
+        "type": "assistant/message",
+        "seq": 14,
+        "time": 1791223849167,
+        "data": {
+          "turn": 1,
+          "step": 1,
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Fixture reply."
+              }
+            ],
+            "source": {
+              "kind": "model",
+              "provider": "deepseek-official",
+              "model": "deepseek-flash",
+              "replayState": {
+                "response": {
+                  "kind": "deepseek-messages",
+                  "version": 1,
+                  "model": "deepseek-flash"
+                },
+                "blocks": [
+                  {
+                    "type": "text"
+                  }
+                ]
+              }
+            },
+            "id": "6e7f93e9-e12e-455c-b87e-247fdfd3134a"
+          },
+          "usage": {
+            "inputTokens": 10,
+            "outputTokens": 4,
+            "totalTokens": 14
+          },
+          "stream": [
+            {
+              "type": "chunk",
+              "time": 1791223848666,
+              "chunk": {
+                "type": "block-start",
+                "index": 0,
+                "blockType": "text"
+              }
+            },
+            {
+              "type": "text-chunks",
+              "time0": 1791223848666,
+              "index": 0,
+              "dt": [
+                494
+              ],
+              "texts": [
+                "Fixture ",
+                "reply."
+              ]
+            },
+            {
+              "type": "chunk",
+              "time": 1791223849162,
+              "chunk": {
+                "type": "block-end",
+                "index": 0,
+                "block": {
+                  "type": "text",
+                  "text": "Fixture reply."
+                }
+              }
+            },
+            {
+              "type": "chunk",
+              "time": 1791223849163,
+              "chunk": {
+                "type": "usage",
+                "usage": {
+                  "inputTokens": 10,
+                  "outputTokens": 4,
+                  "totalTokens": 14
+                }
+              }
+            },
+            {
+              "type": "chunk",
+              "time": 1791223849163,
+              "chunk": {
+                "type": "finish",
+                "reason": {
+                  "kind": "stop"
+                },
+                "replayState": {
+                  "response": {
+                    "kind": "deepseek-messages",
+                    "version": 1,
+                    "model": "deepseek-flash"
+                  },
+                  "blocks": [
+                    {
+                      "type": "text"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "surfaceOp": "append"
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "end",
+        "attemptId": "session-fixture-stream:1",
+        "revision": 8,
+        "index": 6,
+        "outcome": {
+          "kind": "committed",
+          "eventType": "assistant/message",
+          "seq": 14
+        }
+      }
+    }
+  ],
+  "interruptedFollow": [
+    {
+      "type": "event",
+      "event": {
+        "type": "turn/start",
+        "seq": 4,
+        "time": 1791227604638,
+        "data": {
+          "turn": 1
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "start",
+        "attemptId": "session-765878bf-5729-46b7-84f5-d4024a56a534:1",
+        "revision": 1,
+        "turn": 1,
+        "step": 1,
+        "startedAfterSeq": 11
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-765878bf-5729-46b7-84f5-d4024a56a534:1",
+        "revision": 2,
+        "index": 0,
+        "time": 1791227604876,
+        "chunk": {
+          "type": "block-start",
+          "index": 0,
+          "blockType": "text"
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-765878bf-5729-46b7-84f5-d4024a56a534:1",
+        "revision": 3,
+        "index": 1,
+        "time": 1791227604877,
+        "chunk": {
+          "type": "text-delta",
+          "index": 0,
+          "text": "Fixture "
+        }
+      }
+    },
+    {
+      "type": "event",
+      "event": {
+        "type": "assistant/message",
+        "seq": 14,
+        "time": 1791227604894,
+        "data": {
+          "turn": 1,
+          "step": 1,
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Fixture "
+              }
+            ],
+            "source": {
+              "kind": "model",
+              "provider": "deepseek-official",
+              "model": "deepseek-flash"
+            },
+            "id": "aea002f4-e32d-45cb-aee0-9dc53ec1382a"
+          },
+          "interrupted": true,
+          "stream": [
+            {
+              "type": "chunk",
+              "time": 1791227604876,
+              "chunk": {
+                "type": "block-start",
+                "index": 0,
+                "blockType": "text"
+              }
+            },
+            {
+              "type": "text-chunks",
+              "time0": 1791227604877,
+              "index": 0,
+              "dt": [],
+              "texts": [
+                "Fixture "
+              ]
+            }
+          ]
+        },
+        "surfaceOp": "append"
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "end",
+        "attemptId": "session-765878bf-5729-46b7-84f5-d4024a56a534:1",
+        "revision": 4,
+        "index": 2,
+        "outcome": {
+          "kind": "committed",
+          "eventType": "assistant/message",
+          "seq": 14
+        }
+      }
+    },
+    {
+      "type": "event",
+      "event": {
+        "type": "turn/end",
+        "seq": 16,
+        "time": 1791227604897,
+        "data": {
+          "turn": 1,
+          "reason": {
+            "kind": "aborted",
+            "reason": {
+              "kind": "user"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "reasoning": [
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "start",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 1,
+        "turn": 1,
+        "step": 1,
+        "startedAfterSeq": 11
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 2,
+        "index": 0,
+        "time": 1791228451009,
+        "chunk": {
+          "type": "block-start",
+          "index": 0,
+          "blockType": "reasoning"
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 3,
+        "index": 1,
+        "time": 1791228451010,
+        "chunk": {
+          "type": "reasoning-delta",
+          "index": 0,
+          "text": "Fixture reasoning."
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 4,
+        "index": 2,
+        "time": 1791228451010,
+        "chunk": {
+          "type": "block-end",
+          "index": 0,
+          "block": {
+            "type": "reasoning",
+            "text": "Fixture reasoning."
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 5,
+        "index": 3,
+        "time": 1791228451010,
+        "chunk": {
+          "type": "block-start",
+          "index": 1,
+          "blockType": "text"
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 6,
+        "index": 4,
+        "time": 1791228451010,
+        "chunk": {
+          "type": "text-delta",
+          "index": 1,
+          "text": "Fixture "
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 7,
+        "index": 5,
+        "time": 1791228451104,
+        "chunk": {
+          "type": "text-delta",
+          "index": 1,
+          "text": "reply."
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 8,
+        "index": 6,
+        "time": 1791228451105,
+        "chunk": {
+          "type": "block-end",
+          "index": 1,
+          "block": {
+            "type": "text",
+            "text": "Fixture reply."
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 9,
+        "index": 7,
+        "time": 1791228451106,
+        "chunk": {
+          "type": "usage",
+          "usage": {
+            "inputTokens": 10,
+            "outputTokens": 4,
+            "totalTokens": 14
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "chunk",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 10,
+        "index": 8,
+        "time": 1791228451106,
+        "chunk": {
+          "type": "finish",
+          "reason": {
+            "kind": "stop"
+          },
+          "replayState": {
+            "response": {
+              "kind": "deepseek-messages",
+              "version": 1,
+              "model": "deepseek-flash"
+            },
+            "blocks": [
+              {
+                "type": "reasoning"
+              },
+              {
+                "type": "text"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "event",
+      "event": {
+        "type": "assistant/message",
+        "seq": 14,
+        "time": 1791228451109,
+        "data": {
+          "turn": 1,
+          "step": 1,
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "reasoning",
+                "text": "Fixture reasoning."
+              },
+              {
+                "type": "text",
+                "text": "Fixture reply."
+              }
+            ],
+            "source": {
+              "kind": "model",
+              "provider": "deepseek-official",
+              "model": "deepseek-flash",
+              "replayState": {
+                "response": {
+                  "kind": "deepseek-messages",
+                  "version": 1,
+                  "model": "deepseek-flash"
+                },
+                "blocks": [
+                  {
+                    "type": "reasoning"
+                  },
+                  {
+                    "type": "text"
+                  }
+                ]
+              }
+            },
+            "id": "5243857b-c762-4329-9e43-770d38e0550e"
+          },
+          "usage": {
+            "inputTokens": 10,
+            "outputTokens": 4,
+            "totalTokens": 14
+          },
+          "stream": [
+            {
+              "type": "chunk",
+              "time": 1791228451009,
+              "chunk": {
+                "type": "block-start",
+                "index": 0,
+                "blockType": "reasoning"
+              }
+            },
+            {
+              "type": "reasoning-chunks",
+              "time0": 1791228451010,
+              "index": 0,
+              "dt": [],
+              "texts": [
+                "Fixture reasoning."
+              ]
+            },
+            {
+              "type": "chunk",
+              "time": 1791228451010,
+              "chunk": {
+                "type": "block-end",
+                "index": 0,
+                "block": {
+                  "type": "reasoning",
+                  "text": "Fixture reasoning."
+                }
+              }
+            },
+            {
+              "type": "chunk",
+              "time": 1791228451010,
+              "chunk": {
+                "type": "block-start",
+                "index": 1,
+                "blockType": "text"
+              }
+            },
+            {
+              "type": "text-chunks",
+              "time0": 1791228451010,
+              "index": 1,
+              "dt": [
+                94
+              ],
+              "texts": [
+                "Fixture ",
+                "reply."
+              ]
+            },
+            {
+              "type": "chunk",
+              "time": 1791228451105,
+              "chunk": {
+                "type": "block-end",
+                "index": 1,
+                "block": {
+                  "type": "text",
+                  "text": "Fixture reply."
+                }
+              }
+            },
+            {
+              "type": "chunk",
+              "time": 1791228451106,
+              "chunk": {
+                "type": "usage",
+                "usage": {
+                  "inputTokens": 10,
+                  "outputTokens": 4,
+                  "totalTokens": 14
+                }
+              }
+            },
+            {
+              "type": "chunk",
+              "time": 1791228451106,
+              "chunk": {
+                "type": "finish",
+                "reason": {
+                  "kind": "stop"
+                },
+                "replayState": {
+                  "response": {
+                    "kind": "deepseek-messages",
+                    "version": 1,
+                    "model": "deepseek-flash"
+                  },
+                  "blocks": [
+                    {
+                      "type": "reasoning"
+                    },
+                    {
+                      "type": "text"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "surfaceOp": "append"
+      }
+    },
+    {
+      "type": "assistant-stream",
+      "frame": {
+        "type": "end",
+        "attemptId": "session-82fb42f9-2d30-456a-9bfb-e3defae189be:1",
+        "revision": 11,
+        "index": 9,
+        "outcome": {
+          "kind": "committed",
+          "eventType": "assistant/message",
+          "seq": 14
+        }
+      }
+    }
+  ]
+}

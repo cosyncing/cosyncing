@@ -296,6 +296,10 @@ class _OpenSessionSyncSupervisorState
         continue;
       }
       final lease = _leases.putIfAbsent(key, () => _createLease(key, source));
+      if (_requiresForeground(lease) && !visibleKeys.contains(key)) {
+        _suspendLease(lease);
+        continue;
+      }
       if (lease.suspended) {
         _resumeLeaseAfterSuspension(lease);
       } else {
@@ -320,7 +324,10 @@ class _OpenSessionSyncSupervisorState
   void _suspendBackgroundLeases() {
     final onscreen = _visibleKeys;
     final background = _leases.keys
-        .where((key) => !onscreen.contains(key))
+        .where(
+          (key) =>
+              !onscreen.contains(key) || _requiresForeground(_leases[key]!),
+        )
         .toList(growable: false);
     for (final key in background) {
       _suspendLease(_leases[key]!);
@@ -362,7 +369,12 @@ class _OpenSessionSyncSupervisorState
     final provider = sessionDetailControllerProvider(key);
     final subscription = _container!.listen<SessionDetailState>(
       provider,
-      (previous, next) {},
+      (previous, next) {
+        if (previous?.agentActions?.supportsObserve !=
+            next.agentActions?.supportsObserve) {
+          _scheduleReconcile();
+        }
+      },
       fireImmediately: true,
     );
     return _ResidentSessionLease(
@@ -374,6 +386,7 @@ class _OpenSessionSyncSupervisorState
 
   void _requestAttach(_ResidentSessionLease lease) {
     if (_attachAdmissionSuspended ||
+        _requiresForeground(lease) ||
         _isBackgroundLifecycle(_readLifecycle()) ||
         lease.suspended ||
         !lease.active ||
@@ -390,6 +403,14 @@ class _OpenSessionSyncSupervisorState
       _attachQueue.addLast(request);
     }
   }
+
+  bool _requiresForeground(_ResidentSessionLease lease) =>
+      lease.subscription
+          .read()
+          .forActiveSource(lease.source)
+          .agentActions
+          ?.supportsObserve ==
+      false;
 
   void _drainAttachQueue() {
     // Admissions already queued under a resumed app are still cold attaches.

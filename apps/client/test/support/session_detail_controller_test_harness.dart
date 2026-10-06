@@ -293,16 +293,19 @@ AgentInfo fakeControllerAgentInfo({
   bool canTranscriptExport = true,
   bool canFork = true,
   bool canClone = true,
+  bool supportsObserve = true,
 }) {
   return AgentInfo(
     id: 'claude',
     displayName: 'Claude',
-    capabilities: const AgentCapabilities(
+    capabilities: AgentCapabilities(
       integrationKind: IntegrationKind.sdkCallback,
-      attachModes: [AttachMode.observe, AttachMode.resume],
-      supportsObserve: true,
-      supportsResume: true,
-      supportsLiveAttach: false,
+      attachModes: supportsObserve
+          ? const [AttachMode.observe, AttachMode.resume]
+          : const [AttachMode.live],
+      supportsObserve: supportsObserve,
+      supportsResume: supportsObserve,
+      supportsLiveAttach: !supportsObserve,
       supportsNativeArtifact: true,
       supportsNativeFileInput: true,
       supportsModelSwitch: true,

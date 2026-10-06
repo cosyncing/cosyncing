@@ -147,17 +147,26 @@ function memoryStore(seed: Record<string, DshCookie> = {}): DshCredentialStore &
   };
 }
 
-/** A carrier that is present but never needed by the paths under test. */
-function inertSocketFactory(): { factory: DshMuxSocketFactory; opens: string[] } {
-  const opens: string[] = [];
+/** A disposable carrier answering only the captured workspace baseline. */
+function workspaceSocketFactory(): { factory: DshMuxSocketFactory; opens: string[]; endpoints: string[]; closed: () => number } {
+  const opens: string[] = []; const endpoints: string[] = []; let closed = 0;
   return {
-    opens,
+    opens, endpoints, closed: () => closed,
     factory: (url: string): DshMuxSocketLike => {
       opens.push(url);
       const listeners = new Map<string, Array<(event: unknown) => void>>();
+      const emit = (type: string, event: unknown = {}) => { for (const listener of listeners.get(type) ?? []) listener(event); };
+      queueMicrotask(() => emit('open'));
       return {
-        send() { /* nothing is scripted on this carrier */ },
-        close() { /* nothing to release */ },
+        send(data) {
+          const frame = JSON.parse(data) as { type: string; endpoint: string; streamId: string };
+          if (frame.type !== 'open') return;
+          endpoints.push(frame.endpoint);
+          queueMicrotask(() => emit('message', { data: JSON.stringify(frame.endpoint === 'workspace/follow'
+            ? { type: 'item', streamId: frame.streamId, value: { type: 'baseline', value: { items: [], archivedSessionIds: [], pinnedSessionIds: [] } } }
+            : { type: 'error', streamId: frame.streamId, error: { code: 'gateway/method-unavailable', message: 'not scripted', details: {} } }) }));
+        },
+        close() { closed += 1; emit('close'); },
         addEventListener(type, listener) { listeners.set(type, [...(listeners.get(type) ?? []), listener]); },
       };
     },
@@ -174,7 +183,7 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
   // endpoint plus profile — is the whole point of the lookup.
   const scope = dshCredentialScope(host.baseUrl, '/fixture/dsh-home');
   const store = memoryStore({ [scope]: COOKIE });
-  const sockets = inertSocketFactory();
+  const sockets = workspaceSocketFactory();
   const adapter = new DshAdapter({
     env: {},
     baseUrl: host.baseUrl,
@@ -188,6 +197,10 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
           { sessionId: 'session-cold', updatedAt: 1_759_449_500_000, agentAvailable: false, running: false, blank: true, cwd: '/fixture/other', projections: { kind: 'cached', asOfSeq: 0, values: {} } },
         ],
       }),
+      'session/projections': () => ({ asOfSeq: 17, values: {
+        title: 'cold durable title', permissions: { currentValue: 'read-only' },
+        modelSelection: { lastUsed: null, next: { provider: 'parity-fixture', model: 'fixture-text', reasoningEffort: 'high' } },
+      } }),
     })),
   });
 
@@ -203,9 +216,19 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
   const cold = sessions.find((session) => session.id === 'session-cold');
   check('the roster titles a session from its own projections',
     first?.title === 'spike' && first.status === 'working', JSON.stringify(first?.title));
-  check('a session whose agent is not loaded is listed but not offered for Drive',
-    cold !== undefined && cold.control?.drive.state === 'unavailable' && cold.status === 'idle',
+  check('an ordinary cold session is listed and can use native command-driven resumption',
+    cold !== undefined && cold.control?.drive.state === 'driving' && cold.status === 'idle',
     JSON.stringify({ drive: cold?.control?.drive.state, status: cold?.status }));
+  check('cold discovery restores durable title/model/preset beyond a stale cached roster cut',
+    cold?.title === 'cold durable title' && cold.currentModel?.modelID === 'fixture-text'
+      && cold.currentModel.reasoningEffort === 'high' && cold.currentMode === 'read-only'
+      && cold.cwd === '/fixture/other', JSON.stringify(cold));
+  const coldReads = host.requests.filter((request) => request.path === '/api/session/projections');
+  check('cold discovery uses one authenticated projection read and only the disposable workspace carrier',
+    coldReads.length === 1 && coldReads[0]?.cookie === `${COOKIE.name}=${COOKIE.value}`
+      && JSON.stringify(coldReads[0]?.body).includes('session-cold') && sockets.opens.length === 1
+      && sockets.closed() === 1 && sockets.endpoints.join() === 'workspace/follow',
+    JSON.stringify({reads: coldReads.length, sockets: sockets.opens.length}));
   check('the roster read carried the stored cookie, not an anonymous request',
     host.requests.some((request) => request.path === '/api/session/list' && request.cookie === `${COOKIE.name}=${COOKIE.value}`),
     JSON.stringify(host.requests.map((request) => request.cookie)));
@@ -234,6 +257,61 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
   check('an unrecognized port is reported as a finding rather than a version guess',
     host.requests.some((request) => request.path === '/api/mux') === false,
     JSON.stringify(host.requests.map((request) => request.path)));
+  host.stop();
+}
+
+{
+  const host = await startHost();
+  const scope = dshCredentialScope(host.baseUrl, '/fixture/dsh-home');
+  const store = memoryStore({ [scope]: COOKIE });
+  const sockets = workspaceSocketFactory();
+  const rows = Array.from({ length: 67 }, (_, index) => ({
+    sessionId: `cold-budget-${index}`, updatedAt: index, agentAvailable: false,
+    cwd: '/fixture/cold', projections: { kind: 'cached', asOfSeq: 10, values: { title: `cached ${index}` } },
+  }));
+  const fetchImpl = probeAwareFetch(scriptedFetch(host.baseUrl, host, {
+    'session/list': () => ({ items: [...rows, { sessionId: 'active-budget', updatedAt: 100, agentAvailable: true,
+      projections: { kind: 'sequenced', asOfSeq: 10, values: { title: 'active title' } } }] }),
+    'session/projections': () => {
+      const body = host.requests.at(-1)?.body as { payload: { args: { request: { sessionId: string } } } };
+      const id = body.payload.args.request.sessionId;
+      if (id === 'cold-budget-65') return { asOfSeq: 9, values: { title: 'older cut' } };
+      if (id === 'cold-budget-64') return { asOfSeq: 11, values: [] };
+      return { asOfSeq: 11, values: { title: `fresh ${id}` } };
+    },
+  }));
+  const adapter = new DshAdapter({ env: {}, baseUrl: host.baseUrl, dshHome: '/fixture/dsh-home',
+    credentialStore: store, remoteSocketFactory: sockets.factory,
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/api/session/projections') && init.body.includes('cold-budget-63')) {
+        host.requests.push({ method: 'POST', path: '/api/session/projections', cookie: init.headers.cookie ?? null, body: JSON.parse(init.body) });
+        return { status: 503, text: async () => 'temporarily unavailable' };
+      }
+      return fetchImpl(url, init);
+    },
+  });
+  const sessions = await adapter.discoverSessions();
+  const reads = host.requests.filter((request) => request.path === '/api/session/projections');
+  const ids = reads.map((request) => (request.body as { payload: { args: { request: { sessionId: string } } } }).payload.args.request.sessionId);
+  check('cold projection discovery refreshes only the newest 64 cold sessions without an event or session subscription',
+    sessions.length === 68 && reads.length === 64 && new Set(ids).size === 64
+      && !ids.some((id) => ['cold-budget-0', 'cold-budget-1', 'cold-budget-2', 'active-budget'].includes(id))
+      && reads.every((request) => request.cookie === `${COOKIE.name}=${COOKIE.value}`) && sockets.opens.length === 1
+      && sockets.closed() === 1 && sockets.endpoints.join() === 'workspace/follow',
+    JSON.stringify({ sessions: sessions.length, reads: reads.length, sockets: sockets.opens.length }));
+  check('a newer cold projection updates its row while active and over-budget roster rows are retained',
+    sessions.find((row) => row.id === 'cold-budget-66')?.title === 'fresh cold-budget-66'
+      && sessions.find((row) => row.id === 'cold-budget-0')?.title === 'cached 0'
+      && sessions.find((row) => row.id === 'active-budget')?.title === 'active title');
+  check('older cuts, malformed projections and service failures retain the cached session instead of regressing or removing it',
+    [65, 64, 63].every((index) => sessions.find((row) => row.id === `cold-budget-${index}`)?.title === `cached ${index}`));
+  const beforeWindowReads = reads.length;
+  const window = await adapter.discoverSessions({ updatedAfter: 64 });
+  const windowReads = host.requests.filter((request) => request.path === '/api/session/projections').slice(beforeWindowReads);
+  const windowIds = windowReads.map((request) => (request.body as { payload: { args: { request: { sessionId: string } } } }).payload.args.request.sessionId);
+  check('bounded discovery skips projection work for idle sessions older than its requested window',
+    window.length === 4 && windowReads.length === 3 && windowIds.every((id) => ['cold-budget-64', 'cold-budget-65', 'cold-budget-66'].includes(id))
+      && window.some((row) => row.id === 'active-budget'), JSON.stringify({ rows: window.length, reads: windowIds }));
   host.stop();
 }
 

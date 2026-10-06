@@ -31,9 +31,11 @@
 export {};
 
 import { spawn, type Subprocess } from 'bun';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, homedir, platform, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
+import { DSH_CURRENT_VERSION, parseDshVersion } from '../../packages/typescript/adapters/dsh/src/compatibility.ts';
+import { captureChildEffects, rememberCaptureChild, stopCaptureChild, trackCaptureChildren } from './dsh-capture-child.ts';
 import {
   assertDisposableHome,
   assertRootsContained,
@@ -114,6 +116,9 @@ if (!versionProbe.success || dshVersion.length === 0) {
   }, null, 2));
   process.exit(0);
 }
+if (parseDshVersion(dshVersion)?.raw !== DSH_CURRENT_VERSION) {
+  throw new Error(`this physical runner requires exactly ${DSH_CURRENT_VERSION}; received ${dshVersion}`);
+}
 const dshPath = Bun.which(arg('dsh') ?? 'dsh') ?? resolve(arg('dsh') ?? 'dsh');
 
 const basePort = Number(arg('port') ?? 17834);
@@ -147,7 +152,7 @@ Object.assign(process.env, roots, {
   COSYNCING_HOME: cosyncingHome,
   COSYNCING_DSH_BASE_URL: `http://127.0.0.1:${String(MANAGED_PORT)}`,
   COSYNCING_DSH_MANAGED_HOST: '1',
-  PATH: `${dirname(dshPath)}:${process.env.PATH ?? ''}`,
+  PATH: `${dirname(dshPath)}${delimiter}${process.env.PATH ?? ''}`,
 });
 for (const name of ['DISPLAY', 'BROWSER', 'XDG_OPEN_DESKTOP', 'WSL_BROWSER']) delete process.env[name];
 // Proved against the environment the child will actually inherit, not the pin.
@@ -168,6 +173,8 @@ const effects = defaultManagedHostEffects();
 // The disposable state home, twice over: the ownership record and the credential
 // file must not be able to reach the installed broker's.
 const owners = managedHostStore(cosyncingHome);
+const childEffects = captureChildEffects();
+const ownedManagedChildren = trackCaptureChildren(effects);
 const outDir = arg('out') ?? join('output', 'review', 'dsh-live-integration', startedAt.replace(/[:.]/g, '-'));
 mkdirSync(outDir, { recursive: true });
 
@@ -201,6 +208,7 @@ function writers(): {
 }
 
 let externalHost: Subprocess | undefined;
+let externalIdentity: ReturnType<typeof rememberCaptureChild> | undefined;
 let managedStarted = false;
 
 try {
@@ -222,7 +230,7 @@ try {
       ? Promise.resolve({ detail: `${String(launchCommand)} ${launchArgs.join(' ')}` })
       : Promise.reject(new Error(JSON.stringify(launchArgs)))));
 
-  await attempt('the child could not have opened a browser even if it wanted to',
+  await attempt('the managed child has isolated state and no inherited display handoff',
     () => (roots.HOME === home
         && process.env.DISPLAY === undefined && process.env.BROWSER === undefined
       ? Promise.resolve({ detail: 'disposable HOME, no DISPLAY, no BROWSER' })
@@ -361,6 +369,7 @@ try {
     stdout: 'pipe', stderr: 'pipe', env: { ...process.env } as Record<string, string>, cwd: home,
   });
   externalHost = externalChild;
+  externalIdentity = rememberCaptureChild(externalChild.pid, childEffects);
   const scraped: { url?: string } = {};
   const scrape = (async (): Promise<void> => {
     const decoder = new TextDecoder();
@@ -465,21 +474,50 @@ try {
     'two cosyncing clients sharing one live session with the native browser',
     'reconnect across the history/live boundary during a turn',
   ]) skip(name, untestedReason);
-  skip('supervision suspension against a real crash-looping host', 'simulated in the ownership suite; forcing a real crash loop would need a broken host build');
-  skip('Windows and macOS lifecycle and auth acceptance', 'this host is Linux/WSL; neither platform was executed here');
+  skip('supervision suspension against a real crash-looping host', 'this metadata-only pass does not intentionally fail a host; a separate real failure scenario is required');
+  const otherPlatforms = platform() === 'darwin' ? 'Windows and Linux' : platform() === 'win32' ? 'macOS and Linux' : 'Windows and macOS';
+  skip(`${otherPlatforms} lifecycle and auth acceptance`, `this run executed on ${platform()}/${arch()}; other platforms are not covered by it`);
 } catch (error) {
   record('the pass itself', 'failed', error instanceof Error ? error.message : String(error));
 } finally {
   if (managedStarted) {
     await releaseManagedHost(shippedDshAdapter(), effects, owners).catch(() => undefined);
   }
-  externalHost?.kill(15);
-  await sleep(750);
+  if (ownedManagedChildren.launched.size > 0) {
+    await attempt('the capture cleans up only its identified managed children', async () => {
+      for (const pid of ownedManagedChildren.launched) {
+        const identity = ownedManagedChildren.identities.get(pid);
+        if (!identity) {
+          if (childEffects.read(pid, { fresh: true }).state === 'absent') continue;
+          throw new Error('managed capture child was not identified; no signal sent');
+        }
+        const outcome = await stopCaptureChild(identity, childEffects);
+        if (!outcome.ok) throw new Error(`managed capture child preserved: ${outcome.reason}`);
+      }
+      if ((await effects.listenerAsync!(MANAGED_PORT)).state !== 'absent') throw new Error('managed review listener remains');
+      return { detail: 'identified children stopped or already gone; review listener absent' };
+    });
+  }
+  if (externalHost) {
+    await attempt('the capture stops its own external process tree', async () => {
+      if (!externalIdentity) throw new Error('external child was not identified; no signal sent');
+      const outcome = await stopCaptureChild(externalIdentity, childEffects);
+      if (!outcome.ok) throw new Error(`external child cleanup preserved the process: ${outcome.reason}`);
+      const listener = await effects.listenerAsync!(EXTERNAL_PORT);
+      if (listener.state !== 'absent') throw new Error('external review listener remains after child cleanup');
+      return { detail: `owned tree ${outcome.state}; review listener absent` };
+    });
+  }
   if (arg('keep-home') === undefined) {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(cosyncingHome, { recursive: true, force: true });
+    await attempt('disposable capture roots are removed', async () => {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cosyncingHome, { recursive: true, force: true });
+      return { detail: 'both disposable roots removed' };
+    });
   }
 
+  const gitCommit = Bun.spawnSync(['git', 'rev-parse', 'HEAD']);
+  const gitStatus = Bun.spawnSync(['git', 'status', '--porcelain']);
   const report = {
     schemaVersion: 1,
     lane: 'dsh-0.2-live-integration',
@@ -487,8 +525,9 @@ try {
     finishedAt: new Date().toISOString(),
     cost: { modelRequests: 0, creditsSpent: 0, note: 'no prompt was sent by this script' },
     candidate: {
-      commit: Bun.spawnSync(['git', 'rev-parse', 'HEAD']).stdout.toString().trim(),
-      dirty: Bun.spawnSync(['git', 'status', '--porcelain']).stdout.toString().trim().length > 0,
+      commit: gitCommit.success ? gitCommit.stdout.toString().trim() : null,
+      dirty: gitStatus.success ? gitStatus.stdout.toString().trim().length > 0 : null,
+      identitySource: gitCommit.success && gitStatus.success ? 'git' : 'unavailable; supply a separate tracked-source export record',
       bun: Bun.version,
       platform: platform(),
       arch: arch(),
@@ -497,12 +536,12 @@ try {
     isolation: {
       home,
       cosyncingHome,
-      stateHomeRemoved: arg('keep-home') === undefined,
+      stateHomeRemoved: !existsSync(home) && !existsSync(cosyncingHome),
       ports: { managed: MANAGED_PORT, external: EXTERNAL_PORT },
       documentsPinned: documents.pinned,
       documentsReason: documents.reason,
       rootsPinned: Object.keys(roots),
-      homeRemoved: arg('keep-home') === undefined,
+      homeRemoved: !existsSync(home),
     },
     summary: {
       passed: scenarios.filter((scenario) => scenario.status === 'passed').length,

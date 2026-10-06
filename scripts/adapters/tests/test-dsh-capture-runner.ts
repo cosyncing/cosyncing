@@ -4,6 +4,78 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { runDshContractCapture, type CaptureRuntime } from '../dsh-contract-capture.ts';
+import { rememberCaptureChild, stopCaptureChild, trackCaptureChildren, type CaptureChildEffects } from '../dsh-capture-child.ts';
+import type { HostProcessIdentity, HostProcessRead } from '../../../packages/typescript/adapter-api/src/index.ts';
+
+async function testChildCleanup(check: (name: string, ok: boolean) => void): Promise<void> {
+  const identity: HostProcessIdentity = { pid: 410, start: 'birth-1', boot: 'boot-1', comm: 'owned-wrapper' };
+  {
+    let reads = 0;
+    const effects = {
+      spawn: (_launch: string) => ({ pid: identity.pid }),
+      liveProcess: (_pid: number, _options?: { fresh?: boolean }): HostProcessRead => {
+        reads += 1; return { state: 'running', identity };
+      },
+    };
+    const tracked = trackCaptureChildren(effects);
+    effects.spawn('owned');
+    check('managed capture tracking adds no startup process-table probe', reads === 0 && tracked.launched.has(identity.pid));
+    effects.liveProcess(identity.pid); effects.liveProcess(999, { fresh: true });
+    check('managed capture tracking ignores cached and unrelated identities', tracked.identities.size === 0);
+    effects.liveProcess(identity.pid, { fresh: true });
+    const replacement = { ...identity, start: 'recycled' };
+    identity.start = replacement.start;
+    effects.liveProcess(identity.pid, { fresh: true });
+    check('managed capture retains the first fresh birth proof for cleanup', tracked.identities.get(identity.pid)?.start === 'birth-1' && reads === 4);
+    identity.start = 'birth-1';
+  }
+  const fixture = () => {
+    let now = 0;
+    let live: HostProcessRead = { state: 'running', identity: { ...identity } };
+    const signals: string[] = [];
+    const fresh: boolean[] = [];
+    let onSignal = (_signal: 'SIGTERM' | 'SIGKILL') => { live = { state: 'absent' }; };
+    let onSleep = () => {};
+    const effects: CaptureChildEffects = {
+      read: (_pid, options) => { fresh.push(options.fresh === true); return live; },
+      signal: (_pid, signal) => { signals.push(signal); onSignal(signal); },
+      now: () => now,
+      sleep: async (ms) => { now += ms; onSleep(); },
+    };
+    return { effects, signals, fresh, setLive: (value: HostProcessRead) => { live = value; },
+      setSignal: (fn: typeof onSignal) => { onSignal = fn; }, setSleep: (fn: typeof onSleep) => { onSleep = fn; } };
+  };
+  {
+    const h = fixture(); const owned = rememberCaptureChild(identity.pid, h.effects);
+    const result = await stopCaptureChild(owned, h.effects, 100);
+    check('capture cleanup signals its proven wrapper once and observes exit', result.ok && h.signals.join() === 'SIGTERM' && h.fresh[0] === true && h.fresh[1] === true);
+  }
+  for (const changed of [{ ...identity, start: 'reused-pid' }, { ...identity, boot: 'next-boot' }]) {
+    const h = fixture(); const owned = rememberCaptureChild(identity.pid, h.effects);
+    h.setLive({ state: 'running', identity: changed });
+    const result = await stopCaptureChild(owned, h.effects, 100);
+    check(`capture cleanup preserves a replaced ${changed.start === identity.start ? 'boot' : 'PID'}`, !result.ok && h.signals.length === 0);
+  }
+  {
+    const h = fixture(); const owned = rememberCaptureChild(identity.pid, h.effects);
+    h.setSignal(() => {});
+    h.setSleep(() => h.setLive({ state: 'running', identity: { ...identity, start: 'replacement-after-term' } }));
+    const result = await stopCaptureChild(owned, h.effects, 100);
+    check('capture cleanup never escalates after wrapper identity changes', !result.ok && h.signals.join() === 'SIGTERM');
+  }
+  {
+    const h = fixture(); const owned = rememberCaptureChild(identity.pid, h.effects);
+    h.setSignal((signal) => { if (signal === 'SIGKILL') h.setLive({ state: 'absent' }); });
+    const result = await stopCaptureChild(owned, h.effects, 100);
+    check('capture cleanup escalates only against a freshly re-proved owned wrapper', result.ok && result.escalated && h.signals.join() === 'SIGTERM,SIGKILL' && h.fresh.filter(Boolean).length === 3);
+  }
+  for (const state of ['unknown', 'absent'] as const) {
+    const h = fixture(); const owned = rememberCaptureChild(identity.pid, h.effects);
+    h.setLive({ state });
+    const result = await stopCaptureChild(owned, h.effects, 100);
+    check(`capture cleanup sends nothing when a child is ${state}`, h.signals.length === 0 && result.ok === (state === 'absent'));
+  }
+}
 
 // The runner still owns a real child, stdout announcement, HTTP and WebSocket.
 // This host only supplies free contract responses; it cannot call a provider.
@@ -60,6 +132,7 @@ async function testRunner(): Promise<void> {
     if (ok) passed += 1; else failed += 1;
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`);
   };
+  await testChildCleanup(check);
   const scratch = mkdtempSync(join(tmpdir(), 'cosyncing-capture-runner-test-'));
   const emptyPath = join(scratch, 'empty-path');
   mkdirSync(emptyPath);
@@ -98,7 +171,8 @@ async function testRunner(): Promise<void> {
       });
       const run = readdirSync(out)[0]!;
       const record = JSON.parse(readFileSync(join(out, run, 'capture.json'), 'utf8'));
-      check(`${platform}: the complete free capture finishes without an OS helper`, exit === 0 && Object.keys(record.captures).length === 13);
+      check(`${platform}: the complete free capture finishes without an OS helper`,
+        exit === 0 && Object.keys(record.captures).length === 14 && record.captures.hostCleanup?.ok === true);
       check(`${platform}: unavailable Documents are evidence, not a startup exception`,
         record.provenance.defaultWorkspace.usable === false
           && record.provenance.defaultWorkspace.probed === false

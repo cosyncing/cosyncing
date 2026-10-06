@@ -175,6 +175,37 @@ try {
       return true;
     })());
 
+  // Native Windows re-resolves homedir() after USERPROFILE is pinned. Exercise
+  // that lookup in an isolated process on every gate platform, preserving the
+  // original account while accepting only the separate disposable roots.
+  const movingHomeProbe = Bun.spawnSync([process.execPath, '--eval', `
+    import { pathToFileURL } from 'node:url';
+    const original = ${JSON.stringify(join(scratch, 'original-account'))};
+    const disposable = ${JSON.stringify(home)};
+    globalThis.captureTestAccount = original;
+    const source = await Bun.file(new URL(${JSON.stringify(new URL('../dsh-capture-sandbox.ts', import.meta.url).href)})).text();
+    // Replace only the OS lookup seam; Bun optimizes native built-in imports
+    // around mock.module. All containment implementation remains unchanged.
+    const lookup = ${JSON.stringify(join(scratch, 'dynamic-home-lookup.mjs'))};
+    const guard = ${JSON.stringify(join(scratch, 'dynamic-home-guard.mjs'))};
+    await Bun.write(lookup, 'export function homedir() { return globalThis.captureTestAccount; }');
+    const injected = source.replace("from 'node:os'", 'from ' + JSON.stringify(pathToFileURL(lookup).href));
+    const executable = new Bun.Transpiler({ loader: 'ts' }).transformSync(injected);
+    await Bun.write(guard, executable);
+    const sandbox = await import(pathToFileURL(guard).href);
+    globalThis.captureTestAccount = disposable;
+    sandbox.assertRootsContained(disposable, sandbox.isolatedStateRoots(disposable), disposable);
+    let refused = false;
+    try { sandbox.assertRootsContained(original, sandbox.isolatedStateRoots(original), original); }
+    catch { refused = true; }
+    if (!refused) throw new Error('the original account lost its containment protection');
+    refused = false;
+    try { sandbox.assertDisposableHome(original); } catch { refused = true; }
+    if (!refused) throw new Error('the original account became a disposable home');
+  `], { stdout: 'pipe', stderr: 'pipe' });
+  check('pinning a dynamic account-home lookup accepts the capture and still protects the original account',
+    movingHomeProbe.success, movingHomeProbe.stderr.toString());
+
   // The first-use Workspace: a host that cannot resolve a Documents directory
   // cannot create its default Workspace and its web composer stays disabled.
   // Direct API sessions may still use the host's working directory. The host

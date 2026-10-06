@@ -957,7 +957,7 @@ registry.register(new CodexAdapter({
     }
   },
   reportDaemonOwnership: (evidence) => {
-    // BPC8: persist whether cosyncing started the app-server daemon so uninstall can stop only what it owns.
+    // Persist whether cosyncing started the app-server daemon so uninstall can stop only what it owns.
     // A null decision (pre-existing/unknown daemon) records nothing, preserving any earlier sticky ownership.
     try {
       if (evidence) {
@@ -8225,23 +8225,18 @@ server = Bun.serve<WsData>({
         const pending = ws.data.pendingInbound ?? [];
         ws.data.pendingInbound = undefined;
         for (const raw of pending) routeInbound(ws, raw);
-        // Send the slash-command list (non-blocking — doesn't delay prompt readiness).
-        mc.conn
-          .listCommands?.()
-          .then((cmds) => cmds?.length && sendRaw({ kind: 'commands', commands: cmds }))
-          .catch(() => {});
-        // Send the model + agent + mode pickers (non-blocking). `modes` = permission modes (Claude).
-        // Per-surface fault isolation + a BOUNDED refresh ladder:
-        // an adapter whose backing service is still starting (managed `opencode serve` after a
-        // restart, a codex daemon spawning the just-created thread) can serve agents while its model
-        // catalog rejects/empties — sending once and stopping reproduced the recurring "agent chip
-        // shown, no model selection on a new session" report. A non-empty response may also be
-        // incomplete (Sol/Max before Sol/Max+Ultra), so the bounded ladder continues after models
-        // arrive and sends only semantic changes.
+        const catalogBackend = registry.get(tool);
+        // Keep optional native catalog notifications attached after bounded startup retries.
         void refreshSessionOptions(
           mc.conn,
           (options) => sendRaw({ kind: 'options', ...options }),
-          { signal: sessionOptionsAbort.signal },
+          {
+            signal: sessionOptionsAbort.signal,
+            ...(catalogBackend?.watchSessionCatalog ? {
+              watchChanges: (notify: () => void) => catalogBackend!.watchSessionCatalog!(id, notify),
+            } : {}),
+            sendCommands: (commands) => sendRaw({ kind: 'commands', commands }),
+          },
         ).finally(() => {
           if (ws.data.sessionOptionsAbort === sessionOptionsAbort) {
             ws.data.sessionOptionsAbort = undefined;

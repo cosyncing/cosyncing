@@ -73,6 +73,7 @@ import type { DshHistoryPage, DshPermissionCatalog, DshPermissionOption, DshSess
 import {
   mapDshApproval,
   mapDshQuestion,
+  dshModelSelection,
   type DshHistoryEntry,
   type DshPendingApproval,
   type DshPendingQuestion,
@@ -169,7 +170,6 @@ export function dshStreamFailureIsTerminal(failure: DshStreamFailure | undefined
 /** What the link saw that it could not use. Contained, bounded, and never fatal. */
 export interface DshRemoteLinkDiagnostic {
   code: 'unusable-stream-item'
-    | 'ignored-assistant-stream'
     | 'snapshot-timeout'
     | 'auth-refused'
     | 'waterfall-delegated'
@@ -284,7 +284,7 @@ async function firstItemOf(
     }
   } finally {
     clearTimeoutImpl(timer);
-    void iterator.return?.();
+    void iterator.return?.().catch(() => { /* the bounded reader already observed the stream failure */ });
   }
 }
 
@@ -318,6 +318,11 @@ interface DshFollowCut {
   projections?: unknown;
 }
 
+interface StreamWithdrawal {
+  kind: 'terminal' | 'retry-exhausted' | 'carrier-lost';
+  reason: string;
+}
+
 interface SessionRuntime {
   connection: DshSessionConnection;
   channel: DshRemoteSessionChannel;
@@ -335,10 +340,10 @@ interface SessionRuntime {
   /**
    * Set when the follow stream failed terminally or its retries ran out.
    *
-   * The session's LIVE surface is over; its data is not. History keeps answering
-   * from the last cut it held, and a re-attach (a new runtime) is what retries.
+   * The session's LIVE cut is withdrawn. A fresh carrier retries transient
+   * exhaustion; terminal refusals require a new session runtime to retry.
    */
-  withdrawn?: string;
+  withdrawn?: StreamWithdrawal;
 }
 
 export interface DshRemoteHostLinkOptions {
@@ -354,6 +359,8 @@ export interface DshRemoteHostLinkOptions {
   /** How long a history read waits for the follow snapshot that opens it. */
   snapshotTimeoutMs?: number;
   onDiagnostic?: (diagnostic: DshRemoteLinkDiagnostic) => void;
+  onHostChanged?: () => void;
+  onCatalogChanged?: () => void;
 }
 
 /**
@@ -366,6 +373,10 @@ export interface DshRemoteHostLinkOptions {
  */
 export class DshRemoteSessionChannel implements DshSessionChannel {
   readonly family = 'remote-0.2' as const;
+
+  attachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<DshOutcome<{ attachment: unknown; data: unknown }>> {
+    return this.link.call('session/attachment', DshRemoteArgs.attachment(sessionId, attachmentId), signal ? { signal } : {});
+  }
 
   constructor(
     private readonly link: DshRemoteHostLink,
@@ -389,6 +400,13 @@ export class DshRemoteSessionChannel implements DshSessionChannel {
           detail: `this DeepSeek Harness session is no longer being followed: ${withdrawn}`,
         });
       }
+      // Follow can deliver its snapshot before the independent $events ready
+      // frame. Paging immediately would capture an absent clientId, then reject
+      // a valid page when the initial handshake finishes during its POST. Wait
+      // on the shared handshake before taking the first cut; later generation
+      // replacement remains fenced by call(), without another reconnect loop.
+      const verified = await this.link.verify();
+      if (!verified.ok) return verified;
       const cut = await this.link.cut(this.sessionId);
       if (!cut) {
         return transportFailure('unreachable', {
@@ -478,9 +496,11 @@ export class DshRemoteSessionChannel implements DshSessionChannel {
     // that the catalog answered, and the gateway's own `session/model-unavailable`
     // refusal is the authority on a route that cannot serve. Inventing a `false`
     // here would disable the composer on the exact version this build targets.
+    const current = this.link.modelSelection(this.sessionId);
     return {
       routable: true,
       groups: parseDshModelGroups(row.groups),
+      ...(current ? { current } : {}),
     };
   }
 
@@ -548,9 +568,7 @@ export class DshRemoteSessionChannel implements DshSessionChannel {
   }
 
   async answerQuestion(pending: DshPendingQuestion, answers: string[][]): Promise<DshReceipt> {
-    return this.link.settleWaterfall('question answer', pending.rpcId, {
-      kind: 'result',
-      value: {
+    const answer = {
         answers: pending.ids.map((id, index) => {
           const given = [...new Set(answers[index] ?? [])];
           const labels = pending.optionLabels[index] ?? [];
@@ -561,8 +579,17 @@ export class DshRemoteSessionChannel implements DshSessionChannel {
           }
           return { id, selected, ...(custom ? { custom } : {}) };
         }),
-      },
-    });
+    };
+    if (pending.continued && pending.callId) {
+      const outcome = await this.link.call<boolean>('userQuestions/answer',
+        DshRemoteArgs.answerQuestion(this.sessionId, pending.callId, answer), { generationLoss: 'non-idempotent-write' });
+      if (!outcome.ok) {
+        if (outcome.failure.kind === 'rpc' && outcome.failure.code === 'REPLY_QUEUED') return { accepted: false, reason: 'not-pending' };
+        throw new DshDriveError('continued question answer', outcome.failure);
+      }
+      return outcome.value === true ? { accepted: true } : { accepted: false, reason: 'not-pending' };
+    }
+    return this.link.settleWaterfall('question answer', pending.rpcId, { kind: 'result', value: answer });
   }
 
   async respondApproval(pending: DshPendingApproval, allow: boolean): Promise<DshReceipt> {
@@ -603,6 +630,10 @@ export class DshRemoteHostLink {
   private readonly pageMessages: number;
   private readonly snapshotTimeoutMs: number;
   private readonly onDiagnostic?: (diagnostic: DshRemoteLinkDiagnostic) => void;
+  private readonly onHostChanged?: () => void;
+  private readonly onCatalogChanged?: () => void;
+  private rosterReconciliation?: Promise<void>;
+  private rosterDirty = false;
   private readonly sessions = new Map<string, SessionRuntime>();
   private readonly requestSeq = { value: 0 };
   private mux?: DshMuxClient;
@@ -613,6 +644,12 @@ export class DshRemoteHostLink {
   private controlRetryHandle?: unknown;
   /** The host-wide projection stream ended for good. See {@link readControl}. */
   private controlWithdrawn?: string;
+  private workspaceStream?: DshMuxStream;
+  private workspaceRetryHandle?: unknown;
+  private workspaceRetries = 0;
+  private workspaceWithdrawn = false;
+  private readonly workspaceRows = new Map<string, Record<string, unknown>>();
+  private archivedSessions = new Set<string>();
   /**
    * The credential the CURRENT carrier shook hands with.
    *
@@ -626,6 +663,7 @@ export class DshRemoteHostLink {
   private readonly forwardedNames = new Set<string>();
   /** Sessions that gave up their open interactions pending a replacement attach. */
   private readonly handoffs = new Map<string, { timer: unknown; eventIds: string[] }>();
+  private readonly questionWaits = new Map<string, { sessionId: string; stream: DshMuxStream; timer?: unknown }>();
   /** Host-wide permission-preset catalog, valid for one carrier generation. */
   private permissionCatalogValue?: readonly DshPermissionOption[];
   private permissionCatalogCarrier = -1;
@@ -649,6 +687,8 @@ export class DshRemoteHostLink {
     this.pageMessages = options.historyPageMessages ?? 200;
     this.snapshotTimeoutMs = options.snapshotTimeoutMs ?? DSH_REMOTE_SNAPSHOT_TIMEOUT_MS;
     if (options.onDiagnostic) this.onDiagnostic = options.onDiagnostic;
+    if (options.onHostChanged) this.onHostChanged = options.onHostChanged;
+    if (options.onCatalogChanged) this.onCatalogChanged = options.onCatalogChanged;
   }
 
   get authState(): import('./auth.ts').DshAuthState {
@@ -726,6 +766,7 @@ export class DshRemoteHostLink {
   ): Promise<DshOutcome<T>> {
     const policy = options?.generationLoss ?? 'epoch-bound';
     const carrier = this.generation;
+    const mux = this.mux;
     const clientId = this.events?.currentGeneration?.clientId;
     // The credential in hand when this call started, if it had one. Getting to
     // an authenticated state is `ensure()`'s JOB, so a call that entered with
@@ -760,14 +801,14 @@ export class DshRemoteHostLink {
       });
     }
     if (policy === 'non-idempotent-write') {
-      if (!this.isReady || this.generation !== carrier) {
+      if (!this.isReady || this.generation !== carrier || this.mux !== mux) {
         return transportFailure('generation-lost', {
           retryable: true,
           detail: 'the DeepSeek Harness host stopped being ready; the write was not sent',
         });
       }
     } else if (policy === 'epoch-bound'
-      && (this.generation !== carrier || clientId !== this.events?.currentGeneration?.clientId)) {
+      && (this.mux !== mux || this.generation !== carrier || clientId !== this.events?.currentGeneration?.clientId)) {
       return transportFailure('generation-lost', {
         retryable: true,
         detail: 'the DeepSeek Harness generation ended while the call was authenticating',
@@ -779,7 +820,7 @@ export class DshRemoteHostLink {
     });
     if (policy === 'epoch-bound'
       && outcome.ok
-      && (this.generation !== carrier || clientId !== this.events?.currentGeneration?.clientId)) {
+      && (this.mux !== mux || this.generation !== carrier || clientId !== this.events?.currentGeneration?.clientId)) {
       // The answer is real, but it describes a host this caller is no longer
       // talking to. The transport is asked to abort in flight and normally
       // obliges; a response that was already on its way back when the carrier
@@ -875,7 +916,7 @@ export class DshRemoteHostLink {
       answer: (event) => this.answerEvent(event.clientId, event.eventId, event.outcome),
     }, {
       onLost: (_carrier, reason) => this.onCarrierLost(reason),
-      onEvent: (event, _args) => this.onForwardedEvent(event),
+      onEvent: (event, args) => this.onForwardedEvent(event, args),
       onWaterfall: (frame) => this.onWaterfall(frame),
       onCancellation: (eventId) => this.onCancellation(eventId),
       onDiagnostic: (diagnostic: DshEventLinkDiagnostic) => this.note({ code: 'event-diagnostic', detail: diagnostic.code }),
@@ -887,6 +928,9 @@ export class DshRemoteHostLink {
   stop(): void {
     this.stopped = true;
     this.started = false;
+    this.unsubscribeCredential();
+    this.stopWorkspace();
+    for (const eventId of this.questionWaits.keys()) this.releaseQuestionWait(eventId);
     this.controlStream = undefined;
     this.controlCarrier = -1;
     if (this.controlRetryHandle !== undefined) {
@@ -919,8 +963,9 @@ export class DshRemoteHostLink {
    * loop on a discovery leg with a budget attached is how a roster read turns
    * into the thing the budget exists to prevent.
    */
-  async roster(signal?: AbortSignal): Promise<DshOutcome<{ items: unknown[] }>> {
+  async roster(signal?: AbortSignal): Promise<DshOutcome<{ items: unknown[]; complete: boolean }>> {
     const items: unknown[] = [];
+    let complete = false;
     let cursor: string | undefined;
     for (let page = 0; page < 8; page += 1) {
       const outcome = await this.call<{ items?: unknown; cursor?: unknown }>(
@@ -932,12 +977,24 @@ export class DshRemoteHostLink {
       );
       if (!outcome.ok) return outcome;
       const row = record(outcome.value);
-      if (Array.isArray(row?.items)) items.push(...row.items);
-      const next = optionalString(row?.cursor);
-      if (!next || next === cursor) break;
+      // This result can become deletion authority after native disposal. A
+      // malformed success is a contract failure, never an empty complete list.
+      if (!row || !Array.isArray(row.items)
+          || row.items.some(item => !optionalString(record(item)?.sessionId))
+          || (row.cursor !== undefined && row.cursor !== null
+            && (typeof row.cursor !== 'string' || row.cursor.length === 0))) {
+        return transportFailure('invalid-envelope', {
+          retryable: false,
+          detail: 'DeepSeek Harness session/list returned an invalid session list or cursor',
+        });
+      }
+      items.push(...row.items);
+      const next = optionalString(row.cursor);
+      if (!next) { complete = true; break; }
+      if (next === cursor) break;
       cursor = next;
     }
-    return { ok: true, value: { items } };
+    return { ok: true, value: { items, complete } };
   }
 
   /**
@@ -950,17 +1007,37 @@ export class DshRemoteHostLink {
    * failure rather than answering "no workspaces", which would surface as a
    * create refusal blaming the operator's registry for our own timeout.
    */
-  async workspaces(signal?: AbortSignal): Promise<DshOutcome<{ items: unknown[]; sessionIds: Map<string, string[]> }>> {
-    const mux = this.mux;
-    if (!mux || this.stopped) {
+  async workspaces(signal?: AbortSignal): Promise<DshOutcome<{ items: unknown[]; sessionIds: Map<string, string[]>; archivedSessionIds: Set<string> }>> {
+    if (this.stopped) {
       return transportFailure('generation-lost', {
-        retryable: true,
-        detail: 'the DeepSeek Harness stream carrier is not running',
+        retryable: false,
+        detail: 'the DeepSeek Harness link has stopped',
       });
     }
+    const authenticated = await this.auth.ensure();
+    if (authenticated.state !== 'authenticated') return transportFailure('unauthenticated', {
+      retryable: false, detail: authenticated.detail,
+    });
+    if (signal?.aborted) return transportFailure('timeout', { retryable: false, detail: 'the workspace read was canceled' });
+    const credentialRevision = this.auth.credentialRevision;
+    // Discovery needs the workspace association even before anyone attaches.
+    // A bounded standalone carrier reads that baseline without enrolling an
+    // event client or leaving an idle broker in a reconnect loop.
+    const ownsMux = this.mux === undefined;
+    const mux = this.mux ?? new DshMuxClient({
+      baseUrl: this.baseUrl, headers: () => this.auth.authHeaders(),
+      ...(this.socketFactory ? { socketFactory: this.socketFactory } : {}),
+      setTimeout: this.setTimeoutImpl, clearTimeout: this.clearTimeoutImpl,
+    }, { onOpen() {}, onLost() {} });
+    if (ownsMux) mux.start();
     const stream = mux.open('workspace/follow', { args: {} });
+    const cancel = () => { stream.cancel(); if (ownsMux) mux.stop(); };
+    const unsubscribeCredential = ownsMux ? this.auth.onCredentialChange(cancel) : undefined;
+    signal?.addEventListener('abort', cancel, { once: true });
     try {
       const baseline = await firstItemOf(stream, (item) => item.type === 'baseline', this.snapshotTimeoutMs, this.setTimeoutImpl, this.clearTimeoutImpl);
+      if (signal?.aborted) return transportFailure('timeout', { retryable: false, detail: 'the workspace read was canceled' });
+      if (credentialRevision !== this.auth.credentialRevision) return transportFailure('generation-lost', { retryable: true });
       if (!baseline) {
         this.note({ code: 'unusable-stream-item', detail: 'workspace/follow produced no baseline' });
         return transportFailure('timeout', {
@@ -977,9 +1054,19 @@ export class DshRemoteHostLink {
         if (!workspaceId || !Array.isArray(row?.sessionIds)) continue;
         sessionIds.set(workspaceId, row.sessionIds.filter((entry): entry is string => typeof entry === 'string'));
       }
-      return { ok: true, value: { items, sessionIds } };
+      const archivedSessionIds = new Set(Array.isArray(value?.archivedSessionIds)
+        ? value.archivedSessionIds.filter((id): id is string => typeof id === 'string') : []);
+      return { ok: true, value: { items, sessionIds, archivedSessionIds } };
+    } catch (error) {
+      if (signal?.aborted) return transportFailure('timeout', { retryable: false, detail: 'the workspace read was canceled' });
+      if (credentialRevision !== this.auth.credentialRevision) return transportFailure('generation-lost', { retryable: true });
+      return transportFailure('unreachable', { retryable: true, detail: error instanceof DshStreamError
+        ? `workspace/follow: ${error.failure.code}` : 'workspace/follow failed before publishing its baseline' });
     } finally {
+      unsubscribeCredential?.();
+      signal?.removeEventListener('abort', cancel);
       stream.cancel();
+      if (ownsMux) mux.stop();
     }
   }
 
@@ -1120,6 +1207,8 @@ export class DshRemoteHostLink {
     this.start();
     this.openFollow(runtime);
     this.ensureControl();
+    this.ensureWorkspace();
+    this.publishWorkspace(connection.info.id);
     for (const frame of this.events?.pendingWaterfalls() ?? []) {
       if (frame.agentId !== sessionId) continue;
       this.note({ code: 'waterfall-replayed', detail: frame.event });
@@ -1132,6 +1221,7 @@ export class DshRemoteHostLink {
     const runtime = this.sessions.get(sessionId);
     if (!runtime) return;
     if (connection && runtime.connection !== connection) return;
+    for (const [eventId, wait] of this.questionWaits) if (wait.sessionId === sessionId) this.releaseQuestionWait(eventId);
     runtime.stream?.cancel();
     runtime.stream = undefined;
     if (runtime.retryHandle !== undefined) {
@@ -1139,6 +1229,7 @@ export class DshRemoteHostLink {
       runtime.retryHandle = undefined;
     }
     this.sessions.delete(sessionId);
+    if (this.sessions.size === 0) this.stopWorkspace();
     for (const waiter of runtime.waiters) waiter();
     runtime.waiters.clear();
     this.handoffInteractions(sessionId);
@@ -1151,7 +1242,11 @@ export class DshRemoteHostLink {
    * timeout is an invitation to retry it forever.
    */
   streamWithdrawn(sessionId: string): string | undefined {
-    return this.sessions.get(sessionId)?.withdrawn;
+    return this.sessions.get(sessionId)?.withdrawn?.reason;
+  }
+
+  modelSelection(sessionId: string): DshModelSelection | undefined {
+    return dshModelSelection(this.sessions.get(sessionId)?.connection.projectionValue('modelSelection'));
   }
 
   /** The session's current cut, waiting for the follow snapshot that opens it. */
@@ -1229,6 +1324,7 @@ export class DshRemoteHostLink {
       });
     }
     const receipt = await link.answer(eventId, outcome);
+    if (receipt.ok || receipt.retryable === false) this.releaseQuestionWait(eventId);
     if (receipt.ok) return { accepted: true };
     if (receipt.retryable === false) return { accepted: false, reason: 'not-pending' };
     throw new DshDriveError(action, {
@@ -1267,7 +1363,7 @@ export class DshRemoteHostLink {
     if (runtime.withdrawn) return;
     const mux = this.mux;
     if (!mux || this.stopped) return;
-    const stream = mux.open('session/follow', { args: DshRemoteArgs.follow({ sessionId: runtime.connection.info.id }) });
+    const stream = mux.open('session/follow', { args: DshRemoteArgs.follow({ sessionId: runtime.connection.info.id, assistantStream: true }) });
     runtime.stream = stream;
     runtime.carrier = mux.generation;
     void this.readFollow(runtime, stream, mux.generation);
@@ -1278,15 +1374,15 @@ export class DshRemoteHostLink {
     let failure: DshStreamFailure | undefined;
     try {
       for await (const raw of stream) {
-        if (this.sessions.get(sessionId) !== runtime || carrier !== runtime.carrier) return;
+        if (this.sessions.get(sessionId) !== runtime || carrier !== runtime.carrier || runtime.stream !== stream) return;
         this.handleFollowItem(runtime, raw);
       }
     } catch (error) {
-      if (this.sessions.get(sessionId) !== runtime || carrier !== runtime.carrier) return;
+      if (this.sessions.get(sessionId) !== runtime || carrier !== runtime.carrier || runtime.stream !== stream) return;
       failure = error instanceof DshStreamError ? error.failure : undefined;
       this.note({ code: 'unusable-stream-item', detail: `session/follow: ${failure?.code ?? 'stream-lost'}` });
     }
-    if (this.sessions.get(sessionId) !== runtime || carrier !== runtime.carrier) return;
+    if (this.sessions.get(sessionId) !== runtime || carrier !== runtime.carrier || runtime.stream !== stream) return;
     this.retryFollow(runtime, failure);
   }
 
@@ -1316,16 +1412,19 @@ export class DshRemoteHostLink {
     runtime.snapshot = undefined;
     runtime.cut = undefined;
     runtime.snapshotSettled = false;
-    runtime.connection.onGenerationLost();
+    runtime.connection.onTranscriptLost();
     for (const waiter of runtime.waiters) waiter();
     runtime.waiters.clear();
     if (dshStreamFailureIsTerminal(failure)) {
-      this.withdrawSession(runtime, failure?.code ?? 'stream-ended');
+      this.withdrawSession(runtime, {
+        kind: failure?.code.startsWith('carrier/') ? 'carrier-lost' : 'terminal',
+        reason: failure?.code ?? 'stream-ended',
+      });
       return;
     }
     const attempts = runtime.retries;
     if (attempts >= DSH_STREAM_RETRY_DELAYS_MS.length) {
-      this.withdrawSession(runtime, `session/follow retried ${String(attempts)} times`);
+      this.withdrawSession(runtime, { kind: 'retry-exhausted', reason: `session/follow retried ${String(attempts)} times` });
       return;
     }
     runtime.retries = attempts + 1;
@@ -1343,8 +1442,8 @@ export class DshRemoteHostLink {
   }
 
   /** End one session's live surface without touching its host, its carrier, or its siblings. */
-  private withdrawSession(runtime: SessionRuntime, reason: string): void {
-    runtime.withdrawn = reason;
+  private withdrawSession(runtime: SessionRuntime, withdrawal: StreamWithdrawal): void {
+    runtime.withdrawn = withdrawal;
     runtime.stream = undefined;
     if (runtime.retryHandle !== undefined) {
       this.clearTimeoutImpl(runtime.retryHandle);
@@ -1354,7 +1453,7 @@ export class DshRemoteHostLink {
     // read returns its notice instead of spending the snapshot timeout.
     for (const waiter of runtime.waiters) waiter();
     runtime.waiters.clear();
-    this.note({ code: 'stream-withdrawn', detail: `${runtime.connection.info.id}:${reason}` });
+    this.note({ code: 'stream-withdrawn', detail: `${runtime.connection.info.id}:${withdrawal.reason}` });
   }
 
   /** Extend the current cut with one durable event, keeping it a cut rather than a pile. */
@@ -1416,6 +1515,9 @@ export class DshRemoteHostLink {
         // snapshot's cursor keeps that machinery, which was qualified against a
         // real host, doing exactly the job it was written for.
         runtime.connection.handleMuxFrame(bridgeFrame('session/subscribed', `snapshot-${String(cursor)}`, { sessionId: runtime.connection.info.id, lastSeq: cursor }));
+        if (item.assistantStream !== undefined) runtime.connection.handleMuxFrame(bridgeFrame(
+          'session/assistant-baseline', `assistant-baseline-${String(cursor)}`, { value: item.assistantStream },
+        ));
         for (const waiter of runtime.waiters) waiter();
         runtime.waiters.clear();
         return;
@@ -1435,12 +1537,7 @@ export class DshRemoteHostLink {
         return;
       }
       case 'assistant-stream': {
-        // Deliberately unread. Live assistant deltas are the one 0.2 surface this
-        // build has never captured from a real host — the durable `assistant/*`
-        // events on the same stream carry the settled text and ARE mapped — so the
-        // honest action is to record that a transient surface exists and render
-        // the settled row rather than guess at a frame shape.
-        this.note({ code: 'ignored-assistant-stream' });
+        runtime.connection.handleMuxFrame(bridgeFrame('session/assistant-frame', 'assistant-frame', { value: item.frame }));
         return;
       }
       default:
@@ -1515,14 +1612,7 @@ export class DshRemoteHostLink {
         const values = record(block)?.values;
         const asOfSeq = optionalNumber(record(block)?.asOfSeq);
         if (!runtime || !values || asOfSeq === undefined) continue;
-        for (const [key, value] of Object.entries(values)) {
-          runtime.connection.handleMuxFrame(bridgeFrame('session/projection', `control-${sessionId}-${key}`, {
-            sessionId,
-            key,
-            value,
-            seq: asOfSeq,
-          }));
-        }
+        runtime.connection.handleMuxFrame(bridgeFrame('session/projection-baseline', `control-${sessionId}`, { block }));
       }
       return;
     }
@@ -1545,6 +1635,12 @@ export class DshRemoteHostLink {
   // ── Events ────────────────────────────────────────────────────────────────
 
   private onCarrierOpen(carrier: number): void {
+    this.stopWorkspace();
+    this.workspaceRetries = 0;
+    this.workspaceWithdrawn = false;
+    this.workspaceRows.clear();
+    this.archivedSessions.clear();
+    this.ensureWorkspace();
     // A fresh carrier means every stream that rode the previous one is gone.
     // Projections are host-wide, so their baseline is re-read here too.
     if (this.controlCarrier !== carrier) {
@@ -1554,8 +1650,8 @@ export class DshRemoteHostLink {
       }
       this.controlStream = undefined;
       this.controlCarrier = -1;
-      // A new carrier is a new host process for the purposes of a refusal: the
-      // ladder that ran out on the last one is not carried over.
+      // Control is re-probed on a fresh carrier. Its previous retry ladder is
+      // not carried over; this does not establish a new process identity.
       this.controlRetries = 0;
       this.controlWithdrawn = undefined;
       if (this.sessions.size > 0) this.ensureControl();
@@ -1563,6 +1659,10 @@ export class DshRemoteHostLink {
     this.carrierCredential = this.auth.credentialRevision;
     for (const runtime of this.sessions.values()) {
       if (runtime.carrier === carrier && runtime.stream) continue;
+      if (runtime.retryHandle !== undefined) {
+        this.clearTimeoutImpl(runtime.retryHandle);
+        runtime.retryHandle = undefined;
+      }
       runtime.stream = undefined;
       runtime.snapshot = undefined;
       runtime.cut = undefined;
@@ -1571,7 +1671,7 @@ export class DshRemoteHostLink {
       // session whose stream was withdrawn because the SOCKET died gets another
       // run, and one whose stream the host refused for a terminal reason keeps
       // that verdict, because a new socket asks the same question.
-      if (runtime.withdrawn && !runtime.withdrawn.includes('retried')) {
+      if (runtime.withdrawn?.kind !== 'terminal') {
         runtime.withdrawn = undefined;
         runtime.retries = 0;
       }
@@ -1580,6 +1680,8 @@ export class DshRemoteHostLink {
   }
 
   private onCarrierLost(reason: string): void {
+    this.stopWorkspace();
+    for (const eventId of this.questionWaits.keys()) this.releaseQuestionWait(eventId);
     this.controlStream = undefined;
     this.controlCarrier = -1;
     if (this.controlRetryHandle !== undefined) {
@@ -1603,10 +1705,6 @@ export class DshRemoteHostLink {
       // The carrier, not the session, gave up: the retry ladder starts over on
       // the new one, and a stream that was withdrawn for a terminal reason stays
       // withdrawn for the same reason.
-      if (runtime.withdrawn && !runtime.withdrawn.includes('retried')) {
-        runtime.withdrawn = undefined;
-        runtime.retries = 0;
-      }
       runtime.connection.onGenerationLost();
     }
     for (const handler of this.lostHandlers) handler(reason);
@@ -1629,10 +1727,11 @@ export class DshRemoteHostLink {
     this.note({ code: 'credential-changed', detail: change });
     this.remote.abortInFlight();
     const wasRunning = this.mux !== undefined;
-    if (!wasRunning) return;
-    this.detachCarrier(change === 'removed'
-      ? 'the DeepSeek Harness enrollment was withdrawn'
-      : 'the DeepSeek Harness session cookie was replaced');
+    if (wasRunning) {
+      this.detachCarrier(change === 'removed'
+        ? 'the DeepSeek Harness enrollment was withdrawn'
+        : 'the DeepSeek Harness session cookie was replaced');
+    }
     if (change === 'removed') return;
     if (this.stopped || !this.started || this.auth.cookieHeader() === null) return;
     if (this.sessions.size === 0) return;
@@ -1641,6 +1740,7 @@ export class DshRemoteHostLink {
 
   /** Close the carrier and event link this link owns, leaving every session re-attachable. */
   private detachCarrier(reason: string): void {
+    this.stopWorkspace();
     const events = this.events;
     const mux = this.mux;
     this.events = undefined;
@@ -1658,6 +1758,10 @@ export class DshRemoteHostLink {
       runtime.snapshot = undefined;
       runtime.cut = undefined;
       runtime.snapshotSettled = false;
+      if (runtime.retryHandle !== undefined) {
+        this.clearTimeoutImpl(runtime.retryHandle);
+        runtime.retryHandle = undefined;
+      }
       runtime.connection.onGenerationLost();
     }
     for (const handler of this.lostHandlers) handler(reason);
@@ -1742,7 +1846,10 @@ export class DshRemoteHostLink {
       return;
     }
     if (frame.event === 'user-questions/request') {
-      const mapped = mapDshQuestion(frame.eventId, { sessionId: frame.agentId, questions: frame.request.questions });
+      const wait = record(frame.request.wait);
+      const callId = optionalString(wait?.callId);
+      const mapped = mapDshQuestion(frame.eventId, { sessionId: frame.agentId, questions: frame.request.questions,
+        ...(callId ? { callId } : {}) });
       if (!mapped) {
         void this.events?.answer(frame.eventId, { kind: 'next' });
         return;
@@ -1750,38 +1857,193 @@ export class DshRemoteHostLink {
       runtime.connection.handleMuxFrame(bridgeFrame('question/requested', frame.eventId, {
         sessionId: frame.agentId,
         questions: frame.request.questions,
+        ...(callId ? { callId } : {}),
       }));
+      if (callId && wait?.timed === true) this.attachQuestionWait(frame.agentId, frame.eventId, callId);
     }
   }
 
   private onCancellation(eventId: string): void {
+    this.releaseQuestionWait(eventId);
     for (const runtime of this.sessions.values()) runtime.connection.noteCancellation(eventId);
   }
 
-  /**
-   * The forwarded `$events` emits.
-   *
-   * Session transcript does NOT arrive here — it arrives on `session/follow` —
-   * and the meaning of the host's other forwarded events has never been captured
-   * for cosyncing, so nothing is mapped from a name. The event name is recorded so
-   * a capture run can see what a real host actually forwards.
-   */
-  /**
-   * Record a forwarded event name this build has no mapping for.
-   *
-   * Its own code rather than `unusable-stream-item`, because the two facts are
-   * opposite: that one means the host sent something we should have understood
-   * and did not, this one means the host told us something whose meaning nobody
-   * has observed yet. Folding them together makes an unknown name look like a
-   * parser bug in every report, which is exactly the signal a capture run needs
-   * to be able to tell apart. Names are recorded, never bodies: a body is where
-   * a host's content would live, and this build has not earned an opinion about
-   * one.
-   */
-  private onForwardedEvent(event: string): void {
+  private attachQuestionWait(sessionId: string, eventId: string, callId: string): void {
+    if (this.questionWaits.has(eventId) || !this.mux || !this.isReady) return;
+    const stream = this.mux.open('userQuestions/attachWait', { args: { agentId: sessionId, callId } });
+    const wait: { sessionId: string; stream: DshMuxStream; timer?: unknown } = { sessionId, stream };
+    this.questionWaits.set(eventId, wait);
+    void (async () => {
+      try {
+        for await (const raw of stream) {
+          if (this.questionWaits.get(eventId) !== wait) return;
+          const remainingMs = optionalNumber(record(raw)?.remainingMs);
+          if (remainingMs === undefined || remainingMs < 0 || !Number.isFinite(remainingMs)) break;
+          if (wait.timer !== undefined) continue;
+          wait.timer = this.setTimeoutImpl(() => {
+            if (this.questionWaits.get(eventId) !== wait) return;
+            // Match the native UI: the timer rejects this foreground waterfall.
+            // Only the durable continued projection grants the late-answer route.
+            void this.settleWaterfall('question timeout', eventId, { kind: 'rejected', error: {
+              name: 'UserQuestionError', code: 'ASK_TIMED_OUT', message: 'ask_user_question timed out before the user answered',
+            } }).catch(() => { this.releaseQuestionWait(eventId); });
+          }, Math.min(remainingMs, 2_147_483_647));
+        }
+      } catch {
+        this.note({ code: 'unusable-stream-item', detail: 'userQuestions/attachWait ended before its timed claim settled' });
+      } finally {
+        if (this.questionWaits.get(eventId) === wait) this.releaseQuestionWait(eventId);
+      }
+    })();
+  }
+
+  private releaseQuestionWait(eventId: string): void {
+    const wait = this.questionWaits.get(eventId);
+    if (!wait) return;
+    this.questionWaits.delete(eventId);
+    if (wait.timer !== undefined) this.clearTimeoutImpl(wait.timer);
+    wait.stream.cancel();
+  }
+
+  private stopWorkspace(): void {
+    this.workspaceStream?.cancel();
+    this.workspaceStream = undefined;
+    if (this.workspaceRetryHandle !== undefined) this.clearTimeoutImpl(this.workspaceRetryHandle);
+    this.workspaceRetryHandle = undefined;
+  }
+
+  /** One host-wide registry feed while sessions are attached; discovery uses a bounded read. */
+  private ensureWorkspace(): void {
+    const mux = this.mux;
+    if (!mux || this.stopped || !this.sessions.size || this.workspaceStream || this.workspaceWithdrawn) return;
+    const stream = mux.open('workspace/follow', { args: {} });
+    this.workspaceStream = stream;
+    void (async () => {
+      let failure: DshStreamFailure | undefined;
+      try {
+        for await (const raw of stream) {
+          if (this.workspaceStream !== stream || this.mux !== mux) return;
+          this.handleWorkspace(raw);
+        }
+      } catch (error) {
+        if (this.workspaceStream !== stream || this.mux !== mux) return;
+        failure = error instanceof DshStreamError ? error.failure : undefined;
+      }
+      if (this.workspaceStream !== stream || this.mux !== mux) return;
+      this.workspaceStream = undefined;
+      if (dshStreamFailureIsTerminal(failure) || this.workspaceRetries >= DSH_STREAM_RETRY_DELAYS_MS.length) {
+        this.workspaceWithdrawn = true;
+        this.note({ code: 'stream-withdrawn', detail: `workspace/follow:${failure?.code ?? 'retry-exhausted'}` }); return;
+      }
+      const delay = DSH_STREAM_RETRY_DELAYS_MS[this.workspaceRetries++] ?? 0;
+      if (!delay) this.ensureWorkspace();
+      else this.workspaceRetryHandle = this.setTimeoutImpl(() => {
+        this.workspaceRetryHandle = undefined; this.ensureWorkspace();
+      }, delay);
+    })();
+  }
+
+  private handleWorkspace(raw: unknown): void {
+    const item = record(raw);
+    if (!item) return;
+    const ids = (value: unknown) => Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+    if (item.type === 'baseline') {
+      const value = record(item.value);
+      if (!Array.isArray(value?.items) || !Array.isArray(value.archivedSessionIds)) return;
+      this.workspaceRows.clear();
+      for (const rawRow of value.items) {
+        const row = record(rawRow); const id = optionalString(row?.workspaceId);
+        if (id && row) this.workspaceRows.set(id, row);
+      }
+      this.archivedSessions = new Set(ids(value.archivedSessionIds));
+      this.workspaceRetries = 0;
+    } else if (item.type === 'upsert') {
+      const row = record(item.workspace); const id = optionalString(row?.workspaceId);
+      if (!id || !row) return;
+      this.workspaceRows.set(id, row);
+    } else if (item.type === 'remove' && typeof item.workspaceId === 'string') this.workspaceRows.delete(item.workspaceId);
+    else if (item.type === 'archived' && Array.isArray(item.archivedSessionIds)) {
+      this.archivedSessions = new Set(ids(item.archivedSessionIds)); this.reconcileRoster();
+    } else if (!['order', 'pinned'].includes(String(item.type))) return;
+    for (const sessionId of this.sessions.keys()) this.publishWorkspace(sessionId);
+    this.onHostChanged?.();
+  }
+
+  private publishWorkspace(sessionId: string): void {
+    const workspace = [...this.workspaceRows.values()].find((row) => Array.isArray(row.sessionIds) && row.sessionIds.includes(sessionId));
+    this.sessions.get(sessionId)?.connection.handleHostFrame(bridgeFrame('host/session-workspace', 'workspace', {
+      archived: this.archivedSessions.has(sessionId),
+      ...(optionalString(workspace?.title) ? { projectName: workspace!.title } : {}),
+      ...(optionalString(workspace?.path) ? { cwd: workspace!.path } : {}),
+    }));
+  }
+
+  /** Source-defined host events carry lifecycle, never transcript deltas. */
+  private onForwardedEvent(event: string, args: readonly unknown[]): void {
+    const sessionId = optionalString(args[0]);
+    const connection = sessionId ? this.sessions.get(sessionId)?.connection : undefined;
+    if (event === 'api-session/status' && typeof args[1] === 'boolean') {
+      connection?.handleHostFrame(bridgeFrame('host/session-status', event, { running: args[1] })); return;
+    }
+    if (event === 'api-session/activity' && optionalNumber(args[1]) !== undefined) {
+      connection?.handleHostFrame(bridgeFrame('host/session-activity', event, { updatedAt: args[1] })); return;
+    }
+    if (event === 'api-session/error') {
+      const messages = (Array.isArray(args[1]) ? args[1] : [args[1]])
+        .flatMap((raw) => optionalString(record(raw)?.message) ?? []).join('\n').slice(0, 2000);
+      connection?.handleHostFrame(bridgeFrame('host/agent-error', event, { message: messages || 'The DeepSeek Harness agent reported an error.' })); return;
+    }
+    if (event === 'api-session/added') {
+      const summary = record(args[0]);
+      const id = optionalString(summary?.sessionId);
+      if (id) this.sessions.get(id)?.connection.handleHostFrame(bridgeFrame('host/session-updated', event, { summary }));
+      this.onHostChanged?.(); return;
+    }
+    if (event === 'api-session/removed') {
+      // Upstream emits this on Session disposal. A persisted cold log can still
+      // exist, so only an exhaustive successful roster may declare it deleted.
+      this.onHostChanged?.(); this.reconcileRoster(); return;
+    }
+    if (['permission-presets/catalog-changed', 'llm/adapters-updated', 'commands/change',
+      'agent-preset/selected', 'settings/document-updated', 'plugin-manager/changed', 'credentials/record-updated', 'credentials/reference-updated'].includes(event)) {
+      this.permissionCatalogValue = undefined; this.permissionCatalogCarrier = -1;
+      this.onCatalogChanged?.();
+      this.onHostChanged?.(); return;
+    }
+    if (event === 'deepseek-account/session-expired' || event === 'deepseek-account/model-sign-in-required') {
+      for (const runtime of this.sessions.values()) runtime.connection.handleHostFrame(bridgeFrame('host/service-notice', event, {
+        message: 'DeepSeek Harness requires provider sign-in in its native client.',
+      }));
+      return;
+    }
     if (this.forwardedNames.has(event)) return;
     this.forwardedNames.add(event);
     this.note({ code: 'forwarded-event-unmapped', detail: event });
+  }
+
+  private reconcileRoster(): void {
+    this.rosterDirty = true;
+    if (this.rosterReconciliation) return;
+    const mux = this.mux;
+    const clientId = this.events?.currentGeneration?.clientId;
+    const operation = (async () => {
+      do {
+        this.rosterDirty = false;
+        const outcome = await this.roster();
+        if (!outcome.ok || this.mux !== mux || this.events?.currentGeneration?.clientId !== clientId) return;
+        const rows = new Map(outcome.value.items.flatMap((raw) => {
+          const row = record(raw); const id = optionalString(row?.sessionId);
+          return id && row ? [[id, row] as const] : [];
+        }));
+        for (const [id, runtime] of this.sessions) {
+          const summary = rows.get(id);
+          if (summary) runtime.connection.handleHostFrame(bridgeFrame('host/session-updated', 'roster', { summary }));
+          else if (outcome.value.complete) runtime.connection.handleHostFrame(bridgeFrame('host/session-removed', 'roster', {}));
+        }
+      } while (this.rosterDirty && !this.stopped);
+    })();
+    this.rosterReconciliation = operation;
+    void operation.finally(() => { if (this.rosterReconciliation === operation) this.rosterReconciliation = undefined; });
   }
 
   private note(diagnostic: DshRemoteLinkDiagnostic): void {

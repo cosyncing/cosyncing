@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "98ed08fbaf2e94ad84ba359f5816a400263cf303",
+  "acceptedBase": "15d6f683f7fe84eaaca71f6983f26365f2a15657",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -158,6 +158,7 @@
     "broker.roster-window",
     "broker.security-attention",
     "broker.service-lifecycle",
+    "broker.session-catalog-convergence",
     "broker.session-truth-conformance",
     "broker.state-security",
     "broker.surface",
@@ -210,7 +211,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:da836a737e55a7cca5009cdcc6ff7b866bdf74c800164ddeeb365d7cd0d5ab0f"
+      "fingerprint": "sha256:4bb956dfeb09c164368662900bc1e789c14eec9b5390e305c1f58c2b4285436c"
     },
     {
       "id": "capabilities",
@@ -218,7 +219,7 @@
     },
     {
       "id": "client",
-      "fingerprint": "sha256:af5d4b4fdf9d0032539b4ddae3ad3928ca8e4166b5e5310bf9e7240d5142d79f"
+      "fingerprint": "sha256:46d99411a4de8f597d180a20714f9f59ea5a825d354e311ab25f3a774808f930"
     },
     {
       "id": "contract",
@@ -440,7 +441,7 @@
     },
     {
       "id": "attention-retention",
-      "fingerprint": "sha256:e27abc16a8ca110b6c28e5e01fba7eae46eaccc1c5ee454fe97efbd9e6fe2f78"
+      "fingerprint": "sha256:cab9829c987811848ba0f572c5828a3302baad8a35f03790a6e5a7c624a4c23c"
     },
     {
       "id": "attention-service",
@@ -628,7 +629,7 @@
     },
     {
       "id": "dsh-capture-runner",
-      "fingerprint": "sha256:87836ec6fcd8d64130da9dcac748f79d0952277f29f3c1a7e415540168c033d6"
+      "fingerprint": "sha256:bfeebdbc5684d4ba81a06e7e49248a2ecf1894bc0ea52feccd4bb0f2887b7026"
     },
     {
       "id": "dsh-capture-sandbox",
@@ -676,7 +677,7 @@
     },
     {
       "id": "dsh-mapping",
-      "fingerprint": "sha256:a2d91ec60b9e4d46b8e40ef3fae479468abcc8b50d1fa357f183704927112595"
+      "fingerprint": "sha256:06a70b6bb1f532c100352988afbfdd095f448676328919ab16e1ecfc265179e7"
     },
     {
       "id": "dsh-mux",
@@ -696,7 +697,7 @@
     },
     {
       "id": "dsh-remote-host",
-      "fingerprint": "sha256:c35bf403c0c14ce11ca5b56dd049325ee778ee1d38895c1106cfa09e193b5e38"
+      "fingerprint": "sha256:d758319a0860aaa06c338360309e28191ec93973403c626119de54bd218dfacf"
     },
     {
       "id": "dsh-server",
@@ -1013,6 +1014,10 @@
     {
       "id": "security-attention",
       "fingerprint": "sha256:335e3a3f25fbd91854eeb3ecad72ce0cde3c64f4c06c1d9be752cb213f789c34"
+    },
+    {
+      "id": "session-options",
+      "fingerprint": "sha256:949d40864bb29ac59666cd42ceeb545db201a363ac9ad7e26222814cad76a6ab"
     },
     {
       "id": "session-truth-conformance",

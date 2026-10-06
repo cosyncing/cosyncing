@@ -662,7 +662,6 @@ export class DshAuthSession {
         if (!current()) return this.outcome();
         this.setState('absent', 'cookie-expired', 'the stored DeepSeek Harness session has expired');
       } else {
-        this.publishCredential(stored);
         // From here the held credential IS the enrollment's record, so a later
         // empty read of that record means the enrollment was withdrawn.
         this.storeBacked = true;
@@ -672,6 +671,9 @@ export class DshAuthSession {
         if (this.stateValue !== 'authenticated') {
           this.setState('authenticated', 'token-exchanged', 'authenticated with the stored DeepSeek Harness session');
         }
+        // Subscribers may immediately handshake with this credential. Publish
+        // only after cookieHeader() can expose it as usable.
+        this.publishCredential(stored);
         // A reused cookie still gets a renewal when the token is in hand AND the
         // cookie is nearing expiry: this is the broker-restart-onto-a-surviving-host
         // case, where the cookie was earned days ago and the current launch has
@@ -778,8 +780,8 @@ export class DshAuthSession {
     this.renewalRetryAfter = 0;
     // A fresh credential outranks whatever this scope was refused for.
     this.refusedCookie = undefined;
-    this.publishCredential(cookie);
     this.setState('authenticated', 'token-exchanged', 'authenticated with the DeepSeek Harness host');
+    this.publishCredential(cookie);
     // The write is authorized at its own commit boundary (see queueStore), so a
     // save that waits behind an earlier one and only reaches the file after the
     // scope has moved on never lands. Checking after the await would be too

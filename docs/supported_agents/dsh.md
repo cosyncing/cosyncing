@@ -1,12 +1,12 @@
 # DeepSeek Harness (experimental)
 
 The provisional DeepSeek Harness adapter is intended for source contributors.
-It connects to a `dsh web` host and was verified against two versions of it:
+It connects to a `dsh web` host. The recorded version targets are:
 `@deepseek-ai/dsh` 0.1.0-rc.6 and 0.2.0-rc.2. Those are two different wire
 contracts, not one contract with an older build behind it, and cosyncing selects
-between them by reading the host rather than by trusting a version string. A
-version that is neither of those two is recognized as one of the two families and
-reported as unverified; nothing about it is assumed.
+between them by reading the host rather than by trusting a version string.
+Other builds in the 0.1 or 0.2 family are reported as unverified;
+family recognition does not qualify their behavior. Other versions may be refused.
 
 cosyncing never installs or configures that host, but it can start, supervise,
 and stop one it owns — see [Managed hosts](#managed-hosts).
@@ -28,8 +28,7 @@ Install it globally with npm, so that `dsh` lands on your PATH:
 npm install -g @deepseek-ai/dsh@0.2.0-rc.2
 ```
 
-Or pin the older contract instead; both are verified, and each selects its own
-code path:
+Or pin the older contract, which keeps its separate legacy code path:
 
 ```bash
 npm install -g @deepseek-ai/dsh@0.1.0-rc.6
@@ -79,6 +78,10 @@ the cookie the host issued, in its own credential file, scoped to that address a
 that host's profile: a second host does not share it, a second cosyncing install
 does not read it, and the file is written owner-only.
 
+An already attached session resumes after successful re-enrollment through a fresh
+authenticated handshake and session baseline. Disconnect keeps it withdrawn until
+a usable credential is supplied again.
+
 The cookie outlives both processes. Restart the broker, or restart the host, and
 cosyncing is still signed in — no re-paste, and no new launch URL to go hunting
 for. A host cosyncing starts for itself needs no `dsh connect` at all: the launch
@@ -91,7 +94,12 @@ re-enrolling when what actually went wrong is something else.
 
 ## Current behavior
 
-- Existing sessions and history are discovered from the host.
+- Existing sessions, current model selection, workspace association, and history
+  are discovered from the host. Ordinary cold sessions remain readable and the
+  native command routes resume their agent when needed. Initial history awaits
+  the event handshake before paging; compaction replaces its native surface range
+  with one checkpoint context. Native archive changes
+  withdraw new prompts while preserving history; unarchive reconciles availability.
 - Multiple active foreground cosyncing clients share the ordered transcript
   and live control surface.
 - Session creation and rename, text prompts, permission and question replies,
@@ -104,23 +112,54 @@ re-enrolling when what actually went wrong is something else.
   prompt it was picked for and is what the DSH browser UI shows next.
 - Permission presets (`read-only`, `workspace-write`, `danger-full-access` on a
   default install). Only presets the host advertises can be selected, and a
-  deployment that composes no permission service shows no control.
+  deployment that composes no permission service shows no control. A selected
+  preset is applied before an ordinary native command; a refused change prevents
+  that command from executing.
 - The host's own slash commands — `compact`, `export`, `feedback`, `goal`,
   `permission`, `plan` on a default install — read from the live registry
   rather than a fixed list, so a deployment's own commands appear too.
-- Image attachments, delivered as inline bytes on the prompt.
+- Native catalog changes automatically refresh the attached model, reasoning,
+  permission and command choices. Successful empty responses remove stale
+  choices; a failed catalog read retains that surface's last successful value.
+- Assistant text and reasoning follow the host's transient attempt/revision/index
+  stream. Reconnect baselines replace partial output, and durable messages settle
+  the same transcript identity. Abandoned attempts reload history; interrupted partial replies settle through the native durable message.
+- Blocking approval and question cards survive a follow-only retry while the
+  event authority remains healthy. Timed questions hold the native wait claim;
+  after timeout, a durable continued question offers a nonblocking late answer
+  through `userQuestions/answer`. Ordinary answers use `$events/result`; one
+  decision is submitted through one route.
+- Ordinary sends queue a follow-up. On `0.2.0-rc.2`, the local `/steer` command
+  takes text for the running turn's next step. Queue and steering echoes share
+  their native message identity with delivery.
+  Native cancellation or editing retracts stale queued bubbles through a history
+  refresh.
+- rc.2 tool calls and results use cosyncing's generic cards with their arguments,
+  output and error state. DSH's specialized client-side tool cards remain native.
+- Image attachments are delivered as bytes. Image-only echoes retain their native
+  identity. Durable image previews use session-authorized readback and the
+  broker's artifact delivery, bounded to 4 MiB per image and 16 previews per
+  history read. Larger or unavailable previews are reported explicitly.
 - A background resident tab does not keep a DSH subscription. Foregrounding it
-  reattaches and catches up from history.
+  refreshes the roster, reattaches explicitly in live mode and catches up from
+  history, while its cached transcript and unsent draft remain resident.
+  A visible window retains its subscription when input focus moves elsewhere;
+  hiding it releases transport, and returning it to view resumes the session.
+  After the last foreground client leaves, the broker's reconnect grace ends
+  even when native work or a decision is pending. Its adapter subscription then
+  closes and unanswered interactions return to the host; the native session keeps
+  running independently.
 - The adapter fails closed when host identity cannot be verified or a session
-  has been removed.
+  has been removed. A malformed roster is reported as a contract failure;
+  it cannot falsely remove an attached durable session after a native agent
+  becomes inactive.
 
 ## What is verified on 0.2, and what is not
 
 "0.2" here means one build: `0.2.0-rc.2`, the version the contract was captured
-from and the version every 0.2 result below was re-checked against. Recognition
-of a 0.2 host and its contract family covers the 0.2 line, but qualification
-does not: a different 0.2 build, including a later release candidate, has not
-been exercised and is not covered by the statements in this section.
+from and the version every 0.2 result below was re-checked against. A different
+0.2 build, including stable 0.2.0 or another release
+candidate, has not been qualified and is not covered by the statements below.
 
 What was captured from a running `0.2.0-rc.2` host and re-checked against one:
 starting a host without a browser window opening, becoming authenticated to it
@@ -130,17 +169,41 @@ it while a client reconnects, creating a session on a host that has no workspace
 registered, keeping the credential across a broker restart, and enrolling a host
 cosyncing does not own without touching that host's process.
 
-What has NOT been verified against 0.2 is anything that needs a real model turn on
-that host: prompt echoes, streamed replies, tool output cards, approval and
-question payloads, and image attachments. The 0.2 wire carries the same durable-log
-format that 0.1 did, and the mappings are shared, but shared code is not shared
-evidence — treat those surfaces as unverified on 0.2 until a capture says
-otherwise. Two further 0.2 limits are the host's own, not gaps in cosyncing: its
-roster carries no model column (its model catalog is host-wide and names no
-current selection), and its launch-token exchange is the only sign-in route, so
-there is no read-only credential to ask for.
+Additional contract captures used a disposable `0.2.0-rc.2` host and a local
+scripted provider. They exercised user echoes, streamed and settled text,
+follow replacement during partial output, read-tool results, approval allow/reject, blocking questions,
+timed questions and late answers, and image-only and caption-plus-image admission
+and durable readback. These captures made no real model requests and prove the
+adapter path, rather than provider-backed or visible browser acceptance.
 
-Still deferred: non-image file attachments, background resident subscriptions,
+Native Windows x64 and macOS arm64 passes also exercised basic managed launch,
+authentication, roster/history reads and external enrollment without a model request. A separate
+Linux pass made the real host fail at startup with disposable invalid configuration:
+three recovery attempts failed, then supervision refused further launches. These
+results cover basic lifecycle and startup suspension, rather than client UI or
+failure during a model turn.
+
+Separate provider-backed turns on a disposable Linux host exercised the actual
+adapter prompt path: streamed and settled replies, read-tool results, approval
+allow/reject, blocking questions, continued questions with late answers, image-only
+and caption-plus-image input, carrier replacement during output, and interruption.
+An owned process was also terminated during real streamed output: normal recovery
+started a replacement, cleared stale partial output, and completed a new turn after
+the consumer read the replacement history baseline. These are adapter outcomes;
+they do not qualify visible browser behavior.
+
+Visible cosyncing/native browser outcomes, two foreground cosyncing clients sharing
+a completed turn with the native browser, and broker restart during a turn remain
+acceptance work. A successful login, roster read, or transport test does not qualify
+those scenarios. The adapter remains experimental pending that evidence.
+
+Cold discovery refreshes durable model, reasoning effort, title, and permission
+projections instead of relying only on a stale cached roster cut. Reads are bounded
+to the newest 64 eligible cold sessions; failed reads retain the roster hint.
+The host's launch-token exchange remains the enrollment
+route; there is no separate read-only credential.
+
+Still deferred: non-image file attachments, background Observe subscriptions,
 session fork and search, subagents, workspace and settings mutation, goals as a
 first-class surface, credential and agent-preset management, and some
 DSH-specific message presentation.
@@ -191,3 +254,9 @@ another port, another machine — and it names that address for you to start, an
 still offers no `dsh web`: that command takes no address, so it would start a
 host at the default one instead. Not the host you are diagnosing, and possibly
 the one the service already manages.
+
+Authenticated service failures such as 5xx responses, service RPC failures, and
+timeouts follow the normal owned-host recovery policy. Missing or refused
+enrollment, unsafe credential storage, and address/Host-Origin faults require
+operator intervention and do not terminate a healthy owned host. An unsupported
+optional capability affects its own control rather than restarting the host.
