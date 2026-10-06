@@ -195,6 +195,58 @@ const COOKIE_NAME = dshCookieNameForOrigin(BASE);
     !detail.includes(TOKEN) && !detail.includes('v1.body.sig'), detail);
 }
 
+// Withdrawal must also stop a managed host whose launch token is still held.
+// The old token is renewal authority, not permission to undo `dsh disconnect`.
+for (const origin of ['stored', 'owned-exchange'] as const) {
+  let now = 1_700_000_000_000;
+  const store = memoryStore();
+  if (origin === 'stored') store.records.set('scope-test', {
+    name: COOKIE_NAME, value: 'v1.original', expiresAt: now + 20 * 86_400_000,
+  });
+  const { session, requests } = harness(() => okResponse(), { store, now: () => now });
+  session.adoptLaunchToken(TOKEN);
+  await session.ensure();
+  const before = requests.length;
+  store.records.clear();
+  const withdrawn = await session.ensure();
+  check(`${origin} owned enrollment withdrawal removes the usable header`,
+    withdrawn.state === 'absent' && withdrawn.reason === 'no-credential' && session.cookieHeader() === null);
+  await Promise.all([session.ensure(), session.ensure(), session.ensure()]);
+  session.adoptLaunchToken('replacement-owned-token');
+  await session.ensure();
+  check(`${origin} withdrawal cannot recreate enrollment using a retained or replacement launch token`,
+    requests.length === before && store.records.size === 0 && session.cookieHeader() === null);
+  store.records.set('scope-test', {
+    name: COOKIE_NAME, value: 'v2.re-enrolled', expiresAt: now + 20 * 86_400_000,
+  });
+  const recovered = await session.ensure();
+  check(`${origin} usable re-enrollment lifts withdrawal without spending a launch token`,
+    recovered.state === 'authenticated' && session.cookieHeader() === `${COOKIE_NAME}=v2.re-enrolled`
+      && requests.length === before);
+  now += 20 * 86_400_000 - 1000;
+  const renewed = await session.ensure();
+  check(`${origin} re-enrollment still permits bounded proactive owned renewal`,
+    renewed.state === 'authenticated' && requests.length === before + 1
+      && requests.at(-1)?.url.endsWith('token=replacement-owned-token') === true);
+}
+
+{
+  const store = memoryStore();
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v1.refused-owned', expiresAt: 2_000_000_000_000 });
+  const { session, requests } = harness(() => okResponse(), { store });
+  session.adoptLaunchToken(TOKEN);
+  await session.ensure();
+  session.reportCredentialRefused();
+  await tick();
+  const refusal = await session.ensure();
+  await session.ensure();
+  check('a refused owned enrollment remains refused and sends no token exchange',
+    refusal.reason === 'credential-refused' && session.cookieHeader() === null && requests.length === 0);
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v2.fresh-owned', expiresAt: 2_000_000_000_000 });
+  check('a refused owned enrollment accepts the operator supplied fresh credential',
+    (await session.ensure()).state === 'authenticated' && requests.length === 0);
+}
+
 // ── 3. Refusals ─────────────────────────────────────────────────────────────
 
 {

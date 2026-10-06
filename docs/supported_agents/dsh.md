@@ -80,7 +80,9 @@ does not read it, and the file is written owner-only.
 
 An already attached session resumes after successful re-enrollment through a fresh
 authenticated handshake and session baseline. Disconnect keeps it withdrawn until
-a usable credential is supplied again.
+a usable credential is supplied again. A retained managed-launch token cannot
+undo a withdrawal or a refused enrollment; renewal resumes after successful
+re-enrollment.
 
 The cookie outlives both processes. Restart the broker, or restart the host, and
 cosyncing is still signed in — no re-paste, and no new launch URL to go hunting
@@ -118,6 +120,11 @@ re-enrolling when what actually went wrong is something else.
 - The host's own slash commands — `compact`, `export`, `feedback`, `goal`,
   `permission`, `plan` on a default install — read from the live registry
   rather than a fixed list, so a deployment's own commands appear too.
+- On rc.2, native commands expose no model or reasoning override parameter.
+  Compaction uses the host's configured summarization model or durable request
+  selection, which can differ from the model selected for the next prompt.
+  Explicit command model/reasoning selection remains an unresolved integration
+  requirement and is not covered by per-prompt selection evidence.
 - Native catalog changes automatically refresh the attached model, reasoning,
   permission and command choices. Successful empty responses remove stale
   choices; a failed catalog read retains that surface's last successful value.

@@ -70,7 +70,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   needs the credential, so signing a host in connects it and disconnecting it
   withdraws the access rather than leaving a warm connection streaming on an
   authorization nobody holds any more. A replaced credential re-handshakes; a
-  withdrawn one does not reconnect.
+  withdrawn one does not reconnect, even when its managed-launch token remains
+  in memory. A refused enrollment waits for a usable replacement rather than
+  silently exchanging that token.
 - A DeepSeek Harness host that cosyncing cannot sign in to is left running.
   Missing, expired and refused credentials, an address the host will not answer,
   and an unreadable credential store are reported as their own diagnosis with

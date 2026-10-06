@@ -334,6 +334,8 @@ export class DshAuthSession {
    * remedies: withdraw the credential, or keep serving with the one in hand.
    */
   private storeBacked = false;
+  /** An observed withdrawal requires a usable enrollment before token renewal resumes. */
+  private enrollmentWithdrawn = false;
   /** Bumped every time the usable credential changes identity; see {@link onCredentialChange}. */
   private revisionValue = 0;
   private readonly credentialHandlers = new Set<(change: DshCredentialChange, revision: number) => void>();
@@ -517,6 +519,7 @@ export class DshAuthSession {
     this.ownership += 1;
     this.inFlight = undefined;
     this.refusedCookie = undefined;
+    this.enrollmentWithdrawn = false;
     this.publishCredential(undefined);
     this.launchToken = undefined;
     this.setState('absent', 'cancelled', 'the credential scope for this endpoint was replaced');
@@ -539,6 +542,7 @@ export class DshAuthSession {
     this.inFlight = undefined;
     if (reason === 'credential-refused') {
       const cookie = this.cookie;
+      this.enrollmentWithdrawn = true;
       this.publishCredential(undefined);
       if (cookie) void this.clearStored();
       // Remembered so a later readiness attempt can tell "this enrollment was
@@ -645,13 +649,14 @@ export class DshAuthSession {
     if (this.refusedCookie !== undefined && stored !== null && !sameCookie(this.refusedCookie, stored)) {
       this.refusedCookie = undefined;
     }
-    if (stored !== null && this.refusedCookie !== undefined) {
-      // The refused cookie is still what the store holds, which means the
-      // refusal's own cleanup did not take. Say the same thing again rather than
-      // put a refused credential back on the wire.
+    if (this.refusedCookie !== undefined) {
+      // Neither the refused record nor its cleanup is a fresh enrollment.
+      // Keep the refusal until the store supplies a different usable record;
+      // the owned launch token must not silently undo that refusal.
       this.setState('blocked', 'credential-refused',
-        `the DeepSeek Harness host refused the stored session cookie for ${new URL(this.baseUrl).host}. `
-        + 'Run `cosy dsh connect` again to enroll a fresh one.');
+        stored === null ? this.noCredentialDetail()
+          : `the DeepSeek Harness host refused the stored session cookie for ${new URL(this.baseUrl).host}. `
+            + 'Run `cosy dsh connect` again to enroll a fresh one.');
       return this.outcome();
     }
     if (stored) {
@@ -665,6 +670,7 @@ export class DshAuthSession {
         // From here the held credential IS the enrollment's record, so a later
         // empty read of that record means the enrollment was withdrawn.
         this.storeBacked = true;
+        this.enrollmentWithdrawn = false;
         // A session that was blocked, refused or simply not yet authenticated
         // republishes; a warm one does not, so a routine re-read of the
         // enrollment cannot flicker readiness through "exchanging" on every call.
@@ -695,7 +701,15 @@ export class DshAuthSession {
       // into the store (`storeBacked` false) is not such a record, and dropping
       // it would turn a broken credential file into a re-enrollment loop.
       this.storeBacked = false;
+      this.enrollmentWithdrawn = true;
       this.publishCredential(undefined);
+    }
+    if (this.enrollmentWithdrawn) {
+      // A launch token can renew an enrollment, but it cannot recreate one the
+      // operator withdrew. Even a later token adoption must await a usable
+      // record; ordinary expiry above remains eligible for owned renewal.
+      this.setState('absent', 'no-credential', this.noCredentialDetail());
+      return this.outcome();
     }
     // 2. The launch token, when we own the process that printed it.
     if (this.launchToken) {

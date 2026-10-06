@@ -1407,12 +1407,23 @@ for (const cause of ['abort', 'credential'] as const) {
 }
 
 // Enrollment repairs an existing attach through normal roster reads alone.
-for (const withdrawal of ['removed', 'refused'] as const) {
-  const h = harness();
+for (const cause of ['removed', 'refused'] as const) for (const owned of [false, true]) {
+  const withdrawal = `${cause}-${owned ? 'owned' : 'external'}`;
+  let exchanges = 0;
+  const h = harness({
+    cookie: { ...COOKIE, expiresAt: Date.now() + 20 * 86_400_000 },
+    authFetch: async () => {
+      exchanges += 1;
+      return { status: 303, headers: { get: (key) => key === 'set-cookie'
+        ? `${COOKIE.name}=v1.unrequested-enrollment; Max-Age=2592000; Path=/; HttpOnly`
+        : key === 'location' ? './' : null } };
+    },
+  });
+  if (owned) h.auth.adoptLaunchToken('fixture-owned-launch');
   await h.link.verify();
   const { connection } = attach(h);
   await flush();
-  if (withdrawal === 'removed') await h.store.clear('scope');
+  if (cause === 'removed') await h.store.clear('scope');
   else h.host.refuse = { status: 401, body: 'unauthorized' };
   await h.link.roster();
   await flush();
@@ -1420,13 +1431,13 @@ for (const withdrawal of ['removed', 'refused'] as const) {
   await expectRejection(`${withdrawal} enrollment refuses an attached prompt`, () => connection.sendPrompt({ text: 'blocked' }));
   await h.link.roster();
   await flush();
-  check(`${withdrawal} enrollment stays disconnected without a fresh credential`, h.host.sockets.length === 1);
+  check(`${withdrawal} enrollment stays disconnected without a fresh credential`, h.host.sockets.length === 1 && exchanges === 0);
   h.host.refuse = undefined;
-  await h.store.save('scope', { ...COOKIE, value: `v1.fresh-${withdrawal}` });
+  await h.store.save('scope', { ...COOKIE, value: `v1.fresh-${withdrawal}`, expiresAt: Date.now() + 20 * 86_400_000 });
   await Promise.all([h.link.roster(), h.link.roster(), h.link.roster()]);
   await flush();
   check(`${withdrawal} enrollment opens exactly one fresh authenticated handshake`,
-    h.host.sockets.length === 2 && h.host.live.headers.cookie === `${COOKIE.name}=v1.fresh-${withdrawal}`);
+    h.host.sockets.length === 2 && h.host.live.headers.cookie === `${COOKIE.name}=v1.fresh-${withdrawal}` && exchanges === 0);
   check(`${withdrawal} enrollment recovers follow and authority without reattach or verify`,
     h.link.isReady && h.host.opensFor('session/follow').length === 2 && await h.link.snapshotCursor(SESSION_ID) === SNAPSHOT.cursor);
   h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
