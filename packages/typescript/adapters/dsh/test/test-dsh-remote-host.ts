@@ -273,14 +273,16 @@ interface Harness {
 }
 
 function harness(options: {
+  host?: ScriptedHost;
   cookie?: DshCookie | null;
+  wrapRemoteFetch?: (fetch: DshFetch) => DshFetch;
   snapshotTimeoutMs?: number;
   authFetch?: DshAuthFetch;
   reconnectDelayMs?: number;
   setTimeout?: (handler: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
 } = {}): Harness {
-  const host = new ScriptedHost();
+  const host = options.host ?? new ScriptedHost();
   const cookies: Record<string, DshCookie> = {};
   if (options.cookie !== null) cookies.scope = options.cookie ?? COOKIE;
   const store = memoryStore(cookies);
@@ -291,7 +293,8 @@ function harness(options: {
     ...(options.authFetch ? { fetchImpl: options.authFetch } : { fetchImpl: async () => { throw new Error('no exchange scripted'); } }),
   });
   const diagnostics: Array<{ code: string; detail?: string }> = [];
-  const remote = new DshRemoteClient({ baseUrl: BASE_URL, headers: () => auth.authHeaders(), fetchImpl: host.fetchImpl });
+  const remote = new DshRemoteClient({ baseUrl: BASE_URL, headers: () => auth.authHeaders(),
+    fetchImpl: options.wrapRemoteFetch ? options.wrapRemoteFetch(host.fetchImpl) : host.fetchImpl });
   const link = new DshRemoteHostLink({
     baseUrl: BASE_URL,
     auth,
@@ -752,6 +755,51 @@ for (const cause of ['abort', 'credential'] as const) {
 }
 
 // ── Drive ───────────────────────────────────────────────────────────────────
+
+{
+  // rc.2 checks requestId against both native queued and durable user messages
+  // before accepting a prompt. Restarting only the broker leaves that native
+  // set alive, so restarting a process-local counter silently loses new turns.
+  const host = new ScriptedHost();
+  const admitted: Array<{ requestId: string; mode: unknown; text: string }> = [];
+  const seen = new Set<string>();
+  host.unaryHandlers.set('session/prompt', (args) => {
+    const request = args.request as { requestId: string; mode: unknown; content: Array<{ text?: string }> };
+    if (!seen.has(request.requestId)) {
+      seen.add(request.requestId);
+      admitted.push({ requestId: request.requestId, mode: request.mode, text: request.content.map((part) => part.text ?? '').join('') });
+    }
+    return { value: { accepted: true } };
+  });
+  const first = harness({ host });
+  await first.link.verify();
+  const before = attach(first).connection;
+  await flush();
+  await before.sendPrompt({ text: 'before restart one' });
+  await before.sendPrompt({ text: 'before restart two' });
+  await before.close(); first.link.stop();
+  const replacement = harness({ host });
+  await replacement.link.verify();
+  const after = attach(replacement).connection;
+  await flush();
+  await after.sendPrompt({ text: 'after restart queue' });
+  await after.runCommand('steer', 'after restart steer');
+  const writes = host.unaryCalls.filter((call) => call.endpoint === 'session/prompt');
+  check('new broker links do not reuse prompt identities already seen by the surviving native session',
+    admitted.length === 4 && seen.size === 4, JSON.stringify(admitted));
+  check('new queued and steering prompts are both admitted after a broker replacement',
+    admitted.some((request) => request.text === 'after restart queue' && request.mode === 'queue')
+      && admitted.some((request) => request.text === 'after restart steer' && request.mode === 'steer'));
+  check('broker replacement sends each fresh prompt once without retrying an acknowledged duplicate', writes.length === 4);
+  await after.close();
+  const reattached = attach(replacement).connection;
+  await flush();
+  await reattached.sendPrompt({ text: 'after channel replacement' });
+  check('a replacement channel also keeps its new prompt distinct from previous native requests',
+    admitted.length === 5 && admitted.at(-1)?.text === 'after channel replacement'
+      && host.unaryCalls.filter((call) => call.endpoint === 'session/prompt').length === 5);
+  await reattached.close(); replacement.link.stop();
+}
 
 {
   const h = harness();
@@ -1406,6 +1454,36 @@ for (const cause of ['abort', 'credential'] as const) {
   h.link.stop();
 }
 
+// rc.2 forwards initializer failures as strings and agent failures as error chains.
+{
+  const h = harness(); await h.link.verify();
+  const { messages } = attach(h); await flush();
+  const events = h.host.stream('$events');
+  h.host.live.item(events.streamId, {
+    type: 'emit', event: 'api-session/error',
+    args: [SESSION_ID, 'The fixture provider is temporarily unavailable.'],
+  });
+  await flush();
+  check('a captured scalar native error preserves the actual failure detail',
+    messages.filter((message) => message.type === 'error').length === 1
+      && messages.some((message) => message.type === 'error'
+        && message.message === 'The fixture provider is temporarily unavailable.'));
+  h.host.live.item(events.streamId, {
+    type: 'emit', event: 'api-session/error', args: [SESSION_ID, [
+      { name: 'ProviderError', message: 'The fixture request failed.' },
+      { name: 'TransportError', message: 'HTTP 503.' },
+    ]],
+  });
+  await flush();
+  check('native error-chain details remain intact alongside scalar notifications',
+    messages.filter((message) => message.type === 'error').length === 2
+      && messages.some((message) => message.type === 'error'
+        && message.message === 'The fixture request failed.\nHTTP 503.'));
+  check('a native provider error leaves the healthy event authority and carrier live',
+    h.link.isReady && h.host.sockets.length === 1 && h.host.eventResults.length === 0);
+  h.link.stop();
+}
+
 // Enrollment repairs an existing attach through normal roster reads alone.
 for (const cause of ['removed', 'refused'] as const) for (const owned of [false, true]) {
   const withdrawal = `${cause}-${owned ? 'owned' : 'external'}`;
@@ -1907,6 +1985,203 @@ for (const event of ['settings/document-updated', 'plugin-manager/changed', 'llm
     before.some(m => m.value === 'before-change') && after.some(m => m.value === 'after-change')
       && !after.some(m => m.value === 'before-change') && h.host.sockets.length === 1 && h.link.isReady
       && !h.diagnostics.some(d => d.code === 'forwarded-event-unmapped' && d.detail === event));
+  h.link.stop();
+}
+
+// A catalog read started before native invalidation must not poison later pickers.
+for (const replacement of [['new-preset'], []] as string[][]) {
+  let release!: () => void;
+  let held = false;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const h = harness({ wrapRemoteFetch: (fetch) => async (url, init) => {
+    const response = await fetch(url, init);
+    if (url.endsWith('/permissionPresets/catalog') && !held) {
+      held = true;
+      await gate;
+    }
+    return response;
+  } });
+  await h.link.verify(); const { connection } = attach(h); await flush();
+  let catalog = ['obsolete-preset'];
+  h.host.unaryHandlers.set('permissionPresets/catalog', () => ({ value: {
+    options: catalog.map(value => ({ value, name: value })), defaultPreset: catalog[0],
+  } }));
+  const obsoleteRead = connection.listModes(); await flush();
+  catalog = replacement;
+  h.host.live.item(h.host.stream('$events').streamId, {
+    type: 'emit', event: 'permission-presets/catalog-changed', args: [],
+  });
+  await flush();
+  const current = await connection.listModes();
+  const label = replacement.length ? 'replacement' : 'empty replacement';
+  check(`native catalog ${label} removes obsolete picker choices`,
+    !current.some(mode => mode.value === 'obsolete-preset')
+      && (replacement.length ? current.some(mode => mode.value === 'new-preset') : current.length === 0));
+  release(); await obsoleteRead;
+  const later = await connection.listModes();
+  check(`a late pre-invalidation reply cannot undo the catalog ${label}`,
+    !later.some(mode => mode.value === 'obsolete-preset')
+      && (replacement.length ? later.some(mode => mode.value === 'new-preset') : later.length === 0)
+      && h.host.sockets.length === 1 && h.link.isReady);
+  h.link.stop();
+}
+
+// Credential renewal can recreate the mux with the same numeric generation.
+for (const replacement of [['fresh-enrollment-preset'], []] as string[][]) {
+  const h = harness({ cookie: { ...COOKIE, expiresAt: Date.now() + 20 * 86_400_000 } });
+  await h.link.verify(); const { connection } = attach(h); await flush();
+  let catalog = ['old-enrollment-preset'];
+  h.host.unaryHandlers.set('permissionPresets/catalog', () => ({ value: {
+    options: catalog.map(value => ({ value, name: value })), defaultPreset: catalog[0],
+  } }));
+  const before = await connection.listModes();
+  const oldGeneration = h.link.generation;
+  await h.store.clear('scope'); await h.link.roster(); await flush();
+  const withdrawn = !h.link.isReady && !h.link.carrierRunning;
+  catalog = replacement;
+  await h.store.save('scope', { ...COOKIE, value: 'v1.fresh-catalog-enrollment', expiresAt: Date.now() + 20 * 86_400_000 });
+  await Promise.all([h.link.roster(), h.link.roster()]); await flush();
+  const current = await connection.listModes();
+  const label = replacement.length ? 'replacement' : 'empty replacement';
+  check(`preset catalog ${label} exercises attached renewal with a reused generation`,
+    before.some(mode => mode.value === 'old-enrollment-preset') && withdrawn
+      && h.link.isReady && h.host.sockets.length === 2 && oldGeneration === h.link.generation);
+  check(`a fresh authenticated handshake reloads the preset catalog ${label}`,
+    !current.some(mode => mode.value === 'old-enrollment-preset')
+      && (replacement.length ? current.some(mode => mode.value === 'fresh-enrollment-preset') : current.length === 0)
+      && h.host.unaryCalls.filter(call => call.endpoint === 'permissionPresets/catalog').length >= 2);
+  h.link.stop();
+}
+
+// A host-scoped catalog can outlive withdrawal; the mutation waiting on it cannot.
+for (const selector of ['model', 'permission'] as const) for (const operation of ['prompt', 'command'] as const)
+  for (const loss of ['withdrawal', 'carrier', 'close'] as const) {
+    const endpoint = selector === 'model' ? 'session/modelCatalog' : 'permissionPresets/catalog';
+    let release!: () => void;
+    let held = false;
+    const timers: Array<{ run: () => void; ms: number; cancelled: boolean }> = [];
+    const h = harness({
+      wrapRemoteFetch: fetch => async (url, init) => {
+        const response = await fetch(url, init);
+        if (url.endsWith('/' + endpoint) && !held) {
+          held = true;
+          await new Promise<void>(resolve => { release = resolve; });
+        }
+        return response;
+      },
+      reconnectDelayMs: 50,
+      setTimeout: (run, ms) => { const timer = { run, ms, cancelled: false }; timers.push(timer); return timer; },
+      clearTimeout: handle => { (handle as typeof timers[number]).cancelled = true; },
+    });
+    h.host.unaryHandlers.set('permissionPresets/catalog', () => ({ value: {
+      options: [{ value: 'read-only', name: 'Read only' }],
+    } }));
+    h.host.unaryHandlers.set('commands/list', () => ({ value: [{ name: 'compact' }, { name: 'permission' }] }));
+    h.host.unaryHandlers.set('commands/execute', () => ({ value: { commandId: 'fenced-command', result: { kind: 'success' } } }));
+    h.host.unaryHandlers.set('session/selectModel', () => ({ value: { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } } }));
+    h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+    await h.link.verify(); const { connection } = attach(h); await flush();
+    const input = selector === 'model'
+      ? { model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' } }
+      : { permissionMode: 'read-only' };
+    const run = (target: DshSessionConnection) => operation === 'prompt'
+      ? target.sendPrompt({ text: 'Explicit mutation lifetime witness', ...input })
+      : target.runCommand('compact', undefined, input);
+    let rejected = false;
+    const old = run(connection).catch(() => { rejected = true; });
+    await flush();
+    if (loss === 'withdrawal') {
+      await h.store.clear('scope'); await h.link.roster(); await flush();
+      await h.store.save('scope', { ...COOKIE, value: 'v1.new-mutation-authority' });
+      await h.link.roster(); await flush();
+    } else if (loss === 'carrier') {
+      h.host.live.dropSocket(); await flush();
+      const reconnect = timers.findLast(timer => timer.ms === 50 && !timer.cancelled);
+      reconnect?.run(); await flush();
+    } else {
+      await connection.close();
+    }
+    const label = `${operation} ${selector} catalog across ${loss}`;
+    check(`${label} reaches a held read and a healthy replacement authority`,
+      held && h.link.isReady && h.host.sockets.length === (loss === 'close' ? 1 : 2));
+    const mark = h.host.unaryCalls.length;
+    release(); await old;
+    check(`${label} rejects the old mutation even after readiness returns`, rejected);
+    check(`${label} sends no selection, permission, prompt or command after the old read lands`,
+      !h.host.unaryCalls.slice(mark).some(call => ['session/selectModel', 'session/prompt', 'commands/execute'].includes(call.endpoint)));
+    const current = loss === 'close' ? attach(h).connection : connection;
+    const freshMark = h.host.unaryCalls.length;
+    await run(current);
+    check(`${label} permits one explicitly new mutation without reconnecting again`,
+      h.host.unaryCalls.slice(freshMark).filter(call => operation === 'prompt'
+        ? call.endpoint === 'session/prompt'
+        : call.endpoint === 'commands/execute' && call.args.line === '/compact').length === 1
+        && h.host.sockets.length === (loss === 'close' ? 1 : 2));
+    await current.close(); h.link.stop();
+  }
+
+// A follow-only retry invalidates transcript, not the authority of a parked send.
+{
+  let release!: () => void;
+  let held = false;
+  const h = harness({ wrapRemoteFetch: fetch => async (url, init) => {
+    const response = await fetch(url, init);
+    if (url.endsWith('/session/modelCatalog') && !held) {
+      held = true;
+      await new Promise<void>(resolve => { release = resolve; });
+    }
+    return response;
+  } });
+  h.host.unaryHandlers.set('session/selectModel', () => ({ value: { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } }));
+  h.host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+  await h.link.verify(); const { connection } = attach(h); await flush();
+  const oldFollow = h.host.stream('session/follow').streamId;
+  const send = connection.sendPrompt({ text: 'The event authority remains healthy', model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash' } });
+  await flush(); h.host.live.end(oldFollow); await flush();
+  check('a parked mutation sees a real follow replacement with the same event authority',
+    held && h.link.isReady && h.host.sockets.length === 1 && h.host.stream('session/follow').streamId !== oldFollow);
+  release(); await send;
+  check('follow-only recovery permits the existing send exactly once',
+    h.host.unaryCalls.filter(call => call.endpoint === 'session/prompt').length === 1);
+  await connection.close(); h.link.stop();
+}
+
+// Native command selection configures the next prompt, not command arguments.
+{
+  const h = harness(); await h.link.verify();
+  const { connection } = attach(h); await flush();
+  h.host.unaryHandlers.set('commands/list', () => ({ value: [{ name: 'compact' }] }));
+  h.host.unaryHandlers.set('commands/execute', () => ({ value: { commandId: 'selected-command', result: { kind: 'success' } } }));
+  h.host.unaryHandlers.set('session/selectModel', () => ({ value: { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } } }));
+  await connection.runCommand('compact', undefined, { model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' } });
+  const calls = h.host.unaryCalls;
+  const selection = calls.find(call => call.endpoint === 'session/selectModel');
+  check('native command model and effort use the captured next-prompt selection before execution',
+    selection !== undefined && calls.indexOf(selection) < calls.findIndex(call => call.endpoint === 'commands/execute')
+      && JSON.stringify(selection.args) === JSON.stringify({ request: { sessionId: SESSION_ID, provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } }));
+  const executions = calls.filter(call => call.endpoint === 'commands/execute');
+  check('native command selection submits one unchanged command envelope without override fields',
+    executions.length === 1 && JSON.stringify(executions[0]?.args) === JSON.stringify({ agentId: SESSION_ID, line: '/compact', submittedAttachments: [] }));
+  h.host.live.item(h.host.stream('session/control').streamId, { type: 'projection', sessionId: SESSION_ID, key: 'modelSelection', seq: 3,
+    value: { next: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } } });
+  await flush(); const mark = calls.length;
+  await connection.runCommand('compact', undefined, { model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' } });
+  check('a command using the native next selection does not repeat its selection write',
+    !calls.slice(mark).some(call => call.endpoint === 'session/selectModel') && calls.slice(mark).filter(call => call.endpoint === 'commands/execute').length === 1);
+  h.link.stop();
+}
+for (const fault of ['refused', 'generation-lost'] as const) {
+  const h = harness(); await h.link.verify(); const { connection } = attach(h); await flush();
+  h.host.unaryHandlers.set('commands/list', () => ({ value: [{ name: 'compact' }] }));
+  h.host.unaryHandlers.set('commands/execute', () => ({ value: { commandId: 'must-not-execute', result: { kind: 'success' } } }));
+  h.host.unaryHandlers.set('session/selectModel', () => {
+    if (fault === 'refused') return { error: { code: 'session/model-unavailable', message: 'the native selection was refused' } };
+    h.link.stop(); return { value: { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } };
+  });
+  await expectRejection(`native command does not execute after ${fault} model selection`, () => connection.runCommand('compact', undefined,
+    { model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' } }));
+  check(`native command ${fault} model selection sends no command or retry`,
+    h.host.unaryCalls.filter(call => call.endpoint === 'session/selectModel').length === 1 && !h.host.unaryCalls.some(call => call.endpoint === 'commands/execute'));
   h.link.stop();
 }
 

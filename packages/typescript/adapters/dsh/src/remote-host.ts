@@ -31,6 +31,7 @@
  * same vocabulary instead of rewriting them per family.
  */
 
+import { randomUUID } from 'node:crypto';
 import { PRODUCT_IDENTITY } from '@cosyncing/adapter-api';
 import {
   DshDriveError,
@@ -635,7 +636,6 @@ export class DshRemoteHostLink {
   private rosterReconciliation?: Promise<void>;
   private rosterDirty = false;
   private readonly sessions = new Map<string, SessionRuntime>();
-  private readonly requestSeq = { value: 0 };
   private mux?: DshMuxClient;
   private events?: DshEventLink;
   private controlStream?: DshMuxStream;
@@ -667,6 +667,7 @@ export class DshRemoteHostLink {
   /** Host-wide permission-preset catalog, valid for one carrier generation. */
   private permissionCatalogValue?: readonly DshPermissionOption[];
   private permissionCatalogCarrier = -1;
+  private permissionCatalogRevision = 0;
   private started = false;
   private stopped = false;
   private readonly lostHandlers = new Set<(reason: string) => void>();
@@ -1161,7 +1162,9 @@ export class DshRemoteHostLink {
    */
   channel(sessionId: string): DshRemoteSessionChannel {
     return new DshRemoteSessionChannel(this, this.remote, sessionId, {
-      newRequestId: () => `cosyncing-${String(++this.requestSeq.value)}`,
+      // The native session deduplicates these against its durable user messages.
+      // Its lifetime can span multiple broker processes and host-link instances.
+      newRequestId: () => `cosyncing-${randomUUID()}`,
       pageMessages: this.pageMessages,
     });
   }
@@ -1278,7 +1281,8 @@ export class DshRemoteHostLink {
   }
 
   /**
-   * The host's permission-preset catalog, read once per carrier generation.
+   * The host's permission-preset catalog, cached until a fresh handshake or
+   * native catalog invalidation.
    *
    * Cached because it is host-wide and the composer asks for it on every
    * attach; scoped to the carrier because a host that came back under a new
@@ -1288,6 +1292,7 @@ export class DshRemoteHostLink {
    */
   async permissionCatalog(): Promise<DshPermissionCatalog | undefined> {
     const carrier = this.generation;
+    const revision = this.permissionCatalogRevision;
     if (this.permissionCatalogValue && this.permissionCatalogCarrier === carrier) {
       return { options: this.permissionCatalogValue };
     }
@@ -1297,8 +1302,12 @@ export class DshRemoteHostLink {
     if (!outcome.ok) return undefined;
     const options = dshPermissionOptions(outcome.value);
     if (options.length === 0) return undefined;
-    this.permissionCatalogValue = options;
-    this.permissionCatalogCarrier = carrier;
+    // Host-scoped reads may finish after a native catalog update. Their old
+    // snapshot must not replace the cache used by subsequent attached pickers.
+    if (carrier === this.generation && revision === this.permissionCatalogRevision) {
+      this.permissionCatalogValue = options;
+      this.permissionCatalogCarrier = carrier;
+    }
     const row = record(outcome.value);
     const defaultPreset = optionalString(row?.defaultPreset);
     return { options, ...(defaultPreset ? { defaultPreset } : {}) };
@@ -1635,6 +1644,11 @@ export class DshRemoteHostLink {
   // ── Events ────────────────────────────────────────────────────────────────
 
   private onCarrierOpen(carrier: number): void {
+    // Credential replacement creates a new mux whose numeric generation may
+    // repeat. Neither its cache nor a late read from the old handshake is current.
+    this.permissionCatalogRevision += 1;
+    this.permissionCatalogValue = undefined;
+    this.permissionCatalogCarrier = -1;
     this.stopWorkspace();
     this.workspaceRetries = 0;
     this.workspaceWithdrawn = false;
@@ -1990,7 +2004,7 @@ export class DshRemoteHostLink {
     }
     if (event === 'api-session/error') {
       const messages = (Array.isArray(args[1]) ? args[1] : [args[1]])
-        .flatMap((raw) => optionalString(record(raw)?.message) ?? []).join('\n').slice(0, 2000);
+        .flatMap((raw) => optionalString(raw) ?? optionalString(record(raw)?.message) ?? []).join('\n').slice(0, 2000);
       connection?.handleHostFrame(bridgeFrame('host/agent-error', event, { message: messages || 'The DeepSeek Harness agent reported an error.' })); return;
     }
     if (event === 'api-session/added') {
@@ -2006,6 +2020,7 @@ export class DshRemoteHostLink {
     }
     if (['permission-presets/catalog-changed', 'llm/adapters-updated', 'commands/change',
       'agent-preset/selected', 'settings/document-updated', 'plugin-manager/changed', 'credentials/record-updated', 'credentials/reference-updated'].includes(event)) {
+      this.permissionCatalogRevision += 1;
       this.permissionCatalogValue = undefined; this.permissionCatalogCarrier = -1;
       this.onCatalogChanged?.();
       this.onHostChanged?.(); return;

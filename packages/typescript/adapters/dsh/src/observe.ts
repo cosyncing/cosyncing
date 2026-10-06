@@ -224,6 +224,7 @@ export class DshSessionConnection implements SessionConnection {
   private hostLastSeq?: number;
   private jobs: unknown[] = [];
   private closed = false;
+  private mutationRevision = 0;
   /** Set by `host/session-removed`: the session is gone upstream — mutations refuse, transient/control frames drop, durable transcript events still flow. */
   private removed = false;
   private archived = false;
@@ -784,6 +785,7 @@ export class DshSessionConnection implements SessionConnection {
    */
   onGenerationLost(): void {
     if (this.closed) return;
+    this.mutationRevision += 1;
     this.onTranscriptLost();
     this.projections.clear();
     this.resetImageReads();
@@ -826,6 +828,7 @@ export class DshSessionConnection implements SessionConnection {
    * nothing has proven).
    */
   private assertMutable(action: string): void {
+    if (this.closed) throw new Error(`cannot ${action}: this DeepSeek Harness connection was closed`);
     if (this.removed) {
       throw new Error(`cannot ${action}: this session was removed from the DeepSeek Harness host`);
     }
@@ -835,6 +838,17 @@ export class DshSessionConnection implements SessionConnection {
     if (this.mutationReady && !this.mutationReady()) {
       throw new Error(`cannot ${action}: the DeepSeek Harness host link is re-verifying; retry in a moment`);
     }
+  }
+
+  /** Catalog reads may survive authority loss; their waiting mutation may not. */
+  private mutationGuard(action: string): () => void {
+    const revision = this.mutationRevision;
+    return () => {
+      this.assertMutable(action);
+      if (revision !== this.mutationRevision) {
+        throw new Error(`cannot ${action}: the DeepSeek Harness event authority changed; submit a new operation`);
+      }
+    };
   }
 
   private archivedControl(): NonNullable<SessionInfo['control']> {
@@ -847,20 +861,22 @@ export class DshSessionConnection implements SessionConnection {
   }
 
   private async submitPrompt(input: PromptInput, mode: 'queue' | 'steer'): Promise<void> {
-    this.assertMutable(mode === 'steer' ? 'steer the running turn' : 'send a prompt');
+    const guard = this.mutationGuard(mode === 'steer' ? 'steer the running turn' : 'send a prompt');
+    guard();
     // Selectors FIRST. dsh has no per-prompt model or permission field, so a
     // "per-prompt override" is really two durable session changes followed by a
     // send. Ordering is not cosmetic: a prompt that raced ahead of its own
     // selectors would run under the previous model or the previous permission
     // preset — silently, and with the UI showing the new one.
-    await this.applyModelSelection(input.model);
-    await this.applyPermissionMode(input.permissionMode);
+    await this.applyModelSelection(input.model, guard);
+    guard();
+    await this.applyPermissionMode(input.permissionMode, guard);
     const clientMessageId = input.clientMessageId;
     // Re-guarded after the selectors, because both of them AWAIT. A guard taken
     // before a wait proves nothing about the moment after it: the generation
     // can be lost while a catalog read or a switch command is parked, and this
     // send would then land on an epoch nothing has re-baselined.
-    this.assertMutable('send a prompt');
+    guard();
     await this.channel.prompt(this.info.id, input, {
       mode,
       imageLimits: this.imageLimits(),
@@ -896,10 +912,11 @@ export class DshSessionConnection implements SessionConnection {
    * so an unchanged picker costs no write at all — which is what keeps an
    * ordinary send a single RPC.
    */
-  private async applyModelSelection(model: PromptInput['model']): Promise<void> {
+  private async applyModelSelection(model: PromptInput['model'], guard: () => void): Promise<void> {
     if (!model) return;
     this.assertMutable('select a model');
     const catalog = await this.channel.models(this.info.id);
+    guard();
     const wanted = {
       provider: model.providerID,
       model: model.modelID,
@@ -932,10 +949,11 @@ export class DshSessionConnection implements SessionConnection {
    * projection and registers no `permission` command, and silently skipping the
    * switch there would run the turn under the wrong policy.
    */
-  private async applyPermissionMode(mode: string | undefined): Promise<void> {
+  private async applyPermissionMode(mode: string | undefined, guard: () => void): Promise<void> {
     if (mode === undefined) return;
     this.assertMutable('select a permission mode');
     const select = await this.permissionSelect();
+    guard();
     if (!select) {
       throw new Error(
         'this DeepSeek Harness deployment composes no permission service, so it has no permission mode to select',
@@ -946,6 +964,7 @@ export class DshSessionConnection implements SessionConnection {
     }
     if (select.currentValue === mode) return;
     const roster = await this.channel.listCommands(this.info.id);
+    guard();
     if (!roster.some((command) => command.name === DSH_PERMISSION_COMMAND)) {
       throw new Error(
         'this DeepSeek Harness host advertises permission modes but no command to switch them, so the mode was not changed',
@@ -1316,16 +1335,21 @@ export class DshSessionConnection implements SessionConnection {
       await this.submitPrompt({ ...input, text }, 'steer');
       return;
     }
-    this.assertMutable(`run "${name}"`);
+    const guard = this.mutationGuard(`run "${name}"`);
+    guard();
     const roster = await this.channel.listCommands(this.info.id);
+    guard();
     if (!roster.some((command) => command.name === name)) {
       throw new Error(`dsh has no command "${name}"`);
     }
     // Re-guarded after the roster read: the lookup awaited, and the generation
     // it was issued under may have ended while it was in flight.
     this.assertMutable(`run "${name}"`);
-    await this.applyPermissionMode(input?.permissionMode);
-    this.assertMutable(`run "${name}"`);
+    await this.applyPermissionMode(input?.permissionMode, guard);
+    guard();
+    // rc.2 selects the next prompt; its command envelope has no model override.
+    if (this.channel.family === 'remote-0.2') await this.applyModelSelection(input?.model, guard);
+    guard();
     const trimmed = args?.trim() ?? '';
     const execution = await this.channel.executeCommand(
       this.info.id,

@@ -82,7 +82,9 @@ An already attached session resumes after successful re-enrollment through a fre
 authenticated handshake and session baseline. Disconnect keeps it withdrawn until
 a usable credential is supplied again. A retained managed-launch token cannot
 undo a withdrawal or a refused enrollment; renewal resumes after successful
-re-enrollment.
+re-enrollment. Requests waiting on catalog reads are fenced when event authority
+ends or the connection closes. After recovery, submit a new prompt or command;
+the old request cannot resume merely because readiness returns.
 
 The cookie outlives both processes. Restart the broker, or restart the host, and
 cosyncing is still signed in — no re-paste, and no new launch URL to go hunting
@@ -120,13 +122,16 @@ re-enrolling when what actually went wrong is something else.
 - The host's own slash commands — `compact`, `export`, `feedback`, `goal`,
   `permission`, `plan` on a default install — read from the live registry
   rather than a fixed list, so a deployment's own commands appear too.
-- On rc.2, native commands expose no model or reasoning override parameter.
-  Compaction uses the host's configured summarization model or durable request
-  selection, which can differ from the model selected for the next prompt.
-  Explicit command model/reasoning selection remains an unresolved integration
-  requirement and is not covered by per-prompt selection evidence.
+- On rc.2, model and reasoning selections submitted with a native command apply
+  to the next prompt, matching the native client. The command API has no model
+  override parameter. Compaction uses the host's configured summarization model
+  or durable request selection, which can differ from that next-prompt choice;
+  it does not forward the selected reasoning effort to its summarization request.
 - Native catalog changes automatically refresh the attached model, reasoning,
-  permission and command choices. Successful empty responses remove stale
+  permission and command choices. Late preset-catalog reads cannot undo a newer
+  invalidation. A fresh authenticated handshake reloads presets even when the
+  transport's numeric generation repeats after credential renewal.
+  Successful empty responses remove stale
   choices; a failed catalog read retains that surface's last successful value.
 - Assistant text and reasoning follow the host's transient attempt/revision/index
   stream. Reconnect baselines replace partial output, and durable messages settle
@@ -199,10 +204,16 @@ started a replacement, cleared stale partial output, and completed a new turn af
 the consumer read the replacement history baseline. These are adapter outcomes;
 they do not qualify visible browser behavior.
 
-Visible cosyncing/native browser outcomes, two foreground cosyncing clients sharing
-a completed turn with the native browser, and broker restart during a turn remain
-acceptance work. A successful login, roster read, or transport test does not qualify
-those scenarios. The adapter remains experimental pending that evidence.
+A local scripted-provider browser pass verified shared completed turns in two
+foreground cosyncing clients and the native browser, visible read-tool input and
+output, and an approval answered through cosyncing. Model-backed browser outcomes
+and the remaining browser recovery and interaction scenarios remain acceptance
+work. A successful login, roster read, or transport test does not qualify those
+scenarios. The adapter remains experimental pending that evidence.
+
+Forwarded native errors preserve both scalar messages and error-chain details.
+A model-provider failure leaves a healthy authenticated host eligible for the
+next turn; it does not itself establish a host-process failure.
 
 Cold discovery refreshes durable model, reasoning effort, title, and permission
 projections instead of relying only on a stale cached roster cut. Reads are bounded
@@ -224,6 +235,11 @@ received. That refusal is the correct behaviour for the types it does not
 support and should not be read as a statement about DSH. A path is not a
 substitute for uploading either way: DSH may run on another machine, where a
 broker-local path names nothing it can open.
+
+New rc.2 prompts use distinct request identities across broker restarts and
+connection replacements. The native host deduplicates these identities against
+queued and durable user messages. Ambiguous prompt failures still require an
+explicit new user action; cosyncing does not automatically retry the prompt.
 
 The upstream host exposes one writable client contract rather than a separate
 read-only Observe credential, so cosyncing accepts only an explicit foreground

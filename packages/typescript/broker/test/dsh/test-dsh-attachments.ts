@@ -161,7 +161,8 @@ check(
   check(
     'a staged non-image is refused on its type, with nothing sent',
     refused instanceof DshDriveError
-      && refused.message.includes('accepts images but not other file attachments')
+      && refused.code === 'attachment-unsupported'
+      && refused.message.includes('adapter supports image attachments only')
       && sent.length === 0,
     refused instanceof Error ? refused.message : String(refused),
   );

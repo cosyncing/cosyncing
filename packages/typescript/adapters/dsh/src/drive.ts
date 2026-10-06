@@ -54,18 +54,15 @@ export class DshDriveError extends Error {
 /**
  * Non-image files are refused rather than silently dropped.
  *
- * This is a host limit, not a deferral. `session.prompt` accepts exactly two
- * content parts — text and image — and nothing in the API takes a general file:
- * `session.attachment` READS one durable image back after proving the session
- * log references it. Sending the text alone would deliver a prompt referring to
- * a file the agent never received, which reads to the user as the agent
- * ignoring them.
+ * The adapter currently stages text and images. DSH 0.2 has a separate file
+ * upload surface that this adapter does not expose. Sending the text alone
+ * would deliver a prompt referring to a file the agent never received.
  *
  * A PATH is not an option either, the way it is for Claude: dsh may run on
  * another machine, so a broker-local path names nothing the host can open.
  */
 export const DSH_FILE_UNSUPPORTED =
-  'The DeepSeek Harness host accepts images but not other file attachments; paste the file’s contents as text instead.';
+  'Cosyncing’s DeepSeek Harness adapter supports image attachments only; paste the file’s contents as text instead.';
 
 /** Refused before anything is read: an attachment that arrived without staging. */
 export const DSH_FILE_UNSTAGED = 'a DeepSeek Harness attachment arrived without a staged broker path';

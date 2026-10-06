@@ -38,8 +38,22 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   timed/continued questions, retains pending decisions through follow-only
   recovery, and resumes already attached sessions after re-enrollment. A fresh
   carrier resets exhausted transient follow retries while terminal session
-  refusals remain withdrawn. Authenticated service faults follow owned-host
+  refusals remain withdrawn. Native preset catalog refreshes also resist late
+  replies that would restore obsolete or removed choices, and a fresh
+  authenticated handshake reloads presets after credential renewal.
+  Prompts and commands waiting on catalog reads also stop across enrollment
+  withdrawal, carrier replacement or connection close; a fresh user action
+  remains available after recovery.
+  Fresh prompt identities remain distinct across broker restarts, so a surviving
+  native session cannot mistake a new queued or steering prompt for an old one.
+  Authenticated service faults follow owned-host
   recovery instead of being misclassified as enrollment faults.
+  Forwarded native agent errors retain their original failure details.
+- Model and reasoning selections submitted with a native DSH rc.2 command now
+  apply to the next prompt, matching the native client. Compaction retains the
+  host's own summarization-model policy and does not forward the selected effort.
+- Non-image DSH attachment refusals now identify cosyncing's adapter limitation;
+  the rc.2 host has its own file upload surface.
 - DSH current-model and workspace information now reaches cold and attached
   sessions. Native queue cancellation and archive changes converge without
   treating an inactive agent as a deleted durable session. Malformed roster
