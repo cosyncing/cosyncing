@@ -210,7 +210,8 @@ for (const origin of ['stored', 'owned-exchange'] as const) {
   store.records.clear();
   const withdrawn = await session.ensure();
   check(`${origin} owned enrollment withdrawal removes the usable header`,
-    withdrawn.state === 'absent' && withdrawn.reason === 'no-credential' && session.cookieHeader() === null);
+    withdrawn.state === 'absent' && withdrawn.reason === 'no-credential' && session.cookieHeader() === null
+      && withdrawn.detail.includes('withdrawn') && withdrawn.detail.includes('cosy dsh connect'));
   await Promise.all([session.ensure(), session.ensure(), session.ensure()]);
   session.adoptLaunchToken('replacement-owned-token');
   await session.ensure();

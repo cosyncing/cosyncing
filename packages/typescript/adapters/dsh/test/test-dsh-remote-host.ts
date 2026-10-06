@@ -1501,10 +1501,30 @@ for (const kind of ['approval', 'question'] as const) {
       messages.filter((m) => m.type === 'permission-resolved' && m.requestId === eventId).length === 1
       && messages.some((m) => m.type === 'permission-resolved' && m.requestId === eventId && m.decision === 'approve'));
   } else {
-    h.host.live.item(events.streamId, { type: 'cancel', eventId });
+    await Promise.all([
+      connection.answerQuestion(eventId, [['yes']]),
+      connection.answerQuestion(eventId, [['yes']]),
+    ]);
+    await expectRejection('follow recovery cannot answer the question twice',
+      () => connection.answerQuestion(eventId, [['yes']]));
+    h.host.live.item(events.streamId, { type: 'cancel', eventId }); await flush();
+    check('follow recovery answers once on the original question authority and settles one card',
+      h.host.eventResults.length === 1 && h.host.eventResults[0]?.eventId === eventId
+        && messages.filter((message) => message.type === 'question-resolved' && message.requestId === eventId).length === 1);
+    const cancelledId = `${eventId}-cancelled`;
+    h.host.live.item(events.streamId, {
+      type: 'waterfall', eventId: cancelledId, agentId: SESSION_ID,
+      event: 'user-questions/request',
+      request: { questions: [{ id: 'q2', question: 'Continue again?', options: [{ label: 'yes' }] }] },
+    });
+    await flush();
+    h.host.live.end(h.host.stream('session/follow').streamId); await flush();
+    h.host.live.item(events.streamId, { type: 'cancel', eventId: cancelledId });
     await flush();
     check('a question cancelled after follow recovery resolves without an answer',
-      messages.some((message) => message.type === 'question-resolved' && message.requestId === eventId) && h.host.eventResults.length === 0);
+      messages.filter((message) => message.type === 'question-resolved' && message.requestId === cancelledId).length === 1
+        && h.host.eventResults.length === 1 && h.host.stream('$events').streamId === events.streamId
+        && h.host.sockets.length === 1);
   }
   h.link.stop();
 }

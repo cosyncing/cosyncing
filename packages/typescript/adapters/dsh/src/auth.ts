@@ -739,6 +739,10 @@ export class DshAuthSession {
       return `the DeepSeek Harness session cookie cosyncing held for ${new URL(this.baseUrl).host} was refused `
         + 'and has been dropped. Run `cosy dsh connect` with a URL from that host to enroll a fresh one.';
     }
+    if (this.enrollmentWithdrawn) {
+      return `the DeepSeek Harness enrollment for ${new URL(this.baseUrl).host} was withdrawn. `
+        + 'Run `cosy dsh connect` and paste the URL that host printed to enroll it again.';
+    }
     return this.store
       ? `cosyncing has no DeepSeek Harness session for ${new URL(this.baseUrl).host}. `
         + 'For a host you started, run `cosy dsh connect` and paste the URL dsh printed. '
