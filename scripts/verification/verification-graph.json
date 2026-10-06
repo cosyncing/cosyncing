@@ -791,7 +791,7 @@
     },
     {
       "id": "client.complete",
-      "description": "Flutter formatting, analysis, tests, and canonical web build pass. Live-only resident sessions retain cached transcript and draft while releasing hidden transport; only the foreground page rejoins after a fresh roster read. Queued background admissions and held capability reads cannot supersede foreground authority, a pending close fences replacement attachment, and late visibility or source changes prevent a resumed join. Observe-capable adapters preserve their existing resident transport behavior. Suspension also cancels a queued live admission before it starts. An unavailable registry read cannot erase the same-source foreground-only restriction, and credential saving on an initially offstage page waits for a fresh foreground roster. Visible inactive windows keep live transport; hidden windows release it and restore through a fresh roster without reconnecting merely on focus changes."
+      "description": "Flutter formatting, analysis, tests, and canonical web build pass. Live-only resident sessions retain cached transcript and draft while releasing hidden transport; only the foreground page rejoins after a fresh roster read. Queued background admissions and held capability reads cannot supersede foreground authority, a pending close fences replacement attachment, and late visibility or source changes prevent a resumed join. Observe-capable adapters preserve their existing resident transport behavior. Suspension also cancels a queued live admission before it starts. An unavailable registry read cannot erase the same-source foreground-only restriction, and credential saving on an initially offstage page waits for a fresh foreground roster. Visible inactive windows keep live transport; hidden windows release it and restore through a fresh roster without reconnecting merely on focus changes. A restored foreground live-only page waits boundedly for its initial authoritative roster attach instruction; cancellation or a source change retires that wait before socket authority can be acquired. An authoritative Observe row remains attachable while optional capabilities are pending; post-attachment capability publication preserves the existing bootstrap boundary and reuses any early registry read."
     },
     {
       "id": "dart.broker-contract.dependencies",
@@ -4358,6 +4358,7 @@
         "apps/client/lib/src/features/sessions/detail/session_detail_state_helpers.dart",
         "apps/client/lib/src/features/sessions/workspace/open_session_sync_supervisor.dart",
         "apps/client/test/src/features/sessions/detail/session_detail_bootstrap_ui_test.dart",
+        "apps/client/test/src/features/sessions/detail/session_detail_status_actions_test.dart",
         "apps/client/test/src/features/sessions/detail/session_detail_control_lifecycle_test.dart",
         "apps/client/test/src/features/sessions/workspace/open_session_sync_supervisor_test.dart",
         "apps/client/test/src/features/sessions/workspace/retained_session_production_lifecycle_test.dart",

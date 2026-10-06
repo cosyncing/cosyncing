@@ -157,6 +157,9 @@ re-enrolling when what actually went wrong is something else.
   history, while its cached transcript and unsent draft remain resident.
   A visible window retains its subscription when input focus moves elsewhere;
   hiding it releases transport, and returning it to view resumes the session.
+  A page restored at browser startup waits for its authoritative roster attach
+  instruction before joining, so a delayed roster cannot cause an implicit
+  attachment to a live-only host.
   After the last foreground client leaves, the broker's reconnect grace ends
   even when native work or a decision is pending. Its adapter subscription then
   closes and unanswered interactions return to the host; the native session keeps

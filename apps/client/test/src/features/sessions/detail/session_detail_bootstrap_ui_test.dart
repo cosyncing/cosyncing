@@ -24,6 +24,189 @@ import '../../../../support/session_detail_page_test_harness.dart';
 void main() {
   group('Session Detail bootstrap UI', () {
     testWidgets(
+      'initial authoritative Observe row attaches while actions remain pending',
+      (tester) async {
+        _setViewport(tester, const Size(1280, 800));
+        final connection = ScriptedSessionDetailConnection(events: const []);
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+            brokerClient: _PendingPageActionsBroker(),
+            extraOverrides: [
+              sessionListControllerProvider.overrideWith(
+                _ObservePageRoster.new,
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+        expect(connection.connectCount, 1);
+        expect(connection.state, SessionDetailConnectionStatus.connected);
+        expect(connection.reattachModes, isEmpty);
+        expect(tester.takeException(), isNull);
+        await _resetApp(tester);
+      },
+    );
+
+    testWidgets(
+      'initial live-only restore waits for its delayed roster instruction',
+      (tester) async {
+        _setViewport(tester, const Size(1280, 800));
+        final connection = _LiveOnlyPageConnection();
+        final roster = StubSessionListController();
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+            brokerClient: FakeBrokerClient(
+              agents: [fakeControllerAgentInfo(supportsObserve: false)],
+            ),
+            extraOverrides: [
+              sessionListControllerProvider.overrideWith(() => roster),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+        expect(connection.refusedBare, 0);
+        expect(connection.reattachModes, isEmpty);
+        roster.setSessions(const [_liveOnlyPageInfo]);
+        await tester.pumpAndSettle();
+        expect(connection.reattachModes, ['live']);
+        expect(connection.refusedBare, 0);
+        expect(find.text('Retained live-only transcript'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await _resetApp(tester);
+      },
+    );
+
+    testWidgets(
+      'initial live-only restore cannot wake after hidden suspension',
+      (tester) async {
+        _setViewport(tester, const Size(1280, 800));
+        final connection = _LiveOnlyPageConnection();
+        final roster = StubSessionListController();
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+            brokerClient: FakeBrokerClient(
+              agents: [fakeControllerAgentInfo(supportsObserve: false)],
+            ),
+            extraOverrides: [
+              sessionListControllerProvider.overrideWith(() => roster),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.hidden,
+        );
+        await tester.pumpAndSettle();
+        roster.setSessions(const [_liveOnlyPageInfo]);
+        await tester.pumpAndSettle();
+        expect(connection.refusedBare, 0);
+        expect(connection.reattachModes, isEmpty);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pumpAndSettle();
+        expect(connection.reattachModes, ['live']);
+        expect(connection.refusedBare, 0);
+        expect(find.text('Retained live-only transcript'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await _resetApp(tester);
+      },
+    );
+
+    testWidgets(
+      'initial live-only restore bounds a missing roster instruction',
+      (tester) async {
+        _setViewport(tester, const Size(1280, 800));
+        final connection = _LiveOnlyPageConnection();
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+            brokerClient: FakeBrokerClient(
+              agents: [fakeControllerAgentInfo(supportsObserve: false)],
+            ),
+            extraOverrides: [
+              sessionListControllerProvider.overrideWith(
+                StubSessionListController.new,
+              ),
+              sessionDetailInitialSessionTimeoutProvider.overrideWithValue(
+                const Duration(milliseconds: 100),
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+        expect(connection.refusedBare, 0);
+        expect(connection.reattachModes, isEmpty);
+        await tester.pump(const Duration(milliseconds: 200));
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SessionDetailPage)),
+        );
+        final state = container.read(
+          sessionDetailControllerProvider(
+            const SessionDetailKey(tool: 'claude', sessionId: 'session-1'),
+          ),
+        );
+        expect(state.bootstrapState.hasFailed, isTrue);
+        expect(state.connectionStatus, SessionDetailConnectionStatus.closed);
+        expect(connection.refusedBare, 0);
+        expect(connection.reattachModes, isEmpty);
+        expect(tester.takeException(), isNull);
+        await _resetApp(tester);
+      },
+    );
+
+    testWidgets(
+      'initial live-only restore retires its wait when the page unmounts',
+      (tester) async {
+        _setViewport(tester, const Size(1280, 800));
+        final connection = _LiveOnlyPageConnection();
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+            brokerClient: FakeBrokerClient(
+              agents: [fakeControllerAgentInfo(supportsObserve: false)],
+            ),
+            extraOverrides: [
+              sessionListControllerProvider.overrideWith(
+                StubSessionListController.new,
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+        expect(connection.refusedBare, 0);
+        expect(connection.reattachModes, isEmpty);
+        await _resetApp(tester);
+        await tester.pump();
+        expect(connection.refusedBare, 0);
+        expect(connection.reattachModes, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
       'live-only page releases hidden transport and restores only after '
       'fresh foreground roster',
       (tester) async {
@@ -977,6 +1160,29 @@ const _liveOnlyPageInfo = SessionInfo(
   status: SessionStatus.idle,
   attachMode: AttachMode.live,
 );
+
+final class _ObservePageRoster extends StubSessionListController {
+  @override
+  SessionListState build() => const SessionListState(
+    status: SessionListStatus.loaded,
+    sessions: [
+      SessionInfo(
+        id: 'session-1',
+        tool: 'claude',
+        title: 'Observe fixture',
+        status: SessionStatus.idle,
+        attachMode: AttachMode.observe,
+      ),
+    ],
+  );
+}
+
+final class _PendingPageActionsBroker extends FakeBrokerClient {
+  final pending = Completer<List<AgentInfo>>();
+
+  @override
+  Future<List<AgentInfo>> listAgents() => pending.future;
+}
 
 final class _LiveOnlyPageRoster extends StubSessionListController {
   @override

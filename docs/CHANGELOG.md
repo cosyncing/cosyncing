@@ -73,6 +73,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   transcript and unsent draft. Foreground attachment fences a superseded queued
   background attach and waits for an in-progress transport close.
   Visible windows retain their subscriptions across input focus changes.
+  Restored foreground pages also wait for the initial authoritative live-only
+  attach instruction, avoiding a refused implicit join while the roster loads.
   The last foreground client's departure also releases the broker subscription
   after its reconnect grace, allowing pending decisions to return to the native
   host instead of retaining an invisible attention lease.
