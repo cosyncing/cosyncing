@@ -1,0 +1,68 @@
+{
+  "provenance": {
+    "version": "0.2.0-rc.2",
+    "source": "disposable web host with a scripted local read-tool turn",
+    "modelBacked": false,
+    "providerSpending": 0
+  },
+  "follow": [
+    {
+      "type": "event",
+      "event": {
+        "type": "tool/call",
+        "seq": 15,
+        "time": 1791224018738,
+        "data": {
+          "turn": 1,
+          "step": 1,
+          "callId": "call-fixture",
+          "name": "read",
+          "arguments": "{\"file_path\":\"fixture.txt\"}"
+        }
+      }
+    },
+    {
+      "type": "event",
+      "event": {
+        "type": "tool/result",
+        "seq": 16,
+        "time": 1791224018754,
+        "data": {
+          "turn": 1,
+          "step": 1,
+          "message": {
+            "role": "tool",
+            "source": {
+              "kind": "tool",
+              "callId": "call-fixture"
+            },
+            "toolCallId": "call-fixture",
+            "content": [
+              {
+                "type": "text",
+                "text": "<path>/fixture/workspace/fixture.txt</path>\n<type>file</type>\n<content>\n1: Local fixture content.\n\n(End of file - total 1 lines)\n</content>"
+              }
+            ],
+            "isError": false,
+            "id": "7bc6cdc7-2da6-4f32-83af-d519df11b09e"
+          },
+          "meta": {
+            "path": "/fixture/workspace/fixture.txt",
+            "offset": 1,
+            "lines": [
+              {
+                "number": 1,
+                "text": "Local fixture content."
+              }
+            ],
+            "totalLines": 1
+          }
+        },
+        "sourceEventSeqs": [
+          15
+        ],
+        "surfaceOp": "append"
+      }
+    }
+  ]
+}

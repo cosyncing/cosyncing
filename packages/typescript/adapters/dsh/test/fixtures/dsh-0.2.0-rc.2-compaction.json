@@ -1,0 +1,44 @@
+{
+  "provenance": {
+    "version": "0.2.0-rc.2",
+    "source": "disposable web host manual compact command with a scripted local Responses provider; identifiers, time and text sanitized",
+    "modelBacked": false,
+    "providerSpending": 0
+  },
+  "replacement": {
+    "event": {
+      "type": "user/message",
+      "seq": 34,
+      "time": 1000,
+      "data": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Compaction fixture checkpoint."
+          }
+        ],
+        "source": {
+          "kind": "compact-checkpoint",
+          "compactionId": "compaction-fixture",
+          "sourceCommandId": "command-fixture"
+        },
+        "role": "user",
+        "id": "compaction-fixture-message"
+      },
+      "sourceEventSeqs": [
+        32,
+        33,
+        11,
+        12,
+        15,
+        24,
+        25
+      ],
+      "surfaceOp": {
+        "op": "replace",
+        "startSeq": 11,
+        "endSeq": 25
+      }
+    }
+  }
+}

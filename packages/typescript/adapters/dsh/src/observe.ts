@@ -46,9 +46,13 @@ import type {
   Unsubscribe,
 } from '@cosyncing/adapter-api';
 import type { DshDownlinkFrame, DshRpcClient } from './server.ts';
+import { DshAssistantStream } from './assistant-stream.ts';
 import { DshDriver, dshModelOptions, type DshImageLimits } from './drive.ts';
+import { DshLegacySessionChannel, type DshHistoryPage, type DshSessionChannel } from './protocol.ts';
 import {
   createDshMapState,
+  dshImageCount,
+  dshUserImageArtifacts,
   dshMessageKey,
   dshProjectionMessages,
   DshProjectionStore,
@@ -57,6 +61,7 @@ import {
   mapDshEvent,
   mapDshHistory,
   mapDshQuestion,
+  mapDshSession,
   type DshHistoryEntry,
   type DshMapState,
   type DshPending,
@@ -140,8 +145,24 @@ function dshModeCategory(value: string): ModeOption['category'] {
 }
 
 export interface DshConnectionOptions {
-  rpc: DshRpcClient;
+  /**
+   * The legacy transport. Kept as the default construction path so the whole
+   * qualified 0.1 suite keeps exercising the real driver; a caller that supplies
+   * a `channel` (the 0.2 link) does not need one.
+   */
+  rpc?: DshRpcClient;
   driver?: DshDriver;
+  /**
+   * Everything this connection reads and writes, behind one seam.
+   *
+   * The connection is transcript machinery, not a transport: the admit gate, the
+   * priming boundary, the projection store and the pending cards were qualified
+   * against a real 0.1 host and are correct for any host that can hand them the
+   * same frame vocabulary and the same page-shaped history read. Both families go
+   * through here, which is what lets the same connection serve a 0.2 host without
+   * a second copy of that logic to keep in step.
+   */
+  channel?: DshSessionChannel;
   /** Injected clock, so the priming timeout is testable without real waiting. */
   now?: () => number;
   historyMaxPages?: number;
@@ -166,10 +187,11 @@ interface HistoryPage {
   projections?: unknown;
 }
 
+type ContinuedAnswer = { kind: 'accepted' | 'admitted' } | { kind: 'claimed'; turn: number | undefined };
+
 export class DshSessionConnection implements SessionConnection {
   private readonly handlers = new Set<AgentMessageHandler>();
-  private readonly rpc: DshRpcClient;
-  private readonly driver: DshDriver;
+  private readonly channel: DshSessionChannel;
   private readonly nowImpl: () => number;
   private readonly historyMaxPages: number;
   private readonly historyPageMessages: number;
@@ -181,7 +203,16 @@ export class DshSessionConnection implements SessionConnection {
   /** Live temporal fold. History reads NEVER touch it — see getHistory. */
   private readonly state: DshMapState;
   private readonly projections = new DshProjectionStore();
+  private readonly assistantStream: DshAssistantStream;
   private readonly pending = new Map<string, DshPending>();
+  private readonly questionClaims = new Map<string, Promise<void>>();
+  private readonly continuedAnswers = new Map<string, ContinuedAnswer>();
+  private continuedTurn?: number;
+  /** Follow-ordered inbox fold; control projections can arrive on either side of a splice. */
+  private readonly nativeInbox = new Map<string, Array<Record<string, unknown>>>();
+  private readonly imageReads = new Map<string, Promise<string | undefined>>();
+  private readonly imageAborts = new Set<AbortController>();
+  private imageEpoch = 0;
   /** Reverse index so an `approval/resolved` frame, which names only the approvalId, finds its card. */
   private readonly approvalIndex = new Map<string, string>();
 
@@ -195,12 +226,19 @@ export class DshSessionConnection implements SessionConnection {
   private hostLastSeq?: number;
   private jobs: unknown[] = [];
   private closed = false;
+  private mutationRevision = 0;
   /** Set by `host/session-removed`: the session is gone upstream — mutations refuse, transient/control frames drop, durable transcript events still flow. */
   private removed = false;
+  private archived = false;
+  private unarchivedControl?: SessionInfo['control'];
 
   constructor(readonly info: SessionInfo, options: DshConnectionOptions) {
-    this.rpc = options.rpc;
-    this.driver = options.driver ?? new DshDriver(options.rpc);
+    if (options.channel) {
+      this.channel = options.channel;
+    } else {
+      if (!options.rpc) throw new Error('a DeepSeek Harness connection needs either a channel or an rpc client');
+      this.channel = new DshLegacySessionChannel(options.rpc, options.driver);
+    }
     this.nowImpl = options.now ?? (() => Date.now());
     this.historyMaxPages = options.historyMaxPages ?? DSH_HISTORY_MAX_PAGES;
     this.historyPageMessages = options.historyPageMessages ?? DSH_HISTORY_PAGE_MESSAGES;
@@ -209,6 +247,7 @@ export class DshSessionConnection implements SessionConnection {
     if (options.mutationReady) this.mutationReady = options.mutationReady;
     if (options.onClosed) this.onClosed = options.onClosed;
     this.state = createDshMapState(info.id, true);
+    this.assistantStream = new DshAssistantStream(info.id);
   }
 
   // ── History ───────────────────────────────────────────────────────────────
@@ -227,9 +266,10 @@ export class DshSessionConnection implements SessionConnection {
     let readFailed = false;
     let pagesRead = 0;
     let reachedCeiling = false;
+    let tailProjections: unknown;
 
     for (let page = 0; page < this.historyMaxPages; page += 1) {
-      const outcome = await this.rpc.call<HistoryPage>('session.history', {
+      const outcome = await this.channel.history({
         sessionId: this.info.id,
         maxMessages: this.historyPageMessages,
         ...(beforeSeq !== undefined ? { beforeSeq } : {}),
@@ -239,7 +279,11 @@ export class DshSessionConnection implements SessionConnection {
         break;
       }
       const entries = normalizeEntries(outcome.value?.events);
-      if (pagesRead === 0) this.projections.seed(outcome.value?.projections);
+      if (pagesRead === 0) {
+        tailProjections = outcome.value?.projections;
+        this.projections.seed(outcome.value?.projections);
+        this.reconcileContinuedQuestions();
+      }
       pagesRead += 1;
       pages.unshift(entries);
       const oldest = entries[0]?.event.seq;
@@ -249,6 +293,28 @@ export class DshSessionConnection implements SessionConnection {
     }
 
     const entries = pages.flat();
+    // Fill only the missed suffix against the retained inbox/turn state before
+    // reseeding the inbox or advancing the admit gate. Include history reads
+    // that win a race with live delivery; skip events delivered during awaits.
+    const deliveredThrough = this.highestAdmitted();
+    for (const entry of entries) {
+      if (typeof entry.event.seq === 'number' && entry.event.seq > deliveredThrough) {
+        this.consumeQuestionLifecycle(entry.event, false);
+      }
+    }
+    if (!this.primed && !readFailed) {
+      this.nativeInbox.clear();
+      const tail = tailProjections as { asOfSeq?: number; values?: { inbox?: Record<string, unknown> } } | undefined;
+      const inbox = tail?.values?.inbox;
+      for (const target of ['next-turn', 'next-step']) {
+        const items = inbox?.[target];
+        this.nativeInbox.set(target, Array.isArray(items) ? items as Array<Record<string, unknown>> : []);
+      }
+      for (const entry of entries) {
+        if (entry.event.type === 'agent/inbox/spliced' && (entry.event.seq ?? -1) > (tail?.asOfSeq ?? -1)) this.consumeInboxSplice(entry.event, false, false);
+      }
+    }
+    this.reconcileContinuedQuestions();
     // Seed the admit gate from what history actually delivered, so the live tail
     // never repeats a row the reset already carried.
     for (const entry of entries) this.rememberSeq(entry.event.seq);
@@ -263,6 +329,11 @@ export class DshSessionConnection implements SessionConnection {
     // sent resolve their clientKey on history rows exactly as on live frames.
     historyState.clientKeys = this.state.clientKeys;
     const messages = mapDshHistory(entries, historyState);
+    // Readback is authorized upstream against the session log. The broker's
+    // existing artifact store promotes these bounded inline bytes to its own
+    // credentialed fetch URLs; no DSH cookie or private endpoint reaches clients.
+    const imageBudget = { remaining: 16 };
+    for (const entry of [...entries].reverse()) messages.push(...await this.imageArtifacts(entry.event, imageBudget));
 
     // Only a priming read (initial attach, or the wholesale re-read after a
     // reconnect gap) seeds the live fold, and only when the read SUCCEEDED. A
@@ -302,10 +373,22 @@ export class DshSessionConnection implements SessionConnection {
    */
   async getHistoryOverlays(_query?: HistoryQuery): Promise<AgentMessage[]> {
     const rows: AgentMessage[] = [];
+    const imageBudget = { remaining: 16 };
     for (const key of this.projections.keys()) {
       rows.push(...dshProjectionMessages(key, this.projections.get(key), { forkedChild: this.info.parentThreadId !== undefined }));
     }
-    return rows;
+    for (const items of this.nativeInbox.values()) {
+      for (const message of items) {
+        const source = message.source as { kind?: string } | undefined;
+        if (source?.kind !== 'user') continue;
+        const id = typeof message.id === 'string' ? message.id : undefined;
+        const text = dshQueueText(message.content);
+        const imageCount = dshImageCount(message.content);
+        if (id && (text || imageCount)) rows.push({ type: 'user-message', key: dshMessageKey(this.info.id, id), text, queued: true, ...(imageCount ? { imageCount } : {}) });
+        if (imageCount) rows.push(...await this.imageArtifacts({ type: 'user/message', data: message }, imageBudget));
+      }
+    }
+    return [...rows, ...this.assistantStream.messages()];
   }
 
   /** Pending question and approval cards, replayed after history on attach. */
@@ -337,8 +420,8 @@ export class DshSessionConnection implements SessionConnection {
   /**
    * Route one mux frame for this session.
    *
-   * ONLY `session/event` frames wait for priming: they are the frames the
-   * history seed also delivers, so releasing them early is the duplicate risk
+   * Transcript events and assistant attempts wait for priming: they are the
+   * rows history also delivers, so releasing them early is the duplicate risk
    * the buffer exists to prevent. Every other frame type is safe immediately —
    * projections are seq-guarded, queue/jobs are authoritative whole snapshots,
    * and prompt frames dedupe by rpcId — and several are control signals
@@ -358,7 +441,7 @@ export class DshSessionConnection implements SessionConnection {
     // permanently. Those still pass the seq admit gate, so a genuinely
     // duplicated event cannot double-render.
     if (this.removed && frame.frameType !== 'session/event') return;
-    if (!this.primed && frame.frameType === 'session/event') {
+    if (!this.primed && ['session/event', 'session/assistant-frame', 'session/assistant-baseline'].includes(frame.frameType)) {
       this.primingStartedAt ??= this.nowImpl();
       const overflowed = this.primingBuffer.length >= this.primingMaxFrames
         || this.nowImpl() - this.primingStartedAt >= this.primingTimeoutMs;
@@ -412,10 +495,23 @@ export class DshSessionConnection implements SessionConnection {
   private consumeMuxFrame(frame: DshDownlinkFrame): void {
     const payload = frame.payload;
     switch (frame.frameType) {
+      case 'session/assistant-baseline': {
+        for (const message of this.assistantStream.baseline(payload.value)) this.deliver(message);
+        return;
+      }
+      case 'session/assistant-frame': {
+        for (const message of this.assistantStream.frame(payload.value)) this.deliver(message);
+        return;
+      }
       case 'session/event': {
         const event = payload.event as DshSessionEvent | undefined;
         if (!event || typeof event.type !== 'string') return;
         if (!this.admit(event.seq)) return;
+        if (event.type === 'assistant/message') {
+          const data = event.data as { turn?: unknown; step?: unknown } | undefined;
+          this.assistantStream.settle(data?.turn, data?.step);
+        }
+        this.consumeQuestionLifecycle(event);
         const entry: DshHistoryEntry = { event, ...(payload.view !== undefined ? { view: payload.view } : {}) };
         // A live surface REPLACE rewrites transcript the client already holds.
         // Only a wholesale reload can make rows disappear, so say so rather than
@@ -425,6 +521,11 @@ export class DshSessionConnection implements SessionConnection {
           return;
         }
         for (const message of mapDshEvent(entry, this.state)) this.deliver(message);
+        const epoch = this.imageEpoch;
+        void this.imageArtifacts(event).then((images) => {
+          if (this.closed || this.imageEpoch !== epoch) return;
+          for (const image of images) this.deliver(image);
+        });
         return;
       }
       case 'session/subscribed': {
@@ -464,10 +565,19 @@ export class DshSessionConnection implements SessionConnection {
         }
         return;
       }
+      case 'session/projection-baseline': {
+        const before = new Set(this.projections.keys());
+        const adopted = this.projections.seed(payload.block);
+        if ([...before].some((key) => !this.projections.keys().includes(key))) this.deliver({ type: 'history-reset' });
+        this.reconcileContinuedQuestions();
+        for (const key of adopted) for (const message of dshProjectionMessages(key, this.projections.get(key), { forkedChild: this.info.parentThreadId !== undefined })) this.deliver(message);
+        return;
+      }
       case 'session/projection': {
         const key = typeof payload.key === 'string' ? payload.key : '';
         const seq = typeof payload.seq === 'number' ? payload.seq : 0;
         if (!key || !this.projections.apply(key, payload.value, seq)) return;
+        if (key === 'userQuestions' || key === 'inbox') this.reconcileContinuedQuestions();
         for (const message of dshProjectionMessages(key, payload.value, { forkedChild: this.info.parentThreadId !== undefined })) {
           this.deliver(message);
         }
@@ -532,8 +642,51 @@ export class DshSessionConnection implements SessionConnection {
     // the session as working after the host already said it is gone.
     if (this.closed || this.removed) return;
     switch (frame.frameType) {
+      case 'host/session-workspace': {
+        const archived = frame.payload.archived === true;
+        if (archived !== this.archived) {
+          if (archived) this.unarchivedControl = this.info.control;
+          this.archived = archived;
+          this.info.control = archived ? this.archivedControl() : this.unarchivedControl;
+          if (archived) this.info.status = 'idle';
+          this.deliver({ type: 'notice', message: archived
+            ? 'This session was archived in DeepSeek Harness. Its durable history remains available.'
+            : 'This session was unarchived in DeepSeek Harness.' });
+        }
+        const value = { ...(this.info.control ? { control: this.info.control } : {}),
+          ...(archived ? { status: 'idle' as const } : {}),
+          ...(typeof frame.payload.projectName === 'string' ? { projectName: frame.payload.projectName } : {}),
+          ...(typeof frame.payload.cwd === 'string' ? { cwd: frame.payload.cwd } : {}) };
+        Object.assign(this.info, value);
+        this.deliver({ type: 'metadata-update', key: 'sessionInfo', value });
+        if (archived) this.deliver({ type: 'status', status: 'idle' });
+        return;
+      }
+      case 'host/session-activity': {
+        if (typeof frame.payload.updatedAt !== 'number') return;
+        this.info.updatedAt = frame.payload.updatedAt;
+        this.deliver({ type: 'metadata-update', key: 'sessionInfo', value: { updatedAt: frame.payload.updatedAt } }); return;
+      }
+      case 'host/service-notice': {
+        if (typeof frame.payload.message === 'string') this.deliver({ type: 'notice', message: frame.payload.message }); return;
+      }
+      case 'host/session-updated': {
+        const summary = frame.payload.summary as Parameters<typeof mapDshSession>[0] & { agentAvailable?: boolean };
+        // rc.2 commands resolve/resume an ordinary cold Agent themselves.
+        const mapped = mapDshSession(summary);
+        if (!mapped || mapped.id !== this.info.id) return;
+        this.unarchivedControl = mapped.control;
+        const value = { control: this.archived ? this.archivedControl() : mapped.control, status: this.archived ? 'idle' as const : mapped.status,
+          ...(mapped.cwd ? { cwd: mapped.cwd } : {}),
+          ...(mapped.currentModel ? { currentModel: mapped.currentModel, model: mapped.model } : {}),
+          ...(mapped.updatedAt !== undefined ? { updatedAt: mapped.updatedAt } : {}) };
+        Object.assign(this.info, value);
+        this.deliver({ type: 'metadata-update', key: 'sessionInfo', value });
+        this.deliver({ type: 'status', status: !this.archived && summary.running === true ? 'running' : 'idle' });
+        return;
+      }
       case 'host/session-status': {
-        const running = frame.payload.running === true;
+        const running = !this.archived && frame.payload.running === true;
         this.info.status = running ? 'working' : this.pending.size > 0 ? 'needs-input' : 'idle';
         this.deliver({ type: 'status', status: running ? 'running' : 'idle' });
         return;
@@ -576,6 +729,27 @@ export class DshSessionConnection implements SessionConnection {
   }
 
   /**
+   * The host withdrew a pending approval or question by id.
+   *
+   * 0.2 says only "this event id is cancelled", with no statement of which kind
+   * it was, so the connection decides from the card it is actually holding. A
+   * resolved frame of the wrong kind would be worse than nothing: a question
+   * settled with a `permission-resolved` leaves the question card on screen while
+   * telling the broker the interaction is over.
+   */
+  noteCancellation(eventId: string): void {
+    const entry = this.pending.get(eventId);
+    if (!entry) return;
+    this.pending.delete(eventId);
+    if (entry.kind === 'approval') {
+      this.approvalIndex.delete(entry.approvalId);
+      this.deliver({ type: 'permission-resolved', requestId: eventId, decision: 'external' });
+      return;
+    }
+    this.deliver({ type: 'question-resolved', requestId: eventId });
+  }
+
+  /**
    * The transient inbox, as an authoritative whole snapshot. Queued and steering
    * items render as dimmed user bubbles; `context` items are invisible until the
    * agent claims them, exactly as the host describes.
@@ -584,7 +758,7 @@ export class DshSessionConnection implements SessionConnection {
    * `user/message` event carries — so when the agent claims the item, the
    * durable row replaces the queued one in place instead of doubling it.
    *
-   * KNOWN GAP (round 1): a queued item DELETED via another client
+   * Legacy-only gap: a queued item DELETED via another client
    * (`session.updateQueue` from the dsh browser UI) vanishes from the next
    * snapshot without any durable row claiming its key, and the canonical
    * vocabulary has no "remove this bubble" message — so the dimmed bubble goes
@@ -623,9 +797,22 @@ export class DshSessionConnection implements SessionConnection {
    */
   onGenerationLost(): void {
     if (this.closed) return;
+    this.mutationRevision += 1;
+    this.onTranscriptLost();
+    this.projections.clear();
+    this.resetImageReads();
+    // Retain the old attempt identity until a fresh follow cut can retract it.
+    // Resetting here would either lose the retraction or read the obsolete cut.
+    this.assistantStream.suspend();
+    this.primingBuffer = this.primingBuffer.filter(frame => !['session/assistant-frame', 'session/assistant-baseline'].includes(frame.frameType));
+    this.settlePendingAsExternal(true);
+  }
+
+  /** A follow baseline ended while the independent event authority survives. */
+  onTranscriptLost(): void {
+    if (this.closed) return;
     this.primed = false;
     this.primingStartedAt = undefined;
-    this.settlePendingAsExternal();
   }
 
   /**
@@ -634,15 +821,16 @@ export class DshSessionConnection implements SessionConnection {
    * this connection tracks are unverifiable or gone, and no resolution frame
    * is coming for them.
    */
-  private settlePendingAsExternal(): void {
+  private settlePendingAsExternal(preserveContinued = false): void {
     for (const entry of this.pending.values()) {
+      if (preserveContinued && entry.kind === 'question' && entry.continued) continue;
       if (entry.kind === 'approval') {
         this.deliver({ type: 'permission-resolved', requestId: entry.rpcId, decision: 'external' });
       } else {
         this.deliver({ type: 'question-resolved', requestId: entry.rpcId });
       }
+      this.pending.delete(entry.rpcId);
     }
-    this.pending.clear();
     this.approvalIndex.clear();
   }
 
@@ -655,31 +843,57 @@ export class DshSessionConnection implements SessionConnection {
    * nothing has proven).
    */
   private assertMutable(action: string): void {
+    if (this.closed) throw new Error(`cannot ${action}: this DeepSeek Harness connection was closed`);
     if (this.removed) {
       throw new Error(`cannot ${action}: this session was removed from the DeepSeek Harness host`);
+    }
+    if (this.archived || this.info.control?.drive.supported === false) {
+      throw new Error(`cannot ${action}: ${this.info.control?.drive.reason ?? 'this DeepSeek Harness agent is unavailable'}`);
     }
     if (this.mutationReady && !this.mutationReady()) {
       throw new Error(`cannot ${action}: the DeepSeek Harness host link is re-verifying; retry in a moment`);
     }
   }
 
+  /** Catalog reads may survive authority loss; their waiting mutation may not. */
+  private mutationGuard(action: string): () => void {
+    const revision = this.mutationRevision;
+    return () => {
+      this.assertMutable(action);
+      if (revision !== this.mutationRevision) {
+        throw new Error(`cannot ${action}: the DeepSeek Harness event authority changed; submit a new operation`);
+      }
+    };
+  }
+
+  private archivedControl(): NonNullable<SessionInfo['control']> {
+    return { ...(this.unarchivedControl ?? this.info.control ?? { terminalSync: DSH_TERMINAL_SYNC_IMPOSSIBLE }),
+      drive: { state: 'unavailable', supported: false, reason: 'This session is archived in DeepSeek Harness; unarchive it in the native client first.' } };
+  }
+
   async sendPrompt(input: PromptInput): Promise<void> {
-    this.assertMutable('send a prompt');
+    await this.submitPrompt(input, 'queue');
+  }
+
+  private async submitPrompt(input: PromptInput, mode: 'queue' | 'steer'): Promise<void> {
+    const guard = this.mutationGuard(mode === 'steer' ? 'steer the running turn' : 'send a prompt');
+    guard();
     // Selectors FIRST. dsh has no per-prompt model or permission field, so a
     // "per-prompt override" is really two durable session changes followed by a
     // send. Ordering is not cosmetic: a prompt that raced ahead of its own
     // selectors would run under the previous model or the previous permission
     // preset — silently, and with the UI showing the new one.
-    await this.applyModelSelection(input.model);
-    await this.applyPermissionMode(input.permissionMode);
+    await this.applyModelSelection(input.model, guard);
+    guard();
+    await this.applyPermissionMode(input.permissionMode, guard);
     const clientMessageId = input.clientMessageId;
     // Re-guarded after the selectors, because both of them AWAIT. A guard taken
     // before a wait proves nothing about the moment after it: the generation
     // can be lost while a catalog read or a switch command is parked, and this
     // send would then land on an epoch nothing has re-baselined.
-    this.assertMutable('send a prompt');
-    await this.driver.prompt(this.info.id, input, {
-      mode: 'queue',
+    guard();
+    await this.channel.prompt(this.info.id, input, {
+      mode,
       imageLimits: this.imageLimits(),
       ...(this.info.cwd ? { sessionCwd: this.info.cwd } : {}),
       ...(clientMessageId
@@ -707,16 +921,17 @@ export class DshSessionConnection implements SessionConnection {
   }
 
   /**
-   * Apply a per-prompt model override as a session selection.
+   * Apply a prompt or command model override as a session selection.
    *
    * Skipped entirely when the request already matches what the session runs,
    * so an unchanged picker costs no write at all — which is what keeps an
    * ordinary send a single RPC.
    */
-  private async applyModelSelection(model: PromptInput['model']): Promise<void> {
+  private async applyModelSelection(model: PromptInput['model'], guard: () => void): Promise<void> {
     if (!model) return;
     this.assertMutable('select a model');
-    const catalog = await this.driver.models(this.info.id);
+    const catalog = await this.channel.models(this.info.id);
+    guard();
     const wanted = {
       provider: model.providerID,
       model: model.modelID,
@@ -735,11 +950,11 @@ export class DshSessionConnection implements SessionConnection {
     // the generation may have ended while that request was parked, and a
     // selection is durable session state, not a retryable read.
     this.assertMutable('select a model');
-    await this.driver.selectModel(this.info.id, wanted);
+    await this.channel.selectModel(this.info.id, wanted);
   }
 
   /**
-   * Apply a per-prompt permission mode by running the host's own switch command.
+   * Apply a prompt or command permission mode by running the host's own switch command.
    *
    * Validated against the LIVE roster before anything is sent, for two
    * different reasons. The value must be one the host advertised — an
@@ -749,10 +964,11 @@ export class DshSessionConnection implements SessionConnection {
    * projection and registers no `permission` command, and silently skipping the
    * switch there would run the turn under the wrong policy.
    */
-  private async applyPermissionMode(mode: string | undefined): Promise<void> {
+  private async applyPermissionMode(mode: string | undefined, guard: () => void): Promise<void> {
     if (mode === undefined) return;
     this.assertMutable('select a permission mode');
-    const select = this.permissionSelect();
+    const select = await this.permissionSelect();
+    guard();
     if (!select) {
       throw new Error(
         'this DeepSeek Harness deployment composes no permission service, so it has no permission mode to select',
@@ -762,7 +978,8 @@ export class DshSessionConnection implements SessionConnection {
       throw new Error(`the DeepSeek Harness host does not offer the permission mode "${mode}"`);
     }
     if (select.currentValue === mode) return;
-    const roster = await this.driver.listCommands(this.info.id);
+    const roster = await this.channel.listCommands(this.info.id);
+    guard();
     if (!roster.some((command) => command.name === DSH_PERMISSION_COMMAND)) {
       throw new Error(
         'this DeepSeek Harness host advertises permission modes but no command to switch them, so the mode was not changed',
@@ -773,7 +990,7 @@ export class DshSessionConnection implements SessionConnection {
     // generation would change how the session approves tools while this
     // connection no longer speaks for it.
     this.assertMutable('select a permission mode');
-    const execution = await this.driver.executeCommand(this.info.id, `/${DSH_PERMISSION_COMMAND} ${mode}`);
+    const execution = await this.channel.executeCommand(this.info.id, `/${DSH_PERMISSION_COMMAND} ${mode}`);
     if (execution?.result.kind === 'error') {
       throw new Error(
         execution.result.text
@@ -783,29 +1000,67 @@ export class DshSessionConnection implements SessionConnection {
     }
   }
 
-  /** The permission roster the host last published for this session. */
-  private permissionSelect(): { options: ModeOption[]; currentValue: string } | undefined {
+  /**
+   * The presets this session can be switched to, and the one it is on.
+   *
+   * Two sources, because the captured build splits them across two routes: the
+   * per-session `permissions` projection carries the CURRENT value, and the
+   * roster of what may be chosen lives on a host-wide catalog endpoint. Reading
+   * only the projection gives a picker with a selection and no choices, and a
+   * selector that validates a request against that picker then refuses the
+   * preset the session is already running. Reading only the catalog would offer
+   * the host's DEFAULT preset as though the session had said so.
+   *
+   * The catalog read is bounded by the link's per-carrier cache, so a picker
+   * that re-renders does not re-request it; an unavailable roster returns
+   * undefined rather than a guessed one.
+   */
+  private async permissionSelect(): Promise<{ options: ModeOption[]; currentValue: string } | undefined> {
+    const fromProjection = this.permissionProjection();
+    // A projection that carries its own roster is self-describing, which is what
+    // the 0.1 family does. Trust it and ask the host nothing.
+    if (fromProjection && fromProjection.options.length > 0) return fromProjection;
+    const catalog = await this.channel.permissionCatalog?.();
+    if (!catalog || catalog.options.length === 0) return undefined;
+    const options: ModeOption[] = catalog.options.map((option) => ({
+      value: option.value,
+      label: option.name && option.name.length > 0 ? option.name : option.value,
+      ...(option.description ? { description: option.description } : {}),
+      category: dshModeCategory(option.value),
+    }));
+    // The session's own value outranks the catalog's default, and a current
+    // preset the catalog does not list is still listed: hiding the state a
+    // session is actually in is how a picker ends up showing the wrong thing
+    // as the one the user chose.
+    const currentValue = fromProjection?.currentValue ?? '';
+    if (currentValue && !options.some((option) => option.value === currentValue)) {
+      options.push({ value: currentValue, label: currentValue, category: dshModeCategory(currentValue) });
+    }
+    return { options, currentValue };
+  }
+
+  /** The roster and current value the `permissions` projection itself carries. */
+  private permissionProjection(): { options: ModeOption[]; currentValue: string } | undefined {
     const value = this.projections.get(DSH_PERMISSIONS_PROJECTION);
     if (!value || typeof value !== 'object') return undefined;
     const row = value as { options?: unknown; currentValue?: unknown };
-    if (!Array.isArray(row.options)) return undefined;
     const options: ModeOption[] = [];
-    for (const entry of row.options) {
-      if (!entry || typeof entry !== 'object') continue;
-      const option = entry as { value?: unknown; name?: unknown; description?: unknown };
-      if (typeof option.value !== 'string' || option.value.length === 0) continue;
-      options.push({
-        value: option.value,
-        label: typeof option.name === 'string' && option.name ? option.name : option.value,
-        ...(typeof option.description === 'string' ? { description: option.description } : {}),
-        category: dshModeCategory(option.value),
-      });
+    if (Array.isArray(row.options)) {
+      for (const entry of row.options) {
+        if (!entry || typeof entry !== 'object') continue;
+        const option = entry as { value?: unknown; name?: unknown; description?: unknown };
+        if (typeof option.value !== 'string' || option.value.length === 0) continue;
+        options.push({
+          value: option.value,
+          label: typeof option.name === 'string' && option.name ? option.name : option.value,
+          ...(typeof option.description === 'string' ? { description: option.description } : {}),
+          category: dshModeCategory(option.value),
+        });
+      }
     }
-    if (options.length === 0) return undefined;
-    return {
-      options,
-      currentValue: typeof row.currentValue === 'string' ? row.currentValue : '',
-    };
+    const currentValue = typeof row.currentValue === 'string' ? row.currentValue : '';
+    if (options.length === 0 && currentValue === '') return undefined;
+    return { options, currentValue };
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
@@ -817,7 +1072,7 @@ export class DshSessionConnection implements SessionConnection {
     if (!entry || entry.kind !== 'approval') {
       throw new Error(`dsh approval ${requestId} is no longer pending`);
     }
-    const receipt = await this.driver.respondApproval(entry, decision !== 'reject');
+    const receipt = await this.channel.respondApproval(entry, decision !== 'reject');
     // The receipt reason is one of exactly two (the decoder fails anything
     // else closed as drift). `bad-response`: OUR payload was malformed, the
     // card is still pending on the host, and swallowing it would leave the
@@ -829,30 +1084,206 @@ export class DshSessionConnection implements SessionConnection {
     if (!receipt.accepted && receipt.reason === 'bad-response') {
       throw new Error(`the dsh host rejected the approval answer for ${requestId} as malformed`);
     }
-    this.pending.delete(requestId);
-    this.approvalIndex.delete(entry.approvalId);
-    if (!receipt.accepted) {
-      this.deliver({ type: 'permission-resolved', requestId, decision: 'external' });
+    // A successful receipt is also a settlement. The event cancellation can
+    // arrive after the receipt; deleting silently here would strand the UI
+    // card because that cancellation then finds no entry. Identity fences a
+    // replayed card from a replacement event generation.
+    if (this.pending.get(requestId) === entry) {
+      this.pending.delete(requestId);
+      this.approvalIndex.delete(entry.approvalId);
+      this.deliver({ type: 'permission-resolved', requestId, decision: receipt.accepted ? decision : 'external' });
     }
   }
 
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
+    const claimed = this.questionClaims.get(requestId);
+    if (claimed) return claimed;
+    const operation = this.answerQuestionOnce(requestId, answers);
+    this.questionClaims.set(requestId, operation);
+    try { await operation; } finally {
+      if (this.questionClaims.get(requestId) === operation) this.questionClaims.delete(requestId);
+    }
+  }
+
+  private async answerQuestionOnce(requestId: string, answers: string[][]): Promise<void> {
     this.assertMutable('answer a question');
     const entry = this.pending.get(requestId);
     if (!entry || entry.kind !== 'question') {
       throw new Error(`dsh question ${requestId} is no longer pending`);
     }
-    const receipt = await this.driver.answerQuestion(entry, answers);
+    // Install suppression before awaiting: the host can claim and abandon this
+    // reply before its receipt arrives. That late receipt must not hide the
+    // replacement card a completed turn has already made answerable again.
+    const claim: ContinuedAnswer = { kind: 'accepted' };
+    const callId = entry.continued ? entry.callId : undefined;
+    if (callId) this.continuedAnswers.set(callId, claim);
+    const rollbackClaim = () => {
+      if (callId && this.continuedAnswers.get(callId) === claim) this.continuedAnswers.delete(callId);
+    };
+    let receipt: Awaited<ReturnType<DshSessionChannel['answerQuestion']>>;
+    try { receipt = await this.channel.answerQuestion(entry, answers); }
+    catch (error) { rollbackClaim(); throw error; }
     // Same receipt discipline as respondPermission: `bad-response` throws and
     // keeps the card; `not-pending` — the only other reason the decoder admits
     // — settles the card as resolved-elsewhere.
     if (!receipt.accepted && receipt.reason === 'bad-response') {
+      rollbackClaim();
       throw new Error(`the dsh host rejected the question answer for ${requestId} as malformed`);
     }
-    this.pending.delete(requestId);
-    if (!receipt.accepted) {
+    if (this.pending.get(requestId) === entry) {
+      this.pending.delete(requestId);
       this.deliver({ type: 'question-resolved', requestId });
     }
+  }
+
+  /** Continued questions survive the event generation; their durable projection
+   * and queued-reply inbox determine whether they can be answered again. */
+  private reconcileContinuedQuestions(): void {
+    const value = this.projections.get('userQuestions') as { active?: unknown[] } | undefined;
+    if (value && !Array.isArray(value.active)) return;
+    const inbox = this.projections.get('inbox') as Record<string, unknown> | undefined;
+    const queued = new Set<string>();
+    for (const target of ['next-turn', 'next-step']) {
+      const items = inbox?.[target];
+      for (const raw of Array.isArray(items) ? items : []) {
+        const source = (raw as { source?: { kind?: string; callId?: string } })?.source;
+        if (source?.kind === 'user-question-reply' && typeof source.callId === 'string') queued.add(source.callId);
+      }
+    }
+    const active = new Map<string, { callId: string; questions: unknown[] }>();
+    for (const raw of value?.active ?? []) {
+      const q = raw as { callId?: unknown; state?: unknown; questions?: unknown };
+      if (q?.state === 'continued' && typeof q.callId === 'string' && Array.isArray(q.questions)) active.set(q.callId, { callId: q.callId, questions: q.questions });
+    }
+    for (const [id, entry] of this.pending) {
+      if (entry.kind !== 'question' || !entry.continued || !entry.callId) continue;
+      const answer = this.continuedAnswers.get(entry.callId);
+      // An outstanding RPC is not yet proof of settlement. Keep its existing
+      // card until the receipt or a queued/claimed/admitted reply proves it.
+      if (active.has(entry.callId) && !queued.has(entry.callId) && (!answer || answer.kind === 'accepted')) continue;
+      this.pending.delete(id);
+      this.deliver({ type: 'question-resolved', requestId: id });
+    }
+    // A missing projection during carrier replacement is not an empty roster.
+    if (value) for (const callId of this.continuedAnswers.keys()) if (!active.has(callId)) this.continuedAnswers.delete(callId);
+    for (const q of active.values()) {
+      if (queued.has(q.callId) || this.continuedAnswers.has(q.callId)) continue;
+      // A projected transition can precede the waterfall cancellation. Retire
+      // that generation-bound card before exposing the durable answer route.
+      for (const [id, entry] of this.pending) {
+        if (entry.kind === 'question' && entry.callId === q.callId && !entry.continued) this.noteCancellation(id);
+      }
+      const id = `dsh-question:${this.info.id}:${q.callId}`;
+      if (this.pending.has(id)) continue;
+      const entry = mapDshQuestion(id, { sessionId: this.info.id, callId: q.callId, questions: q.questions, continued: true });
+      if (!entry) continue;
+      this.pending.set(id, entry);
+      this.deliver(entry.message);
+    }
+  }
+
+  private consumeQuestionLifecycle(event: DshSessionEvent, live = true): void {
+    if (event.type === 'agent/inbox/spliced') {
+      this.consumeInboxSplice(event, live);
+      return;
+    }
+    const data = event.data as { turn?: unknown; source?: { kind?: string; callId?: string } } | undefined;
+    if (event.type === 'turn/start' && typeof data?.turn === 'number') this.continuedTurn = data.turn;
+    if (event.type === 'user/message' && data?.source?.kind === 'user-question-reply' && data.source.callId) {
+      this.continuedAnswers.set(data.source.callId, { kind: 'admitted' });
+    }
+    if (event.type === 'turn/end' && typeof data?.turn === 'number') {
+      for (const [callId, answer] of this.continuedAnswers) {
+        // A bounded initial history window can omit turn/start. A claim still
+        // belongs to the next turn/end on this ordered durable stream.
+        if (answer.kind === 'claimed' && (answer.turn === undefined || answer.turn === data.turn)) this.continuedAnswers.delete(callId);
+      }
+      if (this.continuedTurn === data.turn) this.continuedTurn = undefined;
+      if (live) this.reconcileContinuedQuestions();
+    }
+  }
+
+  private consumeInboxSplice(event: DshSessionEvent, live = true, trackAnswers = true): void {
+    const data = event.data as { target?: string; start?: number; removedCount?: number; inserted?: unknown[]; outcome?: string } | undefined;
+    if (!data || !['next-turn', 'next-step'].includes(data.target ?? '') || !Number.isSafeInteger(data.start)
+        || !Array.isArray(data.inserted)) return;
+    const target = data.target!;
+    const items = [...(this.nativeInbox.get(target) ?? [])];
+    const start = data.start!; const count = data.removedCount ?? 0;
+    if (start < 0 || start > items.length || !Number.isSafeInteger(count) || count < 0 || start + count > items.length) {
+      if (live) this.deliver({ type: 'history-reset' }); return;
+    }
+    const inserted = data.inserted.filter((m): m is Record<string, unknown> => m !== null && typeof m === 'object' && !Array.isArray(m));
+    const removed = items.splice(start, count, ...inserted);
+    this.nativeInbox.set(target, items);
+    for (const message of trackAnswers ? removed : []) {
+      const source = message.source as { kind?: string; callId?: string } | undefined;
+      if (source?.kind !== 'user-question-reply' || !source.callId) continue;
+      if (data.outcome === 'canceled') this.continuedAnswers.delete(source.callId);
+      else this.continuedAnswers.set(source.callId, { kind: 'claimed', turn: this.continuedTurn });
+    }
+    // A canceled splice is explicit deletion/edit, distinct from a claim. The
+    // canonical history reset retracts old bubbles and rebuilds queued overlays.
+    if (live && data.outcome === 'canceled' && removed.length) this.deliver({ type: 'history-reset' });
+    for (const message of inserted) {
+      const source = message.source as { kind?: string } | undefined;
+      const text = dshQueueText(message.content); const id = typeof message.id === 'string' ? message.id : undefined;
+      const imageCount = dshImageCount(message.content);
+      if (live && source?.kind === 'user' && (text || imageCount) && id) this.deliver({ type: 'user-message', key: dshMessageKey(this.info.id, id), text, queued: true, ...(imageCount ? { imageCount } : {}) });
+      if (live && imageCount && source?.kind === 'user') {
+        const epoch = this.imageEpoch;
+        void this.imageArtifacts({ type: 'user/message', data: message }).then((rows) => {
+          if (!this.closed && epoch === this.imageEpoch) for (const row of rows) this.deliver(row);
+        });
+      }
+    }
+    if (live) this.reconcileContinuedQuestions();
+  }
+
+  private async imageArtifacts(event: Pick<DshSessionEvent, 'type' | 'data'>, budget?: { remaining: number }): Promise<AgentMessage[]> {
+    if (!this.channel.attachment) return [];
+    const rows: AgentMessage[] = [];
+    const epoch = this.imageEpoch;
+    for (const ref of dshUserImageArtifacts(event, this.info.id)) {
+      if (budget && budget.remaining-- <= 0) {
+        if (budget.remaining === -1) rows.push({ type: 'notice', message: 'Additional DeepSeek Harness image previews are outside this bounded history read.' });
+        continue;
+      }
+      let read = this.imageReads.get(ref.attachmentId);
+      if (!read && this.imageReads.size >= 16) this.imageReads.delete(this.imageReads.keys().next().value!);
+      if (!read && this.imageReads.size < 16 && this.imageAborts.size < 4) {
+        read = (async () => {
+          if ((ref.message.size ?? 0) > 4 * 1024 * 1024) return undefined;
+          const abort = new AbortController(); this.imageAborts.add(abort);
+          const timer = setTimeout(() => abort.abort(), 2000);
+          let outcome: Awaited<ReturnType<NonNullable<DshSessionChannel['attachment']>>>;
+          try { outcome = await this.channel.attachment!(this.info.id, ref.attachmentId, abort.signal); }
+          finally { clearTimeout(timer); this.imageAborts.delete(abort); }
+          if (!outcome.ok || epoch !== this.imageEpoch || this.closed) return undefined;
+          const attachment = outcome.value.attachment as { attachmentId?: unknown; mediaType?: unknown; bytes?: unknown } | undefined;
+          const data = outcome.value.data;
+          if (!attachment || attachment.attachmentId !== ref.attachmentId || attachment.mediaType !== ref.message.mimeType
+              || typeof data !== 'string' || data.length > 5_592_408 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) return undefined;
+          const bytes = Buffer.from(data, 'base64');
+          if (!bytes.length || bytes.length > 4 * 1024 * 1024 || bytes.length !== attachment.bytes
+              || (ref.message.size !== undefined && bytes.length !== ref.message.size)) return undefined;
+          return `data:${ref.message.mimeType};base64,${data}`;
+        })().catch(() => undefined);
+        this.imageReads.set(ref.attachmentId, read);
+      }
+      const url = await read;
+      if (!url && this.imageReads.get(ref.attachmentId) === read) this.imageReads.delete(ref.attachmentId);
+      if (epoch !== this.imageEpoch || this.closed) return [];
+      rows.push({ ...ref.message, ...(url ? { url } : {}) });
+      if (!url) rows.push({ type: 'notice', message: 'This DeepSeek Harness image preview is unavailable or exceeds the bounded readback limit.' });
+    }
+    return rows;
+  }
+
+  private resetImageReads(): void {
+    this.imageEpoch += 1; this.imageReads.clear();
+    for (const abort of this.imageAborts) abort.abort();
+    this.imageAborts.clear();
   }
 
   /**
@@ -868,7 +1299,7 @@ export class DshSessionConnection implements SessionConnection {
    * exactly as the host ordered them — advertised order is picker order.
    */
   async listModels(): Promise<ModelOption[]> {
-    const catalog = await this.driver.models(this.info.id);
+    const catalog = await this.channel.models(this.info.id);
     if (!catalog.routable) return [];
     // Flattened through the shared mapper, so the attached picker shows the
     // same rows the pre-session catalog (`DshAdapter.listModels`) offered.
@@ -878,22 +1309,25 @@ export class DshSessionConnection implements SessionConnection {
   /**
    * The permission presets this deployment offers.
    *
-   * Read from the `permissions` projection the connection already holds — no
-   * request at all, so a mode picker costs nothing and stays correct as the
-   * host pushes updates. An absent key means no permission service is composed
-   * and the control is hidden, which is exactly what an empty list does.
+ * Read from the `permissions` projection the connection already holds wherever
+   * that projection carries its own roster, so a mode picker costs nothing and
+   * stays correct as the host pushes updates. Where the projection carries only
+   * the current value — the captured 0.2 shape — the roster comes from the
+   * host-wide catalog endpoint, cached per carrier. No roster at all means no
+   * permission service is composed and the control is hidden, which is exactly
+   * what an empty list does.
    */
   async listModes(): Promise<ModeOption[]> {
-    return this.permissionSelect()?.options ?? [];
+    return (await this.permissionSelect())?.options ?? [];
   }
 
   /**
-   * The session's command roster: the host's own registry, plus the local
-   * interrupt.
+   * The session's command roster: the host's own registry, plus local
+   * interruption and, on rc.2, steering.
    *
    * A READ. Every host command runs through the command registry and is never
    * sent to the model, so all of them are `action` kind. A host row whose name
-   * collides with the local interrupt is dropped, because two entries with one
+   * collides with a local command is dropped, because two entries with one
    * name is a picker that lies about which one runs.
    *
    * A host that cannot be reached still yields the interrupt — losing the
@@ -902,14 +1336,18 @@ export class DshSessionConnection implements SessionConnection {
    */
   async listCommands(): Promise<SlashCommand[]> {
     const local: SlashCommand[] = [{ name: 'stop', description: 'Stop the running turn', kind: 'action' }];
+    if (this.channel.family === 'remote-0.2') {
+      local.push({ name: 'steer', description: 'Send text to the running turn at its next step', kind: 'action' });
+    }
     let roster: Awaited<ReturnType<DshDriver['listCommands']>>;
     try {
-      roster = await this.driver.listCommands(this.info.id);
+      roster = await this.channel.listCommands(this.info.id);
     } catch {
       return local;
     }
     for (const command of roster) {
-      if (DSH_LOCAL_COMMANDS.includes(command.name)) continue;
+      if (DSH_LOCAL_COMMANDS.includes(command.name)
+        || (this.channel.family === 'remote-0.2' && command.name === 'steer')) continue;
       local.push({
         name: command.name,
         ...(command.description ? { description: command.description } : {}),
@@ -933,22 +1371,36 @@ export class DshSessionConnection implements SessionConnection {
    * text; the name is re-checked against the live roster so a stale picker
    * cannot send an unknown slash line into the host's parser.
    */
-  async runCommand(name: string, args?: string, _input?: CommandInput): Promise<CommandResult | void> {
+  async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void> {
     if (DSH_LOCAL_COMMANDS.includes(name)) {
       this.assertMutable(`run "${name}"`);
-      await this.driver.cancel(this.info.id);
+      await this.channel.cancel(this.info.id);
       return;
     }
-    this.assertMutable(`run "${name}"`);
-    const roster = await this.driver.listCommands(this.info.id);
+    if (this.channel.family === 'remote-0.2' && name === 'steer') {
+      this.assertMutable('steer the running turn');
+      const text = args?.trim();
+      if (!text) throw new Error('/steer requires text for the running turn');
+      await this.submitPrompt({ ...input, text }, 'steer');
+      return;
+    }
+    const guard = this.mutationGuard(`run "${name}"`);
+    guard();
+    const roster = await this.channel.listCommands(this.info.id);
+    guard();
     if (!roster.some((command) => command.name === name)) {
       throw new Error(`dsh has no command "${name}"`);
     }
     // Re-guarded after the roster read: the lookup awaited, and the generation
     // it was issued under may have ended while it was in flight.
     this.assertMutable(`run "${name}"`);
+    await this.applyPermissionMode(input?.permissionMode, guard);
+    guard();
+    // rc.2 selects the next prompt; its command envelope has no model override.
+    if (this.channel.family === 'remote-0.2') await this.applyModelSelection(input?.model, guard);
+    guard();
     const trimmed = args?.trim() ?? '';
-    const execution = await this.driver.executeCommand(
+    const execution = await this.channel.executeCommand(
       this.info.id,
       trimmed ? `/${name} ${trimmed}` : `/${name}`,
     );
@@ -965,6 +1417,8 @@ export class DshSessionConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
+    this.resetImageReads();
+    this.channel.close?.();
     if (this.closed) return;
     this.closed = true;
     this.handlers.clear();

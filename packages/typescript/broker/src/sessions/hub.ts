@@ -2556,6 +2556,13 @@ export class Hub {
   private handleRetentionChanged(managed: ManagedConn): void {
     const key = this.keyForManaged(managed);
     if (!key || this.pinned.has(key) || managed.clientCount > 0) return;
+    if (this.requiresForegroundSubscribers(managed)) {
+      // Release starts the normal reconnect grace. Subsequent live frames may
+      // not turn it into an indefinite lease or keep extending that deadline.
+      this.attentionLeases.delete(managed);
+      this.attentionLeaseDenied.delete(managed);
+      return;
+    }
     if (managed.requiresAttentionRetention) {
       this.acquireAttentionLease(key, managed);
       return;
@@ -2565,6 +2572,7 @@ export class Hub {
   }
 
   private acquireAttentionLease(key: string, managed: ManagedConn): boolean {
+    if (this.requiresForegroundSubscribers(managed)) return false;
     if (this.attentionLeases.has(managed)) {
       this.cancelEvict(key);
       return true;
@@ -2586,6 +2594,10 @@ export class Hub {
     this.attentionLeaseDenied.delete(managed);
     this.cancelEvict(key);
     return true;
+  }
+
+  private requiresForegroundSubscribers(managed: ManagedConn): boolean {
+    return this.registry.get(managed.conn.info.tool)?.integration?.sessionRetention === 'foreground';
   }
 
   private scheduleEvict(key: string, managed: ManagedConn): void {

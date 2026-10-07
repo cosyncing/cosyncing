@@ -102,6 +102,8 @@ export interface ManagedHostDescriptor {
   };
   /** How long a freshly started host has to become ready before it is a failure. */
   readonly readyTimeoutMs: number;
+  /** The qualified launch keeps its server in the foreground until shutdown. */
+  readonly launchKeepsServerForeground?: boolean;
   /** How long a stop waits after SIGTERM before escalating. */
   readonly stopGraceMs: number;
 }
@@ -115,6 +117,12 @@ export interface ManagedHostDescriptor {
  * migrations establish their common primitive set.
  */
 export interface AgentIntegration {
+  /**
+   * Native sessions remain host-owned when the foreground subscriber leaves.
+   * After the normal reconnect grace, release their adapter subscriptions
+   * even if a turn or decision is pending. Absence preserves attention leases.
+   */
+  readonly sessionRetention?: 'foreground';
   readonly managedRuntime?: ManagedRuntimeIntegration;
   /**
    * Declares that this agent's host is EXTERNAL — a process that exists

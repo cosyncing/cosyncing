@@ -235,7 +235,7 @@
     },
     {
       "id": "broker.managed-host-ownership",
-      "description": "The broker starts or stops an external agent host ONLY when it can prove it started that exact process \u2014 pid, a start token that survives pid reuse, the boot it started in, and the address the record was written for must all match \u2014 and re-proves it immediately before every signal, so a pid recycled between deciding and acting is never signalled; a serving host, an occupied-but-unready address, an unidentifiable process, and a damaged ownership record are all preserved untouched, and a spawned child whose own identity cannot be read is stopped again rather than leaked as a process no later broker could ever prove it owns. Proof is scoped to one BOOT, because a Linux start token counts ticks since boot and would otherwise let a post-reboot stranger inherit a pid and start token; a missing command name makes the process lookup indeterminate, but a changed non-empty name does not revoke otherwise matching proof because a process can rename itself at runtime. \"Nothing is there\" and \"this machine will not say\" are never the same answer: only a proven-empty address is spawned into, only a proven-gone process has its record cleared, and a failed stop keeps the proof that authorizes the next attempt. A start reconciles the RECORD independently of the address, so a host that released its listener but still runs \u2014 or one left behind by a repointed configuration, including a repoint onto an address somebody else already serves \u2014 is settled rather than kept alive until shutdown or having its only proof overwritten; that reconciliation reaps nothing it cannot prove is a DIFFERENT process from the one holding the address, so an unnameable address and our own serving host are both left strictly alone. A descriptor that cannot launch is not a shortcut around any of that: moving a managed host to a remote or operator-run one reaps the local process we started rather than leaving it alive until shutdown. No outcome that ends without a running host is silent, and silence is not reachable by accident: what to say is decided next to the outcome type, exhaustively, so an unhandled variant fails to compile rather than reaching an operator as nothing. A start blocked by a predecessor, a host of ours still running that nothing can now reap, and an address held by something unready that is not ours or cannot be identified all reach the operator pointed at doctor \u2014 built from our own closed vocabulary, never from another program's output, and never claiming a host is somebody else's when the honest answer is that we could not tell. Release reads that record as its primary input, so a host stays reapable even when the adapter stops describing it, which is exactly when a second host has appeared. Readiness proves the serving process IS the spawned child before ownership is claimed, and the advertised deadline bounds the wait for an answer rather than the interval between questions \u2014 measured from the spawn, so a hung pre-flight probe or a slow reap cannot spend a fresh host's budget and then fail it for being slow. Supervision restarts only a host proven crashed or proven ours-and-wedged, under a crash-loop budget, and shutdown waits for a recovery already in flight before releasing. Uninstall stops only a still-proven owned child and reports every other host as preserved."
+      "description": "The broker starts or stops an external agent host ONLY when it can prove it started that exact process \u2014 pid, a start token that survives pid reuse, the boot it started in, and the address the record was written for must all match \u2014 and re-proves it immediately before every signal, so a pid recycled between deciding and acting is never signalled; a serving host, an occupied-but-unready address, an unidentifiable process, and a damaged ownership record are all preserved untouched, and a spawned child whose own identity cannot be read is stopped again rather than leaked as a process no later broker could ever prove it owns. Proof is scoped to one BOOT, because a Linux start token counts ticks since boot and would otherwise let a post-reboot stranger inherit a pid and start token; a missing command name makes the process lookup indeterminate, but a changed non-empty name does not revoke otherwise matching proof because a process can rename itself at runtime. \"Nothing is there\" and \"this machine will not say\" are never the same answer: only a proven-empty address is spawned into, only a proven-gone process has its record cleared, and a failed stop keeps the proof that authorizes the next attempt. A start reconciles the RECORD independently of the address, so a host that released its listener but still runs \u2014 or one left behind by a repointed configuration, including a repoint onto an address somebody else already serves \u2014 is settled rather than kept alive until shutdown or having its only proof overwritten; that reconciliation reaps nothing it cannot prove is a DIFFERENT process from the one holding the address, so an unnameable address and our own serving host are both left strictly alone. A descriptor that cannot launch is not a shortcut around any of that: moving a managed host to a remote or operator-run one reaps the local process we started rather than leaving it alive until shutdown. No outcome that ends without a running host is silent, and silence is not reachable by accident: what to say is decided next to the outcome type, exhaustively, so an unhandled variant fails to compile rather than reaching an operator as nothing. A start blocked by a predecessor, a host of ours still running that nothing can now reap, and an address held by something unready that is not ours or cannot be identified all reach the operator pointed at doctor \u2014 built from our own closed vocabulary, never from another program's output, and never claiming a host is somebody else's when the honest answer is that we could not tell. Release reads that record as its primary input, so a host stays reapable even when the adapter stops describing it, which is exactly when a second host has appeared. Readiness proves the serving process IS the spawned child before ownership is claimed, and the advertised deadline bounds the wait for an answer rather than the interval between questions \u2014 measured from the spawn, so a hung pre-flight probe or a slow reap cannot spend a fresh host's budget and then fail it for being slow. Supervision restarts only a host proven crashed or proven ours-and-wedged, under a crash-loop budget whose suspension does not quietly expire: a streak that reaches the limit keeps its refusal after the attempt window ages out, and lifts only when the host is proven serving again, when the configuration that produced the crash changes, or when the broker restarts, so a host that dies on every start cannot get another three tries merely by being left alone for the window. A descriptor that cannot launch at all withdraws its window attempt rather than charging or forgiving the streak, because absence is not a crash, and shutdown waits for a recovery already in flight before releasing. Uninstall stops only a still-proven owned child and reports every other host as preserved. Buffered owned-child output reaches authentication before slow synchronous process-table walks can consume the startup readiness window, without increasing that window or weakening fresh ownership proofs. A malformed DSH core roster also blocks ownership effects as a contract fault rather than being reported healthy."
     },
     {
       "id": "broker.sync-degraded",
@@ -311,7 +311,7 @@
     },
     {
       "id": "broker.attention-retention",
-      "description": "Resolved attention events and delivery records are pruned by explicit retention and count limits."
+      "description": "Resolved attention events and delivery records are pruned by explicit retention and count limits. Live attention retains ordinary zero-client owners, while an adapter declaring foreground retention releases after reconnect grace despite pending work or decisions. The actual DSH integration declaration follows that policy, preserves a second foreground client and an in-grace rejoin, and prevents later activity from acquiring an indefinite lease."
     },
     {
       "id": "broker.attention-pending-withdrawn",
@@ -503,7 +503,7 @@
     },
     {
       "id": "broker.dsh-mapping",
-      "description": "dsh native events fold totally into canonical rows without enumerating plugins: a real captured turn maps exactly, an unrecognized event type becomes an honest activity record instead of a throw or a silent drop, tool cards come only from the host-computed view with the documented generic JSON fallback, and the projection store is generic higher-seq-wins seeded from the history tail's consistent cut, keeping unknown keys readable but never forwarding raw dsh-shaped values."
+      "description": "dsh native events fold totally into canonical rows without enumerating plugins: a real captured turn maps exactly, an unrecognized event type becomes an honest activity record instead of a throw or a silent drop, tool cards come only from the host-computed view with the documented generic JSON fallback, and the projection store is generic higher-seq-wins seeded from the history tail's consistent cut, keeping unknown keys readable but never forwarding raw dsh-shaped values. Captured rc.2 tool messages preserve their visible result and error state, image-only user messages preserve native identity and image count, and durable reasoning settles the streamed reasoning key. Captured rc.2 startSeq/endSeq replacement ranges remove shadowed surface messages, retain log-only rows, and fold nested checkpoints while retaining the legacy start/end form."
     },
     {
       "id": "broker.dsh-observe",
@@ -511,11 +511,11 @@
     },
     {
       "id": "broker.dsh-drive",
-      "description": "Every dsh write is the host's own contract or refuses: prompts post their queue/steer placement, answers echo the asking rpcId and re-attach selections to their native ids, a single-select answer carries at most one of selected/custom, an app-sent prompt's minted rpcId converges its own echo without claiming another client's message, a bad-response receipt throws and keeps the card while not-pending settles it as resolved elsewhere, unimplemented seams are absent rather than throwing stubs, and an attachment is refused outright instead of being sent as text naming a file the agent never received."
+      "description": "Every dsh write is the host's own contract or refuses: prompts post their queue/steer placement, answers echo the asking rpcId and re-attach selections to their native ids, a single-select answer carries at most one of selected/custom, an app-sent prompt's minted rpcId converges its own echo without claiming another client's message, a bad-response receipt throws and keeps the card while not-pending settles it as resolved elsewhere, unimplemented seams are absent rather than throwing stubs, and an attachment is refused outright instead of being sent as text naming a file the agent never received. The rc.2 session command roster exposes a local steer caller that sends one next-step prompt; empty text, native refusal and generation loss prevent or fence it. Steering model and permission selections precede its prompt, and a legacy registry command named steer retains its own route. Ordinary advertised native commands apply the selected permission preset before exactly one requested execution; unknown or refused presets and generation loss suppress that execution, while interruption bypasses preset selection. Explicit rc.2 native-command model and reasoning input selects the next prompt before one unchanged command envelope, matching native behavior; unchanged choices avoid redundant selection, and selection refusal or generation loss prevents command execution."
     },
     {
       "id": "broker.dsh-diagnosis",
-      "description": "dsh doctor says only what a read-only, effect-free observer can prove, and what it tells an operator to DO follows the same posture rule as every other managed host: where cosyncing manages this one, an absent host yields no `dsh web` command at all, because instructing a manual start while the service is starting or recovering one leaves two hosts on a single address. The posture is scoped by ADDRESS rather than by agent: the managed wording applies only to an address the broker reports managing, so a host on another machine is never described as supervised. That address also decides the command, and a non-default one never receives `dsh web` at all \u2014 managed or not \u2014 because that command takes no address and would start a host at the default one instead: not the host being diagnosed, and precisely the address a service manages. The operator is told which address to start instead. Beyond that, it opens no socket and issues no RPC of its own, separates \"a server is listening\" from \"a dsh host is listening\" by the upgrade-required downlink fingerprint, treats an npx cache with no binary on PATH as an advisory rather than an install, fails a build below the exact tested floor, and refuses a non-http(s) or query-bearing base URL instead of probing it \u2014 redacting any credential rather than quoting the configured value."
+      "description": "dsh doctor says only what a read-only, effect-free observer can prove, and what it tells an operator to DO follows the same posture rule as every other managed host: where cosyncing manages this one, an absent host yields no `dsh web` command at all, because instructing a manual start while the service is starting or recovering one leaves two hosts on a single address. The posture is scoped by ADDRESS rather than by agent: the managed wording applies only to an address the broker reports managing, so a host on another machine is never described as supervised. That address also decides the command, and a non-default one never receives `dsh web` at all \u2014 managed or not \u2014 because that command takes no address and would start a host at the default one instead: not the host being diagnosed, and precisely the address a service manages. The operator is told which address to start instead. Beyond that, it opens no socket and issues no RPC of its own, separates \"a server is listening\" from \"a dsh host is listening\" by the upgrade-required downlink fingerprint, treats an npx cache with no binary on PATH as an advisory rather than an install, fails a build below the exact tested floor, and refuses a non-http(s) or query-bearing base URL instead of probing it \u2014 redacting any credential rather than quoting the configured value. The two families are separated by the adapter's OWN contract probe rather than by a second fingerprint, which is load-bearing: a 0.2 host's fingerprint IS a refusal (401 unauthorized on its carrier, 404 where the 0.1 downlink used to be), so a doctor that looked only for upgrade-required reported a healthy, correctly installed 0.2 host as an unexpected status and sent the operator to inspect their own port. Behind a 0.2 carrier the enrollment question is answered LOCALLY, from the same store the adapter writes under the same derived scope: a held, unexpired credential passes as HELD rather than as accepted, because an anonymous probe cannot prove acceptance and an authenticated one would read the real carrier route as a 404; a missing one names the command that enrolls the host; an expired one says so; a store that refuses to answer is reported as storage rather than as missing enrollment, so a group-writable or symlinked credential file is never answered by writing to it; and a host cosyncing starts itself is never handed a manual enrollment it could only complete by starting a competing host. No cookie value or name reaches the report."
     },
     {
       "id": "broker.dsh-attach-priming",
@@ -791,7 +791,7 @@
     },
     {
       "id": "client.complete",
-      "description": "Flutter formatting, analysis, tests, and canonical web build pass."
+      "description": "Flutter formatting, analysis, tests, and canonical web build pass. Live-only resident sessions retain cached transcript and draft while releasing hidden transport; only the foreground page rejoins after a fresh roster read. Queued background admissions and held capability reads cannot supersede foreground authority, a pending close fences replacement attachment, and late visibility or source changes prevent a resumed join. Observe-capable adapters preserve their existing resident transport behavior. Suspension also cancels a queued live admission before it starts. An unavailable registry read cannot erase the same-source foreground-only restriction, and credential saving on an initially offstage page waits for a fresh foreground roster. Visible inactive windows keep live transport; hidden windows release it and restore through a fresh roster without reconnecting merely on focus changes. A restored foreground live-only page waits boundedly for its initial authoritative roster attach instruction; cancellation or a source change retires that wait before socket authority can be acquired. An authoritative Observe row remains attachable while optional capabilities are pending; post-attachment capability publication preserves the existing bootstrap boundary and reuses any early registry read."
     },
     {
       "id": "dart.broker-contract.dependencies",
@@ -883,7 +883,7 @@
     },
     {
       "id": "broker.dsh-contract-capture",
-      "description": "The contract capture that the 0.2 fixture is built from cannot touch the machine it runs on and cannot claim more than it saw. The child host is handed a disposable HOME plus pinned DSH_HOME, DSH_AGENTS_HOME and XDG roots rather than an inherited environment, because the installed host resolves DSH_HOME before ~/.dsh and an operator's own export used to redirect an 'isolated' capture into real sessions; provider keys reach it only by an explicitly named --credential-env, never by inheritance, and a name that relocates storage is refused. Every root the child can write is proved contained before it starts. The model turn's provenance is derived from the host's own frames: an unaccepted prompt, a turn that streamed only whitespace, or a turn that stalled on an approval the capture refused is reported as not model-backed and says where it stalled."
+      "description": "The contract capture that the 0.2 fixture is built from cannot touch the machine it runs on and cannot claim more than it saw. The child host is handed a disposable HOME plus pinned DSH_HOME, DSH_AGENTS_HOME and XDG roots rather than an inherited environment, because the installed host resolves DSH_HOME before ~/.dsh and an operator's own export used to redirect an 'isolated' capture into real sessions; provider keys reach it only by an explicitly named --credential-env, never by inheritance, and a name that relocates storage is refused. Every root the child can write is proved contained before it starts. The model turn's provenance is derived from the host's own frames: an unaccepted prompt, a turn that streamed only whitespace, or a turn that stalled on an approval the capture refused is reported as not model-backed and says where it stalled. Local scripted providers are explicitly reported as non-model-backed with zero provider spending; isolated product observers verify visible outcomes without upgrading them to physical model or browser acceptance."
     },
     {
       "id": "broker.dsh-launch-qualification",
@@ -891,7 +891,7 @@
     },
     {
       "id": "broker.dsh-credential-lifetime",
-      "description": "The exchanged 0.2 session survives what it should and gives up only when it is told to. A transport failure during the initial exchange or a renewal keeps both the cookie and the launch token and reports an unreachable host rather than a refused token; renewal is retried on a bounded backoff. Only an authoritative refusal or an ownership change retires a token: releasing or replacing the launch token fences an exchange already in flight, so a late success publishes no state and no credential-store write. A credential store that refuses to answer is reported as storage, never as missing enrollment, and a superseded load failure cannot dismantle the session that replaced it."
+      "description": "The exchanged 0.2 session survives what it should and gives up only when it is told to. A transport failure during the initial exchange or a renewal keeps both the cookie and the launch token and reports an unreachable host rather than a refused token; renewal is retried on a bounded backoff. Only an authoritative refusal or an ownership change retires a token: releasing or replacing the launch token fences an exchange already in flight, so a late success publishes no state and no credential-store write. A credential store that refuses to answer is reported as storage, never as missing enrollment, and a superseded load failure cannot dismantle the session that replaced it. An observed persisted enrollment withdrawal or cookie refusal cannot be undone by a retained or subsequently adopted managed launch token. A usable operator re-enrollment lifts that block, resumes the existing attached session, and permits bounded proactive renewal again."
     },
     {
       "id": "broker.dsh-stream-carrier",
@@ -900,6 +900,30 @@
     {
       "id": "broker.dsh-event-generation",
       "description": "Nothing is answered to a 0.2 host until its event generation is proven, and the proof is revoked the moment the stream stops earning it. Readiness is the ready frame alone, with a deadline that exists without an injected clock; a logical end or error on the event stream ends the generation, clears its pending interactions and drives a real reconnect even while the socket stays open, and an old reader cannot invalidate a newer generation. Answering claims the pending entry atomically, so concurrent callers produce one request to the host, a receipt that lands after a reconnect cannot delete the new generation's pending entry, a failed send puts the request back and a host refusal does not."
+    },
+    {
+      "id": "broker.dsh-session-link",
+      "description": "The rc.2 session link resumes existing attached sessions after credential re-enrollment through exactly one fresh authenticated handshake and baseline. Follow-only recovery retains healthy event-authority cards; the exact bounded retry ladder resets transient exhaustion on a fresh carrier while preserving terminal session refusals. Captured assistant revisions, attempt/index ordering, reconnect baselines, durable settlement, and abandonment converge on stable transcript keys. Timed wait claims expire the foreground waterfall; durable continued questions use only their dedicated answer route. Native queue cancellation, workspace/archive changes, and exhaustive roster reconciliation converge without treating inactivity or partial reads as deletion. Initial history waits for the shared event handshake before taking its follow cut and paging, preserving earlier messages when follow precedes ready without weakening stale-generation fencing. Source-defined settings/document-updated and plugin-manager/changed events refresh cached catalogs without replacing the live carrier or event authority. Malformed successful roster payloads, row identities and cursors are contract refusals. Native disposal cannot remove an attached durable session without a subsequent valid exhaustive roster, and malformed later pages confer no deletion authority. Captured scalar initialization errors and agent error chains retain native messages without changing healthy carrier or event authority. Fences late permission-catalog cache writes across native invalidation, including empty replacement catalogs. Fresh authenticated handshakes invalidate preset caches even when a new mux repeats its numeric generation. A prompt or command awaiting a host-scoped catalog cannot cross enrollment withdrawal, a replaced event authority or connection close, while a fresh explicit operation and follow-only transcript recovery remain usable. Fresh queued and steering prompts remain distinct across broker and channel replacements against the native session deduplication set, with one send per explicit action and no automatic retry. A physical carrier loss suspends process-local assistant overlays until the fresh same-cursor baseline retracts abandoned text or reasoning or restores the surviving attempt. Continued-question acceptance, claim and durable admission are distinct: matching turn completion releases an abandoned claim even when read from reconnect history; queued later replies, admitted answers and concurrent answer coalescing remain protected, including a late receipt."
+    },
+    {
+      "id": "broker.dsh-product-integration",
+      "description": "The 0.2 product path authenticates roster reads, discovers workspace membership on a bounded disposable carrier, and retains ordinary cold sessions that native commands can resume. Missing or refused enrollment never falls back to legacy. Managed launch output is fenced to its owned origin and scoped credential store. Transport and fixture success do not qualify model-backed or UI acceptance. Cold discovery reads fresh durable projections for at most the newest 64 eligible cold rows, excludes older idle rows before those reads, and retains the cached summary on a failed, malformed, or older-cut answer."
+    },
+    {
+      "id": "broker.dsh-credential-store",
+      "description": "An exchanged 0.2 cookie lives where the other broker secrets live, outlives the broker that earned it, and is judged by what happens when the file is not what the code hoped. The store is owner-only, carries a schema version, and records a revision so a refresh is distinguishable from a re-read; one record per scope, so a second enrollment cannot log the first one out; a cookie the host could not have issued, or a value past the ceiling, is refused on the way in rather than truncated or stored; a group-writable or symlinked store is refused without following or rewriting the linked file; a corrupt store, or one written by a future build, is reported and left byte-for-byte alone rather than answered as 'not enrolled' or silently replaced; and the injected store reads the same bytes as the direct API, which is what lets a command run while the service is down and still be believed by the running broker."
+    },
+    {
+      "id": "broker.dsh-enrollment",
+      "description": "The enrollment command covers a host cosyncing does not own, from a launch URL that never becomes a shell-history secret. The URL arrives by hidden prompt or stdin, and a URL carrying a token on argv is refused rather than read, because the command exists precisely to keep tokens out of argv; the exchange runs against the address the operator named, so a URL for some other host is refused and stores nothing, and a refusal never quotes the token back; the printed result names the host and expiry and never prints the token or the cookie; the cookie lands in the file the running broker reads, so enrollment needs no restart; disconnect removes cosyncing's own credential and leaves the operator's host process alone, says so when there was nothing to remove, and leaves status pointing at the command that fixes it; a missing URL is an instruction rather than a crash; and an unknown subcommand, option, or malformed URL is refused with usage instead of a stack."
+    },
+    {
+      "id": "broker.dsh-managed-launch",
+      "description": "The managed DeepSeek Harness launch reaches an authenticated host with nobody typing. The started child's output is forwarded to its adapter across the whole readiness wait, so an announcement printed AFTER the first poll still becomes a session instead of a start that timed out behind a browser that never opened; what settles the start is the shipped adapter's own readiness, so a host that answers the index-route exchange but not the API is not reported as up; the roster goes out with the cookie that exchange earned and no legacy RPC is tried on the way; the credential lands in the broker's own store, scoped to the endpoint and profile that asked for it; a restarted broker is still logged in with nothing re-typed; releasing a host this broker started keeps the credential the next start needs; and an announcement naming an authority other than the configured endpoint is never exchanged and stores nothing."
+    },
+    {
+      "id": "broker.session-catalog-convergence",
+      "description": "Attached session model, agent, permission and command catalogs refresh after native invalidation beyond bounded startup retries. Same-length semantic changes replace picker values; valid empty catalogs retract stale choices, failed surfaces retain their last successful value, and burst notifications serialize while fencing stale reads. Closing the socket unsubscribes exactly once and prevents late or reentrant frames. The DSH adapter delivers captured native invalidation without replacing the authenticated carrier or event authority. Picker and command reads have independent publication, invalidation fences and bounded retry ladders, so either pending surface cannot block the other. Closing a socket releases refresh ownership without waiting for an optional read and discards its late result."
     }
   ],
   "executionGroups": [
@@ -1551,7 +1575,13 @@
         "broker.dsh-credential-lifetime",
         "broker.dsh-stream-carrier",
         "broker.dsh-event-generation",
-        "broker.dsh-contract-capture"
+        "broker.dsh-contract-capture",
+        "broker.dsh-session-link",
+        "broker.dsh-product-integration",
+        "broker.dsh-credential-store",
+        "broker.dsh-enrollment",
+        "broker.dsh-managed-launch",
+        "broker.session-catalog-convergence"
       ],
       "command": [
         "bun",
@@ -1756,10 +1786,16 @@
             "dsh-mux",
             "dsh-event-link",
             "dsh-remote",
+            "dsh-remote-host",
+            "dsh-integration",
+            "dsh-credentials",
+            "dsh-enrollment",
+            "dsh-managed-launch",
             "dsh-capture-sandbox",
             "dsh-capture-prompt",
             "dsh-capture-turn",
-            "dsh-capture-runner"
+            "dsh-capture-runner",
+            "session-options"
           ]
         },
         {
@@ -2419,6 +2455,9 @@
             "test:broker-attention-retention"
           ],
           "sourceOwners": [
+            "packages/typescript/adapter-api/src/integration.ts",
+            "packages/typescript/adapters/dsh/src/implementation.ts",
+            "packages/typescript/broker/src/sessions/hub.ts",
             "packages/typescript/broker/test/broker/test-attention-retention.ts"
           ]
         },
@@ -3405,7 +3444,10 @@
             "test:dsh-mapping"
           ],
           "sourceOwners": [
-            "packages/typescript/adapters/dsh/test/test-dsh-mapping.ts"
+            "packages/typescript/adapters/dsh/test/test-dsh-mapping.ts",
+            "packages/typescript/adapters/dsh/test/fixtures/dsh-0.2.0-rc.2-tool.json",
+            "packages/typescript/adapters/dsh/test/fixtures/dsh-0.2.0-rc.2-images.json",
+            "packages/typescript/adapters/dsh/test/fixtures/dsh-0.2.0-rc.2-compaction.json"
           ]
         },
         {
@@ -4091,6 +4133,79 @@
           ]
         },
         {
+          "id": "dsh-remote-host",
+          "claimId": "broker.dsh-session-link",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-remote-host"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/dsh/src/remote-host.ts",
+            "packages/typescript/adapters/dsh/src/observe.ts",
+            "packages/typescript/adapters/dsh/src/protocol.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-remote-host.ts",
+            "packages/typescript/adapters/dsh/src/assistant-stream.ts",
+            "packages/typescript/adapters/dsh/test/fixtures/dsh-0.2.0-rc.2-assistant-stream.json",
+            "packages/typescript/adapters/dsh/test/fixtures/dsh-0.2.0-rc.2-questions.json"
+          ]
+        },
+        {
+          "id": "dsh-integration",
+          "claimId": "broker.dsh-product-integration",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-integration"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/dsh/src/implementation.ts",
+            "packages/typescript/adapters/dsh/src/protocol.ts",
+            "packages/typescript/adapters/dsh/src/remote-host.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-integration.ts"
+          ]
+        },
+        {
+          "id": "dsh-credentials",
+          "claimId": "broker.dsh-credential-store",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-credentials"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/src/security/dsh-credentials.ts",
+            "packages/typescript/broker/test/dsh/test-dsh-credentials.ts"
+          ]
+        },
+        {
+          "id": "dsh-enrollment",
+          "claimId": "broker.dsh-enrollment",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-enrollment"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/src/cli/dsh-commands.ts",
+            "packages/typescript/broker/test/dsh/test-dsh-enrollment.ts"
+          ]
+        },
+        {
+          "id": "dsh-managed-launch",
+          "claimId": "broker.dsh-managed-launch",
+          "command": [
+            "bun",
+            "run",
+            "test:dsh-managed-launch"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/dsh/test-dsh-managed-launch.ts",
+            "packages/typescript/broker/src/installation/shipped-adapters.ts",
+            "packages/typescript/adapters/dsh/src/implementation.ts"
+          ]
+        },
+        {
           "id": "dsh-capture-sandbox",
           "claimId": "broker.dsh-contract-capture",
           "command": [
@@ -4139,7 +4254,28 @@
           ],
           "sourceOwners": [
             "scripts/adapters/dsh-contract-capture.ts",
-            "scripts/adapters/tests/test-dsh-capture-runner.ts"
+            "scripts/adapters/tests/test-dsh-capture-runner.ts",
+            "scripts/adapters/dsh-fixture-capture.ts",
+            "scripts/adapters/dsh-live-integration.ts",
+            "scripts/adapters/dsh-capture-child.ts"
+          ]
+        },
+        {
+          "id": "session-options",
+          "claimId": "broker.session-catalog-convergence",
+          "command": [
+            "bun",
+            "run",
+            "test:broker-session-options"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/src/sessions/session-options.ts",
+            "packages/typescript/broker/src/runtime/runtime.ts",
+            "packages/typescript/broker/test/broker/test-session-options.ts",
+            "packages/typescript/adapter-api/src/index.ts",
+            "packages/typescript/adapters/dsh/src/implementation.ts",
+            "packages/typescript/adapters/dsh/src/remote-host.ts",
+            "packages/typescript/adapters/dsh/test/test-dsh-remote-host.ts"
           ]
         }
       ]
@@ -4216,6 +4352,18 @@
       ],
       "sourceOwners": [
         "scripts/client/check.ts",
+        "apps/client/lib/src/features/sessions/detail/session_detail_bootstrap.dart",
+        "apps/client/lib/src/features/sessions/detail/session_detail_controller.dart",
+        "apps/client/lib/src/features/sessions/detail/session_detail_page.dart",
+        "apps/client/lib/src/features/sessions/detail/session_detail_state.dart",
+        "apps/client/lib/src/features/sessions/detail/session_detail_state_helpers.dart",
+        "apps/client/lib/src/features/sessions/workspace/open_session_sync_supervisor.dart",
+        "apps/client/test/src/features/sessions/detail/session_detail_bootstrap_ui_test.dart",
+        "apps/client/test/src/features/sessions/detail/session_detail_status_actions_test.dart",
+        "apps/client/test/src/features/sessions/detail/session_detail_control_lifecycle_test.dart",
+        "apps/client/test/src/features/sessions/workspace/open_session_sync_supervisor_test.dart",
+        "apps/client/test/src/features/sessions/workspace/retained_session_production_lifecycle_test.dart",
+        "apps/client/test/support/session_detail_controller_test_harness.dart",
         "scripts/client/build-web.ts",
         "scripts/client/build-desktop.ts",
         "scripts/client/build-android.ts",

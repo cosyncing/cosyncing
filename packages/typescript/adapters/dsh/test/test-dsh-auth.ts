@@ -195,6 +195,59 @@ const COOKIE_NAME = dshCookieNameForOrigin(BASE);
     !detail.includes(TOKEN) && !detail.includes('v1.body.sig'), detail);
 }
 
+// Withdrawal must also stop a managed host whose launch token is still held.
+// The old token is renewal authority, not permission to undo `dsh disconnect`.
+for (const origin of ['stored', 'owned-exchange'] as const) {
+  let now = 1_700_000_000_000;
+  const store = memoryStore();
+  if (origin === 'stored') store.records.set('scope-test', {
+    name: COOKIE_NAME, value: 'v1.original', expiresAt: now + 20 * 86_400_000,
+  });
+  const { session, requests } = harness(() => okResponse(), { store, now: () => now });
+  session.adoptLaunchToken(TOKEN);
+  await session.ensure();
+  const before = requests.length;
+  store.records.clear();
+  const withdrawn = await session.ensure();
+  check(`${origin} owned enrollment withdrawal removes the usable header`,
+    withdrawn.state === 'absent' && withdrawn.reason === 'no-credential' && session.cookieHeader() === null
+      && withdrawn.detail.includes('withdrawn') && withdrawn.detail.includes('cosy dsh connect'));
+  await Promise.all([session.ensure(), session.ensure(), session.ensure()]);
+  session.adoptLaunchToken('replacement-owned-token');
+  await session.ensure();
+  check(`${origin} withdrawal cannot recreate enrollment using a retained or replacement launch token`,
+    requests.length === before && store.records.size === 0 && session.cookieHeader() === null);
+  store.records.set('scope-test', {
+    name: COOKIE_NAME, value: 'v2.re-enrolled', expiresAt: now + 20 * 86_400_000,
+  });
+  const recovered = await session.ensure();
+  check(`${origin} usable re-enrollment lifts withdrawal without spending a launch token`,
+    recovered.state === 'authenticated' && session.cookieHeader() === `${COOKIE_NAME}=v2.re-enrolled`
+      && requests.length === before);
+  now += 20 * 86_400_000 - 1000;
+  const renewed = await session.ensure();
+  check(`${origin} re-enrollment still permits bounded proactive owned renewal`,
+    renewed.state === 'authenticated' && requests.length === before + 1
+      && requests.at(-1)?.url.endsWith('token=replacement-owned-token') === true);
+}
+
+{
+  const store = memoryStore();
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v1.refused-owned', expiresAt: 2_000_000_000_000 });
+  const { session, requests } = harness(() => okResponse(), { store });
+  session.adoptLaunchToken(TOKEN);
+  await session.ensure();
+  session.reportCredentialRefused();
+  await tick();
+  const refusal = await session.ensure();
+  await session.ensure();
+  check('a refused owned enrollment remains refused and sends no token exchange',
+    refusal.reason === 'credential-refused' && session.cookieHeader() === null && requests.length === 0);
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v2.fresh-owned', expiresAt: 2_000_000_000_000 });
+  check('a refused owned enrollment accepts the operator supplied fresh credential',
+    (await session.ensure()).state === 'authenticated' && requests.length === 0);
+}
+
 // ── 3. Refusals ─────────────────────────────────────────────────────────────
 
 {
@@ -728,6 +781,148 @@ const COOKIE_NAME = dshCookieNameForOrigin(BASE);
   check('a 401 still retires the token it was shown',
     refusedOutcome.state === 'rejected' && refusedOutcome.reason === 'token-invalid' && !refused.hasLaunchToken,
     JSON.stringify(refusedOutcome));
+}
+
+// ── 9. The enrollment is a file another process writes ───────────────────────
+//
+// `cosy dsh connect` and `cosy dsh disconnect` run in a terminal, against the
+// same credential file a running broker holds in memory. A session that reads
+// that file once and memoizes it makes both commands inert until the next
+// restart, which is not what they promise: the operator enrolls, the broker
+// carries on saying it has nothing, and the only fix is a restart nobody
+// mentioned. These tests hold ONE warm session open across every enrollment
+// change, because the warm case is the only one that was ever broken.
+
+{
+  // The enrollment appearing is the whole of what `cosy dsh connect` does to a
+  // running broker: it writes a cookie. Nothing else tells this process.
+  const store = memoryStore();
+  const { session, requests } = harness(() => response(401, {}), { store });
+  const before = await session.ensure();
+  check('a warm session with nothing enrolled says so and sends nothing',
+    before.state !== 'authenticated' && requests.length === 0,
+    `${before.state} / ${String(requests.length)} requests`);
+
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v1.enrolled', expiresAt: 1_700_000_000_000 + 3_600_000 });
+  const after = await session.ensure();
+  check('the SAME session authenticates once the enrollment appears, with no restart',
+    after.state === 'authenticated' && session.cookieHeader() === `${COOKIE_NAME}=v1.enrolled`,
+    `${after.state} / ${session.cookieHeader() ?? 'no cookie'}`);
+
+  // ... and `disconnect` has to work in the other direction just as quietly.
+  store.records.clear();
+  const withdrawn = await session.ensure();
+  check('the SAME session stops authenticating when the enrollment is withdrawn',
+    withdrawn.state !== 'authenticated' && session.cookieHeader() === null,
+    `${withdrawn.state} / ${session.cookieHeader() ?? 'no cookie'}`);
+  check('a withdrawn enrollment is reported as no credential, not as a refused one',
+    withdrawn.reason === 'no-credential', withdrawn.reason ?? '');
+}
+
+{
+  // A replacement is not a removal followed by an addition as far as a live
+  // carrier is concerned: the socket has to be re-handshaked either way, and the
+  // three cases must be told apart or a link cannot know whether to reconnect.
+  const store = memoryStore();
+  const { session } = harness(() => response(401, {}), { store });
+  const changes: Array<{ change: string; revision: number }> = [];
+  const headersAtPublication: Array<string | null> = [];
+  session.onCredentialChange((change, revision) => {
+    changes.push({ change, revision });
+    headersAtPublication.push(session.cookieHeader());
+  });
+  const first = session.credentialRevision;
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v1.a', expiresAt: 1_700_000_000_000 + 3_600_000 });
+  await session.ensure();
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v2.b', expiresAt: 1_700_000_000_000 + 3_600_000 });
+  await session.ensure();
+  store.records.clear();
+  await session.ensure();
+  check('adoption, replacement and removal are each reported, once and in order',
+    JSON.stringify(changes.map((entry) => entry.change)) === JSON.stringify(['adopted', 'replaced', 'removed']),
+    JSON.stringify(changes));
+  check('adoption is published with a usable header and removal without one',
+    JSON.stringify(headersAtPublication) === JSON.stringify([`${COOKIE_NAME}=v1.a`, `${COOKIE_NAME}=v2.b`, null]),
+    JSON.stringify(headersAtPublication));
+  check('the revision moves for every identity change and only for those',
+    changes.every((entry, index) => entry.revision === first + index + 1), JSON.stringify(changes));
+  const steady = session.credentialRevision;
+  await session.ensure();
+  await session.ensure();
+  check('reading an unchanged enrollment again is not a change',
+    session.credentialRevision === steady, `${String(steady)} -> ${String(session.credentialRevision)}`);
+}
+
+{
+  // Renewal must stay bounded now that the enrollment is re-read on every call.
+  // "A token is in hand" is not a premise for exchanging again -- the cookie's
+  // own expiry window is -- or every readiness probe becomes a GET.
+  let now = 1_700_000_000_000;
+  const store = memoryStore();
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v1.long', expiresAt: now + 20 * 86_400_000 });
+  const { session, requests } = harness(() => response(303, {
+    location: './',
+    'set-cookie': `${COOKIE_NAME}=v2.renewed; Max-Age=2592000; Path=/`,
+  }), { store, now: () => now });
+  session.adoptLaunchToken(TOKEN);
+  for (let index = 0; index < 5; index += 1) {
+    const outcome = await session.ensure();
+    check(`a fresh stored cookie answers readiness without an exchange (attempt ${String(index + 1)})`,
+      outcome.state === 'authenticated' && requests.length === 0,
+      `${outcome.state} / ${String(requests.length)} exchanges`);
+  }
+  now += 20 * 86_400_000;
+  const renewed = await session.ensure();
+  check('the same cookie does get renewed once it is actually nearing expiry',
+    renewed.state === 'authenticated' && requests.length === 1, `${String(requests.length)} exchanges`);
+}
+
+{
+  // A refusal is an opinion about ONE cookie, so it has to die when that cookie
+  // does. Refusals arrive from real requests rather than from `ensure()` -- a
+  // stored, unexpired cookie is trusted until something actually 401s -- so this
+  // walks the production sequence: warm session, a request that gets refused,
+  // then `cosy dsh connect` writing a fresh enrollment into the same file.
+  const store = memoryStore();
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v1.dead', expiresAt: 1_700_000_000_000 + 3_600_000 });
+  const { session, requests } = harness(() => response(401, {}), { store });
+  const warm = await session.ensure();
+  check('a warm session authenticates from the enrollment without asking the host',
+    warm.state === 'authenticated' && requests.length === 0,
+    `${warm.state} / ${String(requests.length)} requests`);
+
+  session.reportCredentialRefused('credential-refused');
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  check('a refused cookie is dropped and taken out of the store',
+    session.cookieHeader() === null && store.records.size === 0,
+    `${session.cookieHeader() ?? 'no cookie'} / ${String(store.records.size)} records`);
+
+  // Until somebody enrolls again, the answer has to name the dead cookie rather
+  // than send the operator off to enroll a host that is already enrolled.
+  const held = await session.ensure();
+  check('the refusal is still the diagnosis while nothing new is enrolled',
+    held.state !== 'authenticated' && held.detail.includes('was refused'), held.detail);
+
+  store.records.set('scope-test', { name: COOKIE_NAME, value: 'v2.fresh', expiresAt: 1_700_000_000_000 + 3_600_000 });
+  const repaired = await session.ensure();
+  check('a fresh enrollment recovers the refused session on the next readiness call',
+    repaired.state === 'authenticated' && session.cookieHeader() === `${COOKIE_NAME}=v2.fresh`,
+    `${repaired.state} / ${session.cookieHeader() ?? 'no cookie'}`);
+}
+
+{
+  // The one block a re-read cannot lift, pinned so the rule above cannot be
+  // generalized into a loop: a Host/Origin refusal is a statement about the
+  // ADDRESS, and the address is fixed for the life of the session.
+  const { session, requests } = harness(() => response(403, {}));
+  session.adoptLaunchToken(TOKEN);
+  const blocked = await session.ensure();
+  check('a Host/Origin refusal blocks, and says retrying will not help',
+    blocked.state === 'blocked' && blocked.reason === 'host-or-origin-refused'
+      && blocked.detail.includes('cosyncing cannot fix that by retrying'), blocked.detail);
+  const again = await session.ensure();
+  check('the Host/Origin refusal does not re-request on every readiness call',
+    again.state === 'blocked' && requests.length === 1, `${String(requests.length)} requests`);
 }
 
 const failed = results.filter((entry) => !entry.ok);

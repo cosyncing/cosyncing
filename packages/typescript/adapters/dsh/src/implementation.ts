@@ -35,6 +35,7 @@ import {
   type AvailabilityOptions,
   type ManagedHostDescriptor,
   type ManagedHostIdentityInputs,
+  type ManagedHostReadinessFault,
   type ModelOption,
   type PromptInput,
   type SessionConnection,
@@ -43,7 +44,18 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { diagnoseDshSetup, DSH_AGENT_ID, DSH_DISPLAY_NAME, resolveDshHome } from './diagnostics.ts';
-import { decideManagedLaunch } from './compatibility.ts';
+import { DSH_CURRENT_VERSION, parseDshVersion, decideManagedLaunch, type DshContractFamily, type DshProbeFetch } from './compatibility.ts';
+import {
+  DshAuthSession,
+  dshCredentialScope,
+  parseDshLaunchUrl,
+  type DshCredentialStore,
+} from './auth.ts';
+import type { DshMuxSocketFactory } from './mux.ts';
+import { DshRemoteArgs, DshRemoteClient } from './remote.ts';
+import { DshRemoteHostLink } from './remote-host.ts';
+import { describeDshFailure, type DshOutcome } from './envelope.ts';
+import { selectDshProtocol } from './protocol.ts';
 import { homedir } from 'node:os';
 import { DshDriver, dshModelDisplayName, dshModelOptions } from './drive.ts';
 import { mapDshSession, type DshSessionSummary, type DshWorkspaceSummary } from './mapping.ts';
@@ -120,6 +132,64 @@ function envFlagEnabled(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(value?.trim() ?? '');
 }
 
+/**
+ * The launch announcement, reassembled from whatever the child wrote when.
+ *
+ * `dsh web` prints `dsh web: <authenticated-url>` once it is listening, and that
+ * line is the only source of the token. Two facts make a scanner necessary rather
+ * than a regex over a finished string:
+ *
+ *  - output arrives in chunks. The token can be split across two reads, so a
+ *    candidate that runs to the end of the buffer is INCOMPLETE, not absent, and
+ *    must stay buffered rather than be dropped or emitted half.
+ *  - the announcement can be interleaved with anything else the child writes.
+ *    Scanning a bounded tail is what keeps a chatty host from growing the buffer
+ *    without limit while still finding the line.
+ *
+ * A duplicate URL is reported once per launch: re-adopting the same token is a
+ * no-op, and a NEW token is a new launch, which the session must see.
+ */
+export class DshLaunchScanner {
+  static readonly MARKER = 'dsh web: ';
+  private static readonly MAX_PENDING = 8_192;
+  private static readonly KEEP_ON_OVERFLOW = 512;
+  private pending = '';
+  private readonly emitted = new Set<string>();
+
+  feed(chunk: string): string[] {
+    if (!chunk) return [];
+    this.pending += chunk;
+    if (this.pending.length > DshLaunchScanner.MAX_PENDING) {
+      // Keep a tail long enough to hold a partial URL and its marker.
+      this.pending = this.pending.slice(-DshLaunchScanner.KEEP_ON_OVERFLOW);
+    }
+    const found: string[] = [];
+    for (;;) {
+      const at = this.pending.indexOf(DshLaunchScanner.MARKER);
+      if (at < 0) {
+        // Nothing to complete here. Keep the tail in case a marker is split.
+        this.pending = this.pending.slice(-DshLaunchScanner.MARKER.length);
+        return found;
+      }
+      const start = at + DshLaunchScanner.MARKER.length;
+      const rest = this.pending.slice(start);
+      const end = rest.search(/\s/);
+      if (end < 0) return found; // still arriving; do not consume the candidate
+      const candidate = rest.slice(0, end);
+      this.pending = rest.slice(end);
+      if (candidate && !this.emitted.has(candidate)) {
+        this.emitted.add(candidate);
+        found.push(candidate);
+      }
+    }
+  }
+
+  reset(): void {
+    this.pending = '';
+    this.emitted.clear();
+  }
+}
+
 export interface DshAdapterOptions {
   env?: Readonly<Record<string, string | undefined>>;
   /** Explicit base URL; otherwise the environment, otherwise the documented default. */
@@ -146,11 +216,27 @@ export interface DshAdapterOptions {
   /** The user's home directory; injected so a suite never depends on the real one. */
   homeDir?: string;
   /**
+   * Where a verified 0.2 session cookie lives between broker runs.
+   *
+   * Injected rather than constructed here because the BROKER owns secure
+   * persistence: an adapter that wrote its own credential file would be a plugin
+   * deciding the platform's file-permission rules. Without one the 0.2 path still
+   * works for the life of the process; it simply cannot survive a restart, and
+   * says so instead of pretending.
+   */
+  credentialStore?: DshCredentialStore;
+  /** WebSocket factory for the 0.2 stream carrier, which CAN send. Separate from `socketFactory` on purpose. */
+  remoteSocketFactory?: DshMuxSocketFactory;
+  /** Minting seam for prompt request ids, so a suite can assert the id a turn was started with. */
+  newRequestId?: () => string;
+  /** Where a managed host's `DSH_HOME` would point; also the credential scope's profile half. */
+  dshHome?: string;
+  /**
    * Test seams for the session connection. The verification guard
    * (`mutationReady`), the rpc/driver wiring, and the close hook are NOT
    * overridable: they are the authority boundary, applied after this spread.
    */
-  connection?: Omit<DshConnectionOptions, 'rpc' | 'driver' | 'onClosed' | 'mutationReady'>;
+  connection?: Omit<DshConnectionOptions, 'rpc' | 'driver' | 'channel' | 'onClosed' | 'mutationReady'>;
 }
 
 /**
@@ -382,7 +468,10 @@ export class DshAdapter implements AgentBackend {
    * lifecycle is governed by proven ownership rather than by assumption. See
    * {@link DshAdapter.describeManagedHost}.
    */
-  readonly integration = { externalHost: { managed: true as const } };
+  readonly integration = {
+    externalHost: { managed: true as const },
+    sessionRetention: 'foreground' as const,
+  };
   /**
    * `live` only. dsh has no client-driven resume (the host attaches sessions)
    * and no native artifact signal. Approvals are per tool call, which is what
@@ -422,6 +511,18 @@ export class DshAdapter implements AgentBackend {
   private readonly env: Readonly<Record<string, string | undefined>>;
   private rpcClient?: DshRpcClient;
   private link?: DshHostLink;
+  private remoteAuth?: DshAuthSession;
+  private remoteHost?: DshRemoteHostLink;
+  private readonly catalogWatchers = new Set<() => void>();
+  /** The authenticated probe's result, never the anonymous family fingerprint. */
+  private remoteReadiness?: DshOutcome<unknown>;
+  /** The last contract fingerprint, with the moment it was taken. */
+  private protocolChoice?: { family: DshContractFamily | null; at: number; detail?: string };
+  /** Bytes of child output not yet completed into a line, across announcement chunks. */
+  private readonly managedOutput = new DshLaunchScanner();
+  /** Workspace titles learned from a live `workspace/follow` baseline, with the moment they were read. */
+  private remoteWorkspaceBaseline?: { at: number; titles: Map<string, string>; archived: Set<string> };
+  private static readonly DSH_WORKSPACE_TITLES_TTL_MS = 5 * 60_000;
   /**
    * sessionId → the model identity the last sweep resolved, keyed by the row's
    * `updatedAt`. `session.list` carries no model field of any kind (MEASURED
@@ -609,11 +710,16 @@ export class DshAdapter implements AgentBackend {
         return undefined;
       }
     });
+    const executableVersion = executable === undefined ? undefined : readVersion(executable);
     const launchDecision = executable === undefined
       ? { allowed: false as const }
-      : decideManagedLaunch(readVersion(executable), port);
+      : decideManagedLaunch(executableVersion, port);
     return {
       identityKey: baseUrl,
+      // rc.2 awaits runProfile in its CLI process, and its Windows npm launcher
+      // remains alive with that process. This fact qualifies only that build.
+      ...(launchDecision.allowed && parseDshVersion(executableVersion)?.raw === DSH_CURRENT_VERSION
+        ? { launchKeepsServerForeground: true } : {}),
       locator: loopback && Number.isInteger(port) && port > 0
         ? { kind: 'tcp-port', port }
         : { kind: 'unknown' },
@@ -656,12 +762,304 @@ export class DshAdapter implements AgentBackend {
     };
   }
 
+  // ── Which contract this endpoint speaks ────────────────────────────────────
+
+  /**
+   * How long a family decision is reused before the port is fingerprinted again.
+   *
+   * The probe is two GETs, and discovery runs on a schedule; re-fingerprinting
+   * every sweep would double the traffic to a local host for an answer that
+   * changes exactly once per upgrade. Five minutes is shorter than any plausible
+   * "upgrade and wait for cosyncing to notice" window an operator would tolerate.
+   */
+  private static readonly DSH_PROTOCOL_TTL_MS = 5 * 60_000;
+
+  /** The configured address, or undefined when it cannot be resolved at all. */
+  private baseUrlOrUndefined(): string | undefined {
+    try {
+      return this.baseUrl();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The web contract family to speak, chosen by a read-only fingerprint.
+   *
+   * Two rules govern this, and both were established by the review of the
+   * transport that sits behind them:
+   *
+   *  - A 401/403 on the 0.2 carrier is EVIDENCE OF 0.2, never a reason to try the
+   *    0.1 RPCs. The probe classifies a refusal as `remote-0.2 / auth-required`,
+   *    so this method returns remote and the failure surfaces as "enroll the
+   *    host" rather than as a legacy route-not-found.
+   *  - A port that answers nothing recognizable keeps the legacy path. That is
+   *    not a fallback attempt: the legacy path's own writes are gated behind a
+   *    verified `host.describe`, which such a port cannot pass, so what is
+   *    preserved is the 0.1 suite's behaviour and the existing diagnosis, not a
+   *    licence to issue anything.
+   *
+   * The decision is cached per address. A family change is an upgrade, and the
+   * fingerprint cost of noticing it on every discovery sweep is not worth the
+   * minutes it would save.
+   */
+  private async protocolFamily(signal?: AbortSignal): Promise<DshContractFamily> {
+    const baseUrl = this.baseUrlOrUndefined();
+    if (baseUrl === undefined) return 'legacy-0.1';
+    const now = Date.now();
+    const cached = this.protocolChoice;
+    if (cached && cached.family !== null && now - cached.at < DshAdapter.DSH_PROTOCOL_TTL_MS) return cached.family;
+    const decision = await selectDshProtocol({
+      baseUrl,
+      ...(this.options.fetchImpl
+        ? { fetchImpl: this.options.fetchImpl as unknown as DshProbeFetch }
+        : {}),
+    });
+    this.protocolChoice = {
+      family: decision.family,
+      at: now,
+      ...('detail' in decision ? { detail: decision.detail } : {}),
+    };
+    if (signal?.aborted && decision.family) return decision.family;
+    return decision.family ?? 'legacy-0.1';
+  }
+
+  /** Why this endpoint has no recognized contract, when that is the finding. */
+  get protocolDiagnosis(): string | undefined {
+    return this.protocolChoice?.detail;
+  }
+
+  /** The credential identity for this endpoint: one enrollment per (address, profile). */
+  private credentialScope(baseUrl: string): string {
+    return dshCredentialScope(baseUrl, this.options.dshHome ?? resolveDshHome(this.env, this.homeDir()));
+  }
+
+  private authSession(baseUrl: string): DshAuthSession {
+    this.remoteAuth ??= new DshAuthSession({
+      baseUrl,
+      scope: this.credentialScope(baseUrl),
+      ...(this.options.credentialStore ? { store: this.options.credentialStore } : {}),
+    });
+    return this.remoteAuth;
+  }
+
+  /**
+   * The 0.2 host link, built on first use.
+   *
+   * Lazy for the same reason the legacy link is: a broker with no dsh host
+   * running must not open a socket, a credential read, or an exchange on account
+   * of a roster sweep. Nothing here happens until a code path that actually
+   * serves the endpoint asks for it.
+   */
+  private remote(): DshRemoteHostLink {
+    if (this.remoteHost) return this.remoteHost;
+    const baseUrl = this.baseUrl();
+    const auth = this.authSession(baseUrl);
+    const client = new DshRemoteClient({
+      baseUrl,
+      headers: () => auth.authHeaders(),
+      ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
+      ...(this.options.newRpcId ? { newRpcId: this.options.newRpcId } : {}),
+      ...(this.options.setTimeout ? { setTimeout: this.options.setTimeout } : {}),
+      ...(this.options.clearTimeout ? { clearTimeout: this.options.clearTimeout } : {}),
+    });
+    this.remoteHost = new DshRemoteHostLink({
+      baseUrl,
+      auth,
+      remote: client,
+      onHostChanged: () => { this.remoteWorkspaceBaseline = undefined; },
+      onCatalogChanged: () => {
+        for (const notify of this.catalogWatchers) {
+          try { notify(); } catch { /* one retired listener cannot suppress the others */ }
+        }
+      },
+      ...(this.options.remoteSocketFactory ? { socketFactory: this.options.remoteSocketFactory } : {}),
+      ...(this.options.setTimeout ? { setTimeout: this.options.setTimeout } : {}),
+      ...(this.options.clearTimeout ? { clearTimeout: this.options.clearTimeout } : {}),
+      ...(this.options.reconnectDelayMs !== undefined ? { reconnectDelayMs: this.options.reconnectDelayMs } : {}),
+    });
+    return this.remoteHost;
+  }
+
+  watchSessionCatalog(_sessionId: string, onChange: () => void): () => void {
+    this.catalogWatchers.add(onChange);
+    return () => { this.catalogWatchers.delete(onChange); };
+  }
+
+  /** Whether the 0.2 remote family is in force for this endpoint right now. */
+  private async usingRemoteHost(signal?: AbortSignal): Promise<boolean> {
+    return (await this.protocolFamily(signal)) === 'remote-0.2';
+  }
+
+  /**
+   * Whether an unready managed host is the host's problem or ours.
+   *
+   * Asked after readiness fails and BEFORE supervision touches the process, and
+   * answered with one GET plus one file read. The distinction matters more than
+   * the diagnosis does: 0.2 puts an authentication fence in front of every route
+   * a readiness probe uses, so an unenrolled cookie and a dead host produce the
+   * SAME `false` from `isAvailable`. Recovery's answer to `false` is to stop the
+   * process it owns and start another, which against a host that is running
+   * perfectly well and simply does not know us yet is not a repair but a
+   * killing -- and the replacement cannot authenticate either, so the cycle
+   * repeats until the crash-loop budget runs out, with the operator's own
+   * `dsh web` dead in the middle of it.
+   *
+   * Anonymous 401 identifies the protocol family, not service health. Retain
+   * the authenticated probe's failure so a service error still reaches normal
+   * ownership-checked recovery, while enrollment and configuration faults do
+   * not spend a restart.
+   *
+   * A `{ kind: 'host' }` answer is deliberately the common case. Nothing here
+   * may prevent recovery from restarting a host that really has died, so the
+   * adapter claims the fault only on positive evidence of its own inability.
+   */
+  async managedHostReadinessFault(): Promise<ManagedHostReadinessFault> {
+    const baseUrl = this.baseUrlOrUndefined();
+    if (baseUrl === undefined) {
+      return {
+        kind: 'adapter',
+        remedy: 'address',
+        detail: 'the configured DeepSeek Harness address cannot be resolved, so no host at it can be reached',
+      };
+    }
+    // Forced re-probe: this is asked precisely because something changed, and a
+    // five-minute-old family decision is not evidence about the present.
+    this.protocolChoice = undefined;
+    const decision = await selectDshProtocol({
+      baseUrl,
+      ...(this.options.fetchImpl
+        ? { fetchImpl: this.options.fetchImpl as unknown as DshProbeFetch }
+        : {}),
+    });
+    if (decision.family !== 'remote-0.2') return { kind: 'host' };
+    // Something is answering the 0.2 contract. Now: can WE talk to it?
+    const auth = this.authSession(baseUrl);
+    if (auth.reason === 'host-or-origin-refused') {
+      return {
+        kind: 'adapter',
+        remedy: 'address',
+        detail: `${auth.detail} The host is running; cosyncing is pointed at an address it does not answer.`,
+      };
+    }
+    const readiness = this.remoteReadiness;
+    if (readiness && !readiness.ok) {
+      const failure = readiness.failure;
+      if (failure.kind === 'rpc' && [
+        'gateway/method-unavailable', 'gateway/definition-unavailable',
+        'gateway/unknown-endpoint', 'gateway/signature-invalid', 'gateway/arguments-invalid',
+      ].includes(failure.code)) {
+        return { kind: 'adapter', remedy: 'contract', detail: `DeepSeek Harness readiness: ${describeDshFailure(failure)}` };
+      }
+      if (failure.kind === 'transport' && (
+        ['invalid-envelope', 'rpc-id-mismatch', 'route-not-allowed'].includes(failure.reason)
+        || failure.status === 404
+      )) {
+        return { kind: 'adapter', remedy: 'contract', detail: `DeepSeek Harness readiness: ${describeDshFailure(failure)}` };
+      }
+      if (failure.kind === 'rpc' || (failure.reason !== 'unauthenticated' && failure.reason !== 'forbidden')) {
+        return { kind: 'host' };
+      }
+    }
+    const credential = await this.enrollmentState(baseUrl);
+    if (credential === 'unreachable') {
+      return {
+        kind: 'adapter',
+        remedy: 'storage',
+        detail: 'cosyncing could not read its DeepSeek Harness credential store, so it cannot authenticate '
+          + `to the running host at ${new URL(baseUrl).host}. Run \`${PRODUCT_IDENTITY.primaryBinary} repair\`.`,
+      };
+    }
+    if (credential === 'absent') {
+      return {
+        kind: 'adapter',
+        remedy: 'credential',
+        detail: `the DeepSeek Harness host at ${new URL(baseUrl).host} is running, but cosyncing has no `
+          + `session for it. Run \`${PRODUCT_IDENTITY.primaryBinary} dsh connect\` and paste the URL dsh printed.`,
+      };
+    }
+    if (auth.reason === 'credential-refused' || auth.state !== 'authenticated') {
+      return { kind: 'adapter', remedy: 'credential', detail: auth.detail };
+    }
+    return { kind: 'host' };
+  }
+
+  /** Whether this endpoint's enrollment is present, absent, or unreadable. */
+  private async enrollmentState(baseUrl: string): Promise<'present' | 'absent' | 'unreachable'> {
+    const store = this.options.credentialStore;
+    if (!store) return 'absent';
+    try {
+      const stored = await store.load(this.credentialScope(baseUrl));
+      if (!stored) return 'absent';
+      return stored.expiresAt !== undefined && stored.expiresAt <= Date.now() ? 'absent' : 'present';
+    } catch {
+      return 'unreachable';
+    }
+  }
+
+  /**
+   * The broker's managed-launch output, fed here rather than read from a journal.
+   *
+   * The host prints its authenticated URL exactly once, and the token inside it
+   * is the only credential that exists until the exchange is done. Two properties
+   * make this the right intake point: the bytes are the child's real output (the
+   * failure journal is redacted, and a redacted token is not a token), and the
+   * adapter is the component that knows which endpoint it is configured for —
+   * which is what turns "a URL appeared" into "the URL for the host I own".
+   */
+  observeManagedOutput(chunk: string): void {
+    const baseUrl = this.baseUrlOrUndefined();
+    if (baseUrl === undefined) return;
+    for (const raw of this.managedOutput.feed(chunk)) {
+      try {
+        const parsed = parseDshLaunchUrl(raw, baseUrl);
+        const auth = this.authSession(baseUrl);
+        auth.adoptLaunchToken(parsed.token);
+        // Kick the exchange off now. Readiness will call `ensure()` too, but an
+        // exchange that waits for the first probe is an exchange that spends the
+        // host's startup budget on a queue.
+        void auth.ensure();
+      } catch {
+        // A URL that does not match the configured endpoint is not an error to
+        // quote back: it names a launch token, and the honest answer is that this
+        // announcement was not for us.
+        continue;
+      }
+    }
+  }
+
+  /**
+   * The owned launch is over: forget its token, keep any cookie it earned.
+   *
+   * The token is per-process, so its lifetime ended with the process. The cookie
+   * did not: it is signed under the host's secret for thirty days and outlives
+   * both this broker and that host's restart, so throwing it away at the wrong
+   * moment would make an operator re-enroll a host that is still perfectly
+   * authenticated. `reason` is why the launch ended, which changes nothing here
+   * and is exactly the point — no ending is a reason to destroy a working
+   * credential.
+   */
+  managedLaunchEnded(_reason: string): void {
+    this.managedOutput.reset();
+    this.remoteAuth?.releaseLaunchToken(true);
+  }
+
   async isAvailable(options?: AvailabilityOptions): Promise<boolean> {
+    this.remoteReadiness = undefined;
     let rpc: DshRpcClient;
     try {
       rpc = this.rpc();
     } catch {
       return false; // an unusable configured base URL is "not available", not a crash
+    }
+    if (await this.usingRemoteHost(options?.signal)) {
+      // An authenticated roster read, not a socket: availability answers "can
+      // this endpoint serve cosyncing", and opening the carrier to ask it would
+      // make every roster sweep a WebSocket handshake against a host nobody has
+      // opened a session for.
+      const outcome = await this.remote().roster(options?.signal);
+      this.remoteReadiness = outcome;
+      return outcome.ok;
     }
     // Host-scoped, so a downlink generation rotating mid-probe must not answer
     // "unavailable" for a host that is answering fine.
@@ -674,7 +1072,15 @@ export class DshAdapter implements AgentBackend {
   }
 
   async diagnoseSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
-    return diagnoseDshSetup(context, this.options.baseUrl ? { baseUrl: this.options.baseUrl } : {});
+    // Doctor reads the SAME store under the SAME scope as the running adapter,
+    // which is the only reason its enrollment answer means anything. The scope is
+    // recomputed from this adapter's own options rather than passed in, so the two
+    // cannot drift into looking at different files.
+    return diagnoseDshSetup(context, {
+      ...(this.options.baseUrl ? { baseUrl: this.options.baseUrl } : {}),
+      ...(this.options.credentialStore ? { credentialStore: this.options.credentialStore } : {}),
+      ...(this.options.dshHome ? { dshHome: this.options.dshHome } : {}),
+    });
   }
 
   /**
@@ -686,6 +1092,7 @@ export class DshAdapter implements AgentBackend {
    * user sees after creating a session in the host's own UI and not yet typing.
    */
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
+    if (await this.usingRemoteHost(options?.signal)) return this.discoverRemoteSessions(options);
     const cancel = options?.signal ? { signal: options.signal } : {};
     const list = await this.rpc().call<{ items?: unknown }>('session.list', {}, cancel);
     if (!list.ok) return [];
@@ -710,6 +1117,96 @@ export class DshAdapter implements AgentBackend {
     }
     await this.overlayRosterModels(sessions, options?.signal);
     return sessions;
+  }
+
+
+  /**
+   * The 0.2 roster: `session/list`, titled from the workspace baseline.
+   *
+   * Two field-level notes, because both change what a user sees:
+   *
+   *  - `agentAvailable=false` identifies a cold agent, not a deleted session.
+   *    The native command routes resume ordinary cold sessions when needed.
+   *  - cached `modelSelection` is session-specific. Its next selection intent
+   *    takes precedence over the last used model; an unselected session has
+   *    no invented host-wide default.
+   */
+  private async discoverRemoteSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
+    const list = await this.remote().roster(options?.signal);
+    if (!list.ok) return [];
+    const titles = await this.remoteWorkspaceTitles(options?.signal);
+    // Cached roster projections can predate durable title/model changes. The
+    // cold-safe projection route folds the actual log without activating an
+    // agent. Bound the extra reads, and retain the hint if a read cannot answer.
+    const refreshed = new Map<string, unknown>();
+    const cold = list.value.items.filter((raw) => {
+      const row = raw as DshSessionSummary & { agentAvailable?: unknown };
+      return row?.agentAvailable === false && typeof row.sessionId === 'string'
+        && !(options?.updatedAfter !== undefined && row.running !== true
+          && typeof row.updatedAt === 'number' && row.updatedAt < options.updatedAfter);
+    }).sort((a, b) => Number((b as DshSessionSummary).updatedAt ?? 0) - Number((a as DshSessionSummary).updatedAt ?? 0))
+      .slice(0, DSH_ROSTER_MODEL_MAX);
+    await Promise.all(cold.map(async (raw) => {
+      if (options?.signal?.aborted) return;
+      const row = raw as DshSessionSummary;
+      const id = row.sessionId as string;
+      const outcome = await this.remote().call<unknown>('session/projections', DshRemoteArgs.projections(id), {
+        generationLoss: 'host-scoped', ...(options?.signal ? { signal: options.signal } : {}),
+      });
+      if (!outcome.ok || !outcome.value || typeof outcome.value !== 'object') return;
+      const block = outcome.value as { asOfSeq?: unknown; values?: unknown };
+      if (!Number.isSafeInteger(block.asOfSeq) || Number(block.asOfSeq) < -1
+          || !block.values || typeof block.values !== 'object' || Array.isArray(block.values)) return;
+      const held = row.projections as { asOfSeq?: unknown } | undefined;
+      if (typeof held?.asOfSeq === 'number' && Number(block.asOfSeq) < held.asOfSeq) return;
+      refreshed.set(id, { kind: 'sequenced', asOfSeq: block.asOfSeq, values: block.values });
+    }));
+    const sessions: SessionInfo[] = [];
+    for (const raw of list.value.items) {
+      const summary = (raw ?? {}) as DshSessionSummary & { agentAvailable?: unknown };
+      const id = typeof summary.sessionId === 'string' ? summary.sessionId : undefined;
+      const workspaceTitle = id ? titles.get(id) : undefined;
+      const mapped = mapDshSession(id && refreshed.has(id) ? { ...summary, projections: refreshed.get(id) } : summary, {
+        ...(workspaceTitle ? { workspaceTitle } : {}),
+        // The native prompt/select/command routes resume ordinary cold sessions.
+        driveSupported: !id || !this.remoteWorkspaceBaseline?.archived.has(id),
+      });
+      if (!mapped) continue;
+      if (id && this.remoteWorkspaceBaseline?.archived.has(id) && mapped.control) mapped.control.drive.reason = 'This session is archived in DeepSeek Harness; unarchive it in the native client first.';
+      if (options?.updatedAfter !== undefined
+          && mapped.status === 'idle'
+          && mapped.updatedAt !== undefined
+          && mapped.updatedAt < options.updatedAfter) {
+        continue;
+      }
+      sessions.push(mapped);
+    }
+    return sessions;
+  }
+
+  /**
+   * sessionId -> its workspace's title, from the bounded `workspace/follow` baseline.
+   *
+   * The link uses a bounded disposable carrier when no session is attached.
+   * Closing it after the baseline preserves discovery without an idle socket.
+   */
+  private async remoteWorkspaceTitles(signal?: AbortSignal): Promise<Map<string, string>> {
+    const cached = this.remoteWorkspaceBaseline;
+    if (cached && Date.now() - cached.at < DshAdapter.DSH_WORKSPACE_TITLES_TTL_MS) return cached.titles;
+    const titles = new Map<string, string>();
+    const outcome = await this.remote().workspaces(signal);
+    if (!outcome.ok) return cached?.titles ?? titles;
+    for (const raw of outcome.value.items) {
+      const workspace = (raw ?? {}) as DshWorkspaceSummary;
+      const workspaceId = typeof workspace.workspaceId === 'string' ? workspace.workspaceId : '';
+      const title = typeof workspace.title === 'string' && workspace.title
+        ? workspace.title
+        : typeof workspace.path === 'string' ? workspace.path : undefined;
+      if (!workspaceId || !title) continue;
+      for (const sessionId of outcome.value.sessionIds.get(workspaceId) ?? []) titles.set(sessionId, title);
+    }
+    this.remoteWorkspaceBaseline = { at: Date.now(), titles, archived: outcome.value.archivedSessionIds };
+    return titles;
   }
 
   /**
@@ -858,6 +1355,7 @@ export class DshAdapter implements AgentBackend {
     // Best effort by design: a host that cannot answer leaves both fields
     // absent and the `request/header` path stays the fallback. An attach must
     // not fail over a picker seed.
+    if (await this.usingRemoteHost()) return this.attachRemoteSession(info);
     const identity = await this.sessionModelIdentity(sessionId);
     if (identity) {
       info.model = identity.model;
@@ -883,9 +1381,47 @@ export class DshAdapter implements AgentBackend {
     return connection;
   }
 
+
+  /**
+   * Attach through the 0.2 link.
+   *
+   * The channel is built first and handed to the connection, then registered:
+   * the connection needs its read/write seam at construction, and the follow
+   * stream must not open against a connection that does not exist yet.
+   *
+   * Mutations are gated on `isReady`, which for this family means an issued
+   * cookie AND a verified event generation — the two things that make an answer
+   * attributable. Registering starts the carrier; readiness arrives with the
+   * `ready` frame, and until then writes are refused rather than queued.
+   */
+  private attachRemoteSession(info: SessionInfo): SessionConnection {
+    const host = this.remote();
+    const channel = host.channel(info.id);
+    const connection = new DshSessionConnection(info, {
+      ...(this.options.connection ?? {}),
+      channel,
+      mutationReady: () => host.isReady,
+      onClosed: (id) => host.unregister(id, connection),
+    });
+    host.register(connection, channel);
+    return connection;
+  }
+
   /** Create is available only while a host is reachable and owns at least one workspace. */
   async canCreateSession(): Promise<boolean> {
     if (!(await this.isAvailable())) return false;
+    if (await this.usingRemoteHost()) {
+      // An authenticated 0.2 host answers `session/create` with an empty request
+      // — captured, not inferred, from 0.2.0-rc.2, where the host created a
+      // session on a machine whose `workspace/follow` baseline listed NO
+      // workspaces. Gating creation on that registry asks the wrong question:
+      // the answer used to be "there is nowhere to put it" on a host that was
+      // perfectly willing to make one, which hid the create affordance on every
+      // fresh host. Readiness is proven again, and more strongly, immediately
+      // before the write; this preflight runs on roster sweeps, so it stays a
+      // cheap authenticated read rather than a carrier open.
+      return true;
+    }
     return (await this.workspaces()).length > 0;
   }
 
@@ -904,6 +1440,7 @@ export class DshAdapter implements AgentBackend {
    * or worse, a misleading 409 "no longer available" for a valid selection.
    */
   async listModels(): Promise<ModelOption[]> {
+    if (await this.usingRemoteHost()) return dshModelOptions(await this.remote().modelCatalog());
     return dshModelOptions(await new DshDriver(this.rpc()).catalog());
   }
 
@@ -914,6 +1451,16 @@ export class DshAdapter implements AgentBackend {
    * itself rather than trusting an earlier sweep.
    */
   private async requireVerifiedHost(): Promise<void> {
+    if (await this.usingRemoteHost()) {
+      // Authenticated AND holding a current event generation. A 0.2 host has no
+      // `describe` to ask, and a cookie alone would let a write through while the
+      // event stream that authorizes an answer is unverified.
+      const verified = await this.remote().verify();
+      if (!verified.ok) {
+        throw new Error('the DeepSeek Harness host did not pass verification; the write was not issued');
+      }
+      return;
+    }
     const outcome = await this.rpc().call<unknown>('host.describe', {}, { generationLoss: 'host-scoped' });
     if (!outcome.ok || !verifyDshHostDescribe(outcome.value).ok) {
       throw new Error('the DeepSeek Harness host did not pass verification; the write was not issued');
@@ -921,11 +1468,14 @@ export class DshAdapter implements AgentBackend {
   }
 
   /**
-   * Create a session inside an existing workspace.
+   * Create a session, in the requested workspace when one was requested.
    *
    * Creating the WORKSPACE is out of round 1 (`workspace.create` is not on the
-   * method allowlist), so a directory with no registered workspace is refused
-   * with that fact rather than silently landing the session somewhere else.
+   * method allowlist), so a NAMED directory with no registered workspace is
+   * refused with that fact rather than silently landing the session somewhere
+   * else. No directory named is not that case: 0.2 creates from an empty request
+   * (captured on 0.2.0-rc.2), and the legacy family picks the host's first
+   * registered workspace.
    *
    * Verification happens immediately before EACH write — the create, and the
    * optional rename or model selection — not once at the top: a describe before
@@ -945,22 +1495,45 @@ export class DshAdapter implements AgentBackend {
     title?: string;
     model?: PromptInput['model'];
   }): Promise<SessionInfo> {
-    const workspaces = await this.workspaces();
-    if (workspaces.length === 0) {
-      throw new Error('the DeepSeek Harness host has no workspace to create a session in');
-    }
+    const remoteHost = await this.usingRemoteHost();
     const directory = opts?.directory?.replace(/\/+$/, '');
-    const chosen = directory
-      ? workspaces.find((workspace) => workspace.path.replace(/\/+$/, '') === directory)
-      : workspaces[0];
-    if (!chosen) {
-      throw new Error(
-        `no DeepSeek Harness workspace is registered for ${directory}; add it in the host, then retry`,
-      );
+    // Which workspace the session lands in is decided in two steps, and the
+    // second one is family-specific.
+    //
+    // A caller that NAMED a directory always gets that directory or a refusal,
+    // both families: silently placing a session somewhere else is how files get
+    // written into the wrong project. What is NOT a question anyone gets to ask
+    // by refusing is the case where no directory was named at all. There, the
+    // legacy family still needs the workspace id its RPC takes, while 0.2 has a
+    // captured answer — an empty request, which the host serves by choosing its
+    // own default — and an empty workspace registry is a normal state of a fresh
+    // host rather than a reason to refuse the user.
+    let workspaceId: string | undefined;
+    /** What the registry knew about the workspace that will hold the session. */
+    let registered: { title: string; path: string } | undefined;
+    if (directory) {
+      const chosen = (await this.workspaces())
+        .find((workspace) => workspace.path.replace(/\/+$/, '') === directory);
+      if (!chosen) {
+        throw new Error(
+          `no DeepSeek Harness workspace is registered for ${directory}; add it in the host, then retry`,
+        );
+      }
+      workspaceId = chosen.workspaceId;
+      registered = { title: chosen.title, path: chosen.path };
+    } else if (!remoteHost) {
+      const [first] = await this.workspaces();
+      if (!first) {
+        throw new Error('the DeepSeek Harness host has no workspace to create a session in');
+      }
+      workspaceId = first.workspaceId;
+      registered = { title: first.title, path: first.path };
     }
-    const driver = new DshDriver(this.rpc());
+    const driver = remoteHost ? undefined : new DshDriver(this.rpc());
     await this.requireVerifiedHost();
-    const created = await driver.create(chosen.workspaceId);
+    const created = remoteHost
+      ? await this.remote().createSession(workspaceId === undefined ? {} : { workspaceId })
+      : await driver!.create(workspaceId!);
     let title = opts?.title;
     if (title) {
       // The session EXISTS upstream from here on. A failed re-verification or
@@ -970,7 +1543,9 @@ export class DshAdapter implements AgentBackend {
       // cosmetic, so it degrades to the workspace/default title.
       try {
         await this.requireVerifiedHost();
-        title = await driver.rename(created.sessionId, title);
+        title = remoteHost
+          ? await this.remote().renameSession(created.sessionId, title)
+          : await driver!.rename(created.sessionId, title);
       } catch {
         title = undefined;
       }
@@ -985,7 +1560,13 @@ export class DshAdapter implements AgentBackend {
       // catalog before this call, so what arrives here is a servable route.
       try {
         await this.requireVerifiedHost();
-        const selected = await driver.selectModel(created.sessionId, {
+        const selected = remoteHost
+          ? await this.remote().selectModelHost(created.sessionId, {
+            provider: requestedModel.providerID,
+            model: requestedModel.modelID,
+            ...(requestedModel.reasoningEffort ? { reasoningEffort: requestedModel.reasoningEffort } : {}),
+          })
+          : await driver!.selectModel(created.sessionId, {
           provider: requestedModel.providerID,
           model: requestedModel.modelID,
           ...(requestedModel.reasoningEffort ? { reasoningEffort: requestedModel.reasoningEffort } : {}),
@@ -1001,6 +1582,31 @@ export class DshAdapter implements AgentBackend {
         currentModel = undefined;
       }
     }
+    // Where the session actually landed. When the registry decided it, that
+    // answer was already in hand. When the HOST decided it — the 0.2 case, where
+    // an empty request is what the captured contract sends — `session/create`
+    // answers with only an id, so the roster is the one place the real cwd and
+    // the host's own default title are written down. One bounded read, and a read
+    // that has not caught up leaves both unset rather than inventing them; the
+    // next discovery sweep fills them, and neither is worth reporting a creation
+    // failure over for a session that now exists.
+    let landing: { title?: string; cwd?: string } = registered
+      ? { title: registered.title, cwd: registered.path }
+      : {};
+    if (!registered) {
+      try {
+        const landed = (await this.discoverSessions())
+          .find((session) => session.id === created.sessionId);
+        if (landed) {
+          landing = {
+            ...(landed.title ? { title: landed.title } : {}),
+            ...(landed.cwd ? { cwd: landed.cwd } : {}),
+          };
+        }
+      } catch {
+        /* the row is cosmetic next to the session's existence */
+      }
+    }
     return {
       id: created.sessionId,
       tool: this.id,
@@ -1008,8 +1614,8 @@ export class DshAdapter implements AgentBackend {
       // created here can spawn children immediately, so the row it returns has
       // to carry it too or those children render flat until the next discovery.
       nativeId: created.sessionId,
-      title: title || chosen.title,
-      cwd: chosen.path,
+      title: title || landing.title || '',
+      ...(landing.cwd === undefined ? {} : { cwd: landing.cwd }),
       status: 'idle',
       attachMode: 'live',
       launchSurface: 'app',
@@ -1023,10 +1629,38 @@ export class DshAdapter implements AgentBackend {
     // so there is nothing native to write back for null.
     if (title === null) return;
     await this.requireVerifiedHost();
+    if (await this.usingRemoteHost()) {
+      await this.remote().renameSession(sessionId, title);
+      return;
+    }
     await new DshDriver(this.rpc()).rename(sessionId, title);
   }
 
   private async workspaces(): Promise<Array<{ workspaceId: string; path: string; title: string }>> {
+    if (await this.usingRemoteHost()) {
+      // `workspace/follow` needs a carrier, and `verify()` is the one call that
+      // authenticates AND opens it. Skipping it here would either read against a
+      // link that was never started (an empty registry, and a create refusal that
+      // blames the operator's own workspaces) or open a doomed socket to a host
+      // that has not issued a cookie.
+      const verified = await this.remote().verify();
+      if (!verified.ok) return [];
+      const outcome = await this.remote().workspaces();
+      if (!outcome.ok) return [];
+      const remoteWorkspaces: Array<{ workspaceId: string; path: string; title: string }> = [];
+      for (const raw of outcome.value.items) {
+        const workspace = (raw ?? {}) as DshWorkspaceSummary;
+        const workspaceId = typeof workspace.workspaceId === 'string' ? workspace.workspaceId : '';
+        const path = typeof workspace.path === 'string' ? workspace.path : '';
+        if (!workspaceId || !path) continue;
+        remoteWorkspaces.push({
+          workspaceId,
+          path,
+          title: typeof workspace.title === 'string' && workspace.title ? workspace.title : path,
+        });
+      }
+      return remoteWorkspaces;
+    }
     // A workspace registry is host state, not session state, so it outlives an
     // epoch the same way the liveness probe does.
     const outcome = await this.rpc().call<{ items?: unknown }>('workspace.list', {}, {

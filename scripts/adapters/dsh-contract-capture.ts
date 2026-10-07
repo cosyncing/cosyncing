@@ -41,6 +41,7 @@ import {
 } from './dsh-capture-sandbox.ts';
 import { modelBackedVerdict } from './dsh-capture-prompt.ts';
 import { runPromptTurn, type TurnSocket } from './dsh-capture-turn.ts';
+import { captureChildEffects, rememberCaptureChild, stopCaptureChild } from './dsh-capture-child.ts';
 
 const ROOT = resolve(import.meta.dir, '../..');
 
@@ -178,6 +179,16 @@ function launchCaptureHost(executable: string, port: number, workspace: string, 
 export interface CaptureRuntime {
   platform?: NodeJS.Platform;
   launchHost?: typeof launchCaptureHost;
+  /** A local scripted model is contract evidence, never provider acceptance. */
+  modelSource?: 'provider' | 'scripted-local';
+  replaceFollowDuringTurn?: boolean;
+  promptContent?: readonly unknown[];
+  /** Attach real product readers before submitting the scenario's prompt. */
+  beforeTurn?: (context: { baseUrl: string; cookieHeader: string; sessionId: string; home: string }) => Promise<{
+    finish(): Promise<unknown>; close(): Promise<void>;
+  }>;
+  /** Optional isolated adapter pass; credentials stay in memory and are never serialized. */
+  afterTurn?: (context: { baseUrl: string; cookieHeader: string; sessionId: string; home: string }) => Promise<unknown>;
 }
 
 export async function runDshContractCapture(
@@ -223,7 +234,8 @@ export async function runDshContractCapture(
       // turn has run there is nothing to derive it from, so it starts false and
       // says so rather than asserting a fixed answer.
       modelBacked: false,
-      modelTurn: { attempted: false, reason: 'no prompt scenario was requested' },
+      modelTurn: { attempted: false, reason: args.prompt.length > 0
+        ? 'the requested prompt has not been submitted' : 'no prompt scenario was requested' },
       defaultWorkspace: { probed: false, usable: false, reason: 'startup has not reached the directory probe' },
       platform: `${platform}/${process.arch}`,
     },
@@ -231,6 +243,7 @@ export async function runDshContractCapture(
   };
   const captures = record.captures as Record<string, unknown>;
   let token: string | undefined;
+  let scriptedDiagnostics = '';
   let cookie: string | undefined;
 
   const record_ = (id: string, value: unknown): void => {
@@ -238,6 +251,9 @@ export async function runDshContractCapture(
   };
 
   let child: ReturnType<typeof launchCaptureHost> | undefined;
+  const childEffects = captureChildEffects();
+  let childIdentity: ReturnType<typeof rememberCaptureChild> | undefined;
+  let product: Awaited<ReturnType<NonNullable<CaptureRuntime['beforeTurn']>>> | undefined;
   let failures = 0;
   try {
     mkdirSync(join(home, '.dsh'), { recursive: true, mode: 0o700 });
@@ -277,6 +293,7 @@ export async function runDshContractCapture(
     console.log(`dsh: ${String((record.provenance as Record<string, unknown>).versionOutput)}`);
 
     child = (runtime.launchHost ?? launchCaptureHost)(args.executable, args.port, workspace, childEnv.env);
+    childIdentity = rememberCaptureChild(child.pid, childEffects);
     const host = child;
     let announcement = '';
     const tokenFound = new Promise<string>((resolvePromise, rejectPromise) => {
@@ -303,7 +320,11 @@ export async function runDshContractCapture(
     });
     // Consume diagnostics without retaining or publishing provider output.
     void (async () => {
-      for await (const _chunk of host.stderr as unknown as AsyncIterable<Uint8Array>) { /* drain */ }
+      for await (const chunk of host.stderr as unknown as AsyncIterable<Uint8Array>) {
+        if (runtime.modelSource === 'scripted-local' && scriptedDiagnostics.length < 8192) {
+          scriptedDiagnostics += new TextDecoder().decode(chunk).slice(0, 8192 - scriptedDiagnostics.length);
+        }
+      }
     })().catch(() => { /* host shutdown */ });
 
     const baseUrl = `http://127.0.0.1:${String(args.port)}`;
@@ -475,6 +496,7 @@ export async function runDshContractCapture(
 
         // 5. An optional, paid, deliberately chosen model turn.
         if (args.prompt.length > 0) {
+          if (runtime.beforeTurn) product = await runtime.beforeTurn({ baseUrl, cookieHeader, sessionId, home });
           // Retain the conservative qualification boundary for paid scenarios.
           // A missing UI prerequisite does not imply that the API cannot prompt.
           // Free captures still complete and record the unverified prerequisite.
@@ -504,8 +526,10 @@ export async function runDshContractCapture(
             cookie: cookieHeader,
             sessionId,
             text: args.prompt,
+            ...(runtime.promptContent ? { content: runtime.promptContent } : {}),
             approval: args.approval,
             timeoutMs: args.promptTimeoutMs,
+            ...(runtime.replaceFollowDuringTurn ? { replaceFollowDuringTurn: true } : {}),
           });
           const delivered = turn.answers.filter((entry) => entry.state === 'delivered').length;
           const failed = turn.answers.filter((entry) => entry.state === 'failed').length;
@@ -529,9 +553,13 @@ export async function runDshContractCapture(
             : 'the prompt never left this client (' + String(turn.stoppedBy ?? 'subscriptions never opened') + ')');
           record.provenance = {
             ...record.provenance as object,
-            modelBacked: verdict.modelBacked,
+            modelBacked: runtime.modelSource === 'scripted-local' ? false : verdict.modelBacked,
+            modelSource: runtime.modelSource ?? 'provider',
+            scriptedTurnCompleted: runtime.modelSource === 'scripted-local' && verdict.modelBacked,
             modelTurn: {
               ...verdict,
+              ...(runtime.modelSource === 'scripted-local'
+                ? { modelBacked: false, reason: 'scripted local provider; no real model was used' } : {}),
               approvalPolicy: args.approval,
               promptSent: turn.promptSent,
               promptState: turn.promptState,
@@ -542,28 +570,37 @@ export async function runDshContractCapture(
               approvalsFailed: failed,
             },
           };
-          console.log('model turn: ' + (verdict.modelBacked ? 'model-backed' : 'not model-backed (' + verdict.reason + ')'));
+          console.log('model turn: ' + (runtime.modelSource === 'scripted-local'
+            ? 'scripted local provider (zero model spending)'
+            : verdict.modelBacked ? 'model-backed' : 'not model-backed (' + verdict.reason + ')'));
+          await call('session.projectionsAfterTurn', 'session/projections', { request: { sessionId } });
+          if (runtime.afterTurn) record_('product.afterTurn', await runtime.afterTurn({ baseUrl, cookieHeader, sessionId, home }));
+          if (product) {
+            const result = await product.finish(); record_('product.duringTurn', result);
+            if (result && typeof result === 'object' && 'passed' in result && result.passed === false) failures += 1;
+          }
         }
       }
     }
   } catch (error) {
     failures += 1;
     record_('captureError', { message: error instanceof Error ? error.message : String(error) });
+    if (scriptedDiagnostics) record_('scriptedDiagnostics', scriptedDiagnostics);
   } finally {
+    if (product) {
+      try { await product.close(); } catch (error) {
+        failures += 1; record_('productCleanupError', { message: error instanceof Error ? error.message : String(error) });
+      }
+    }
     if (child) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        child.kill();
-        await Promise.race([child.exited, new Promise((r) => { timer = setTimeout(r, 3_000); })]);
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill('SIGKILL');
-          await child.exited;
-        }
+        if (!childIdentity) throw new Error('capture child was not identified; no signal sent');
+        const outcome = await stopCaptureChild(childIdentity, childEffects);
+        record_('hostCleanup', outcome);
+        if (!outcome.ok) throw new Error(`capture child cleanup preserved the process: ${outcome.reason}`);
       } catch (error) {
         failures += 1;
         record_('hostCleanupError', { message: error instanceof Error ? error.message : String(error) });
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
       }
     }
     try {

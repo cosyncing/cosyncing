@@ -11,7 +11,116 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- DeepSeek Harness hosts on the 0.2 contract can be signed in to.
+  `cosyncing dsh connect` takes the one-time URL that `dsh web` printed for a
+  host you started yourself, exchanges it, and keeps the session cookie the host
+  issues; `dsh status` shows what is held, and `dsh disconnect` forgets it. The
+  URL is accepted from a hidden prompt or stdin only, never as an argument, so a
+  host credential cannot land in shell history or the process list. The cookie
+  lives in an owner-only file scoped to that address and that host's profile, and
+  outlives a broker restart, so signing in is a one-time act for a host you keep.
+  A host cosyncing starts for itself signs itself in from its own launch output.
+  `cosyncing doctor` reports the same enrollment the running broker sees, and
+  names the fix for each state it finds instead of recommending a re-enrollment
+  for an unrelated problem.
+- The DeepSeek Harness adapter now speaks the 0.2 contract as well as 0.1:
+  roster, session open and history, live output, creation and rename, prompts,
+  interruptions, and reconnect. The contract is chosen by what the host answers,
+  not by a version string, with recorded targets `0.1.0-rc.6` and `0.2.0-rc.2`.
+  The support page distinguishes captured contracts and provider-backed adapter
+  outcomes from outstanding browser and platform acceptance.
+
 ### Changed
+
+- DSH reconnects remove abandoned partial assistant output even when the durable
+  history cursor is unchanged. Continued questions become answerable again when
+  a turn ends before its claimed reply is admitted; queued later replies and
+  durable answers retain their protection against duplicate submission.
+- Model pickers and slash-command catalogs refresh independently, so an optional
+  command lookup cannot delay an available model picker or its retry schedule.
+- DeepSeek Harness `0.2.0-rc.2` now consumes captured assistant streams and
+  timed/continued questions, retains pending decisions through follow-only
+  recovery, and resumes already attached sessions after re-enrollment. A fresh
+  carrier resets exhausted transient follow retries while terminal session
+  refusals remain withdrawn. Native preset catalog refreshes also resist late
+  replies that would restore obsolete or removed choices, and a fresh
+  authenticated handshake reloads presets after credential renewal.
+  Prompts and commands waiting on catalog reads also stop across enrollment
+  withdrawal, carrier replacement or connection close; a fresh user action
+  remains available after recovery.
+  Fresh prompt identities remain distinct across broker restarts, so a surviving
+  native session cannot mistake a new queued or steering prompt for an old one.
+  Authenticated service faults follow owned-host
+  recovery instead of being misclassified as enrollment faults.
+  Forwarded native agent errors retain their original failure details.
+- Model and reasoning selections submitted with a native DSH rc.2 command now
+  apply to the next prompt, matching the native client. Compaction retains the
+  host's own summarization-model policy and does not forward the selected effort.
+- Non-image DSH attachment refusals now identify cosyncing's adapter limitation;
+  the rc.2 host has its own file upload surface.
+- DSH current-model and workspace information now reaches cold and attached
+  sessions. Native queue cancellation and archive changes converge without
+  treating an inactive agent as a deleted durable session. Malformed roster
+  responses cannot falsely prove removal or healthy service readiness. Image-only echoes,
+  bounded durable image previews, and rc.2 tool-result content are preserved.
+  The local `/steer` command sends text to a running rc.2 turn's next step. Native
+  settings and plugin changes automatically refresh attached model, permission
+  and command choices without reconnecting. Empty catalogs retract stale choices;
+  a failed read preserves the last successful value for that surface.
+  Cold discovery refreshes durable metadata beyond stale roster hints without
+  activating an agent. Initial history waits for the authenticated event handshake,
+  and native compaction removes shadowed messages while retaining its checkpoint. Provider-backed adapter turns supplement the scripted
+  captures; visible browser, shared-client, and remaining platform acceptance
+  are tracked separately.
+- DSH tabs release live transport while offstage or hidden and explicitly
+  reattach after a fresh foreground roster read, retaining their cached
+  transcript and unsent draft. Foreground attachment fences a superseded queued
+  background attach and waits for an in-progress transport close.
+  Visible windows retain their subscriptions across input focus changes.
+  Restored foreground pages also wait for the initial authoritative live-only
+  attach instruction, avoiding a refused implicit join while the roster loads.
+  The last foreground client's departure also releases the broker subscription
+  after its reconnect grace, allowing pending decisions to return to the native
+  host instead of retaining an invisible attention lease.
+- Native DSH commands apply the selected permission preset before executing;
+  a refused preset prevents the requested command. Managed startup keeps launch
+  output flowing through enrollment while retaining fresh ownership proof.
+- Enrollment takes effect without restarting the broker. `cosyncing dsh connect`
+  and `cosyncing dsh disconnect` are read by a running broker the next time it
+  needs the credential, so signing a host in connects it and disconnecting it
+  withdraws the access rather than leaving a warm connection streaming on an
+  authorization nobody holds any more. A replaced credential re-handshakes; a
+  withdrawn one does not reconnect, even when its managed-launch token remains
+  in memory. A refused enrollment waits for a usable replacement rather than
+  silently exchanging that token.
+- A DeepSeek Harness host that cosyncing cannot sign in to is left running.
+  Missing, expired and refused credentials, an address the host will not answer,
+  and an unreadable credential store are reported as their own diagnosis with
+  the command that fixes them, instead of being read as a crashed host and
+  answered by stopping a process that was working.
+- `cosyncing dsh connect`, `dsh status` and `dsh disconnect` honour
+  `COSYNCING_DSH_BASE_URL`. They previously targeted the default address even
+  when the broker was configured for another one, which made them operate on the
+  wrong host.
+- Permission presets on a 0.2 host are read from the host's preset catalog.
+  The per-session state carries only the preset in force, so the picker was
+  empty and selecting the preset a session was already running was refused.
+- A DeepSeek Harness session that a host stops following reports that instead of
+  waiting out a timeout, and a stream the host keeps refusing is retried on a
+  bounded backoff rather than reopened as fast as the process can spin.
+- Reopening a DeepSeek Harness session keeps an approval or question that was
+  still open on it, and an interaction no client is left to show is handed back
+  to the host rather than answered on the user's behalf.
+- Reading a DeepSeek Harness session's history twice returns the current
+  transcript. A repeated read previously returned the snapshot taken when the
+  session was first opened, so a compacted session kept showing its old
+  conversation.
+- A DeepSeek Harness host that has no workspace registered is no longer told it
+  cannot create a session. A 0.2 host with an empty workspace registry creates
+  sessions anyway, so the registry no longer answers the creation question;
+  naming a directory the host has not registered is still refused.
 
 - An Android update keeps downloading after you leave the app, with its
   progress in a notification. If it finishes while you are away, a
@@ -19,6 +128,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   back to Cosyncing.
 
 ### Fixed
+
+- A DeepSeek Harness host started by cosyncing is now reachable. The managed
+  start read the child's output once, before waiting for the host to come up, so
+  a 0.2 host that printed its sign-in URL a moment later was never signed in to,
+  and a healthy host was reported as having failed to start in time.
 
 - Progress bars drew full from the start, so the Android update download,
   the context bar in a session's details and the artifact preview's loading

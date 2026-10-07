@@ -361,6 +361,14 @@ check('the decoder is the same one the fold uses',
     === JSON.stringify({ kind: 'aborted', detail: 'cause cancel-request' }),
   JSON.stringify(decodeTurnEndReason({ kind: 'aborted', reason: { kind: 'cancel-request' } })));
 
+const answeredQuestion = fold([
+  frame('cap-follow', assistantMessage('Answered.')),
+  frame('cap-follow', turnEnd({ kind: 'completed' })),
+], questioned);
+check('a completed turn after a question is not reported as still waiting for it', modelBackedVerdict(answeredQuestion, true).stalledOn === null);
+const imageEcho = fold([frame('cap-follow', sessionEvent('user/message', { source: { kind: 'user' }, content: [{ type: 'image', attachment: { attachmentId: 'fixture-image' } }] }))]);
+check('an image-only durable user message counts as an echo', imageEcho.userMessageEchoed);
+
 const failed = results.filter((entry) => !entry.ok);
 console.log(`\n${String(results.length - failed.length)} passed, ${String(failed.length)} failed`);
 if (failed.length > 0) process.exit(1);

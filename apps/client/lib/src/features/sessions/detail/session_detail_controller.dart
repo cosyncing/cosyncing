@@ -432,12 +432,35 @@ class SessionDetailController
         connection.state != SessionDetailConnectionStatus.closed &&
         establishedIntent == SessionDetailAttachIntent.backgroundObserve &&
         !state.bootstrapState.hasFailed;
-    final operationBody = canPromoteObserve
+    final startOperation = canPromoteObserve
         ? () => _promoteObserveConnection(requestedSource, connection)
         : () => _attachOnce(intent);
-    final operation = supersedes
+    late final Future<void> operation;
+    Future<void> operationBody() {
+      final suspension = _transportSuspensionInFlight;
+      if (suspension == null) return startOperation();
+      return suspension.then<void>((_) {
+        if (_disposed ||
+            !identical(_attachInFlight, operation) ||
+            requestedSource !=
+                RosterSource.of(ref.read(activeBrokerProfileProvider))) {
+          return Future<void>.value();
+        }
+        return startOperation();
+      });
+    }
+
+    operation = supersedes
         ? operationBody()
-        : _attachQueue.then((_) => operationBody());
+        : _attachQueue.then<void>((_) {
+            // Foreground or another broker can supersede this admission
+            // before its queued body starts. A stale body must not become the
+            // newest bootstrap attempt and replace that foreground attach.
+            if (_disposed || !identical(_attachInFlight, operation)) {
+              return Future<void>.value();
+            }
+            return operationBody();
+          });
     _attachInFlight = operation;
     _attachInFlightSource = requestedSource;
     _attachInFlightIntent = intent;
@@ -474,10 +497,11 @@ class SessionDetailController
   /// but an already-mounted Session Detail otherwise keeps reconnecting with
   /// the resolver that preceded that credential mutation. Supersede that
   /// same-source attach and create a fresh connection from the current client.
-  Future<void> rebindBrokerClient() {
+  Future<void> rebindBrokerClient({SessionDetailAttachIntent? intent}) {
     final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
     if (source == null || _disposed) return Future<void>.value();
-    final intent =
+    final requestedIntent =
+        intent ??
         _establishedAttachIntent ??
         _attachInFlightIntent ??
         SessionDetailAttachIntent.interactive;
@@ -489,17 +513,21 @@ class SessionDetailController
     _attachInFlightIntent = null;
     _attachQueue = Future<void>.value();
 
-    final operation = () async {
+    late final Future<void> operation;
+    operation = () async {
+      await _transportSuspensionInFlight;
+      if (_disposed || !identical(_attachInFlight, operation)) return;
       await _resetConnectionForProfileSwitch();
       if (_disposed ||
+          !identical(_attachInFlight, operation) ||
           RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
         return;
       }
-      await _attachOnce(intent);
+      await _attachOnce(requestedIntent);
     }();
     _attachInFlight = operation;
     _attachInFlightSource = source;
-    _attachInFlightIntent = intent;
+    _attachInFlightIntent = requestedIntent;
     unawaited(
       operation.then<void>(
         (_) => _clearAttachInFlight(operation),
@@ -517,17 +545,38 @@ class SessionDetailController
     _attachInFlightIntent = null;
   }
 
+  Future<void>? _transportSuspensionInFlight;
+
   /// Stops background transport work without evicting bounded controller state.
   ///
   /// Browser lifecycle suspension uses this instead of releasing the provider
   /// lease. H1 pages, the semantic anchor, status, tool/question projection,
   /// and the window-local viewport record therefore remain resident while the
   /// socket and reconnect machinery are fully stopped.
-  Future<void> suspendTransport() async {
+  Future<void> suspendTransport() {
+    final inFlight = _transportSuspensionInFlight;
+    if (inFlight != null) return inFlight;
+    late final Future<void> operation;
+    operation = _suspendTransportBody().whenComplete(() {
+      if (identical(_transportSuspensionInFlight, operation)) {
+        _transportSuspensionInFlight = null;
+      }
+    });
+    _transportSuspensionInFlight = operation;
+    return operation;
+  }
+
+  Future<void> _suspendTransportBody() async {
     final cancellations = _requestTransportAttachCancellation();
     _cancelInitialHistoryTimeout();
     _abortBootstrapActionRefresh();
     _bootstrapAttempt++;
+    // Suspension retires queued admissions as well as active socket work. A
+    // body that has not started must not reopen live transport after close.
+    _attachInFlight = null;
+    _attachInFlightSource = null;
+    _attachInFlightIntent = null;
+    _attachQueue = Future<void>.value();
     _clearHistoryPageTracking();
     _clearHistoryRefreshTracking();
     _requestedDriveReason = null;
@@ -916,10 +965,18 @@ class SessionDetailController
           return;
         }
       }
-      state = state.copyWith(agentActions: _unavailableAgentActions);
+      state = state.copyWith(
+        agentActions: _unavailableAgentActions(
+          supportsObserve: state.agentActions?.supportsObserve,
+        ),
+      );
     } on Object {
       if (!_canApplyAgentActions(bootstrapAttempt, source)) return;
-      state = state.copyWith(agentActions: _unavailableAgentActions);
+      state = state.copyWith(
+        agentActions: _unavailableAgentActions(
+          supportsObserve: state.agentActions?.supportsObserve,
+        ),
+      );
     }
   }
 

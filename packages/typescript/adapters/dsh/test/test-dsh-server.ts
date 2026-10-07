@@ -198,11 +198,17 @@ function check(name: string, ok: boolean, detail = ''): void {
   // route past an allowlist. The module list is exhaustive on purpose: a new
   // file in src/ fails this check until someone decides which side it belongs
   // on, which is the decision that matters.
-  const domainSources = ['index.ts', 'implementation.ts', 'mapping.ts', 'observe.ts', 'drive.ts', 'diagnostics.ts'];
+  // protocol.ts is the seam the domain consumes. It names no route and holds no
+  // socket: it decides which family to speak and hands the domain a channel whose
+  // methods are reads and writes, which is why it sits with the callers rather
+  // than with the carriers.
+  const domainSources = ['index.ts', 'implementation.ts', 'mapping.ts', 'observe.ts', 'drive.ts', 'diagnostics.ts', 'protocol.ts', 'assistant-stream.ts'];
   // event-link.ts belongs on the transport side: it owns the carrier's socket
   // lifecycle and the generation read off it, which is exactly what a domain
   // module must not get hold of.
-  const transportSources = ['server.ts', 'envelope.ts', 'remote.ts', 'mux.ts', 'auth.ts', 'compatibility.ts', 'event-link.ts'];
+  // remote-host.ts is transport for the same reason event-link.ts is: it owns the
+  // carrier, opens the logical streams, and decides when a generation has ended.
+  const transportSources = ['server.ts', 'envelope.ts', 'remote.ts', 'mux.ts', 'auth.ts', 'compatibility.ts', 'event-link.ts', 'remote-host.ts'];
   let stray = '';
   for (const name of domainSources) {
     const text = await Bun.file(new URL(`../src/${name}`, import.meta.url)).text();

@@ -209,12 +209,34 @@ void main() {
           buildSessionDetailTestPage(
             events: const [],
             brokerClient: _PendingAgentsBrokerClient(),
+            extraOverrides: [
+              sessionListControllerProvider.overrideWith(
+                _ObserveInstructionRoster.new,
+              ),
+            ],
           ),
         );
         await openStatusTab(tester);
         await showSessionStatusTestItem(
           tester,
           const Key('session-detail-export-transcript-button'),
+        );
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SessionDetailPage)),
+        );
+        expect(
+          container
+              .read(
+                sessionDetailControllerProvider(
+                  const SessionDetailKey(
+                    tool: 'claude',
+                    sessionId: 'session-1',
+                  ),
+                ),
+              )
+              .connectionStatus,
+          SessionDetailConnectionStatus.connected,
         );
 
         for (final key in const [
@@ -447,6 +469,24 @@ class _PendingAgentsBrokerClient extends FakeBrokerClient {
 
   @override
   Future<List<AgentInfo>> listAgents() => _never.future;
+}
+
+/// An authoritative Observe instruction lets the session connect independently
+/// of the still-pending optional action catalog.
+class _ObserveInstructionRoster extends SessionListController {
+  @override
+  SessionListState build() => const SessionListState(
+    status: SessionListStatus.loaded,
+    sessions: [
+      SessionInfo(
+        id: 'session-1',
+        tool: 'claude',
+        title: 'Observe fixture',
+        status: SessionStatus.idle,
+        attachMode: AttachMode.observe,
+      ),
+    ],
+  );
 }
 
 /// Broker whose first /api/agents call rejects and later calls succeed —

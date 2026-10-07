@@ -230,5 +230,201 @@ check(
   );
 }
 
+// Native invalidation outlives the bounded attach ladder and refreshes an open socket.
+{
+  const controller = new AbortController();
+  let changed: (() => void) | undefined;
+  let stopped = 0;
+  let model = 'before';
+  let modes = ['ask'];
+  let commands = ['goal'];
+  let refuseModels = false;
+  const options: any[] = [];
+  const commandFrames: any[] = [];
+  const refreshed = refreshSessionOptions(conn({
+    listModels: async () => {
+      if (refuseModels) throw new Error('model service transiently unavailable');
+      return model ? [{ providerID: 'fixture', modelID: model, label: model }] : [];
+    },
+    listModes: async () => modes.map(value => ({ value, label: value })),
+    listCommands: async () => commands.map(name => ({ name, description: name })),
+  }), value => options.push(value), {
+    delays: [], signal: controller.signal,
+    watchChanges: notify => { changed = notify; return () => { stopped++; }; },
+    sendCommands: value => commandFrames.push(value),
+  });
+  const drain = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+  await drain();
+  check('a native watcher remains registered after the attach ladder', !!changed && stopped === 0 && options.length === 1);
+  model = 'after'; modes = ['read-only']; commands = ['compact'];
+  changed?.(); await drain();
+  check('native invalidation updates same-length model and permission pickers without reattach',
+    options.length === 2 && options[1]?.models[0]?.modelID === 'after'
+      && options[1]?.modes[0]?.value === 'read-only');
+  check('native invalidation replaces the attached slash-command catalog',
+    commandFrames.length === 2 && commandFrames[1]?.[0]?.name === 'compact');
+  changed?.(); await drain();
+  check('identical native notifications send no duplicate catalog frames', options.length === 2 && commandFrames.length === 2);
+  refuseModels = true; modes = ['workspace-write'];
+  changed?.(); await drain();
+  check('a failed catalog surface retains its prior value while a healthy surface updates',
+    options.at(-1)?.models[0]?.modelID === 'after' && options.at(-1)?.modes[0]?.value === 'workspace-write');
+  refuseModels = false; model = ''; modes = []; commands = [];
+  changed?.(); await drain();
+  check('successful empty native catalogs retract stale picker and command entries',
+    options.at(-1)?.models.length === 0 && options.at(-1)?.modes.length === 0
+      && commandFrames.at(-1)?.length === 0);
+  controller.abort(); await refreshed;
+  const mark = [options.length, commandFrames.length];
+  changed?.(); await drain();
+  check('socket close unsubscribes once and rejects every later native notification',
+    stopped === 1 && options.length === mark[0] && commandFrames.length === mark[1]);
+}
+{
+  const controller = new AbortController();
+  let changed: (() => void) | undefined;
+  let readCount = 0;
+  let release: (() => void) | undefined;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const options: any[] = [];
+  const refreshed = refreshSessionOptions(conn({
+    listModels: async () => {
+      readCount++;
+      if (readCount === 1) await held;
+      return [{ providerID: 'fixture', modelID: readCount === 1 ? 'obsolete' : 'current', label: 'model' }];
+    },
+  }), value => options.push(value), {
+    delays: [], signal: controller.signal,
+    watchChanges: notify => { changed = notify; return () => {}; },
+  });
+  await Promise.resolve(); changed?.(); changed?.(); release?.();
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  check('catalog invalidation fences the outstanding read and coalesces its burst',
+    options.length === 1 && options[0]?.models[0]?.modelID === 'current' && readCount === 2,
+    JSON.stringify({ readCount, options }));
+  controller.abort(); await refreshed;
+}
+{
+  const controller = new AbortController();
+  let release: (() => void) | undefined;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const options: any[] = [];
+  let stopped = 0;
+  const refreshed = refreshSessionOptions(conn({
+    listModels: async () => { await held; return [{ providerID: 'fixture', modelID: 'late', label: 'model' }]; },
+  }), value => options.push(value), {
+    delays: [], signal: controller.signal,
+    watchChanges: () => () => { stopped++; },
+  });
+  controller.abort(); release?.(); await refreshed;
+  check('a catalog read completed after socket close cannot publish', options.length === 0 && stopped === 1);
+}
+
+{
+  const controller = new AbortController();
+  const commands: any[] = [];
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await refreshSessionOptions(conn({
+    listModels: async () => [{ providerID: 'fixture', modelID: 'model', label: 'Model' }],
+    listCommands: async () => { await held; return [{ name: 'goal', description: 'Goal' }]; },
+  }), () => { controller.abort(); release(); }, {
+    delays: [], signal: controller.signal,
+    watchChanges: () => () => {}, sendCommands: value => commands.push(value),
+  });
+  check('closing during options delivery prevents a later command frame', commands.length === 0);
+}
+{
+  const controller = new AbortController(); let changed: (() => void) | undefined;
+  let catalog = 'before'; const commands: any[] = []; const options: any[] = [];
+  const refreshed = refreshSessionOptions(conn({
+    listModels: async () => [{ providerID: 'fixture', modelID: catalog, label: catalog }],
+    listCommands: async () => [{ name: catalog, description: catalog }],
+  }), value => {
+    options.push(value);
+    if (catalog === 'before') { catalog = 'after'; changed?.(); }
+  }, {
+    delays: [], signal: controller.signal,
+    watchChanges: notify => { changed = notify; return () => {}; },
+    sendCommands: value => commands.push(value),
+  });
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+  // Independently ready commands may arrive before options trigger the change;
+  // none may restore the old catalog after the new command catalog arrives.
+  const names = commands.map(frame => frame[0]?.name);
+  check('a reentrant catalog change converges independent command delivery without a stale overwrite',
+    options.length === 2 && names.at(-1) === 'after'
+      && names.filter(name => name === 'after').length === 1
+      && !names.slice(names.indexOf('after') + 1).includes('before'));
+  controller.abort(); await refreshed;
+}
+
+// A deferred optional read must not hold the other surface's first delivery,
+// native invalidation or retry ladder. Both directions share the same policy.
+for (const slow of ['commands', 'options']) {
+  const controller = new AbortController();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let changed: (() => void) | undefined;
+  let version = 'before';
+  const options: any[] = []; const commands: any[] = [];
+  const refreshed = refreshSessionOptions(conn({
+    listModels: async () => {
+      const value = version;
+      if (slow === 'options') await held;
+      return [{ providerID: 'fixture', modelID: value, label: value }];
+    },
+    listCommands: async () => {
+      const value = version;
+      if (slow === 'commands') await held;
+      return [{ name: value, description: value }];
+    },
+  }), value => options.push(value), {
+    delays: [], signal: controller.signal,
+    watchChanges: notify => { changed = notify; return () => {}; },
+    sendCommands: value => commands.push(value),
+  });
+  const drain = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
+  await drain();
+  const fast = slow === 'commands' ? options : commands;
+  const deferred = slow === 'commands' ? commands : options;
+  check(`pending ${slow} cannot delay the independent surface`, fast.length === 1 && deferred.length === 0);
+  version = 'after'; changed?.(); await drain();
+  check(`pending ${slow} cannot delay native refresh on the independent surface`, fast.length === 2 && deferred.length === 0);
+  release(); await drain();
+  check(`the obsolete ${slow} read is fenced before its replacement is published`,
+    deferred.length === 1 && (slow === 'commands' ? commands[0]?.[0]?.name : options[0]?.models[0]?.modelID) === 'after');
+  controller.abort(); await refreshed;
+}
+{
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const options: any[] = []; let modelReads = 0;
+  const refreshed = refreshSessionOptions(conn({
+    listModels: async () => [{ providerID: 'fixture', modelID: String(++modelReads), label: 'Model' }],
+    listCommands: async () => { await held; return []; },
+  }), value => options.push(value), {
+    delays: [1, 2], wait: async () => {}, sendCommands: () => {},
+  });
+  for (let i = 0; i < 80; i++) await Promise.resolve();
+  check('a stalled command read cannot hold the bounded model retry ladder', modelReads === 3 && options.length === 3);
+  release(); await refreshed;
+}
+{
+  const controller = new AbortController();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let stopped = 0; let finished = false; const commands: any[] = [];
+  const refreshed = refreshSessionOptions(conn({ listCommands: async () => { await held; return [{ name: 'late' }]; } }), () => {}, {
+    delays: [], signal: controller.signal, watchChanges: () => () => { stopped++; }, sendCommands: value => commands.push(value),
+  }).then(() => { finished = true; });
+  controller.abort();
+  for (let i = 0; i < 40; i++) await Promise.resolve();
+  check('closing a socket releases refresh ownership without waiting for an optional read', finished && stopped === 1);
+  release(); await refreshed;
+  for (let i = 0; i < 40; i++) await Promise.resolve();
+  check('the late command read cannot publish after close', commands.length === 0);
+}
+
 console.log(failures ? `\nFAIL: ${failures} check(s) failed.` : '\nAll session-options checks passed.');
 process.exit(failures ? 1 : 0);

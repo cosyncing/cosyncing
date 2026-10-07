@@ -206,6 +206,34 @@ export interface AgentBackend {
    * and only after deciding it is allowed to.
    */
   describeManagedHost?(): Promise<import('./integration.ts').ManagedHostDescriptor | null>;
+
+  /**
+   * Raw output from a managed host THIS broker just started, forwarded while the
+   * start is in flight.
+   *
+   * Optional and narrow on purpose. Some hosts print something only their own
+   * client can use — DeepSeek Harness prints an authenticated URL whose token is
+   * the only credential that exists until it is exchanged — and the broker cannot
+   * interpret it, so the alternative to handing it over is a broker that starts a
+   * host it can never log into.
+   *
+   * The text is the cumulative capture so far, not a delta: it is bounded, and a
+   * receiver that dedupes is simpler and more robust than a caller that has to
+   * slice correctly. It is also why this is a lifecycle hook and not a log
+   * subscription: the bytes are the child's real output, which makes them a
+   * credential carrier, and this channel hands them to exactly one adapter for
+   * exactly one owned launch.
+   */
+  observeManagedOutput?(chunk: string): void;
+
+  /**
+   * The owned launch is over — stopped, exited, abandoned, or no longer ours.
+   *
+   * The counterpart to {@link observeManagedOutput}: whatever the adapter derived
+   * from those bytes has a lifetime no longer than the launch that produced them,
+   * and this is the notification that lets it let go.
+   */
+  managedLaunchEnded?(reason: string): void;
   /**
    * WHICH host a given environment points this adapter at, as an opaque identity
    * key — the same key {@link import('./integration.ts').ManagedHostDescriptor}
@@ -228,6 +256,25 @@ export interface AgentBackend {
   managedHostIdentity?(inputs: import('./integration.ts').ManagedHostIdentityInputs): string | null;
   /** Exact readiness of the described managed host; defaults to isAvailable. */
   isManagedHostReady?(options?: AvailabilityOptions): Promise<boolean>;
+  /**
+   * WHY the described managed host failed its readiness probe, before anything
+   * is done to the process.
+   *
+   * Readiness is a boolean, and one boolean covers two unrelated facts: the
+   * host is not answering, and the host is answering fine but this broker cannot
+   * ask it anything. Recovery acts on the first and must not act on the second,
+   * because the remedy for an unauthenticated broker is a credential, not a
+   * SIGTERM to a healthy host that is minding its own business. Without this
+   * seam, an operator's `cosy dsh disconnect` -- or an expired cookie, or a
+   * credential file the owner is repairing -- reads to supervision as a crashed
+   * host, and supervision "fixes" it by killing and replacing a process the
+   * operator started themselves.
+   *
+   * Called only after a failed readiness probe and only before any process
+   * effect. Answer `{ kind: 'host' }` to let recovery proceed as if this hook
+   * did not exist, which is what an adapter with no such distinction should do.
+   */
+  managedHostReadinessFault?(options?: AvailabilityOptions): Promise<ManagedHostReadinessFault>;
   /** Is the tool installed / its server reachable right now? */
   isAvailable(options?: AvailabilityOptions): Promise<boolean>;
   /** Read-only setup/doctor checks. This path must not call discovery or start/install any runtime. */
@@ -303,6 +350,9 @@ export interface AgentBackend {
    *  state changes that are visible without opening a second driver, such as a terminal-sync bridge
    *  socket appearing/disappearing. The broker pushes the returned SessionInfo to attached clients. */
   watchSessionInfo?(onChange: (info: SessionInfo) => void): Unsubscribe;
+  /** Native model, permission, agent or command catalog invalidation for an attached session.
+   * The broker rereads catalogs; this watcher grants no mutation authority. */
+  watchSessionCatalog?(sessionId: string, onChange: () => void): Unsubscribe;
 }
 
 /** Per-call context for an availability probe. */
@@ -316,6 +366,23 @@ export interface AvailabilityOptions {
    */
   signal?: AbortSignal;
 }
+
+/**
+ * What a failed managed-host readiness probe actually means, as answered by the
+ * adapter whose host it is.
+ *
+ * The split is deliberately narrow, and it is about who has to act. `host` means
+ * the process or the address is the problem, which is what managed-host recovery
+ * exists for. `adapter` means the host is being left alone and cosyncing is the
+ * party holding the wrong end: an enrollment nobody issued, a credential that
+ * expired or was refused, a Host/Origin fence that says this address is not the
+ * one the host printed, or a credential store that cannot be read or written.
+ * `remedy` is the short, stable code the operator-facing message and doctor pick
+ * up; `detail` is the sentence.
+ */
+export type ManagedHostReadinessFault =
+  | { kind: 'host' }
+  | { kind: 'adapter'; remedy: 'credential' | 'address' | 'storage' | 'contract'; detail: string };
 
 export interface SessionDiscoveryOptions {
   /** Inclusive UTC epoch-millisecond cutoff for idle historical sessions. */

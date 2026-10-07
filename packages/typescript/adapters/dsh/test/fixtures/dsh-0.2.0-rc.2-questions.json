@@ -1,0 +1,61 @@
+{
+  "provenance": {
+    "version": "0.2.0-rc.2",
+    "source": "disposable web host with timed ask-user preset and a local scripted Messages provider",
+    "modelBacked": false,
+    "providerSpending": 0
+  },
+  "waterfall": {
+    "type": "waterfall",
+    "event": "user-questions/request",
+    "eventId": "question-fixture-timed",
+    "agentId": "session-fixture-001",
+    "request": {
+      "questions": [
+        {
+          "id": "q-fixture",
+          "question": "Choose a fixture option",
+          "options": [
+            {
+              "label": "yes"
+            },
+            {
+              "label": "no"
+            }
+          ]
+        }
+      ],
+      "wait": {
+        "callId": "call-fixture",
+        "timed": true
+      }
+    }
+  },
+  "continued": {
+    "active": [
+      {
+        "callId": "call-fixture",
+        "questions": [
+          {
+            "id": "q-fixture",
+            "question": "Choose a fixture option",
+            "options": [
+              {
+                "label": "yes"
+              },
+              {
+                "label": "no"
+              }
+            ]
+          }
+        ],
+        "state": "continued"
+      }
+    ],
+    "settled": []
+  },
+  "inbox": {
+    "next-turn": [],
+    "next-step": []
+  }
+}

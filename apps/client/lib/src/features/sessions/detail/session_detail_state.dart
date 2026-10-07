@@ -2716,6 +2716,7 @@ class SessionAgentActions {
     required this.canAttachFiles,
     this.canRenameDisplay = false,
     this.loaded = true,
+    this.supportsObserve,
   });
 
   /// Builds action capabilities from broker [AgentInfo].
@@ -2727,6 +2728,7 @@ class SessionAgentActions {
       canClone: agent.canClone,
       canTranscriptExport: agent.canTranscriptExport,
       canAttachFiles: agent.capabilities.supportsNativeFileInput,
+      supportsObserve: agent.capabilities.supportsObserve,
     );
   }
 
@@ -2747,6 +2749,10 @@ class SessionAgentActions {
 
   /// Whether the adapter truthfully accepts prompt attachments.
   final bool canAttachFiles;
+
+  /// Whether a resident background transport can observe without authority.
+  /// Null means the broker capability has not been established yet.
+  final bool? supportsObserve;
 
   /// Whether these flags were read from a broker agent registry entry.
   ///

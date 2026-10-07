@@ -49,6 +49,7 @@ export interface PromptTurnRequest {
   cookie: string;
   sessionId: string;
   text: string;
+  content?: readonly unknown[];
   approval: 'allow-once' | 'deny';
   /** Overall deadline for the turn, including the wait for a baseline. */
   timeoutMs: number;
@@ -56,6 +57,8 @@ export interface PromptTurnRequest {
   receiptGraceMs?: number;
   /** Frames kept in the record; the rest are counted but not stored. */
   maxFrames?: number;
+  /** Contract capture: replace follow after the first text chunk, retaining $events. */
+  replaceFollowDuringTurn?: boolean;
 }
 
 /** Why the turn stopped being observed. Recorded rather than guessed later. */
@@ -114,6 +117,7 @@ export async function runPromptTurn(
   let evidence = emptyPromptEvidence();
   let clientId: string | null = null;
   let baseline = false;
+  let replacedFollow = false;
   let promptSent = false;
   let promptState: PromptTurnResult['promptState'] = 'not-sent';
   let promptDetail: string | undefined;
@@ -166,6 +170,7 @@ export async function runPromptTurn(
     promptState = 'pending';
     const body = clientRequestBody('capture-prompt-1', PROMPT_ENDPOINT, promptRequest({
       sessionId: request.sessionId, text: request.text, approval: request.approval, timeoutMs: request.timeoutMs,
+      ...(request.content ? { content: request.content } : {}),
     }));
     track((async (): Promise<void> => {
       let posted: { status: number; body: string };
@@ -187,7 +192,10 @@ export async function runPromptTurn(
       const accepted = evidence.promptAccepted;
       promptState = accepted ? 'accepted' : 'failed';
       if (!accepted) {
-        promptDetail = 'the host did not accept the prompt (status ' + String(posted.status) + ')';
+        const failure = envelope as { result?: { error?: { code?: string; message?: string; details?: { reason?: string } } } } | undefined;
+        promptDetail = 'the host did not accept the prompt (status ' + String(posted.status) + ')'
+          + (failure?.result?.error?.code ? ': ' + failure.result.error.code : '');
+        if (failure?.result?.error?.details?.reason) promptDetail += ' (' + failure.result.error.details.reason + ')';
         stop('prompt-failed');
       }
     })());
@@ -197,6 +205,14 @@ export async function runPromptTurn(
     if (phase === 'done') return;
     if (frames.length < maxFrames) frames.push({ streamId, value });
     evidence = observePromptFrame(evidence, { streamId, value });
+    const assistantFrame = value['frame'] as { type?: string; chunk?: { type?: string } } | undefined;
+    if (request.replaceFollowDuringTurn && !replacedFollow && value['type'] === 'assistant-stream'
+        && assistantFrame?.type === 'chunk' && assistantFrame.chunk?.type === 'text-delta') {
+      replacedFollow = true;
+      socket.send(JSON.stringify({ type: 'cancel', streamId: TURN_FOLLOW_STREAM }));
+      socket.send(JSON.stringify({ type: 'open', streamId: `${TURN_FOLLOW_STREAM}-replacement`, endpoint: 'session/follow',
+        payload: { args: { request: { address: { kind: 'session', sessionId: request.sessionId }, assistantStream: true } } } }));
+    }
 
     if (streamId === TURN_EVENTS_STREAM && value['type'] === 'ready' && clientId === null) {
       const announced = value['clientId'];

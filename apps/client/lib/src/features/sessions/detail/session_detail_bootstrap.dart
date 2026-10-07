@@ -164,6 +164,36 @@ extension _SessionDetailBootstrap on SessionDetailController {
     }
 
     final existingConnection = _connection;
+    Future<List<AgentInfo>>? initialAgentRead;
+    if (intent == SessionDetailAttachIntent.backgroundObserve) {
+      // Live-only adapters require an explicit foreground join. Retaining a
+      // controller and cached transcript must not open a bare socket or grant
+      // authority merely because the session remains in the open set.
+      await _refreshAgentActions(
+        loadAgents: client.listAgents,
+        bootstrapAttempt: attempt,
+        source: source,
+        abort: actionAbort.future,
+      );
+      if (!_isCurrentBootstrapAttempt(attempt) ||
+          RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
+        return;
+      }
+      if (state.agentActions?.supportsObserve == false) {
+        state = state.copyWith(
+          connectionStatus: SessionDetailConnectionStatus.closed,
+          bootstrapState: SessionDetailBootstrapState(
+            attempt: attempt,
+            hasCachedMessages: hasCachedMessages,
+          ),
+          clearError: true,
+        );
+        if (identical(_bootstrapActionAbort, actionAbort)) {
+          _bootstrapActionAbort = null;
+        }
+        return;
+      }
+    }
     final connection = _connection ??=
         ref.read(sessionDetailConnectionFactoryProvider)(
           resolver: client.resolver,
@@ -182,22 +212,65 @@ extension _SessionDetailBootstrap on SessionDetailController {
 
     try {
       // The broker's one-shot create instruction wins; otherwise local
-      // provenance may authorize an automatic restore. Both are local facts —
-      // the ownership decision itself is the broker's atomic reason-tagged
-      // attach, so no roster or transcript is fetched here.
+      // provenance may authorize an automatic restore. Those are local facts;
+      // ownership is decided by the broker's atomic reason-tagged attach.
+      // Ordinary foreground joins also honor the authoritative live instruction
+      // once its roster row arrives.
       // A background attach asks for no authority, which is NOT the same as
       // being unable to receive any: it still opens a bare socket, and a bare
       // socket is full-authority on some adapters. So the unreadable-mode check
       // applies here too — it is a fact about the session, not about what this
       // attach wanted.
-      final attachRequest =
-          intent == SessionDetailAttachIntent.backgroundObserve
+      var attachRequest = intent == SessionDetailAttachIntent.backgroundObserve
           ? _InteractiveAttachRequest(readOnly: _rosterAttachModeUnreadable)
           : await _interactiveAttachRequest(source);
       if (!_isCurrentBootstrapAttempt(attempt) ||
           RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
         await _retireBootstrapAfterProfileChange(attempt);
         return;
+      }
+
+      if (intent == SessionDetailAttachIntent.interactive &&
+          attachRequest.mode == null &&
+          !attachRequest.readOnly &&
+          !ref
+              .read(rosterSessionsProvider)
+              .any(
+                (session) =>
+                    session.tool == arg.tool &&
+                    session.id == arg.sessionId &&
+                    session.attachMode == AttachMode.observe,
+              )) {
+        // Restored pages can mount before their first authoritative roster row.
+        // A live-only adapter must never receive the bare fallback during that
+        // window. Learn its capability, then wait for the actual instruction;
+        // cached session identity cannot supply mutation authority.
+        final agents = client.listAgents();
+        initialAgentRead = agents;
+        await _refreshAgentActions(
+          loadAgents: () => agents,
+          bootstrapAttempt: attempt,
+          source: source,
+          abort: actionAbort.future,
+        );
+        if (!_isCurrentBootstrapAttempt(attempt) ||
+            RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
+          return;
+        }
+        if (state.agentActions?.supportsObserve == false) {
+          await _waitForLiveOnlyAttachInstruction(actionAbort.future);
+          if (!_isCurrentBootstrapAttempt(attempt) ||
+              RosterSource.of(ref.read(activeBrokerProfileProvider)) !=
+                  source) {
+            return;
+          }
+          attachRequest = await _interactiveAttachRequest(source);
+          if (!_isCurrentBootstrapAttempt(attempt) ||
+              RosterSource.of(ref.read(activeBrokerProfileProvider)) !=
+                  source) {
+            return;
+          }
+        }
       }
 
       _requestedDriveReason = attachRequest.reason;
@@ -295,12 +368,18 @@ extension _SessionDetailBootstrap on SessionDetailController {
           _startInitialSessionTimeout(attempt);
         }
       }
-      await _refreshAgentActions(
-        loadAgents: client.listAgents,
-        bootstrapAttempt: attempt,
-        source: source,
-        abort: actionAbort.future,
-      );
+      if (intent != SessionDetailAttachIntent.backgroundObserve) {
+        // Preserve the post-attachment bootstrap boundary for transcript frames
+        // and capability publication. Reuse an early read instead of fetching
+        // the registry twice.
+        final agents = initialAgentRead;
+        await _refreshAgentActions(
+          loadAgents: agents == null ? client.listAgents : () => agents,
+          bootstrapAttempt: attempt,
+          source: source,
+          abort: actionAbort.future,
+        );
+      }
       if (identical(_bootstrapActionAbort, actionAbort)) {
         _bootstrapActionAbort = null;
       }
@@ -325,6 +404,41 @@ extension _SessionDetailBootstrap on SessionDetailController {
         );
         _abandonBootstrapConnection(connection, attempt);
       }
+    }
+  }
+
+  Future<void> _waitForLiveOnlyAttachInstruction(Future<void> abort) async {
+    final ready = Completer<void>();
+    final subscription = ref.listen<List<SessionInfo>>(
+      rosterSessionsProvider,
+      (_, sessions) {
+        if (!ready.isCompleted &&
+            sessions.any(
+              (session) =>
+                  session.tool == arg.tool &&
+                  session.id == arg.sessionId &&
+                  (session.attachMode == AttachMode.live ||
+                      session.attachMode == AttachMode.unknown),
+            )) {
+          ready.complete();
+        }
+      },
+      fireImmediately: true,
+    );
+    try {
+      // The shared refresh may coalesce with a startup load or healthy feed.
+      // Its return alone does not prove this particular row has arrived.
+      unawaited(
+        ref
+            .read(sessionRosterResumeRefreshProvider)()
+            .catchError((Object _) {}),
+      );
+      await Future.any<void>([
+        ready.future,
+        abort,
+      ]).timeout(ref.read(sessionDetailInitialSessionTimeoutProvider));
+    } finally {
+      subscription.close();
     }
   }
 

@@ -58,7 +58,7 @@ export interface DshSessionEvent {
   /** A reader that does not recognize `type` may safely skip the event. */
   ignorable?: boolean;
   sourceEventSeqs?: number[];
-  /** `'append'` or `{op:'replace', start, end}`; present only on surface events. */
+  /** `'append'` or a replacement range; rc.2 uses startSeq/endSeq, rc.6 start/end. */
   surfaceOp?: unknown;
 }
 
@@ -122,6 +122,31 @@ function bounded(text: string): string {
  * user-visible carrier; a `reasoning`, `image`, or plugin-added block leaves no
  * text behind rather than being stringified into the bubble.
  */
+export function dshImageCount(content: unknown): number {
+  return Array.isArray(content) ? content.filter((raw) => record(raw)?.type === 'image').length : 0;
+}
+
+/** Durable references are identities, never broker-local paths or bearer URLs. */
+export function dshUserImageArtifacts(event: Pick<DshSessionEvent, 'type' | 'data'>, sessionId: string): Array<{
+  attachmentId: string; message: Extract<AgentMessage, { type: 'file-artifact' }>;
+}> {
+  const data = record(event.data);
+  if (event.type !== 'user/message' || record(data?.source)?.kind !== 'user' || !Array.isArray(data?.content)) return [];
+  const messageId = optionalString(data.id);
+  if (!messageId) return [];
+  return data.content.flatMap((raw) => {
+    const block = record(raw); const ref = record(block?.attachment);
+    const id = optionalString(ref?.attachmentId); const mediaType = optionalString(ref?.mediaType);
+    if (block?.type !== 'image' || !id || !mediaType || !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mediaType)) return [];
+    const path = `dsh-image:${sessionId}:${id}`;
+    return [{ attachmentId: id, message: { type: 'file-artifact' as const, path, artifactKey: path,
+      name: optionalString(ref?.name) ?? `image.${mediaType.split('/')[1]}`, mimeType: mediaType,
+      ...(optionalNumber(ref?.bytes) !== undefined ? { size: optionalNumber(ref?.bytes)! } : {}),
+      userMessageKey: dshMessageKey(sessionId, messageId),
+    } }];
+  });
+}
+
 export function dshContentText(content: unknown): string {
   if (!Array.isArray(content)) return '';
   const parts: string[] = [];
@@ -162,6 +187,8 @@ export interface DshProjectionEntry {
  */
 export class DshProjectionStore {
   private readonly entries = new Map<string, DshProjectionEntry>();
+
+  clear(): void { this.entries.clear(); }
 
   /**
    * Seed from a history tail page's projections block — one consistent cut.
@@ -274,6 +301,15 @@ export function dshProjectionMessages(
   options: { forkedChild?: boolean } = {},
 ): AgentMessage[] {
   switch (key) {
+    case 'modelSelection': {
+      const selected = dshModelSelection(value);
+      if (!record(value)) return [];
+      return [{ type: 'metadata-update', key: 'sessionInfo', value: {
+        model: selected?.model,
+        currentModel: selected ? { providerID: selected.provider, modelID: selected.model,
+          ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}) } : undefined,
+      } }];
+    }
     case 'title': {
       const title = optionalString(value);
       return title ? [{ type: 'metadata-update', key: 'sessionInfo', value: { title } }] : [];
@@ -418,6 +454,7 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
   // replayed overlay is too late for the chip at open. Later switches arrive as
   // a live projection republish (see dshProjectionMessages).
   const currentMode = optionalString(record(store.get('permissions'))?.currentValue);
+  const selected = dshModelSelection(store.get('modelSelection'));
   const cwd = optionalString(raw.cwd);
   const updatedAt = optionalNumber(raw.updatedAt);
   const driveSupported = options.driveSupported !== false;
@@ -439,6 +476,8 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
     ...(updatedAt !== undefined ? { updatedAt } : {}),
     ...(optionalString(raw.agentPreset) ? { currentAgent: optionalString(raw.agentPreset)! } : {}),
     ...(currentMode ? { currentMode } : {}),
+    ...(selected ? { model: selected.model, currentModel: { providerID: selected.provider, modelID: selected.model,
+      ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}) } } : {}),
     control: {
       drive: {
         state: driveSupported ? 'driving' : 'unavailable',
@@ -457,14 +496,28 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
   };
 }
 
+/** Durable selection intent (`next`) and the last request's selection stay distinct upstream. */
+export function dshModelSelection(value: unknown): { provider: string; model: string; reasoningEffort?: string } | undefined {
+  const block = record(value);
+  const selection = record(block?.next ?? block?.lastUsed);
+  const provider = optionalString(selection?.provider);
+  const model = optionalString(selection?.model);
+  if (!provider || !model) return undefined;
+  const reasoningEffort = optionalString(selection?.reasoningEffort);
+  return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) };
+}
+
 // ── Surface folding ─────────────────────────────────────────────────────────
 
 function surfaceReplace(event: DshSessionEvent): { start: number; end: number } | undefined {
   const op = record(event.surfaceOp);
   if (!op || op.op !== 'replace') return undefined;
-  const start = optionalNumber(op.start);
-  const end = optionalNumber(op.end);
-  if (start === undefined || end === undefined) return undefined;
+  const sequenced = op.startSeq !== undefined || op.endSeq !== undefined;
+  const start = optionalNumber(sequenced ? op.startSeq : op.start);
+  const end = optionalNumber(sequenced ? op.endSeq : op.end);
+  if (start === undefined || end === undefined
+    || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+    || start < 0 || end < start || end >= event.seq) return undefined;
   return { start, end };
 }
 
@@ -1124,7 +1177,8 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
     case 'user/message': {
       const source = record(data?.source);
       const text = dshContentText(data?.content);
-      if (!text) return [];
+      const imageCount = dshImageCount(data?.content);
+      if (!text && !(source?.kind === 'user' && imageCount)) return [];
       if (source?.kind === 'user') {
         const rpcId = optionalString(source.rpcId);
         const clientKey = rpcId ? state.clientKeys.get(rpcId) : undefined;
@@ -1139,6 +1193,7 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
         return [{
           type: 'user-message',
           text,
+          ...(imageCount ? { imageCount } : {}),
           key: messageId ? dshMessageKey(state.sessionId, messageId) : key,
           sentAt: event.time,
           ...(turnId ? { turnId } : {}),
@@ -1230,6 +1285,9 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
       }
       // An empty assembled message is a truncation artifact, not a reply: it
       // must produce no transcript row while its usage still counts.
+      const reasoning = (Array.isArray(message?.content) ? message.content : [])
+        .flatMap((raw) => { const block = record(raw); return block?.type === 'reasoning' && typeof block.text === 'string' ? [block.text] : []; }).join('');
+      if (reasoning) rows.push({ type: 'thinking', text: reasoning, key: `${assistantStreamKey(state, data) ?? key}:reasoning` });
       if (text) {
         rows.push({ type: 'model-output', text, final: true, key: assistantStreamKey(state, data) ?? key });
       }
@@ -1323,7 +1381,7 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
     case 'tool/result': {
       const message = record(data?.message);
       const block = record(Array.isArray(message?.content) ? message?.content[0] : undefined);
-      const callId = optionalString(block?.toolCallId) ?? optionalString(record(message?.source)?.callId);
+      const callId = optionalString(message?.toolCallId) ?? optionalString(block?.toolCallId) ?? optionalString(record(message?.source)?.callId);
       if (!callId) return [dshUnmappedEvent(event)];
       const open = state.openTurn;
       const callStart = open?.openCalls.get(callId);
@@ -1334,8 +1392,9 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
         open.openCalls.delete(callId);
       }
       const nativeError = record(data?.error);
-      const presentation = mapToolResultView(entry.view, dshContentText(block?.content) || block?.content);
-      const isError = block?.isError === true || nativeError !== undefined;
+      const content = optionalString(block?.toolCallId) && block?.content !== undefined ? block.content : message?.content;
+      const presentation = mapToolResultView(entry.view, dshContentText(content) || content);
+      const isError = message?.isError === true || block?.isError === true || nativeError !== undefined;
       const rows: AgentMessage[] = [{
         type: 'tool-result',
         callId,
@@ -1562,6 +1621,9 @@ export interface DshPendingQuestion {
   kind: 'question';
   rpcId: string;
   sessionId: string;
+  /** Timed call identity; continued questions use a dedicated durable route. */
+  callId?: string;
+  continued?: boolean;
   /** Native question ids, in the order the canonical answer arrays arrive. */
   ids: string[];
   /**
@@ -1647,10 +1709,13 @@ export function mapDshQuestion(rpcId: string, payload: Record<string, unknown>):
     kind: 'question',
     rpcId,
     sessionId,
+    ...(optionalString(payload.callId) ? { callId: optionalString(payload.callId)! } : {}),
+    ...(payload.continued === true ? { continued: true } : {}),
     ids,
     optionLabels,
     multiSelect,
-    message: { type: 'question-request', requestId: rpcId, questions },
+    message: { type: 'question-request', requestId: rpcId, questions,
+      ...(payload.continued === true ? { blocking: false } : {}) },
   };
 }
 

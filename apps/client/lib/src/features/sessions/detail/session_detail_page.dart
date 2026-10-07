@@ -252,6 +252,10 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   ({String text, int revision})? _pendingPromptClear;
   _SubmittedPromptSnapshot? _lastSubmittedPrompt;
   int _profileTransitionGeneration = 0;
+  int _foregroundRestoreGeneration = 0;
+  bool _onstage = true;
+  bool _initialAttachDeferred = false;
+  bool _foregroundTransportReleased = false;
 
   /// True while a previous incarnation is still retiring this session's
   /// transport.
@@ -358,6 +362,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         _terminalFresh = _terminalTabVisible;
       });
     }
+    if (!_isPageForeground) {
+      _initialAttachDeferred = true;
+      return;
+    }
+    _initialAttachDeferred = false;
     final controller = ref.read(
       sessionDetailControllerProvider(_key).notifier,
     );
@@ -367,6 +376,106 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     // never hydrate again. Ask for the durable row explicitly; the offer is
     // restore-if-empty, so it cannot disturb a composer with content.
     unawaited(controller.offerDurableDraftToComposer());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final onstage = TickerMode.valuesOf(context).enabled;
+    if (_onstage == onstage) return;
+    _onstage = onstage;
+    if (onstage) {
+      _scheduleForegroundRestore();
+    } else {
+      _suspendLiveOnlyTransport();
+    }
+  }
+
+  bool get _isPageForeground {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    return _onstage &&
+        (lifecycle == null ||
+            lifecycle == AppLifecycleState.resumed ||
+            lifecycle == AppLifecycleState.inactive);
+  }
+
+  bool get _requiresForegroundTransport =>
+      !(ref
+              .read(sessionDetailControllerProvider(_key))
+              .agentActions
+              ?.supportsObserve ??
+          true);
+
+  void _suspendLiveOnlyTransport() {
+    _foregroundRestoreGeneration++;
+    if (_awaitingRetirementHandoff) return;
+    final state = _sessionState;
+    if (state.agentActions?.supportsObserve ?? true) return;
+    _foregroundTransportReleased = true;
+    if (state.connectionStatus == SessionDetailConnectionStatus.closed &&
+        state.bootstrapState.readiness ==
+            SessionDetailBootstrapReadiness.idle) {
+      return;
+    }
+    unawaited(
+      ref
+          .read(sessionDetailControllerProvider(_key).notifier)
+          .suspendTransport(),
+    );
+  }
+
+  void _scheduleForegroundRestore() {
+    if (_awaitingRetirementHandoff ||
+        !_isPageForeground ||
+        (!_initialAttachDeferred &&
+            (!_foregroundTransportReleased ||
+                (_sessionState.agentActions?.supportsObserve ?? true)))) {
+      return;
+    }
+    final generation = ++_foregroundRestoreGeneration;
+    final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
+    if (source == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_restoreForeground(generation, source));
+    });
+  }
+
+  Future<void> _restoreForeground(int generation, RosterSource source) async {
+    if (!mounted ||
+        generation != _foregroundRestoreGeneration ||
+        !_isPageForeground) {
+      return;
+    }
+    try {
+      await ref.read(sessionRosterResumeRefreshProvider)();
+    } on Object {
+      // An explicit live join must be based on a fresh readable roster row.
+      return;
+    }
+    if (!mounted ||
+        generation != _foregroundRestoreGeneration ||
+        !_isPageForeground ||
+        _awaitingRetirementHandoff ||
+        RosterSource.of(ref.read(activeBrokerProfileProvider)) != source ||
+        (!_initialAttachDeferred &&
+            (!_foregroundTransportReleased ||
+                (_sessionState.agentActions?.supportsObserve ?? true)))) {
+      return;
+    }
+    final deferredInitial = _initialAttachDeferred;
+    _initialAttachDeferred = false;
+    final controller = ref.read(sessionDetailControllerProvider(_key).notifier);
+    final attach = controller.attach();
+    if (deferredInitial) unawaited(controller.offerDurableDraftToComposer());
+    await attach;
+    if (mounted &&
+        generation == _foregroundRestoreGeneration &&
+        _isPageForeground &&
+        RosterSource.of(ref.read(activeBrokerProfileProvider)) == source &&
+        _sessionState.connectionStatus ==
+            SessionDetailConnectionStatus.connected) {
+      _foregroundTransportReleased = false;
+    }
   }
 
   /// Whether the user is mid-edit, so this tab must not be moved (N3b).
@@ -440,6 +549,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
 
   @override
   void dispose() {
+    _foregroundRestoreGeneration++;
     WidgetsBinding.instance.removeObserver(this);
     // N3b: leave the handoff registry before the controllers below are torn
     // down, so a prepare that arrives during teardown can never read a disposed
@@ -475,6 +585,17 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive) {
+      _scheduleForegroundRestore();
+    }
+    // An inactive desktop/web window remains visible while input focus moves.
+    // Session transport follows visibility; microphone capture follows focus.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      _suspendLiveOnlyTransport();
+    }
     // Background/inactive/hidden/detached lifecycle cancels ASR (discard partial)
     // and releases the mic. It must not continue recording silently.
     if (state == AppLifecycleState.paused ||
@@ -2158,10 +2279,18 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                   next.notice == BrokerCredentialNotice.tokenRemoved ||
                   next.notice == BrokerCredentialNotice.signedOut);
           if (!committed) return;
+          final background =
+              !_isPageForeground &&
+              (_requiresForegroundTransport || _initialAttachDeferred);
+          if (background) _initialAttachDeferred = true;
           unawaited(
             ref
                 .read(sessionDetailControllerProvider(_key).notifier)
-                .rebindBrokerClient(),
+                .rebindBrokerClient(
+                  intent: background
+                      ? SessionDetailAttachIntent.backgroundObserve
+                      : null,
+                ),
           );
         },
       )
@@ -2193,6 +2322,16 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                 .read(sessionDetailControllerProvider(_key).notifier)
                 .promoteBackgroundObserveToInteractive(),
           );
+        },
+      )
+      ..listen<bool?>(
+        sessionDetailControllerProvider(
+          _key,
+        ).select((detail) => detail.agentActions?.supportsObserve),
+        (previous, next) {
+          if (next == false && !_isPageForeground) {
+            _suspendLiveOnlyTransport();
+          }
         },
       );
     // Broker-qualified by (profile, endpoint): a session frame stamped with
@@ -2680,6 +2819,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
 
   Future<void> _changeProfileAfterDraftBarrier() async {
     final generation = ++_profileTransitionGeneration;
+    _foregroundRestoreGeneration++;
     _cancelAttachmentIntakeForSourceChange();
     // Every scheduled/staged draft belongs to the source generation that
     // admitted it. Retire profile A synchronously, before awaiting its
@@ -2703,6 +2843,16 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     _applyingRemoteDraft = true;
     _promptController.clear();
     _applyingRemoteDraft = false;
-    await ref.read(sessionDetailControllerProvider(_key).notifier).attach();
+    final background =
+        !_isPageForeground &&
+        (_requiresForegroundTransport || _initialAttachDeferred);
+    if (background) _initialAttachDeferred = true;
+    await ref
+        .read(sessionDetailControllerProvider(_key).notifier)
+        .attach(
+          intent: background
+              ? SessionDetailAttachIntent.backgroundObserve
+              : SessionDetailAttachIntent.interactive,
+        );
   }
 }

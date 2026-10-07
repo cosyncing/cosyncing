@@ -1,0 +1,76 @@
+{
+  "provenance": {
+    "version": "0.2.0-rc.2",
+    "source": "disposable web host with a local scripted provider and a repository PNG",
+    "modelBacked": false,
+    "providerSpending": 0
+  },
+  "userEvents": [
+    {
+      "type": "user/message",
+      "seq": 8,
+      "time": 1791226394141,
+      "data": {
+        "content": [
+          {
+            "type": "image",
+            "attachment": {
+              "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba",
+              "mediaType": "image/png",
+              "width": 192,
+              "height": 192,
+              "bytes": 1362
+            }
+          }
+        ],
+        "source": {
+          "kind": "user",
+          "rpcId": "capture-a2plavui"
+        },
+        "role": "user",
+        "id": "a894768d-6fcd-4537-808a-928cc269ace3"
+      },
+      "surfaceOp": "append"
+    },
+    {
+      "type": "user/message",
+      "seq": 8,
+      "time": 1791226439500,
+      "data": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Describe the fixture image."
+          },
+          {
+            "type": "image",
+            "attachment": {
+              "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba",
+              "mediaType": "image/png",
+              "width": 192,
+              "height": 192,
+              "bytes": 1362
+            }
+          }
+        ],
+        "source": {
+          "kind": "user",
+          "rpcId": "capture-m4zwnr0g"
+        },
+        "role": "user",
+        "id": "7b0552b1-4293-4e64-8bb4-667b8c4668bf"
+      },
+      "surfaceOp": "append"
+    }
+  ],
+  "readback": {
+    "attachment": {
+      "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba",
+      "mediaType": "image/png",
+      "width": 192,
+      "height": 192,
+      "bytes": 1362
+    },
+    "data": "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAABmJLR0QA/wD/AP+gvaeTAAAFB0lEQVR4nO3dT2ibZQDH8SZLm7DOjLZpQG87dKO629hOWmsRusPKio79QQ8rbGxMEDqigmAhIHjbWG620TJ2kR28KfSk7OBkm1sVQSbCWnCiSUaoqWnaNHs9CDoma7L8kjzP877fzzkkv6TfJm/etCTUG090Ac0Kmx4AtxEQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBEjE9oAWGh/ccP3Z09JWRaDTa+VsvFAqHDr3W+du1hNsB7T+wL5WaHnnpRYMbYrGYwVs3ztWAksnBdHpmcnLC9JCgczKgsbHRTObCwEC/6SFw8CD6zNlTV658Sj2WcOwZ6J13z5+fftv0CvzHpWegM2dPUY9tnAlobGx05oP3Ta/A49wIKJkczGQuhMNurA0UN34k6fQMR812ciCg/Qf2cb7HWg4ElEpNm56AJ7I9oOHhPWY/qcDWbA/o+LGjpidgK7afSBx5ufmnn83NzRs3b925vZjL59f+WmvhqkeV19p1zU6wPaBoTzN/oVGprM/OZbNz8/l8oeWT8CjbA2rC0r3lk1On79792fSQQPBbQEv3lg9PHsnl8qaHBIXtB9FPpVJZPzl1mno6yVcBzc5leeXqMP8EVK1Ws3PzplcEjn8CunHzFu+5Os8/AX2/+IPpCUHkn4D+yOVMTwgi/wRUq9VMTwgi/wQEIwgIEgKChIAgISBICAgSv30a74T44Vf7z73RyCWrv+XuT73X7j0KAjKhpzv8zI5GLhjeXmr3FhEvYZAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQ2P5fGaXV0srKSiOX3KhstHsM/s/2gMbH+ZoVq/ESBgkBQUJAkBAQJAQECQFBQkAGhLptP3vSOAIyIJLwzzdQE5ABseeHTE9oGQLqtMhgf89eAkKzdp6YCIX987D75544Ibp7V/z1g6ZXtBIBdc62RF/yo5Sf3oJ1EVDHRHfveu7jD7ufTZoe0mK++m2wU2Swf+eJifiRg6GIDx9tH96lxu0YHwnHetp05aHe7ZGBvtgLQz17h5o+avY2qq1d1XKBDmjgrTe3JfpMr9hK+fod0xPq4BjIYp5X+vJr0yPqICB7lb9drC79anpFHQRkK88rZq+aHlEfAVlqdeHa+k+/mF5RHwHZqFYoFi5dNr2iIQRkHa9Wy6UzD1ds/56efxCQdR5cnF/77kfTKxpFQHYpzn725+cLplc8hUCfSLSKV6s9uDjvVj1dBGSJWqGYS2cceuX6FwGZ5nmrC9cKly67ctT8GAIyx/PK1xeLn1x14nzPkwQ6oOrv+YcmPu72Kuvlb26Xvviquny/87feWqHeeML0BjiMt/GQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUHyN3zj4xAtWmTmAAAAAElFTkSuQmCC"
+  }
+}

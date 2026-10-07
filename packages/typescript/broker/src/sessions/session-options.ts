@@ -1,4 +1,4 @@
-import type { AgentOption, ModelOption, ModeOption, SessionConnection } from '@cosyncing/protocol';
+import type { AgentOption, ModelOption, ModeOption, SessionConnection, SlashCommand } from '@cosyncing/protocol';
 
 export interface SessionOptions {
   models: ModelOption[];
@@ -78,8 +78,8 @@ export function optionsChanged(next: SessionOptions, sent: SessionOptions | null
  *  Codex daemon spawning the just-created thread) usually settles within this window. A non-empty
  *  model list does not prove the catalog is complete: Codex can first advertise Sol/Max and add
  *  Ultra later without changing the model count. The ladder therefore always runs to completion;
- *  semantic comparison keeps identical frames quiet. Bounded — after the last attempt the socket
- *  has what it has until reattach. */
+ *  semantic comparison keeps identical frames quiet. After the bounded ladder, adapters with
+ *  native invalidation keep the attached catalog current until the socket closes. */
 export const SESSION_OPTIONS_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000] as const;
 
 type SessionOptionsWait = (delayMs: number) => Promise<void>;
@@ -88,6 +88,8 @@ export interface SessionOptionsRefreshConfig {
   delays?: readonly number[];
   wait?: SessionOptionsWait;
   signal?: AbortSignal;
+  watchChanges?: (onChange: () => void) => () => void;
+  sendCommands?: (commands: SlashCommand[]) => void;
 }
 
 async function waitForSessionOptionsRefresh(delayMs: number, signal?: AbortSignal): Promise<void> {
@@ -105,32 +107,111 @@ async function waitForSessionOptionsRefresh(delayMs: number, signal?: AbortSigna
   });
 }
 
-/** Collect and send semantically distinct attach-time option frames over the bounded refresh ladder.
- *
- *  The injected waiter keeps the real runtime timer-based while allowing a caller-level regression
- *  to execute the exact loop without waiting 56 seconds. */
+/** Refresh attach-time options and keep an optional native invalidation watcher until close. */
 export async function refreshSessionOptions(
   conn: SessionConnection,
   send: (options: SessionOptions) => void,
   config: SessionOptionsRefreshConfig = {},
 ): Promise<void> {
-  const {
-    delays = SESSION_OPTIONS_RETRY_DELAYS_MS,
-    signal,
-  } = config;
+  const { delays = SESSION_OPTIONS_RETRY_DELAYS_MS, signal } = config;
   const wait = config.wait ?? ((delayMs) => waitForSessionOptionsRefresh(delayMs, signal));
   let sent: SessionOptions | null = null;
-  for (let attempt = 0; attempt <= delays.length; attempt++) {
-    if (signal?.aborted) return;
-    const options = await collectSessionOptions(conn).catch(() => null);
-    if (signal?.aborted) return;
+  let sentCommands: string | undefined;
+  let active = !signal?.aborted;
+  let stopWatching: (() => void) | undefined;
+  let finishWatching: (() => void) | undefined;
+  const closed = new Promise<void>((resolve) => { finishWatching = resolve; });
+  const close = () => {
+    active = false;
+    stopWatching?.();
+    stopWatching = undefined;
+    finishWatching?.();
+  };
+  signal?.addEventListener('abort', close, { once: true });
+  const readOptions = async (): Promise<SessionOptions | null> => {
+    if (!config.watchChanges) return await collectSessionOptions(conn);
+    // A successful empty response retracts stale entries; a failed surface
+    // retains only its own last successful value.
+    const soft = async <T>(read: (() => Promise<T[]> | T[]) | undefined, previous: T[]): Promise<T[]> => {
+      try { return read ? await read() : []; } catch { return previous; }
+    };
+    const [models, agents, modes] = await Promise.all([
+      soft(conn.listModels?.bind(conn), sent?.models ?? []),
+      soft(conn.listAgents?.bind(conn), sent?.agents ?? []),
+      soft(conn.listModes?.bind(conn), sent?.modes ?? []),
+    ]);
+    if (!sent && !models.length && !agents.length && !modes.length) return null;
+    return { models, agents, modes };
+  };
+  // Each surface owns its read, revision fence and retry ladder. A stalled
+  // optional command registry must not delay ready pickers or their refreshes.
+  const createRefresh = <T>(read: () => Promise<T>, publish: (value: T) => void): (() => Promise<void>) => {
+    let revision = 0;
+    let pending = false;
+    let running: Promise<void> | undefined;
+    const refresh = (): Promise<void> => {
+      if (!active || signal?.aborted) return Promise.resolve();
+      revision++;
+      pending = true;
+      if (running) return running;
+      running = (async () => {
+        while (pending && active && !signal?.aborted) {
+          pending = false;
+          const startedRevision = revision;
+          const value = await read();
+          if (!active || signal?.aborted) return;
+          if (revision !== startedRevision) continue;
+          publish(value);
+        }
+      })().finally(() => {
+        running = undefined;
+        if (pending && active && !signal?.aborted) void refresh().catch(() => {});
+      });
+      return running;
+    };
+    return refresh;
+  };
+  const refreshOptions = createRefresh(() => readOptions().catch(() => null), options => {
     if (options && optionsChanged(options, sent)) {
       send(options);
       sent = options;
     }
-    const delay = delays[attempt];
-    if (delay === undefined) return;
-    await wait(delay);
-    if (signal?.aborted) return;
+  });
+  const refreshCommands = config.sendCommands && conn.listCommands ? createRefresh(async () => {
+    if (!config.watchChanges && sentCommands !== undefined) return undefined;
+    try { return await conn.listCommands!(); } catch { return undefined; }
+  }, commands => {
+    if (commands === undefined) return;
+    const signature = JSON.stringify(commands);
+    if (signature !== sentCommands) {
+      config.sendCommands!(commands);
+      sentCommands = signature;
+    }
+  }) : undefined;
+  const retry = async (refresh: () => Promise<void>) => {
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      await refresh();
+      if (!active || signal?.aborted) return;
+      const delay = delays[attempt];
+      if (delay === undefined) break;
+      await wait(delay);
+    }
+  };
+  try {
+    if (!active) return;
+    if (config.watchChanges && signal) {
+      stopWatching = config.watchChanges(() => {
+        void refreshOptions().catch(() => {});
+        void refreshCommands?.().catch(() => {});
+      });
+    }
+    await Promise.race([
+      Promise.all([retry(refreshOptions), ...(refreshCommands ? [retry(refreshCommands)] : [])]),
+      closed,
+    ]);
+    if (stopWatching && active) await closed;
+  } finally {
+    close();
+    signal?.removeEventListener('abort', close);
   }
 }

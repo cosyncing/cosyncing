@@ -1312,5 +1312,66 @@ for (const [name, parkOn, forbidden] of [
 }
 
 const failed = results.filter((result) => !result.ok).length;
+// Command permission intent must be applied before the requested native command.
+{
+  const { connection, sent } = await attached({
+    'commands/list': [{ name: 'goal' }, { name: 'permission' }],
+    'commands/execute': ok({ commandId: 'cmd-permission', result: { kind: 'success' } }),
+  });
+  await connection.runCommand('goal', 'keep the selected policy', { permissionMode: 'read-only' });
+  const lines = sent.filter(entry => entry.path === 'commands/execute')
+    .map(entry => (entry.body.payload as { args: { line: string } }).args.line);
+  check('a command applies its selected permission preset before exactly one native execution',
+    JSON.stringify(lines) === JSON.stringify(['/permission read-only', '/goal keep the selected policy']));
+  check('a permission-only command performs no model selection',
+    !sent.some(entry => entry.path === 'session.models' || entry.path === 'session.selectModel'));
+}
+{
+  const { connection, sent } = await attached({
+    'commands/list': [{ name: 'goal' }, { name: 'permission' }],
+    'commands/execute': ok({ commandId: 'cmd-permission', result: { kind: 'success' } }),
+  });
+  await connection.runCommand('goal', undefined, { permissionMode: 'workspace-write' });
+  check('an unchanged command permission preset performs only its requested execution',
+    sent.filter(entry => entry.path === 'commands/execute').length === 1
+      && (sent.find(entry => entry.path === 'commands/execute')!.body.payload as { args: { line: string } }).args.line === '/goal');
+}
+for (const failure of ['unadvertised', 'missing-switch', 'switch-refused'] as const) {
+  const { connection, sent } = await attached({
+    'commands/list': [{ name: 'goal' }, ...(failure === 'missing-switch' ? [] : [{ name: 'permission' }])],
+    'commands/execute': ok({ commandId: 'cmd-permission', result: failure === 'switch-refused'
+      ? { kind: 'error', text: 'fixture policy refusal' } : { kind: 'success' } }),
+  });
+  let refused: unknown;
+  await connection.runCommand('goal', undefined, { permissionMode: failure === 'unadvertised' ? 'unadvertised-preset' : 'read-only' })
+    .catch((error: unknown) => { refused = error; });
+  check(`a ${failure} command permission selection suppresses native execution`,
+    refused instanceof Error && !sent.some(entry => entry.path === 'commands/execute'
+      && (entry.body.payload as { args: { line: string } }).args.line === '/goal'));
+}
+for (const loss of ['switch-roster', 'switch'] as const) {
+  let ready = true; let rosters = 0;
+  const { connection, sent } = await attached({
+    'commands/list': [{ name: 'goal' }, { name: 'permission' }],
+    'commands/execute': ok({ commandId: 'cmd-permission', result: { kind: 'success' } }),
+  }, { permissions: PERMISSIONS }, { mutationReady: () => ready, onRequest: path => {
+    if (path === 'commands/list') rosters += 1;
+    if ((loss === 'switch-roster' && path === 'commands/list' && rosters === 2)
+        || (loss === 'switch' && path === 'commands/execute')) ready = false;
+  } });
+  let refused: unknown;
+  await connection.runCommand('goal', undefined, { permissionMode: 'read-only' })
+    .catch((error: unknown) => { refused = error; });
+  check(`generation loss during the command permission ${loss} prevents requested execution`,
+    refused instanceof Error && !sent.some(entry => entry.path === 'commands/execute'
+      && (entry.body.payload as { args: { line: string } }).args.line === '/goal'));
+}
+{
+  const { connection, sent } = await attached();
+  await connection.runCommand('stop', undefined, { permissionMode: 'unadvertised-preset' });
+  check('interruption bypasses a command permission selector and remains available',
+    sent.some(entry => entry.path === 'session.cancel') && !sent.some(entry => entry.path === 'commands/execute'));
+}
+
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

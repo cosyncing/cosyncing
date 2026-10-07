@@ -302,6 +302,7 @@ import {
   MANAGED_HOST_SUPERVISION_INTERVAL_MS,
   releaseManagedHost,
 } from './managed-host.ts';
+import { dshAdapterOptions } from '../installation/shipped-adapters.ts';
 import {
   mutationFingerprint,
   ProtocolJournal,
@@ -956,7 +957,7 @@ registry.register(new CodexAdapter({
     }
   },
   reportDaemonOwnership: (evidence) => {
-    // BPC8: persist whether cosyncing started the app-server daemon so uninstall can stop only what it owns.
+    // Persist whether cosyncing started the app-server daemon so uninstall can stop only what it owns.
     // A null decision (pre-existing/unknown daemon) records nothing, preserving any earlier sticky ownership.
     try {
       if (evidence) {
@@ -1010,7 +1011,7 @@ registry.register(new KimiAdapter());
 // not a registration question. An operator who has not started `dsh web` is
 // better served by an agent that says so than by one that stays invisible
 // unless they already knew to set a variable.
-registry.register(new DshAdapter());
+registry.register(new DshAdapter(dshAdapterOptions()));
 // Antigravity — observe (transcript-JSONL replay + tail) for every conversation,
 // plus Drive on an explicit `?mode=resume`: a broker-owned
 // `agy --conversation <id> --input-format stream-json` child that starts on the
@@ -8224,23 +8225,18 @@ server = Bun.serve<WsData>({
         const pending = ws.data.pendingInbound ?? [];
         ws.data.pendingInbound = undefined;
         for (const raw of pending) routeInbound(ws, raw);
-        // Send the slash-command list (non-blocking — doesn't delay prompt readiness).
-        mc.conn
-          .listCommands?.()
-          .then((cmds) => cmds?.length && sendRaw({ kind: 'commands', commands: cmds }))
-          .catch(() => {});
-        // Send the model + agent + mode pickers (non-blocking). `modes` = permission modes (Claude).
-        // Per-surface fault isolation + a BOUNDED refresh ladder:
-        // an adapter whose backing service is still starting (managed `opencode serve` after a
-        // restart, a codex daemon spawning the just-created thread) can serve agents while its model
-        // catalog rejects/empties — sending once and stopping reproduced the recurring "agent chip
-        // shown, no model selection on a new session" report. A non-empty response may also be
-        // incomplete (Sol/Max before Sol/Max+Ultra), so the bounded ladder continues after models
-        // arrive and sends only semantic changes.
+        const catalogBackend = registry.get(tool);
+        // Keep optional native catalog notifications attached after bounded startup retries.
         void refreshSessionOptions(
           mc.conn,
           (options) => sendRaw({ kind: 'options', ...options }),
-          { signal: sessionOptionsAbort.signal },
+          {
+            signal: sessionOptionsAbort.signal,
+            ...(catalogBackend?.watchSessionCatalog ? {
+              watchChanges: (notify: () => void) => catalogBackend!.watchSessionCatalog!(id, notify),
+            } : {}),
+            sendCommands: (commands) => sendRaw({ kind: 'commands', commands }),
+          },
         ).finally(() => {
           if (ws.data.sessionOptionsAbort === sessionOptionsAbort) {
             ws.data.sessionOptionsAbort = undefined;
@@ -8353,6 +8349,8 @@ const managedHostStartup = Promise.allSettled(registry.list().map(async (backend
  */
 /** Agents already told about, so the give-up notice is said once rather than once per tick. */
 const announcedRestartGiveUp = new Set<string>();
+/** Agents whose host is running but unusable by us, told once rather than once per tick. */
+const announcedReadinessBlock = new Set<string>();
 const managedHostSupervisor = new ManagedHostSupervisor({
   backends: () => registry.list(),
   effects: managedHostEffects,
@@ -8399,6 +8397,26 @@ const managedHostSupervisor = new ManagedHostSupervisor({
           ? { capturedOutput: outcome.outcome.capturedOutput }
           : {}),
       });
+    } else if (outcome.action === 'blocked') {
+      // The adapter says the host is fine and cosyncing is not, so recovery
+      // stopped before signalling anything. This is the one supervision outcome
+      // where the correct action is NO action, which makes it the easiest one to
+      // lose: a healthy host sitting unauthenticated for three days produces no
+      // log line and no journal entry at all, and the operator's only clue is
+      // that the sessions stopped appearing. So it is said once, and journalled
+      // durably, with the remedy in the sentence rather than implied by a code.
+      if (!announcedReadinessBlock.has(agent)) {
+        announcedReadinessBlock.add(agent);
+        console.warn(`${LOG_PREFIX} left the managed ${agent} host running: ${outcome.detail}`);
+      }
+      recordManagedRuntimeFailure({
+        agent,
+        detailCode: `host-readiness-${outcome.remedy}`,
+      });
+    } else if (outcome.action === 'healthy' && announcedReadinessBlock.delete(agent)) {
+      // Recovered, so the next block is news again -- and the durable record an
+      // earlier one wrote is false now, so it goes.
+      clearManagedRuntimeFailure(agent);
     } else if (outcome.action === 'declined' && outcome.reason === 'budget-exhausted') {
       // Once per agent, not once per tick. The supervisor keeps declining for as long as the broker runs,
       // and repeating this every interval buried every other line in the log with a fact that had not

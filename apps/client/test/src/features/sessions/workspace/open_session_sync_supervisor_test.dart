@@ -1092,6 +1092,89 @@ void main() {
     },
   );
 
+  testWidgets(
+    'live-only leases release even selected transport and never grant '
+    'foreground authority',
+    (tester) async {
+      final lifecycle = _LifecycleMonitor();
+      addTearDown(lifecycle.dispose);
+      final tracker = _DetailTracker(publishConnectedOnAttach: true)
+        ..liveOnlyKeys.add('claude/a');
+      final roster = _ResumeRosterController();
+      final store = _OpenStore()
+        ..snapshots['p1'] = const OpenSessionsSnapshot(
+          refs: [a, b],
+          activeKey: 'claude/a',
+        );
+      late ProviderContainer container;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            activeBrokerProfileProvider.overrideWith(
+              (ref) => _profile(endpoint: 'http://127.0.0.1:7734'),
+            ),
+            openSessionsStoreProvider.overrideWithValue(store),
+            sessionDetailControllerProvider.overrideWith(
+              () => _TrackingDetailController(tracker),
+            ),
+            sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+              lifecycle,
+            ),
+            sessionListControllerProvider.overrideWith(() => roster),
+          ],
+          child: Builder(
+            builder: (context) {
+              container = ProviderScope.containerOf(context);
+              return const MaterialApp(
+                home: OpenSessionSyncSupervisor(
+                  child: _VisibleSelectedStateProbe(),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tracker.intents['claude/a'], isNull);
+      expect(tracker.intents['codex/b'], [
+        SessionDetailAttachIntent.backgroundObserve,
+      ]);
+      final controller = tracker.controllers['claude/a']!;
+      await controller.attach(); // The foreground page, not the supervisor.
+      await tester.pumpAndSettle();
+      final beforeHide = tracker.suspended.length;
+      lifecycle.emit(BrokerAppLifecycleState.hidden);
+      await tester.pumpAndSettle();
+      expect(
+        tracker.suspended.skip(beforeHide),
+        containsAll(['claude/a', 'codex/b']),
+      );
+      expect(tracker.controllers['claude/a'], same(controller));
+      expect(tracker.disposed, isEmpty);
+      roster.resumeGate = Completer<void>();
+      lifecycle.emit(BrokerAppLifecycleState.resumed);
+      await tester.pump();
+      expect(tracker.intents['claude/a'], [
+        SessionDetailAttachIntent.interactive,
+      ]);
+      expect(tracker.intents['codex/b'], hasLength(1));
+      roster.resumeGate!.complete();
+      await tester.pumpAndSettle();
+      expect(tracker.intents['claude/a'], [
+        SessionDetailAttachIntent.interactive,
+      ]);
+      expect(tracker.intents['codex/b'], hasLength(2));
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .activate('codex/b');
+      await tester.pumpAndSettle();
+      expect(tracker.controllers['claude/a'], same(controller));
+      expect(tracker.intents['claude/a'], [
+        SessionDetailAttachIntent.interactive,
+      ]);
+    },
+  );
+
   test('resume roster refresh coalesces concurrent lifecycle owners', () async {
     final roster = _ResumeRosterController()..resumeGate = Completer<void>();
     final container = ProviderContainer(
@@ -1154,6 +1237,7 @@ final class _DetailTracker {
   final String? hungKey;
   final Completer<void>? hungGate;
   final bool publishConnectedOnAttach;
+  final Set<String> liveOnlyKeys = {};
   final Map<String, List<SessionDetailAttachIntent>> intents = {};
   final Map<String, int> builds = {};
   final Map<String, _TrackingDetailController> controllers = {};
@@ -1198,7 +1282,15 @@ final class _TrackingDetailController extends SessionDetailController {
       ..builds[workingSetKey] = (tracker.builds[workingSetKey] ?? 0) + 1
       ..controllers[workingSetKey] = this;
     ref.onDispose(() => tracker.disposed.add(workingSetKey));
-    return SessionDetailState(tool: arg.tool, sessionId: arg.sessionId);
+    return SessionDetailState(
+      tool: arg.tool,
+      sessionId: arg.sessionId,
+      agentActions: tracker.liveOnlyKeys.contains(workingSetKey)
+          ? SessionAgentActions.fromAgentInfo(
+              fakeControllerAgentInfo(supportsObserve: false),
+            )
+          : null,
+    );
   }
 
   @override
@@ -1221,9 +1313,7 @@ final class _TrackingDetailController extends SessionDetailController {
         await gate.future;
       }
       if (tracker.publishConnectedOnAttach) {
-        state = SessionDetailState(
-          tool: state.tool,
-          sessionId: state.sessionId,
+        state = state.copyWith(
           connectionStatus: SessionDetailConnectionStatus.connected,
         );
       }

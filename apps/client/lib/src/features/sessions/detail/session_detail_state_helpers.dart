@@ -242,11 +242,15 @@ extension _SessionDetailStateHelpers on SessionDetailController {
   }
 }
 
-const _unavailableAgentActions = SessionAgentActions(
-  canRenameNative: false,
-  canFork: false,
-  canClone: false,
-  canTranscriptExport: false,
-  canAttachFiles: false,
-  loaded: false,
-);
+// A failed registry read disables actions without forgetting a learned
+// foreground-only transport restriction. A source change resets detail state.
+SessionAgentActions _unavailableAgentActions({bool? supportsObserve}) =>
+    SessionAgentActions(
+      canRenameNative: false,
+      canFork: false,
+      canClone: false,
+      canTranscriptExport: false,
+      canAttachFiles: false,
+      loaded: false,
+      supportsObserve: supportsObserve == false ? false : null,
+    );
