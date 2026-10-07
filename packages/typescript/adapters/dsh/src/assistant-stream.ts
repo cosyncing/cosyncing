@@ -64,7 +64,11 @@ export class DshAssistantStream {
       if (a.nextIndex !== active.nextIndex) return this.invalidate(previous);
       this.attempt = a;
     }
-    return [...(previous && previous.id !== this.attempt?.id ? this.resetMessages() : []), ...this.messages()];
+    // Upstream restarts its attempt counter with each Agent lifecycle. The
+    // durable turn/step disambiguates an ID reused after a host/agent restart.
+    const replaced = previous && (previous.id !== this.attempt?.id
+      || previous.turn !== this.attempt?.turn || previous.step !== this.attempt?.step);
+    return [...(replaced ? this.resetMessages() : []), ...this.messages()];
   }
 
   frame(raw: unknown): AgentMessage[] {
@@ -73,7 +77,7 @@ export class DshAssistantStream {
     if (!f || !index(f.revision) || typeof f.attemptId !== 'string') return this.invalidate();
     // A new Agent lifecycle starts its own dense revision counter at one.
     if (f.type === 'start' && f.revision === 1 && this.revision !== 0) {
-      if (this.attempt?.id === f.attemptId) return [];
+      if (this.attempt?.id === f.attemptId && this.attempt.turn === f.turn && this.attempt.step === f.step) return [];
       const reset = this.invalidate(); this.revision = 0;
       return [...reset, ...this.frame(f)];
     }

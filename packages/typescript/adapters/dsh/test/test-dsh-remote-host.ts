@@ -2308,7 +2308,7 @@ for (const [name, value] of [
 // Carrier replacement reconciles process-local attempts even when the durable
 // cursor did not move. Chunk bodies come from the captured scripted provider;
 // carrier loss and the durable checkpoint are deliberately injected schedules.
-for (const scenario of ['lost-text', 'lost-reasoning', 'surviving-text']) {
+for (const scenario of ['lost-text', 'lost-reasoning', 'surviving-text', 'restarted-text']) {
   const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-assistant-stream.json', import.meta.url)).json();
   const frames = scenario === 'lost-reasoning' ? fixture.reasoning : fixture.follow.slice(1);
   const last = frames.findIndex((item: { frame?: { chunk?: { type?: string } } }) =>
@@ -2331,16 +2331,34 @@ for (const scenario of ['lost-text', 'lost-reasoning', 'surviving-text']) {
   h.host.live.dropSocket(); await flush();
   check(`${scenario}: loss hides the overlay without reading an obsolete history cut`,
     !(await connection.getHistoryOverlays()).some(m => m.type === type) && !messages.some(m => m.type === 'history-reset'));
-  if (scenario === 'surviving-text') h.host.followSnapshot = { ...(h.host.followSnapshot as object), assistantStream: fixture.follow[4].assistantStream };
+  const survives = scenario === 'surviving-text' || scenario === 'restarted-text';
+  if (survives) {
+    const baseline = fixture.follow[4].assistantStream;
+    h.host.followSnapshot = { ...(h.host.followSnapshot as object), assistantStream: {
+      ...baseline, activeAttempt: { ...baseline.activeAttempt,
+        turn: baseline.activeAttempt.turn + (scenario === 'restarted-text' ? 1 : 0) },
+    } };
+  }
   const reconnect = [...timers].find(([, timer]) => timer.ms === 7)!;
   timers.delete(reconnect[0]); reconnect[1].handler(); await flush();
   const resets = messages.filter(m => m.type === 'history-reset');
   const overlays = (await connection.getHistoryOverlays()).filter(m => m.type === type);
   check(`${scenario}: the fresh same-cursor baseline reconciles exactly the surviving overlay`,
     h.link.isReady && h.host.sockets.length === 2 && connection.isPrimed
-      && (scenario === 'surviving-text' ? resets.length === 0 && overlays.length === 1
-        : resets.length === 1 && overlays.length === 0));
+      && resets.length === (scenario === 'surviving-text' ? 0 : 1)
+      && overlays.length === (survives ? 1 : 0));
   await connection.close(); h.link.stop();
+}
+{
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-assistant-stream.json', import.meta.url)).json();
+  const fold = new DshAssistantStream(SESSION_ID);
+  fold.baseline(fixture.follow[4].assistantStream);
+  const turn = fixture.follow[1].frame.turn + 1;
+  const restarted = fold.frame({ ...fixture.follow[1].frame, turn });
+  for (const item of fixture.follow.slice(2, 4)) fold.frame(item.frame);
+  check('a restarted Agent reusing its attempt counter replaces the prior turn instead of being deduplicated',
+    restarted.some(m => m.type === 'history-reset')
+      && fold.messages().some(m => m.type === 'model-output' && m.key === `dsh:${SESSION_ID}:turn${String(turn)}:step1`));
 }
 
 // Native claims happen before user/message admission. Interrupted preparation
