@@ -187,6 +187,8 @@ interface HistoryPage {
   projections?: unknown;
 }
 
+type ContinuedAnswer = { kind: 'accepted' | 'admitted' } | { kind: 'claimed'; turn: number | undefined };
+
 export class DshSessionConnection implements SessionConnection {
   private readonly handlers = new Set<AgentMessageHandler>();
   private readonly channel: DshSessionChannel;
@@ -204,8 +206,8 @@ export class DshSessionConnection implements SessionConnection {
   private readonly assistantStream: DshAssistantStream;
   private readonly pending = new Map<string, DshPending>();
   private readonly questionClaims = new Map<string, Promise<void>>();
-  private readonly answeredContinuedCalls = new Set<string>();
-  private readonly seenQueuedQuestionReplies = new Set<string>();
+  private readonly continuedAnswers = new Map<string, ContinuedAnswer>();
+  private continuedTurn?: number;
   /** Follow-ordered inbox fold; control projections can arrive on either side of a splice. */
   private readonly nativeInbox = new Map<string, Array<Record<string, unknown>>>();
   private readonly imageReads = new Map<string, Promise<string | undefined>>();
@@ -291,6 +293,15 @@ export class DshSessionConnection implements SessionConnection {
     }
 
     const entries = pages.flat();
+    // Fill only the missed suffix against the retained inbox/turn state before
+    // reseeding the inbox or advancing the admit gate. Include history reads
+    // that win a race with live delivery; skip events delivered during awaits.
+    const deliveredThrough = this.highestAdmitted();
+    for (const entry of entries) {
+      if (typeof entry.event.seq === 'number' && entry.event.seq > deliveredThrough) {
+        this.consumeQuestionLifecycle(entry.event, false);
+      }
+    }
     if (!this.primed && !readFailed) {
       this.nativeInbox.clear();
       const tail = tailProjections as { asOfSeq?: number; values?: { inbox?: Record<string, unknown> } } | undefined;
@@ -300,9 +311,10 @@ export class DshSessionConnection implements SessionConnection {
         this.nativeInbox.set(target, Array.isArray(items) ? items as Array<Record<string, unknown>> : []);
       }
       for (const entry of entries) {
-        if (entry.event.type === 'agent/inbox/spliced' && (entry.event.seq ?? -1) > (tail?.asOfSeq ?? -1)) this.consumeInboxSplice(entry.event, false);
+        if (entry.event.type === 'agent/inbox/spliced' && (entry.event.seq ?? -1) > (tail?.asOfSeq ?? -1)) this.consumeInboxSplice(entry.event, false, false);
       }
     }
+    this.reconcileContinuedQuestions();
     // Seed the admit gate from what history actually delivered, so the live tail
     // never repeats a row the reset already carried.
     for (const entry of entries) this.rememberSeq(entry.event.seq);
@@ -499,7 +511,7 @@ export class DshSessionConnection implements SessionConnection {
           const data = event.data as { turn?: unknown; step?: unknown } | undefined;
           this.assistantStream.settle(data?.turn, data?.step);
         }
-        if (event.type === 'agent/inbox/spliced') this.consumeInboxSplice(event);
+        this.consumeQuestionLifecycle(event);
         const entry: DshHistoryEntry = { event, ...(payload.view !== undefined ? { view: payload.view } : {}) };
         // A live surface REPLACE rewrites transcript the client already holds.
         // Only a wholesale reload can make rows disappear, so say so rather than
@@ -789,7 +801,10 @@ export class DshSessionConnection implements SessionConnection {
     this.onTranscriptLost();
     this.projections.clear();
     this.resetImageReads();
-    this.assistantStream.baseline({ revision: 0 });
+    // Retain the old attempt identity until a fresh follow cut can retract it.
+    // Resetting here would either lose the retraction or read the obsolete cut.
+    this.assistantStream.suspend();
+    this.primingBuffer = this.primingBuffer.filter(frame => !['session/assistant-frame', 'session/assistant-baseline'].includes(frame.frameType));
     this.settlePendingAsExternal(true);
   }
 
@@ -1096,14 +1111,25 @@ export class DshSessionConnection implements SessionConnection {
     if (!entry || entry.kind !== 'question') {
       throw new Error(`dsh question ${requestId} is no longer pending`);
     }
-    const receipt = await this.channel.answerQuestion(entry, answers);
+    // Install suppression before awaiting: the host can claim and abandon this
+    // reply before its receipt arrives. That late receipt must not hide the
+    // replacement card a completed turn has already made answerable again.
+    const claim: ContinuedAnswer = { kind: 'accepted' };
+    const callId = entry.continued ? entry.callId : undefined;
+    if (callId) this.continuedAnswers.set(callId, claim);
+    const rollbackClaim = () => {
+      if (callId && this.continuedAnswers.get(callId) === claim) this.continuedAnswers.delete(callId);
+    };
+    let receipt: Awaited<ReturnType<DshSessionChannel['answerQuestion']>>;
+    try { receipt = await this.channel.answerQuestion(entry, answers); }
+    catch (error) { rollbackClaim(); throw error; }
     // Same receipt discipline as respondPermission: `bad-response` throws and
     // keeps the card; `not-pending` — the only other reason the decoder admits
     // — settles the card as resolved-elsewhere.
     if (!receipt.accepted && receipt.reason === 'bad-response') {
+      rollbackClaim();
       throw new Error(`the dsh host rejected the question answer for ${requestId} as malformed`);
     }
-    if (entry.continued && entry.callId) this.answeredContinuedCalls.add(entry.callId);
     if (this.pending.get(requestId) === entry) {
       this.pending.delete(requestId);
       this.deliver({ type: 'question-resolved', requestId });
@@ -1124,8 +1150,6 @@ export class DshSessionConnection implements SessionConnection {
         if (source?.kind === 'user-question-reply' && typeof source.callId === 'string') queued.add(source.callId);
       }
     }
-    for (const callId of queued) this.seenQueuedQuestionReplies.add(callId);
-    for (const callId of this.seenQueuedQuestionReplies) if (!queued.has(callId)) this.seenQueuedQuestionReplies.delete(callId);
     const active = new Map<string, { callId: string; questions: unknown[] }>();
     for (const raw of value?.active ?? []) {
       const q = raw as { callId?: unknown; state?: unknown; questions?: unknown };
@@ -1133,13 +1157,17 @@ export class DshSessionConnection implements SessionConnection {
     }
     for (const [id, entry] of this.pending) {
       if (entry.kind !== 'question' || !entry.continued || !entry.callId) continue;
-      if (active.has(entry.callId) && !queued.has(entry.callId)) continue;
+      const answer = this.continuedAnswers.get(entry.callId);
+      // An outstanding RPC is not yet proof of settlement. Keep its existing
+      // card until the receipt or a queued/claimed/admitted reply proves it.
+      if (active.has(entry.callId) && !queued.has(entry.callId) && (!answer || answer.kind === 'accepted')) continue;
       this.pending.delete(id);
       this.deliver({ type: 'question-resolved', requestId: id });
     }
-    for (const callId of this.answeredContinuedCalls) if (!active.has(callId)) this.answeredContinuedCalls.delete(callId);
+    // A missing projection during carrier replacement is not an empty roster.
+    if (value) for (const callId of this.continuedAnswers.keys()) if (!active.has(callId)) this.continuedAnswers.delete(callId);
     for (const q of active.values()) {
-      if (queued.has(q.callId) || this.answeredContinuedCalls.has(q.callId)) continue;
+      if (queued.has(q.callId) || this.continuedAnswers.has(q.callId)) continue;
       // A projected transition can precede the waterfall cancellation. Retire
       // that generation-bound card before exposing the durable answer route.
       for (const [id, entry] of this.pending) {
@@ -1154,7 +1182,28 @@ export class DshSessionConnection implements SessionConnection {
     }
   }
 
-  private consumeInboxSplice(event: DshSessionEvent, live = true): void {
+  private consumeQuestionLifecycle(event: DshSessionEvent, live = true): void {
+    if (event.type === 'agent/inbox/spliced') {
+      this.consumeInboxSplice(event, live);
+      return;
+    }
+    const data = event.data as { turn?: unknown; source?: { kind?: string; callId?: string } } | undefined;
+    if (event.type === 'turn/start' && typeof data?.turn === 'number') this.continuedTurn = data.turn;
+    if (event.type === 'user/message' && data?.source?.kind === 'user-question-reply' && data.source.callId) {
+      this.continuedAnswers.set(data.source.callId, { kind: 'admitted' });
+    }
+    if (event.type === 'turn/end' && typeof data?.turn === 'number') {
+      for (const [callId, answer] of this.continuedAnswers) {
+        // A bounded initial history window can omit turn/start. A claim still
+        // belongs to the next turn/end on this ordered durable stream.
+        if (answer.kind === 'claimed' && (answer.turn === undefined || answer.turn === data.turn)) this.continuedAnswers.delete(callId);
+      }
+      if (this.continuedTurn === data.turn) this.continuedTurn = undefined;
+      if (live) this.reconcileContinuedQuestions();
+    }
+  }
+
+  private consumeInboxSplice(event: DshSessionEvent, live = true, trackAnswers = true): void {
     const data = event.data as { target?: string; start?: number; removedCount?: number; inserted?: unknown[]; outcome?: string } | undefined;
     if (!data || !['next-turn', 'next-step'].includes(data.target ?? '') || !Number.isSafeInteger(data.start)
         || !Array.isArray(data.inserted)) return;
@@ -1167,11 +1216,11 @@ export class DshSessionConnection implements SessionConnection {
     const inserted = data.inserted.filter((m): m is Record<string, unknown> => m !== null && typeof m === 'object' && !Array.isArray(m));
     const removed = items.splice(start, count, ...inserted);
     this.nativeInbox.set(target, items);
-    for (const message of removed) {
+    for (const message of trackAnswers ? removed : []) {
       const source = message.source as { kind?: string; callId?: string } | undefined;
       if (source?.kind !== 'user-question-reply' || !source.callId) continue;
-      if (data.outcome === 'canceled') this.answeredContinuedCalls.delete(source.callId);
-      else this.answeredContinuedCalls.add(source.callId);
+      if (data.outcome === 'canceled') this.continuedAnswers.delete(source.callId);
+      else this.continuedAnswers.set(source.callId, { kind: 'claimed', turn: this.continuedTurn });
     }
     // A canceled splice is explicit deletion/edit, distinct from a claim. The
     // canonical history reset retracts old bubbles and rebuilds queued overlays.

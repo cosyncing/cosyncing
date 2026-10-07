@@ -12,7 +12,11 @@ const MAX_TEXT = 1_048_576;
 export class DshAssistantStream {
   private revision = 0;
   private attempt?: Attempt;
+  private suspended = false;
   constructor(private readonly sessionId: string) {}
+
+  /** Hide an unverified overlay while retaining its identity for the next baseline's retraction. */
+  suspend(): void { this.suspended = true; }
 
   settle(turn: unknown, step: unknown): void {
     if (this.attempt && this.attempt.turn === turn && this.attempt.step === step) this.attempt = undefined;
@@ -21,7 +25,7 @@ export class DshAssistantStream {
   /** Full replacements make reconnect baselines and retransmitted chunks idempotent. */
   messages(): AgentMessage[] {
     const a = this.attempt;
-    if (!a) return [];
+    if (!a || this.suspended) return [];
     const key = `dsh:${this.sessionId}:turn${String(a.turn)}:step${String(a.step)}`;
     return [
       ...(a.text ? [{ type: 'model-output' as const, text: a.text, key, final: false }] : []),
@@ -30,6 +34,7 @@ export class DshAssistantStream {
   }
 
   baseline(raw: unknown): AgentMessage[] {
+    this.suspended = false;
     const baseline = object(raw);
     if (!baseline || !index(baseline.revision)) return this.invalidate();
     const previous = this.attempt;
@@ -63,6 +68,7 @@ export class DshAssistantStream {
   }
 
   frame(raw: unknown): AgentMessage[] {
+    if (this.suspended) return [];
     const f = object(raw);
     if (!f || !index(f.revision) || typeof f.attemptId !== 'string') return this.invalidate();
     // A new Agent lifecycle starts its own dense revision counter at one.

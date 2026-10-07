@@ -34,6 +34,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- DSH reconnects remove abandoned partial assistant output even when the durable
+  history cursor is unchanged. Continued questions become answerable again when
+  a turn ends before its claimed reply is admitted; queued later replies and
+  durable answers retain their protection against duplicate submission.
+- Model pickers and slash-command catalogs refresh independently, so an optional
+  command lookup cannot delay an available model picker or its retry schedule.
 - DeepSeek Harness `0.2.0-rc.2` now consumes captured assistant streams and
   timed/continued questions, retains pending decisions through follow-only
   recovery, and resumes already attached sessions after re-enrollment. A fresh

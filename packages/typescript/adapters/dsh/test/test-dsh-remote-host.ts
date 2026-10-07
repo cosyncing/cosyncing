@@ -145,6 +145,7 @@ class ScriptedHost {
    */
   workspaces: unknown[] = [{ workspaceId: 'ws-1', path: '/fixture/workspace', title: 'fixture', sessionIds: [SESSION_ID] }];
   controlBaseline: unknown = CONTROL_BASELINE;
+  followSnapshot: unknown = SNAPSHOT;
 
   constructor() {
     // The defaults are the captured free-capture responses, so a test that does
@@ -208,7 +209,7 @@ class ScriptedHost {
       return;
     }
     if (endpoint === 'session/follow') {
-      socket.item(streamId, SNAPSHOT);
+      socket.item(streamId, this.followSnapshot);
       return;
     }
     if (endpoint === 'session/control') {
@@ -2302,6 +2303,143 @@ for (const [name, value] of [
   check('a malformed later roster page cannot turn a partial read into deletion authority',
     !outcome.ok && h.host.unaryCalls.filter(call => call.endpoint === 'session/list').length === 2);
   h.link.stop();
+}
+
+// Carrier replacement reconciles process-local attempts even when the durable
+// cursor did not move. Chunk bodies come from the captured scripted provider;
+// carrier loss and the durable checkpoint are deliberately injected schedules.
+for (const scenario of ['lost-text', 'lost-reasoning', 'surviving-text']) {
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-assistant-stream.json', import.meta.url)).json();
+  const frames = scenario === 'lost-reasoning' ? fixture.reasoning : fixture.follow.slice(1);
+  const last = frames.findIndex((item: { frame?: { chunk?: { type?: string } } }) =>
+    item.frame?.chunk?.type === (scenario === 'lost-reasoning' ? 'reasoning-delta' : 'text-delta'));
+  const checkpoint = { type: 'event', event: { type: 'step/start', seq: frames[0].frame.startedAfterSeq, time: 1,
+    data: { turn: frames[0].frame.turn, step: frames[0].frame.step } } };
+  const timers = new Map<object, { handler: () => void; ms: number }>();
+  const h = harness({ reconnectDelayMs: 7,
+    setTimeout: (handler, ms) => { const id = {}; timers.set(id, { handler, ms }); return id; },
+    clearTimeout: id => { timers.delete(id as object); } });
+  h.host.followSnapshot = { ...SNAPSHOT, cursor: checkpoint.event.seq,
+    records: [...(SNAPSHOT.records as unknown[]), checkpoint], assistantStream: { revision: 0 } };
+  await h.link.verify(); const { connection, messages } = attach(h, { id: SESSION_ID, tool: 'dsh', title: 'fixture', status: 'idle', attachMode: 'live' });
+  await flush(); await connection.getHistory();
+  for (const frame of frames.slice(0, last + 1)) h.host.live.item(h.host.stream('session/follow').streamId, frame);
+  await flush();
+  const type = scenario === 'lost-reasoning' ? 'thinking' : 'model-output';
+  check(`${scenario}: the partial attempt is visible before carrier loss`, messages.some(m => m.type === type));
+  messages.length = 0;
+  h.host.live.dropSocket(); await flush();
+  check(`${scenario}: loss hides the overlay without reading an obsolete history cut`,
+    !(await connection.getHistoryOverlays()).some(m => m.type === type) && !messages.some(m => m.type === 'history-reset'));
+  if (scenario === 'surviving-text') h.host.followSnapshot = { ...(h.host.followSnapshot as object), assistantStream: fixture.follow[4].assistantStream };
+  const reconnect = [...timers].find(([, timer]) => timer.ms === 7)!;
+  timers.delete(reconnect[0]); reconnect[1].handler(); await flush();
+  const resets = messages.filter(m => m.type === 'history-reset');
+  const overlays = (await connection.getHistoryOverlays()).filter(m => m.type === type);
+  check(`${scenario}: the fresh same-cursor baseline reconciles exactly the surviving overlay`,
+    h.link.isReady && h.host.sockets.length === 2 && connection.isPrimed
+      && (scenario === 'surviving-text' ? resets.length === 0 && overlays.length === 1
+        : resets.length === 1 && overlays.length === 0));
+  await connection.close(); h.link.stop();
+}
+
+// Native claims happen before user/message admission. Interrupted preparation
+// releases a continued reply at turn/end; accepted/queued replies for a later
+// turn and actually admitted answers must remain suppressed.
+for (const scenario of ['interrupted', 'missed-end', 'admitted', 'late-receipt']) {
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-questions.json', import.meta.url)).json();
+  let releaseReceipt!: () => void;
+  const receipt = new Promise<void>(resolve => { releaseReceipt = resolve; });
+  const timers = new Map<object, { handler: () => void; ms: number }>();
+  const h = harness({ reconnectDelayMs: 7,
+    setTimeout: (handler, ms) => { const id = {}; timers.set(id, { handler, ms }); return id; },
+    clearTimeout: id => { timers.delete(id as object); },
+    wrapRemoteFetch: fetch => async (url, init) => {
+      const result = await fetch(url, init);
+      if (scenario === 'late-receipt' && url.endsWith('/userQuestions/answer')) await receipt;
+      return result;
+    } });
+  await h.link.verify(); const { connection } = attach(h, { id: SESSION_ID, tool: 'dsh', title: 'fixture', status: 'idle', attachMode: 'live' }); await flush(); await connection.getHistory();
+  let seq = Number(SNAPSHOT.cursor);
+  const records = [...(SNAPSHOT.records as unknown[])];
+  const event = (type: string, data: unknown, deliver = true) => {
+    const frame = { type: 'event', event: { type, seq: ++seq, time: 1, data } };
+    records.push(frame);
+    if (deliver) h.host.live.item(h.host.stream('session/follow').streamId, frame);
+  };
+  const project = (key: string, value: unknown) => h.host.live.item(h.host.stream('session/control').streamId,
+    { type: 'projection', sessionId: SESSION_ID, key, seq, value });
+  event('turn/start', { turn: 1 });
+  project('userQuestions', fixture.continued); await flush();
+  const card = connection.getPending().find(m => m.type === 'question-request');
+  if (!card || card.type !== 'question-request') throw new Error('missing continued fixture question');
+  h.host.unaryHandlers.set('userQuestions/answer', () => ({ value: true }));
+  const answer = connection.answerQuestion(card.requestId, [['yes']]);
+  if (scenario !== 'late-receipt') await answer;
+  else await flush();
+  const reply = { id: 'late-reply', source: { kind: 'user-question-reply', callId: 'call-fixture', outcome: 'answered' },
+    content: [{ type: 'text', text: 'fixture answer' }] };
+  event('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [reply] });
+  project('inbox', { 'next-turn': [reply], 'next-step': [] });
+  event('turn/end', { turn: 1, reason: { kind: 'completed' } }); await flush();
+  check(`${scenario}: ending an unrelated turn cannot release a queued later reply`, connection.getPending().length === 0);
+  event('turn/start', { turn: 2 });
+  event('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] });
+  project('inbox', fixture.inbox);
+  if (scenario === 'admitted') event('user/message', reply);
+  await flush();
+  check(`${scenario}: a claimed reply remains suppressed before its turn ends`, connection.getPending().length === 0);
+  if (scenario === 'missed-end') { h.host.live.dropSocket(); await flush(); }
+  event('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }, scenario !== 'missed-end');
+  await flush();
+  if (scenario === 'late-receipt') { releaseReceipt(); await answer; }
+  h.host.followSnapshot = { ...SNAPSHOT, cursor: seq, records, assistantStream: { revision: 0 },
+    projections: { asOfSeq: seq, values: { userQuestions: fixture.continued, inbox: fixture.inbox } } };
+  h.host.controlBaseline = { type: 'baseline', value: { projections: { [SESSION_ID]: {
+    asOfSeq: seq, values: { userQuestions: fixture.continued, inbox: fixture.inbox },
+  } } } };
+  if (scenario !== 'missed-end') { h.host.live.dropSocket(); await flush(); }
+  const reconnect = [...timers].find(([, timer]) => timer.ms === 7)!;
+  timers.delete(reconnect[0]); reconnect[1].handler(); await flush(); await connection.getHistory();
+  const expected = scenario === 'admitted' ? 0 : 1;
+  check(`${scenario}: recovery distinguishes abandoned claims from durable admission`,
+    h.link.isReady && connection.getPending().length === expected);
+  if (expected) {
+    const retryCard = connection.getPending()[0]!;
+    if (retryCard.type !== 'question-request') throw new Error('wrong continued fixture card');
+    await Promise.all([connection.answerQuestion(retryCard.requestId, [['yes']]), connection.answerQuestion(retryCard.requestId, [['no']])]);
+    check(`${scenario}: the replacement card accepts exactly one new decision`,
+      h.host.unaryCalls.filter(call => call.endpoint === 'userQuestions/answer').length === 2 && connection.getPending().length === 0);
+  }
+  await connection.close(); h.link.stop();
+}
+
+{
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-questions.json', import.meta.url)).json();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const h = harness({ wrapRemoteFetch: fetch => async (url, init) => {
+    const response = await fetch(url, init);
+    if (url.endsWith('/userQuestions/answer')) await held;
+    return response;
+  } });
+  await h.link.verify(); const { connection } = attach(h, { id: SESSION_ID, tool: 'dsh', title: 'fixture', status: 'idle', attachMode: 'live' }); await flush(); await connection.getHistory();
+  const project = (seq: number) => h.host.live.item(h.host.stream('session/control').streamId,
+    { type: 'projection', sessionId: SESSION_ID, key: 'userQuestions', seq, value: fixture.continued });
+  project(3); await flush();
+  const card = connection.getPending()[0]!;
+  if (card.type !== 'question-request') throw new Error('missing refused fixture question');
+  h.host.unaryHandlers.set('userQuestions/answer', () => ({ error: { code: 'BAD_ANSWER', message: 'fixture refusal' } }));
+  const answer = connection.answerQuestion(card.requestId, [['yes']]).then(() => false, () => true);
+  await flush(); project(4); await flush();
+  check('a projection refresh cannot settle an answer whose receipt is still outstanding', connection.getPending().length === 1);
+  release();
+  check('a refused continued answer retains its card and rolls back local suppression', await answer && connection.getPending().length === 1);
+  h.host.unaryHandlers.set('userQuestions/answer', () => ({ value: true }));
+  await connection.answerQuestion(card.requestId, [['no']]);
+  check('a corrected continued answer remains available after refusal', connection.getPending().length === 0
+    && h.host.unaryCalls.filter(call => call.endpoint === 'userQuestions/answer').length === 2);
+  await connection.close(); h.link.stop();
 }
 
 console.log(`\n${String(results.filter((entry) => entry.ok).length)}/${String(results.length)} checks passed`);

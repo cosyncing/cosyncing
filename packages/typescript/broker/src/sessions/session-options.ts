@@ -117,10 +117,7 @@ export async function refreshSessionOptions(
   const wait = config.wait ?? ((delayMs) => waitForSessionOptionsRefresh(delayMs, signal));
   let sent: SessionOptions | null = null;
   let sentCommands: string | undefined;
-  let revision = 0;
-  let pending = false;
   let active = !signal?.aborted;
-  let running: Promise<void> | undefined;
   let stopWatching: (() => void) | undefined;
   let finishWatching: (() => void) | undefined;
   const closed = new Promise<void>((resolve) => { finishWatching = resolve; });
@@ -146,48 +143,52 @@ export async function refreshSessionOptions(
     if (!sent && !models.length && !agents.length && !modes.length) return null;
     return { models, agents, modes };
   };
-  const refresh = (): Promise<void> => {
-    if (!active || signal?.aborted) return Promise.resolve();
-    revision++;
-    pending = true;
-    if (running) return running;
-    running = (async () => {
-      while (pending && active && !signal?.aborted) {
-        pending = false;
-        const startedRevision = revision;
-        const [options, commands] = await Promise.all([
-          readOptions().catch(() => null),
-          config.sendCommands && conn.listCommands && (config.watchChanges || sentCommands === undefined)
-            ? Promise.resolve().then(() => conn.listCommands!()).catch(() => undefined)
-            : Promise.resolve(undefined),
-        ]);
-        if (!active || signal?.aborted) return;
-        if (revision !== startedRevision) continue;
-        if (options && optionsChanged(options, sent)) {
-          send(options);
-          sent = options;
+  // Each surface owns its read, revision fence and retry ladder. A stalled
+  // optional command registry must not delay ready pickers or their refreshes.
+  const createRefresh = <T>(read: () => Promise<T>, publish: (value: T) => void): (() => Promise<void>) => {
+    let revision = 0;
+    let pending = false;
+    let running: Promise<void> | undefined;
+    const refresh = (): Promise<void> => {
+      if (!active || signal?.aborted) return Promise.resolve();
+      revision++;
+      pending = true;
+      if (running) return running;
+      running = (async () => {
+        while (pending && active && !signal?.aborted) {
+          pending = false;
+          const startedRevision = revision;
+          const value = await read();
+          if (!active || signal?.aborted) return;
+          if (revision !== startedRevision) continue;
+          publish(value);
         }
-        if (!active || signal?.aborted) return;
-        if (revision !== startedRevision) continue;
-        if (commands !== undefined && config.sendCommands) {
-          const signature = JSON.stringify(commands);
-          if (signature !== sentCommands) {
-            config.sendCommands(commands);
-            sentCommands = signature;
-          }
-        }
-      }
-    })().finally(() => {
-      running = undefined;
-      if (pending && active && !signal?.aborted) void refresh().catch(() => {});
-    });
-    return running;
+      })().finally(() => {
+        running = undefined;
+        if (pending && active && !signal?.aborted) void refresh().catch(() => {});
+      });
+      return running;
+    };
+    return refresh;
   };
-  try {
-    if (!active) return;
-    if (config.watchChanges && signal) {
-      stopWatching = config.watchChanges(() => { void refresh().catch(() => {}); });
+  const refreshOptions = createRefresh(() => readOptions().catch(() => null), options => {
+    if (options && optionsChanged(options, sent)) {
+      send(options);
+      sent = options;
     }
+  });
+  const refreshCommands = config.sendCommands && conn.listCommands ? createRefresh(async () => {
+    if (!config.watchChanges && sentCommands !== undefined) return undefined;
+    try { return await conn.listCommands!(); } catch { return undefined; }
+  }, commands => {
+    if (commands === undefined) return;
+    const signature = JSON.stringify(commands);
+    if (signature !== sentCommands) {
+      config.sendCommands!(commands);
+      sentCommands = signature;
+    }
+  }) : undefined;
+  const retry = async (refresh: () => Promise<void>) => {
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       await refresh();
       if (!active || signal?.aborted) return;
@@ -195,6 +196,19 @@ export async function refreshSessionOptions(
       if (delay === undefined) break;
       await wait(delay);
     }
+  };
+  try {
+    if (!active) return;
+    if (config.watchChanges && signal) {
+      stopWatching = config.watchChanges(() => {
+        void refreshOptions().catch(() => {});
+        void refreshCommands?.().catch(() => {});
+      });
+    }
+    await Promise.race([
+      Promise.all([retry(refreshOptions), ...(refreshCommands ? [retry(refreshCommands)] : [])]),
+      closed,
+    ]);
     if (stopWatching && active) await closed;
   } finally {
     close();
