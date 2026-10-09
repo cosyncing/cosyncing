@@ -316,6 +316,7 @@ async function withSourceBroker(
   const requiredIds = required.map((asset) => asset.id).sort();
   check('manifest contains every embedded service asset, including the Windows bootstrap',
     JSON.stringify(requiredIds) === JSON.stringify([
+      'claude-mod-marketplace',
       'omp/cosyncing-bridge/index.ts',
       'pi/cosyncing-bridge/index.ts',
       'service/launchd/cosyncing.plist',
@@ -652,7 +653,10 @@ try {
   const packageChecks = doctorJson.sections?.find((section) => section.id === 'package')?.checks ?? [];
   check('copied artifact doctor validates every embedded required asset',
     doctor.exitCode === 1 && doctorJson.ok === false &&
-      packageChecks.filter((item) => item.status === 'pass' && item.evidence?.required === true).length === 6 &&
+      // Seven, not six: the Claude mod marketplace is the seventh embedded asset the artifact has to
+      // carry. It is embedded rather than adjacent because the npm package publishes one JS bundle plus
+      // the web sidecar, so a directory beside the bundle would not be published at all.
+      packageChecks.filter((item) => item.status === 'pass' && item.evidence?.required === true).length === 7 &&
       packageChecks.every((item) => !String(item.id).includes('poc-ui')),
     doctor.stderr.trim().slice(0, 180));
   check('packaged doctor is read-only',

@@ -209,6 +209,12 @@ const _internalEventNames = <String>{
   // because transcripts recorded then still replay it. No adapter emits it now,
   // and nothing new should claim a bare name this generic.
   'init',
+  // "Claude wrote a record type we have not seen." It is true, it is worth
+  // an inbox item, and it is not session content: it describes the mirror,
+  // not what happened in front of the terminal. It belongs to the inbox,
+  // where the broker already filed it, and not to a row between two tool
+  // calls -- where it also repeated on every replay of the transcript.
+  'transcript.unknown-type',
 };
 
 /// Whether [message] is internal bookkeeping that must not become a row.
@@ -234,17 +240,30 @@ bool isInternalBookkeepingMessage(AgentMessage message) {
   return name != null && _internalEventNames.contains(name);
 }
 
-bool _isFinalOnlyAlwaysVisible(AgentMessage message) => switch (message.type) {
-  AgentMessageType.userMessage ||
-  AgentMessageType.permissionRequest ||
-  AgentMessageType.questionRequest ||
-  AgentMessageType.fileArtifact ||
-  AgentMessageType.notice ||
-  AgentMessageType.historyReset ||
-  AgentMessageType.error ||
-  AgentMessageType.unknown => true,
-  _ => false,
-};
+/// Whether a Final-only view keeps this row.
+///
+/// A steering row survives because it is the user's own words: Final-only hides
+/// the
+/// agent's working, not what the human said. Dropping it would show an app-sent
+/// message in Full mode and nothing in Final-only, which reads as a send that
+/// was
+/// lost. Matched on the payload rather than the event name, so it stays true of
+/// an
+/// adapter that maps its own steering shape onto the same accessor.
+bool _isFinalOnlyAlwaysVisible(AgentMessage message) {
+  if (message.steeringMessage != null) return true;
+  return switch (message.type) {
+    AgentMessageType.userMessage ||
+    AgentMessageType.permissionRequest ||
+    AgentMessageType.questionRequest ||
+    AgentMessageType.fileArtifact ||
+    AgentMessageType.notice ||
+    AgentMessageType.historyReset ||
+    AgentMessageType.error ||
+    AgentMessageType.unknown => true,
+    _ => false,
+  };
+}
 
 bool _isDeliveredUserMessage(AgentMessage message) =>
     message.type == AgentMessageType.userMessage && !message.userMessageQueued;

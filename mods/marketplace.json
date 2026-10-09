@@ -1,0 +1,13 @@
+{
+  "name": "cosyncing",
+  "owner": { "name": "cosyncing" },
+  "metadata": { "description": "The cosyncing Claude mod, shipped with the broker." },
+  "plugins": [
+    {
+      "name": "cosyncing-claude",
+      "source": "./cosyncing-claude",
+      "description": "Drive this Claude session from cosyncing: prompts in, turn state out, permission decisions answered from either side.",
+      "version": "0.5.13"
+    }
+  ]
+}

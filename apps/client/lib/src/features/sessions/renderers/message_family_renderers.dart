@@ -113,18 +113,83 @@ Widget _fileArtifactMessageRenderer(
   return _TranscriptArtifactRow(message: message, action: action);
 }
 
+/// One quiet sentence for each reason the broker lets a held call go.
+///
+/// The reason is the broker's fact and the sentence is the client's, which is
+/// why the
+/// wire carries a code and not a message: a released prompt is exactly the case
+/// where
+/// the app has to explain itself, and translated copy is the only version a
+/// reader can
+/// act on. An unrecognized code earns nothing, so it returns null and the card
+/// keeps
+/// its ordinary title rather than asserting a reason nobody checked.
+String? _permissionReleaseSummary(AppLocalizations l10n, AgentMessage message) {
+  return switch (message.permissionReleaseReason) {
+    PermissionReleaseReason.modeBypassPermissions =>
+      l10n.sessionRequestReleaseModeBypass,
+    PermissionReleaseReason.modeUnknown =>
+      l10n.sessionRequestReleaseModeUnknown,
+    PermissionReleaseReason.planTerminalOnly =>
+      l10n.sessionRequestReleasePlanTerminalOnly,
+    PermissionReleaseReason.viewerNone => l10n.sessionRequestReleaseViewerNone,
+    PermissionReleaseReason.killSwitch => l10n.sessionRequestReleaseKillSwitch,
+    PermissionReleaseReason.band => l10n.sessionRequestReleaseBand,
+    PermissionReleaseReason.expired => l10n.sessionRequestReleaseExpired,
+    PermissionReleaseReason.unknown || null => null,
+  };
+}
+
+/// The mode line under an approval card, or null when there is nothing to name.
+///
+/// The tool's own word goes in unedited: a translated guess about which mode
+/// the
+/// user's terminal is in is worse than vendor jargon they can check against the
+/// prompt
+/// in front of them. A mode this client has not met decodes to `unknown`, and
+/// `unknown` is not a mode anybody chose, so it names nothing here.
+String? _permissionModeNote(AppLocalizations l10n, AgentMessage message) {
+  final mode = message.permissionRequestMode;
+  if (mode == null || mode == PermissionModeName.unknown) return null;
+  return l10n.sessionRequestInMode(mode.wireValue);
+}
+
 Widget _permissionRequestMessageRenderer(
   BuildContext context,
   AgentMessage message, {
   Widget? action,
 }) {
   final l10n = AppLocalizations.of(context);
+  // A released prompt is not a request this app can answer. The broker let it
+  // fall
+  // back to the terminal, so the card says where the prompt went and which rule
+  // sent
+  // it there, and it grows no buttons — an actionable card for a decision that
+  // is
+  // already closed invites a tap that cannot land.
+  final releaseSummary = message.requestIsReadOnly
+      ? _permissionReleaseSummary(l10n, message)
+      : null;
+  final released = releaseSummary != null;
+  final preview = released ? null : message.permissionRequestInputPreview;
   return _TranscriptBoxMessage(
     plain: true,
-    icon: Icons.gpp_good_outlined,
-    title: l10n.sessionRequestPermissionTitle,
-    summary:
-        message.permissionRequestTitle ?? l10n.sessionRequestPermissionFallback,
+    icon: released ? Icons.gpp_maybe_outlined : Icons.gpp_good_outlined,
+    // The title outlives the prompt: the card stays in the transcript once the
+    // terminal has settled it, so it says where the approval went, not that
+    // anybody is still waiting on it.
+    title: released
+        ? l10n.sessionRequestLeftToTerminal
+        : l10n.sessionRequestPermissionTitle,
+    // What is being approved comes first. A card that names the tool and
+    // nothing else asks for agreement to a command the user cannot see, so the
+    // broker sends the command, path or URL and the card leads with it. The
+    // session title is the fallback for a broker that had nothing to name.
+    summary: released
+        ? releaseSummary
+        : preview ??
+              message.permissionRequestTitle ??
+              l10n.sessionRequestPermissionFallback,
     payloadRows: _collectPayloadRows(
       message: message,
       preferredKeys: const [
@@ -142,15 +207,41 @@ Widget _permissionRequestMessageRenderer(
     // the transcript called the decision somebody else's while the card below
     // was taking it. An actionable request needs no hint: its own action card
     // already states whether it is pending, sent, or settled.
-    readOnlyHint: message.requestIsReadOnly
+    note: _permissionModeNote(l10n, message),
+    // A released card's title already says the terminal has it. "Awaiting
+    // permission response" beside it was a third account of the same prompt,
+    // and the one that stayed wrong after the terminal settled it.
+    readOnlyHint: message.requestIsReadOnly && !released
         ? l10n.sessionRequestAwaitingPermission
         : null,
     payloadAsChips: true,
+    // The preview names the call; "Show details" holds all of it: the rest of
+    // a long command, an edit's old and new text, a file's body. A detail that
+    // only repeats the preview (an older broker's copy of it, for clients that
+    // predate the preview) is left out rather than offered again. A released
+    // card leads with its reason instead, and keeps every detail.
     detailContent: _PermissionRequestDetail(
-      detail: message.permissionRequestDetail,
+      detail: _detailBeyondPreview(message.permissionRequestDetail, preview),
       action: action,
     ),
   );
+}
+
+/// The card's detail, or null when it says nothing the preview does not.
+///
+/// A copy of the preview is one line ending with the preview's value: the
+/// broker's copy for older clients is `Tool: value`, and the call's full input
+/// is exactly `key: value` when the call has one short field. Anything longer,
+/// or on more than one line, is more of the call, and the card offers it.
+String? _detailBeyondPreview(String? detail, String? preview) {
+  final text = detail?.trim();
+  if (text == null || text.isEmpty) return null;
+  final shown = preview?.trim();
+  if (shown == null || shown.isEmpty) return text;
+  if (text.contains('\n')) return text;
+  final colon = shown.indexOf(': ');
+  final value = colon > 0 ? shown.substring(colon + 2) : shown;
+  return text == shown || text.endsWith(': $value') ? null : text;
 }
 
 Widget _permissionResolvedMessageRenderer(
@@ -197,6 +288,7 @@ Widget _questionRequestMessageRenderer(
   BuildContext context,
   AgentMessage message, {
   Widget? action,
+  bool settled = false,
 }) {
   final l10n = AppLocalizations.of(context);
   final questions = message.questionRequestQuestions;
@@ -217,7 +309,10 @@ Widget _questionRequestMessageRenderer(
       message: message,
       preferredKeys: const ['question', 'prompt', 'message', 'context'],
     ),
-    readOnlyHint: message.requestIsReadOnly
+    // Only while somebody still owes the answer. A settled question is drawn
+    // read-only too, and "Awaiting answer" above "Settled in your terminal or
+    // another app." gave one card two accounts of the same question.
+    readOnlyHint: message.requestIsReadOnly && !settled
         ? l10n.sessionRequestAwaitingAnswer
         : null,
     payloadAsChips: true,
@@ -405,6 +500,16 @@ Widget _eventMessageRenderer(BuildContext context, AgentMessage message) {
   // Context material gets a presentation of its own: quiet, collapsed, and
   // labelled for a human. Every other event keeps the generic card below, so an
   // unknown or future event still renders honestly rather than disappearing.
+  //
+  // Steering is checked first because it is the user's own words arriving by an
+  // unusual route. An ordinary event row hides that the message reached the
+  // agent at
+  // all, which is the one thing a reader mid-turn needs to know, and a user
+  // bubble
+  // would claim it was typed at that terminal.
+  if (message.steeringMessage != null) {
+    return _SteeringRow(message: message);
+  }
   if (message.contextInjection != null) {
     return _ContextInjectionRow(message: message);
   }

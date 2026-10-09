@@ -4,6 +4,18 @@
   "@appTitle": {
     "description": "The application name."
   },
+  "routeNotFoundTitle": "Page not found",
+  "@routeNotFoundTitle": {
+    "description": "Title of the screen shown for an in-app address that matches no page, such as a mistyped or outdated link."
+  },
+  "routeNotFoundBody": "There is no page at this address.",
+  "@routeNotFoundBody": {
+    "description": "Body under the page-not-found title."
+  },
+  "routeNotFoundGoToSessions": "Go to Sessions",
+  "@routeNotFoundGoToSessions": {
+    "description": "The one action on the page-not-found screen; opens the Sessions list, where the app starts."
+  },
   "sessionsTitle": "Sessions",
   "@sessionsTitle": {
     "description": "Title of the session list screen."
@@ -3159,6 +3171,58 @@
   "sessionRequestPermissionTitle": "Permission request",
   "sessionRequestPermissionFallback": "Permission request received.",
   "sessionRequestAwaitingPermission": "Awaiting permission response",
+  "sessionRequestInMode": "Claude was in {mode} mode",
+  "@sessionRequestInMode": {
+    "description": "Line under an approval card naming the permission mode the tool was in when it asked. {mode} is the tool's own word for its mode, shown unedited."
+  },
+  "sessionRequestLeftToTerminal": "Approval left to your terminal",
+  "@sessionRequestLeftToTerminal": {
+    "description": "Title of the read-only card shown when cosyncing let a permission prompt fall through to the terminal instead of answering it. It stays on the card after the prompt is settled, so it must not say the terminal is still waiting."
+  },
+  "sessionRequestReleaseModeBypass": "Claude was bypassing permission checks, and cosyncing leaves any prompt it still shows to your terminal.",
+  "@sessionRequestReleaseModeBypass": {
+    "description": "Reason line on the read-only approval card: the session was bypassing permission checks."
+  },
+  "sessionRequestReleasePlanTerminalOnly": "This is Claude's plan. Approving it also picks how Claude carries on, so answer it in your terminal.",
+  "@sessionRequestReleasePlanTerminalOnly": {
+    "description": "Reason line on the read-only card that shows Claude's plan: approving a plan also chooses how Claude continues, which only the terminal's own dialog offers."
+  },
+  "sessionRequestReleaseModeUnknown": "The permission mode could not be read, and cosyncing answers nothing on an unread mode.",
+  "@sessionRequestReleaseModeUnknown": {
+    "description": "Reason line on the read-only approval card: the mode row had not been written."
+  },
+  "sessionRequestReleaseViewerNone": "No cosyncing seat could answer this one, so the prompt stayed in your terminal.",
+  "@sessionRequestReleaseViewerNone": {
+    "description": "Reason line on the read-only approval card: nobody watching could answer it, either because no app was attached or because the one attached was only watching."
+  },
+  "sessionRequestReleaseKillSwitch": "True sync is switched off in cosyncing settings.",
+  "@sessionRequestReleaseKillSwitch": {
+    "description": "Reason line on the read-only approval card: the user turned true sync off."
+  },
+  "sessionRequestReleaseBand": "You answered it in your terminal.",
+  "@sessionRequestReleaseBand": {
+    "description": "Reason line on a settled approval card: the prompt in the user's own terminal was answered."
+  },
+  "sessionRequestReleaseExpired": "cosyncing stopped waiting and left this one to your terminal.",
+  "@sessionRequestReleaseExpired": {
+    "description": "Reason line on a settled approval card: cosyncing stopped waiting because the terminal stopped asking for an answer, or the broker stopped answering it."
+  },
+  "sessionRequestDecidedByApp": "Answered in the app",
+  "@sessionRequestDecidedByApp": {
+    "description": "Outcome line on a settled approval card: a tap in cosyncing answered it."
+  },
+  "sessionRequestDecidedByBand": "Answered in your terminal",
+  "@sessionRequestDecidedByBand": {
+    "description": "Outcome line on a settled approval card: the prompt in the user's own terminal was answered."
+  },
+  "sessionRequestDecidedByExpired": "Nobody answered in time",
+  "@sessionRequestDecidedByExpired": {
+    "description": "Outcome line on a settled approval card: cosyncing's deadline passed with no answer."
+  },
+  "transcriptSteeringLabel": "Sent from the app mid-turn",
+  "@transcriptSteeringLabel": {
+    "description": "Label on the transcript row for a message the user sent from the app into a turn that was already running. It was not typed at that terminal, so it must not read as an ordinary user turn."
+  },
   "sessionRequestQuestionTitle": "Question",
   "sessionRequestQuestionsTitle": "Questions",
   "sessionRequestQuestionFallback": "The agent requested an answer.",
@@ -3172,8 +3236,28 @@
   "@sessionRequestNoLongerWaiting": {
     "description": "Request card label: the session no longer offers this approval or question, so it cannot be answered here; no resolution for it reached this device."
   },
+  "sessionRequestSettledInTerminal": "Settled in your terminal.",
+  "@sessionRequestSettledInTerminal": {
+    "description": "Outcome line on a read-only card once the prompt or question it explained, which only the terminal could answer, is settled there."
+  },
+  "sessionQuestionSettledElsewhere": "Settled in your terminal or another app.",
+  "@sessionQuestionSettledElsewhere": {
+    "description": "Outcome line on a question card settled by somebody other than this app. The broker does not say whether the terminal or another app answered, so the line names both."
+  },
+  "sessionQuestionClosedUnansweredInTerminal": "Closed in your terminal without an answer.",
+  "@sessionQuestionClosedUnansweredInTerminal": {
+    "description": "Outcome line on a settled question card: the terminal ended the question (for example Escape) and nothing was picked. It must not say the question was answered."
+  },
+  "sessionQuestionClosedUnansweredInApp": "Closed from the app without an answer.",
+  "@sessionQuestionClosedUnansweredInApp": {
+    "description": "Outcome line on a settled question card: the app ended the question (Stop or Dismiss) and nothing was picked. It must not say the question was answered."
+  },
   "sessionRequestConnectToReply": "Connect to the session to reply.",
   "sessionRequestReadOnlyReply": "This request is read-only. Answer where the agent is running.",
+  "sessionQuestionAnswerInTerminal": "This question is waiting in your terminal. Answer it there.",
+  "@sessionQuestionAnswerInTerminal": {
+    "description": "Shown on a read-only question card whose question is open in the agent's terminal and can only be answered there (for example a number, or a multi-select whose options the app cannot send)."
+  },
   "sessionRequestReject": "Reject",
   "sessionRequestApprove": "Allow",
   "@sessionRequestApprove": {
@@ -3188,6 +3272,34 @@
   "sessionRequestSubmit": "Submit",
   "sessionRequestAnswerLabel": "Answer",
   "sessionRequestCustomAnswerHint": "Type your own answer",
+  "sessionQuestionNumberLabel": "A number from {min} to {max}",
+  "@sessionQuestionNumberLabel": {
+    "description": "Label of the field that answers a number question, naming the range the agent takes; both ends are included.",
+    "placeholders": {
+      "min": {
+        "type": "String",
+        "example": "3"
+      },
+      "max": {
+        "type": "String",
+        "example": "12"
+      }
+    }
+  },
+  "sessionQuestionNumberInvalid": "Enter a number from {min} to {max}.",
+  "@sessionQuestionNumberInvalid": {
+    "description": "Shown under a number answer that is not a plain number inside the question's range; nothing is sent until it is.",
+    "placeholders": {
+      "min": {
+        "type": "String",
+        "example": "3"
+      },
+      "max": {
+        "type": "String",
+        "example": "12"
+      }
+    }
+  },
   "sessionRequestActionFailed": "Request action failed. Please retry.",
   "sessionRequestOutcomeApproved": "Approved",
   "@sessionRequestOutcomeApproved": {

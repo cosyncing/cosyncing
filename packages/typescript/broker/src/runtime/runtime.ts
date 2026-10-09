@@ -70,6 +70,9 @@ import {
   stopCodexDaemonEnsureProcess,
 } from '@cosyncing/adapter-codex';
 import { ClaudeAdapter, claudeSessionId, installClaudeHooks, uninstallClaudeHooks, claudeHooksInstalled, claudeHooksSettingsPath, isClaudeTranscriptPathAllowed, readLatestModel, readLatestPermissionMode, modelAlias } from '@cosyncing/adapter-claude';
+import { ClaudeModService } from '../sessions/claude-mod-service.ts';
+import { routeModAnswer, routeModApprove, routeModRejectQuestion } from '../sessions/mod-client-messages.ts';
+import { findClaudeTranscript } from '../sessions/claude-transcript-locator.ts';
 import { KimiAdapter } from '@cosyncing/adapter-kimi';
 import { DshAdapter } from '@cosyncing/adapter-dsh';
 import { AgyAdapter } from '@cosyncing/adapter-antigravity';
@@ -271,6 +274,7 @@ import {
   resolveBrokerConfiguration,
   setHttpWorkspaceBrowsingEnabled,
 } from './configuration.ts';
+import { claudeTrueSyncKillSwitchFrom } from './claude-mod-kill-switch.ts';
 import { loadOrCreateBrokerInstance } from './broker-instance.ts';
 import { resolveRuntimeCredentials, safeCredentialEqual } from '../security/credentials.ts';
 import {
@@ -439,6 +443,50 @@ const SERVICE_BOUNDARY = detectBrokerServiceBoundary();
 
 const CONFIG_INSPECTION = inspectBrokerConfig();
 const EFFECTIVE_CONFIGURATION = resolveBrokerConfiguration({ packaged: BUILD_INFO.packaged });
+
+// ── Claude true sync: the two switches, and who is allowed to believe them ──
+// On for the two hosts the socket is measured on, off everywhere else. A `false` in config.json
+// still wins, and the platform rule is not decoration: on native Windows the listener would bind
+// nothing, so the switch has to read as off there or the mod would be told to wait for an answer
+// that cannot come. `startClaudeModSocket` keeps its own Windows return for the same reason, one
+// floor lower. These three constants sit here, rather than beside the socket they belong to,
+// because the ADAPTER is registered hundreds of lines earlier and has to be built knowing them: a
+// Claude row that advertises a `live` attach the broker cannot serve is a button the app is told
+// to draw and the user is left to press.
+const CLAUDE_MOD_HOST_DEFAULT = process.platform === 'linux' || process.platform === 'darwin';
+const CLAUDE_MOD_ENABLED =
+  (EFFECTIVE_CONFIGURATION.config.features?.claudeTrueSyncMod ?? CLAUDE_MOD_HOST_DEFAULT) === true
+  && process.env.COSYNCING_CLAUDE_MOD_OFF !== '1';
+/** Whether a Claude row may claim the `live` attach mode at all. */
+const CLAUDE_MOD_BRIDGE_ADVERTISED = CLAUDE_MOD_ENABLED && process.platform !== 'win32';
+/** Mid-turn steering. The transcript row it leaves is rendered as a steering row, so the app can
+ *  show what the user sent; the switch stays so it can be withdrawn without a rebuild. */
+const CLAUDE_MOD_STEERING = process.env.COSYNCING_CLAUDE_STEER !== '0';
+
+/**
+ * cosyncing's own kill switch, read again within the last second rather than once at startup.
+ *
+ * The spec's rule is that the switch reaches a holding terminal on the next poll, which a snapshot
+ * taken before the broker had a config file cannot honour. The config lives in a small JSON file,
+ * so the read is cached for a second: fresh enough that a flip lands well inside one 20 s poll, and
+ * cheap enough that a poll from each of a dozen terminals is not a dozen file reads.
+ *
+ * An unreadable, malformed or invalid config answers `true`, which means "do not hold"; the rule is
+ * `claudeTrueSyncKillSwitchFrom`'s. A missing one reads as the defaults.
+ */
+let killSwitchReading: { at: number; on: boolean } | undefined;
+function claudeTrueSyncKillSwitch(): boolean {
+  const now = Date.now();
+  if (killSwitchReading && now - killSwitchReading.at < 1_000) return killSwitchReading.on;
+  let on = true;
+  try {
+    on = claudeTrueSyncKillSwitchFrom(inspectBrokerConfig(setupStateHome()), CLAUDE_MOD_HOST_DEFAULT);
+  } catch {
+    on = true;
+  }
+  killSwitchReading = { at: now, on };
+  return on;
+}
 const PORT = EFFECTIVE_CONFIGURATION.config.broker.port;
 const LISTEN_HOST = BROKER_LISTEN_HOST;
 if (EFFECTIVE_CONFIGURATION.config.broker.host !== LISTEN_HOST) throw new Error('broker-listener-host-invariant');
@@ -972,7 +1020,52 @@ registry.register(new CodexAdapter({
     }
   },
 })); // Codex — observe (rollout-JSONL tail); resume is a later increment
-registry.register(new ClaudeAdapter()); // Claude Code — observe (transcript-JSONL tail); resume/live are later increments
+registry.register(new ClaudeAdapter({
+  // The mod registry, read per row. The adapter never opens the socket and never caches the
+  // answer; it asks while it builds a row, which is the only way a roster row can say `live`
+  // about a terminal that is still reporting and `observe` about one that stopped.
+  //
+  // Passed ONLY when a socket can actually be served. The adapter builds its advertised
+  // capabilities from nothing but the presence of this object, so handing it a bridge on native
+  // Windows, or with the feature switched off, advertised a `live` attach that no broker would
+  // ever answer -- the row read `live`, the app drew for `live`, and the attach came back Observe.
+  modBridge: CLAUDE_MOD_BRIDGE_ADVERTISED ? {
+    // Read per request: the adapter is built before the socket is bound, and a bind that failed
+    // must not leave a `live` attach advertised that no terminal can reach.
+    serving: () => claudeModService.listening,
+    status: (sessionId) => {
+      const status = claudeModService.status(sessionId);
+      return {
+        present: status.present,
+        live: status.state === 'live',
+        reasons: status.reasons,
+        ...(claudeModService.registrationFor(sessionId)?.cwd
+          ? { cwd: claudeModService.registrationFor(sessionId)!.cwd }
+          : {}),
+      };
+    },
+    // A live Claude row's writes go to the mod's queue for that session. The queue validates the
+    // command and refuses a row that has gone, so the adapter reports the refusal rather than
+    // pretending the terminal received it.
+    send: (sessionId, command) => {
+      const result = claudeModService.send(sessionId, command);
+      return { ok: result.ok === true, ...('code' in result ? { code: String(result.code) } : {}) };
+    },
+    // Steering is on because the app now renders the row a mid-turn append leaves. It stays a
+    // switch rather than a constant so it can be turned off without a rebuild if that row ever
+    // stops rendering.
+    steeringEnabled: () => CLAUDE_MOD_STEERING,
+    // Whether the terminal's turn is running, straight from the mod's own `turn.start` /
+    // `turn.complete`. This is what makes a prompt a prompt and a steer a steer: the row's folded
+    // status cannot answer it, and guessing from `needs-input` used to turn every prompt typed
+    // after a released approval card into a mid-turn append that went nowhere.
+    turnRunning: (sessionId) => claudeModService.currentTurn(sessionId) !== '',
+    // When the mod last said the turn ended: a history read restates only a run that started before.
+    turnEndedAt: (sessionId) => claudeModService.turnEndedAt(sessionId),
+    // What a card showed that the transcript does not record, so a reload draws it the same way.
+    cardNote: (sessionId, requestId) => claudeModService.cardNote(sessionId, requestId),
+  } : undefined,
+})); // Claude Code — observe (transcript-JSONL tail); resume is Take over; live is the cosyncing mod
 // Kimi Code — observe for every session (kimi web HTTP + WS), plus Drive for
 // the ones cosyncing itself created. Foreground clients explicitly request
 // `mode=live`; background resident tabs stay on the authority-free bare owner.
@@ -1661,6 +1754,86 @@ function ensureClaudeHooksConn(id: string, transcriptPath: string, b: any) {
   const conn = claudeHooks.hello(id, claudeHooksInfo(b, id, transcriptPath), transcriptPath);
   hub.adopt('claude', id, conn);
   return conn;
+}
+
+// ── Claude true-sync mod socket ──
+// One Unix socket in the state directory, spoken to by the cosyncing Claude mod over
+// `$.http.fetch(url, { socketPath })`. It is not an HTTP route: it never touches the
+// token-authenticated surface, so `route-authorization.ts` has no entry for it and the packaged
+// 404 gate on the legacy hook legs stays exactly as it is.
+// CLAUDE_MOD_ENABLED, CLAUDE_MOD_STEERING and the kill switch are defined up at the configuration,
+// next to the snapshot they are read from, because the Claude adapter above is built from them.
+const claudeModService: ClaudeModService = new ClaudeModService({
+  hub: (sessionId) => {
+    const mc = hub.getConn('claude', sessionId);
+    return mc ? { clientCount: mc.clientCount, conn: mc.conn } : undefined;
+  },
+  hubAll: (sessionId) => hub.getConns('claude', sessionId).map((mc) => ({ clientCount: mc.clientCount, conn: mc.conn })),
+  // The permission mode that gates a hold lives in the session transcript, and the registration's
+  // own cwd is the only honest way from a session id to that file.
+  transcriptPath: (sessionId) => findClaudeTranscript(sessionId, claudeModService.registrationFor(sessionId)?.cwd),
+  killSwitch: claudeTrueSyncKillSwitch,
+  sessionTitle: (sessionId) => latestSessionInfoByKey.get(latestSessionKey('claude', sessionId))?.title,
+  // The mod's own report of its session. Nothing was wired here for a whole review round, which
+  // meant a refused command and a pid that stopped being provable both vanished silently.
+  onEvent: (event) => {
+    void noteClaudeModEvent(event);
+  },
+  // A registration is the terminal's first word about itself. It is logged with what the kernel
+  // said, because "which process is this and when did it start" is the first question any field
+  // report has to answer; row liveness itself still follows the adapter's own watch tick.
+  onRegister: (sessionId, info) => {
+    console.log(`${LOG_PREFIX} claude-mod registered ${sessionId} pid=${info.peerPid} version=${info.claudeVersion} surface=${info.surface} interactive=${info.isInteractive}`);
+  },
+  log: {
+    warn: (message) => console.warn(`${LOG_PREFIX} claude-mod ${message}`),
+    info: (message) => console.log(`${LOG_PREFIX} claude-mod ${message}`),
+  },
+});
+/**
+ * One mod event that the broker can only route from here: the pid behind a registration stopped
+ * being provable, once per session.
+ *
+ * The registry raises it exactly once, and the mod's row goes Observe on its own. What the person
+ * needs is the reason, because Observe with no explanation reads as cosyncing having forgotten a
+ * terminal that is still open in front of them. It shares `sync-degraded` with the unknown-row
+ * case rather than inventing an inbox kind for one sentence.
+ */
+async function noteClaudeModEvent(event: { sessionId: string; kind: string }): Promise<void> {
+  if (event.kind !== 'attention.pid-dead') return;
+  const hubId = claudeModService.hubIdFor(event.sessionId) ?? event.sessionId;
+  const info = latestSessionInfoByKey.get(latestSessionKey('claude', hubId))
+    ?? latestSessionInfoByKey.get(latestSessionKey('claude', event.sessionId));
+  const sessionId = info?.id ?? hubId;
+  try {
+    await attentionService.upsertEvent({
+      dedupeKey: `sync-degraded:claude:${sessionId}:mod-pid-dead`,
+      kind: 'sync-degraded',
+      state: 'active',
+      severity: 'maintenance',
+      agent: 'claude',
+      sessionId,
+      ...(info?.title ? { sessionTitle: info.title } : {}),
+      title: 'The terminal behind a synced Claude session has closed',
+      summary: 'The cosyncing mod in that terminal is no longer running, so the session is mirrored '
+        + 'read-only. Opening Claude in it again resumes the sync on its own.',
+      action: { kind: 'open-session', tool: 'claude', sessionId },
+    });
+  } catch (error) {
+    console.warn(`${LOG_PREFIX} claude-mod attention event failed: ${String((error as Error)?.message ?? error).slice(0, 160)}`);
+  }
+}
+
+async function startClaudeModSocket(): Promise<void> {
+  if (!CLAUDE_MOD_ENABLED) return;
+  if (process.platform === 'win32') return; // Native Windows keeps Take over; the pipe path is unmeasured.
+  try {
+    await claudeModService.start();
+  } catch (error) {
+    // A socket we could not create costs the feature and not the broker: no true sync means
+    // Observe plus Take over, which is the fail-open shape the spec asks for.
+    console.warn(`${LOG_PREFIX} claude-mod socket unavailable, true sync off: ${String((error as Error)?.message ?? error).slice(0, 200)}`);
+  }
 }
 
 const latestSessionInfoByKey = new Map<string, SessionInfo>();
@@ -4362,12 +4535,36 @@ async function handleManagedClientMessage(
         );
       }
     } else if (msg.kind === 'approve') {
-      await mc.conn.respondPermission(String(msg.requestId), msg.decision);
+      // A mod hold is answered by the broker itself; the answer travels back over the socket and
+      // the card closes from the same event. The adapter connection never saw the request.
+      // Routed through `mod-client-messages` rather than inline, so the seam suite drives the
+      // same three lines the app does instead of reaching around them.
+      const modRouted = routeModApprove(
+        { service: claudeModService, conn: { tool: mc.conn.info.tool, id: mc.conn.info.id, respondPermission: (requestId, decision) => mc.conn.respondPermission(requestId, decision as never) }, send: (frame) => send(frame as never) },
+        { requestId: String(msg.requestId), decision: String(msg.decision) },
+      );
+      if (!modRouted) {
+        await mc.conn.respondPermission(String(msg.requestId), msg.decision);
+      }
     } else if (msg.kind === 'answer') {
-      // The adapter selects the native answer transport for this request.
-      await mc.conn.answerQuestion?.(String(msg.requestId), msg.answers ?? []);
+      // The app sends one array of labels per question; Claude's tool takes `{ [question text]:
+      // answer }`, and the conversion happens against the questions the hold carries. It resolves
+      // the hold rather than queueing a command: a mod parked on a hold is not parked on its poll
+      // leg at the same time, and the old route delivered nothing while telling the user it had.
+      const modRouted = routeModAnswer(
+        { service: claudeModService, conn: { tool: mc.conn.info.tool, id: mc.conn.info.id, respondPermission: (requestId, decision) => mc.conn.respondPermission(requestId, decision as never) }, send: (frame) => send(frame as never) },
+        { requestId: String(msg.requestId), answers: msg.answers ?? [] },
+      );
+      if (!modRouted) {
+        // The adapter selects the native answer transport for this request.
+        await mc.conn.answerQuestion?.(String(msg.requestId), msg.answers ?? []);
+      }
     } else if (msg.kind === 'reject-question') {
-      await mc.conn.rejectQuestion?.(String(msg.requestId));
+      const modRouted = routeModRejectQuestion(
+        { service: claudeModService, conn: { tool: mc.conn.info.tool, id: mc.conn.info.id, respondPermission: (requestId, decision) => mc.conn.respondPermission(requestId, decision as never) }, send: (frame) => send(frame as never) },
+        { requestId: String(msg.requestId) },
+      );
+      if (!modRouted) await mc.conn.rejectQuestion?.(String(msg.requestId));
     } else if (msg.kind === 'command') {
       const commandName = String(msg.name);
       const res = mc.conn.runCommand
@@ -8285,6 +8482,7 @@ server = Bun.serve<WsData>({
 
 console.log(`${LOG_PREFIX} broker on http://${server.hostname}:${server.port}  (machine: ${MACHINE})`);
 console.log(`${LOG_PREFIX} adapters: ${registry.list().map((b) => b.id).join(', ')}`);
+void startClaudeModSocket();
 if (!TOKEN) {
   console.warn(
     `${LOG_PREFIX} SECURITY WARNING: this source-development broker has no application credential; `
@@ -8489,6 +8687,12 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
       server?.stop(true);
     } catch (error) {
       console.warn(`[${PRODUCT_IDENTITY.productName}] listener shutdown failed: ${String(error)}`);
+    }
+
+    try {
+      claudeModService.close();
+    } catch (error) {
+      console.warn(`[${PRODUCT_IDENTITY.productName}] claude-mod socket shutdown failed: ${String(error)}`);
     }
 
     stopOpencodeConfigWatch();

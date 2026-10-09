@@ -79,7 +79,11 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('kilo', 'F01', 'full', 'bounded SQLite Observe plus authenticated managed-server create, live attach, and restart reattach on 7.4.23 or newer'),
 
   // F02 true sync
-  claim('claude', 'F02', 'partial', 'hooks are answer-only; Drive is app-owned continuation'),
+  // Stays `partial` on evidence, not on capability: a full claim needs an L3 entry in
+  // `trace-manifest.ts`, and the mod's real-agent proof runs in the tier-2 smoke harness, which is
+  // excluded from `check` and is not a tracked matrix entry. The sentence describes what the mod
+  // actually does, including where it is refused.
+  claim('claude', 'F02', 'partial', 'mod true sync over the local broker socket: prompt, steer, stop and approvals both ways on a terminal session the user owns; not offered on native Windows or below Claude Code 2.1.288, where the session keeps Observe and Take over'),
   claim('codex', 'F02', 'full', 'managed app-server live thread'),
   claim('opencode', 'F02', 'full', 'shared opencode serve plus attach TUI'),
   claim('pi', 'F02', 'full', 'bridge extension'),
@@ -90,7 +94,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('kilo', 'F02', 'n/a', 'the broker manages a dedicated authenticated loopback host on port 4097, but no exact-session terminal join has been captured'),
 
   // F03 prompt/queue/stop
-  claim('claude', 'F03', 'full', 'Drive prompt/stop; hooks sync cannot inject prompts'),
+  claim('claude', 'F03', 'full', 'Drive prompt/stop; a terminal session synced through the mod also takes prompt, steer and stop (F02)'),
   claim('codex', 'F03', 'full', 'Drive/live; queued steer guarded'),
   claim('opencode', 'F03', 'full', 'shared server; private Drive partial but prompt path covered'),
   claim('pi', 'F03', 'full', 'resume/bridge; queue semantics partial but prompt/stop path covered'),

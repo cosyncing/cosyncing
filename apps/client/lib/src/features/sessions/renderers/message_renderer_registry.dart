@@ -71,11 +71,16 @@ final Map<AgentMessageType, AgentMessageRenderer> agentMessageRendererRegistry =
     };
 
 /// Builds a renderer for one [AgentMessage].
+///
+/// [requestSettled] says a request card's request is over: answered,
+/// dismissed, or withdrawn. Only the session knows that, and the card has to
+/// stop saying it is waiting.
 Widget buildAgentMessageRenderer(
   BuildContext context,
   AgentMessage message, {
   Widget? fileArtifactAction,
   Widget? requestAction,
+  bool requestSettled = false,
 }) {
   if (message.type == AgentMessageType.fileArtifact) {
     return _fileArtifactMessageRenderer(
@@ -96,6 +101,7 @@ Widget buildAgentMessageRenderer(
       context,
       message,
       action: requestAction,
+      settled: requestSettled,
     );
   }
   return (agentMessageRendererRegistry[message.type] ??

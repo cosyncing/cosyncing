@@ -150,6 +150,7 @@ void main() {
       Size? surfaceSize,
       String initialLocation = '/sessions',
       List<Override> overrides = const [],
+      Locale? locale,
     }) async {
       if (surfaceSize != null) {
         tester.view
@@ -228,6 +229,7 @@ void main() {
             // screens need the real delegates just as they have them under App.
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
+            locale: locale,
             routerConfig: router,
           ),
         ),
@@ -555,6 +557,112 @@ void main() {
         sessionsRoute,
       );
       expect(find.byKey(const Key('session-file-page')), findsNothing);
+    });
+
+    group('locations no route matches', () {
+      final notFound = find.byKey(const Key('route-not-found'));
+      final goToSessions = find.byKey(
+        const Key('route-not-found-go-to-sessions'),
+      );
+
+      // Read off the delegate rather than `router.state`, which throws while
+      // the location matches nothing.
+      String location(GoRouter router) =>
+          router.routerDelegate.currentConfiguration.uri.path;
+
+      testWidgets('an unknown location shows the not-found page, and its '
+          'action lands on Sessions', (tester) async {
+        final router = await pumpApp(tester, surfaceSize: const Size(500, 900));
+
+        // An easy slip: the inbox is called Notifications, but it lives at
+        // /attention.
+        router.go('/notifications');
+        await tester.pumpAndSettle();
+
+        expect(location(router), '/notifications');
+        expect(notFound, findsOneWidget);
+        expect(find.text('Page not found'), findsOneWidget);
+        expect(find.text('There is no page at this address.'), findsOneWidget);
+        expect(
+          find.text('Page Not Found'),
+          findsNothing,
+          reason: "go_router's English-only default screen",
+        );
+        expect(
+          find.descendant(
+            of: goToSessions,
+            matching: find.text('Go to Sessions'),
+          ),
+          findsOneWidget,
+        );
+
+        await tester.tap(goToSessions);
+        await tester.pumpAndSettle();
+
+        expect(location(router), sessionsRoute);
+        expect(notFound, findsNothing);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+      });
+
+      for (final (locale, title, action) in const [
+        (Locale('zh'), '未找到页面', '前往会话'),
+        (Locale('ja'), 'ページが見つかりません', 'セッションへ移動'),
+        (Locale('ko'), '페이지를 찾을 수 없습니다', '세션으로 이동'),
+        (Locale('es'), 'Página no encontrada', 'Ir a Sesiones'),
+      ]) {
+        testWidgets('a deep link to an unknown location speaks '
+            '${locale.languageCode} and still lands on Sessions', (
+          tester,
+        ) async {
+          final router = await pumpApp(
+            tester,
+            surfaceSize: const Size(500, 900),
+            initialLocation: '/notifications',
+            locale: locale,
+          );
+
+          expect(notFound, findsOneWidget);
+          expect(find.text(title), findsOneWidget);
+          expect(find.text('Page not found'), findsNothing);
+          expect(
+            find.descendant(of: goToSessions, matching: find.text(action)),
+            findsOneWidget,
+          );
+
+          await tester.tap(goToSessions);
+          await tester.pumpAndSettle();
+
+          expect(location(router), sessionsRoute);
+          expect(notFound, findsNothing);
+          expect(find.byType(SessionsWorkspace), findsOneWidget);
+        });
+      }
+
+      testWidgets('/ lands on Sessions, at launch and from another page', (
+        tester,
+      ) async {
+        final router = await pumpApp(
+          tester,
+          surfaceSize: const Size(500, 900),
+          initialLocation: '/',
+        );
+
+        expect(location(router), sessionsRoute);
+        expect(notFound, findsNothing);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+
+        router.go(attentionRoute);
+        await tester.pumpAndSettle();
+        expect(location(router), attentionRoute);
+
+        // Where go_router's default error screen sent its Home button.
+        router.go('/');
+        await tester.pumpAndSettle();
+
+        expect(location(router), sessionsRoute);
+        expect(notFound, findsNothing);
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+      });
     });
 
     testWidgets('settings can open the transfer manager route', (tester) async {

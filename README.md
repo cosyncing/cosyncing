@@ -75,13 +75,14 @@ hosted service between the client and the broker.
   <a href="https://kilocode.ai/" title="Kilo Code"><img src="docs/assets/agents/pills/kilocode.svg" alt="Kilo Code" height="34"></a>
 </p>
 
-One protocol covers all twelve. Per-agent control differs, and Claude Code sessions open read-only
-until you take over. See [supported-agent setup](docs/supported_agents/README.md) for versions and
+One protocol covers all twelve. Per-agent control differs: a Claude Code session in your own terminal
+syncs with the app in both directions, including approvals, once setup installs its mod; without the mod it opens read-only until
+you take over. See [supported-agent setup](docs/supported_agents/README.md) for versions and
 installation, and [adapter support](docs/protocol/adapter-support.md) for the capability matrix.
 
 Foreground clients can join the same broker-owned Codex, Pi, omp, or Reasonix Drive session without starting a
-second native Resume. Claude Code keeps its Observe/Take-over flow on another client, while OpenCode
-keeps its shared-live behavior. Background Observe connections stay read-only.
+second native Resume. A Claude Code session without the mod keeps its Observe/Take-over flow on
+another client, while OpenCode keeps its shared-live behavior. Background Observe connections stay read-only.
 
 **Experimental:** Eight provisional adapters are available to source contributors.
 [Kimi Code](docs/supported_agents/kimi.md) observes every session on a

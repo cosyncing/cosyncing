@@ -11,6 +11,18 @@ import 'package:broker_contract/src/models/policy_token.dart';
 /// field, and an unrecognized name simply renders as an ordinary event.
 const String kContextInjectionEvent = 'context.injection';
 
+/// Event name for a message the user sent from the app INTO a running turn.
+///
+/// The host's own transcript marks the row as not typed at that keyboard and
+/// names who inserted it, so an adapter that can read those two facts maps the
+/// row to this name instead of dropping it or calling it a user turn. Mirrors
+/// `STEERING_MESSAGE_EVENT` in the broker's
+/// `packages/typescript/protocol/src/index.ts`. Like the context event, the
+/// name is a convention on a free-form field and not a hashed contract surface:
+/// a client that predates it renders an ordinary event row rather than a user
+/// message the user never typed in that terminal.
+const String kSteeringMessageEvent = 'steering.message';
+
 /// Canonical `AgentMessage.type` values emitted by the broker.
 ///
 /// See `docs/protocol/contract-sync.md`.
@@ -963,6 +975,18 @@ final class AgentQuestionOption {
   final String? description;
 }
 
+/// How a question is answered.
+enum AgentQuestionKind {
+  /// By picking among the listed options (and free text, where taken).
+  choice,
+
+  /// By typing free text; there are no options.
+  text,
+
+  /// By typing one number within the question's range.
+  number,
+}
+
 /// One question in a canonical `question-request`.
 final class AgentQuestion {
   /// Creates a structured agent question.
@@ -971,6 +995,12 @@ final class AgentQuestion {
     required this.options,
     this.header,
     this.multiple = false,
+    this.freeText = true,
+    this.kind = AgentQuestionKind.choice,
+    this.min,
+    this.max,
+    this.step,
+    this.unit,
   });
 
   /// The question body.
@@ -984,6 +1014,129 @@ final class AgentQuestion {
 
   /// Whether more than one advertised option may be selected.
   final bool multiple;
+
+  /// Whether a typed answer is accepted besides the listed options.
+  ///
+  /// False when the agent takes only its own labels: offering a text field
+  /// there collects an answer that is refused before it is ever sent.
+  final bool freeText;
+
+  /// How the question is answered.
+  final AgentQuestionKind kind;
+
+  /// A number question's lowest and highest value, both inclusive.
+  final double? min;
+
+  /// See [min].
+  final double? max;
+
+  /// The increment the agent's own number control moves in.
+  final double? step;
+
+  /// A short unit shown beside a number, as the agent wrote it.
+  final String? unit;
+
+  /// Whether [answer] is a number this question takes: written plainly, as
+  /// the agent's own control writes one, and inside the range. A question
+  /// that is not a number question takes any non-empty text here.
+  bool takesNumber(String answer) {
+    if (kind != AgentQuestionKind.number) return answer.trim().isNotEmpty;
+    final text = answer.trim();
+    if (!RegExp(r'^-?\d+(\.\d+)?$').hasMatch(text)) return false;
+    final value = double.parse(text);
+    final low = min;
+    final high = max;
+    return (low == null || value >= low) && (high == null || value <= high);
+  }
+}
+
+/// A tool's own permission mode, spelled as the tool spells it.
+///
+/// The card names the mode an approval was decided in, and a translated
+/// guess is worse than the vendor's word. `unknown` is a reading rather than a
+/// gap: the host had not written its mode row yet.
+enum PermissionModeName {
+  defaultMode('default'),
+  acceptEdits('acceptEdits'),
+  plan('plan'),
+  auto('auto'),
+  dontAsk('dontAsk'),
+  bypassPermissions('bypassPermissions'),
+  unknown('unknown');
+
+  const PermissionModeName(this.wireValue);
+
+  /// The value emitted on the broker wire.
+  final String wireValue;
+
+  /// Parses a broker mode without throwing on future values. A mode this client
+  /// has not met reads as [PermissionModeName.unknown] rather than as a guess,
+  /// because the line under an approval card is a claim about the user's tool.
+  static PermissionModeName fromWire(String? wire) {
+    return PermissionModeName.values.firstWhere(
+      (mode) => mode.wireValue == wire,
+      orElse: () => PermissionModeName.unknown,
+    );
+  }
+}
+
+/// Who settled a request that two seats could both answer.
+enum PermissionDecidedBy {
+  /// A tap in the app.
+  app('app'),
+
+  /// The prompt shown in the user's own terminal.
+  band('band'),
+
+  /// Nobody, within the time the broker was willing to wait.
+  expired('expired'),
+
+  /// A value this client does not know.
+  unknown('unknown');
+
+  const PermissionDecidedBy(this.wireValue);
+
+  /// The value emitted on the broker wire.
+  final String wireValue;
+
+  /// Parses a broker decider without throwing on future values.
+  static PermissionDecidedBy fromWire(String? wire) {
+    return PermissionDecidedBy.values.firstWhere(
+      (source) => source.wireValue == wire,
+      orElse: () => PermissionDecidedBy.unknown,
+    );
+  }
+}
+
+/// Why the broker let a held call fall through to the terminal unanswered.
+///
+/// The gate reasons are rules the user can read out loud: the session was
+/// bypassing permissions, the mode could not be read, nobody was watching, or
+/// true sync is off. `planTerminalOnly` is Claude's plan, shown for reading
+/// and approved in the terminal, because approving it also picks how Claude
+/// carries on. `band` and `expired` name who else got there.
+enum PermissionReleaseReason {
+  modeBypassPermissions('mode:bypassPermissions'),
+  modeUnknown('mode:unknown'),
+  planTerminalOnly('plan:terminal-only'),
+  viewerNone('viewer:none'),
+  killSwitch('killSwitch'),
+  band('band'),
+  expired('expired'),
+  unknown('unknown');
+
+  const PermissionReleaseReason(this.wireValue);
+
+  /// The value emitted on the broker wire.
+  final String wireValue;
+
+  /// Parses a broker reason without throwing on future values.
+  static PermissionReleaseReason fromWire(String? wire) {
+    return PermissionReleaseReason.values.firstWhere(
+      (reason) => reason.wireValue == wire,
+      orElse: () => PermissionReleaseReason.unknown,
+    );
+  }
 }
 
 /// Typed accessors for canonical permission and question requests.
@@ -1006,6 +1159,14 @@ extension RequestAgentMessage on AgentMessage {
       ? _trimmedString(raw['detail'])
       : null;
 
+  /// What is being approved, as the broker described the call: a command, a
+  /// path, a URL. Bounded text rather than a sentence, so it is the same in
+  /// every locale, and absent when the broker had nothing to name.
+  String? get permissionRequestInputPreview =>
+      type == AgentMessageType.permissionRequest
+      ? _trimmedString(raw['inputPreview'])
+      : null;
+
   /// Canonical permission decision options advertised by the broker.
   List<String> get permissionRequestOptions {
     if (type != AgentMessageType.permissionRequest) return const [];
@@ -1015,6 +1176,87 @@ extension RequestAgentMessage on AgentMessage {
       value.map(_trimmedString).whereType<String>(),
     );
   }
+
+  /// The permission mode the card was raised in, or `null` when the broker did
+  /// not say. Absent means the broker said nothing, which is what an older
+  /// broker does, and the card renders without the line.
+  PermissionModeName? get permissionRequestMode {
+    if (type != AgentMessageType.permissionRequest) return null;
+    final value = raw['permissionMode'];
+    return value is String && value.isNotEmpty
+        ? PermissionModeName.fromWire(value)
+        : null;
+  }
+
+  /// Why this request was NOT answered here, on the read-only card the broker
+  /// raises when a prompt falls back to the terminal.
+  PermissionReleaseReason? get permissionReleaseReason {
+    if (type != AgentMessageType.permissionRequest &&
+        type != AgentMessageType.permissionResolved) {
+      return null;
+    }
+    final value = raw['releaseReason'];
+    return value is String && value.isNotEmpty
+        ? PermissionReleaseReason.fromWire(value)
+        : null;
+  }
+
+  /// Who settled it, when the broker can say. Only a resolution says it: a
+  /// request is drawn before anybody has answered.
+  PermissionDecidedBy? get permissionDecidedBy {
+    if (type != AgentMessageType.permissionResolved) return null;
+    final value = raw['decidedBy'];
+    return value is String && value.isNotEmpty
+        ? PermissionDecidedBy.fromWire(value)
+        : null;
+  }
+
+  /// The answer a question closed with, one row per question in the card's
+  /// order, in the shape this client's answer frame sends: option labels, or
+  /// text the person typed. An empty row is a question that got no answer.
+  ///
+  /// Null when the resolution carries none (the question was dismissed, or the
+  /// broker does not know the answer), and when it carries one this decode
+  /// cannot read: a card is never drawn with an answer guessed from a part.
+  List<List<String>>? get questionResolvedAnswers {
+    if (type != AgentMessageType.questionResolved) return null;
+    final value = raw['answers'];
+    if (value is! List) return null;
+    final rows = <List<String>>[];
+    for (final row in value) {
+      if (row is! List || row.any((answer) => answer is! String)) return null;
+      rows.add(List<String>.unmodifiable(row.cast<String>()));
+    }
+    return List<List<String>>.unmodifiable(rows);
+  }
+
+  /// Who settled the question, when the broker said: the same values a
+  /// permission's resolution carries. `app` on the resolution of an answer
+  /// sent from the app, the seat that sent it included.
+  PermissionDecidedBy? get questionResolvedDecidedBy {
+    if (type != AgentMessageType.questionResolved) return null;
+    final value = raw['decidedBy'];
+    return value is String && value.isNotEmpty
+        ? PermissionDecidedBy.fromWire(value)
+        : null;
+  }
+
+  /// Why the question ended without an answer from the app, when the broker
+  /// said: `band` for the terminal's own cancel, `expired` when cosyncing
+  /// stopped waiting.
+  PermissionReleaseReason? get questionResolvedReleaseReason {
+    if (type != AgentMessageType.questionResolved) return null;
+    final value = raw['releaseReason'];
+    return value is String && value.isNotEmpty
+        ? PermissionReleaseReason.fromWire(value)
+        : null;
+  }
+
+  /// Whether the question is open in the agent's own terminal and can only be
+  /// answered there. Comes with a read-only card that says so.
+  bool get questionRequestAnswerInTerminal =>
+      type == AgentMessageType.questionRequest &&
+      raw['answerInTerminal'] == true;
 
   /// Structured questions carried by a canonical `question-request`.
   List<AgentQuestion> get questionRequestQuestions {
@@ -1041,12 +1283,24 @@ extension RequestAgentMessage on AgentMessage {
           );
         }
       }
+      final kind = switch (item['kind']) {
+        'text' => AgentQuestionKind.text,
+        'number' => AgentQuestionKind.number,
+        _ => AgentQuestionKind.choice,
+      };
+      final number = kind == AgentQuestionKind.number;
       questions.add(
         AgentQuestion(
           question: question,
           header: _trimmedString(item['header']),
           options: List.unmodifiable(options),
           multiple: item['multiple'] == true,
+          freeText: item['freeText'] != false,
+          kind: kind,
+          min: number ? _finiteDouble(item['min']) : null,
+          max: number ? _finiteDouble(item['max']) : null,
+          step: number ? _finiteDouble(item['step']) : null,
+          unit: number ? _trimmedString(item['unit']) : null,
         ),
       );
     }
@@ -1091,6 +1345,32 @@ extension ToolAgentMessage on AgentMessage {
       source: source,
       body: body,
       truncated: payload['truncated'] == true,
+    );
+  }
+
+  /// Text and provenance of a [kSteeringMessageEvent] event, when this is one.
+  ///
+  /// `null` for every other message, so a caller cannot render an unrelated
+  /// event through the steering presentation. An empty `text` is treated as
+  /// absent: a steering row with nothing in it is noise, not a fact.
+  ///
+  /// No clip flag, because there is nothing to clip it. The payload is
+  /// `SteeringMessagePayload` in the wire contract: `text`, `source`, an
+  /// optional dedupe `key`, and nothing beside them. This read used to look for
+  /// a `truncated` the producer never writes, which meant a note about text the
+  /// adapter had cut could never appear -- and if it ever had, it would have
+  /// appeared over text that was in fact whole. Long steering is the row's own
+  /// collapsed-to-a-toggle problem, not a claim about what Claude received.
+  ({String text, String source})? get steeringMessage {
+    if (eventName != kSteeringMessageEvent) return null;
+    final payload = raw['payload'];
+    if (payload is! Map) return null;
+    final text = payload['text'];
+    final source = payload['source'];
+    if (text is! String || text.trim().isEmpty) return null;
+    return (
+      text: text.trim(),
+      source: source is String && source.isNotEmpty ? source : 'app',
     );
   }
 
@@ -1782,6 +2062,11 @@ List<AgentActivityChild> _activityChildren(Object? raw) {
 String? _trimmedString(Object? value) {
   if (value is! String || value.trim().isEmpty) return null;
   return value.trim();
+}
+
+double? _finiteDouble(Object? value) {
+  if (value is! num || !value.isFinite) return null;
+  return value.toDouble();
 }
 
 String? _shortPolicyToken(Object? value, {int maxLength = 200}) {

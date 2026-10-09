@@ -11,7 +11,7 @@ cosyncing-owned integration files; it does not install the coding agent.
 | [Codex](codex.md) | 0.144.5 | Official standalone installer | Managed app-server, Drive, and terminal sync |
 | [OpenCode](opencode.md) | 1.17.19 | Official install script | Managed shared `serve` |
 | [Pi](pi.md) | 0.78.1 | Official install script | Packaged in-session bridge |
-| [Claude Code](claude-code.md) | 2.1.207 | Official npm or native installer | Observe and Take over |
+| [Claude Code](claude-code.md) | 2.1.207 | Official npm or native installer | Observe and Take over; [true sync](claude-true-sync.md) through a Claude Code mod on 2.1.288 or newer |
 
 These are cosyncing compatibility floors, not the latest upstream releases.
 Direct agent-to-user file delivery — the agent calling a tool that hands you a

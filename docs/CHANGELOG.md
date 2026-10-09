@@ -13,6 +13,47 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Driving a Claude Code session from your phone: on Linux and macOS hosts,
+  Cosyncing can install a Claude Code mod during setup that lets the app send
+  prompts, stop a turn, and answer permission and question prompts from the
+  app while you keep using the same terminal session. Setup asks first, and
+  the mod is only installed for Claude Code 2.1.288 or newer. An approval
+  card leads with the command or path and opens to the whole call, and it waits
+  for as long as Claude's own dialog would: whichever side answers first wins.
+  The app shows an approval card when the session is in `default`,
+  `accept edits` or plan mode and you are watching it; the mode newer Claude
+  versions label "manual" is recorded as `default` and gets a card too. Claude's
+  plan is shown in the app for reading and approved in the terminal, where the
+  choice of how Claude carries on is made. Questions asked with Claude's picker
+  reach the app in auto mode too, and the app answers each kind the picker
+  asks: one or several choices, typed text, and a number within Claude's range,
+  with labels that contain commas or quotes reaching Claude exactly as if
+  picked in the terminal. In auto mode Claude's classifier decides tool
+  calls and the app shows nothing for them, and in `dontAsk` mode nothing is
+  asked. In `bypassPermissions` mode, or a mode Cosyncing cannot read, Claude's
+  own dialog keeps answering and the app shows a read-only note naming the mode.
+  Prompts, steering and stop sync in every mode. See
+  [Claude true sync](supported_agents/claude-true-sync.md).
+- `cosyncing setup --install-claude-mod` installs the Claude Code mod in the
+  same run, also after an earlier decline or a removal inside Claude, and
+  works with `--yes`; `--no-install-claude-mod` declines it and removes an
+  installed copy. A plain `--yes` keeps the choice you made before. Setup and
+  `cosy update` never fail because of the mod: when Claude's own plugin
+  command refuses, times out or answers with something unreadable, they
+  finish, leave the mod as it was, print the commands that complete the step,
+  and `cosy doctor` repeats them until a later run succeeds.
+- The Claude Code mod reaches a broker whose state directory was moved with
+  `COSYNCING_HOME` from any terminal, including one that does not export it,
+  because setup writes the broker's socket path into the mod it installs.
+  `COSYNCING_CLAUDE_DISABLE=1` in a terminal's environment turns the mod off
+  for that session: it does not register, hold or draw anything, and the app
+  mirrors the session read-only.
+- When an agent records a session detail this version of Cosyncing does not
+  recognize, you now get one inbox note naming it instead of the detail
+  silently missing from the transcript. It is reported once per session for
+  each kind of detail, and does not return to your unread count after you
+  have read it.
+
 - DeepSeek Harness hosts on the 0.2 contract can be signed in to.
   `cosyncing dsh connect` takes the one-time URL that `dsh web` printed for a
   host you started yourself, exchanges it, and keeps the session cookie the host
@@ -346,6 +387,34 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- A question card that had been answered, in the terminal or another app, still
+  said "Awaiting answer" above the line saying it was settled. A settled card
+  now says only that it is settled; a question still open in the terminal keeps
+  the hint.
+- A settled question card from Claude said the question was settled but not
+  how it was answered, even on the device that sent the answer. It now shows
+  the options picked, checked, and any typed answer as text, whether the
+  answer came from the app or the terminal, and keeps showing it after a
+  reload.
+- A settled question card from Claude did not say who answered it, and read
+  "Settled in your terminal or another app" even on the device that sent the
+  answer. It now says "Answered in the app", "You answered it in your
+  terminal" or that cosyncing stopped waiting, as an approval card does, and
+  keeps saying it after a reload. A question closed with nothing picked, by
+  Escape in the terminal or Stop or Dismiss in the app, says it was closed
+  without an answer.
+- The mode and model shown for a Claude session you are watching kept the
+  values from when you opened it. A turn answered by another model now
+  updates the model while the session runs. A mode changed in the terminal
+  shows from the next prompt sent in it, because Claude records the mode with
+  each prompt and not when you press Shift+Tab. After a plan is approved, the
+  mode may not show until the next prompt, because Claude may not record which
+  mode the approval chose. A subagent's model or mode is not shown as the
+  session's.
+- Opening the app at an address it has no page for, such as an old or
+  mistyped link, showed an English-only error with a Home button that led
+  nowhere. It now shows a page in your language with one button to Sessions,
+  and the bare address opens Sessions.
 - The macOS shell installers no longer stop with an `unbound variable` error
   after placing the broker in a UTF-8 locale, regardless of the selected
   language. The all-in-one installer can continue to install the desktop

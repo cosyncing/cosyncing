@@ -29,6 +29,7 @@ import {
   type InstalledResourceRecord,
 } from '../installation/install-state.ts';
 import { acquireInstallationLock, type InstallationLockHandle } from '../installation/installation-lock.ts';
+import { claudeModMarketplaceDir, claudeModRefreshEnvironment } from '../installation/claude-mod-ownership.ts';
 import type {
   DurableServiceVersionActivation,
   DurableServiceVersionBuild,
@@ -55,6 +56,13 @@ export const RELEASE_MANIFEST_SCHEMA_VERSION = 1 as const;
 export const UPGRADE_JOURNAL_SCHEMA_VERSION = 1 as const;
 export const MAX_RELEASE_MANIFEST_BYTES = 256 * 1024;
 export const MAX_RELEASE_ARTIFACT_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Ceiling on the delegated Claude mod refresh. Longer than the 15 s a version probe gets: this child
+ * reads Claude's own diagnosis and runs four `claude plugin` commands, and a slow-but-fine refresh is
+ * worth waiting for rather than reporting as a failure the operator has to chase.
+ */
+const CLAUDE_MOD_REFRESH_TIMEOUT_MS = 60_000;
 
 /** Every host target a signed manifest may name. A binary only ever selects the one matching its own build
  *  target, so a mixed linux+darwin manifest verifies unchanged on both and each host ignores the others. */
@@ -213,6 +221,14 @@ export interface UpgradeCommandResult {
   fromVersion: string;
   toVersion?: string;
   recoveredInterruptedUpgrade: boolean;
+  /**
+   * What happened to the cosyncing Claude mod, when this host has one.
+   *
+   * Recorded rather than folded into `status`: the broker upgrade itself committed and health-checked
+   * before the mod was touched, and a mod Claude refused to install must not read as a failed upgrade.
+   * Absent when there was no mod copy to refresh, which is most hosts.
+   */
+  claudeMod?: { status: 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string };
 }
 
 interface UpgradeJournal {
@@ -265,7 +281,19 @@ export interface UpgradeDependencies {
   manifestUrl?: string;
   trustedKeys?: Readonly<Record<string, string>>;
   fetch?: typeof fetch;
-  runBinary?: (executable: string, args: readonly string[]) => Promise<UpgradeBinaryResult>;
+  /**
+   * Runs the candidate's self-check and, after commit, its `claude-mod refresh`. The fourth argument is the
+   * environment the child gets; when it is omitted the child gets HOME and PATH only, which is right for the
+   * self-check and wrong for the refresh, so the refresh always passes one.
+   */
+  runBinary?: (
+    executable: string,
+    args: readonly string[],
+    timeoutMs?: number,
+    env?: Readonly<Record<string, string>>,
+  ) => Promise<UpgradeBinaryResult>;
+  /** The environment the refresh child's allowlist is taken from. Defaults to this process's own. */
+  env?: Readonly<Record<string, string | undefined>>;
   service?: UpgradeServiceController;
   verifyBrokerVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
   healthAttempts?: number;
@@ -862,21 +890,26 @@ export async function checkReleaseUpdate(
   }
 }
 
-async function defaultRunBinary(executable: string, args: readonly string[]): Promise<UpgradeBinaryResult> {
+export async function defaultRunBinary(
+  executable: string,
+  args: readonly string[],
+  timeoutMs = 15_000,
+  env?: Readonly<Record<string, string>>,
+): Promise<UpgradeBinaryResult> {
   let child: ReturnType<typeof Bun.spawn>;
   try {
     child = Bun.spawn([executable, ...args], {
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
-      env: { HOME: process.env.HOME ?? '', PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      env: env ? { ...env } : { HOME: process.env.HOME ?? '', PATH: process.env.PATH ?? '/usr/bin:/bin' },
     });
   } catch {
     return { status: 'unavailable', stdout: '', stderr: '' };
   }
   const completed = await Promise.race([
     child.exited.then((exitCode) => ({ timedOut: false as const, exitCode })),
-    Bun.sleep(15_000).then(() => ({ timedOut: true as const, exitCode: undefined })),
+    Bun.sleep(timeoutMs).then(() => ({ timedOut: true as const, exitCode: undefined })),
   ]);
   if (completed.timedOut) child.kill('SIGKILL');
   const streamText = (value: number | ReadableStream<Uint8Array> | undefined): Promise<string> =>
@@ -1245,8 +1278,102 @@ function result(
   fromVersion: string,
   recoveredInterruptedUpgrade: boolean,
   toVersion?: string,
+  claudeMod?: UpgradeCommandResult['claudeMod'],
 ): UpgradeCommandResult {
-  return { schemaVersion: 1, status, exitCode, detailCode, summary, fromVersion, recoveredInterruptedUpgrade, ...(toVersion ? { toVersion } : {}) };
+  return {
+    schemaVersion: 1,
+    status,
+    exitCode,
+    detailCode,
+    summary,
+    fromVersion,
+    recoveredInterruptedUpgrade,
+    ...(toVersion ? { toVersion } : {}),
+    ...(claudeMod ? { claudeMod: { status: claudeMod.status, detailCode: claudeMod.detailCode } } : {}),
+  };
+}
+
+/**
+ * Bring the cosyncing Claude mod along with the broker, by asking the NEW binary to do it.
+ *
+ * The marketplace copy is what Claude loads in place, and it is written from the marketplace embedded
+ * in whichever build ran setup. The OLD process cannot update it -- the copy embedded in it IS the old
+ * mod -- so the freshly switched binary runs its own `claude-mod refresh`. Gated on a copy existing at
+ * all, so a host that never installed the mod spawns nothing.
+ *
+ * Called after the journal is gone and the receipts are committed, with the upgrade's installation lock
+ * already released so the child can take its own: the broker upgrade has succeeded by then, and a mod
+ * Claude refuses to install is reported, never rolled back.
+ */
+async function refreshInstalledClaudeMod(options: {
+  home: string;
+  targetPath: string;
+  toVersion: string;
+  javaScriptCandidate: boolean;
+  runtimePath?: string;
+  runBinary: NonNullable<UpgradeDependencies['runBinary']>;
+  env: Readonly<Record<string, string | undefined>>;
+}): Promise<{ status: 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string; clause: string }> {
+  const marketplaceDir = claudeModMarketplaceDir(options.home);
+  let installedCopy = false;
+  try {
+    installedCopy = existsSync(marketplaceDir);
+  } catch {
+    installedCopy = false;
+  }
+  if (!installedCopy) {
+    return { status: 'skipped', detailCode: 'claude-mod-refresh-skipped-no-copy', clause: '' };
+  }
+  // The same launch pair the self-check used: a JavaScript bundle carries no interpreter, so it goes to
+  // the validated runtime rather than whatever `bun` PATH happens to resolve.
+  const launch = options.javaScriptCandidate && options.runtimePath
+    ? [options.runtimePath, options.targetPath]
+    : [options.targetPath];
+  // The child gets the operator's Claude-relevant environment, not the self-check's HOME and PATH. With only
+  // those two it ran `claude plugin` against the default `~/.claude` whatever CLAUDE_CONFIG_DIR said, used a
+  // bare `claude` whatever COSYNCING_CLAUDE_BIN said, and resolved its own state home from scratch. One
+  // allowlist, defined beside the mod's ownership rules, so the parent and the child agree on what passes.
+  const ran = await options.runBinary(
+    launch[0] as string,
+    [...launch.slice(1), 'claude-mod', 'refresh', '--json', '--home', options.home],
+    CLAUDE_MOD_REFRESH_TIMEOUT_MS,
+    claudeModRefreshEnvironment(options.env),
+  );
+  let parsed: { status?: unknown; detailCode?: unknown } | undefined;
+  try {
+    parsed = JSON.parse(ran.stdout) as { status?: unknown; detailCode?: unknown };
+  } catch { /* a child that printed nothing parseable answered nothing */ }
+  const reported = typeof parsed?.detailCode === 'string' ? parsed.detailCode : undefined;
+  const raw = parsed?.status;
+  if (ran.status !== 'ok') {
+    return {
+      status: 'failed',
+      detailCode: reported ?? `claude-mod-refresh-${ran.status}`,
+      clause: ` The cosyncing Claude mod was not refreshed (${reported ?? `claude-mod-refresh-${ran.status}`}); run cosyncing setup to reconcile it.`,
+    };
+  }
+  if (raw === 'refreshed') {
+    return {
+      status: 'refreshed',
+      detailCode: typeof reported === 'string' ? reported : 'claude-mod-refreshed',
+      clause: ` The cosyncing Claude mod was refreshed to ${options.toVersion}.`,
+    };
+  }
+  if (raw === 'current' || raw === 'skipped') {
+    return {
+      status: raw,
+      detailCode: typeof reported === 'string' ? reported : `claude-mod-refresh-${raw}`,
+      clause: '',
+    };
+  }
+  // The child answered ok but not with a refresh outcome: either it is an older binary without the
+  // verb (an upgrade FROM a pre-mod release cannot refresh anything) or it said something unexpected.
+  // Say which, and leave the reconciliation to setup.
+  return {
+    status: 'failed',
+    detailCode: reported ?? 'claude-mod-refresh-unparsable',
+    clause: ` The cosyncing Claude mod was not refreshed (${reported ?? 'claude-mod-refresh-unparsable'}); run cosyncing setup to reconcile it.`,
+  };
 }
 
 /** Signed-manifest, checksum-first, rollback-capable binary upgrade. */
@@ -1567,7 +1694,32 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           await dependencies.service.versions.finalize(serviceVersion);
         } catch { /* leave it for repair */ }
       }
-      return result('complete', 0, 'upgrade-complete', `Upgraded cosyncing from ${fromVersion} to ${toVersion}.`, fromVersion, recovered, toVersion);
+      // The upgrade is committed and healthy: journal gone, receipts written, candidate answering on its
+      // own port. Release the installation lock BEFORE delegating the mod refresh so the child can take
+      // its own -- one lock, one owner at a time -- and a refused refresh stays a note on a complete
+      // upgrade rather than becoming a reason to roll a healthy broker back. The release really is first:
+      // it used to sit after the refresh, so the child always found the lock held and refreshed nothing.
+      // `release()` is idempotent, so the `finally` below is a no-op on this path.
+      lock.release();
+      const modOutcome = await refreshInstalledClaudeMod({
+        home: dependencies.home,
+        targetPath,
+        toVersion,
+        javaScriptCandidate,
+        ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
+        runBinary: dependencies.runBinary ?? defaultRunBinary,
+        env: dependencies.env ?? process.env,
+      });
+      return result(
+        'complete',
+        0,
+        'upgrade-complete',
+        `Upgraded cosyncing from ${fromVersion} to ${toVersion}.${modOutcome.clause}`,
+        fromVersion,
+        recovered,
+        toVersion,
+        modOutcome.status === 'skipped' ? undefined : modOutcome,
+      );
     } catch (error) {
       if (!authorizationFenceWasActive
           && authorizationMigrationRollbackFenceActive(dependencies.home)) {

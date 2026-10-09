@@ -25,7 +25,7 @@ import { writeFileSync, appendFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CANONICAL_MESSAGE_TYPES, summarizeDiff } from '../../../adapter-api/src/index.ts';
-import { ClaudeAdapter, ClaudeObserveConnection, ClaudeResumeConnection, drainClaudeLiveStatusProbes, mapTranscript, enrichClaudeToolResult, structuredPatchToDiff } from '../src/index.ts';
+import { ClaudeAdapter, ClaudeObserveConnection, ClaudeResumeConnection, drainClaudeLiveStatusProbes, mapTranscript, enrichClaudeToolResult, readLatestPermissionMode, structuredPatchToDiff } from '../src/index.ts';
 import type { ClaudeStore } from '../src/index.ts';
 import type { AgentMessage, SessionInfo } from '../../../adapter-api/src/index.ts';
 
@@ -554,6 +554,238 @@ await (async () => {
   const second = await conn.getHistory();
   await conn.close();
   check('identity: a resync re-read keys the tailed line identically (ordinals are idempotent per line)', (second.find((m) => m.type === 'model-output') as any)?.key === tailed?.key, `resync=${(second.find((m) => m.type === 'model-output') as any)?.key} tail=${tailed?.key}`);
+})();
+
+// AskUserQuestion: the resolution carries the answer Claude recorded, in the card's rows (P-3c)
+await (async () => {
+  // The line shapes Claude writes: the call's input on the assistant row, and on the answering user
+  // row a string tool_result plus `toolUseResult: { questions, answers, annotations? }`.
+  const ask = (id: string, questions: unknown[]) => ({
+    type: 'assistant', uuid: `a-${id}`, isSidechain: false,
+    message: { id: `m-${id}`, role: 'assistant', content: [{ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions } }] },
+  });
+  const answered = (id: string, questions: unknown[], answers: Record<string, string>, isError = false) => ({
+    type: 'user', uuid: `u-${id}`, isSidechain: false, sourceToolAssistantUUID: `a-${id}`,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: isError ? 'The user dismissed the question.' : 'User has answered your questions. You can now continue with the user\'s answers in mind.', ...(isError ? { is_error: true } : {}) }] },
+    toolUseResult: isError ? 'Error: dismissed' : { questions, answers, annotations: {} },
+  });
+  const COLOUR = { question: 'Which colour?', header: 'Colour', multiSelect: false, options: [{ label: 'Amber' }, { label: 'Teal' }] };
+  const CHECKS = { question: 'Which checks?', header: 'Checks', multiSelect: true, options: [{ label: 'Lint' }, { label: 'Small, cheap' }, { label: 'Types' }] };
+  const resolvedFor = (lines: unknown[], id: string) => mapTranscript(lines as any[]).find((m: any) => m.type === 'question-resolved' && m.requestId === id) as any;
+
+  const single = resolvedFor([ask('toolu_single', [COLOUR]), answered('toolu_single', [COLOUR], { 'Which colour?': 'Teal' })], 'toolu_single');
+  check('P-3c mapper: a single choice closes with the label picked', JSON.stringify(single?.answers) === JSON.stringify([['Teal']]), JSON.stringify(single));
+
+  // Claude's picker writes a label holding ", " as a JSON string.
+  const multi = resolvedFor([ask('toolu_multi', [CHECKS]), answered('toolu_multi', [CHECKS], { 'Which checks?': 'Lint, "Small, cheap"' })], 'toolu_multi');
+  check('P-3c mapper: a multi-select closes with each label picked, a quoted one whole', JSON.stringify(multi?.answers) === JSON.stringify([['Lint', 'Small, cheap']]), JSON.stringify(multi));
+
+  const other = resolvedFor([ask('toolu_other', [COLOUR]), answered('toolu_other', [COLOUR], { 'Which colour?': 'a dark green' })], 'toolu_other');
+  check('P-3c mapper: a typed "Other" answer closes with the text typed', JSON.stringify(other?.answers) === JSON.stringify([['a dark green']]), JSON.stringify(other));
+
+  // Typed text beside picked labels, or an older build's unquoted label: never guessed into options.
+  const mixed = resolvedFor([ask('toolu_mixed', [CHECKS]), answered('toolu_mixed', [CHECKS], { 'Which checks?': 'Lint, and the slow ones' })], 'toolu_mixed');
+  check('P-3c mapper: a multi-select answer that is not all labels stays whole, as typed text', JSON.stringify(mixed?.answers) === JSON.stringify([['Lint, and the slow ones']]), JSON.stringify(mixed));
+
+  // Rows follow the card's order, not the map's; a question left unanswered is an empty row.
+  const both = resolvedFor([ask('toolu_both', [COLOUR, CHECKS]), answered('toolu_both', [COLOUR, CHECKS], { 'Which checks?': 'Types', 'Which colour?': 'Amber' })], 'toolu_both');
+  check('P-3c mapper: two questions close in the card\'s order', JSON.stringify(both?.answers) === JSON.stringify([['Amber'], ['Types']]), JSON.stringify(both));
+  const partial = resolvedFor([ask('toolu_partial', [COLOUR, CHECKS]), answered('toolu_partial', [COLOUR, CHECKS], { 'Which colour?': 'Amber' })], 'toolu_partial');
+  check('P-3c mapper: a question with no answer is an empty row', JSON.stringify(partial?.answers) === JSON.stringify([['Amber'], []]), JSON.stringify(partial));
+
+  const dismissed = resolvedFor([ask('toolu_dismissed', [COLOUR]), answered('toolu_dismissed', [COLOUR], {}, true)], 'toolu_dismissed');
+  check('P-3c mapper: a dismissed question closes with no answers', !!dismissed && !('answers' in dismissed), JSON.stringify(dismissed));
+})();
+
+// observe tail: the mode and model chips follow the running session, not the attach-time reading
+await (async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ca-claude-facts-'));
+  const file = join(dir, 'sess-facts.jsonl');
+  const HAIKU = 'claude-haiku-4-5-20251001';
+  const SONNET = 'claude-sonnet-5-5';
+  const assistant = (uuid: string, id: string, model: string, text: string, sidechain = false) => ({
+    type: 'assistant', uuid, isSidechain: sidechain, message: { id, model, role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] },
+  });
+  writeFileSync(file, [
+    { type: 'permission-mode', permissionMode: 'default', sessionId: 'facts' },
+    { type: 'user', uuid: 'f1', isSidechain: false, message: { role: 'user', content: 'go' } },
+    assistant('f2', 'msg_F1', HAIKU, 'first'),
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+  const info: any = { id: 'x', tool: 'claude', title: 't', cwd: dir, status: 'idle', attachMode: 'observe', model: HAIKU, currentModel: { providerID: 'anthropic', modelID: HAIKU, label: 'Haiku 4.5' } };
+  const conn = new ClaudeObserveConnection(file, info);
+  const history = await conn.getHistory();
+  const live: any[] = [];
+  conn.subscribe((m) => live.push(m));
+  const append = (...rows: unknown[]) => appendFileSync(file, rows.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const until = async (ok: () => boolean) => {
+    for (let i = 0; i < 40 && !ok(); i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  const sessionInfo = () => live.filter((m) => m.type === 'metadata-update' && m.key === 'sessionInfo');
+  const said = (text: string) => live.some((m) => m.type === 'model-output' && m.text === text);
+
+  check('facts: attach reads the mode the transcript last recorded', info.currentMode === 'default', String(info.currentMode));
+  check('facts: a history read draws no chip update', !history.some((m: any) => m.type === 'metadata-update' && m.key === 'sessionInfo'), JSON.stringify(history.filter((m: any) => m.type === 'metadata-update')));
+
+  // Shift+Tab in the terminal.
+  append({ type: 'permission-mode', permissionMode: 'plan', sessionId: 'facts' });
+  await until(() => sessionInfo().length > 0);
+  const modeUpdates = sessionInfo().filter((m) => 'currentMode' in m.value);
+  check('P-7 facts: a permission-mode row on the tail is one update with the new mode', modeUpdates.length === 1 && modeUpdates[0].value.currentMode === 'plan' && info.currentMode === 'plan', JSON.stringify(sessionInfo()));
+
+  // A subagent answers on another model, then the main chain answers on Sonnet.
+  append(assistant('f3', 'msg_S1', 'claude-opus-4-8', 'from a subagent', true), assistant('f4', 'msg_F2', SONNET, 'main on sonnet'));
+  await until(() => said('main on sonnet'));
+  const modelUpdates = sessionInfo().filter((m) => 'currentModel' in m.value);
+  check('P-7 facts: a main-chain row on another model is one update naming it', modelUpdates.length === 1 && modelUpdates[0].value.currentModel?.modelID === SONNET && modelUpdates[0].value.model === SONNET, JSON.stringify(modelUpdates));
+  check('P-7 facts: a sidechain row on another model is no update', !modelUpdates.some((m) => m.value.currentModel?.modelID === 'claude-opus-4-8') && info.currentModel?.modelID === SONNET, JSON.stringify(modelUpdates));
+  check('P-7 facts: the update carries the label the chip reads, and keeps the provider', modelUpdates[0]?.value.currentModel?.label === 'Sonnet 5.5' && modelUpdates[0]?.value.currentModel?.providerID === 'anthropic', JSON.stringify(modelUpdates[0]?.value));
+
+  // The same mode again and the same model again change nothing.
+  const before = sessionInfo().length;
+  append({ type: 'permission-mode', permissionMode: 'plan', sessionId: 'facts' }, assistant('f5', 'msg_F3', SONNET, 'again'), assistant('f6', 'msg_F4', '<synthetic>', 'api error'));
+  await until(() => said('again'));
+  await new Promise((r) => setTimeout(r, 150));
+  check('P-7 facts: a repeated mode, a repeated model, and a synthetic row draw no update', sessionInfo().length === before, JSON.stringify(sessionInfo().slice(before)));
+
+  // A resync replays the file, and still draws no chip update.
+  const replay = await conn.getHistory();
+  await conn.close();
+  check('P-7 facts: a history replay after the change draws no chip update', !replay.some((m: any) => m.type === 'metadata-update' && m.key === 'sessionInfo'), JSON.stringify(replay.filter((m: any) => m.type === 'metadata-update')));
+})();
+
+// P-9: the mode is read where Claude 2.1.294 writes it. Row shapes are that build's: keys and types
+// from a real transcript, content invented.
+const P9 = (() => {
+  let n = 0;
+  const base = (extra: Record<string, unknown>) => ({
+    parentUuid: `p9-${n}`, isSidechain: false, userType: 'external', entrypoint: 'cli', cwd: '/work',
+    sessionId: 'p9-session', version: '2.1.294', gitBranch: 'main', timestamp: new Date(1_791_400_000_000 + (n += 1) * 1000).toISOString(),
+    uuid: `p9-${n}`, ...extra,
+  });
+  return {
+    /** A prompt the person sent: the only row that carries the live mode on every turn. */
+    prompt: (mode: string, text = 'go') => base({
+      type: 'user', promptId: `pr-${n}`, promptSource: 'typed', turnOrigin: 'human', turnPosition: { promptIndex: n, turnIndex: n },
+      permissionMode: mode, message: { role: 'user', content: text },
+    }),
+    /** The title block's mode row, written beside `last-prompt`, and not every turn. */
+    titleMode: (mode: string) => ({ type: 'permission-mode', permissionMode: mode, sessionId: 'p9-session' }),
+    /** A tool's result: never carries a mode. */
+    toolResult: (toolUseId: string) => base({
+      type: 'user', promptId: `pr-${n}`, session_id: 'p9-session', slug: 'p9', sourceToolAssistantUUID: `a-${n}`,
+      permissionDecision: { decision: 'accept', reasonType: 'mode', source: 'config' },
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'done' }] },
+      toolUseResult: { type: 'text', content: 'done' },
+    }),
+    /** The model asks to leave plan mode. */
+    exitPlanCall: (toolUseId: string) => base({
+      type: 'assistant', requestId: `req-${n}`,
+      message: { id: `msg_${n}`, role: 'assistant', type: 'message', model: 'claude-haiku-5-5', stop_reason: 'tool_use',
+        content: [{ type: 'tool_use', id: toolUseId, name: 'ExitPlanMode', input: { plan: 'the plan', planFilePath: '/plans/p.md' }, caller: { type: 'direct' } }] },
+    }),
+    /** The plan approved: the session leaves plan mode, and nothing records for which mode. */
+    exitPlanApproved: (toolUseId: string) => base({
+      type: 'user', promptId: `pr-${n}`, session_id: 'p9-session', slug: 'p9', sourceToolAssistantUUID: `a-${n}`,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'User has approved your plan.' }] },
+      toolUseResult: { plan: 'the plan', isAgent: false, filePath: '/plans/p.md' },
+    }),
+    /** The plan rejected: still in plan mode. */
+    exitPlanRejected: (toolUseId: string) => base({
+      type: 'user', promptId: `pr-${n}`, session_id: 'p9-session', slug: 'p9', sourceToolAssistantUUID: `a-${n}`, toolDenialKind: 'user-rejected',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'The user rejected the plan.', is_error: true }] },
+      toolUseResult: 'User rejected tool use',
+    }),
+    /** A subagent's prompt. This build writes these in the subagent's own file and with no mode; this
+     *  one carries one anyway, because a subagent's mode is never the session's. */
+    sidechainPrompt: (mode: string) => base({
+      type: 'user', isSidechain: true, agentId: 'agent-1', promptId: `pr-${n}`, slug: 'p9',
+      permissionMode: mode, message: { role: 'user', content: 'subagent task' },
+    }),
+  };
+})();
+
+await (async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ca-claude-p9-'));
+  const read = (name: string, rows: unknown[]) => {
+    const file = join(dir, `${name}.jsonl`);
+    writeFileSync(file, rows.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    return readLatestPermissionMode(file);
+  };
+  check('P-9 reader: a prompt row newer than the title block\'s mode is the mode',
+    read('prompt-after-title', [P9.titleMode('default'), P9.prompt('default'), P9.prompt('auto')]) === 'auto');
+  check('P-9 reader: a title-block row newer than a prompt is the mode',
+    read('title-after-prompt', [P9.prompt('auto'), P9.titleMode('default')]) === 'default');
+  check('P-9 reader: a tool result says nothing about the mode',
+    read('tool-result', [P9.prompt('acceptEdits'), P9.toolResult('toolu_r1')]) === 'acceptEdits');
+  check('P-9 reader: a subagent\'s row is not the session\'s mode',
+    read('sidechain', [P9.prompt('default'), P9.sidechainPrompt('bypassPermissions')]) === 'default');
+  check('P-9 reader: an approved plan leaves the mode unknown, not plan',
+    read('plan-approved', [P9.prompt('plan'), P9.exitPlanCall('toolu_plan1'), P9.exitPlanApproved('toolu_plan1')]) === undefined);
+  check('P-9 reader: a rejected plan keeps plan',
+    read('plan-rejected', [P9.prompt('plan'), P9.exitPlanCall('toolu_plan2'), P9.exitPlanRejected('toolu_plan2')]) === 'plan');
+  check('P-9 reader: the next prompt after an approved plan names the mode again',
+    read('plan-then-prompt', [P9.prompt('plan'), P9.exitPlanCall('toolu_plan3'), P9.exitPlanApproved('toolu_plan3'), P9.prompt('acceptEdits')]) === 'acceptEdits');
+  check('P-9 reader: a subagent\'s plan approval is not the session\'s',
+    read('sidechain-plan', [P9.prompt('plan'), { ...P9.exitPlanCall('toolu_plan4'), isSidechain: true }, { ...P9.exitPlanApproved('toolu_plan4'), isSidechain: true }]) === 'plan');
+})();
+
+// P-9 on the live tail: the chip follows the rows the gate reads, on the live connection only.
+await (async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ca-claude-p9-tail-'));
+  const file = join(dir, 'sess-p9.jsonl');
+  writeFileSync(file, [P9.titleMode('default'), P9.prompt('acceptEdits')].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const info: any = { id: 'x', tool: 'claude', title: 't', cwd: dir, status: 'idle', attachMode: 'observe' };
+  const conn = new ClaudeObserveConnection(file, info);
+  check('P-9 attach: the seed reads the prompt row, the newest reading', info.currentMode === 'acceptEdits', String(info.currentMode));
+  const history = await conn.getHistory();
+  const live: any[] = [];
+  conn.subscribe((m) => live.push(m));
+  const append = (...rows: unknown[]) => appendFileSync(file, rows.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const settle = () => new Promise((r) => setTimeout(r, 250));
+  const modeUpdates = () => live.filter((m) => m.type === 'metadata-update' && m.key === 'sessionInfo' && 'currentMode' in m.value);
+
+  append(P9.prompt('plan', 'plan it'));
+  await settle();
+  check('P-9 tail: a prompt row in a new mode is one chip update', modeUpdates().length === 1 && modeUpdates()[0].value.currentMode === 'plan' && info.currentMode === 'plan',
+    JSON.stringify(modeUpdates()));
+  append(P9.toolResult('toolu_t1'));
+  await settle();
+  check('P-9 tail: a tool-result row is none', modeUpdates().length === 1, JSON.stringify(modeUpdates()));
+  append(P9.sidechainPrompt('bypassPermissions'));
+  await settle();
+  check('P-9 tail: a sidechain row is none', modeUpdates().length === 1 && info.currentMode === 'plan', JSON.stringify(modeUpdates()));
+  append(P9.exitPlanCall('toolu_t2'), P9.exitPlanRejected('toolu_t2'));
+  await settle();
+  check('P-9 tail: a rejected plan keeps plan, with no update', modeUpdates().length === 1 && info.currentMode === 'plan', JSON.stringify(modeUpdates()));
+  append(P9.exitPlanCall('toolu_t3'), P9.exitPlanApproved('toolu_t3'));
+  await settle();
+  const cleared = modeUpdates()[1];
+  check('P-9 tail: an approved plan clears the chip: one update with no mode', modeUpdates().length === 2 && cleared?.value.currentMode === undefined && !('currentMode' in info),
+    JSON.stringify(modeUpdates()));
+  append(P9.prompt('acceptEdits', 'carry on'));
+  await settle();
+  check('P-9 tail: the next prompt names the mode again', modeUpdates().length === 3 && modeUpdates()[2].value.currentMode === 'acceptEdits' && info.currentMode === 'acceptEdits',
+    JSON.stringify(modeUpdates()));
+  const replay = await conn.getHistory();
+  await conn.close();
+  check('P-9 tail: a history read or replay draws no chip update',
+    ![...history, ...replay].some((m: any) => m.type === 'metadata-update' && m.key === 'sessionInfo'));
+
+  // The plan dialog was already open when the app attached: the call is history, its answer is tail.
+  const file2 = join(dir, 'sess-p9-open.jsonl');
+  writeFileSync(file2, [P9.prompt('plan'), P9.exitPlanCall('toolu_open')].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const info2: any = { id: 'y', tool: 'claude', title: 't', cwd: dir, status: 'idle', attachMode: 'observe' };
+  const conn2 = new ClaudeObserveConnection(file2, info2);
+  await conn2.getHistory();
+  const live2: any[] = [];
+  conn2.subscribe((m) => live2.push(m));
+  appendFileSync(file2, JSON.stringify(P9.exitPlanApproved('toolu_open')) + '\n');
+  await settle();
+  await conn2.close();
+  check('P-9 tail: a plan approved after attach, for a call made before it, clears the chip',
+    info2.currentMode === undefined && live2.some((m) => m.type === 'metadata-update' && m.key === 'sessionInfo' && 'currentMode' in m.value && m.value.currentMode === undefined),
+    JSON.stringify(live2.filter((m) => m.type === 'metadata-update')));
 })();
 
 // ── 2. real-data smoke (read-only; no content printed) ──────────────────────────

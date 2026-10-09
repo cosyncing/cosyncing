@@ -8,6 +8,7 @@ import { OPENCODE_SHIM_RC_RESOURCE_IDS, OPENCODE_SHIM_RESOURCE_ID } from '@cosyn
 import {
   LEGACY_TAILSCALE_RESOURCE_ID,
 } from './legacy-connectivity-migration.ts';
+import { CLAUDE_MOD_RESOURCE_ID } from './claude-mod-ownership.ts';
 
 /** Every receipt id emitted by setup and handled by uninstall. */
 export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
@@ -27,6 +28,9 @@ export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
   'pi-bridge',
   'omp-bridge',
   LEGACY_TAILSCALE_RESOURCE_ID,
+  // One receipt for the Claude mod's marketplace directory. The two Claude settings keys the install
+  // writes are NOT receipts: they belong to Claude, and uninstall reverses them with Claude's own CLI.
+  CLAUDE_MOD_RESOURCE_ID,
   ...Object.values(AGENT_SKILL_RESOURCE_IDS),
   OPENCODE_SHIM_RESOURCE_ID,
   ...Object.values(OPENCODE_SHIM_RC_RESOURCE_IDS),
@@ -52,6 +56,12 @@ export interface InstalledResourceRecord {
     originalSha256?: string;
     marker?: string;
     backupPath?: string;
+    /**
+     * Relative paths `installedSha256` covers, for a resource that is a directory of files. The proof is
+     * over the files the install wrote, so a later build that adds or drops one can still prove the
+     * older copy was cosyncing's.
+     */
+    files?: string[];
   };
 }
 

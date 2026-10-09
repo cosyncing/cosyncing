@@ -192,7 +192,8 @@ class ScriptedPresenter implements SetupPresenter {
   lastPlan?: SetupPlan;
 
   constructor(readonly options: {
-    cancelAt?: 'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'service' | 'quota' | 'confirm';
+    cancelAt?:
+      'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'claudeMod' | 'service' | 'quota' | 'confirm';
     managed?: boolean;
     service?: SetupServiceChoice;
     lingering?: boolean;
@@ -200,6 +201,10 @@ class ScriptedPresenter implements SetupPresenter {
     apply?: boolean;
     skill?: boolean;
     opencodeShim?: boolean;
+    /** Defaults to the product default (yes) so a fixture that says nothing behaves like an operator who
+     *  took the default. A host with no Claude still plans nothing, so this only bites where the fixture
+     *  gives the host a Claude. */
+    claudeMod?: boolean;
     language?: SetupLanguage;
     cancelLanguage?: boolean;
     legacyPi?: boolean;
@@ -234,6 +239,10 @@ class ScriptedPresenter implements SetupPresenter {
   async confirmOpencodeShim(): Promise<SetupPromptResult<boolean>> {
     this.calls.push('opencode-shim');
     return this.options.cancelAt === 'opencodeShim' ? SETUP_PROMPT_CANCELLED : this.options.opencodeShim ?? true;
+  }
+  async confirmClaudeMod(): Promise<SetupPromptResult<boolean>> {
+    this.calls.push('claude-mod');
+    return this.options.cancelAt === 'claudeMod' ? SETUP_PROMPT_CANCELLED : this.options.claudeMod ?? true;
   }
   async chooseService(): Promise<SetupPromptResult<SetupServiceChoice>> {
     this.calls.push('service');
@@ -302,6 +311,20 @@ function setupOptions(root: string, presenter: SetupPresenter, overrides: Record
     ...overrides,
   } as Parameters<typeof runSetup>[0];
 }
+
+/**
+ * A host with no `claude` on PATH, for the partial inspections these fixtures hand straight to a presenter.
+ *
+ * The mod resolver reads `support.supported` before it decides whether to ask anything, so a fixture that
+ * leaves the field out does not mean "unsupported", it means the presenter crashes. This says unsupported.
+ */
+const claudeModSkipped = {
+  status: 'skipped' as const,
+  support: { supported: false, skipReason: 'missing-cli' as const, minimumVersion: '2.1.288' },
+  copy: { dir: '', status: 'missing' as const, expectedSha256: '' },
+  settings: { settingsPath: '', status: 'absent' as const },
+  marketplaceDir: '',
+};
 
 function supportedPiFixture(machine: string): { context: ReturnType<typeof contextFor>; bridge: string } {
   const packageRoot = join(machine, 'pi-package');
@@ -684,7 +707,7 @@ try {
       `${setup.status}: ${setup.summary} ${JSON.stringify(setup.issueCodes ?? [])}`);
     check('darwin setup never blocks on, or explains itself with, systemd wording',
       !JSON.stringify(setup).toLowerCase().includes('systemd')
-        && presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,quota,plan,confirm,complete',
+        && presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,claude-mod,service,quota,plan,confirm,complete',
       presenter.calls.join(','));
   }
 
@@ -828,17 +851,31 @@ try {
       setup.status === 'complete' && setup.exitCode === 0 && setup.summary.includes('No supported coding agents') && install.committed,
       `${setup.status}: ${setup.summary}`);
     check('required managed acknowledgement precedes every optional choice and mutation confirmation',
-      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,quota,plan,confirm,complete',
+      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,claude-mod,service,quota,plan,confirm,complete',
       presenter.calls.join(','));
     check('setup creates separate valid owner-only credentials',
       inspectBrokerToken(join(home, 'secrets', 'broker-token')).status === 'ok'
         && inspectPiIntegration(join(home, 'secrets', 'pi-integration.json')).status === 'ok'
         && isOwnerOnlyFile(join(home, 'secrets', 'broker-token')));
+    // The no-mode-picker, no-hook guard, kept honest about the Claude mod. What it still forbids is a per-agent MODE PICKER and a Claude
+    // HOOK: setup writes no mode key and no hook key. What it permits, by name, is at most one Claude key:
+    // `claudeModRequested`, the mod's own consent, because that mod is a setup-installed thing and a
+    // decline has to be durable. Naming the one allowance is the point; if a second Claude key appears,
+    // this fails again.
+    //
+    // This fixture has no `claude` on PATH, so the mod was never OFFERED and no consent answer exists to
+    // store. The old assertion here was `claudeModRequested === true`, a false green: the real presenter
+    // answers `false` for an unsupported host, and persisting that as a decline meant a later
+    // `claude update` found a decision nobody had made. U3 made "not offered" read as "absent", so that
+    // is what is asserted. The supported-host case, where the answer IS stored, is covered by
+    // test:claude-mod-setup ("an unsupported host..." / "the consent is recorded...").
     check('setup state has no per-agent mode picker and keeps independent consent fields',
       state.agents?.codex === false && state.quotaWarningsEnabled === true
         && state.serviceChoice === 'foreground' && !('tailscaleServeRequested' in state)
         && state.agentSkillRequested === true
-        && !Object.keys(state).some((key) => /mode|claude|hook/i.test(key)));
+        && !('claudeModRequested' in state)
+        && !Object.keys(state).some((key) => /mode|claude|hook/i.test(key)),
+      JSON.stringify(state));
     const skillTargets = agentSkillTargets(contextFor(machine));
     // R10 reversed the R8 decision: consent now provisions a Tokdash when none is running. Provisioning is
     // still NOT part of the transaction — no plan action, no install receipt — because it must never roll a
@@ -864,7 +901,11 @@ try {
         && !AGENT_SKILL_SOURCE.includes('- Claude Code: `SendUserFile`')
         && AGENT_SKILL_SOURCE.includes('including Claude Code and Codex')
         && AGENT_SKILL_SOURCE.includes('Do not place files in `<cwd>/.cosyncing/outbox/`'));
-    check('setup never edits Claude settings', readFileSync(claudeSettings, 'utf8') === '{"preserve":true}\n');
+    // Scoped to this host on purpose: with no `claude` on PATH the mod is never offered, so nothing may
+    // touch Claude's settings. On a host that is offered the mod and consents, Claude's own commands add
+    // two settings keys; test:claude-mod-setup covers that side.
+    check('setup with no claude on PATH leaves Claude settings untouched',
+      readFileSync(claudeSettings, 'utf8') === '{"preserve":true}\n');
     check('successful setup removes the pending transaction journal', !readSetupTransactionJournal(home));
 
     const before = treeSnapshot(home);
@@ -1063,8 +1104,14 @@ try {
       skillChecks.length === 2
         && skillChecks.every((candidate) => candidate.status === 'pass'
           && candidate.detailCode === 'agent-skill-present'));
+    // Scoped to what the planner actually mutates. This used to regex the whole serialized plan, which
+    // stopped meaning anything the moment the plan gained a Claude-shaped FIELD: `claudeModIntent: 'none'`
+    // sits early in the JSON, so the old pattern matched any later word like "install" against it and the
+    // check could only ever go red or rubber-stamp. Action ids and the plan rows are the mutations.
     check('committed planner emits no Claude, hook, or control-mode mutation',
-      plan.noOp && !JSON.stringify(plan).match(/claude.*(write|install)|hook|mode.?picker/i));
+      plan.noOp
+        && !plan.actions.some((action) => /claude|hook|mode/i.test(action.id))
+        && !plan.mutationSummary.some((row) => /claude.*(write|install)|hook|mode.?picker/i.test(row)));
   }
 
   // Tokdash auto-provisioning (R10). Consent means "poll a Tokdash, and set one up if there is none". The
@@ -3569,7 +3616,11 @@ try {
     check('supported Pi installs the exact packaged bridge under the one global acknowledgement',
       installed.status === 'complete' && existsSync(bridge)
         && presenter.calls.filter((call) => call === 'ack').length === 1
-        && !presenter.calls.some((call) => /legacy|mode|claude|hook/.test(call)));
+        // One acknowledgement, and no per-agent mode picker, no hook prompt, and no legacy-migration
+        // prompt. The Claude mod's own consent is asked once and is not a hook: it is a setup-offered,
+        // Claude-installed mod, so its absence here used to be the point and now would be a regression.
+        && !presenter.calls.some((call) => /legacy|mode|hook/.test(call))
+        && presenter.calls.filter((call) => call === 'claude-mod').length === 1);
   }
 
   // The outro: state directory, only the endpoints the applied plan actually produced, and the shared token
@@ -3781,6 +3832,15 @@ try {
       codexStandaloneWarning: ['curl -fsSL https://chatgpt.com/codex/install.sh | sh'],
       outroShortCommand: ['cosy', ['cosy status', 'cosy doctor', 'cosy update']],
       planStep: [{ kind: 'credentials' }],
+      // A real reason, because the default single argument object matches no case in the switch, and both
+      // catalogs would then render `undefined` — equal in both languages, which proves nothing.
+      claudeModSkipReason: ['missing-cli', '2.1.288'],
+      claudeModOwnershipSkip: ['receipt-invalid', '/h/claude-mod/marketplace'],
+      claudeModOutcome: [{
+        schemaVersion: 1, at: '2026-07-17T12:00:00.000Z', operation: 'install', status: 'failed',
+        detailCode: 'claude-mod-install-refused', failureCode: 'policy_blocked',
+        commands: ['cosyncing setup --install-claude-mod'],
+      }],
       resultSummary: ['complete', { binary: 'cosyncing', stage: 's' }],
     };
     const render = (messages: typeof english, key: keyof typeof english): string => {
@@ -3809,6 +3869,9 @@ try {
       { kind: 'agent-skill-refresh' },
       { kind: 'agent-skill-remove' },
       { kind: 'opencode-shim' },
+      { kind: 'claude-mod', intent: 'install', marketplaceDir: '/h/.cosyncing/claude-mod/marketplace', refreshing: false },
+      { kind: 'claude-mod', intent: 'install', marketplaceDir: '/h/.cosyncing/claude-mod/marketplace', refreshing: true },
+      { kind: 'claude-mod', intent: 'remove', marketplaceDir: '/h/.cosyncing/claude-mod/marketplace', refreshing: false },
       { kind: 'service-install', definitionPath: '/h/.config/systemd/user/cosyncing.service' },
       { kind: 'service-remove', provider: 'systemd', product: 'cosyncing' },
       { kind: 'binary-install', version: '0.1.0', path: '/h/bin/cosyncing' },
@@ -3826,6 +3889,20 @@ try {
     const shared = keys.filter((key) => render(english, key) === render(chinese, key));
     check('the Chinese catalog is real copy, not the English strings echoed back',
       shared.length === 0, shared.join(','));
+
+    // Every skip reason has to be sayable in both languages, and the floor has to actually appear in the
+    // one that names a floor. A reason with no string renders as `undefined` in the wizard, which is the
+    // failure mode a single sampled key cannot see.
+    const everyReason = ['missing-cli', 'below-minimum-version', 'native-windows', 'org-policy'] as const;
+    check('every Claude mod skip reason renders real copy in both languages, floor included',
+      everyReason.every((reason) => {
+        const en = english.claudeModSkipReason(reason, '2.1.288');
+        const zh = chinese.claudeModSkipReason(reason, '2.1.288');
+        return en.length > 0 && zh.length > 0 && en !== zh && en !== 'undefined' && zh !== 'undefined';
+      })
+        && english.claudeModSkipReason('below-minimum-version', '2.1.288').includes('2.1.288')
+        && chinese.claudeModSkipReason('below-minimum-version', '2.1.288').includes('2.1.288'),
+      everyReason.map((reason) => english.claudeModSkipReason(reason, '2.1.288')).join(' | '));
 
     // The English catalog is the reference text, so these are byte-exact. Changing one is a deliberate copy
     // change; adding a translation must never move them.
@@ -4016,6 +4093,9 @@ try {
   {
     const shimInspection = (requested: boolean | undefined): SetupInspection => ({
       setupState: { schemaVersion: 1, ...(requested === undefined ? {} : { opencodeShimRequested: requested }) },
+      // A host with no `claude` on PATH, which is what these partial fixtures describe. Without it the
+      // mod resolver would read a field the fixture never set.
+      claudeMod: claudeModSkipped,
     } as unknown as SetupInspection);
     const presenterFor = (opencodeShim: OpencodeShimSignal): SetupPresenter =>
       createNonInteractiveSetupPresenter({ write: () => {} }, {
@@ -4054,6 +4134,7 @@ try {
         schemaVersion: 1,
         ...(requested === undefined ? {} : { opencodeShimRequested: requested }),
       },
+      claudeMod: claudeModSkipped,
     } as unknown as SetupInspection);
 
     // intendedChoices resolves the flag intent without prompting (the seam the early-return uses).
@@ -4271,6 +4352,7 @@ try {
         systemdLingeringRequested: false,
         agentSkillRequested: false,
         opencodeShimRequested: false,
+        claudeModRequested: true,
         quotaWarningsEnabled: false,
         language: 'en',
       },
@@ -4290,6 +4372,7 @@ try {
       },
       agentSkills: [],
       opencodeShim: { shimPath: join(home, 'shell', 'opencode-shim.sh'), shimStatus: 'missing', rc: [] },
+      claudeMod: claudeModSkipped,
       // The service owns the port, exactly as it does on a real host mid-upgrade.
       portStatus: 'owned-running',
       pipxAvailable: false,

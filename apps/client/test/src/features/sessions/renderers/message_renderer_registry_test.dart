@@ -1231,6 +1231,272 @@ void main() {
         );
       });
     });
+
+    group("a synced Claude session's approval card", () {
+      // The card is the only place a two-seat session can say what it did. The
+      // mode it was raised in, and the rule that let a prompt fall back to the
+      // terminal, both arrive as codes and become copy here.
+      AgentMessage card({
+        String? permissionMode,
+        String? releaseReason,
+        bool readOnly = false,
+      }) => AgentMessage.fromJson({
+        'type': 'permission-request',
+        'requestId': 'perm-sync-1',
+        'title': 'Edit src/index.ts',
+        if (permissionMode != null) 'permissionMode': permissionMode,
+        if (releaseReason != null) 'releaseReason': releaseReason,
+        if (readOnly) 'readOnly': true,
+      });
+
+      testWidgets('names the mode it was raised in', (tester) async {
+        await _pumpRenderer(tester, card(permissionMode: 'acceptEdits'));
+
+        expect(find.text('Claude was in acceptEdits mode'), findsOneWidget);
+      });
+
+      testWidgets('says nothing about a mode it did not see', (tester) async {
+        await _pumpRenderer(tester, card());
+
+        expect(
+          find.byKey(const Key('transcript-message-note')),
+          findsNothing,
+        );
+      });
+
+      testWidgets('an unread mode names no mode', (tester) async {
+        // `unknown` is a real reading: the mode row had not been written. It
+        // is not a mode the user chose, so putting it in the sentence "Claude
+        // was in unknown mode" would be a claim about their terminal.
+        await _pumpRenderer(tester, card(permissionMode: 'unknown'));
+
+        expect(find.textContaining('unknown mode'), findsNothing);
+        expect(
+          find.byKey(const Key('transcript-message-note')),
+          findsNothing,
+        );
+      });
+
+      testWidgets('a released prompt is not offered as a request', (
+        tester,
+      ) async {
+        await _pumpRenderer(
+          tester,
+          card(
+            permissionMode: 'bypassPermissions',
+            releaseReason: 'mode:bypassPermissions',
+            readOnly: true,
+          ),
+        );
+
+        expect(find.text('Approval left to your terminal'), findsOneWidget);
+        expect(
+          find.textContaining('bypassing permission checks'),
+          findsOneWidget,
+        );
+        // The ordinary request title is gone: this card has nothing to request.
+        expect(find.text('Permission request'), findsNothing);
+        // And the title is the card's one account of where the prompt is: a
+        // second "Awaiting permission response" beside it stayed on the card,
+        // wrong, after the terminal settled the prompt.
+        expect(
+          find.textContaining('Awaiting permission response'),
+          findsNothing,
+        );
+      });
+
+      // Every released card stands for a dialog open in the terminal. A
+      // reason that says there was nothing to approve contradicts the card it
+      // is printed on (CX1).
+      for (final reason in const [
+        'mode:bypassPermissions',
+        'plan:terminal-only',
+      ]) {
+        testWidgets('the $reason reason leaves the prompt to the terminal, '
+            'and never says there was nothing to approve', (tester) async {
+          await _pumpRenderer(
+            tester,
+            card(releaseReason: reason, readOnly: true),
+          );
+
+          expect(find.textContaining('your terminal.'), findsOneWidget);
+          expect(find.textContaining('nothing to approve'), findsNothing);
+          expect(find.textContaining('nothing was ever asked'), findsNothing);
+        });
+      }
+
+      for (final reason in const <String, String>{
+        'mode:bypassPermissions': 'bypassing permission checks',
+        'plan:terminal-only': "This is Claude's plan",
+        'mode:unknown': 'could not be read',
+        'viewer:none': 'No cosyncing seat could answer',
+        'killSwitch': 'switched off',
+        'band': 'You answered it in your terminal',
+        'expired': 'left this one',
+      }.entries) {
+        testWidgets('the ${reason.key} reason is told in words', (
+          tester,
+        ) async {
+          await _pumpRenderer(
+            tester,
+            card(releaseReason: reason.key, readOnly: true),
+          );
+
+          expect(
+            find.textContaining(reason.value),
+            findsAtLeastNWidgets(1),
+          );
+        });
+      }
+
+      // Auto mode and dontAsk draw no card at all (AM2). A code for either,
+      // or the retired plan-mode one, is a reason the app has no sentence for.
+      for (final retired in const ['mode:auto', 'mode:dontAsk', 'mode:plan']) {
+        testWidgets('the retired $retired reason is told in no words', (
+          tester,
+        ) async {
+          await _pumpRenderer(
+            tester,
+            card(releaseReason: retired, readOnly: true),
+          );
+
+          expect(find.textContaining('auto mode'), findsNothing);
+          expect(find.textContaining("don't-ask"), findsNothing);
+          expect(find.textContaining('planning'), findsNothing);
+        });
+      }
+
+      testWidgets('an unrecognized reason keeps the ordinary card', (
+        tester,
+      ) async {
+        await _pumpRenderer(
+          tester,
+          card(releaseReason: 'futureRule', readOnly: true),
+        );
+
+        // It stays read-only, which the wire said, and invents no explanation
+        // the broker never gave.
+        expect(find.text('Permission request'), findsOneWidget);
+        expect(
+          find.textContaining('Awaiting permission response'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('an actionable card is never dressed as a released one', (
+        tester,
+      ) async {
+        // A card the app CAN answer must not borrow the waiting card's words,
+        // or the user leaves a decision sitting under copy that says it is
+        // somebody else's.
+        await _pumpRenderer(
+          tester,
+          card(permissionMode: 'default', releaseReason: 'band'),
+        );
+
+        expect(find.text('Permission request'), findsOneWidget);
+        expect(find.text('Approval left to your terminal'), findsNothing);
+        expect(find.text('Claude was in default mode'), findsOneWidget);
+      });
+    });
+
+    group('steering row', () {
+      // A message the app sent into a running turn. It is neither the user's
+      // own keystrokes at that terminal nor an agent event, and both of those
+      // mistakes were available to the renderer.
+      AgentMessage steered({
+        String text = 'use the staging database',
+        String? source = 'cosyncing-claude',
+      }) => AgentMessage.fromJson({
+        'type': 'event',
+        'name': kSteeringMessageEvent,
+        'payload': {
+          'text': text,
+          if (source != null) 'source': source,
+        },
+      });
+
+      const toggle = Key('transcript-steering-toggle');
+
+      testWidgets('is labelled and collapsed', (tester) async {
+        await _pumpRenderer(tester, steered());
+
+        expect(find.text('Sent from the app mid-turn'), findsOneWidget);
+        expect(
+          find.textContaining('use the staging database'),
+          findsNothing,
+        );
+      });
+
+      testWidgets('opens to the message and the route it came by', (
+        tester,
+      ) async {
+        await _pumpRenderer(tester, steered());
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('use the staging database'), findsOneWidget);
+        expect(find.text('cosyncing-claude'), findsOneWidget);
+
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('use the staging database'),
+          findsNothing,
+        );
+      });
+
+      testWidgets('is not presented as a message typed at the terminal', (
+        tester,
+      ) async {
+        await _pumpRenderer(tester, steered());
+
+        // The user bubble is right-aligned and says "you". A steering row is
+        // left-aligned chrome, and no user-message affordance appears for it.
+        expect(
+          find.byKey(const Key('transcript-steering-toggle')),
+          findsOneWidget,
+        );
+        final align = tester.widget<Align>(find.byType(Align).first);
+        expect(align.alignment, Alignment.centerLeft);
+      });
+
+      testWidgets('an empty steer falls back to the generic event card', (
+        tester,
+      ) async {
+        await _pumpRenderer(tester, steered(text: '   '));
+
+        expect(find.byKey(toggle), findsNothing);
+        expect(find.text('Event'), findsOneWidget);
+      });
+
+      testWidgets('the disclosure is reachable and announces its state', (
+        tester,
+      ) async {
+        final semantics = tester.ensureSemantics();
+        await _pumpRenderer(tester, steered());
+
+        expect(
+          tester.getSize(find.byKey(toggle)).height,
+          greaterThanOrEqualTo(40.0),
+        );
+        expect(
+          tester.getSemantics(find.byKey(toggle)),
+          isSemantics(
+            isButton: true,
+            hasExpandedState: true,
+            isExpanded: false,
+          ),
+        );
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getSemantics(find.byKey(toggle)),
+          isSemantics(hasExpandedState: true, isExpanded: true),
+        );
+        semantics.dispose();
+      });
+    });
   });
 }
 

@@ -306,6 +306,27 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Restore the receipt-owned packaged skill.': '请恢复收据证明归属的发行包 skill。',
   'Address the reported cause, then rerun setup.': '请处理报告的原因，然后重新运行 setup。',
   'Cleanup from that run remains; rerun setup, which rolls the remainder back before replanning.': '上次运行仍有清理项；请重新运行 setup，它会先回滚剩余改动再重新规划。',
+  // The Claude mod's doctor line. Every summary here is literal on purpose — the catalog is keyed on the
+  // exact sentence, so a path interpolated into a summary could never be translated and would render in
+  // English inside a Chinese report.
+  'The cosyncing Claude mod is installed and current.': 'cosyncing 的 Claude mod 已安装，并且是当前版本。',
+  'The cosyncing Claude mod is an older build than this broker; setup will refresh it.': 'cosyncing 的 Claude mod 比当前 broker 版本旧；重新运行 setup 会更新它。',
+  'The cosyncing Claude mod is installed but switched off in Claude\'s own settings.': 'cosyncing 的 Claude mod 已安装，但在 Claude 自己的设置里被关掉了。',
+  'The cosyncing Claude mod is declined, but its marketplace directory is still installed.': 'cosyncing 的 Claude mod 已被拒绝安装，但它的 marketplace 目录仍然在磁盘上。',
+  'Claude\'s cosyncing marketplace entry points somewhere other than cosyncing\'s own directory, so cosyncing leaves it alone.': 'Claude 里 cosyncing 的 marketplace 条目指向的不是 cosyncing 自己的目录，因此 cosyncing 不会去动它。',
+  'The cosyncing Claude mod is requested, but its marketplace directory is not installed.': '已选择安装 cosyncing 的 Claude mod，但它的 marketplace 目录还没有装上。',
+  'The cosyncing Claude mod cannot be proven from its receipt, so neither setup nor uninstall will overwrite it.': '无法用收据证明这个 Claude mod 归属 cosyncing，因此 setup 和 uninstall 都不会覆盖它。',
+  'Rerun setup to refresh the mod to this build\'s version.': '请重新运行 setup，把 mod 更新到当前版本。',
+  'Switch it back on inside Claude (`claude plugin` settings). Setup leaves a switched-off mod alone.': '请在 Claude 自己的设置里重新开启（`claude plugin`）。setup 不会去动一个已被关闭的 mod。',
+  'The cosyncing Claude mod was removed inside Claude. cosyncing keeps its own copy out of the way and will not put it back.': '这个 cosyncing Claude mod 已在 Claude 内部被移除。cosyncing 会保留自己的副本但不会重新装回去。',
+  'To use it again, run `cosyncing setup --install-claude-mod`. To finish the removal, run `cosyncing setup --no-install-claude-mod`, which takes cosyncing\'s own directory back.': '若要重新使用，请运行 `cosyncing setup --install-claude-mod`。若要彻底移除，请运行 `cosyncing setup --no-install-claude-mod`，它会收回 cosyncing 自己的目录。',
+  'The cosyncing Claude mod is not on offer on this host, but its marketplace directory is still installed.': '这台机器上不提供 cosyncing Claude mod，但它的 marketplace 目录仍在磁盘上。',
+  'cosyncing leaves its own directory in place while Claude cannot run the mod here, and removes it with `cosyncing uninstall`. Once Claude can run it again, setup refreshes or removes it as you choose.': '在 Claude 无法在这台机器上运行该 mod 期间，cosyncing 会保留自己的目录；`cosyncing uninstall` 会移除它。等 Claude 能再次运行它时，setup 会按你的选择更新或移除它。',
+  'A Claude mod step did not finish; the commands that finish it are listed.': '有一个 Claude mod 步骤没有完成；完成它所需的命令已列出。',
+  'Run the listed commands, then rerun doctor.': '请运行列出的命令，然后重新运行 doctor。',
+  'Rerun setup to remove the declined mod, or accept it again.': '请重新运行 setup 移除已拒绝的 mod，或者重新接受它。',
+  'Reconcile Claude\'s marketplace entry with cosyncing\'s, or keep it and leave the mod declined.': '请把 Claude 的 marketplace 条目对齐到 cosyncing 的目录，或者保留它并把 mod 保持为拒绝状态。',
+  'Rerun setup to install the requested mod.': '请重新运行 setup 安装所选的 mod。',
 });
 
 function replaceMatch(source: string, pattern: RegExp, replacement: (...parts: string[]) => string): string | undefined {
@@ -528,7 +549,22 @@ function zhUninstallAdvisory(item: UninstallPlan['advisories'][number]): string 
   }
 }
 
+/**
+ * What an uninstall could not finish, said in Chinese. Built from the structured leftovers rather than
+ * by translating the English sentence, so the commands stay byte-for-byte what has to be typed.
+ */
+function zhUninstallLeftovers(result: LifecycleCommandResult): string {
+  const leftovers = result.claudeModLeftovers;
+  if (!leftovers) return '';
+  return ` 仍需手动处理：Claude 自己设置里 cosyncing Claude mod 的两项条目（${leftovers.detailCode}）。`
+    + `请依次运行：${leftovers.commands.map((command) => `\`${command}\``).join('，然后 ')}。`;
+}
+
 function zhUninstallResult(result: LifecycleCommandResult, facts: UninstallRenderFacts): string {
+  return zhUninstallResultBody(result, facts) + zhUninstallLeftovers(result);
+}
+
+function zhUninstallResultBody(result: LifecycleCommandResult, facts: UninstallRenderFacts): string {
   switch (result.detailCode) {
     case 'uninstall-confirmation-required': return '显示归属计划后，需要确认才能卸载。';
     case 'purge-data-confirmation-required': return '清除两个持久目录需要单独确认。';

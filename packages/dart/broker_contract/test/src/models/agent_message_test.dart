@@ -479,6 +479,97 @@ void main() {
       expect(question.options.first.description, 'Run the suite.');
     });
 
+    test('reads freeText and answerInTerminal, and defaults both open', () {
+      final terminal = AgentMessage.fromJson({
+        'type': 'question-request',
+        'requestId': 'question-terminal',
+        'readOnly': true,
+        'answerInTerminal': true,
+        'questions': [
+          {
+            'question': 'Which checks?',
+            'options': [
+              {'label': 'Lint'},
+            ],
+            'multiple': true,
+            'freeText': false,
+          },
+          {
+            'question': 'Which build?',
+            'options': [
+              {'label': 'Debug'},
+            ],
+          },
+        ],
+      });
+      expect(terminal.questionRequestAnswerInTerminal, isTrue);
+      expect(
+        terminal.questionRequestQuestions.map((question) => question.freeText),
+        [false, true],
+      );
+
+      final older = AgentMessage.fromJson({
+        'type': 'question-request',
+        'requestId': 'question-older',
+        'questions': [
+          {
+            'question': 'Continue?',
+            'options': [
+              {'label': 'Yes'},
+            ],
+          },
+        ],
+      });
+      expect(older.questionRequestAnswerInTerminal, isFalse);
+      expect(older.questionRequestQuestions.single.freeText, isTrue);
+    });
+
+    test('a number question carries its range, and takes only a plain number '
+        'inside it', () {
+      final message = AgentMessage.fromJson({
+        'type': 'question-request',
+        'requestId': 'q-number',
+        'questions': [
+          {
+            'question': 'How many slides?',
+            'options': <Object>[],
+            'kind': 'number',
+            'min': 3,
+            'max': 12,
+            'step': 1,
+            'unit': 'slides',
+          },
+          {
+            'question': 'Name the branch?',
+            'options': <Object>[],
+            'kind': 'text',
+            // A range on a question that is not a number is not one.
+            'min': 1,
+          },
+          {
+            'question': 'Which build?',
+            'options': [
+              {'label': 'Debug'},
+              {'label': 'Release'},
+            ],
+          },
+        ],
+      });
+      final [number, text, choice] = message.questionRequestQuestions;
+      expect(number.kind, AgentQuestionKind.number);
+      expect([number.min, number.max, number.step], [3, 12, 1]);
+      expect(number.unit, 'slides');
+      expect(text.kind, AgentQuestionKind.text);
+      expect(text.min, isNull);
+      expect(choice.kind, AgentQuestionKind.choice);
+      for (final taken in const ['3', '12', '7.5', ' 4 ']) {
+        expect(number.takesNumber(taken), isTrue, reason: taken);
+      }
+      for (final refused in const ['2', '13', '1e1', 'five', '', '-', '4.']) {
+        expect(number.takesNumber(refused), isFalse, reason: refused);
+      }
+    });
+
     test('fromJson handles unknown type gracefully', () {
       final json = {
         'type': 'future-message-type',
@@ -545,6 +636,302 @@ void main() {
       final json = {'type': 'user-message'};
       final msg = AgentMessage.fromJson(json);
       expect(msg.toString(), contains('user-message'));
+    });
+  });
+
+  group('synced Claude approval attribution', () {
+    AgentMessage card({
+      String? permissionMode,
+      String? releaseReason,
+      String? decidedBy,
+      bool readOnly = false,
+    }) => AgentMessage.fromJson({
+      'type': 'permission-request',
+      'requestId': 'perm-1',
+      'title': 'Bash',
+      if (permissionMode != null) 'permissionMode': permissionMode,
+      if (releaseReason != null) 'releaseReason': releaseReason,
+      if (decidedBy != null) 'decidedBy': decidedBy,
+      if (readOnly) 'readOnly': true,
+    });
+
+    test('names the mode the card was raised in', () {
+      expect(
+        card(permissionMode: 'acceptEdits').permissionRequestMode,
+        PermissionModeName.acceptEdits,
+      );
+      expect(
+        card(permissionMode: 'default').permissionRequestMode!.wireValue,
+        'default',
+      );
+    });
+
+    test('a silent broker keeps the card as it was', () {
+      // The fields are additive. Absent is "the broker said nothing", which is
+      // what every broker before true sync does, and it must not read as a mode
+      // or a reason the app then puts on screen.
+      final message = card();
+      expect(message.permissionRequestMode, isNull);
+      expect(message.permissionReleaseReason, isNull);
+      expect(message.permissionDecidedBy, isNull);
+    });
+
+    test('a mode this client has not met reads as unknown, not as a guess', () {
+      // The line under an approval card is a claim about the user's own tool,
+      // so a future mode name must never be presented as one this app
+      // understood.
+      expect(
+        card(permissionMode: 'yoloSuperMode').permissionRequestMode,
+        PermissionModeName.unknown,
+      );
+    });
+
+    test('a request names no seat: only a resolution says who settled it', () {
+      // Nothing draws a card with its answer already on it, and the contract
+      // carries `decidedBy` on `permission-resolved` only.
+      expect(card(decidedBy: 'band').permissionDecidedBy, isNull);
+    });
+
+    test('the reason and the seat travel on the resolution too', () {
+      final resolved = AgentMessage.fromJson({
+        'type': 'permission-resolved',
+        'requestId': 'perm-1',
+        'decision': 'external',
+        'decidedBy': 'band',
+        'releaseReason': 'expired',
+      });
+      expect(resolved.permissionDecidedBy, PermissionDecidedBy.band);
+      expect(
+        resolved.permissionReleaseReason,
+        PermissionReleaseReason.expired,
+      );
+    });
+
+    test('no reason names a mode Claude does not write', () {
+      // CX9: the permission pane's "manual" is stored as `default` and held
+      // like it. A `mode:manual` reason only ever told a person their
+      // terminal was in a mode it was not in, so the vocabulary has none, and
+      // the string reads as an unknown reason.
+      expect(
+        PermissionReleaseReason.values.map((reason) => reason.wireValue),
+        isNot(contains('mode:manual')),
+      );
+      expect(
+        card(
+          releaseReason: 'mode:manual',
+          readOnly: true,
+        ).permissionReleaseReason,
+        PermissionReleaseReason.unknown,
+      );
+    });
+
+    test('the reason is not read off a card that is not a request', () {
+      // A stray `releaseReason` on, say, a tool result is not a claim about an
+      // approval, and reading one would put a reason sentence on a card that
+      // never had a prompt.
+      final tool = AgentMessage.fromJson({
+        'type': 'tool-result',
+        'callId': 'call-1',
+        'releaseReason': 'viewer:none',
+      });
+      expect(tool.permissionReleaseReason, isNull);
+      expect(tool.permissionDecidedBy, isNull);
+    });
+
+    test('the wire strings survive the round trip unchanged', () {
+      // The mode and reason codes are the vendor's and the broker's own words.
+      // A translation here would silently fork the vocabulary.
+      expect(PermissionModeName.defaultMode.wireValue, 'default');
+      expect(
+        PermissionReleaseReason.planTerminalOnly.wireValue,
+        'plan:terminal-only',
+      );
+      expect(PermissionReleaseReason.killSwitch.wireValue, 'killSwitch');
+    });
+
+    test('a mode that draws no card is no reason a card can name', () {
+      // Auto mode and dontAsk settle a call without showing anyone a dialog,
+      // so the broker draws nothing for them. A code for either is not a
+      // sentence the app owns any more: it reads as unknown, never as a claim
+      // about the person's terminal.
+      for (final retired in ['mode:auto', 'mode:dontAsk', 'mode:plan']) {
+        expect(
+          PermissionReleaseReason.fromWire(retired),
+          PermissionReleaseReason.unknown,
+          reason: retired,
+        );
+      }
+      expect(PermissionDecidedBy.app.wireValue, 'app');
+    });
+  });
+
+  group('the answer a question closed with', () {
+    AgentMessage resolved(Object? answers) => AgentMessage.fromJson({
+      'type': 'question-resolved',
+      'requestId': 'toolu_1',
+      'answers': ?answers,
+    });
+
+    test('reads one row per question, in order, empty rows included', () {
+      expect(
+        resolved([
+          ['Teal'],
+          ['Lint', 'Small, cheap'],
+          <String>[],
+        ]).questionResolvedAnswers,
+        [
+          ['Teal'],
+          ['Lint', 'Small, cheap'],
+          <String>[],
+        ],
+      );
+    });
+
+    test('a resolution without one, or one it cannot read, has none', () {
+      expect(resolved(null).questionResolvedAnswers, isNull);
+      expect(resolved('Teal').questionResolvedAnswers, isNull);
+      expect(
+        resolved([
+          ['Teal'],
+          'Amber',
+        ]).questionResolvedAnswers,
+        isNull,
+      );
+      expect(
+        resolved([
+          ['Teal', 3],
+        ]).questionResolvedAnswers,
+        isNull,
+      );
+    });
+
+    test('only a question resolution carries one', () {
+      final permission = AgentMessage.fromJson({
+        'type': 'permission-resolved',
+        'requestId': 'perm-1',
+        'decision': 'approve',
+        'answers': [
+          ['Teal'],
+        ],
+      });
+      expect(permission.questionResolvedAnswers, isNull);
+    });
+  });
+
+  group('who closed a question', () {
+    AgentMessage resolved(Map<String, Object> attribution) =>
+        AgentMessage.fromJson({
+          'type': 'question-resolved',
+          'requestId': 'toolu_1',
+          ...attribution,
+        });
+
+    test('reads the seat and the reason a permission resolution uses', () {
+      expect(
+        resolved({'decidedBy': 'app'}).questionResolvedDecidedBy,
+        PermissionDecidedBy.app,
+      );
+      expect(
+        resolved({'releaseReason': 'band'}).questionResolvedReleaseReason,
+        PermissionReleaseReason.band,
+      );
+      final lapsed = resolved({
+        'decidedBy': 'expired',
+        'releaseReason': 'expired',
+      });
+      expect(lapsed.questionResolvedDecidedBy, PermissionDecidedBy.expired);
+      expect(
+        lapsed.questionResolvedReleaseReason,
+        PermissionReleaseReason.expired,
+      );
+    });
+
+    test('a resolution that says nothing names nobody', () {
+      final bare = resolved(const {});
+      expect(bare.questionResolvedDecidedBy, isNull);
+      expect(bare.questionResolvedReleaseReason, isNull);
+    });
+
+    test('a value this client has not met reads as unknown, not as a seat', () {
+      expect(
+        resolved({'decidedBy': 'phone'}).questionResolvedDecidedBy,
+        PermissionDecidedBy.unknown,
+      );
+    });
+
+    test('only a question resolution carries one', () {
+      final permission = AgentMessage.fromJson({
+        'type': 'permission-resolved',
+        'requestId': 'perm-1',
+        'decision': 'external',
+        'decidedBy': 'app',
+        'releaseReason': 'band',
+      });
+      expect(permission.questionResolvedDecidedBy, isNull);
+      expect(permission.questionResolvedReleaseReason, isNull);
+    });
+  });
+
+  group('steering rows', () {
+    test('carries the text and the route', () {
+      final message = AgentMessage.fromJson({
+        'type': 'event',
+        'name': kSteeringMessageEvent,
+        'payload': {
+          'text': 'use the staging database',
+          'source': 'cosyncing-claude',
+        },
+      });
+      final steered = message.steeringMessage!;
+      expect(steered.text, 'use the staging database');
+      expect(steered.source, 'cosyncing-claude');
+    });
+
+    test("a missing route is not the terminal's", () {
+      // The app is the only writer that uses this event, so an unstamped row is
+      // still the app's. Claiming nothing would leave the row unattributed in
+      // the one place the reader needs to know who typed it.
+      final message = AgentMessage.fromJson({
+        'type': 'event',
+        'name': kSteeringMessageEvent,
+        'payload': {'text': 'stop and re-read the test'},
+      });
+      expect(message.steeringMessage!.source, 'app');
+    });
+
+    test('an empty steer is absent, and so is any other event', () {
+      // A steering row with no text is noise; an unrelated event must not be
+      // drawn through the steering presentation.
+      expect(
+        AgentMessage.fromJson({
+          'type': 'event',
+          'name': kSteeringMessageEvent,
+          'payload': {'text': '   '},
+        }).steeringMessage,
+        isNull,
+      );
+      expect(
+        AgentMessage.fromJson({
+          'type': 'event',
+          'name': 'claude.init',
+          'payload': {'text': 'x'},
+        }).steeringMessage,
+        isNull,
+      );
+    });
+
+    test('the event name is a wire convention, not a new message type', () {
+      // Steering rides on `event`, which is why this lane moves no contract
+      // revision: an older client renders an ordinary event row.
+      expect(kSteeringMessageEvent, 'steering.message');
+      expect(
+        AgentMessage.fromJson({
+          'type': 'event',
+          'name': kSteeringMessageEvent,
+          'payload': {'text': 'x'},
+        }).type,
+        AgentMessageType.event,
+      );
     });
   });
 

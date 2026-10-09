@@ -86,6 +86,13 @@ import {
   inspectOmpBridgeReceiptTarget,
   inspectPiBridgeOwnership,
 } from './pi-bridge-ownership.ts';
+import {
+  claudeModSupportForHost,
+  claudeUserSettingsPath,
+  decideClaudeModOwnership,
+  readClaudeModOutcome,
+  type ClaudeModSupport,
+} from './claude-mod-ownership.ts';
 import { parseMachinePeers } from '../roster/machine-aggregation.ts';
 import { WindowsTaskSchedulerPowerShellBackend } from './windows-task-scheduler-powershell.ts';
 import { parseWindowsServiceEnvironment, windowsServiceVersionKey } from './windows-service-install.ts';
@@ -148,6 +155,8 @@ export interface DoctorDependencies {
    * touch, and a promise with an exception in it is not the promise.
    */
   probeTokdashVersion?: boolean;
+  /** Managed Claude policy roots for a test. Production reads the platform's own; there is no env override. */
+  claudePolicyRoots?: readonly string[];
 }
 
 function remediation(command: string, message: string): SetupCheck['remediation'] {
@@ -936,6 +945,151 @@ function agentSkillChecks(home: string, context: SetupDiagnosisContext): SetupCh
       remediation: { kind: 'manual', message: 'Preserve or reconcile the user-managed copy explicitly; repair will not overwrite it.' },
     };
   });
+}
+
+/**
+ * The Claude mod, as one line.
+ *
+ * Silent when there is nothing to report — never asked and nothing installed — because a host that was
+ * offered nothing has no problem to diagnose. Once the mod IS installed this is the only place that can
+ * tell an operator Claude's own settings no longer match the receipt, which is the drift that makes a
+ * synced session stop appearing with no other symptom at all.
+ *
+ * Two rules this keeps, because breaking either was the obvious mistake:
+ *  - Every `summary` and remediation message is a LITERAL string. Doctor's Chinese catalog is keyed on the
+ *    exact English sentence, so a summary that interpolates a path can never be translated; the path
+ *    belongs in `evidence`, where the renderer already shows it.
+ *  - Host capability is NOT consulted. Doctor describes what is, and a Claude that was uninstalled after
+ *    the mod went in must still be reported, not read as "nothing to see here".
+ */
+export function claudeModChecks(
+  home: string,
+  context: SetupDiagnosisContext,
+  version: string,
+  /**
+   * What this host can run, from the same preflight every other agent check uses.
+   *
+   * This used to be hardcoded to `supported: true`, on the reasoning that doctor describes what IS
+   * rather than what could be. That reasoning is right about the DISK and wrong about the VERDICT:
+   * `decideClaudeModOwnership` asks host support first, so forcing it on made an unsupported host
+   * read as a machine that had been offered the mod and had something wrong with it, and a host
+   * that genuinely cannot run a mod got no line at all. The host fact goes in as a fact; the disk
+   * and settings are still read whatever it says.
+   */
+  support: ClaudeModSupport,
+): SetupCheck[] {
+  const setupState = readSetupState(home);
+  const install = inspectInstallState(home);
+  const decision = decideClaudeModOwnership({
+    install,
+    support,
+    stateHome: home,
+    version,
+    settingsPath: claudeUserSettingsPath(context.homeDir, context.env),
+    requested: setupState.claudeModRequested,
+  });
+  const evidence = {
+    path: context.displayPath(decision.marketplaceDir),
+    state: decision.status,
+    ...(support.detectedVersion ? { claudeVersion: support.detectedVersion } : {}),
+    ...(support.skipReason ? { skipReason: support.skipReason } : {}),
+  };
+  // A mod step that did not finish is said whatever else is true: it is the one line that carries the
+  // commands that finish it. Literal summary; the commands are evidence, which the renderer prints.
+  const unfinished = readClaudeModOutcome(home);
+  const unfinishedLines: SetupCheck[] = unfinished
+    ? [{
+        id: 'state.claude-mod.last-outcome',
+        status: 'warn',
+        detailCode: unfinished.detailCode,
+        summary: 'A Claude mod step did not finish; the commands that finish it are listed.',
+        evidence: {
+          operation: unfinished.operation,
+          at: unfinished.at,
+          ...(unfinished.failureCode ? { claudeFailureCode: unfinished.failureCode } : {}),
+          commands: unfinished.commands.join(' ; '),
+        },
+        remediation: { kind: 'manual', message: 'Run the listed commands, then rerun doctor.' },
+      }]
+    : [];
+  // Nothing asked, nothing installed, nothing to say. "Asked" is the stored answer, not a committed
+  // install: an install committed before the mod existed never asked anyone, and calling its mod
+  // "requested" told the operator about a choice they never made.
+  if (decision.status === 'absent' && setupState.claudeModRequested === undefined) return unfinishedLines;
+  // A host that cannot run the mod and has no files of ours on disk: silent, which is the shape of
+  // "not applicable", whether or not setup has ever committed. With files it gets the `skipped` line
+  // below, because a mod cosyncing wrote on a host that has since lost its Claude is worth saying.
+  if (decision.status === 'skipped' && decision.copy.status === 'missing') return unfinishedLines;
+  const check = (
+    status: SetupCheck['status'],
+    detailCode: string,
+    summary: string,
+    remediationMessage?: string,
+  ): SetupCheck => ({
+    id: 'state.claude-mod',
+    status,
+    detailCode,
+    summary,
+    evidence,
+    ...(remediationMessage
+      ? { remediation: remediation('cosyncing setup', remediationMessage) }
+      : {}),
+  });
+  return [...claudeModDecisionLines(decision, check), ...unfinishedLines];
+}
+
+function claudeModDecisionLines(
+  decision: ReturnType<typeof decideClaudeModOwnership>,
+  check: (status: SetupCheck['status'], detailCode: string, summary: string, remediationMessage?: string) => SetupCheck,
+): SetupCheck[] {
+  switch (decision.status) {
+    case 'owned-current':
+      return [check('pass', 'claude-mod-present', 'The cosyncing Claude mod is installed and current.')];
+    case 'owned-stale':
+      return [check('warn', 'claude-mod-stale',
+        'The cosyncing Claude mod is an older build than this broker; setup will refresh it.',
+        'Rerun setup to refresh the mod to this build\'s version.')];
+    case 'disabled':
+      // The switch is Claude's, so the fix is Claude's. Telling the operator to rerun setup was
+      // false: setup honours a switch-off and leaves it alone.
+      return [check('warn', 'claude-mod-disabled',
+        'The cosyncing Claude mod is installed but switched off in Claude\'s own settings.',
+        'Switch it back on inside Claude (`claude plugin` settings). Setup leaves a switched-off mod alone.')];
+    case 'removed-in-claude':
+      return [check('pass', 'claude-mod-removed-in-claude',
+        'The cosyncing Claude mod was removed inside Claude. cosyncing keeps its own copy out of the way and will not put it back.',
+        'To use it again, run `cosyncing setup --install-claude-mod`. To finish the removal, run `cosyncing setup --no-install-claude-mod`, which takes cosyncing\'s own directory back.')];
+    case 'declined':
+      // Only warn when there is actually something on disk. A decline with nothing installed is
+      // the ordinary state of a machine that was asked and said no, and it used to be reported as
+      // a leftover directory that was not there.
+      if (decision.copy.status === 'missing') return [];
+      return [check('warn', 'claude-mod-declined-with-files',
+        'The cosyncing Claude mod is declined, but its marketplace directory is still installed.',
+        'Rerun setup to remove the declined mod, or accept it again.')];
+    case 'foreign-marketplace':
+      return [check('warn', 'claude-mod-foreign',
+        'Claude\'s cosyncing marketplace entry points somewhere other than cosyncing\'s own directory, so cosyncing leaves it alone.',
+        'Reconcile Claude\'s marketplace entry with cosyncing\'s, or keep it and leave the mod declined.')];
+    case 'absent':
+      return [check('warn', 'claude-mod-missing',
+        'The cosyncing Claude mod is requested, but its marketplace directory is not installed.',
+        'Rerun setup to install the requested mod.')];
+    case 'skipped':
+      // Files of ours on a host that can no longer run them: an uninstalled or downgraded Claude,
+      // or an org policy that arrived afterwards. Say which, because the operator's fix differs.
+      // Literal, because the catalog keys on the exact sentence; the reason it is not on offer is
+      // already in `evidence.skipReason`, which the renderer prints alongside.
+      return [check('warn', 'claude-mod-skipped-with-files',
+        'The cosyncing Claude mod is not on offer on this host, but its marketplace directory is still installed.',
+        'cosyncing leaves its own directory in place while Claude cannot run the mod here, and removes it with `cosyncing uninstall`. Once Claude can run it again, setup refreshes or removes it as you choose.')];
+    case 'unsafe':
+    case 'unreadable':
+    case 'unowned':
+    case 'receipt-invalid':
+      return [check('warn', `claude-mod-${decision.status}`,
+        'The cosyncing Claude mod cannot be proven from its receipt, so neither setup nor uninstall will overwrite it.')];
+  }
 }
 
 /**
@@ -1740,6 +1894,38 @@ export function defaultDoctorAdapters(
   return shippedAdapters();
 }
 
+/**
+ * Whether this host could run the mod, read from the diagnosis that already ran.
+ *
+ * Doctor is a no-effects context, so it cannot shell out to `claude --version` to find this out.
+ * It does not have to: the Claude adapter's own version check carries the build it resolved in its
+ * evidence, and the managed-policy file is a read. Both are what setup's preflight weighed, so the
+ * two commands answer the question the same way instead of doctor asserting an answer it never
+ * looked up.
+ *
+ * An absent diagnosis means the adapter had nothing to say, which is `missing-cli`. That is a real
+ * answer: no Claude, no mod.
+ */
+export function claudeModSupportFromDiagnosis(
+  context: SetupDiagnosisContext,
+  diagnoses: readonly AgentSetupDiagnosis[],
+  policyRoots?: readonly string[],
+): ClaudeModSupport {
+  const claude = diagnoses.find((diagnosis) => diagnosis.agent === 'claude');
+  let detectedVersion: string | undefined;
+  for (const check of claude?.checks ?? []) {
+    const seen = (check.evidence as Record<string, unknown> | undefined)?.installedVersion;
+    if (typeof seen === 'string' && seen.length > 0) detectedVersion = seen;
+  }
+  return claudeModSupportForHost({
+    platform: context.platform,
+    env: context.env,
+    homeDir: context.homeDir,
+    ...(detectedVersion ? { detectedVersion } : {}),
+    ...(policyRoots ? { policyRoots } : {}),
+  });
+}
+
 export async function collectDoctorReport(dependencies: DoctorDependencies): Promise<DoctorReport> {
   if (dependencies.context.effects !== 'forbidden') throw new Error('doctor requires a no-effects context');
   const home = dependencies.stateHome ?? setupStateHome();
@@ -1819,6 +2005,13 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
         credentialCheck({ id: 'state.omp-integration', label: 'omp integration credential', inspection: ompIntegration, context }),
         environmentPrecedenceCheck({ packaged: dependencies.buildInfo.packaged, home, context }),
         machinePeerCredentialCheck(context),
+        // After the skill checks and before the setup-failure checks: it reads the same install receipt the
+        // skill checks read, and a mod problem is not a setup FAILURE, so it must not sort with those.
+        ...claudeModChecks(home, context, dependencies.buildInfo.version, claudeModSupportFromDiagnosis(
+          context,
+          adapterDiagnoses,
+          dependencies.claudePolicyRoots,
+        )),
         ...agentSkillChecks(home, context),
         ...setupFailureChecks(home, context),
         ...managedHostChecks(home),

@@ -1,5 +1,7 @@
-import { basename } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, isAbsolute } from 'node:path';
 import type { OpencodeShimSignal } from '../installation/setup-presenter.ts';
+import type { SetupDependencies } from '../installation/setup.ts';
 import { BUILD_INFO, type BuildInfo } from '../runtime/build-info.ts';
 import { exitAfterDiagnostics } from '../runtime/fatal-start.ts';
 import { currentApplicationIdentity, type ApplicationIdentity } from '../runtime/application-identity.ts';
@@ -58,6 +60,12 @@ export interface CliDependencies {
     assetReport: CliRuntimeAssetReport,
   ) => Promise<CliDoctorReport>;
   renderDoctorReport?: (report: CliDoctorReport) => string;
+  /**
+   * Hermetic overrides for the REAL setup run: a scratch home, a diagnosis context, no durable service.
+   * Lets a test drive the real argv parser, the real presenter and the real `runSetup` together, which is
+   * the only route that proves a flag reaches the plan.
+   */
+  setupOverrides?: Partial<SetupDependencies>;
   /** Force human doctor colour on or off; unset lets the TTY, NO_COLOR, and TERM policy decide. */
   colorize?: boolean;
   runSetup?: (options: {
@@ -66,6 +74,11 @@ export interface CliDependencies {
     enableSystemdLingering: boolean;
     installAgentSkill: boolean;
     opencodeShimSignal: OpencodeShimSignal;
+    /**
+     * `--install-claude-mod` (true), `--no-install-claude-mod` (false), or neither (undefined). Neither is
+     * not a yes: it leaves whatever choice an earlier run stored in charge.
+     */
+    installClaudeMod?: boolean;
     replaceLegacyPiBridge: boolean;
     upgradeLegacyAgentSkill: boolean;
   }) => Promise<{ exitCode: number }>;
@@ -114,6 +127,15 @@ export interface CliDependencies {
     allowLegacyIntegrations: boolean;
     json: boolean;
     interactive: boolean;
+    invocation: string;
+    stdout: CliWriter;
+    stderr: CliWriter;
+  }) => Promise<{ exitCode: number }>;
+  /** `cosyncing claude-mod refresh`. Injected by the tests; the upgrade calls the real one. */
+  runClaudeModRefresh?: (options: {
+    json: boolean;
+    /** State home to refresh. Defaults to this process's own resolved `setupStateHome()`. */
+    home?: string;
     invocation: string;
     stdout: CliWriter;
     stderr: CliWriter;
@@ -176,7 +198,7 @@ function help(packaged: boolean): string {
 
 Usage:
   ${brokerUsage}
-  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
+  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--no-install-agent-skill] [--no-install-opencode-shim] [--install-claude-mod | --no-install-claude-mod] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
   ${command} pair [--broker-url <client-reachable-url>] [--label <device>] [--wait] [--json]
   ${command} pair --status <pairing-id> [--timeout <seconds>] [--json]
   ${command} devices list [--json]
@@ -190,6 +212,7 @@ Usage:
   ${command} repair [--yes] [--accept-legacy-integrations] [--json]
   ${command} upgrade [--yes] [--manifest <url>] [--json]
   ${command} uninstall [--yes] [--accept-legacy-integrations] [--purge-data --confirm-purge-data] [--json]
+  ${command} claude-mod refresh [--json] [--home <state-dir>]
   ${command} version [--json]
   ${command} doctor [--json]
   ${command} help
@@ -209,6 +232,7 @@ Commands:
   upgrade  Verify, stage, switch, health-check, and roll back a signed release (alias: update)
   uninstall Remove only receipt/hash/marker-owned resources; preserve data by default
   version  Print immutable build metadata
+  claude-mod  refresh  Bring the installed Claude mod up to this build's copy (the self-upgrade runs it)
   doctor   Diagnose the package, agents, state, service, and local broker without changing the machine
   help     Show this help
 
@@ -293,10 +317,12 @@ async function defaultRunSetup(options: {
   enableSystemdLingering: boolean;
   installAgentSkill: boolean;
   opencodeShimSignal: OpencodeShimSignal;
+  installClaudeMod?: boolean;
   replaceLegacyPiBridge: boolean;
   upgradeLegacyAgentSkill: boolean;
   buildInfo: Readonly<BuildInfo>;
   stdout: CliWriter;
+  setupOverrides?: Partial<SetupDependencies>;
 }): Promise<{ exitCode: number }> {
   const [{ runSetup }, presenters] = await Promise.all([
     import('../installation/setup.ts'),
@@ -308,14 +334,18 @@ async function defaultRunSetup(options: {
         enableSystemdLingering: options.enableSystemdLingering,
         installAgentSkill: options.installAgentSkill,
         opencodeShim: options.opencodeShimSignal,
+        ...(options.installClaudeMod === undefined ? {} : { installClaudeMod: options.installClaudeMod }),
         replaceLegacyPiBridge: options.replaceLegacyPiBridge,
         upgradeLegacyAgentSkill: options.upgradeLegacyAgentSkill,
       })
-    : presenters.createClackSetupPresenter();
+    : presenters.createClackSetupPresenter(
+        options.installClaudeMod === undefined ? {} : { installClaudeMod: options.installClaudeMod },
+      );
   return runSetup({
     buildInfo: options.buildInfo,
     ...applicationLaunchInputs(options.buildInfo),
     presenter,
+    ...options.setupOverrides,
   });
 }
 
@@ -490,6 +520,41 @@ async function defaultRunRepair(options: {
   const result = await lifecycle.runRepair({ ...base, confirmed, allowLegacyIntegrations: allowLegacy, expectedPlan: plan });
   writeCommandResult(result, options.json, options.stdout, options.stderr);
   return result;
+}
+
+/**
+ * `cosyncing claude-mod refresh`, the narrow reconciliation the self-upgrade runs.
+ *
+ * Non-interactive by design and quiet about it: there is nothing here to confirm, because the
+ * command writes one directory cosyncing has to prove it wrote and asks Claude to re-read it. It
+ * exists so the freshly installed binary can bring the mod up to date in the same breath as the
+ * upgrade, from inside its own version of the embedded marketplace -- the OLD process cannot do
+ * that, because the marketplace embedded in it is the OLD mod.
+ *
+ * Exit codes: 0 for refreshed, already-current and skipped (a host that cannot have the mod is a
+ * correct outcome, not a failure), 1 for refused or failed. The caller is `upgrade`, which reports
+ * the outcome inside a result that stays `complete`; a human running it by hand gets a real status.
+ */
+async function defaultRunClaudeModRefresh(options: {
+  json: boolean;
+  home?: string;
+  stdout: CliWriter;
+  stderr: CliWriter;
+  buildInfo: Readonly<BuildInfo>;
+}): Promise<{ exitCode: number }> {
+  const lifecycle = await import('../installation/broker-lifecycle.ts');
+  const { setupStateHome } = await import('../installation/setup-state.ts');
+  const { createSetupDiagnosisContext } = await import('../installation/diagnosis-context.ts');
+  const home = options.home ?? setupStateHome();
+  const context = createSetupDiagnosisContext({ homeDir: homedir() });
+  const outcome = await lifecycle.refreshClaudeMod({ buildInfo: options.buildInfo, home, context });
+  const ok = outcome.status === 'refreshed' || outcome.status === 'current' || outcome.status === 'skipped';
+  if (options.json) {
+    options.stdout.write(`${JSON.stringify(outcome)}\n`);
+  } else {
+    (ok ? options.stdout : options.stderr).write(`${outcome.summary}\n`);
+  }
+  return { exitCode: ok ? 0 : 1 };
 }
 
 async function defaultRunUpgrade(options: {
@@ -688,6 +753,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       '--no-install-agent-skill',
       '--install-opencode-shim',
       '--no-install-opencode-shim',
+      '--install-claude-mod',
+      '--no-install-claude-mod',
       '--replace-legacy-pi-bridge',
       '--upgrade-legacy-agent-skill',
     ]);
@@ -701,6 +768,16 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const acceptManagedRuntimeOwnership = args.includes('--accept-managed-runtime-ownership');
     const enableSystemdLingering = args.includes('--enable-systemd-lingering');
     const installAgentSkill = !args.includes('--no-install-agent-skill');
+    // Tri-state, and neither flag is not a yes. A plain `--yes` keeps whatever an earlier run stored, so a
+    // standing decline survives it; `--install-claude-mod` is the explicit yes, interactive or with `--yes`,
+    // and acts in the same run even after a decline or a removal inside Claude.
+    if (args.includes('--install-claude-mod') && args.includes('--no-install-claude-mod')) {
+      stderr.write(`${command}: setup received both --install-claude-mod and --no-install-claude-mod\n`);
+      return 2;
+    }
+    const installClaudeMod: boolean | undefined = args.includes('--no-install-claude-mod')
+      ? false
+      : args.includes('--install-claude-mod') ? true : undefined;
     const replaceLegacyPiBridge = args.includes('--replace-legacy-pi-bridge');
     const upgradeLegacyAgentSkill = args.includes('--upgrade-legacy-agent-skill');
     // Tri-state consent. If both flags are passed, --no- wins deterministically. 'unset' (neither) never
@@ -711,9 +788,11 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         ? 'on'
         : 'unset';
     // Non-interactive negative flags require --yes; the bare positive opt-in (--install-opencode-shim) does not
-    // — it only informs the non-interactive presenter and is inert in the interactive (clack) path.
+    // — it only informs the non-interactive presenter and is inert in the interactive (clack) path. The two
+    // Claude mod flags are answers in either path: the wizard takes them instead of asking.
     if (!yes && (acceptManagedRuntimeOwnership || enableSystemdLingering
-      || !installAgentSkill || opencodeShimSignal === 'off' || replaceLegacyPiBridge || upgradeLegacyAgentSkill)) {
+      || !installAgentSkill || opencodeShimSignal === 'off'
+      || replaceLegacyPiBridge || upgradeLegacyAgentSkill)) {
       stderr.write(`${command}: non-interactive setup flags require --yes\n`);
       return 2;
     }
@@ -737,6 +816,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
             enableSystemdLingering,
             installAgentSkill,
             opencodeShimSignal,
+            ...(installClaudeMod === undefined ? {} : { installClaudeMod }),
             replaceLegacyPiBridge,
             upgradeLegacyAgentSkill,
           })
@@ -746,10 +826,12 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
             enableSystemdLingering,
             installAgentSkill,
             opencodeShimSignal,
+            ...(installClaudeMod === undefined ? {} : { installClaudeMod }),
             replaceLegacyPiBridge,
             upgradeLegacyAgentSkill,
             buildInfo,
             stdout,
+            ...(dependencies.setupOverrides ? { setupOverrides: dependencies.setupOverrides } : {}),
           });
       return setup.exitCode;
     } catch {
@@ -968,6 +1050,49 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     return (await (dependencies.runRepair ?? ((options) => defaultRunRepair({ ...options, buildInfo })))(
       { yes, allowLegacyIntegrations, json, interactive: process.stdin.isTTY, invocation: command, stdout, stderr },
+    )).exitCode;
+  }
+
+  if (requested === 'claude-mod') {
+    const [claudeModSubcommand, ...claudeModArgs] = args;
+    if (claudeModSubcommand !== 'refresh') {
+      stderr.write(`${command} claude-mod: expected 'refresh'\n`);
+      return 2;
+    }
+    let json = false;
+    // The upgrade passes the state home it already resolved, because the child it spawns gets a
+    // minimal environment and a lost COSYNCING_HOME would mean refreshing a copy on another
+    // machine's default path. An explicit flag is also easier to audit than an inherited variable.
+    let home: string | undefined;
+    for (let index = 0; index < claudeModArgs.length; index += 1) {
+      const arg = claudeModArgs[index];
+      if (arg === '--json') {
+        if (json) {
+          stderr.write(`${command} claude-mod refresh: unknown or duplicate option\n`);
+          return 2;
+        }
+        json = true;
+        continue;
+      }
+      if (arg === '--home') {
+        const value = claudeModArgs[++index];
+        if (!value || home !== undefined) {
+          stderr.write(`${command} claude-mod refresh: --home requires a path\n`);
+          return 2;
+        }
+        home = value;
+        continue;
+      }
+      stderr.write(`${command} claude-mod refresh: unknown or duplicate option\n`);
+      return 2;
+    }
+    if (home !== undefined && (!isAbsolute(home) || home.includes('\0'))) {
+      stderr.write(`${command} claude-mod refresh: --home must be an absolute path\n`);
+      return 2;
+    }
+    return (await (dependencies.runClaudeModRefresh
+      ?? ((options) => defaultRunClaudeModRefresh({ ...options, buildInfo })))(
+      { json, ...(home ? { home } : {}), invocation: command, stdout, stderr },
     )).exitCode;
   }
 

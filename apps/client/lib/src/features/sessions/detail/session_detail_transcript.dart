@@ -2732,6 +2732,9 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     // standalone clean-Chat row (CR2).
     // See docs/project/implementation-status.md (WP1).
     final resolvedRequestDecisions = widget.state.resolvedRequestDecisions;
+    final resolvedRequestAttributions =
+        widget.state.resolvedRequestAttributions;
+    final resolvedQuestionAnswers = widget.state.resolvedQuestionAnswers;
     final resolvedRequestIds = resolvedRequestDecisions.keys.toSet();
     // Permission/question cards are mutating (not prompt-class), so they ride
     // the broader gate: actionable only when the app owns input (driving or
@@ -2836,6 +2839,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                     resolvedRequestIds: resolvedRequestIds,
                     resolvedRequestDecisions: resolvedRequestDecisions,
                     withdrawnRequestIds: widget.state.withdrawnRequestIds,
+                    resolvedRequestAttributions: resolvedRequestAttributions,
+                    resolvedQuestionAnswers: resolvedQuestionAnswers,
                     onForkFromMessage: widget.onForkFromMessage,
                     artifactActionState: _artifactActionStateForMessage(
                       widget.state,

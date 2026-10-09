@@ -93,3 +93,6 @@ screenshots/
 
 # Tool caches
 .fvm/
+
+# Claude Code lays its own API types into a mod directory when it loads it.
+mods/**/.claude-plugin/types/

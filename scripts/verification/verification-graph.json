@@ -17,7 +17,8 @@
         "release-publication",
         "runtime-replacement",
         "cross-platform-builds",
-        "physical-multi-host-real-agent"
+        "physical-multi-host-real-agent",
+        "real-claude-plugin-harness"
       ],
       "expectedArtifacts": [
         "output/check/report.json",
@@ -65,6 +66,26 @@
       "expectedArtifacts": [
         "output/check/windows-broker/report.json"
       ]
+    },
+    "claudeModSmoke": {
+      "command": [
+        "bun",
+        "run",
+        "verification:claude-mod-smoke"
+      ],
+      "executionGroups": [
+        "claude-mod-smoke-lane"
+      ],
+      "exclusions": [
+        "release-publication",
+        "runtime-replacement",
+        "physical-multi-host-real-agent",
+        "real-claude-plugin-harness"
+      ],
+      "expectedArtifacts": [
+        "output/claude-mod-smoke/report.json",
+        "output/claude-mod-smoke/evidence.ndjson"
+      ]
     }
   },
   "exclusions": [
@@ -101,6 +122,14 @@
       "owners": [
         ".github/workflows/platform-runtime.yml",
         "scripts/broker/acceptance/real-host-evidence.ts"
+      ]
+    },
+    {
+      "id": "real-claude-plugin-harness",
+      "description": "The tier-2 Claude mod smoke loads the mod in a real Claude Code session with the operator's own config and spends model turns, so it runs on request and never inside `check`.",
+      "owners": [
+        "scripts/claude-mod/smoke/run.ts",
+        "scripts/claude-mod/smoke/harness.ts"
       ]
     }
   ],
@@ -195,7 +224,7 @@
     },
     {
       "id": "broker.doctor",
-      "description": "Zero-agent diagnosis, isolated paths, and topology checks remain deterministic, and doctor resolves a managed host's identity under the USER home while reading receipts and ownership records from cosyncing's STATE home \u2014 collapsing the two names a host nothing uses, which silently reads as unmanaged and hands back the manual start command."
+      "description": "Zero-agent diagnosis, isolated paths, and topology checks remain deterministic, and doctor resolves a managed host's identity under the USER home while reading receipts and ownership records from cosyncing's STATE home — collapsing the two names a host nothing uses, which silently reads as unmanaged and hands back the manual start command."
     },
     {
       "id": "broker.transactional-setup",
@@ -231,11 +260,11 @@
     },
     {
       "id": "broker.adapter-discovery-bounds",
-      "description": "Roster discovery is bounded in work and in time: every adapter applies the cutoff before expensive native decoding, and no single backend can hold the roster \u2014 a backend whose discovery crosses to a host the broker does not own declares a budget, and a host that accepts connections and never answers is abandoned and cancelled at that budget while the established agents' rows still come back, whether or not that backend honours its abort."
+      "description": "Roster discovery is bounded in work and in time: every adapter applies the cutoff before expensive native decoding, and no single backend can hold the roster — a backend whose discovery crosses to a host the broker does not own declares a budget, and a host that accepts connections and never answers is abandoned and cancelled at that budget while the established agents' rows still come back, whether or not that backend honours its abort."
     },
     {
       "id": "broker.managed-host-ownership",
-      "description": "The broker starts or stops an external agent host ONLY when it can prove it started that exact process \u2014 pid, a start token that survives pid reuse, the boot it started in, and the address the record was written for must all match \u2014 and re-proves it immediately before every signal, so a pid recycled between deciding and acting is never signalled; a serving host, an occupied-but-unready address, an unidentifiable process, and a damaged ownership record are all preserved untouched, and a spawned child whose own identity cannot be read is stopped again rather than leaked as a process no later broker could ever prove it owns. Proof is scoped to one BOOT, because a Linux start token counts ticks since boot and would otherwise let a post-reboot stranger inherit a pid and start token; a missing command name makes the process lookup indeterminate, but a changed non-empty name does not revoke otherwise matching proof because a process can rename itself at runtime. \"Nothing is there\" and \"this machine will not say\" are never the same answer: only a proven-empty address is spawned into, only a proven-gone process has its record cleared, and a failed stop keeps the proof that authorizes the next attempt. A start reconciles the RECORD independently of the address, so a host that released its listener but still runs \u2014 or one left behind by a repointed configuration, including a repoint onto an address somebody else already serves \u2014 is settled rather than kept alive until shutdown or having its only proof overwritten; that reconciliation reaps nothing it cannot prove is a DIFFERENT process from the one holding the address, so an unnameable address and our own serving host are both left strictly alone. A descriptor that cannot launch is not a shortcut around any of that: moving a managed host to a remote or operator-run one reaps the local process we started rather than leaving it alive until shutdown. No outcome that ends without a running host is silent, and silence is not reachable by accident: what to say is decided next to the outcome type, exhaustively, so an unhandled variant fails to compile rather than reaching an operator as nothing. A start blocked by a predecessor, a host of ours still running that nothing can now reap, and an address held by something unready that is not ours or cannot be identified all reach the operator pointed at doctor \u2014 built from our own closed vocabulary, never from another program's output, and never claiming a host is somebody else's when the honest answer is that we could not tell. Release reads that record as its primary input, so a host stays reapable even when the adapter stops describing it, which is exactly when a second host has appeared. Readiness proves the serving process IS the spawned child before ownership is claimed, and the advertised deadline bounds the wait for an answer rather than the interval between questions \u2014 measured from the spawn, so a hung pre-flight probe or a slow reap cannot spend a fresh host's budget and then fail it for being slow. Supervision restarts only a host proven crashed or proven ours-and-wedged, under a crash-loop budget whose suspension does not quietly expire: a streak that reaches the limit keeps its refusal after the attempt window ages out, and lifts only when the host is proven serving again, when the configuration that produced the crash changes, or when the broker restarts, so a host that dies on every start cannot get another three tries merely by being left alone for the window. A descriptor that cannot launch at all withdraws its window attempt rather than charging or forgiving the streak, because absence is not a crash, and shutdown waits for a recovery already in flight before releasing. Uninstall stops only a still-proven owned child and reports every other host as preserved. Buffered owned-child output reaches authentication before slow synchronous process-table walks can consume the startup readiness window, without increasing that window or weakening fresh ownership proofs. A malformed DSH core roster also blocks ownership effects as a contract fault rather than being reported healthy."
+      "description": "The broker starts or stops an external agent host ONLY when it can prove it started that exact process — pid, a start token that survives pid reuse, the boot it started in, and the address the record was written for must all match — and re-proves it immediately before every signal, so a pid recycled between deciding and acting is never signalled; a serving host, an occupied-but-unready address, an unidentifiable process, and a damaged ownership record are all preserved untouched, and a spawned child whose own identity cannot be read is stopped again rather than leaked as a process no later broker could ever prove it owns. Proof is scoped to one BOOT, because a Linux start token counts ticks since boot and would otherwise let a post-reboot stranger inherit a pid and start token; a missing command name makes the process lookup indeterminate, but a changed non-empty name does not revoke otherwise matching proof because a process can rename itself at runtime. \"Nothing is there\" and \"this machine will not say\" are never the same answer: only a proven-empty address is spawned into, only a proven-gone process has its record cleared, and a failed stop keeps the proof that authorizes the next attempt. A start reconciles the RECORD independently of the address, so a host that released its listener but still runs — or one left behind by a repointed configuration, including a repoint onto an address somebody else already serves — is settled rather than kept alive until shutdown or having its only proof overwritten; that reconciliation reaps nothing it cannot prove is a DIFFERENT process from the one holding the address, so an unnameable address and our own serving host are both left strictly alone. A descriptor that cannot launch is not a shortcut around any of that: moving a managed host to a remote or operator-run one reaps the local process we started rather than leaving it alive until shutdown. No outcome that ends without a running host is silent, and silence is not reachable by accident: what to say is decided next to the outcome type, exhaustively, so an unhandled variant fails to compile rather than reaching an operator as nothing. A start blocked by a predecessor, a host of ours still running that nothing can now reap, and an address held by something unready that is not ours or cannot be identified all reach the operator pointed at doctor — built from our own closed vocabulary, never from another program's output, and never claiming a host is somebody else's when the honest answer is that we could not tell. Release reads that record as its primary input, so a host stays reapable even when the adapter stops describing it, which is exactly when a second host has appeared. Readiness proves the serving process IS the spawned child before ownership is claimed, and the advertised deadline bounds the wait for an answer rather than the interval between questions — measured from the spawn, so a hung pre-flight probe or a slow reap cannot spend a fresh host's budget and then fail it for being slow. Supervision restarts only a host proven crashed or proven ours-and-wedged, under a crash-loop budget whose suspension does not quietly expire: a streak that reaches the limit keeps its refusal after the attempt window ages out, and lifts only when the host is proven serving again, when the configuration that produced the crash changes, or when the broker restarts, so a host that dies on every start cannot get another three tries merely by being left alone for the window. A descriptor that cannot launch at all withdraws its window attempt rather than charging or forgiving the streak, because absence is not a crash, and shutdown waits for a recovery already in flight before releasing. Uninstall stops only a still-proven owned child and reports every other host as preserved. Buffered owned-child output reaches authentication before slow synchronous process-table walks can consume the startup readiness window, without increasing that window or weakening fresh ownership proofs. A malformed DSH core roster also blocks ownership effects as a contract fault rather than being reported healthy."
     },
     {
       "id": "broker.sync-degraded",
@@ -435,11 +464,11 @@
     },
     {
       "id": "broker.claude-roster-subagents",
-      "description": "Claude subagent transcripts reach the roster as observe-only CHILD rows of the session that spawned them, and never as sessions of their own: a child carries origin 'subagent' and the parent's published nativeId (the bridge id where the parent has one), a childless parent invents no native identity, and only a parent-spawned `subagents/agent-*.meta.json` carrying a toolUseId becomes a row \u2014 workflow-owned metas, meta-less transcripts, and the nested `subagents/workflows/<run>/` agents stay out, because they are already summarized inside their workflow's activity card. A child id is base64url of its own path, so attach's realpath containment admits it unchanged while a path outside every projects root is still refused, and its connection replays the CHILD transcript rather than the parent's. Observe-only is enforced rather than advertised: a child offers no Drive, no take-over, and no terminal command that cannot work, and a driving attach on one is refused before any process path. Discovery stays bounded \u2014 a parent outside the roster cutoff contributes no children, because its tree is never walked."
+      "description": "Claude subagent transcripts reach the roster as observe-only CHILD rows of the session that spawned them, and never as sessions of their own: a child carries origin 'subagent' and the parent's published nativeId (the bridge id where the parent has one), a childless parent invents no native identity, and only a parent-spawned `subagents/agent-*.meta.json` carrying a toolUseId becomes a row — workflow-owned metas, meta-less transcripts, and the nested `subagents/workflows/<run>/` agents stay out, because they are already summarized inside their workflow's activity card. A child id is base64url of its own path, so attach's realpath containment admits it unchanged while a path outside every projects root is still refused, and its connection replays the CHILD transcript rather than the parent's. Observe-only is enforced rather than advertised: a child offers no Drive, no take-over, and no terminal command that cannot work, and a driving attach on one is refused before any process path. Discovery stays bounded — a parent outside the roster cutoff contributes no children, because its tree is never walked."
     },
     {
       "id": "broker.claude-recency",
-      "description": "A Claude roster row is dated and statused by real conversation evidence, never by sidecar churn. `updatedAt` comes from the last timestamped conversation line, so a `permission-mode` or `bridge-session` rewrite that only bumps mtime cannot make a stale session look fresh. Status projection is layered: exact terminal turn authority settles Idle; exact active authority is qualified by the live `agents --json` row rather than by recency; and only a transcript with NO exact latest-turn marker falls through to the freshness gate, where a raw busy row backed by nothing newer than an old conversation event reads Idle instead of a wedged Working. A parent-launched background Task that is still unnotified keeps the row Working for its pending window even though `agents --json` reports nothing \u2014 the spawning tool_use line is itself an exact active marker, so this upgrade must apply to an active turn the live row leaves idle or the fallback is unreachable for every real transcript. It never outranks live busy or needs-input evidence. Fork transcripts sharing a first user turn carry that turn's uuid as a common lineageId, and the current model is the transcript TAIL model with the adapter-authored tier label the roster reads \u2014 a wrapper's unknown model carries no invented label."
+      "description": "A Claude roster row is dated and statused by real conversation evidence, never by sidecar churn. `updatedAt` comes from the last timestamped conversation line, so a `permission-mode` or `bridge-session` rewrite that only bumps mtime cannot make a stale session look fresh. Status projection is layered: exact terminal turn authority settles Idle; exact active authority is qualified by the live `agents --json` row rather than by recency; and only a transcript with NO exact latest-turn marker falls through to the freshness gate, where a raw busy row backed by nothing newer than an old conversation event reads Idle instead of a wedged Working. A parent-launched background Task that is still unnotified keeps the row Working for its pending window even though `agents --json` reports nothing — the spawning tool_use line is itself an exact active marker, so this upgrade must apply to an active turn the live row leaves idle or the fallback is unreachable for every real transcript. It never outranks live busy or needs-input evidence. Fork transcripts sharing a first user turn carry that turn's uuid as a common lineageId, and the current model is the transcript TAIL model with the adapter-authored tier label the roster reads — a wrapper's unknown model carries no invented label."
     },
     {
       "id": "broker.opencode-identity",
@@ -463,11 +492,11 @@
     },
     {
       "id": "broker.kimi-drive",
-      "description": "Kimi Drive is reachable only for sessions cosyncing created: a foreign session refuses a live attach, a live attach whose safety stream never opens refuses rather than degrading to poll-only, every content write requires that stream at write time (the abort alone is exempt) and goes through the enumerated write door of the CURRENT transport generation, a user prompt seen while the stream was down is held rather than recorded as accounted for, and a proven foreign writer demotes the connection to observe before another write lands. PROVEN means silence across POLLS, and only a poll is one: a reconnect fires several unawaited refreshes in close succession \u2014 the tick, the re-verification finishing, a restored stream adopting its cursor, a frame saying the transcript moved \u2014 and a read is not an interval, so no number of them can confirm a suspect the server was about to account for. The next poll still confirms it, unchanged."
+      "description": "Kimi Drive is reachable only for sessions cosyncing created: a foreign session refuses a live attach, a live attach whose safety stream never opens refuses rather than degrading to poll-only, every content write requires that stream at write time (the abort alone is exempt) and goes through the enumerated write door of the CURRENT transport generation, a user prompt seen while the stream was down is held rather than recorded as accounted for, and a proven foreign writer demotes the connection to observe before another write lands. PROVEN means silence across POLLS, and only a poll is one: a reconnect fires several unawaited refreshes in close succession — the tick, the re-verification finishing, a restored stream adopting its cursor, a frame saying the transcript moved — and a read is not an interval, so no number of them can confirm a suspect the server was about to account for. The next poll still confirms it, unchanged."
     },
     {
       "id": "broker.kimi-diagnosis",
-      "description": "Kimi doctor applies the adapter identity gate and treats an off-PATH install as installed; production doctor diagnoses Kimi unconditionally, from the same shipped-adapter list the installed service derives managed-host activation from, so an agent can never be diagnosed in one and left unmanaged in the other. What a diagnosis tells an operator to DO follows the machine's posture rather than the agent's name. Where cosyncing is responsible for the host, NO remediation names the tool's own command \u2014 not the start, not the restarts, not the instruction to reduce several servers to one \u2014 because stopping a supervised host opens the window its supervisor fills, so a manual restart ends in two servers exactly as a manual start does. The posture is scoped to a CONFIGURATION rather than to the agent: the broker reports which host identities it manages \u2014 the home the service's own environment resolves, and the home an ownership record was written for \u2014 and a diagnosis applies the managed wording only to the home it actually resolved, so an operator whose shell names another `KIMI_CODE_HOME` is never told that a host nothing supervises is supervised. The posture is proven by a committed durable-service receipt OR by an ownership record that still identifies a process, and each covers what the other cannot: a first startup has no record to find, a foreground broker has no service, and a record whose process is proven gone manages nothing and must not silence the instructions an unmanaged operator needs. The receipt is read as a receipt: managed hosts are default-on in the environment setup writes and that file is not a live opt-out, so a missing, unreadable, or drifted environment \u2014 one switched explicitly off included \u2014 cannot withdraw what a running service already loaded. The managed wording claims only that cosyncing is CONFIGURED to manage the host, never that it owns the process answering right now, which may be the operator's own. Only the remediation differs between postures; status, detail code, and evidence are identical. Setup LISTS Kimi in its installable-agent summary, and names the `kimi web` host in the managed-runtime consent it shows before writing that activation: the service it installs starts, restarts, and stops that host, so a host absent from the disclosure would be one managed without being disclosed."
+      "description": "Kimi doctor applies the adapter identity gate and treats an off-PATH install as installed; production doctor diagnoses Kimi unconditionally, from the same shipped-adapter list the installed service derives managed-host activation from, so an agent can never be diagnosed in one and left unmanaged in the other. What a diagnosis tells an operator to DO follows the machine's posture rather than the agent's name. Where cosyncing is responsible for the host, NO remediation names the tool's own command — not the start, not the restarts, not the instruction to reduce several servers to one — because stopping a supervised host opens the window its supervisor fills, so a manual restart ends in two servers exactly as a manual start does. The posture is scoped to a CONFIGURATION rather than to the agent: the broker reports which host identities it manages — the home the service's own environment resolves, and the home an ownership record was written for — and a diagnosis applies the managed wording only to the home it actually resolved, so an operator whose shell names another `KIMI_CODE_HOME` is never told that a host nothing supervises is supervised. The posture is proven by a committed durable-service receipt OR by an ownership record that still identifies a process, and each covers what the other cannot: a first startup has no record to find, a foreground broker has no service, and a record whose process is proven gone manages nothing and must not silence the instructions an unmanaged operator needs. The receipt is read as a receipt: managed hosts are default-on in the environment setup writes and that file is not a live opt-out, so a missing, unreadable, or drifted environment — one switched explicitly off included — cannot withdraw what a running service already loaded. The managed wording claims only that cosyncing is CONFIGURED to manage the host, never that it owns the process answering right now, which may be the operator's own. Only the remediation differs between postures; status, detail code, and evidence are identical. Setup LISTS Kimi in its installable-agent summary, and names the `kimi web` host in the managed-runtime consent it shows before writing that activation: the service it installs starts, restarts, and stops that host, so a host absent from the disclosure would be one managed without being disclosed."
     },
     {
       "id": "broker.kimi-attach-priming",
@@ -475,7 +504,7 @@
     },
     {
       "id": "broker.kimi-roster-subagents",
-      "description": "Kimi subagent journals reach the roster as observe-only CHILD rows of the session that spawned them, never as sessions of their own. Enumeration is authored by `state.json`'s `agents` map rather than by the directory listing: its `type` is the discriminant, `main` is never a child, a reused slot takes the title of its NEWEST spawn record, and a directory the map does not list yields no row. Lineage holds on rows the real discovery path built \u2014 `child.parentThreadId === parent.nativeId` \u2014 and a CHILDLESS parent publishes no `nativeId` at all, so no identity is invented store-wide for parents that never spawned anything. Discovery stays bounded: children spend from the sweep's own row ceiling, the cutoff filters on the CHILD's own mtime, and every ceiling reached is reported rather than silently applied. Observe-only is ENFORCED, not merely advertised \u2014 a non-observe attach is refused before any transport is touched and every mutation on the connection rejects \u2014 and a child's attach replays the CHILD's own journal through the measured mapper, where an unknown line type renders nothing plus a trace instead of a guessed card, and the user row is never duplicated."
+      "description": "Kimi subagent journals reach the roster as observe-only CHILD rows of the session that spawned them, never as sessions of their own. Enumeration is authored by `state.json`'s `agents` map rather than by the directory listing: its `type` is the discriminant, `main` is never a child, a reused slot takes the title of its NEWEST spawn record, and a directory the map does not list yields no row. Lineage holds on rows the real discovery path built — `child.parentThreadId === parent.nativeId` — and a CHILDLESS parent publishes no `nativeId` at all, so no identity is invented store-wide for parents that never spawned anything. Discovery stays bounded: children spend from the sweep's own row ceiling, the cutoff filters on the CHILD's own mtime, and every ceiling reached is reported rather than silently applied. Observe-only is ENFORCED, not merely advertised — a non-observe attach is refused before any transport is touched and every mutation on the connection rejects — and a child's attach replays the CHILD's own journal through the measured mapper, where an unknown line type renders nothing plus a trace instead of a guessed card, and the user row is never duplicated."
     },
     {
       "id": "broker.kimi-drive-authority",
@@ -483,7 +512,7 @@
     },
     {
       "id": "broker.claude-cross-client-join",
-      "description": "Two sockets share ONE Claude Drive connection through the broker's join action, which is what a page reload depends on: a bare attach while this broker's own `claude -p --resume` owner is driving gets a different, read-only observe connection whose history is the transcript alone (so an accepted, still-undelivered prompt is absent from it), is offered joinExisting, and the join reuses the exact owner with no native attach \u2014 one writer, one child \u2014 and replays the owner's pending driven row; a socket that suppressed the action or declared itself read-only is never offered the join or granted authority, and a stale owner revision fails closed."
+      "description": "Two sockets share ONE Claude Drive connection through the broker's join action, which is what a page reload depends on: a bare attach while this broker's own `claude -p --resume` owner is driving gets a different, read-only observe connection whose history is the transcript alone (so an accepted, still-undelivered prompt is absent from it), is offered joinExisting, and the join reuses the exact owner with no native attach — one writer, one child — and replays the owner's pending driven row; a socket that suppressed the action or declared itself read-only is never offered the join or granted authority, and a stale owner revision fails closed."
     },
     {
       "id": "broker.kimi-cross-client-join",
@@ -495,11 +524,11 @@
     },
     {
       "id": "broker.kimi-registration-gate",
-      "description": "One visibility decision covers EVERY roster read \u2014 the agent list, the session snapshot, the delta stream that updates it, the aggregated machine roster, and the resolution that turns one of its rows into an owning broker \u2014 because an agent hidden as undecodable while its sessions still arrive is worse than no filtering at all, and a row a client can SEE must be a row it can open rather than a 404, and a broker asks its peers as the current client it is rather than as the oldest possible one. Kimi is registered for every broker and shown only to clients that can decode its row: a client declaring nothing, one below the integration-kind tolerance, or one whose revision is not a canonical decimal integer is served no Kimi row and keeps every other agent, while a client at or above that tolerance is served it \u2014 and every attach mode the row publishes predates the later attach-mode tolerance, so the declared floor is honest rather than merely safe. The served row carries the whole surface \u2014 observe first, live attach, model switching, and a wired create hook \u2014 because the Drive rollout gate is gone: a flag nobody was expected to set meant the surface most users would meet was the one that never shipped, and ownership plus the requested attach mode, enforced per session, is what actually keeps a write safe. A machine with no host running refuses a create as TEMPORARY and retryable, naming the command that fixes it, rather than as a permanent claim that the tool cannot create sessions. The durable service environment carries no rollout gate and no retired one, and does carry managed-host activation for every agent that declares an external host \u2014 derived from the adapters rather than from a list of tool names \u2014 because an installed service that can see a host but never start, recover, or stop one is the same as the agent not working. Setup LISTS the row in its installable-agent summary and names `kimi web` in the managed-runtime consent, from the same declaration that activates it, so the runtimes an operator agrees to are the runtimes cosyncing manages."
+      "description": "One visibility decision covers EVERY roster read — the agent list, the session snapshot, the delta stream that updates it, the aggregated machine roster, and the resolution that turns one of its rows into an owning broker — because an agent hidden as undecodable while its sessions still arrive is worse than no filtering at all, and a row a client can SEE must be a row it can open rather than a 404, and a broker asks its peers as the current client it is rather than as the oldest possible one. Kimi is registered for every broker and shown only to clients that can decode its row: a client declaring nothing, one below the integration-kind tolerance, or one whose revision is not a canonical decimal integer is served no Kimi row and keeps every other agent, while a client at or above that tolerance is served it — and every attach mode the row publishes predates the later attach-mode tolerance, so the declared floor is honest rather than merely safe. The served row carries the whole surface — observe first, live attach, model switching, and a wired create hook — because the Drive rollout gate is gone: a flag nobody was expected to set meant the surface most users would meet was the one that never shipped, and ownership plus the requested attach mode, enforced per session, is what actually keeps a write safe. A machine with no host running refuses a create as TEMPORARY and retryable, naming the command that fixes it, rather than as a permanent claim that the tool cannot create sessions. The durable service environment carries no rollout gate and no retired one, and does carry managed-host activation for every agent that declares an external host — derived from the adapters rather than from a list of tool names — because an installed service that can see a host but never start, recover, or stop one is the same as the agent not working. Setup LISTS the row in its installable-agent summary and names `kimi web` in the managed-runtime consent, from the same declaration that activates it, so the runtimes an operator agrees to are the runtimes cosyncing manages."
     },
     {
       "id": "broker.dsh-transport",
-      "description": "The dsh transport surface is closed by construction: exactly the round-1 unary methods plus respond and the two stream routes are reachable, every deferred method and traversal variant is refused, path building lives in one source file, the unary envelope fails closed on a mismatched rpcId, a foreign envelope, a non-200, or a body past the ceiling (abandoned mid-stream), and the two push-only downlinks form ONE generation whose frames reach no session until host.describe validates \u2014 a failed probe discards them, and a superseded connection's close cannot evict its replacement."
+      "description": "The dsh transport surface is closed by construction: exactly the round-1 unary methods plus respond and the two stream routes are reachable, every deferred method and traversal variant is refused, path building lives in one source file, the unary envelope fails closed on a mismatched rpcId, a foreign envelope, a non-200, or a body past the ceiling (abandoned mid-stream), and the two push-only downlinks form ONE generation whose frames reach no session until host.describe validates — a failed probe discards them, and a superseded connection's close cannot evict its replacement."
     },
     {
       "id": "broker.dsh-mapping",
@@ -515,11 +544,11 @@
     },
     {
       "id": "broker.dsh-diagnosis",
-      "description": "dsh doctor says only what a read-only, effect-free observer can prove, and what it tells an operator to DO follows the same posture rule as every other managed host: where cosyncing manages this one, an absent host yields no `dsh web` command at all, because instructing a manual start while the service is starting or recovering one leaves two hosts on a single address. The posture is scoped by ADDRESS rather than by agent: the managed wording applies only to an address the broker reports managing, so a host on another machine is never described as supervised. That address also decides the command, and a non-default one never receives `dsh web` at all \u2014 managed or not \u2014 because that command takes no address and would start a host at the default one instead: not the host being diagnosed, and precisely the address a service manages. The operator is told which address to start instead. Beyond that, it opens no socket and issues no RPC of its own, separates \"a server is listening\" from \"a dsh host is listening\" by the upgrade-required downlink fingerprint, treats an npx cache with no binary on PATH as an advisory rather than an install, fails a build below the exact tested floor, and refuses a non-http(s) or query-bearing base URL instead of probing it \u2014 redacting any credential rather than quoting the configured value. The two families are separated by the adapter's OWN contract probe rather than by a second fingerprint, which is load-bearing: a 0.2 host's fingerprint IS a refusal (401 unauthorized on its carrier, 404 where the 0.1 downlink used to be), so a doctor that looked only for upgrade-required reported a healthy, correctly installed 0.2 host as an unexpected status and sent the operator to inspect their own port. Behind a 0.2 carrier the enrollment question is answered LOCALLY, from the same store the adapter writes under the same derived scope: a held, unexpired credential passes as HELD rather than as accepted, because an anonymous probe cannot prove acceptance and an authenticated one would read the real carrier route as a 404; a missing one names the command that enrolls the host; an expired one says so; a store that refuses to answer is reported as storage rather than as missing enrollment, so a group-writable or symlinked credential file is never answered by writing to it; and a host cosyncing starts itself is never handed a manual enrollment it could only complete by starting a competing host. No cookie value or name reaches the report."
+      "description": "dsh doctor says only what a read-only, effect-free observer can prove, and what it tells an operator to DO follows the same posture rule as every other managed host: where cosyncing manages this one, an absent host yields no `dsh web` command at all, because instructing a manual start while the service is starting or recovering one leaves two hosts on a single address. The posture is scoped by ADDRESS rather than by agent: the managed wording applies only to an address the broker reports managing, so a host on another machine is never described as supervised. That address also decides the command, and a non-default one never receives `dsh web` at all — managed or not — because that command takes no address and would start a host at the default one instead: not the host being diagnosed, and precisely the address a service manages. The operator is told which address to start instead. Beyond that, it opens no socket and issues no RPC of its own, separates \"a server is listening\" from \"a dsh host is listening\" by the upgrade-required downlink fingerprint, treats an npx cache with no binary on PATH as an advisory rather than an install, fails a build below the exact tested floor, and refuses a non-http(s) or query-bearing base URL instead of probing it — redacting any credential rather than quoting the configured value. The two families are separated by the adapter's OWN contract probe rather than by a second fingerprint, which is load-bearing: a 0.2 host's fingerprint IS a refusal (401 unauthorized on its carrier, 404 where the 0.1 downlink used to be), so a doctor that looked only for upgrade-required reported a healthy, correctly installed 0.2 host as an unexpected status and sent the operator to inspect their own port. Behind a 0.2 carrier the enrollment question is answered LOCALLY, from the same store the adapter writes under the same derived scope: a held, unexpired credential passes as HELD rather than as accepted, because an anonymous probe cannot prove acceptance and an authenticated one would read the real carrier route as a 404; a missing one names the command that enrolls the host; an expired one says so; a store that refuses to answer is reported as storage rather than as missing enrollment, so a group-writable or symlinked credential file is never answered by writing to it; and a host cosyncing starts itself is never handed a manual enrollment it could only complete by starting a competing host. No cookie value or name reaches the report."
     },
     {
       "id": "broker.dsh-attach-priming",
-      "description": "Driven through the real adapter registry and a real Hub, owner keying included. A dsh session has exactly ONE owner and only by explicit request: bare, observe and resume attaches are all refused and leave no owner, an explicit live attach is the sole owner on the #live key, a bare attach arriving AFTER it is still refused so no second full-authority owner can take over frame routing, and a repeated live attach coalesces onto the same wrapper and connection \u2014 two clients share it, and one disconnecting neither replaces routing nor silences the other. On that owner: live rows are withheld until history primes, so the history/live overlap reaches every client exactly once; both re-baseline signals arrive as a wholesale history re-read \u2014 a reconnect gap with its notice, and a proven host restart that retracts the previous generation to a shorter thread and then admits its reused sequence numbers as new content. Removal retracts Drive authority and the running state to the Hub, refuses later mutations, drops late transient frames while a durable transcript event emitted before it still arrives, and does not disturb another attached session."
+      "description": "Driven through the real adapter registry and a real Hub, owner keying included. A dsh session has exactly ONE owner and only by explicit request: bare, observe and resume attaches are all refused and leave no owner, an explicit live attach is the sole owner on the #live key, a bare attach arriving AFTER it is still refused so no second full-authority owner can take over frame routing, and a repeated live attach coalesces onto the same wrapper and connection — two clients share it, and one disconnecting neither replaces routing nor silences the other. On that owner: live rows are withheld until history primes, so the history/live overlap reaches every client exactly once; both re-baseline signals arrive as a wholesale history re-read — a reconnect gap with its notice, and a proven host restart that retracts the previous generation to a shorter thread and then admits its reused sequence numbers as new content. Removal retracts Drive authority and the running state to the Hub, refuses later mutations, drops late transient frames while a durable transcript event emitted before it still arrives, and does not disturb another attached session."
     },
     {
       "id": "broker.dsh-create-generation-race",
@@ -531,35 +560,35 @@
     },
     {
       "id": "broker.dsh-registration-gate",
-      "description": "dsh is registered for every broker and shown only to clients that can decode its row: a client declaring nothing, one below the integration-kind tolerance, or one whose revision is not a canonical decimal integer is served no dsh row and keeps every other agent, while a client at or above that tolerance is served exactly one \u2014 and its only attach mode predates the later attach-mode tolerance, so the declared floor is honest. The served row is honestly live-only: http-websocket, no observe and no resume (both refused rather than silently downgraded), the reviewed per-tool Drive posture, native rename as its only write-class action, and a typed retryable refusal when no external host is reachable. The host ADDRESS never becomes durable service state \u2014 pointing the adapter elsewhere is a foreground decision, and a remote address is not this machine's to serve \u2014 while managed-host ACTIVATION is durable and on by default, so the installed service starts and stops a locally launchable host it owns. Setup LISTS the row in its installable-agent summary and names `dsh web` in the managed-runtime consent, from the same declaration that activates it, so the runtimes an operator agrees to are the runtimes cosyncing manages."
+      "description": "dsh is registered for every broker and shown only to clients that can decode its row: a client declaring nothing, one below the integration-kind tolerance, or one whose revision is not a canonical decimal integer is served no dsh row and keeps every other agent, while a client at or above that tolerance is served exactly one — and its only attach mode predates the later attach-mode tolerance, so the declared floor is honest. The served row is honestly live-only: http-websocket, no observe and no resume (both refused rather than silently downgraded), the reviewed per-tool Drive posture, native rename as its only write-class action, and a typed retryable refusal when no external host is reachable. The host ADDRESS never becomes durable service state — pointing the adapter elsewhere is a foreground decision, and a remote address is not this machine's to serve — while managed-host ACTIVATION is durable and on by default, so the installed service starts and stops a locally launchable host it owns. Setup LISTS the row in its installable-agent summary and names `dsh web` in the managed-runtime consent, from the same declaration that activates it, so the runtimes an operator agrees to are the runtimes cosyncing manages."
     },
     {
       "id": "broker.agy-store",
-      "description": "The Antigravity CLI store is read WITHOUT being written to: the summaries database opens read-only and leaves no WAL or shm sidecar behind, `app_data_dir` is filtered in SQL at the boundary so an IDE row \u2014 whose per-conversation store is an opaque container this build deliberately does not support \u2014 can never reach the roster, a conversation with a store and NO transcript still yields an honest row whose history is a stated notice rather than an empty session, the discovery cutoff and the per-sweep row budget are both honoured, and a conversation id that would escape the app-data root is refused instead of addressing a path. The zero-time sentinel every summary row carries is matched textually before any parse, because `Date.parse` reads it as a plausible date rather than as nothing and would misdate the entire roster."
+      "description": "The Antigravity CLI store is read WITHOUT being written to: the summaries database opens read-only and leaves no WAL or shm sidecar behind, `app_data_dir` is filtered in SQL at the boundary so an IDE row — whose per-conversation store is an opaque container this build deliberately does not support — can never reach the roster, a conversation with a store and NO transcript still yields an honest row whose history is a stated notice rather than an empty session, the discovery cutoff and the per-sweep row budget are both honoured, and a conversation id that would escape the app-data root is refused instead of addressing a path. The zero-time sentinel every summary row carries is matched textually before any parse, because `Date.parse` reads it as a plausible date rather than as nothing and would misdate the entire roster."
     },
     {
       "id": "broker.agy-mapping",
-      "description": "The measured `(source, type)` inventory folds TOTALLY, keyed on the pair and never on the type alone: all sixteen measured pairs land in the category the table states, and an unlisted pair becomes a NAMED NEUTRAL row carrying its own source and type plus a trace \u2014 never a user bubble, never a throw. `USER_EXPLICIT/USER_INPUT` is the only human bubble, and the harness's own wrappers are stripped off it so the app never renders text the user did not type. Tool rows carry their semantic and their exit code, `CONVERSATION_HISTORY` is a history reset, and a background-task settlement is a self-contained tool block keyed by its sender and joined to the step index that spawned it \u2014 a result that finds no pending call becomes a self-contained block plus a trace rather than a guessed correlation to an unrelated call."
+      "description": "The measured `(source, type)` inventory folds TOTALLY, keyed on the pair and never on the type alone: all sixteen measured pairs land in the category the table states, and an unlisted pair becomes a NAMED NEUTRAL row carrying its own source and type plus a trace — never a user bubble, never a throw. `USER_EXPLICIT/USER_INPUT` is the only human bubble, and the harness's own wrappers are stripped off it so the app never renders text the user did not type. Tool rows carry their semantic and their exit code, `CONVERSATION_HISTORY` is a history reset, and a background-task settlement is a self-contained tool block keyed by its sender and joined to the step index that spawned it — a result that finds no pending call becomes a self-contained block plus a trace rather than a guessed correlation to an unrelated call."
     },
     {
       "id": "broker.agy-observe",
-      "description": "An observe attach replays a recorded conversation and then tails the same file, admitting each step EXACTLY ONCE across the buffered, cutoff and re-read paths \u2014 the byte offset bounds the read and the admitted-step set is the identity fence, so a debounced double-fire or a drain racing a replay still cannot emit a step twice. A transcript that SHRINKS was rewritten rather than appended to, so it re-baselines wholesale and tells every client to reload instead of splicing two different transcripts together. A `RUNNING` row replayed with no live child reads as interrupted, never as running. Removal is terminal for transient frames while a durable row emitted before it still arrives."
+      "description": "An observe attach replays a recorded conversation and then tails the same file, admitting each step EXACTLY ONCE across the buffered, cutoff and re-read paths — the byte offset bounds the read and the admitted-step set is the identity fence, so a debounced double-fire or a drain racing a replay still cannot emit a step twice. A transcript that SHRINKS was rewritten rather than appended to, so it re-baselines wholesale and tells every client to reload instead of splicing two different transcripts together. A `RUNNING` row replayed with no live child reads as interrupted, never as running. Removal is terminal for transient frames while a durable row emitted before it still arrives."
     },
     {
       "id": "broker.agy-drive",
-      "description": "Every Antigravity write is the host's own contract or it refuses. A prompt MINTS its own pending row before the child admits it \u2014 agy records nothing that could correlate until it writes the transcript line, so without this a refresh would delete the user's words \u2014 and that row survives a `getHistory()` replay, which is the only thing an ordinary attach reads. The delivering transcript line CLAIMS the row's key rather than minting a second, fenced by the transcript's byte size at send time so a repeated identical prompt cannot claim a line written before its send; rows and their correlation links are bounded together, so an evicted row leaves no link behind to lend its key to a later repeat. A send against a dead or never-spawned child REJECTS before touching run state rather than vanishing under a Running badge, a stream that closes owing a `result` is surfaced as a failure instead of hanging forever on the measured exit-0 trap, exit codes are traced and never interpreted, and a foreign `USER_EXPLICIT` line self-demotes the connection without killing the tail \u2014 a demotion keeps the accepted prompts and only `close()` drops them."
+      "description": "Every Antigravity write is the host's own contract or it refuses. A prompt MINTS its own pending row before the child admits it — agy records nothing that could correlate until it writes the transcript line, so without this a refresh would delete the user's words — and that row survives a `getHistory()` replay, which is the only thing an ordinary attach reads. The delivering transcript line CLAIMS the row's key rather than minting a second, fenced by the transcript's byte size at send time so a repeated identical prompt cannot claim a line written before its send; rows and their correlation links are bounded together, so an evicted row leaves no link behind to lend its key to a later repeat. A send against a dead or never-spawned child REJECTS before touching run state rather than vanishing under a Running badge, a stream that closes owing a `result` is surfaced as a failure instead of hanging forever on the measured exit-0 trap, exit codes are traced and never interpreted, and a foreign `USER_EXPLICIT` line self-demotes the connection without killing the tail — a demotion keeps the accepted prompts and only `close()` drops them."
     },
     {
       "id": "broker.agy-identity",
-      "description": "Live and replay agree KEY FOR KEY: one recorded fixture driven through both paths produces identical keys in identical order, which is what makes `mapAgyStep()` one fold rather than two that resemble each other \u2014 the stream names steps in lower snake case and the file in upper, and `agent_response` \u2194 `PLANNER_RESPONSE` is not a case fold, so the normalization table at the boundary is what the agreement rests on. The drive registry is IDENTITY-KEYED and compare-and-swap: the hub can attach a replacement before closing the incumbent it displaced, so a stale close cannot deregister its live replacement and leave the session driving while every roster row reads observing."
+      "description": "Live and replay agree KEY FOR KEY: one recorded fixture driven through both paths produces identical keys in identical order, which is what makes `mapAgyStep()` one fold rather than two that resemble each other — the stream names steps in lower snake case and the file in upper, and `agent_response` ↔ `PLANNER_RESPONSE` is not a case fold, so the normalization table at the boundary is what the agreement rests on. The drive registry is IDENTITY-KEYED and compare-and-swap: the hub can attach a replacement before closing the incumbent it displaced, so a stale close cannot deregister its live replacement and leave the session driving while every roster row reads observing."
     },
     {
       "id": "broker.agy-registration-gate",
-      "description": "agy is registered for EVERY broker \u2014 on the runtime registry that serves `/api/agents` and on the shipped-adapter list doctor diagnoses, which must never disagree \u2014 and served to every client that can decode its row, which is all of them: a client declaring nothing, one below either decode tolerance, and one whose revision is not a canonical decimal integer are all served exactly one agy row and keep every other agent. That absence of a declared floor is proved rather than assumed \u2014 every attach mode it publishes predates the attach-mode tolerance and its integration kind predates the integration-kind one, so a later value added without a floor fails here instead of costing an old client its whole roster. The DECLARED attach modes and the modes `attach` honours are the same set, and an undeclared mode is refused loudly rather than silently downgraded. An observe attach spawns NO child, observed through a fake binary that records its own argv, and a bare attach is observe \u2014 never silently promoted to a drive, with no driver registered and its writes refused outright. A resume attach claims the session and still spawns nothing until the first prompt, while a machine with no `agy` on PATH refuses the resume as an ordinary attach refusal and leaves no half-built drive registered behind it. There is no managed host in the durable service environment, because there is no daemon to start, supervise or stop."
+      "description": "agy is registered for EVERY broker — on the runtime registry that serves `/api/agents` and on the shipped-adapter list doctor diagnoses, which must never disagree — and served to every client that can decode its row, which is all of them: a client declaring nothing, one below either decode tolerance, and one whose revision is not a canonical decimal integer are all served exactly one agy row and keep every other agent. That absence of a declared floor is proved rather than assumed — every attach mode it publishes predates the attach-mode tolerance and its integration kind predates the integration-kind one, so a later value added without a floor fails here instead of costing an old client its whole roster. The DECLARED attach modes and the modes `attach` honours are the same set, and an undeclared mode is refused loudly rather than silently downgraded. An observe attach spawns NO child, observed through a fake binary that records its own argv, and a bare attach is observe — never silently promoted to a drive, with no driver registered and its writes refused outright. A resume attach claims the session and still spawns nothing until the first prompt, while a machine with no `agy` on PATH refuses the resume as an ordinary attach refusal and leaves no half-built drive registered behind it. There is no managed host in the durable service environment, because there is no daemon to start, supervise or stop."
     },
     {
       "id": "broker.agy-cross-client-join",
-      "description": "Two sockets share ONE Antigravity Drive connection through the broker's join action. The second socket is OFFERED the join \u2014 a capability that stays silent is never offered it, which was the whole of two shipped defects \u2014 receives the EXISTING connection rather than a second child, and sees the owner's accepted-but-undelivered prompts in its own REPLAY, which is the row a reload used to lose. The join performs no native attach and spawns no second process, so the conversation still has exactly one writer against one stdin: both sockets' prompts arrive there in order, each as the measured `{\"event\":\"user\"}` envelope, and a peer socket's prompt is never mistaken for a foreign write because the pending FIFO and the queued-key map live on the CONNECTION they share. A foreign write in a terminal demotes that connection and the new posture reaches BOTH sockets in the same broadcast, retracting authority from both at once, offering a takeover rather than pretending the session is unreachable, keeping every accepted prompt, and refusing later sends instead of racing the terminal."
+      "description": "Two sockets share ONE Antigravity Drive connection through the broker's join action. The second socket is OFFERED the join — a capability that stays silent is never offered it, which was the whole of two shipped defects — receives the EXISTING connection rather than a second child, and sees the owner's accepted-but-undelivered prompts in its own REPLAY, which is the row a reload used to lose. The join performs no native attach and spawns no second process, so the conversation still has exactly one writer against one stdin: both sockets' prompts arrive there in order, each as the measured `{\"event\":\"user\"}` envelope, and a peer socket's prompt is never mistaken for a foreign write because the pending FIFO and the queued-key map live on the CONNECTION they share. A foreign write in a terminal demotes that connection and the new posture reaches BOTH sockets in the same broadcast, retracting authority from both at once, offering a takeover rather than pretending the session is unreachable, keeping every accepted prompt, and refusing later sends instead of racing the terminal."
     },
     {
       "id": "broker.acp-client",
@@ -695,7 +724,7 @@
     },
     {
       "id": "broker.artifact-session-isolation",
-      "description": "Artifact creation, replay, restart, and download stay bound to one exact broker, tool, and session. An artifact download is resumable on the same terms as the workspace route: it advertises `accept-ranges`, carries the record's content hash as its ETag and its creation time as `last-modified`, answers the closed, open, and suffix byte-range forms exactly, honours a matching `If-Range` with a 206 and a stale one with the whole representation, refuses a range outside the representation with 416 and `content-range: bytes */size`, and answers a ranged `HEAD` with those headers and no body. Two half ranges concatenate to the artifact byte-for-byte. Every security header on the 200 \u2014 `nosniff`, `content-disposition`, `content-security-policy: sandbox` for a non-passive mime, `no-store`, the referrer and cross-origin policies \u2014 is identical on the 206 and on the 416, so no range can turn a hardened attachment into an inline-renderable response."
+      "description": "Artifact creation, replay, restart, and download stay bound to one exact broker, tool, and session. An artifact download is resumable on the same terms as the workspace route: it advertises `accept-ranges`, carries the record's content hash as its ETag and its creation time as `last-modified`, answers the closed, open, and suffix byte-range forms exactly, honours a matching `If-Range` with a 206 and a stale one with the whole representation, refuses a range outside the representation with 416 and `content-range: bytes */size`, and answers a ranged `HEAD` with those headers and no body. Two half ranges concatenate to the artifact byte-for-byte. Every security header on the 200 — `nosniff`, `content-disposition`, `content-security-policy: sandbox` for a non-passive mime, `no-store`, the referrer and cross-origin policies — is identical on the 206 and on the 416, so no range can turn a hardened attachment into an inline-renderable response."
     },
     {
       "id": "broker.prompt-attachment-intake",
@@ -703,11 +732,11 @@
     },
     {
       "id": "broker.inbox-retention",
-      "description": "Delivered prompt attachments are collected from the session inbox under a bounded age, byte, and count policy, and a file a live session may still reference is never removed. A delivered inline or staged attachment past the retention age goes whatever else is in the inbox; over either per-inbox cap the oldest go first and eviction stops at the retained-file floor, which bounds the caps and never the age. Four things are never removed: anything that is not a regular file, so a symlink inside the inbox is neither followed nor deleted; a path an unexpired or claimed staging record still points at; anything inside the grace window while a live session holds that cwd; and every file under a `.cosyncing` that no longer resolves to itself, which is refused outright rather than swept. The sweep is durable and bounded \u2014 session cwds are registered as they are used and survive a restart, a directory that is gone is dropped from the registry, and one call inspects a bounded number of roots and advances a persisted round-robin cursor. A zero retention disables the whole sweep and leaves the staging-metadata sweep untouched."
+      "description": "Delivered prompt attachments are collected from the session inbox under a bounded age, byte, and count policy, and a file a live session may still reference is never removed. A delivered inline or staged attachment past the retention age goes whatever else is in the inbox; over either per-inbox cap the oldest go first and eviction stops at the retained-file floor, which bounds the caps and never the age. Four things are never removed: anything that is not a regular file, so a symlink inside the inbox is neither followed nor deleted; a path an unexpired or claimed staging record still points at; anything inside the grace window while a live session holds that cwd; and every file under a `.cosyncing` that no longer resolves to itself, which is refused outright rather than swept. The sweep is durable and bounded — session cwds are registered as they are used and survive a restart, a directory that is gone is dropped from the registry, and one call inspects a bounded number of roots and advances a persisted round-robin cursor. A zero retention disables the whole sweep and leaves the staging-metadata sweep untouched."
     },
     {
       "id": "broker.claude-artifacts",
-      "description": "Claude's agent-to-user file surfacing maps to canonical `file-artifact` messages through one mapper shared by observe and resume: a `SendUserFile` attachment becomes one artifact per file with the basename as its name and the attachment's own media type as its mime, inlined as a `data:` URL when the bytes are readable and emitted header-only when they are not, and it carries `proactive` because the agent SENT it \u2014 whatever the native record's status field says, since a file the user asked for is still a file the agent handed over. Inline base64 image blocks become artifacts in user AND assistant messages, reusing the block's own base64 rather than re-encoding, and the user-message row still reports its image count. Artifact paths are stable across a re-map, so history replay dedupes rather than duplicating."
+      "description": "Claude's agent-to-user file surfacing maps to canonical `file-artifact` messages through one mapper shared by observe and resume: a `SendUserFile` attachment becomes one artifact per file with the basename as its name and the attachment's own media type as its mime, inlined as a `data:` URL when the bytes are readable and emitted header-only when they are not, and it carries `proactive` because the agent SENT it — whatever the native record's status field says, since a file the user asked for is still a file the agent handed over. Inline base64 image blocks become artifacts in user AND assistant messages, reusing the block's own base64 rather than re-encoding, and the user-message row still reports its image count. Artifact paths are stable across a re-map, so history replay dedupes rather than duplicating."
     },
     {
       "id": "broker.artifact-store-health",
@@ -739,7 +768,7 @@
     },
     {
       "id": "broker.adapter-path-stamps",
-      "description": "Every adapter answers explicitly whether its file-read and file-edit tool rows carry a path, and the answer is proven against a recorded native record run through that adapter's real mapper. Silence fails: the adapter ids come from the adapter classes, so a new or renamed adapter with no declared answer goes red. A declared `supported` names the exact contract fields the path lands on (`semantic.path`, `tool-result.path`, `fileChanges[].path` \u2014 the FILE-naming fields the client derives mentions from, never a command cwd or a search scope) and must actually stamp all of them; a declared `unsupported` carries a written reason and must actually stamp nothing, so an adapter that gains stamping has to come back and say so. Codex reads are the one recorded gap: it has no file-read tool and reads through shell commands, where a path could only be guessed."
+      "description": "Every adapter answers explicitly whether its file-read and file-edit tool rows carry a path, and the answer is proven against a recorded native record run through that adapter's real mapper. Silence fails: the adapter ids come from the adapter classes, so a new or renamed adapter with no declared answer goes red. A declared `supported` names the exact contract fields the path lands on (`semantic.path`, `tool-result.path`, `fileChanges[].path` — the FILE-naming fields the client derives mentions from, never a command cwd or a search scope) and must actually stamp all of them; a declared `unsupported` carries a written reason and must actually stamp nothing, so an adapter that gains stamping has to come back and say so. Codex reads are the one recorded gap: it has no file-read tool and reads through shell commands, where a path could only be guessed."
     },
     {
       "id": "broker.pi-bridge-reload",
@@ -924,6 +953,82 @@
     {
       "id": "broker.session-catalog-convergence",
       "description": "Attached session model, agent, permission and command catalogs refresh after native invalidation beyond bounded startup retries. Same-length semantic changes replace picker values; valid empty catalogs retract stale choices, failed surfaces retain their last successful value, and burst notifications serialize while fencing stale reads. Closing the socket unsubscribes exactly once and prevents late or reentrant frames. The DSH adapter delivers captured native invalidation without replacing the authenticated carrier or event authority. Picker and command reads have independent publication, invalidation fences and bounded retry ladders, so either pending surface cannot block the other. Closing a socket releases refresh ownership without waiting for an optional read and discards its late result."
+    },
+    {
+      "id": "broker.claude-mod-socket",
+      "description": "A Claude mod socket client is served, authenticated by kernel peer credentials, and refused before it can queue anything."
+    },
+    {
+      "id": "broker.claude-mod-registry",
+      "description": "Mod registrations stay fresh on the poll chain, survive restart and /clear, and read a recycled pid as dead."
+    },
+    {
+      "id": "broker.claude-mod-holds",
+      "description": "Held permission decisions answer exactly once, drop late answers with a log line, expire on deadline, and stay inside their poll budget."
+    },
+    {
+      "id": "broker.claude-mod-gates",
+      "description": "Nothing is held outside default and acceptEdits mode, without a viewer, or outside an interactive terminal."
+    },
+    {
+      "id": "broker.claude-mod-peer-creds",
+      "description": "The broker learns the peer pid and uid of a Unix-socket connection from the kernel and never guesses them."
+    },
+    {
+      "id": "broker.claude-mod-framing",
+      "description": "The mod socket's HTTP/1.1 reader honours its written framing rules and parses the requests Claude Code really sends."
+    },
+    {
+      "id": "broker.claude-mod-register-unit",
+      "description": "The mod's own unit tests run in CI against the shipped register.js: the answer rule, the input summary, the socket order and the steer route."
+    },
+    {
+      "id": "broker.claude-mod-service",
+      "description": "A held Claude call is decided from the session transcript, drawn as the app's permission card, and answered once."
+    },
+    {
+      "id": "broker.claude-mod-seam",
+      "description": "The shipped mod, the real mod socket, the real service, the real adapter connection and the real client-message routing run as one path: the mod finds the broker with no environment override, prompts and Stop reach the terminal, approvals and AskUserQuestion answers come back as the tool's own result from either seat, expiry closes the card, and a broker restart is followed by an idle re-registration instead of a dead loop."
+    },
+    {
+      "id": "broker.claude-mod-hold-seam",
+      "description": "Holds end to end through the shipped mod, the real mod socket, ClaudeModService and the app's card: the band is drawn only for a call the broker said it holds, a band whose hold ended is drawn away and its buttons are inert, two asks at once each get their own answer from whichever seat answered them, a verdict the terminal already delivered is never offered again, every card carries an app id of its own that a new process cannot inherit, an AskUserQuestion the broker will not hold becomes a read-only question card, open in the terminal and blocking, that closes with its call, a question handed to Claude's picker from the band stays open there with its inbox item, a question card offers only the answers Claude can take, and a permission card repeats its preview in detail for a client older than inputPreview."
+    },
+    {
+      "id": "broker.claude-mod-lifecycle-seam",
+      "description": "The shipped mod's lifecycle against the real mod socket: it logs only to the debug log and never what a person typed; COSYNCING_CLAUDE_DISABLE turns the whole mod off; its poll loop backs off, survives a refused timer, retires a hot-reloaded predecessor instead of fighting it, and never re-registers a session that ended; a terminal refused as session_claimed takes the session over once the claimant dies; a register carries the running turn; and a broker that accepts and never answers delays no hook and costs a held call no more than its bound."
+    },
+    {
+      "id": "broker.claude-mod-hub-seam",
+      "description": "The mod's turns and cards as the real Hub sees them, through the shipped mod, the real mod socket and ClaudeModService: a Stop from the app leaves every row on the session idle within a second although the transcript records no interruption, a resync and a fresh attach agree that the stopped turn is not running, a turn the transcript closes keeps its own end, a Stop that crosses the turn's own end reads idle at once and still takes the transcript's done close with its tokens, live and in history, a resync restates an open run cancelled only when the mod said the turn ended after it started, so a turn whose prompt landed before the mod's turn.start, or one running through a mid-turn reload of the mod, still reads running, and Escape is closed once, by its own row; a held AskUserQuestion is one card under Claude's own call id whichever copy arrives first, a socket that joins later is drawn the copy it can answer, a late tap on it is refused out loud, and the same call asked by a resumed process gets a card of its own; a card the terminal took back says so (Claude's own dialog chosen from the band, or Escape) and a card the app's Stop closed says the app; a question answered from the app or in the terminal closes, for every seat and on a reload, with the answer given; a question handed to Claude's picker from the band, or released to it by the gate (no viewer, the switch), keeps the row at Needs input with one read-only card open in the terminal until the transcript records the answer or the turn ends, and a reload draws it as answered in the terminal; a closed question card says who closed it (the app's answer, Escape, the app's Stop, a lapsed lease), live, on the transcript's own resolution and on a reload; the hold gate and the mode chip read the newest of a title-block permission-mode row and a main-chain prompt row's permissionMode, so an ask after a prompt in auto is released and one after a newer title block in default is held, and a plan approved earlier in the turn releases the next ask as mode:unknown with no mode on its card or the chip while a rejected plan keeps plan."
+    },
+    {
+      "id": "broker.claude-mod-inventory",
+      "description": "A source-review tripwire, not a sandbox: every use of the SDK handle and of the registration function in the shipped Claude mod, and in the copy setup stamps a socket path into, is attributed to the intended calls, hooks and environment reads or the gate fails, every dial is pinned to the one origin and a resolver-written, guarded socket, a corpus of evasions is refused, and the build's own validator and test runner, run through the binary the gate resolved, agree with it. It bounds what a reviewed change can add quietly, not what the mod can do at run time: the build decides that."
+    },
+    {
+      "id": "broker.claude-mod-smoke-harness",
+      "description": "The tier-2 Claude mod harness proves the mod's half of the socket without Claude, so a real-session run only fails for reasons a real session has to explain, and the smoke's own proof rules are checked the same way: a step is proven from transcript rows keyed on that step's own probe file or from broker events for that step's own hold, never from pane text, and each rule is run against recorded rows and events where only the previous step left evidence."
+    },
+    {
+      "id": "broker.claude-mod-real-smoke",
+      "description": "Against a real Claude Code session the mod registers over the socket, holds within its poll budget, answers from either seat, and fails open when it should."
+    },
+    {
+      "id": "broker.claude-mod-rows",
+      "description": "A live Claude session reaches the app through the mod and not the terminal: discovery advertises `live` only while a registration is fresh and `observe` once it is not, Take over over a fresh registration is refused as an ownership conflict before any transport is opened, mod-sourced steering lines render as steering rows rather than as user turns, and a transcript line type the adapter has not seen raises one attention event instead of passing silently."
+    },
+    {
+      "id": "broker.claude-mod-takeover-exclusion",
+      "description": "The drive surface cannot claim a session a mod is holding: the adapter's live refusal maps to the drive ownership-conflict code, so a Take over over a fresh registration fails with DRIVE_OWNERSHIP_CONFLICT and the same call succeeds once the registration goes stale."
+    },
+    {
+      "id": "broker.claude-mod-setup",
+      "description": "Setup installs the Claude mod through Claude's own commands and nothing else: the four measured commands in order, a receipt that proves the marketplace bytes it wrote, a decline that is remembered and that takes the directory back even after the user removed the mod inside Claude, a refusal that leaves no marketplace behind, uninstall that reverses with Claude before it deletes, a copy it cannot prove preserved with a warning, and a doctor line that reports what it found."
+    },
+    {
+      "id": "broker.claude-jsonl-type-audit",
+      "description": "The adapter's documented Claude transcript type list is measured, not guessed: the auditor classifies every top-level line type across the real transcripts on the machine, the sessions' own and the Task subagent transcripts beside them (`<uuid>/subagents/agent-*.jsonl`, nested workflow runs included), reports the ones the adapter does not know, and its classification of a recorded fixture tree is deterministic."
     }
   ],
   "executionGroups": [
@@ -993,6 +1098,14 @@
       "resourceClass": "heavyweight",
       "gates": [
         "windows-broker"
+      ]
+    },
+    {
+      "id": "claude-mod-smoke-lane",
+      "mode": "serial",
+      "resourceClass": "heavyweight",
+      "gates": [
+        "claude-mod-smoke"
       ]
     }
   ],
@@ -1581,7 +1694,25 @@
         "broker.dsh-credential-store",
         "broker.dsh-enrollment",
         "broker.dsh-managed-launch",
-        "broker.session-catalog-convergence"
+        "broker.session-catalog-convergence",
+        "broker.claude-mod-framing",
+        "broker.claude-mod-register-unit",
+        "broker.claude-mod-seam",
+        "broker.claude-mod-hold-seam",
+        "broker.claude-mod-lifecycle-seam",
+        "broker.claude-mod-hub-seam",
+        "broker.claude-mod-service",
+        "broker.claude-mod-peer-creds",
+        "broker.claude-mod-gates",
+        "broker.claude-mod-holds",
+        "broker.claude-mod-registry",
+        "broker.claude-mod-socket",
+        "broker.claude-mod-inventory",
+        "broker.claude-mod-smoke-harness",
+        "broker.claude-mod-takeover-exclusion",
+        "broker.claude-mod-rows",
+        "broker.claude-mod-setup",
+        "broker.claude-jsonl-type-audit"
       ],
       "command": [
         "bun",
@@ -1795,7 +1926,26 @@
             "dsh-capture-prompt",
             "dsh-capture-turn",
             "dsh-capture-runner",
-            "session-options"
+            "session-options",
+            "claude-mod-seam",
+            "claude-mod-hold-seam",
+            "claude-mod-lifecycle-seam",
+            "claude-mod-hub-seam",
+            "claude-mod-socket",
+            "claude-mod-registry",
+            "claude-mod-holds",
+            "claude-mod-gates",
+            "claude-mod-peer-creds",
+            "claude-mod-framing",
+            "claude-mod-register-unit",
+            "claude-mod-takeover-exclusion",
+            "claude-mod-rows",
+            "claude-jsonl-type-audit",
+            "claude-mod-service",
+            "claude-mod-static-inventory",
+            "claude-mod-inventory-gate",
+            "claude-mod-smoke-selftest",
+            "claude-mod-setup"
           ]
         },
         {
@@ -4277,6 +4427,269 @@
             "packages/typescript/adapters/dsh/src/remote-host.ts",
             "packages/typescript/adapters/dsh/test/test-dsh-remote-host.ts"
           ]
+        },
+        {
+          "id": "claude-mod-socket",
+          "claimId": "broker.claude-mod-socket",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-socket"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-mod-socket-server.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-registry",
+          "claimId": "broker.claude-mod-registry",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-registry"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-mod-registry.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-holds",
+          "claimId": "broker.claude-mod-holds",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-holds"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-mod-holds.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-gates",
+          "claimId": "broker.claude-mod-gates",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-gates"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-mod-gates.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-peer-creds",
+          "claimId": "broker.claude-mod-peer-creds",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-peer-creds"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-unix-peer-credentials.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-framing",
+          "claimId": "broker.claude-mod-framing",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-framing"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-mod-http-framing.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-register-unit",
+          "claimId": "broker.claude-mod-register-unit",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-register-unit"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-mod-register-unit.ts",
+            "mods/cosyncing-claude/hooks/register.test.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-service",
+          "claimId": "broker.claude-mod-service",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-service"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-mod-service.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-seam",
+          "claimId": "broker.claude-mod-seam",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-seam"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-mod-seam.ts",
+            "packages/typescript/broker/src/sessions/mod-client-messages.ts",
+            "mods/cosyncing-claude/hooks/register.js"
+          ]
+        },
+        {
+          "id": "claude-mod-hold-seam",
+          "claimId": "broker.claude-mod-hold-seam",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-hold-seam"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-mod-hold-seam.ts",
+            "packages/typescript/broker/test/claude/claude-mod-seam-harness.ts",
+            "mods/cosyncing-claude/hooks/register.js",
+            "packages/typescript/broker/src/sessions/claude-mod-service.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-lifecycle-seam",
+          "claimId": "broker.claude-mod-lifecycle-seam",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-lifecycle-seam"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-mod-lifecycle-seam.ts",
+            "packages/typescript/broker/test/claude/claude-mod-seam-harness.ts",
+            "mods/cosyncing-claude/hooks/register.js",
+            "packages/typescript/broker/test/claude/claude-mod-terminal-fixture.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-hub-seam",
+          "claimId": "broker.claude-mod-hub-seam",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-hub-seam"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-mod-hub-seam.ts",
+            "packages/typescript/broker/test/claude/claude-mod-seam-harness.ts",
+            "mods/cosyncing-claude/hooks/register.js",
+            "packages/typescript/broker/src/sessions/claude-mod-service.ts",
+            "packages/typescript/broker/src/sessions/mod-holds.ts",
+            "packages/typescript/adapters/claude/src/mod-connection.ts",
+            "packages/typescript/adapters/claude/src/question-answers.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-static-inventory",
+          "claimId": "broker.claude-mod-inventory",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-static-inventory"
+          ],
+          "sourceOwners": [
+            "scripts/mod/check-mod-inventory.ts",
+            "scripts/mod/mod-capability-scan.ts",
+            "scripts/mod/mod-inventory-fixtures.ts",
+            "mods/cosyncing-claude/hooks/register.js",
+            "mods/cosyncing-claude/hooks/hooks.json",
+            "mods/cosyncing-claude/.claude-plugin/plugin.json",
+            "mods/marketplace.json"
+          ]
+        },
+        {
+          "id": "claude-mod-inventory-gate",
+          "claimId": "broker.claude-mod-inventory",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-inventory-gate"
+          ],
+          "sourceOwners": [
+            "scripts/mod/test-mod-inventory-gate.ts",
+            "scripts/mod/check-mod-inventory.ts",
+            "scripts/mod/mod-capability-scan.ts",
+            "mods/cosyncing-claude/hooks/register.js",
+            "packages/typescript/broker/src/runtime/runtime-assets.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-smoke-selftest",
+          "claimId": "broker.claude-mod-smoke-harness",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-smoke-selftest"
+          ],
+          "sourceOwners": [
+            "scripts/claude-mod/smoke/selftest.ts",
+            "scripts/claude-mod/smoke/harness.ts",
+            "scripts/claude-mod/smoke/evidence.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-takeover-exclusion",
+          "claimId": "broker.claude-mod-takeover-exclusion",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-takeover-exclusion"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-mod-takeover-exclusion.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-rows",
+          "claimId": "broker.claude-mod-rows",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-rows"
+          ],
+          "sourceOwners": [
+            "packages/typescript/adapters/claude/test/test-claude-mod-rows.ts"
+          ]
+        },
+        {
+          "id": "claude-mod-setup",
+          "claimId": "broker.claude-mod-setup",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-mod-setup"
+          ],
+          "sourceOwners": [
+            "packages/typescript/broker/test/claude/test-claude-mod-setup.ts",
+            "packages/typescript/broker/test/helpers/fake-claude-cli.ts",
+            "packages/typescript/broker/test/helpers/setup-wizard-child.ts",
+            "packages/typescript/broker/src/installation/claude-mod-ownership.ts",
+            "packages/typescript/broker/src/installation/setup-actions.ts",
+            "packages/typescript/broker/src/installation/setup-presenter.ts",
+            "packages/typescript/broker/src/cli/cli.ts",
+            "packages/typescript/broker/src/runtime/runtime-assets.ts"
+          ]
+        },
+        {
+          "id": "claude-jsonl-type-audit",
+          "claimId": "broker.claude-jsonl-type-audit",
+          "command": [
+            "bun",
+            "run",
+            "test:claude-jsonl-type-audit"
+          ],
+          "sourceOwners": [
+            "scripts/adapters/test-audit-claude-jsonl-types.ts",
+            "scripts/adapters/audit-claude-jsonl-types.ts"
+          ]
         }
       ]
     },
@@ -5092,6 +5505,47 @@
         "scripts/verification/windows-broker.ts",
         "scripts/broker/windows/phase7-suite-survey.ts",
         ".github/workflows/ci.yml"
+      ]
+    },
+    {
+      "id": "claude-mod-smoke",
+      "releaseDomain": "Claude mod acceptance",
+      "claimIds": [
+        "broker.claude-mod-real-smoke"
+      ],
+      "command": [
+        "bun",
+        "run",
+        "verification:claude-mod-smoke"
+      ],
+      "focusedDiagnostics": [
+        [
+          "bun",
+          "run",
+          "verification:claude-mod-smoke"
+        ]
+      ],
+      "dependencies": [],
+      "expectedArtifacts": [
+        {
+          "path": "output/claude-mod-smoke/report.json",
+          "kind": "report"
+        },
+        {
+          "path": "output/claude-mod-smoke/evidence.ndjson",
+          "kind": "artifact"
+        }
+      ],
+      "timeoutClass": "long",
+      "resourceClass": "heavyweight",
+      "platformExclusions": [
+        "real-claude-plugin-harness"
+      ],
+      "sourceOwners": [
+        "scripts/claude-mod/smoke/run.ts",
+        "scripts/claude-mod/smoke/harness.ts",
+        "scripts/claude-mod/smoke/evidence.ts",
+        "mods/cosyncing-claude/hooks/register.js"
       ]
     }
   ]

@@ -18,6 +18,7 @@
  */
 import type { SetupAgentSummary, SetupServiceChoice, TokdashProvisionCapability } from './setup.ts';
 import type { TokdashEndpointRejection } from './tokdash-quota.ts';
+import type { ClaudeModOutcomeRecord, ClaudeModSkipReason } from './claude-mod-ownership.ts';
 
 export type SetupLanguage = 'en' | 'zh-Hans';
 
@@ -43,6 +44,13 @@ export type SetupMutationStep =
   | { kind: 'agent-skill-refresh' }
   | { kind: 'agent-skill-remove' }
   | { kind: 'opencode-shim' }
+  | {
+    kind: 'claude-mod'
+    intent: 'install' | 'remove'
+    marketplaceDir: string
+    /** True when the directory is our own copy from an older broker, so the row says refresh. */
+    refreshing: boolean
+  }
   | { kind: 'service-install'; definitionPath: string }
   | { kind: 'service-remove'; provider: SetupServiceChoice; product: string }
   | { kind: 'binary-install'; version: string; path: string }
@@ -119,6 +127,33 @@ export interface SetupMessages {
   agentSkillConfirm: string;
   legacyAgentSkillConfirm: (paths: string) => string;
   opencodeShimConfirm: string;
+  /**
+   * The mod's own consent question. Phrased around what it does to the user's Claude rather than around
+   * the word "mod", because the thing being agreed to is a plugin appearing in another program.
+   */
+  claudeModConfirm: string;
+  /**
+   * Why the mod is not on offer here. Printed whether or not anything was asked, in both the wizard and
+   * `--yes` output: a host that silently lacks a feature reads as a broken install, and one that says
+   * "your Claude is 2.1.240 and the floor is 2.1.288" reads as a thing the operator can go and fix.
+   */
+  /**
+   * Why the mod is not on offer. `policyKeys` names the managed keys that refused it, because
+   * "an organisation policy" and "your admin set `strictKnownMarketplaces`" are different
+   * conversations to have with that admin.
+   */
+  claudeModSkipReason: (
+    reason: ClaudeModSkipReason,
+    minimumVersion: string,
+    policyKeys?: readonly string[],
+  ) => string;
+  /** The directory holds bytes cosyncing cannot prove it wrote, so this run leaves the mod alone. */
+  claudeModOwnershipSkip: (
+    status: 'unowned' | 'receipt-invalid' | 'unsafe' | 'unreadable',
+    marketplaceDir: string,
+  ) => string;
+  /** A mod step that did not finish, and the commands that finish it. Setup itself still completed. */
+  claudeModOutcome: (outcome: Readonly<ClaudeModOutcomeRecord>) => string;
   serviceQuestion: string;
   serviceForegroundLabel: string;
   serviceForegroundHint: (binary: string) => string;
@@ -211,7 +246,7 @@ const en: SetupMessages = {
     grok: 'Create/Resume is enabled for authenticated Grok Build 1.0.13 or newer; setup preserves Grok state and records its executable for the service.',
     cline: 'Default-profile Observe plus Create/Resume for app-created sessions through an isolated managed Cline Hub, on 3.0.61 or newer; setup persists explicit non-secret provider/model selection and paths, never credentials.',
     kilo: 'Observe plus authenticated Create/Drive on Kilo Code 7.4.23 or newer; the broker manages only its dedicated loopback port 4097 host and leaves foreign servers untouched.',
-    claude: 'Observe + Take over only; setup never edits Claude settings.',
+    claude: 'Observe plus Take over, and true sync through the optional cosyncing Claude mod, which setup offers where supported and installs only with consent.',
     agy: 'Observe + Resume only; agy has no daemon to manage, and setup never touches Antigravity state.',
     kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
     dsh: 'Managed `dsh web` host; one you started yourself, or on another machine, is never touched.',
@@ -241,7 +276,7 @@ const en: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\nFix: ${remediation}`,
   managedRuntimeTitle: 'Required managed-runtime acknowledgement',
   managedRuntimeBody: (product) =>
-    `${product} will manage supported shared Codex/OpenCode runtimes, the packaged Pi and omp bridges, and the Kilo, \`kimi web\`, and \`dsh web\` hosts — starting one when none is running, restarting it if it crashes, and stopping only the one it started. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
+    `${product} will manage supported shared Codex/OpenCode runtimes, the packaged Pi and omp bridges, and the Kilo, \`kimi web\`, and \`dsh web\` hosts — starting one when none is running, restarting it if it crashes, and stopping only the one it started. Externally managed processes stay untouched. This step edits nothing in Claude's own settings; the Claude mod is a separate question later in setup, and Claude installs that one itself.`,
   managedRuntimeConfirm: (product) =>
     `I understand and want ${product} to manage the supported shared runtimes.`,
   legacyPiBridgeConfirm: (path) =>
@@ -251,6 +286,66 @@ const en: SetupMessages = {
     `Upgrade the known preceding cosyncing skill at ${paths}? Unknown or edited skill content is never overwritten.`,
   opencodeShimConfirm:
     'Route `opencode` in your terminal to the shared cosyncing serve so its status shows live in the app?',
+  claudeModConfirm:
+    'Let cosyncing install its Claude Code mod, so a terminal Claude session and the app share one session? '
+      + 'cosyncing writes the mod into `claude-mod/marketplace` under its own state directory, and then '
+      + 'Claude installs it from there: Claude adds `extraKnownMarketplaces.cosyncing` and '
+      + '`enabledPlugins["cosyncing-claude@cosyncing"]` to its own settings and records the install in '
+      + 'plugins/known_marketplaces.json and plugins/installed_plugins.json. Once it is in, a permission '
+      + 'prompt in the app can answer Claude\'s tool approvals.',
+  claudeModSkipReason: (reason, minimumVersion, policyKeys) => {
+    switch (reason) {
+      case 'missing-cli':
+        return 'Claude Code: no cosyncing mod, because no `claude` command was found on this host.';
+      case 'below-minimum-version':
+        return `Claude Code: no cosyncing mod, because the installed build predates ${minimumVersion}. `
+          + 'Run `claude update` and rerun setup to be offered it.';
+      case 'native-windows':
+        return 'Claude Code: no cosyncing mod on native Windows, where Claude sessions stay take-over only. '
+          + 'A WSL or other Linux host is offered the mod.';
+      case 'org-policy':
+        return 'Claude Code: no cosyncing mod, because managed Claude settings restrict where a mod may '
+          + 'come from. cosyncing does not attempt an install an organisation has ruled out.'
+          + (policyKeys && policyKeys.length > 0
+            ? ` Keys found: ${policyKeys.join(', ')}.`
+            : '');
+      case 'settings-invalid':
+        return 'Claude Code: no cosyncing mod this run, because Claude\'s own settings file could not be '
+          + 'read as JSON. cosyncing does not edit another program\'s settings, so nothing else about '
+          + 'this setup run was affected.';
+      case 'config-dir-relative':
+        return 'Claude Code: no cosyncing mod, because CLAUDE_CONFIG_DIR is a relative path, which Claude '
+          + 'resolves against whichever directory a session starts in. Set it to an absolute path and '
+          + 'rerun setup to be offered the mod.';
+      case 'managed-settings-unreadable':
+        return 'Claude Code: no cosyncing mod, because a managed Claude settings file exists and could not be '
+          + 'read. An unreadable policy is not evidence that there is no policy, so cosyncing does not install '
+          + 'past it.';
+    }
+  },
+  claudeModOwnershipSkip: (status, marketplaceDir) => {
+    const why = status === 'unsafe'
+      ? 'is a symlink, is not a directory, or is not owned by this user'
+      : status === 'unreadable'
+        ? 'could not be read'
+        : status === 'unowned'
+          ? 'holds files no cosyncing receipt names'
+          : 'does not match the cosyncing receipt that names it';
+    return `Claude Code: the cosyncing mod was left alone this run, because ${marketplaceDir} ${why}. `
+      + 'The rest of setup is unaffected. To let setup write it again, remove that directory and rerun '
+      + '`cosyncing setup --install-claude-mod`.';
+  },
+  claudeModOutcome: (outcome) => {
+    const what = outcome.operation === 'install'
+      ? 'Claude did not accept the cosyncing mod, so this run put everything back the way it was'
+      : outcome.operation === 'refresh'
+        ? 'Claude did not accept the refreshed cosyncing mod, so the previous copy stays in use'
+        : outcome.operation === 'remove'
+          ? 'Claude did not remove the cosyncing mod, so its directory and receipt stay until it does'
+          : 'Claude\'s cosyncing entries could not be taken back';
+    return `Claude Code: ${what} (${outcome.detailCode}${outcome.failureCode ? `, ${outcome.failureCode}` : ''}). `
+      + `The rest of setup is unaffected. To finish: ${outcome.commands.join(' ; ')}`;
+  },
   serviceQuestion: 'How should the broker run after setup?',
   serviceForegroundLabel: 'Foreground',
   serviceForegroundHint: (binary) => `Run \`${binary} broker\` explicitly after setup.`,
@@ -351,6 +446,13 @@ const en: SetupMessages = {
         return 'Install the cosyncing opencode shim and add a managed source block to detected bash/zsh rc '
           + 'files; open a new shell or source your rc file (e.g. `source ~/.bashrc`) to activate. Unrelated '
           + 'rc content is preserved byte-for-byte.';
+      case 'claude-mod':
+        return step.intent === 'remove'
+          ? `Uninstall the cosyncing Claude mod with Claude's own commands and remove ${step.marketplaceDir}; `
+            + 'only the cosyncing marketplace entry and the cosyncing plugin entry are touched.'
+          : `${step.refreshing ? 'Refresh' : 'Write'} the cosyncing Claude mod at ${step.marketplaceDir} `
+            + 'and install it with Claude\'s own commands, which adds the two cosyncing entries to Claude\'s '
+            + 'own settings and lets Claude record the install in its own plugin state.';
       case 'service-install':
         return `Stop only the owned service when needed, write and enable ${step.definitionPath}, commit `
           + 'receipts, then start and health-check once.';
@@ -450,7 +552,7 @@ const zhHans: SetupMessages = {
     grok: '已认证的 Grok Build 1.0.13 及更高版本支持创建和恢复；安装过程保留 Grok 数据，并为服务记录可执行文件。',
     cline: '默认配置仅观察；在 3.0.61 及更高版本上，应用创建的会话通过隔离、受管的 Cline Hub 支持创建/恢复。安装仅持久化显式的非密钥提供商、模型和路径，不读取凭据。',
     kilo: '从本地 SQLite 观察，并在 Kilo Code 7.4.23 及更高版本上提供经认证的创建和控制；代理仅管理专用的本机回环 4097 端口，绝不接管外部服务器。',
-    claude: '只有「观察 + 接管」两种模式；安装过程不会改动 Claude 的配置。',
+    claude: '支持「观察 + 接管」，并可通过 cosyncing 的可选 Claude mod 实现真同步；安装过程仅在受支持的环境中提供这个 mod，并且须经你同意才会安装。',
     agy: '只有「观察 + 继续」两种模式；agy 没有常驻进程，安装过程不会改动 Antigravity 的数据。',
     kimi: '由 cosyncing 托管 `kimi web` host；你自己启动的 server 不受影响。',
     dsh: '由 cosyncing 托管 `dsh web` host；你自己启动的、或在其他机器上的 host 都不受影响。',
@@ -477,7 +579,7 @@ const zhHans: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\n解决办法：${remediation}`,
   managedRuntimeTitle: '需要确认：由 cosyncing 托管运行时',
   managedRuntimeBody: (product) =>
-    `${product} 会接管支持的 Codex/OpenCode 共享运行时、随包提供的 Pi 与 omp bridge，以及 Kilo、\`kimi web\` 和 \`dsh web\` host：没有运行时会启动，崩溃后会重启，并且只停止它自己启动的那个。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
+    `${product} 会接管支持的 Codex/OpenCode 共享运行时、随包提供的 Pi 与 omp bridge，以及 Kilo、\`kimi web\` 和 \`dsh web\` host：没有运行时会启动，崩溃后会重启，并且只停止它自己启动的那个。你自己启动的进程不受影响。这一步不会改动 Claude 自己的任何设置；Claude mod 是安装过程中后面的一个单独问题，那一项由 Claude 自己完成安装。`,
   managedRuntimeConfirm: (product) => `我已了解，同意由 ${product} 托管这些共享运行时。`,
   legacyPiBridgeConfirm: (path) =>
     `用当前随包版本替换 ${path} 中内容完全匹配的已知旧版 Pi bridge？如果回滚，会逐字节恢复旧文件。`,
@@ -485,6 +587,60 @@ const zhHans: SetupMessages = {
   legacyAgentSkillConfirm: (paths) =>
     `升级 ${paths} 中已知的上一版 cosyncing skill？未知或已编辑的 skill 内容永远不会被覆盖。`,
   opencodeShimConfirm: '把终端里的 `opencode` 指向 cosyncing 的共享 serve，让它的状态实时显示在 App 里？',
+  claudeModConfirm: '让 cosyncing 安装它的 Claude Code mod，让终端里的 Claude 会话和 App 共用同一个会话？'
+    + 'cosyncing 会把 mod 写入自己状态目录下的 `claude-mod/marketplace`，然后由 Claude 从那里安装：'
+    + 'Claude 会在自己的设置里加入 `extraKnownMarketplaces.cosyncing` 与 '
+    + '`enabledPlugins["cosyncing-claude@cosyncing"]` 两项，并在 plugins/known_marketplaces.json 和 '
+    + 'plugins/installed_plugins.json 里记录这次安装。装好后，App 里的授权卡片就能替 Claude 回答工具审批。',
+  claudeModSkipReason: (reason, minimumVersion, policyKeys) => {
+    switch (reason) {
+      case 'missing-cli':
+        return 'Claude Code：没有安装 cosyncing mod，因为这台机器上没有找到 `claude` 命令。';
+      case 'below-minimum-version':
+        return `Claude Code：没有安装 cosyncing mod，因为已安装的版本低于 ${minimumVersion}。`
+          + '运行 `claude update` 后重新执行安装，就能再次看到这一项。';
+      case 'native-windows':
+        return 'Claude Code：原生 Windows 上不安装 cosyncing mod，这里的 Claude 会话仍只支持「观察 + 接管」。'
+          + 'WSL 或其他 Linux host 会提供这一项。';
+      case 'org-policy':
+        return 'Claude Code：没有安装 cosyncing mod，因为受管 Claude 设置限制了 mod 的来源。'
+          + '组织已经排除的安装，cosyncing 不会去尝试。'
+          + (policyKeys && policyKeys.length > 0
+            ? ` 检查到的设置项：${policyKeys.join(', ')}。`
+            : '');
+      case 'settings-invalid':
+        return 'Claude Code：本次没有安装 cosyncing mod，因为 Claude 自己的设置文件无法按 JSON 读取。'
+          + 'cosyncing 不会修改其他程序的文件，本次安装的其余部分不受影响。';
+      case 'config-dir-relative':
+        return 'Claude Code：没有安装 cosyncing mod，因为 CLAUDE_CONFIG_DIR 是相对路径，Claude 会按每个会话'
+          + '启动时所在的目录去解析它。把它设成绝对路径后重新运行 setup，就能再次看到这一项。';
+      case 'managed-settings-unreadable':
+        return 'Claude Code：没有安装 cosyncing mod，因为存在一份无法读取的受管 Claude 设置文件。'
+          + '读不出来的策略不等于没有策略，cosyncing 不会越过它去安装。';
+    }
+  },
+  claudeModOwnershipSkip: (status, marketplaceDir) => {
+    const why = status === 'unsafe'
+      ? '是符号链接、不是目录，或不属于当前用户'
+      : status === 'unreadable'
+        ? '无法读取'
+        : status === 'unowned'
+          ? '里的文件没有任何 cosyncing 凭证记录'
+          : '与记录它的 cosyncing 凭证不一致';
+    return `Claude Code：本次没有改动 cosyncing mod，因为 ${marketplaceDir} ${why}。安装的其余部分不受影响。`
+      + '若要让 setup 重新写入，请删除该目录后运行 `cosyncing setup --install-claude-mod`。';
+  },
+  claudeModOutcome: (outcome) => {
+    const what = outcome.operation === 'install'
+      ? 'Claude 没有接受 cosyncing mod，本次运行已把一切恢复原状'
+      : outcome.operation === 'refresh'
+        ? 'Claude 没有接受更新后的 cosyncing mod，继续使用之前的副本'
+        : outcome.operation === 'remove'
+          ? 'Claude 没有移除 cosyncing mod，在它移除之前，目录和凭证都会保留'
+          : 'Claude 里的 cosyncing 条目没能收回';
+    return `Claude Code：${what}（${outcome.detailCode}${outcome.failureCode ? `，${outcome.failureCode}` : ''}）。`
+      + `安装的其余部分不受影响。完成方法：${outcome.commands.join(' ; ')}`;
+  },
   serviceQuestion: '安装完成后，broker 以哪种方式运行？',
   serviceForegroundLabel: '前台运行',
   serviceForegroundHint: (binary) => `每次自己执行 \`${binary} broker\` 启动。`,
@@ -570,6 +726,13 @@ const zhHans: SetupMessages = {
       case 'opencode-shim':
         return '安装 cosyncing 的 opencode shim，并在检测到的 bash/zsh rc 文件中加入一段受管理的 source 块；'
           + '打开新终端或执行 `source ~/.bashrc` 后生效。rc 里的其他内容会逐字节保留。';
+      case 'claude-mod':
+        return step.intent === 'remove'
+          ? `用 Claude 自己的命令卸载 cosyncing Claude mod，并删除 ${step.marketplaceDir}；`
+            + '只动 cosyncing 的 marketplace 条目和 cosyncing 的插件条目这两项。'
+          : `${step.refreshing ? '更新' : '写入'} ${step.marketplaceDir} 里的 cosyncing Claude mod，`
+            + '并用 Claude 自己的命令安装它，这会在 Claude 自己的设置里加入 cosyncing 的两项条目，'
+            + 'Claude 也会在自己的插件状态里记录这次安装。';
       case 'service-install':
         return `必要时只停止我们自己的服务，写入并启用 ${step.definitionPath}，提交凭证，然后启动并做一次健康检查。`;
       case 'service-remove':

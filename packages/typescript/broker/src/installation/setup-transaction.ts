@@ -33,6 +33,15 @@ export interface SetupTransactionPlan {
   preconditionHash: string;
   /** Additive stable identity for provider-owned objects. Older journals legitimately omit it. */
   installationId?: string;
+  /**
+   * What the run was going to do about the Claude mod, recorded so a recovery can REVERSE it.
+   *
+   * Reversal needs the direction the interrupted run chose, and nothing else in the journal says:
+   * the action id is the same for an install and a removal. Without it, recovery of a mod step had
+   * to re-decide from disk, which after a half-applied install describes the state the run created
+   * rather than the one it was undoing. Older journals legitimately omit it and fall back.
+   */
+  claudeModIntent?: 'install' | 'remove' | 'none';
   actions: SetupPlanAction[];
 }
 
@@ -264,11 +273,20 @@ function normalizePlan(value: unknown): SetupTransactionPlan | undefined {
       reversible: candidate.reversible,
     });
   }
+  // Read the direction back or it never reaches recovery. The writer added `claudeModIntent` to the
+  // journal and the recovery path reads `journal.plan.claudeModIntent`, but this normalizer rebuilt
+  // the plan field by field and dropped it, so recovery always saw "no intent" and re-decided from
+  // the disk the interrupted run had itself rewritten. Older journals legitimately have no such
+  // field, which reads as undefined and keeps the same fallback.
+  const claudeModIntent = value.claudeModIntent;
   return {
     schemaVersion: 1,
     id: value.id,
     preconditionHash: value.preconditionHash,
     ...(typeof value.installationId === 'string' ? { installationId: value.installationId } : {}),
+    ...(claudeModIntent === 'install' || claudeModIntent === 'remove' || claudeModIntent === 'none'
+      ? { claudeModIntent }
+      : {}),
     actions,
   };
 }

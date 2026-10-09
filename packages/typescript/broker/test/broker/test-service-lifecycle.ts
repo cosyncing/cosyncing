@@ -102,6 +102,9 @@ class ServicePresenter implements SetupPresenter {
   async confirmManagedRuntime(): Promise<boolean> { this.calls.push('ack'); return true; }
   async confirmAgentSkill(): Promise<boolean> { this.calls.push('skill'); return true; }
   async confirmOpencodeShim(): Promise<boolean> { this.calls.push('opencode-shim'); return true; }
+  // Declined: these tests assert on the service plan, and a mod row would put an unrelated mutation in
+  // the action list they count. The mod has its own suite (test-claude-mod-setup.ts).
+  async confirmClaudeMod(): Promise<boolean> { return false; }
   async chooseService(): Promise<SetupPromptResult<SetupServiceChoice>> {
     this.calls.push('service');
     if (this.choices.cancelService) return SETUP_PROMPT_CANCELLED;

@@ -682,6 +682,32 @@ final class TranscriptHistoryWindow {
     return Map<String, String?>.unmodifiable(result);
   }
 
+  /// Who settled each settled permission request, by request id.
+  ///
+  /// Folded beside the decisions rather than read off the request frame: on a
+  /// mod-synced session the answer and the attribution arrive on the resolution
+  /// frame, and the request card is the row that stays on screen. Absent for a
+  /// request an older broker resolved without saying, which is what it renders
+  /// today.
+  Map<String, ResolvedRequestAttribution> get resolvedRequestAttributions {
+    final result = <String, ResolvedRequestAttribution>{};
+    for (final page in pages) {
+      result.addAll(_pageDerived(page).resolvedRequestAttributions);
+    }
+    return Map<String, ResolvedRequestAttribution>.unmodifiable(result);
+  }
+
+  /// The answer each settled question closed with, by request id: one row per
+  /// question, as the card draws them. Absent where no resolution said, which
+  /// is a dismissed question or one an older broker closed bare.
+  Map<String, List<List<String>>> get resolvedQuestionAnswers {
+    final result = <String, List<List<String>>>{};
+    for (final page in pages) {
+      result.addAll(_pageDerived(page).resolvedQuestionAnswers);
+    }
+    return Map<String, List<List<String>>>.unmodifiable(result);
+  }
+
   /// The cards no longer waiting for an answer although no resolution for
   /// them is held: this connection's attach did not send them again (see
   /// [SessionQuestionState.withdrawnRequestIds]).
@@ -1179,7 +1205,7 @@ final class TranscriptHistoryWindow {
   }) {
     final base = _tailWritableBase;
     final nextQuestionState = base.questionState
-        .applyMessage(incomingMessage)
+        .applyMessage(incomingMessage, live: true)
         .restated(incomingMessage);
     final message = nextQuestionState.restoreMessage(incomingMessage);
     final tailIndex = base.pages.lastIndexWhere((page) => page.isTail);

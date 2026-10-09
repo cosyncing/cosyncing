@@ -531,6 +531,188 @@ void main() {
     );
 
     testWidgets(
+      'a settled approval says which seat answered, even the one that tapped',
+      (tester) async {
+        // A mod-synced session has two places the same prompt can be answered.
+        // While this seat's own send was hiding the resolution lines, the seat
+        // that lost the race kept reading "Sent" over a call its terminal had
+        // already answered.
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-race',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        final approveFinder = find.byKey(
+          const Key('session-detail-permission-approve-perm-race'),
+        );
+        await tester.ensureVisible(approveFinder);
+        tester.widget<FilledButton>(approveFinder).onPressed?.call();
+        await tester.pumpAndSettle();
+        expect(find.text('Sent'), findsOneWidget);
+
+        connection.emitEvent(
+          const MessageWireEvent(
+            seq: 2,
+            message: AgentMessage(
+              type: AgentMessageType.permissionResolved,
+              raw: {
+                'type': 'permission-resolved',
+                'requestId': 'perm-race',
+                'decision': 'reject',
+                'decidedBy': 'band',
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // This seat's transport badge is no longer the card's story.
+        expect(find.text('Sent'), findsNothing);
+        expect(find.text('Rejected'), findsAtLeastNWidgets(1));
+        expect(
+          find.text('Answered in your terminal'),
+          findsAtLeastNWidgets(1),
+        );
+        expect(
+          find.byKey(
+            const Key('session-detail-permission-decided-by-perm-race'),
+            skipOffstage: false,
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'a card this seat answered never says another client answered it',
+      (tester) async {
+        // `external` is the broker's word for "somebody else settled this", and
+        // it is also the word it sends when THIS seat's own answer reached the
+        // terminal. The card used to read "Resolved in another client." over
+        // the user's own tap, and dropped the badge that was the only proof the
+        // tap had happened at all.
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-own',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        final approveFinder = find.byKey(
+          const Key('session-detail-permission-approve-perm-own'),
+        );
+        await tester.ensureVisible(approveFinder);
+        tester.widget<FilledButton>(approveFinder).onPressed?.call();
+        await tester.pumpAndSettle();
+        expect(find.text('Sent'), findsOneWidget);
+
+        connection.emitEvent(
+          const MessageWireEvent(
+            seq: 2,
+            message: AgentMessage(
+              type: AgentMessageType.permissionResolved,
+              raw: {
+                'type': 'permission-resolved',
+                'requestId': 'perm-own',
+                'decision': 'external',
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Resolved in another client.'),
+          findsNothing,
+          reason: 'nobody else answered this, as far as the broker said',
+        );
+        // With no decision value and no seat to name, this seat's own transport
+        // badge is still the truest sentence on the card.
+        expect(find.text('Sent'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'and the seat the broker did name wins over that badge',
+      (tester) async {
+        // The other half of the same rule: the broker CAN say the terminal
+        // answered, and then the card says so rather than keeping the app's own
+        // "Sent".
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-own2',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        final approveFinder = find.byKey(
+          const Key('session-detail-permission-approve-perm-own2'),
+        );
+        await tester.ensureVisible(approveFinder);
+        tester.widget<FilledButton>(approveFinder).onPressed?.call();
+        await tester.pumpAndSettle();
+
+        connection.emitEvent(
+          const MessageWireEvent(
+            seq: 2,
+            message: AgentMessage(
+              type: AgentMessageType.permissionResolved,
+              raw: {
+                'type': 'permission-resolved',
+                'requestId': 'perm-own2',
+                'decision': 'external',
+                'decidedBy': 'band',
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Answered in your terminal'), findsAtLeastNWidgets(1));
+        expect(find.text('Resolved in another client.'), findsNothing);
+        expect(find.text('Sent'), findsNothing);
+      },
+    );
+
+    testWidgets(
       'deactivates the permission card for an unknown resolution decision',
       (tester) async {
         final connection = ScriptedSessionDetailConnection(
@@ -722,10 +904,13 @@ void main() {
         );
         expect(answerButton.onPressed, isNull);
         expect(dismissButton.onPressed, isNull);
+        // The broker says a question was settled, never by whom: the terminal
+        // and another app both send this, so the card names neither alone.
         expect(
-          find.text('Resolved in another client.'),
-          findsAtLeastNWidgets(1),
+          find.text('Settled in your terminal or another app.'),
+          findsOneWidget,
         );
+        expect(find.text('Resolved in another client.'), findsNothing);
       },
     );
 
@@ -1168,6 +1353,210 @@ void main() {
       },
     );
 
+    testWidgets(
+      'a permission card with a preview does not repeat it as detail',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-preview',
+                  'title': 'Bash permission',
+                  'toolName': 'Bash',
+                  'inputPreview': 'command: rm -rf build',
+                  'detail': 'Bash: rm -rf build',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('command: rm -rf build'), findsOneWidget);
+        expect(
+          find.byKey(const Key('session-permission-detail-toggle')),
+          findsNothing,
+        );
+        expect(find.textContaining('Bash: rm -rf build'), findsNothing);
+        expect(
+          find.byKey(
+            const Key('session-detail-permission-approve-perm-preview'),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'a permission card leads with the preview and opens to the whole call',
+      (tester) async {
+        // The preview names one argument and cuts it at 240 characters: enough
+        // to recognise a call, not always enough to decide one.
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-full',
+                  'title': 'Edit',
+                  'toolName': 'Edit',
+                  'inputPreview': 'file_path: /work/src/app.ts',
+                  'detail':
+                      'file_path: /work/src/app.ts\n'
+                      'old_string: const retries = 3;\n'
+                      'new_string: const retries = 5;',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('file_path: /work/src/app.ts'), findsOneWidget);
+        expect(find.textContaining('const retries = 5;'), findsNothing);
+        await tester.tap(
+          find.byKey(const Key('session-permission-detail-toggle')),
+        );
+        await tester.pumpAndSettle();
+        final full = tester.widget<Text>(
+          find.byKey(const Key('session-permission-full-detail')),
+        );
+        expect(full.data, contains('old_string: const retries = 3;'));
+        expect(full.data, contains('new_string: const retries = 5;'));
+        expect(
+          find.byKey(const Key('session-detail-permission-approve-perm-full')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'a long command cut in the preview is whole behind the toggle',
+      (tester) async {
+        final command = 'echo ${'x' * 400}';
+        final connection = ScriptedSessionDetailConnection(
+          events: [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-long',
+                  'title': 'Bash',
+                  'toolName': 'Bash',
+                  'inputPreview':
+                      '${'command: $command'.substring(0, 239)}\u2026',
+                  'detail': 'command: $command',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const Key('session-permission-detail-toggle')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<Text>(
+                find.byKey(const Key('session-permission-full-detail')),
+              )
+              .data,
+          'command: $command',
+        );
+      },
+    );
+
+    testWidgets(
+      'a call with one short field offers no toggle for the same line again',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-short',
+                  'title': 'Grep',
+                  'toolName': 'Grep',
+                  'inputPreview': 'pattern: a',
+                  'detail': 'pattern: a',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('session-permission-detail-toggle')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'a released permission card keeps its preview behind the detail toggle',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-released-preview',
+                  'title': 'Write permission',
+                  'toolName': 'Write',
+                  'readOnly': true,
+                  'blocking': false,
+                  'releaseReason': 'mode:bypassPermissions',
+                  'inputPreview': 'file_path: /work/notes.md',
+                  'detail': 'Write: /work/notes.md',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('Write: /work/notes.md'), findsNothing);
+        await tester.tap(
+          find.byKey(const Key('session-permission-detail-toggle')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Write: /work/notes.md'), findsOneWidget);
+      },
+    );
+
     testWidgets('canonical read-only permission stays inert while connected', (
       tester,
     ) async {
@@ -1445,6 +1834,583 @@ void main() {
           await tester.pumpAndSettle();
           expect(finder, findsOneWidget);
         }
+      },
+    );
+
+    testWidgets(
+      'a multi-select that takes only its labels offers no free-text field '
+      '(MB5b)',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.questionRequest,
+                raw: {
+                  'type': 'question-request',
+                  'requestId': 'question-labels',
+                  'questions': [
+                    {
+                      'question': 'Which checks?',
+                      'options': [
+                        {'label': 'Lint'},
+                        {'label': 'Test'},
+                      ],
+                      'multiple': true,
+                      'freeText': false,
+                    },
+                    {
+                      'question': 'Which build?',
+                      'options': [
+                        {'label': 'Debug'},
+                        {'label': 'Release'},
+                      ],
+                    },
+                  ],
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const Key('session-detail-question-custom-question-labels-0'),
+          ),
+          findsNothing,
+        );
+        expect(
+          find.byKey(
+            const Key('session-detail-question-custom-question-labels-1'),
+          ),
+          findsOneWidget,
+        );
+
+        for (final key in const [
+          'session-detail-question-option-question-labels-0-0',
+          'session-detail-question-option-question-labels-0-1',
+          'session-detail-question-option-question-labels-1-1',
+        ]) {
+          await tester.ensureVisible(find.byKey(Key(key)));
+          await tester.tap(find.byKey(Key(key)));
+        }
+        await tester.pump();
+        final submitFinder = find.byKey(
+          const Key('session-detail-question-answer-button-question-labels'),
+        );
+        await tester.ensureVisible(submitFinder);
+        tester.widget<FilledButton>(submitFinder).onPressed?.call();
+        await tester.pumpAndSettle();
+
+        expect(connection.lastQuestionRequestId, 'question-labels');
+        expect(connection.lastQuestionAnswers, const [
+          ['Lint', 'Test'],
+          ['Release'],
+        ]);
+      },
+    );
+
+    testWidgets(
+      'a number question takes one number in its range, and only that (NQ1)',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.questionRequest,
+                raw: {
+                  'type': 'question-request',
+                  'requestId': 'question-number',
+                  'questions': [
+                    {
+                      'question': 'How many slides?',
+                      'options': <Object>[],
+                      'kind': 'number',
+                      'min': 3,
+                      'max': 12,
+                      'step': 1,
+                      'unit': 'slides',
+                    },
+                  ],
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        final field = find.byKey(
+          const Key('session-detail-question-number-question-number-0'),
+        );
+        expect(field, findsOneWidget);
+        expect(find.text('A number from 3 to 12'), findsOneWidget);
+        expect(find.text('slides'), findsOneWidget);
+        final submitFinder = find.byKey(
+          const Key('session-detail-question-answer-button-question-number'),
+        );
+        await tester.ensureVisible(submitFinder);
+
+        for (final refused in const ['20', '2', 'five', '1e1', '']) {
+          await tester.enterText(field, refused);
+          await tester.pump();
+          expect(
+            tester.widget<FilledButton>(submitFinder).onPressed,
+            isNull,
+            reason: 'Send waits for a number it takes, not "$refused"',
+          );
+        }
+        expect(find.text('Enter a number from 3 to 12.'), findsNothing);
+        await tester.enterText(field, '20');
+        await tester.pump();
+        expect(find.text('Enter a number from 3 to 12.'), findsOneWidget);
+
+        await tester.enterText(field, '12');
+        await tester.pump();
+        expect(find.text('Enter a number from 3 to 12.'), findsNothing);
+        tester.widget<FilledButton>(submitFinder).onPressed?.call();
+        await tester.pumpAndSettle();
+        expect(connection.lastQuestionRequestId, 'question-number');
+        expect(connection.lastQuestionAnswers, const [
+          ['12'],
+        ]);
+      },
+    );
+
+    testWidgets(
+      'a question to answer in the terminal is drawn read-only and says '
+      'where (MB5b)',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.questionRequest,
+                raw: {
+                  'type': 'question-request',
+                  'requestId': 'question-terminal',
+                  'readOnly': true,
+                  'blocking': false,
+                  'answerInTerminal': true,
+                  'questions': [
+                    {
+                      'question': 'Which sizes?',
+                      'options': [
+                        {'label': 'Small, cheap'},
+                        {'label': 'Large'},
+                      ],
+                      'multiple': true,
+                      'freeText': false,
+                    },
+                  ],
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            'This question is waiting in your terminal. Answer it there.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Which sizes?'), findsAtLeastNWidgets(1));
+        expect(
+          find.byKey(
+            const Key('session-detail-question-custom-question-terminal-0'),
+          ),
+          findsNothing,
+        );
+        expect(
+          find.byKey(
+            const Key(
+              'session-detail-question-answer-button-question-terminal',
+            ),
+          ),
+          findsNothing,
+        );
+        expect(
+          find.byKey(
+            const Key('session-detail-question-reject-question-terminal'),
+          ),
+          findsNothing,
+        );
+        final chip = tester.widget<FilterChip>(
+          find.byKey(
+            const Key('session-detail-question-option-question-terminal-0-0'),
+          ),
+        );
+        expect(chip.onSelected, isNull);
+        expect(connection.sendQuestionAnswerCount, 0);
+      },
+    );
+
+    testWidgets(
+      'a terminal-only question the app could not read still says where to '
+      'answer it (MB5c)',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.questionRequest,
+                raw: {
+                  'type': 'question-request',
+                  'requestId': 'question-unread',
+                  'readOnly': true,
+                  'blocking': false,
+                  'answerInTerminal': true,
+                  'questions': <Object?>[],
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            'This question is waiting in your terminal. Answer it there.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const Key('session-detail-question-answer-question-unread'),
+          ),
+          findsNothing,
+        );
+      },
+    );
+  });
+
+  testWidgets(
+    'a plan card shows the plan and leaves approving it to the terminal (PM2)',
+    (tester) async {
+      const plan = '# Ship the release\n\n1. Tag it.\n2. Promote it.';
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          MessageWireEvent(
+            seq: 1,
+            message: AgentMessage(
+              type: AgentMessageType.permissionRequest,
+              raw: {
+                'type': 'permission-request',
+                'requestId': 'cm-2@00000000000000b2',
+                'toolName': 'ExitPlanMode',
+                'readOnly': true,
+                'blocking': false,
+                'permissionMode': 'plan',
+                'releaseReason': 'plan:terminal-only',
+                'inputPreview': 'plan: # Ship the release',
+                'detail': 'plan: $plan',
+              },
+            ),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      // A released card leads with its reason; the plan is its detail.
+      expect(find.textContaining('Promote it.'), findsNothing);
+      expect(
+        find.text(
+          "This is Claude's plan. Approving it also picks how Claude carries "
+          'on, so answer it in your terminal.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(
+          const Key('session-detail-permission-approve-cm-2@00000000000000b2'),
+        ),
+        findsNothing,
+      );
+      await tester.tap(
+        find.byKey(const Key('session-permission-detail-toggle')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(const Key('session-permission-full-detail')),
+            )
+            .data,
+        'plan: $plan',
+      );
+    },
+  );
+
+  group('a card left to the terminal (CX1)', () {
+    const releasedCard = MessageWireEvent(
+      seq: 1,
+      message: AgentMessage(
+        type: AgentMessageType.permissionRequest,
+        raw: {
+          'type': 'permission-request',
+          'requestId': 'cm-1@00000000000000a1',
+          'toolName': 'Write',
+          'readOnly': true,
+          'blocking': false,
+          'permissionMode': 'bypassPermissions',
+          'releaseReason': 'mode:bypassPermissions',
+          'inputPreview': 'file_path: /work/plan.md',
+        },
+      ),
+    );
+    const releasedReason =
+        'Claude was bypassing permission checks, and cosyncing leaves any '
+        'prompt it still shows to your terminal.';
+
+    testWidgets('an open released card is not pending on this seat', (
+      tester,
+    ) async {
+      final connection = ScriptedSessionDetailConnection(
+        events: const [releasedCard],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Approval left to your terminal'), findsOneWidget);
+      expect(find.text(releasedReason), findsOneWidget);
+      expect(
+        find.text(
+          'This request is read-only. Answer where the agent is running.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Pending'),
+        findsNothing,
+        reason: 'nothing on this card is waiting on this seat',
+      );
+    });
+
+    testWidgets(
+      'once retired, the card says its reason once and that the terminal '
+      'settled it',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [releasedCard],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        // The broker retires an explanation card with its own reason attached.
+        connection.emitEvent(
+          const MessageWireEvent(
+            seq: 2,
+            message: AgentMessage(
+              type: AgentMessageType.permissionResolved,
+              raw: {
+                'type': 'permission-resolved',
+                'requestId': 'cm-1@00000000000000a1',
+                'decision': 'external',
+                'releaseReason': 'mode:bypassPermissions',
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(releasedReason),
+          findsOneWidget,
+          reason: 'the reason leads the card and is not repeated under it',
+        );
+        expect(
+          find.byKey(
+            const Key(
+              'session-detail-permission-outcome-cm-1@00000000000000a1',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Settled in your terminal.'), findsOneWidget);
+        expect(find.text('Resolved in another client.'), findsNothing);
+        expect(find.text('Pending'), findsNothing);
+        expect(
+          find.text(
+            'This request is read-only. Answer where the agent is running.',
+          ),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'a decision on a released card still prints its reason once, and does '
+      'not claim the app approved it',
+      (tester) async {
+        // Nothing a client sends can decide a released card, but the wire can
+        // still carry a decision on one: the defect CX3 fixed in the broker
+        // broadcast exactly that. The terminal decided it either way.
+        final connection = ScriptedSessionDetailConnection(
+          events: const [releasedCard],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        connection.emitEvent(
+          const MessageWireEvent(
+            seq: 2,
+            message: AgentMessage(
+              type: AgentMessageType.permissionResolved,
+              raw: {
+                'type': 'permission-resolved',
+                'requestId': 'cm-1@00000000000000a1',
+                'decision': 'approve',
+                'releaseReason': 'mode:bypassPermissions',
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text(releasedReason), findsOneWidget);
+        expect(find.text('Settled in your terminal.'), findsOneWidget);
+        expect(find.text('Approved'), findsNothing);
+      },
+    );
+
+    testWidgets('a read-only question is not pending on this seat either', (
+      tester,
+    ) async {
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          MessageWireEvent(
+            seq: 1,
+            message: AgentMessage(
+              type: AgentMessageType.questionRequest,
+              raw: {
+                'type': 'question-request',
+                'requestId': 'question-watch',
+                'readOnly': true,
+                'questions': [
+                  {
+                    'question': 'Which branch?',
+                    'options': [
+                      {'label': 'main'},
+                      {'label': 'release'},
+                    ],
+                  },
+                ],
+              },
+            ),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'This request is read-only. Answer where the agent is running.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Pending'), findsNothing);
+    });
+
+    testWidgets(
+      'a question only the terminal could answer is settled in the terminal, '
+      'not in another client',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.questionRequest,
+                raw: {
+                  'type': 'question-request',
+                  'requestId': 'cm-2@00000000000000a2',
+                  'readOnly': true,
+                  'blocking': false,
+                  'answerInTerminal': true,
+                  'questions': [
+                    {
+                      'question': 'How many workers?',
+                      'options': <Object?>[],
+                      'freeText': false,
+                    },
+                  ],
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        connection.emitEvent(
+          const MessageWireEvent(
+            seq: 2,
+            message: AgentMessage(
+              type: AgentMessageType.questionResolved,
+              raw: {
+                'type': 'question-resolved',
+                'requestId': 'cm-2@00000000000000a2',
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const Key('session-detail-question-outcome-cm-2@00000000000000a2'),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Settled in your terminal.'), findsOneWidget);
+        expect(find.text('Resolved in another client.'), findsNothing);
+        expect(
+          find.text(
+            'This question is waiting in your terminal. Answer it there.',
+          ),
+          findsNothing,
+        );
       },
     );
   });
