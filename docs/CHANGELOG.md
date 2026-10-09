@@ -170,6 +170,35 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- A question card that had been answered, in the terminal or another app, still
+  said "Awaiting answer" above the line saying it was settled. A settled card
+  now says only that it is settled; a question still open in the terminal keeps
+  the hint.
+- A settled question card from Claude said the question was settled but not
+  how it was answered, even on the device that sent the answer. It now shows
+  the options picked, checked, and any typed answer as text, whether the
+  answer came from the app or the terminal, and keeps showing it after a
+  reload.
+- A settled question card from Claude did not say who answered it, and read
+  "Settled in your terminal or another app" even on the device that sent the
+  answer. It now says "Answered in the app", "You answered it in your
+  terminal" or that cosyncing stopped waiting, as an approval card does, and
+  keeps saying it after a reload. A question closed with nothing picked, by
+  Escape in the terminal or Stop or Dismiss in the app, says it was closed
+  without an answer.
+- The mode and model shown for a Claude session you are watching kept the
+  values from when you opened it. A turn answered by another model now
+  updates the model while the session runs. A mode changed in the terminal
+  shows from the next prompt sent in it, because Claude records the mode with
+  each prompt and not when you press Shift+Tab. After a plan is approved, the
+  mode may not show until the next prompt, because Claude may not record which
+  mode the approval chose. A subagent's model or mode is not shown as the
+  session's.
+- Opening the app at an address it has no page for, such as an old or
+  mistyped link, showed an English-only error with a Home button that led
+  nowhere. It now shows a page in your language with one button to Sessions,
+  and the bare address opens Sessions.
+
 - A DeepSeek Harness host started by cosyncing is now reachable. The managed
   start read the child's output once, before waiting for the host to come up, so
   a 0.2 host that printed its sign-in URL a moment later was never signed in to,
@@ -387,34 +416,6 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
-- A question card that had been answered, in the terminal or another app, still
-  said "Awaiting answer" above the line saying it was settled. A settled card
-  now says only that it is settled; a question still open in the terminal keeps
-  the hint.
-- A settled question card from Claude said the question was settled but not
-  how it was answered, even on the device that sent the answer. It now shows
-  the options picked, checked, and any typed answer as text, whether the
-  answer came from the app or the terminal, and keeps showing it after a
-  reload.
-- A settled question card from Claude did not say who answered it, and read
-  "Settled in your terminal or another app" even on the device that sent the
-  answer. It now says "Answered in the app", "You answered it in your
-  terminal" or that cosyncing stopped waiting, as an approval card does, and
-  keeps saying it after a reload. A question closed with nothing picked, by
-  Escape in the terminal or Stop or Dismiss in the app, says it was closed
-  without an answer.
-- The mode and model shown for a Claude session you are watching kept the
-  values from when you opened it. A turn answered by another model now
-  updates the model while the session runs. A mode changed in the terminal
-  shows from the next prompt sent in it, because Claude records the mode with
-  each prompt and not when you press Shift+Tab. After a plan is approved, the
-  mode may not show until the next prompt, because Claude may not record which
-  mode the approval chose. A subagent's model or mode is not shown as the
-  session's.
-- Opening the app at an address it has no page for, such as an old or
-  mistyped link, showed an English-only error with a Home button that led
-  nowhere. It now shows a page in your language with one button to Sessions,
-  and the bare address opens Sessions.
 - The macOS shell installers no longer stop with an `unbound variable` error
   after placing the broker in a UTF-8 locale, regardless of the selected
   language. The all-in-one installer can continue to install the desktop
