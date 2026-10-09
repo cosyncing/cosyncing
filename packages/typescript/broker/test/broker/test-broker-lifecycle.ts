@@ -36,6 +36,7 @@ import {
   inspectRepair,
   inspectUninstall,
   readServiceLogs,
+  refreshClaudeMod,
   runRepair,
   runServiceCommand,
   runUninstall,
@@ -2649,10 +2650,32 @@ try {
   }
 
   {
+    const m = machine(); cleanup.push(m.root);
+    writeSetupState({ ...readSetupState(m.home), claudeModRequested: true }, m.home);
+    let claudeCalls = 0;
+    const refreshed = await refreshClaudeMod({
+      buildInfo: BUILD,
+      home: m.home,
+      context: { ...m.context, platform: 'win32' },
+      claudePolicyRoots: [],
+      runClaudeMod: async () => {
+        claudeCalls += 1;
+        throw new Error('native Windows must not run Claude mod commands');
+      },
+    });
+    check('native Windows skips Claude mod refresh without invoking Claude or retaining the mutation lock',
+      refreshed.status === 'skipped'
+        && refreshed.detailCode === 'claude-mod-refresh-skipped-native-windows'
+        && claudeCalls === 0 && !existsSync(installationLockPath(m.home)),
+      `${refreshed.status}/${refreshed.detailCode}/${claudeCalls}`);
+  }
+
+  if (process.platform === 'linux' || process.platform === 'darwin') {
     // SU1, SU2, SU4 through the REAL upgrade and a REAL child: the built CLI runs `claude-mod refresh` as a
     // separate process, takes the real installation lock the upgrade must already have released, and runs
     // a fake `claude` that records the environment it was given. Only the candidate binary is a stand-in,
     // because this fixture's candidate is a byte string; the refresh child is the bundle this tree builds.
+    // The fake Claude is a POSIX shell script; native Windows uses the skip path covered above.
     const fixture = upgradeMachine();
     const home = fixture.m.home;
     const fake = fakeClaude(fixture.m.root, 'upgrade-refresh', '2.1.289');

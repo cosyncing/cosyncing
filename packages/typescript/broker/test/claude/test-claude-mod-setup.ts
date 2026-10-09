@@ -129,7 +129,9 @@ import { ModHoldStore } from '../../src/sessions/mod-holds.ts';
 import { ModAuditStore } from '../../src/sessions/mod-audit.ts';
 
 /** The shipped mod, loaded as written. Its exported helpers are plain functions with no `$` behind them. */
-const { resolveSocketPath } = await import(join(import.meta.dir, '../../../../../mods/cosyncing-claude/hooks/register.js')) as {
+// Bun 1.3.8 caches the broker's text-loader import of this same path. Give the executable import its
+// own module identity so it loads the real exports rather than the embedded source string.
+const { resolveSocketPath } = await import(`${join(import.meta.dir, '../../../../../mods/cosyncing-claude/hooks/register.js')}?claude-mod-setup`) as {
   resolveSocketPath(sources: { override?: string; stamped?: string; cosyncingHome?: string; home?: string }): string;
 };
 
