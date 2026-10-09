@@ -76,6 +76,7 @@ import {
   type InstalledResourceRecord,
 } from '../../src/installation/install-state.ts';
 import {
+  defaultRunBinary,
   releaseManifestForTests,
   runUpgrade,
   type ReleaseArtifact,
@@ -128,6 +129,16 @@ import {
   opencodeShimPort,
   opencodeShimShellPath,
 } from '../../../adapters/opencode/src/shim.ts';
+import {
+  claudeModMarketplaceDir,
+  claudeModReceiptFor,
+  claudeModStampedSocketPath,
+  inspectClaudeModMarketplace,
+  writeClaudeModMarketplace,
+  CLAUDE_MOD_RESOURCE_ID,
+} from '../../src/installation/claude-mod-ownership.ts';
+import { acquireInstallationLock, installationLockPath } from '../../src/installation/installation-lock.ts';
+import { fakeClaude } from '../helpers/fake-claude-cli.ts';
 
 function readFrozenTextFixture(path: string): string {
   const asset = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
@@ -2567,6 +2578,162 @@ try {
         && readFileSync(join(fixture.m.home, 'bin', 'cosyncing.previous'), 'utf8') === 'old-binary-v1'
         && state.committed && (state.state.installer as any)?.version === '2.0.0');
   }
+  // The Claude mod is a COPY that Claude loads in place, written from the marketplace embedded in
+  // whichever build last ran setup. An upgrade that swaps only the binary therefore leaves every open
+  // Claude terminal running the OLD mod while the broker is new. The new binary is asked to refresh the
+  // copy; the old one cannot, because the marketplace embedded in it IS the old mod. (Review U2.)
+  const claudeModCopy = (home: string) => {
+    mkdirSync(join(home, 'claude-mod', 'marketplace'), { recursive: true });
+  };
+  {
+    const fixture = upgradeMachine();
+    claudeModCopy(fixture.m.home);
+    const launches: string[][] = [];
+    const upgraded = await runUpgrade({
+      ...upgradeOptions(fixture),
+      runBinary: async (_executable, args) => {
+        launches.push([...args]);
+        const refresh = args.includes('claude-mod');
+        return {
+          status: 'ok' as const, exitCode: 0, stderr: '',
+          stdout: refresh
+            ? JSON.stringify({ status: 'refreshed', detailCode: 'claude-mod-refreshed', summary: 'fixture' })
+            : JSON.stringify(CANDIDATE_SELF_CHECK),
+        };
+      },
+    });
+    const refresh = launches.find((args) => args.includes('claude-mod'));
+    check('an upgrade with a Claude mod delegates the refresh to the newly installed binary',
+      upgraded.exitCode === 0 && upgraded.claudeMod?.status === 'refreshed'
+        && refresh?.join(' ') === `claude-mod refresh --json --home ${fixture.m.home}`
+        && upgraded.summary.includes('Claude mod was refreshed'),
+      `${upgraded.detailCode}/${JSON.stringify(launches)}/${upgraded.summary}`);
+    // The child is spawned with a minimal environment, so a state home the parent resolved from
+    // COSYNCING_HOME has to travel as an argument or the refresh lands in the wrong home.
+    check('the delegated refresh names the state home it was asked to refresh',
+      refresh?.[refresh.indexOf('--home') + 1] === fixture.m.home, JSON.stringify(refresh));
+  }
+  {
+    const fixture = upgradeMachine();
+    claudeModCopy(fixture.m.home);
+    const upgraded = await runUpgrade({
+      ...upgradeOptions(fixture),
+      runBinary: async (_executable, args) => args.includes('claude-mod')
+        ? { status: 'timeout' as const, stdout: '', stderr: 'fixture timeout' }
+        : { status: 'ok' as const, exitCode: 0, stdout: JSON.stringify(CANDIDATE_SELF_CHECK), stderr: '' },
+    });
+    check('a Claude mod that could not be refreshed is a note on a complete upgrade, not a rollback',
+      upgraded.exitCode === 0 && upgraded.status === 'complete'
+        && upgraded.detailCode === 'upgrade-complete'
+        && upgraded.claudeMod?.status === 'failed'
+        && upgraded.claudeMod.detailCode === 'claude-mod-refresh-timeout'
+        && readFileSync(fixture.m.binary, 'utf8') === candidate.toString()
+        && upgraded.summary.includes('run cosyncing setup'),
+      `${upgraded.exitCode}/${upgraded.detailCode}/${JSON.stringify(upgraded.claudeMod)}`);
+  }
+  {
+    const fixture = upgradeMachine();
+    const launches: string[][] = [];
+    const upgraded = await runUpgrade({
+      ...upgradeOptions(fixture),
+      runBinary: async (_executable, args) => {
+        launches.push([...args]);
+        return { status: 'ok' as const, exitCode: 0, stdout: JSON.stringify(CANDIDATE_SELF_CHECK), stderr: '' };
+      },
+    });
+    check('an upgrade on a host with no Claude mod copy spawns no refresh child and says nothing about one',
+      upgraded.exitCode === 0 && upgraded.claudeMod === undefined
+        && launches.every((args) => !args.includes('claude-mod'))
+        && upgraded.summary === `Upgraded cosyncing from 1.0.0 to 2.0.0.`,
+      `${JSON.stringify(launches)}/${upgraded.summary}`);
+  }
+
+  {
+    // SU1, SU2, SU4 through the REAL upgrade and a REAL child: the built CLI runs `claude-mod refresh` as a
+    // separate process, takes the real installation lock the upgrade must already have released, and runs
+    // a fake `claude` that records the environment it was given. Only the candidate binary is a stand-in,
+    // because this fixture's candidate is a byte string; the refresh child is the bundle this tree builds.
+    const fixture = upgradeMachine();
+    const home = fixture.m.home;
+    const fake = fakeClaude(fixture.m.root, 'upgrade-refresh', '2.1.289');
+    writeSetupState({ ...readSetupState(home), claudeModRequested: true }, home);
+    const dir = claudeModMarketplaceDir(home);
+    const socket = claudeModStampedSocketPath(home);
+    const older = writeClaudeModMarketplace(dir, '0.6.0', socket);
+    const install = inspectInstallState(home);
+    if (!install.committed) throw new Error('upgrade fixture is not committed');
+    writeInstallState({
+      ...install.state,
+      resources: [...install.state.resources, claudeModReceiptFor(dir, older.sha256, older.files)],
+    }, home);
+    // Claude's own two entries, written by the fake exactly as the vendor writes them.
+    const claudeEnv = { CLAUDE_CONFIG_DIR: fake.configDir };
+    Bun.spawnSync([fake.bin, 'plugin', 'marketplace', 'add', dir, '--json'], { env: claudeEnv });
+    Bun.spawnSync([fake.bin, 'plugin', 'install', 'cosyncing-claude@cosyncing', '--json'], { env: claudeEnv });
+    fake.reset();
+    const bundle = join(fixture.m.root, 'built', 'cosyncing.js');
+    const built = Bun.spawnSync([process.execPath, 'run', join(import.meta.dir, '../../../../../scripts/broker/build-broker-bundle.ts'),
+      '--outfile', bundle, '--distribution', 'bootstrap-js'], { stdout: 'pipe', stderr: 'pipe' });
+    const builtVersion = built.exitCode === 0
+      ? (JSON.parse(Bun.spawnSync([process.execPath, bundle, 'version', '--json']).stdout.toString()) as { version: string }).version
+      : 'unbuilt';
+    const operatorEnv = {
+      HOME: fixture.m.userHome,
+      PATH: fake.binDir,
+      USER: 'fixture-user',
+      LANG: 'C.UTF-8',
+      CLAUDE_CONFIG_DIR: fake.configDir,
+      COSYNCING_HOME: home,
+      COSYNCING_CACHE_DIR: fixture.m.cache,
+      COSYNCING_CLAUDE_BIN: fake.bin,
+      // Not on the allowlist: proof that the child gets the allowlist and nothing else.
+      COSYNCING_TEST_SECRET: 'must-not-reach-claude',
+    };
+    const childEnvironments: Readonly<Record<string, string>>[] = [];
+    const upgraded = await runUpgrade({
+      ...upgradeOptions(fixture),
+      env: operatorEnv,
+      runBinary: async (executable, args, timeoutMs, env) => {
+        if (!args.includes('claude-mod')) {
+          return { status: 'ok' as const, exitCode: 0, stdout: JSON.stringify(CANDIDATE_SELF_CHECK), stderr: '' };
+        }
+        childEnvironments.push(env ?? {});
+        void executable;
+        // The production runner, the environment the upgrade chose, and the built CLI.
+        return defaultRunBinary(process.execPath, [bundle, ...args], timeoutMs, env);
+      },
+    });
+    const copy = inspectClaudeModMarketplace(dir, builtVersion, { socketPath: socket });
+    const after = inspectInstallState(home);
+    const receipt = after.committed ? after.state.resources.find((resource) => resource.id === CLAUDE_MOD_RESOURCE_ID) : undefined;
+    check('SU1 cosy update refreshes the mod through the new binary, after releasing its own lock',
+      built.exitCode === 0 && upgraded.exitCode === 0 && upgraded.claudeMod?.status === 'refreshed'
+        && copy.status === 'owned' && receipt?.ownership.installedSha256 === copy.actualSha256,
+      `${built.exitCode} ${upgraded.detailCode} ${JSON.stringify(upgraded.claudeMod)} copy=${copy.status}`);
+    check('SU2 the refresh child released its own lock: no lock file is left and the next mutation can start',
+      !existsSync(installationLockPath(home)) && (() => {
+        try {
+          acquireInstallationLock({ command: 'setup', home }).release();
+          return true;
+        } catch {
+          return false;
+        }
+      })());
+    const seen = fake.environments();
+    check('SU4 the refresh child hands claude the operator\'s Claude environment and nothing off the allowlist',
+      seen.length >= 4 && seen.every((entry) => entry.CLAUDE_CONFIG_DIR === fake.configDir
+        && entry.HOME === fixture.m.userHome
+        && entry.COSYNCING_HOME === home
+        && entry.COSYNCING_CLAUDE_BIN === fake.bin
+        && entry.COSYNCING_TEST_SECRET === '<unset>')
+        && fake.calls().length === 4,
+      `${seen.length} ${JSON.stringify(seen[0])} ${fake.calls().join(' | ')}`);
+    check('SU4 the upgrade spawned the refresh with the allowlisted environment, not its own',
+      childEnvironments.length === 1 && childEnvironments[0]!.CLAUDE_CONFIG_DIR === fake.configDir
+        && !('COSYNCING_TEST_SECRET' in childEnvironments[0]!),
+      JSON.stringify(Object.keys(childEnvironments[0] ?? {})));
+  }
+
   {
     // Driven from the acquisition artifact, not the installed copy: an npm-installed launcher on PATH is the
     // normal way `cosyncing upgrade` is typed, and it is deliberately NOT byte-identical to the home copy
@@ -2722,6 +2889,40 @@ try {
       check('the previous version\'s web root survives and only superseded ones are pruned',
         existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'))
           && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-0.9.0')));
+    }
+
+    {
+      // A JavaScript bundle carries no interpreter, so the delegated refresh has to go through the
+      // runtime this install recorded, exactly like the candidate's own self-check does.
+      const fixture = upgradeMachine();
+      claudeModCopy(fixture.m.home);
+      const before = launches.length;
+      const upgraded = await runUpgrade({
+        ...jsUpgradeOptions(fixture),
+        runBinary: async (executable: string, args: readonly string[]) => {
+          launches.push({ executable, args });
+          return args.includes('claude-mod')
+            ? {
+              status: 'ok' as const,
+              exitCode: 0,
+              stderr: '',
+              stdout: JSON.stringify({ status: 'refreshed', detailCode: 'claude-mod-refreshed', summary: 'fixture' }),
+            }
+            : {
+              status: 'ok' as const,
+              exitCode: 0,
+              stderr: '',
+              stdout: JSON.stringify({ ...CANDIDATE_SELF_CHECK, target: 'universal', distribution: 'bootstrap-js' }),
+            };
+        },
+      });
+      const refresh = launches.slice(before).find((entry) => entry.args.includes('claude-mod'));
+      check('the JavaScript upgrade delegates the Claude mod refresh through the recorded runtime',
+        upgraded.exitCode === 0 && upgraded.claudeMod?.status === 'refreshed'
+          && refresh?.executable === runtimePath
+          && refresh.args[0] === fixture.m.binary
+          && refresh.args[1] === 'claude-mod',
+        JSON.stringify({ refresh, outcome: upgraded.claudeMod }));
     }
 
     {

@@ -13,6 +13,7 @@ import {
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
 import {
   CLAUDE_HOOK_LEGACY_MARKER,
+  CLAUDE_MOD_MIN_VERSION,
   inspectLegacyClaudeHooks,
 } from '@cosyncing/adapter-claude';
 import {
@@ -35,6 +36,7 @@ import {
 } from '@cosyncing/adapter-omp/bridge-asset';
 import { inspectOmpBridgeAsset } from '@cosyncing/adapter-omp';
 import { shippedAdapters } from './shipped-adapters.ts';
+import { claudeModSupportFromDiagnosis } from './doctor.ts';
 import { agentStateFromChecks } from './setup.ts';
 import { OMP_DIALECT } from '@cosyncing/adapter-omp';
 import {
@@ -82,7 +84,11 @@ import {
   type CommittedInstallState,
   type InstalledResourceRecord,
 } from './install-state.ts';
-import { acquireInstallationLock, type InstallationLockHandle } from './installation-lock.ts';
+import {
+  acquireInstallationLock,
+  type InstallationLockHandle,
+  type InstallationMutation,
+} from './installation-lock.ts';
 import { INTERNAL_AGENT_ROSTER_PATH, PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import { inspectRuntimeAssets, serviceFlutterWebRoot } from '../runtime/runtime-assets.ts';
 import {
@@ -142,7 +148,33 @@ import {
   ompBridgeReceiptTargetPrecondition,
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
-import { readSetupTransactionJournal } from './setup-transaction.ts';
+import {
+  claudeConfigDirIsRelative,
+  claudeModCommandBinary,
+  claudeModFailureRecord,
+  claudeModManualRemoveCommands,
+  claudeModMarketplaceDir,
+  claudeModPlanPrecondition,
+  claudeModRemovable,
+  claudeModRemoveCommands,
+  claudeUserSettingsPath,
+  defaultClaudeModCommandRunner,
+  decideClaudeModOwnership,
+  removeClaudeModMarketplace,
+  runClaudeModCommands,
+  writeClaudeModOutcome,
+  CLAUDE_MOD_RESOURCE_ID,
+  type ClaudeModCommandRunner,
+  type ClaudeModOutcomeRecord,
+} from './claude-mod-ownership.ts';
+import { inspectSetupEnvironment } from './setup.ts';
+import {
+  executeSetupTransaction,
+  readSetupTransactionJournal,
+  SetupTransactionError,
+  type SetupCommitAction,
+} from './setup-transaction.ts';
+import { createClaudeModSetupAction, rollbackSetupFiles, snapshotSetupFiles } from './setup-actions.ts';
 import {
   inspectWindowsActiveInstall,
   windowsActiveInstallManifest,
@@ -194,6 +226,14 @@ export interface LifecycleBaseOptions {
   piAgentDir?: string;
   ompAgentDir?: string;
   claudeSettingsPath?: string;
+  /**
+   * Claude's own CLI, for the one thing uninstall has to ask it to do: take its plugin back.
+   *
+   * The default runs the resolved `claude` binary; a test injects the recorded `--json` shapes. The seam is
+   * here rather than inside a helper because uninstall's behaviour on a refusal is a decision, not a
+   * detail — see the `claude-mod.remove` branch.
+   */
+  runClaudeMod?: ClaudeModCommandRunner;
   now?: () => Date;
   /** Injected read-only Codex daemon probe (uninstall live-session enumeration); default talks to the daemon. */
   codexDaemonProbe?: () => Promise<CodexDaemonStatus>;
@@ -278,6 +318,13 @@ export interface LifecycleCommandResult {
   actions?: string[];
   remaining?: string[];
   preservedExternalConnectivity?: string[];
+  /** What the run could not finish, in English sentences that name the commands. */
+  leftBehind?: string[];
+  /**
+   * The Claude mod's part of `leftBehind`, structured, so a renderer in another language can say it
+   * without translating a sentence: the reason code and the literal commands that finish the job.
+   */
+  claudeModLeftovers?: { detailCode: string; commands: string[] };
 }
 
 export interface RepairPlan {
@@ -338,6 +385,13 @@ interface LifecycleEnvironment {
   piAgentDir: string;
   ompAgentDir: string;
   claudeSettingsPath: string;
+  /** The marketplace directory the mod's receipt names, resolved the same way setup resolved it. */
+  claudeModMarketplaceDir: string;
+  /** Broker version whose stamped file set defines `owned-current`. */
+  claudeModVersion: string;
+  runClaudeMod: ClaudeModCommandRunner;
+  /** The environment Claude's CLI runs in, which also decides the configuration a by-hand command names. */
+  claudeModEnv: Readonly<Record<string, string | undefined>>;
   agentSkills: AgentSkillInspection[];
 }
 
@@ -564,10 +618,15 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
     provider,
     piAgentDir: options.piAgentDir ?? resolvePiDialectPaths(PI_DIALECT, dialectEnv).agentDir,
     ompAgentDir: options.ompAgentDir ?? resolvePiDialectPaths(OMP_DIALECT, dialectEnv).agentDir,
-    claudeSettingsPath: options.claudeSettingsPath ?? join(
-      context.env.CLAUDE_CONFIG_DIR?.trim() ?? join(context.homeDir, '.claude'),
-      'settings.json',
-    ),
+    // One rule for where Claude's settings live, shared with setup. The old inline join honoured a relative
+    // CLAUDE_CONFIG_DIR against nothing in particular, which made the same env mean two paths in two
+    // commands of the same CLI.
+    claudeSettingsPath: options.claudeSettingsPath ?? claudeUserSettingsPath(context.homeDir, context.env),
+    claudeModMarketplaceDir: claudeModMarketplaceDir(home),
+    claudeModVersion: options.buildInfo.version,
+    runClaudeMod: options.runClaudeMod
+      ?? defaultClaudeModCommandRunner(claudeModCommandBinary(context.env, context.resolveExecutable), context.env),
+    claudeModEnv: context.env,
     agentSkills: inspectAgentSkills(context),
   };
 }
@@ -970,7 +1029,10 @@ function commandResult(
   exitCode: LifecycleCommandResult['exitCode'],
   detailCode: string,
   summary: string,
-  extra: Pick<LifecycleCommandResult, 'actions' | 'remaining' | 'preservedExternalConnectivity'> = {},
+  extra: Pick<
+    LifecycleCommandResult,
+    'actions' | 'remaining' | 'preservedExternalConnectivity' | 'leftBehind' | 'claudeModLeftovers'
+  > = {},
 ): LifecycleCommandResult {
   return { schemaVersion: 1, status, exitCode, detailCode, summary, ...extra };
 }
@@ -1510,6 +1572,226 @@ function mergeResources(state: CommittedInstallState, incoming: readonly Install
   return { ...state, resources: [...resources.values()].sort((left, right) => left.id.localeCompare(right.id)) };
 }
 
+/**
+ * Refresh cosyncing's Claude mod to what THIS build ships, without a full setup run.
+ *
+ * Why this exists as its own surface: the marketplace directory is a copy. Setup writes it from the
+ * marketplace embedded in the running build, and Claude loads the plugin IN PLACE from that
+ * directory. So after `cosy update` -- which swaps the binary and restarts the service, and never
+ * touches the copy -- the broker is new and the mod in every open Claude terminal is still the old
+ * code. Telling the operator to rerun setup would be true and useless at three in the morning, and
+ * the upgrade cannot write the copy itself: it runs in the OLD process, whose embedded marketplace is
+ * the OLD mod. So the upgrade asks the NEW binary to do it, which is what this is.
+ *
+ * It is narrow on purpose. It reconciles one directory and Claude's view of it, reads the same
+ * ownership decision setup, doctor and uninstall read, and does no service, config, credential or
+ * agent work at all. A mod that is declined, absent, unowned or not on offer is left exactly as it
+ * is and said so.
+ */
+/**
+ * The Claude adapter's own setup diagnosis, or nothing when it has no answer.
+ *
+ * Same reasoning as `ompAgentSupported`: a lifecycle command wants ONE agent's state and must not
+ * invent a cheaper test that disagrees with setup's preflight. `undefined` is a real answer -- it is
+ * what makes the mod's support verdict `missing-cli` rather than a guess about a version nobody read.
+ */
+async function claudeSetupDiagnosis(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis | undefined> {
+  const diagnose = shippedAdapters().find((candidate) => candidate.id === 'claude')?.diagnoseSetup;
+  if (!diagnose) return undefined;
+  try {
+    return await diagnose(context);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function refreshClaudeMod(options: {
+  buildInfo: Readonly<BuildInfo>;
+  home: string;
+  context: SetupDiagnosisContext;
+  runClaudeMod?: ClaudeModCommandRunner;
+  acquireLock?: (options: { command: InstallationMutation; home: string }) => InstallationLockHandle;
+  /** Managed Claude policy roots for a test. Production reads the platform's own. */
+  claudePolicyRoots?: readonly string[];
+  now?: () => Date;
+}): Promise<{
+  status: 'refreshed' | 'current' | 'skipped' | 'refused' | 'failed';
+  detailCode: string;
+  summary: string;
+  /** What Claude did not finish, with the commands that finish it, when the refresh was put back. */
+  outcome?: ClaudeModOutcomeRecord;
+}> {
+  // Locked FIRST, and decided under the lock. A decision taken before the lock describes a disk that a
+  // setup holding the lock may be rewriting, and this writes a directory and the resource ledger. The
+  // upgrade releases its own lock before spawning this child, which is why it can be taken here.
+  const acquire = options.acquireLock ?? ((input) => acquireInstallationLock(input));
+  let lock: InstallationLockHandle;
+  try {
+    lock = acquire({ command: 'claude-mod-refresh', home: options.home });
+  } catch {
+    return {
+      status: 'refused',
+      detailCode: 'claude-mod-refresh-lock-unavailable',
+      summary: 'Another installation mutation is active or the lock is unsafe; the Claude mod was not refreshed.',
+    };
+  }
+  try {
+    // An interrupted setup owns the next step on this machine: its recovery reverses whatever it was
+    // doing, the mod step included. A refresh on top of that journal would be reversed by it.
+    let pending = false;
+    try {
+      pending = readSetupTransactionJournal(options.home) !== undefined;
+    } catch {
+      pending = true;
+    }
+    if (pending) {
+      return {
+        status: 'refused',
+        detailCode: 'claude-mod-refresh-setup-pending',
+        summary: 'An interrupted setup is waiting to be rolled back; run `cosyncing setup`, which also refreshes the Claude mod.',
+      };
+    }
+    // The capability question comes from the Claude adapter's own diagnosis, exactly as repair asks
+    // the omp adapter for its one agent rather than inventing a cheaper test. Two rules for one
+    // verdict is how the upgrade path and setup would start to disagree about whether a host may have
+    // the mod, and the disagreement would surface as a refresh that Claude then refuses to register.
+    const diagnosis = await claudeSetupDiagnosis(options.context);
+    const support = claudeModSupportFromDiagnosis(
+      options.context,
+      diagnosis ? [diagnosis] : [],
+      options.claudePolicyRoots,
+    );
+    const install = inspectInstallState(options.home);
+    const decision = decideClaudeModOwnership({
+      install,
+      support,
+      stateHome: options.home,
+      version: options.buildInfo.version,
+      settingsPath: claudeUserSettingsPath(options.context.homeDir, options.context.env),
+      requested: readSetupState(options.home).claudeModRequested,
+    });
+    if (!decision.support.supported) {
+      return {
+        status: 'skipped',
+        detailCode: `claude-mod-refresh-skipped-${decision.support.skipReason ?? 'unsupported'}`,
+        summary: 'The cosyncing Claude mod is not on offer on this host; nothing was changed.',
+      };
+    }
+    if (decision.status === 'owned-current') {
+      return {
+        status: 'current',
+        detailCode: 'claude-mod-refresh-current',
+        summary: 'The cosyncing Claude mod is already this build\'s version.',
+      };
+    }
+    // Only a copy the ownership decision calls OURS and still IN CLAUDE is written. A decline, a mod
+    // switched off or removed inside Claude, and anything the receipt cannot prove are all left exactly as
+    // they are: the person's last word on the mod is not something an upgrade gets to overrule.
+    if (decision.status !== 'owned-stale' || decision.settings.status !== 'enabled') {
+      return {
+        status: 'skipped',
+        detailCode: `claude-mod-refresh-skipped-${decision.status}`,
+        summary: `The cosyncing Claude mod is not cosyncing's to refresh here (${decision.status}); nothing was changed.`,
+      };
+    }
+
+    // The same action setup runs, so a refresh is staged, journaled and put back exactly the way setup's
+    // is: the previous copy is snapshotted into the transaction directory first, a Claude that refuses the
+    // new one gets the old one back with its receipt untouched, and a refresh killed half-way is rolled
+    // back by the next `cosyncing setup` from the journal, old copy restored and Claude's entries alone.
+    let outcome: ClaudeModOutcomeRecord | undefined;
+    const action = createClaudeModSetupAction({
+      home: options.home,
+      ...(options.now ? { now: options.now } : {}),
+      claudeMod: {
+        intent: 'install',
+        refreshing: true,
+        marketplaceDir: decision.marketplaceDir,
+        settingsPath: decision.settings.settingsPath,
+        version: options.buildInfo.version,
+        claudeBin: claudeModCommandBinary(options.context.env, options.context.resolveExecutable),
+        env: options.context.env,
+        socketPath: decision.socketPath,
+        ...(decision.receipt ? { previousReceipt: decision.receipt } : {}),
+        precondition: claudeModPlanPrecondition(decision.copy, decision.settings),
+        ...(options.runClaudeMod ? { run: options.runClaudeMod } : {}),
+        report: (record) => { outcome = record; },
+      },
+    });
+    const ledger = installStatePath(options.home);
+    const commitAction: SetupCommitAction = {
+      // Setup's own commit id, with the same snapshot record shape, so setup's recovery rolls it back.
+      id: 'install-state.commit',
+      prepare: (context) => snapshotSetupFiles(context, 'install-state.commit', [ledger]),
+      apply: (_context, resources) => {
+        const receipt = resources.find((resource) => resource.id === CLAUDE_MOD_RESOURCE_ID);
+        // A refresh Claude refused returns no receipt: the old copy is back, and so is the old receipt.
+        if (!receipt) return;
+        const current = inspectInstallState(options.home);
+        if (!current.committed) throw new Error('claude-mod-refresh-ledger-uncommitted');
+        writeInstallState({
+          ...current.state,
+          resources: [
+            ...current.state.resources.filter((resource) => resource.id !== CLAUDE_MOD_RESOURCE_ID),
+            receipt,
+          ],
+        }, options.home);
+      },
+      verify: () => inspectInstallState(options.home).committed,
+      rollback: (_context, record) => { rollbackSetupFiles(record); },
+    };
+    const preconditionHash = createHash('sha256')
+      .update(claudeModPlanPrecondition(decision.copy, decision.settings))
+      .digest('hex');
+    try {
+      await executeSetupTransaction({
+        home: options.home,
+        plan: {
+          schemaVersion: 1,
+          id: `claude-mod-refresh-${preconditionHash.slice(0, 24)}`,
+          preconditionHash,
+          ...(install.committed && install.state.installationId
+            ? { installationId: install.state.installationId }
+            : {}),
+          claudeModIntent: 'install',
+          actions: [{
+            id: 'claude-mod.marketplace',
+            title: 'Refresh the cosyncing Claude mod',
+            summary: `Refresh the cosyncing Claude mod at ${decision.marketplaceDir} to ${options.buildInfo.version}.`,
+            reversible: true,
+          }],
+        },
+        actions: [action],
+        commitAction,
+        verifyAll: () => true,
+        ...(options.now ? { now: options.now } : {}),
+      });
+    } catch (error) {
+      return {
+        status: 'failed',
+        detailCode: `claude-mod-refresh-failed-${error instanceof SetupTransactionError ? error.code : 'action-failed'}`,
+        summary: 'The cosyncing Claude mod could not be refreshed and was put back as it was; rerun `cosyncing setup` for the full reconciliation.',
+        ...(outcome ? { outcome } : {}),
+      };
+    }
+    if (outcome) {
+      return {
+        status: 'failed',
+        detailCode: outcome.detailCode,
+        summary: `Claude did not accept the refreshed cosyncing Claude mod, so the previous copy stays in use. To finish: ${outcome.commands.join(' ; ')}`,
+        outcome,
+      };
+    }
+    return {
+      status: 'refreshed',
+      detailCode: 'claude-mod-refreshed',
+      summary: `Refreshed the cosyncing Claude mod to ${options.buildInfo.version} in ${decision.marketplaceDir}.`,
+    };
+  } finally {
+    lock.release();
+  }
+}
+
 export async function runRepair(options: RepairOptions): Promise<LifecycleCommandResult> {
   const plan = options.expectedPlan ?? await inspectRepair(options);
   if (plan.blockers.length > 0) return commandResult('blocked', 1, plan.blockers[0]!.detailCode, plan.blockers[0]!.summary, { remaining: plan.blockers.map((item) => item.detailCode) });
@@ -1918,6 +2200,35 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
   }
   const omp = inspectOmpBridgeOwnership(env.install, env.ompAgentDir);
   const ompReceiptTarget = inspectOmpBridgeReceiptTarget(env.install);
+  // The Claude mod, decided from the receipt and the disk. The host-capability question is deliberately
+  // NOT asked here: a machine where Claude has since been uninstalled still has cosyncing's marketplace
+  // directory in its state home, and an "unsupported host" verdict must not become a reason to leave
+  // our own files behind.
+  const claudeMod = decideClaudeModOwnership({
+    install: env.install,
+    support: { supported: true, minimumVersion: CLAUDE_MOD_MIN_VERSION },
+    stateHome: env.home,
+    version: env.claudeModVersion,
+    settingsPath: env.claudeSettingsPath,
+  });
+  // Only the receipt decides. Either it proves the bytes on disk, or the bytes are already gone and the
+  // receipt is all that is left; either way the directory and the receipt are cosyncing's to take back,
+  // whatever Claude's settings currently say about the mod (switched off, removed inside Claude, or on).
+  if (claudeModRemovable(claudeMod)) {
+    actions.push({
+      id: 'claude-mod.remove',
+      target: claudeMod.receipt?.target ?? claudeMod.marketplaceDir,
+      legacy: false,
+      precondition: claudeModPlanPrecondition(claudeMod.copy, claudeMod.settings),
+    });
+  } else if (claudeMod.copy.status !== 'missing') {
+    // Something is in the directory and the receipt does not prove it is ours. Uninstall says so and
+    // leaves it, exactly as it does for a bridge it cannot prove.
+    warnings.push({
+      detailCode: `claude-mod-${claudeMod.status}-preserved`,
+      summary: 'The Claude mod marketplace directory cosyncing cannot prove it owns will be preserved.',
+    });
+  }
   if (serviceRemovalPlanned
       && (ompReceiptTarget.status === 'owned' || ompReceiptTarget.status === 'missing')) {
     actions.push({
@@ -2241,6 +2552,16 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
   try { lock = acquire({ command: 'uninstall', home: env.home }); }
   catch { return commandResult('blocked', 1, 'installation-lock-unavailable', 'Another installation mutation is active or the lock is unsafe.'); }
   const completed: string[] = [];
+  /**
+   * What the run could not finish, in the words the operator acts on.
+   *
+   * Kept separate from `plan.warnings` because those are decided BEFORE anything is removed and are
+   * re-read from the plan on every retry, while these are discovered mid-flight. A step that could
+   * not be reversed is added here and printed in the summary, so a "complete" uninstall never
+   * silently leave something behind.
+   */
+  const leftBehind: string[] = [];
+  let claudeModLeftovers: LifecycleCommandResult['claudeModLeftovers'];
   let remaining = [...plan.warnings.map((warning) => warning.detailCode)];
   let retainedResources = env.install.committed ? [...env.install.state.resources] : [];
   try {
@@ -2291,6 +2612,97 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           }
           if (!safeRemoveRegular(inspection.bridge.path, expectedSha256)) throw new Error('pi-bridge-drift');
           retainedResources = retainedResources.filter((item) => item.id !== 'pi-bridge');
+        } else if (action.id === 'claude-mod.remove') {
+          // Re-decided under the lock, then reversed in the order that cannot strand anything.
+          //
+          // Claude's own uninstall runs FIRST and a refusal is fatal on purpose. If it fails and we delete
+          // the directory anyway, Claude is left with a marketplace entry naming a path that no longer
+          // exists, which is a broken Claude install attributed to an uninstall that reported success. So
+          // the CLI gets the first chance to fail, and only our own directory goes afterwards.
+          //
+          // The one exception is a marketplace entry that is no longer ours (`foreign`): removing THAT
+          // would remove someone else's marketplace, so the CLI is not asked, and the directory we did
+          // write is taken back.
+          const before = decideClaudeModOwnership({
+            install: inspectInstallState(env.home),
+            support: { supported: true, minimumVersion: CLAUDE_MOD_MIN_VERSION },
+            stateHome: env.home,
+            version: env.claudeModVersion,
+            settingsPath: env.claudeSettingsPath,
+          });
+          if (!action.precondition
+              || claudeModPlanPrecondition(before.copy, before.settings) !== action.precondition) {
+            throw new Error('claude-mod-drift');
+          }
+          if (!claudeModRemovable(before)) throw new Error('claude-mod-drift');
+          const reportLeftovers = (record: ClaudeModOutcomeRecord, why: string): void => {
+            writeClaudeModOutcome(env.home, record);
+            claudeModLeftovers = { detailCode: record.detailCode, commands: [...record.commands] };
+            leftBehind.push(
+              `the cosyncing Claude mod's two entries in Claude's own settings, because ${why}. `
+              + `Finish by hand with ${record.commands.map((line) => `\`${line}\``).join(' then ')}.`,
+            );
+          };
+          let keepDirectory = false;
+          if (before.settings.status === 'foreign') {
+            // Not ours any more: the CLI is not asked, and only the directory we wrote is taken back.
+          } else if (claudeConfigDirIsRelative(env.claudeModEnv)) {
+            // Claude would resolve the relative directory against wherever it was started, so a reversal
+            // run from here could act on some other configuration and report success. cosyncing's own
+            // side is taken back; Claude's is named, to be removed with the directory set absolutely.
+            reportLeftovers(
+              { ...claudeModFailureRecord({ operation: 'uninstall', failed: { outcome: 'unavailable' }, env: {}, now: options.now }),
+                detailCode: 'claude-mod-uninstall-config-dir-relative' },
+              'CLAUDE_CONFIG_DIR is a relative path, so it is not clear which Claude configuration to change; '
+                + 'set it to that configuration\'s absolute path first',
+            );
+          } else {
+            const reversed = await runClaudeModCommands(env.runClaudeMod, claudeModRemoveCommands(), { reversal: true });
+            if (!reversed.ok) {
+              const outcome = reversed.failed?.outcome;
+              const record = claudeModFailureRecord({
+                operation: 'uninstall',
+                failed: reversed.failed,
+                env: env.claudeModEnv,
+                now: options.now,
+              });
+              if (outcome === 'unavailable') {
+                // No `claude` could be run at all, so nothing in Claude changed. An operator who
+                // uninstalled Claude Code, or whose PATH lost it, still owns the right to uninstall
+                // cosyncing: its own directory is taken back and Claude's two entries are named.
+                reportLeftovers(record, 'no `claude` command could be run');
+              } else if (outcome === 'timeout' || outcome === 'unparseable') {
+                // A `claude` ran and its effect is unknown: its entries may still point at the directory.
+                // Deleting the directory under them would leave Claude naming a path that is gone, so the
+                // directory and its receipt stay, and the rest of the uninstall carries on.
+                keepDirectory = true;
+                reportLeftovers(
+                  { ...record, commands: [...record.commands, `rm -r ${JSON.stringify(before.marketplaceDir)}`] },
+                  outcome === 'timeout'
+                    ? '`claude` did not answer in time'
+                    : '`claude` answered with nothing cosyncing could read',
+                );
+                remaining.push('claude-mod-preserved');
+              } else {
+                // Claude answered and refused. Nothing has been deleted yet, so this is a clean "run it
+                // again" rather than a half-cut.
+                throw new Error(`claude-mod-remove-refused:${reversed.failed?.failureCode ?? 'unknown'}`);
+              }
+            }
+          }
+          if (!keepDirectory) {
+            removeClaudeModMarketplace(before.marketplaceDir);
+            retainedResources = retainedResources.filter((item) => item.id !== CLAUDE_MOD_RESOURCE_ID);
+          }
+          if (!claudeModLeftovers) {
+            // Clean: nothing for doctor to repeat, and no empty `claude-mod/` left in the state home.
+            writeClaudeModOutcome(env.home, undefined);
+            try {
+              rmdirSync(dirname(before.marketplaceDir));
+            } catch {
+              // Not empty or already gone; either is fine.
+            }
+          }
         } else if (action.id === 'omp-bridge.remove') {
           if (env.provider && !completed.includes('service.remove')) {
             throw new Error('omp-bridge-service-still-installed');
@@ -2512,7 +2924,13 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
       }
     }
     if (remaining.length > 0) {
-      return commandResult('cleanup-required', 4, remaining[0]!, 'Uninstall preserved modified, unknown, or drifted resources.', { actions: completed, remaining });
+      return commandResult('cleanup-required', 4, remaining[0]!, 'Uninstall preserved modified, unknown, or drifted resources.'
+        + (leftBehind.length > 0 ? ` Left behind and needing a hand: ${leftBehind.join('; ')}` : ''), {
+        actions: completed,
+        remaining,
+        ...(leftBehind.length > 0 ? { leftBehind } : {}),
+        ...(claudeModLeftovers ? { claudeModLeftovers } : {}),
+      });
     }
     if (options.purgeData) {
       try {
@@ -2539,8 +2957,16 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
       + (acquisitionPackagePreserved
         ? ` The \`${PRODUCT_IDENTITY.primaryBinary}\` command stays on PATH from the package it was installed `
           + `from; remove that separately (for example \`npm uninstall -g ${PRODUCT_IDENTITY.productName}\`).`
+        : '')
+      // Named here rather than only in a warning list a caller may not print: these are things this
+      // run did not finish, and an operator reading a line that says "removed" must not have to
+      // know to look elsewhere for the part that is still on their machine.
+      + (leftBehind.length > 0
+        ? ` Left behind and needing a hand: ${leftBehind.join('; ')}`
         : ''), {
       actions: completed,
+      ...(leftBehind.length > 0 ? { leftBehind } : {}),
+      ...(claudeModLeftovers ? { claudeModLeftovers } : {}),
       ...(preservedExternalConnectivity.length > 0 ? { preservedExternalConnectivity } : {}),
     });
   } finally {

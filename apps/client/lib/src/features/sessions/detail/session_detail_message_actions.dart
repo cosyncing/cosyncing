@@ -15,6 +15,8 @@ class _MessageRow extends StatelessWidget {
     required this.artifactActionState,
     this.resolvedRequestDecisions = const {},
     this.withdrawnRequestIds = const {},
+    this.resolvedRequestAttributions = const {},
+    this.resolvedQuestionAnswers = const {},
   });
 
   final AgentMessage message;
@@ -43,6 +45,15 @@ class _MessageRow extends StatelessWidget {
   /// Request ids the session no longer offers although no resolution for them
   /// arrived: their cards deactivate without an outcome.
   final Set<String> withdrawnRequestIds;
+
+  /// Who settled each request, by canonical request id. Absent when the
+  /// broker did not say, which is every resolution this app saw before
+  /// true sync.
+  final Map<String, ResolvedRequestAttribution> resolvedRequestAttributions;
+
+  /// The answer each settled question closed with, by canonical request id.
+  /// Absent when the broker did not say.
+  final Map<String, List<List<String>>> resolvedQuestionAnswers;
   final ValueChanged<String> onForkFromMessage;
   final SessionArtifactActionState artifactActionState;
 
@@ -92,15 +103,26 @@ class _MessageRow extends StatelessWidget {
           isResolved: isResolved || isWithdrawn,
           isWithdrawn: isWithdrawn,
           resolvedDecision: resolvedRequestDecisions[requestId],
+          resolvedAttribution: resolvedRequestAttributions[requestId],
+          releaseReason: message.requestIsReadOnly
+              ? message.permissionReleaseReason
+              : null,
         ),
       AgentMessageType.questionRequest when requestId != null =>
         _QuestionRequestActions(
           requestId: requestId,
           questions: message.questionRequestQuestions,
           isReadOnly: message.requestIsReadOnly,
+          answerInTerminal: message.questionRequestAnswerInTerminal,
           isEnabled: isConnected && canMutate,
           isResolved: isResolved || isWithdrawn,
           isWithdrawn: isWithdrawn,
+          settledAnswers: isResolved
+              ? resolvedQuestionAnswers[requestId]
+              : null,
+          resolvedAttribution: isResolved
+              ? resolvedRequestAttributions[requestId]
+              : null,
           onSubmit: (answers) => controller.sendQuestionAnswer(
             requestId: requestId,
             answers: answers,
@@ -124,6 +146,7 @@ class _MessageRow extends StatelessWidget {
           message,
           fileArtifactAction: artifactAction,
           requestAction: requestAction,
+          requestSettled: isResolved || isWithdrawn,
         ),
       ),
     );
@@ -768,6 +791,8 @@ class _PermissionRequestActions extends StatefulWidget {
     required this.isResolved,
     this.isWithdrawn = false,
     this.resolvedDecision,
+    this.resolvedAttribution,
+    this.releaseReason,
   });
 
   final String requestId;
@@ -795,12 +820,101 @@ class _PermissionRequestActions extends StatefulWidget {
   /// compact outcome.
   final String? resolvedDecision;
 
+  /// Whose answer closed this card, when the broker said. The decision
+  /// alone cannot carry it: `external` covers an app answer the terminal
+  /// confirmed, a terminal answer the app never made, and nobody answering
+  /// at all, and those are three different things to tell the user.
+  final ResolvedRequestAttribution? resolvedAttribution;
+
+  /// Why the broker left this read-only card to the terminal, when it did.
+  /// The card leads with that sentence, so the outcome must not repeat it.
+  final PermissionReleaseReason? releaseReason;
+
   @override
   State<_PermissionRequestActions> createState() =>
       _PermissionRequestActionsState();
 }
 
+/// Which seat settled a card, in the app's own words, or null when the broker
+/// did not say. A permission card and an answered question card say it the
+/// same way; a question closed unanswered says so instead
+/// ([_questionClosedUnansweredLine]).
+///
+/// A release reason wins over a decider where both arrived, because the pair
+/// only happens on a deadline, and "nobody answered in time" is the sentence
+/// the user needs, not a location.
+String? _requestSettledWhereLine(
+  AppLocalizations l10n,
+  ResolvedRequestAttribution? attribution,
+) {
+  if (attribution == null) return null;
+  // A reason beats a seat. The pair only arrives on a deadline, and "nobody
+  // answered in time" is the fact; naming a seat that did not answer is not.
+  final reason = attribution.releaseReason;
+  if (reason != null) {
+    return switch (reason) {
+      PermissionReleaseReason.modeBypassPermissions =>
+        l10n.sessionRequestReleaseModeBypass,
+      PermissionReleaseReason.modeUnknown =>
+        l10n.sessionRequestReleaseModeUnknown,
+      PermissionReleaseReason.planTerminalOnly =>
+        l10n.sessionRequestReleasePlanTerminalOnly,
+      PermissionReleaseReason.viewerNone =>
+        l10n.sessionRequestReleaseViewerNone,
+      PermissionReleaseReason.killSwitch =>
+        l10n.sessionRequestReleaseKillSwitch,
+      PermissionReleaseReason.band => l10n.sessionRequestReleaseBand,
+      PermissionReleaseReason.expired => l10n.sessionRequestReleaseExpired,
+      PermissionReleaseReason.unknown => null,
+    };
+  }
+  final decider = attribution.decider;
+  if (decider == null) return null;
+  return switch (decider) {
+    PermissionDecidedBy.app => l10n.sessionRequestDecidedByApp,
+    PermissionDecidedBy.band => l10n.sessionRequestDecidedByBand,
+    PermissionDecidedBy.expired => l10n.sessionRequestDecidedByExpired,
+    PermissionDecidedBy.unknown => null,
+  };
+}
+
+/// What a question card says when it closed with nothing picked, or null when
+/// something was picked or the broker did not say who closed it.
+///
+/// The seat sentences above are an approval card's, and an approval always
+/// has an answer. A question can end with none: Escape at the terminal comes
+/// back as the terminal's, and Stop or Dismiss in the app as the app's, and
+/// "You answered it in your terminal." or "Answered in the app" then told the
+/// person an answer was given when nobody chose one. A broker that names a
+/// seat also sends the answers whenever there were some (both arrived in the
+/// same contract revision), so a named seat with no answers is a question
+/// closed unanswered. A deadline keeps its own sentence, which already says
+/// nobody answered.
+String? _questionClosedUnansweredLine(
+  AppLocalizations l10n,
+  ResolvedRequestAttribution? attribution,
+  List<List<String>>? answers,
+) {
+  if (attribution == null) return null;
+  if (answers != null && answers.any((row) => row.isNotEmpty)) return null;
+  final reason = attribution.releaseReason;
+  final decider = attribution.decider;
+  if (reason == PermissionReleaseReason.band ||
+      (reason == null && decider == PermissionDecidedBy.band)) {
+    return l10n.sessionQuestionClosedUnansweredInTerminal;
+  }
+  if (reason == null && decider == PermissionDecidedBy.app) {
+    return l10n.sessionQuestionClosedUnansweredInApp;
+  }
+  return null;
+}
+
 class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
+  /// Which seat answered, in the app's own words, or null when the broker
+  /// did not say.
+  String? _settledWhereLine(AppLocalizations l10n) =>
+      _requestSettledWhereLine(l10n, widget.resolvedAttribution);
+
   bool _isSubmitting = false;
   _RequestActionOutcomeState _outcome = _RequestActionOutcomeState.pending;
   String? _failureMessage;
@@ -904,10 +1018,42 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
         !widget.isResolved &&
         !_isSubmitting &&
         _outcome != _RequestActionOutcomeState.sent;
-    // Resolved by another client while this card was still pending locally
-    // (a local send flips _outcome to `sent` and owns its own "Sent" badge).
-    final resolvedElsewhere =
-        widget.isResolved && _outcome != _RequestActionOutcomeState.sent;
+    // The broker's resolution outranks this seat's own submission: a tap that
+    // lost the race is still a tap the user made, and the card has to say who
+    // answered the call. What it may NOT do is claim another client answered
+    // when this one did. `external` is the broker's word for "somebody else
+    // settled it", and it is also what it sends when THIS seat's answer
+    // reached the terminal, so the sentence needs a decision value, a seat, or
+    // this seat's own send to stand on -- and says nothing when none of the
+    // three does. A withdrawn card is not settled at all: nobody answered
+    // it, and no resolution for it arrived.
+    final resolvedByBroker = widget.isResolved && !widget.isWithdrawn;
+    final decisionLine = switch (widget.resolvedDecision) {
+      'approve' => l10n.sessionRequestOutcomeApproved,
+      'approve-session' => l10n.sessionRequestOutcomeApprovedSession,
+      'approve-rule' => l10n.sessionRequestOutcomeApprovedRule,
+      'reject' => l10n.sessionRequestOutcomeRejected,
+      _ => null,
+    };
+    // A card that explains why the terminal has the prompt is closed by the
+    // broker with that same reason attached, and the card already leads with
+    // it: printed again as the outcome, the card said one thing twice. Only
+    // the terminal could have settled it, so that is the outcome.
+    final explainsItself =
+        widget.isReadOnly &&
+        widget.releaseReason != null &&
+        widget.releaseReason != PermissionReleaseReason.unknown;
+    final seatLine = resolvedByBroker && !explainsItself
+        ? _settledWhereLine(l10n)
+        : null;
+    final settledHere = _outcome == _RequestActionOutcomeState.sent;
+    final outcomeLine = !resolvedByBroker
+        ? null
+        : explainsItself
+        ? l10n.sessionRequestSettledInTerminal
+        : (decisionLine ??
+              seatLine ??
+              (settledHere ? null : l10n.sessionRequestResolvedElsewhere));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -923,15 +1069,9 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
             ),
           ),
           const SizedBox(height: 4),
-        ] else if (resolvedElsewhere) ...[
+        ] else if (outcomeLine != null) ...[
           Text(
-            switch (widget.resolvedDecision) {
-              'approve' => l10n.sessionRequestOutcomeApproved,
-              'approve-session' => l10n.sessionRequestOutcomeApprovedSession,
-              'approve-rule' => l10n.sessionRequestOutcomeApprovedRule,
-              'reject' => l10n.sessionRequestOutcomeRejected,
-              _ => l10n.sessionRequestResolvedElsewhere,
-            },
+            outcomeLine,
             key: ValueKey(
               'session-detail-permission-outcome-${widget.requestId}',
             ),
@@ -939,6 +1079,22 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
               color: tokens.textSecondary,
             ),
           ),
+          // The seat, under the decision. Two people with one session can each
+          // answer from a different place, and "Resolved in another client"
+          // over their own keyboard is the confusion this line exists to end.
+          // It is the headline only when there was no decision value to show,
+          // and never printed twice.
+          if (decisionLine != null && seatLine != null) ...[
+            Text(
+              seatLine,
+              key: ValueKey(
+                'session-detail-permission-decided-by-${widget.requestId}',
+              ),
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: tokens.textSecondary,
+              ),
+            ),
+          ],
           const SizedBox(height: 4),
         ] else if (widget.isReadOnly) ...[
           Text(
@@ -975,15 +1131,18 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
                 ),
             ],
           ),
-        // A resolved request is not pending. This badge describes THIS client's
-        // own submission and `pending` is its initial state, so a request
-        // answered anywhere else -- another client, or the terminal -- left the
-        // card reading "Approved" above the buttons and "Pending" below them.
-        // Measured on the installed client during the reasonix permission leg.
-        // `submitting` and `failed` still say something true here and are kept;
-        // only the contradiction is dropped.
-        if (!(resolvedElsewhere &&
-            _outcome == _RequestActionOutcomeState.pending)) ...[
+        // The badge is this client's transport state -- pending, submitting,
+        // sent, failed -- and it stops being the card's story the moment the
+        // broker has a sentence of its own to put on the card. That sentence is
+        // the only case that can contradict it: a request the broker settled
+        // elsewhere used to render "Approved" above the buttons and "Pending"
+        // below them, which is what an installed client showed. A card nobody
+        // has answered yet really is waiting on this seat, so `pending` stays.
+        // A read-only card is not waiting on this seat at all, and "Pending"
+        // under "Answer where the agent is running" said it was.
+        if (outcomeLine == null &&
+            !(widget.isReadOnly &&
+                _outcome == _RequestActionOutcomeState.pending)) ...[
           const SizedBox(height: 8),
           _RequestOutcomeBadge(
             state: _outcome,
@@ -1014,11 +1173,18 @@ class _QuestionRequestActions extends StatefulWidget {
     required this.onSubmit,
     required this.onReject,
     this.isWithdrawn = false,
+    this.answerInTerminal = false,
+    this.settledAnswers,
+    this.resolvedAttribution,
   });
 
   final String requestId;
   final List<AgentQuestion> questions;
   final bool isReadOnly;
+
+  /// The question is open in the agent's terminal and only answerable there:
+  /// the card shows it, says where to answer, and offers nothing to send.
+  final bool answerInTerminal;
   final bool isEnabled;
 
   /// Whether a `question-resolved` for this request already arrived (locally or
@@ -1029,6 +1195,17 @@ class _QuestionRequestActions extends StatefulWidget {
   /// resolution for it arrived ([isResolved] is then true too): the card
   /// shows no outcome.
   final bool isWithdrawn;
+
+  /// The answer the question closed with, one row per question, when the
+  /// resolution said. The settled card draws it: the options picked checked,
+  /// and anything typed as text. Every seat draws the same answer, the one
+  /// that sent it included.
+  final List<List<String>>? settledAnswers;
+
+  /// Who settled the question, when the broker said: answered in the app,
+  /// taken back by the terminal, or left when cosyncing stopped waiting. The
+  /// seat that sent the answer says so too, after a reload as well as live.
+  final ResolvedRequestAttribution? resolvedAttribution;
   final Future<bool> Function(List<List<String>> answers) onSubmit;
   final Future<bool> Function() onReject;
 
@@ -1044,6 +1221,18 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
   bool _isSubmitting = false;
   _RequestActionOutcomeState _outcome = _RequestActionOutcomeState.pending;
   String? _failureMessage;
+
+  /// The settled answer for question [index], when the card is settled and
+  /// the resolution said what it was.
+  List<String>? _settledRow(int index) {
+    final answers = widget.settledAnswers;
+    if (!widget.isResolved ||
+        answers == null ||
+        answers.length != widget.questions.length) {
+      return null;
+    }
+    return answers[index];
+  }
 
   /// Number of answer slots the current `widget.questions` requires.
   ///
@@ -1141,7 +1330,23 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
         _outcome != _RequestActionOutcomeState.sent &&
         answers.isNotEmpty &&
         (widget.questions.isEmpty ||
-            answers.every((answer) => answer.isNotEmpty));
+            (answers.every((answer) => answer.isNotEmpty) &&
+                _numbersTaken(answers)));
+  }
+
+  /// Whether every number question's answer is one it takes. A number out of
+  /// range, or not written plainly, would be refused after the card said
+  /// Sent, and the person would find Claude's picker still open.
+  bool _numbersTaken(List<List<String>> answers) {
+    for (var index = 0; index < widget.questions.length; index++) {
+      final question = widget.questions[index];
+      if (question.kind != AgentQuestionKind.number) continue;
+      final answer = answers[index];
+      if (answer.length != 1 || !question.takesNumber(answer.single)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<bool> _setOutcome(Future<bool> Function() action) async {
@@ -1208,6 +1413,25 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
+    // How a settled card says it was settled. A question open in the
+    // terminal was answered there. A question closed with nothing picked
+    // says so, and where it was closed. Otherwise the broker's word on who
+    // closed it, in the permission card's sentences, which the seat that sent
+    // the answer shows too; with no word, this seat names nobody when it sent
+    // the answer itself, and says "your terminal or another app" when it did
+    // not.
+    final settledHere = _outcome == _RequestActionOutcomeState.sent;
+    final settledLine = !widget.isResolved || widget.isWithdrawn
+        ? null
+        : widget.answerInTerminal
+        ? l10n.sessionRequestSettledInTerminal
+        : (_questionClosedUnansweredLine(
+                l10n,
+                widget.resolvedAttribution,
+                widget.settledAnswers,
+              ) ??
+              _requestSettledWhereLine(l10n, widget.resolvedAttribution) ??
+              (settledHere ? null : l10n.sessionQuestionSettledElsewhere));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1221,10 +1445,22 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
               color: tokens.textSecondary,
             ),
           )
-        else if (widget.isResolved &&
-            _outcome != _RequestActionOutcomeState.sent)
+        else if (settledLine != null)
           Text(
-            l10n.sessionRequestResolvedElsewhere,
+            settledLine,
+            key: ValueKey(
+              'session-detail-question-outcome-${widget.requestId}',
+            ),
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          )
+        else if (widget.answerInTerminal)
+          Text(
+            l10n.sessionQuestionAnswerInTerminal,
+            key: ValueKey(
+              'session-detail-question-in-terminal-${widget.requestId}',
+            ),
             style: theme.textTheme.labelSmall?.copyWith(
               color: tokens.textSecondary,
             ),
@@ -1244,68 +1480,73 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
             ),
           ),
         const SizedBox(height: 8),
-        if (widget.questions.isEmpty)
-          _buildAnswerField(context, index: 0, legacy: true)
-        else
+        if (widget.questions.isEmpty) ...[
+          if (!widget.answerInTerminal)
+            _buildAnswerField(context, index: 0, legacy: true),
+        ] else
           for (var index = 0; index < widget.questions.length; index++) ...[
             if (index > 0) const SizedBox(height: 16),
             _buildStructuredQuestion(context, index),
           ],
-        const SizedBox(height: 8),
-        Wrap(
-          alignment: WrapAlignment.end,
-          spacing: 8,
-          runSpacing: 4,
-          children: [
-            TextButton(
-              key: ValueKey(
-                'session-detail-question-reject-${widget.requestId}',
+        // Nothing to send from here: the answer is the terminal's to give.
+        if (!widget.answerInTerminal) ...[
+          const SizedBox(height: 8),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              TextButton(
+                key: ValueKey(
+                  'session-detail-question-reject-${widget.requestId}',
+                ),
+                style: _transcriptActionButtonStyle(context),
+                onPressed:
+                    widget.isEnabled &&
+                        !widget.isReadOnly &&
+                        !widget.isResolved &&
+                        !_isSubmitting &&
+                        _outcome != _RequestActionOutcomeState.sent
+                    ? _reject
+                    : null,
+                child: Text(l10n.sessionRequestDismiss),
               ),
-              style: _transcriptActionButtonStyle(context),
-              onPressed:
-                  widget.isEnabled &&
-                      !widget.isReadOnly &&
-                      !widget.isResolved &&
-                      !_isSubmitting &&
-                      _outcome != _RequestActionOutcomeState.sent
-                  ? _reject
-                  : null,
-              child: Text(l10n.sessionRequestDismiss),
-            ),
-            FilledButton(
-              key: ValueKey(
-                'session-detail-question-answer-button-${widget.requestId}',
+              FilledButton(
+                key: ValueKey(
+                  'session-detail-question-answer-button-${widget.requestId}',
+                ),
+                style: _transcriptActionButtonStyle(context),
+                onPressed: _canSend ? _send : null,
+                child: _isSubmitting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(l10n.sessionRequestSubmit),
               ),
-              style: _transcriptActionButtonStyle(context),
-              onPressed: _canSend ? _send : null,
-              child: _isSubmitting
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Text(l10n.sessionRequestSubmit),
+            ],
+          ),
+          // Same contradiction as the permission card: "Answered elsewhere"
+          // above and "Pending" below, or "Pending" on a card this seat
+          // cannot answer at all.
+          if (!((widget.isResolved || widget.isReadOnly) &&
+              _outcome == _RequestActionOutcomeState.pending)) ...[
+            const SizedBox(height: 8),
+            _RequestOutcomeBadge(
+              state: _outcome,
+              label: _requestOutcomeLabel(l10n, _outcome),
             ),
           ],
-        ),
-        // Same contradiction as the permission card: "Answered elsewhere" above
-        // and "Pending" below.
-        if (!(widget.isResolved &&
-            _outcome == _RequestActionOutcomeState.pending)) ...[
-          const SizedBox(height: 8),
-          _RequestOutcomeBadge(
-            state: _outcome,
-            label: _requestOutcomeLabel(l10n, _outcome),
-          ),
-        ],
-        if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
-          const SizedBox(height: 4),
-          Text(
-            _failureMessage!,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.error,
+          if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              _failureMessage!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
             ),
-          ),
+          ],
         ],
       ],
     );
@@ -1313,6 +1554,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
 
   Widget _buildStructuredQuestion(BuildContext context, int index) {
     final question = widget.questions[index];
+    final settled = _settledRow(index);
     final theme = Theme.of(context);
     final tokens = context.tokens;
     return Column(
@@ -1350,9 +1592,54 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
             ],
           ),
         ],
-        const SizedBox(height: 8),
-        _buildAnswerField(context, index: index, legacy: false),
+        // A settled card shows what was typed, as text, in place of the field.
+        // A value that is not one of the question's labels was typed: it is
+        // never drawn as an option.
+        if (settled != null) ...[
+          for (final typed in settled.where(
+            (answer) => !question.options.any((o) => o.label == answer),
+          )) ...[
+            const SizedBox(height: 8),
+            _buildTypedAnswer(context, index: index, text: typed),
+          ],
+        ]
+        // A typed answer only where the agent takes one: a multi-select that
+        // accepts its own labels alone gets no field, and neither does a
+        // question that can only be answered in the terminal.
+        else if (question.freeText && !widget.answerInTerminal) ...[
+          const SizedBox(height: 8),
+          _buildAnswerField(context, index: index, legacy: false),
+        ],
       ],
+    );
+  }
+
+  /// What the person typed as the answer to question [index], on a settled
+  /// card: read-only, under the same label the answer field carries.
+  Widget _buildTypedAnswer(
+    BuildContext context, {
+    required int index,
+    required String text,
+  }) {
+    final l10n = AppLocalizations.of(context);
+    final tokens = context.tokens;
+    return InputDecorator(
+      key: ValueKey(
+        'session-detail-question-typed-${widget.requestId}-$index',
+      ),
+      decoration: InputDecoration(
+        border: InputBorder.none,
+        filled: true,
+        fillColor: tokens.surface2,
+        labelText: l10n.sessionRequestAnswerLabel,
+        enabled: false,
+      ),
+      child: SelectableText(
+        text,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+          color: tokens.textPrimary,
+        ),
+      ),
     );
   }
 
@@ -1363,7 +1650,9 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
   }) {
     final question = widget.questions[questionIndex];
     final option = question.options[optionIndex];
-    final selected = _selectedAnswers[questionIndex].contains(option.label);
+    final selected =
+        (_settledRow(questionIndex) ?? _selectedAnswers[questionIndex])
+            .contains(option.label);
     final enabled =
         widget.isEnabled &&
         !widget.isReadOnly &&
@@ -1417,6 +1706,10 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
   }) {
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
+    final question = legacy ? null : widget.questions[index];
+    if (question != null && question.kind == AgentQuestionKind.number) {
+      return _buildNumberField(context, index: index, question: question);
+    }
     return TextField(
       key: ValueKey(
         legacy
@@ -1449,4 +1742,55 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
       ),
     );
   }
+
+  /// A number question's answer: one number, written plainly, inside the
+  /// range the agent gave. The field names the range and says so when the
+  /// typed value is not one the agent takes, and Send waits until it is.
+  Widget _buildNumberField(
+    BuildContext context, {
+    required int index,
+    required AgentQuestion question,
+  }) {
+    final l10n = AppLocalizations.of(context);
+    final tokens = context.tokens;
+    final low = _plainNumber(question.min);
+    final high = _plainNumber(question.max);
+    final typed = _answerControllers[index].text;
+    final invalid = typed.trim().isNotEmpty && !question.takesNumber(typed);
+    return TextField(
+      key: ValueKey(
+        'session-detail-question-number-${widget.requestId}-$index',
+      ),
+      controller: _answerControllers[index],
+      keyboardType: const TextInputType.numberWithOptions(
+        signed: true,
+        decimal: true,
+      ),
+      enabled:
+          widget.isEnabled &&
+          !widget.isReadOnly &&
+          !widget.isResolved &&
+          !_isSubmitting &&
+          _outcome != _RequestActionOutcomeState.sent,
+      onChanged: (_) => setState(() {}),
+      decoration: InputDecoration(
+        border: InputBorder.none,
+        filled: true,
+        fillColor: tokens.surface2,
+        labelText: l10n.sessionQuestionNumberLabel(low, high),
+        suffixText: question.unit,
+        errorText: invalid
+            ? l10n.sessionQuestionNumberInvalid(low, high)
+            : null,
+      ),
+    );
+  }
+}
+
+/// A number as the agent wrote it: `3`, not `3.0`.
+String _plainNumber(double? value) {
+  if (value == null) return '';
+  return value == value.roundToDouble() && value.abs() < 1e15
+      ? value.toInt().toString()
+      : value.toString();
 }

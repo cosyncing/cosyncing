@@ -80,6 +80,49 @@ export type PermissionDecision =
 
 export type PermissionGranularity = 'none' | 'per-tool' | 'per-session' | 'yolo';
 
+/**
+ * A tool's own permission mode, spelled the way the tool spells it.
+ *
+ * The app names the mode an approval was decided in, and a translated guess is worse than the
+ * vendor's word. `unknown` is a real reading, not a gap: the mode row had not been written yet.
+ */
+export type PermissionModeName =
+  | 'default'
+  | 'acceptEdits'
+  | 'plan'
+  | 'auto'
+  | 'dontAsk'
+  | 'bypassPermissions'
+  | 'unknown';
+
+/** Who settled a request that two seats could both answer: a tap in the app, the band in the
+ *  terminal, or nobody, which is how a deadline reads. */
+export type PermissionDecidedBy = 'app' | 'band' | 'expired';
+
+/**
+ * Why a held call was let through to the terminal instead of being answered.
+ *
+ * Additive and optional by design. An older client that ignores it closes the card and shows
+ * nothing, which is exactly what it does today; a client that reads it can say why nothing was
+ * answered, which is the difference between a stuck-looking app and a rule the user can see.
+ *
+ * The `mode:*` members name the mode, one per mode, because the mode IS the reason, and a
+ * shared "not held" value would put one mode's sentence on the card of somebody sitting in
+ * another. cosyncing holds a call only where Claude puts it to a person. Where it does not --
+ * auto mode's classifier, `dontAsk`'s refusal -- there is no card at all, so those modes have no
+ * reason here; `mode:bypassPermissions` is the one mode that still shows one. `plan:terminal-only`
+ * is a plan put to the person for approval: approving it also chooses how Claude carries on, which
+ * only Claude's own dialog offers, so the app shows the plan and the terminal answers it.
+ */
+export type PermissionReleaseReason =
+  | 'mode:bypassPermissions'
+  | 'mode:unknown'
+  | 'plan:terminal-only'
+  | 'viewer:none'
+  | 'killSwitch'
+  | 'band'
+  | 'expired';
+
 /** How a session reached the app-visible surface.
  *  Additive + optional for backward compatibility with existing adapters/clients. */
 export type SessionLaunchSurface = 'app' | 'terminal' | 'ide' | 'unknown';
@@ -961,6 +1004,41 @@ export type AgentMessage =
        *  session is blocked in its own terminal and can't be answered from here (e.g. a Claude
        *  observe row whose `claude agents --json` says it's waiting on a permission prompt). */
       readOnly?: boolean;
+      /**
+       * Whether the agent is BLOCKED waiting on this card. Same knob as `question-request`
+       * (revision 24), and the same reason for it: a card the broker raised to explain a decision
+       * it did NOT make — "this fell through to your terminal, here is why" — is worth showing and
+       * worth replaying to a late socket, but the agent is not waiting on the person reading it.
+       * Without `false` here, that read-only card pinned the row at `needs-input` for the rest of
+       * the session, was replayed to every new socket, and turned every later prompt into a steer.
+       * Omitted or true reproduces today's behaviour: a pending permission forces `needs-input`.
+       */
+      blocking?: boolean;
+      /** The permission mode the session was in when this card was raised, read from the source
+       *  that owns it rather than guessed from the tool. Additive: an older client renders the
+       *  card with no mode line, which is what it renders today. */
+      permissionMode?: PermissionModeName;
+      /** Why this was NOT answered here, on the read-only card the broker raises when it lets a
+       *  prompt fall back to the terminal. Paired with {@link readOnly}. */
+      releaseReason?: PermissionReleaseReason;
+      /**
+       * What is actually being approved, as a short bounded preview: the command, the path, the
+       * URL. The broker takes it from the tool call the prompt is about and caps it at 240
+       * characters, so a card can be decided by reading it.
+       *
+       * This is the field the approval card was missing. Without it the card named the tool and
+       * nothing else, so "Allow" on `Bash` meant agreeing to a command the user could not see --
+       * and the only prose beside it was the broker's own English sentence, which is not a thing
+       * a German or Chinese build can print. Additive: an older client ignores it and draws the
+       * card it draws today.
+       *
+       * A Claude mod card also puts the whole call in `detail`, every argument as `key: value`
+       * on its own line and bounded to 8,000 characters, which every client keeps behind its
+       * details toggle: the preview recognises a call, the detail is enough to decide it, and a
+       * client that predates this field still shows what it approves. A client that draws this
+       * field leaves a `detail` out only when it says nothing the preview does not.
+       */
+      inputPreview?: string;
     }
   | {
       type: 'permission-resolved';
@@ -968,6 +1046,12 @@ export type AgentMessage =
       /** 'external' = settled by another client of the shared owner (e.g. approved in a synced
        *  terminal): the decision itself is not broadcast, only that the request is no longer open. */
       decision: PermissionDecision | 'external';
+      /** Who settled it, when the broker can say. Additive; an older client ignores it and the
+       *  card still closes. */
+      decidedBy?: PermissionDecidedBy;
+      /** Why the broker let the call go without answering it, where that is the resolution.
+       *  Additive, and the reason text stays the client's to write. */
+      releaseReason?: PermissionReleaseReason;
     }
   | {
       /** Agent asked the user a structured question (distinct from a permission). Answer via
@@ -985,15 +1069,61 @@ export type AgentMessage =
        * any pending blocking question or permission still wins the status.
        */
       blocking?: boolean;
+      /**
+       * The question is open in the agent's own terminal and can only be answered there: the app
+       * cannot send the answer it needs (a number, say, or a multi-select whose labels would not
+       * survive being joined). Comes with `readOnly: true`; the card says where to answer it.
+       * Additive: an older client draws the read-only card it draws today.
+       */
+      answerInTerminal?: boolean;
       questions: {
         question: string;
         header?: string;
         options: { label: string; description?: string }[];
         /** true = multiple labels may be selected for this question */
         multiple?: boolean;
+        /**
+         * false = only the listed labels are accepted, so no free-text answer is offered. Absent
+         * means free text is accepted. Additive: an older client offers the field, and a typed
+         * answer to such a question is refused with a notice before anything is sent.
+         */
+        freeText?: boolean;
+        /**
+         * How the question is answered when it is not by picking a label: `text` is typed free
+         * text, `number` is one number from `min` to `max`, written plainly ("12", "-0.5"). Absent
+         * means a choice. Additive: an older client draws a text field for either, and an answer
+         * outside the range is refused with a notice before anything is sent.
+         */
+        kind?: 'text' | 'number';
+        /** `number` only: the lowest and the highest value taken, both inclusive. */
+        min?: number;
+        max?: number;
+        /** `number` only: the increment the agent's own control moves in. */
+        step?: number;
+        /** `number` only: a short unit to show beside the value, as the agent wrote it ("slides"). */
+        unit?: string;
       }[];
     }
-  | { type: 'question-resolved'; requestId: string }
+  | {
+      type: 'question-resolved';
+      requestId: string;
+      /**
+       * The answer the question closed with, when the adapter knows it: one row per question, in
+       * the card's order, in the shape the app's `answer` frame sends. A value is an option's label,
+       * or text the person typed; a value that matches none of the question's labels is typed text.
+       * An empty row is a question that got no answer. Absent when the question was dismissed or
+       * its answer is not known.
+       */
+      answers?: string[][];
+      /** Who settled it, when the broker can say, in `permission-resolved`'s words: `app` for an
+       *  answer sent from the app, which is how the seat that sent it can still say so after it
+       *  reloads. Additive; an older client ignores it and the card still closes. */
+      decidedBy?: PermissionDecidedBy;
+      /** Why it ended without an answer from the app, where that is the resolution: `band` for the
+       *  terminal's own cancel, `expired` when cosyncing stopped waiting. Additive, and the
+       *  sentence stays the client's to write. */
+      releaseReason?: PermissionReleaseReason;
+    }
   | { type: 'terminal-output'; data: string }
   | {
       type: 'notice';
@@ -1302,6 +1432,51 @@ export interface ContextInjectionPayload {
  * handed — intact, and to bound only the pathological case.
  */
 export const CONTEXT_INJECTION_BODY_MAX_UNITS = 8_000;
+
+/**
+ * A transcript record the adapter did not recognize.
+ *
+ * Adapters map what they know and skip what they do not, which is the right failure mode and a
+ * quiet one: when a tool changes the shape of its own history, the app does not error, it just
+ * shows less. Adapters that can tell the difference emit this name so the difference becomes
+ * something the user can be told about rather than something only a re-audit would find.
+ *
+ * Provider-neutral, because every transcript-shaped tool grows new record types, and one name
+ * keeps the client from learning a branch per host.
+ */
+export const UNKNOWN_TRANSCRIPT_TYPE_EVENT = 'transcript.unknown-type';
+
+/** Payload carried by an {@link UNKNOWN_TRANSCRIPT_TYPE_EVENT} event. */
+export interface UnknownTranscriptTypePayload {
+  /** The unrecognized record type, verbatim. */
+  lineType: string;
+}
+
+/**
+ * A message the user sent from the app INTO a turn that was already running.
+ *
+ * The tool's own transcript is where this lands, and it lands marked: the row is
+ * `isMeta` (the human did not type it at that keyboard) and carries the inserting
+ * plugin's provenance. Adapters that can tell those two facts apart map the row to
+ * this one name so the transcript can show it as what it was — steering, not a
+ * prompt the agent never received — without the client learning a shape per host.
+ *
+ * The same shape as {@link CONTEXT_INJECTION_EVENT} for the same reason: event
+ * names are free-form on the wire, so this registers nothing, moves no surface
+ * hash, and leaves an older client rendering an ordinary event instead of lying
+ * about a message the human wrote.
+ */
+export const STEERING_MESSAGE_EVENT = 'steering.message';
+
+/** Payload carried by a {@link STEERING_MESSAGE_EVENT} event. */
+export interface SteeringMessagePayload {
+  /** What the user sent. */
+  text: string;
+  /** Who inserted it, named for the reader. */
+  source: string;
+  /** The native row's key, when the host has one, so the row dedupes across replays. */
+  key?: string;
+}
 
 /**
  * Apply {@link CONTEXT_INJECTION_BODY_MAX_UNITS}, reporting whether it bit.
@@ -1902,8 +2077,58 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * so revision 27 has to ship first, or in the same release as revision 28;
  * revisions 27 and 28 ship together, with the overlap left at one, and a
  * revision-26 peer is read-only against a revision-28 one until it updates.
+ *
+ * Revision 29 lets an approval or question card say what happened to it when
+ * two seats can answer it. A synced Claude Code session is answered by
+ * whichever of the app and the terminal answers first. `permission-request`
+ * gains four fields: `permissionMode`, the mode the tool was in, in the tool's
+ * own spelling; `releaseReason`, on the read-only card raised when a prompt is
+ * left to the terminal; `inputPreview`, what the call would do, bounded to 240
+ * characters; and `blocking`, the knob `question-request` took in revision 24,
+ * since a read-only card that explains a prompt left to the terminal is shown
+ * and replayed, but no agent waits on the reader. The existing `detail` carries
+ * the whole call, every argument as `key: value` on its own line and bounded to
+ * 8,000 characters, behind each client's details toggle, so an older client
+ * still shows what it approves; a client that draws `inputPreview` leaves
+ * `detail` out only when it says nothing the preview does not.
+ *
+ * `permission-resolved` gains `decidedBy` (`app`, `band` for the terminal's own
+ * prompt, or `expired`) and `releaseReason`. `question-request` gains
+ * `answerInTerminal`, for a question whose answer the app cannot send, and each
+ * question gains `freeText`, false where only the listed labels are accepted,
+ * and `kind`: `text` for a question answered in words, or `number` for one
+ * answered with a plain number, which also carries the range `min` to `max` and
+ * may carry `step` and `unit`; a question without `kind` is a choice.
+ * `PermissionModeName` is `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`,
+ * `bypassPermissions` or `unknown`. `PermissionDecidedBy` is `app`, `band` or
+ * `expired`. `PermissionReleaseReason` is `mode:bypassPermissions`,
+ * `mode:unknown`, `plan:terminal-only` (Claude's plan, approved only in the
+ * terminal), `viewer:none`, `killSwitch`, `band` or `expired`.
+ *
+ * Two event names gain constants and typed payloads: `transcript.unknown-type`
+ * (`{ lineType }`, a transcript record type the adapter did not recognize) and
+ * `steering.message` (`{ text, source, key? }`, a message the app sent into a
+ * running turn). Event names are free-form on the wire, so neither registers a
+ * frame kind. No route, frame kind, client message kind, message type or error
+ * code is added, so the surface hash is where revision 28 left it; the number
+ * moves because the DTOs did. The minimum client revision stays at 17: an older
+ * client ignores every new field, draws the card it draws today, and draws the
+ * two events as ordinary event rows.
+ *
+ * `question-resolved` gains `answers`: the answer the question closed with,
+ * one row per question in the card's order, in the shape the app's `answer`
+ * frame sends, so every seat can show what was picked or typed, including the
+ * seat that sent it. It also gains `decidedBy` and `releaseReason`, the
+ * attribution `permission-resolved` already carries, so a settled question
+ * card can say who closed it: answered in the app, in the terminal, or left
+ * when cosyncing stopped waiting. An older client ignores all three and draws
+ * the settled card it draws today.
+ *
+ * The overlap arithmetic moves with the number -- 28 is now the newest revision
+ * inside the window, so a revision-28-or-later client has to ship before a
+ * revision-29 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 28 as const;
+export const BROKER_CONTRACT_REVISION = 29 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.

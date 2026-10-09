@@ -94,6 +94,19 @@ import {
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
 import {
+  claudeModMarketplaceDir,
+  claudeModPlanPrecondition,
+  claudeModRemovable,
+  claudeModCommandBinary,
+  claudeModSupportForHost,
+  claudeUserSettingsPath,
+  decideClaudeModOwnership,
+  CLAUDE_MOD_PLUGIN_ID,
+  CLAUDE_MOD_RESOURCE_ID,
+  type ClaudeModOutcomeRecord,
+  type ClaudeModOwnershipDecision,
+} from './claude-mod-ownership.ts';
+import {
   inspectRcFile,
   opencodeShimHost,
   opencodeShimPort,
@@ -210,6 +223,24 @@ export interface SetupChoices {
   quotaWarnings: boolean;
   installAgentSkill: boolean;
   installOpencodeShim: boolean;
+  /**
+   * Consent to the Claude mod, persisted so a decline is durable: repair and `cosy update` read the stored
+   * value and do not put the mod back.
+   *
+   * Optional because absence means something here that `false` does not: never asked. The wizard always
+   * answers it, and a plan built from stored state or a fixture that has never seen the question gets the
+   * documented default, which is yes. Only an explicit `false` declines.
+   */
+  installClaudeMod?: boolean;
+  /**
+   * Whether THIS run answered the mod question, as opposed to carrying a stored answer forward.
+   *
+   * `installClaudeMod` alone cannot tell the two apart, and the difference is the whole of
+   * `--no-install-claude-mod` after a yes, or a yes after a decline: the answer given now is the
+   * answer this run acts on, while a plain `--yes`, which re-derives every choice from stored
+   * state, must leave a standing decline standing.
+   */
+  claudeModAnsweredThisRun?: boolean;
   /** One-run migration consent; never persisted as an enduring setup preference. */
   replaceLegacyPiBridge?: boolean;
   /** One-run migration consent; never authorizes any skill content except the exact known predecessor. */
@@ -300,6 +331,12 @@ export interface SetupInspection {
   agentSkills: AgentSkillInspection[];
   opencodeShim: OpencodeShimInspection;
   /**
+   * The Claude mod: whether this host may have it, what is on disk and in Claude's settings, and what
+   * the receipt proves. One decision object, computed once, read by the plan, the presenter, doctor and
+   * uninstall, so no two of them can disagree about whether the mod is installed.
+   */
+  claudeMod: ClaudeModOwnershipDecision;
+  /**
    * `other-environment-broker` is a cosyncing broker the operating system can prove lives
    * behind a WSL relay — a different OS instance, so no managed agent runtime is shared and a
    * second port is the right answer rather than the wrong one.
@@ -357,6 +394,22 @@ export interface SetupPlan {
   targetConfig: BrokerConfig;
   installPiBridge: boolean;
   installOmpBridge: boolean;
+  /**
+   * What the plan does about the Claude mod: write the marketplace and ask Claude to install it, reverse
+   * that, or leave it alone. Its own field rather than a boolean because "declined" and "already current"
+   * both mean no row, and uninstall has to tell a mod it should take down from one that was never up.
+   */
+  claudeModIntent: 'install' | 'remove' | 'none';
+  /**
+   * True when the install puts new bytes over a mod that is already in Claude, decided from THIS run's
+   * decision. A failed or rolled-back refresh restores the old copy and leaves Claude's entries alone.
+   */
+  claudeModRefreshing: boolean;
+  /**
+   * The mod's directory holds bytes cosyncing cannot prove it wrote, so this run leaves it alone and says
+   * so. A stated skip rather than a blocker: the mod is never the reason setup does not complete.
+   */
+  claudeModSkip?: { status: 'unowned' | 'receipt-invalid' | 'unsafe' | 'unreadable'; marketplaceDir: string };
   requiresCommit: boolean;
   noOp: boolean;
   actions: SetupPlanAction[];
@@ -391,7 +444,7 @@ export interface SetupPresenter {
   /**
    * Non-prompting resolution of flag-driven choices for the committed-setup
    * no-op short-circuit. The non-interactive presenter returns its flag-resolved intent so an EXPLICIT
-   * `--install-opencode-shim` or `--no-install-agent-skill` on an
+   * `--install-opencode-shim`, `--no-install-agent-skill` or `--no-install-claude-mod` on an
    * already-committed install is not silently dropped by the early-return. Omitted by the interactive
    * presenter (flags are inert there), so the early-return falls back to the stored choices and never prompts
    * on a genuine no-op re-run.
@@ -399,12 +452,33 @@ export interface SetupPresenter {
   intendedChoices?(inspection: Readonly<SetupInspection>): {
     installAgentSkill: boolean;
     installOpencodeShim: boolean;
+    installClaudeMod: boolean;
+    /** Whether the operator answered the mod question (a flag), rather than inheriting the stored answer. */
+    claudeModAnsweredThisRun: boolean;
   };
   confirmManagedRuntime(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmLegacyPiBridge?(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmAgentSkill(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmLegacyAgentSkill?(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmOpencodeShim(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
+  /**
+   * The Claude mod's consent. Returns the answer to use, whether or not a question was asked: a host
+   * Claude cannot host the mod on answers `false` without prompting, so the operator is never asked to
+   * consent to something their machine would then refuse.
+   */
+  confirmClaudeMod(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
+  /**
+   * The interactive presenter's `--install-claude-mod` / `--no-install-claude-mod`, when one was given.
+   * Folded into the no-op check, so an explicit answer on an otherwise unchanged host still runs.
+   */
+  claudeModFlag?(): boolean | undefined;
+  /**
+   * Whether the answer `confirmClaudeMod` returned was given in THIS run: the question was put to the
+   * operator, or `--install-claude-mod` / `--no-install-claude-mod` answered it. A `--yes` that resolved
+   * to the stored choice answered nothing, and neither did a host the mod was never offered on. A
+   * presenter without this method answered nothing either, so the stored choice stays in charge.
+   */
+  claudeModAnsweredThisRun?(): boolean;
   chooseService(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<SetupServiceChoice>>;
   confirmQuotaWarnings(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   showPlan(plan: Readonly<SetupPlan>, inspection: Readonly<SetupInspection>): Promise<void> | void;
@@ -457,6 +531,11 @@ export interface SetupCommandResult {
    * `exitCode`, because quota tracking is optional and its failure is not the setup's failure.
    */
   tokdash?: TokdashProvisionOutcome;
+  /**
+   * A Claude mod step this run could not finish, with the commands that finish it. Like Tokdash it never
+   * affects `status` or `exitCode`: the mod is never the reason setup fails.
+   */
+  claudeMod?: ClaudeModOutcomeRecord;
   /** External routes relinquished by this run. The routes themselves are never inspected or changed. */
   legacyConnectivityMigration?: { preservedTargets: string[] };
   issueCodes?: string[];
@@ -486,11 +565,14 @@ export interface SetupDependencies {
     brokerPort?: number;
     durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
     inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
+    claudePolicyRoots?: readonly string[];
   }) => Promise<SetupInspection>;
   /** Injected so setup acceptance tests never inspect or mutate the host-global Codex daemon. */
   inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
   acquireLock?: (options: { command: 'setup'; home: string }) => InstallationLockHandle;
   actionCatalogFactory?: typeof createSetupActionCatalog;
+  /** Managed Claude policy roots for a test; see {@link inspectSetupEnvironment}. */
+  claudePolicyRoots?: readonly string[];
   durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   /** @deprecated Use durableServiceProviderFactory. */
   systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
@@ -593,20 +675,9 @@ export function agentStateFromChecks(
 }
 
 export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
-  const behavior: Record<string, string> = {
-    codex: 'Managed shared app-server; remote terminals may join it.',
-    opencode: 'Managed shared serve; externally managed servers remain untouched.',
-    pi: 'Packaged in-session bridge when Pi is installed.',
-    omp: 'Packaged in-session bridge when omp is installed.',
-    reasonix: 'Observe plus Create/Resume; Reasonix has no daemon to manage, and setup never touches Reasonix state.',
-    grok: 'Create/Resume is enabled for authenticated Grok Build 1.0.13 or newer; setup preserves Grok state and records its executable for the service.',
-    cline: 'Default-profile Observe plus Create/Resume for app-created sessions through an isolated managed Cline Hub, on 3.0.61 or newer; setup persists explicit non-secret provider/model selection and paths, never credentials.',
-    kilo: 'Observe plus authenticated Create/Drive on Kilo Code 7.4.23 or newer; the broker manages only its dedicated loopback port 4097 host and leaves foreign servers untouched.',
-    claude: 'Observe + Take over only; setup never edits Claude settings.',
-    agy: 'Observe + Resume only; agy has no daemon to manage, and setup never touches Antigravity state.',
-    kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
-    dsh: 'Managed `dsh web` host; one you started yourself, or one on another machine, is never touched.',
-  };
+  // The English catalog is the reference text. The record reads it rather than keeping a second copy here,
+  // which had already drifted from the sentence the wizard prints.
+  const english = setupMessages('en');
   return setupPreflightAgents().map((id) => {
     const matrix = report.minimumVersions.find((entry) => entry.agent === id);
     const version = check(report, `${id}.version`);
@@ -648,10 +719,9 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
       ...(state === 'unsupported' && upgradeCommand ? { upgradeCommand } : {}),
       ...(standaloneWarning ? { managedRuntimeWarning: standaloneWarning } : {}),
       ...(runtimeUnavailable ? { runtimeUnavailable } : {}),
-      // A declared managed host with no copy of its own still says something
-      // true rather than `undefined`, so adding an adapter can never print a
-      // hole into the preflight.
-      managedBehavior: behavior[id] ?? 'Managed external host; one you started yourself is never touched.',
+      // The catalog gives a declared managed host with no copy of its own a sentence that is still true,
+      // rather than `undefined`, so adding an adapter can never print a hole into the preflight.
+      managedBehavior: english.agentBehavior(id),
     };
   });
 }
@@ -790,6 +860,16 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
       shimStatus: input.opencodeShim.shimStatus,
       rc: input.opencodeShim.rc.map(({ id, state }) => ({ id, state })),
     },
+    // Status + hashes only. Paths and the detected Claude version are already in the hash through
+    // `stateHome` and `agents`, and re-listing them here would make one fact two hash inputs.
+    claudeMod: {
+      status: input.claudeMod.status,
+      supported: input.claudeMod.support.supported,
+      skipReason: input.claudeMod.support.skipReason ?? null,
+      copyStatus: input.claudeMod.copy.status,
+      copySha256: input.claudeMod.copy.actualSha256 ?? null,
+      settingsStatus: input.claudeMod.settings.status,
+    },
     portStatus: input.portStatus,
     agents: input.agents.map(({ id, state, installedVersion, minimumVersion, runtimeUnavailable }) => ({
       id,
@@ -829,6 +909,8 @@ export async function inspectSetupEnvironment(options: {
   /** @deprecated Use durableServiceProviderFactory. */
   systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
+  /** Managed Claude policy roots for a test. Production reads the platform's own; there is no env override. */
+  claudePolicyRoots?: readonly string[];
 }): Promise<SetupInspection> {
   const config = inspectBrokerConfig(options.home);
   const storedConfig = config.status === 'ok' ? config.config : defaultBrokerConfig();
@@ -1124,6 +1206,27 @@ export async function inspectSetupEnvironment(options: {
       })
     : undefined;
   const durableServiceStatus = durableService ? await durableService.inspect() : undefined;
+  // The Claude mod, decided once, here. The plan row, the wizard question, doctor and uninstall all read
+  // this one object, so "is the mod installed" has exactly one answer per run.
+  //
+  // The version is the one the agent preflight already resolved, taken whether or not the preflight
+  // called that build supported. A Claude below the floor must read `below-minimum-version` rather than
+  // `missing-cli`: the operator's fix differs, and so does whether the floor is worth printing at all.
+  const claudeAgent = agents.find((agent) => agent.id === 'claude');
+  const claudeMod = decideClaudeModOwnership({
+    install: installState,
+    support: claudeModSupportForHost({
+      platform: context.platform,
+      env: context.env,
+      homeDir: context.homeDir,
+      ...(claudeAgent?.installedVersion ? { detectedVersion: claudeAgent.installedVersion } : {}),
+      ...(options.claudePolicyRoots ? { policyRoots: options.claudePolicyRoots } : {}),
+    }),
+    stateHome: options.home,
+    version: options.buildInfo.version,
+    settingsPath: claudeUserSettingsPath(context.homeDir, context.env),
+    requested: setupState.claudeModRequested,
+  });
   const withoutHash: Omit<SetupInspection, 'preconditionHash' | 'doctor'> = {
     schemaVersion: 1,
     product: PRODUCT_IDENTITY.productName,
@@ -1147,6 +1250,7 @@ export async function inspectSetupEnvironment(options: {
     durableStatePermissionRepairs: durableAssessment.permissionRepairs,
     agentSkills,
     opencodeShim,
+    claudeMod,
     portStatus: currentPort,
     // Same PATH lookup the agent preflight uses, and the same one provisioning itself makes, so the prompt
     // describes the branch that will actually run. BOTH executables, because provisioning skips pipx
@@ -1212,6 +1316,13 @@ function desiredState(options: {
     systemdLingeringRequested: options.choices.enableLingering,
     agentSkillRequested: options.choices.installAgentSkill,
     opencodeShimRequested: options.choices.installOpencodeShim,
+    // Only a host that was actually offered the mod gets a stored answer. An unsupported host
+    // resolves to `false` at the presenter, and storing that as a decline would mean a later
+    // `claude update` -- which makes the host supported -- founds a decision the operator never
+    // made. Absent means "never asked", which is what `!== false` then reads as yes.
+    claudeModRequested: options.inspection.claudeMod.support.supported
+      ? options.choices.installClaudeMod !== false
+      : options.inspection.setupState.claudeModRequested,
     quotaWarningsEnabled: options.choices.quotaWarnings,
     language: options.choices.language,
   };
@@ -1226,6 +1337,7 @@ function setupStateMatches(actual: SetupState, expected: SetupState): boolean {
     && actual.systemdLingeringRequested === expected.systemdLingeringRequested
     && actual.agentSkillRequested === expected.agentSkillRequested
     && actual.opencodeShimRequested === expected.opencodeShimRequested
+    && actual.claudeModRequested === expected.claudeModRequested
     && actual.quotaWarningsEnabled === expected.quotaWarningsEnabled
     && actual.language === expected.language;
 }
@@ -1255,6 +1367,9 @@ export function existingSetupChoices(inspection: Readonly<SetupInspection>): Set
     quotaWarnings: inspection.setupState.quotaWarningsEnabled === true,
     installAgentSkill: inspection.setupState.agentSkillRequested !== false,
     installOpencodeShim: inspection.setupState.opencodeShimRequested !== false,
+    // Default yes, and `!== false` is what makes the default survive: a host that has never been asked
+    // has no key, and no key is not a decline. Only an explicit `false` declines.
+    installClaudeMod: inspection.setupState.claudeModRequested !== false,
   };
 }
 
@@ -1322,6 +1437,35 @@ function opencodeShimReceiptProves(inspection: SetupInspection, sha: string | un
 function opencodeShimOwnedStale(inspection: SetupInspection): boolean {
   return inspection.opencodeShim.shimStatus === 'drifted'
     && opencodeShimReceiptProves(inspection, inspection.opencodeShim.actualSha256);
+}
+
+/**
+ * The ownership decision as THIS run sees it.
+ *
+ * The inspection runs before the wizard has asked anything, so its decision carries only the stored
+ * answer. An operator who answers "yes" here is not the person whose "no" is in the setup state, and
+ * a plan that acted on the stored answer anyway made a change of mind cost two setup runs. An
+ * unanswered re-run (`claudeModAnsweredThisRun` absent) keeps the stored answer in charge, which is
+ * what makes a plain `--yes` respect a standing decline.
+ *
+ * Every other input is the inspection's own, so the host check, the receipt and the settings are
+ * read exactly once and only the answer moves.
+ */
+function claudeModDecisionForRun(
+  inspection: Readonly<SetupInspection>,
+  choices: Readonly<SetupChoices>,
+): ClaudeModOwnershipDecision {
+  const stored = inspection.claudeMod;
+  if (choices.claudeModAnsweredThisRun !== true || choices.installClaudeMod === undefined) return stored;
+  return decideClaudeModOwnership({
+    install: inspection.installState,
+    support: stored.support,
+    stateHome: inspection.stateHome,
+    version: inspection.version,
+    settingsPath: stored.settings.settingsPath,
+    requested: inspection.setupState.claudeModRequested,
+    explicit: choices.installClaudeMod,
+  });
 }
 
 /**
@@ -1520,6 +1664,67 @@ export function buildSetupPlan(options: {
       reversible: true,
     }));
   }
+  // The Claude mod. The decision came from inspection; this decides only what to DO about it.
+  //
+  // Four outcomes, and the two that look similar are not:
+  //  - `install` / `refresh` when the host is offered the mod, the operator wants it, and the directory is
+  //    absent or is our own receipt-proven copy from an older build. Those are the only states setup writes.
+  //    A mod removed inside Claude is sticky, and only an answer given THIS run puts it back.
+  //  - `remove` when the operator declined and something of ours is still installed. A decline has to
+  //    actually take the thing away, on a host where it was installed by an earlier run.
+  //  - nothing, when it is already current.
+  //  - a stated skip, when cosyncing's OWN ownership proof is broken (`unowned`, `receipt-invalid`) or a
+  //    security check failed (`unsafe`, `unreadable`). Writing over bytes the receipt cannot prove is what
+  //    the ownership rules forbid, so the directory is left alone and the run says so; but the mod is never
+  //    the reason setup does not complete, so it is not a blocker.
+  const claudeModDecision = claudeModDecisionForRun(options.inspection, options.choices);
+  const claudeModAnsweredYes = options.choices.claudeModAnsweredThisRun === true
+    && options.choices.installClaudeMod === true;
+  const claudeModWritable = ['absent', 'owned-stale'].includes(claudeModDecision.status)
+    || (claudeModDecision.status === 'removed-in-claude' && claudeModAnsweredYes);
+  const installClaudeMod = claudeModDecision.support.supported
+    && options.choices.installClaudeMod !== false
+    && claudeModWritable;
+  // Refreshing means the mod is in Claude now and stays there whatever happens to this run. A copy the
+  // person removed inside Claude, or one Claude does not list, is a fresh install, and a fresh install
+  // that fails takes back what it added.
+  const claudeModRefreshing = installClaudeMod
+    && claudeModDecision.status === 'owned-stale'
+    && claudeModDecision.settings.status === 'enabled';
+  // A host that cannot run the mod at all plans NOTHING, in either direction. This used to fall
+  // through to the remove branch, because the presenter answers an unsupported host with `false`
+  // and that answer reaches here as a decline: setup then planned `claude plugin uninstall` on a
+  // host with no runnable `claude`, which is a blocker for a person who never had the mod and
+  // whose Claude is simply too old.
+  const removeClaudeMod = claudeModDecision.support.supported
+    && options.choices.installClaudeMod === false
+    && claudeModRemovable(claudeModDecision);
+  const claudeModIntent: 'install' | 'remove' | 'none' =
+    removeClaudeMod ? 'remove' : installClaudeMod ? 'install' : 'none';
+  if (installClaudeMod || removeClaudeMod) {
+    actions.push(planned({
+      kind: 'claude-mod',
+      intent: removeClaudeMod ? 'remove' : 'install',
+      marketplaceDir: claudeModDecision.marketplaceDir,
+      refreshing: claudeModRefreshing,
+    }, {
+      id: 'claude-mod.marketplace',
+      title: removeClaudeMod
+        ? 'Remove the cosyncing Claude mod'
+        : claudeModRefreshing
+          ? 'Refresh the cosyncing Claude mod'
+          : 'Install the cosyncing Claude mod',
+      reversible: true,
+    }));
+  }
+  const claudeModSkip = claudeModDecision.support.supported
+    && options.choices.installClaudeMod !== false
+    && (claudeModDecision.status === 'unowned'
+      || claudeModDecision.status === 'receipt-invalid'
+      || claudeModDecision.status === 'unsafe'
+      || claudeModDecision.status === 'unreadable')
+    ? { status: claudeModDecision.status, marketplaceDir: claudeModDecision.marketplaceDir }
+    : undefined;
   const blockingIssues = [...options.inspection.blockingIssues];
   // Bootstrap copy. Planned whenever the home copy is not byte-identical to the running packaged executable,
   // or its measured receipt is missing/stale — so a first npm install copies, an `npm update` re-copies, and
@@ -1823,6 +2028,7 @@ export function buildSetupPlan(options: {
     id: `setup-${planHash.slice(0, 24)}`,
     preconditionHash: options.inspection.preconditionHash,
     ...(options.installationId ? { installationId: options.installationId } : {}),
+    ...(claudeModIntent === 'none' ? {} : { claudeModIntent }),
     actions: planActions,
   };
   return {
@@ -1834,6 +2040,9 @@ export function buildSetupPlan(options: {
     targetConfig,
     installPiBridge,
     installOmpBridge,
+    claudeModIntent,
+    claudeModRefreshing,
+    ...(claudeModSkip ? { claudeModSkip } : {}),
     requiresCommit,
     noOp: actions.length === 0 && !requiresCommit,
     actions: planActions,
@@ -1852,6 +2061,8 @@ function actionInputs(options: {
   installationId: string;
   aliasPath?: string;
   now?: () => Date;
+  /** Where the mod step reports an outcome it could not finish, for this run's summary. */
+  claudeModReport?: (outcome: ClaudeModOutcomeRecord) => void;
 }): SetupActionInputs {
   const removeResourceIds: string[] = [];
   const removeAgentSkillResourceIds: string[] = [];
@@ -1873,6 +2084,14 @@ function actionInputs(options: {
         removeAgentSkillResourceIds.push(target.resourceId);
       }
     }
+  }
+  // The mod's receipt describes a directory this run is deleting, so the ledger has to stop claiming it.
+  // Nothing else drops it: the setup transaction only ADDS resources from action outcomes, and the
+  // uninstall path has its own retained-resource filter. Leaving it behind would have the install ledger
+  // name a marketplace directory that no longer exists, which reads as a broken install to doctor and
+  // makes the next run plan a refresh over a decline the operator just made.
+  if (options.plan.claudeModIntent === 'remove') {
+    removeResourceIds.push(CLAUDE_MOD_RESOURCE_ID);
   }
   return {
     home: options.inspection.stateHome,
@@ -1919,6 +2138,29 @@ function actionInputs(options: {
     opencodeShimStaleUpgrade: opencodeShimOwnedStale(options.inspection),
     opencodeShimPort: opencodeShimPort(options.context.env.OPENCODE_URL),
     opencodeShimHost: opencodeShimHost(options.context.env.OPENCODE_URL),
+    // Only when the plan actually does something. An absent input means the action is a declared no-op:
+    // no row, no CLI call, no receipt, and nothing for a rollback to reverse.
+    claudeMod: options.plan.claudeModIntent === 'none' ? undefined : {
+      intent: options.plan.claudeModIntent as 'install' | 'remove',
+      // From this run's decision, which the plan carries. The inspection's status is the STORED answer's
+      // view, and reading it here called a reinstall over a removal a refresh.
+      refreshing: options.plan.claudeModRefreshing,
+      marketplaceDir: options.inspection.claudeMod.marketplaceDir,
+      settingsPath: options.inspection.claudeMod.settings.settingsPath,
+      version: options.buildInfo.version,
+      env: options.context.env,
+      socketPath: options.inspection.claudeMod.socketPath,
+      ...(options.inspection.claudeMod.receipt ? { previousReceipt: options.inspection.claudeMod.receipt } : {}),
+      ...(options.claudeModReport ? { report: options.claudeModReport } : {}),
+      // Resolved again here rather than carried from inspection: the operator's PATH can differ between
+      // the two, and the CLI must be the one this process can actually exec. `claude` as a last resort
+      // keeps the failure inside the runner's own "executable not found" line instead of a crash here.
+      claudeBin: claudeModCommandBinary(options.context.env, options.context.resolveExecutable),
+      precondition: claudeModPlanPrecondition(
+        options.inspection.claudeMod.copy,
+        options.inspection.claudeMod.settings,
+      ),
+    },
     installMetadata: {
       installationId: options.installationId,
       version: options.buildInfo.version,
@@ -2075,6 +2317,7 @@ function result(options: {
   /** Set only where the transaction's post-commit health check ran and passed. See {@link SetupAccessReport}. */
   brokerVerified?: boolean;
   tokdash?: TokdashProvisionOutcome;
+  claudeMod?: ClaudeModOutcomeRecord;
   legacyConnectivityMigration?: { preservedTargets: string[] };
   actions?: string[];
   issues?: readonly SetupBlockingIssue[];
@@ -2094,6 +2337,7 @@ function result(options: {
     access: accessReport(options.inspection, options.targetConfig, options.brokerVerified),
     recoveredInterruptedTransaction: options.recovered,
     ...(options.tokdash ? { tokdash: options.tokdash } : {}),
+    ...(options.claudeMod ? { claudeMod: options.claudeMod } : {}),
     ...(options.legacyConnectivityMigration
       ? { legacyConnectivityMigration: options.legacyConnectivityMigration }
       : {}),
@@ -2326,6 +2570,31 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
         opencodeShimRcTargets: opencodeShimRcCandidates(context),
         installOpencodeShim: true,
         opencodeShimPort: opencodeShimPort(context.env.OPENCODE_URL),
+        // A mod step the journal says was reached has to be REVERSED, and the catalog only builds a
+        // real action when the inputs name one. Left out, recovery got a declared no-op with no
+        // rollback: the interrupted run's marketplace directory, its Claude entries and its receipt
+        // all stayed on the machine behind a setup that reported it had rolled the run back.
+        // The journal's own plan row is the source of the intent; nothing is re-decided here,
+        // because what recovery reverses is the decision the interrupted run made.
+        ...(() => {
+          const intent = pendingJournal.plan.claudeModIntent;
+          if (intent !== 'install' && intent !== 'remove') return {};
+          return {
+            claudeMod: {
+              intent,
+              // Derived, not read back: the journal records the direction and the precondition, and the
+              // directory's location is fixed by contract, which is the point of it being under the
+              // state home rather than beside the executable.
+              marketplaceDir: claudeModMarketplaceDir(home),
+              settingsPath: claudeUserSettingsPath(context.homeDir, context.env),
+              version: dependencies.buildInfo.version,
+              claudeBin: claudeModCommandBinary(context.env, context.resolveExecutable),
+              // The rollback record says what to reverse and where the previous copy is; this only
+              // supplies the CLI, in the environment the interrupted run would have used.
+              env: context.env,
+            },
+          };
+        })(),
         installMetadata: {
           installationId,
           version: dependencies.buildInfo.version,
@@ -2392,6 +2661,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
     inspectLegacyCodexDaemon: dependencies.inspectLegacyCodexDaemon,
     brokerPort,
+    ...(dependencies.claudePolicyRoots ? { claudePolicyRoots: dependencies.claudePolicyRoots } : {}),
   });
   let inspection = await inspectCandidate();
   // FIRST prompt, ahead of the intro panels: every panel below is copy, and copy needs a language before it
@@ -2426,10 +2696,19 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   }
 
   // Fold any flag intent (non-interactive presenter) into the stored choices so the committed-setup no-op
-  // short-circuit below reflects `--install-opencode-shim` and `--no-install-agent-skill` rather than
-  // silently dropping them. The interactive presenter omits
+  // short-circuit below reflects `--install-opencode-shim`, `--no-install-agent-skill` and
+  // `--no-install-claude-mod` rather than silently dropping them. The interactive presenter omits
   // intendedChoices, so this is a pure stored re-run.
+  //
+  // Each of the three has to be named here. The stored choice is what a re-run honours by default, and on a
+  // committed install the plan built from stored choices decides whether there IS a run: a flag left out of
+  // this fold cannot produce its row, so `--no-install-claude-mod` on a machine that already has the mod
+  // would answer "already configured" and leave the mod in place.
   const intended = dependencies.presenter.intendedChoices?.(inspection);
+  // The interactive presenter has no `intendedChoices`, but a `--install-claude-mod` given to it is still an
+  // answer. Left out of this fold, an interactive rerun with nothing else to do answered "already
+  // configured" before the question was reached, so the explicit yes did nothing.
+  const flaggedClaudeMod = intended ? undefined : dependencies.presenter.claudeModFlag?.();
   // The just-chosen language folds in the same way: picking a new one on an already-committed install is a
   // real difference, so the no-op short-circuit below correctly stops short-circuiting and the choice gets
   // persisted through the normal transaction instead of a side write.
@@ -2439,8 +2718,15 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           ...existingSetupChoices(inspection),
           installAgentSkill: intended.installAgentSkill,
           installOpencodeShim: intended.installOpencodeShim,
+          installClaudeMod: intended.installClaudeMod,
+          claudeModAnsweredThisRun: intended.claudeModAnsweredThisRun,
         }
-      : existingSetupChoices(inspection)),
+      : {
+          ...existingSetupChoices(inspection),
+          ...(flaggedClaudeMod === undefined || !inspection.claudeMod.support.supported
+            ? {}
+            : { installClaudeMod: flaggedClaudeMod, claudeModAnsweredThisRun: true }),
+        }),
     language,
   };
   const existingPlan = buildSetupPlan({ inspection, choices: existingChoices, now: dependencies.now });
@@ -2571,6 +2857,15 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     return cancelled(dependencies, inspection, recovered, 'opencode shim choice');
   }
 
+  // Asked after the shim and before the service, because it is the one consent here that installs
+  // something into ANOTHER program — Claude's own plugin list — rather than into a file cosyncing owns.
+  // The presenter skips the question entirely on a host that cannot run the mod, so a Windows operator
+  // never has to read about it.
+  const installClaudeMod = await dependencies.presenter.confirmClaudeMod(inspection);
+  if (installClaudeMod === SETUP_PROMPT_CANCELLED) {
+    return cancelled(dependencies, inspection, recovered, 'Claude mod choice');
+  }
+
   const service = await dependencies.presenter.chooseService(inspection);
   if (service === SETUP_PROMPT_CANCELLED) return cancelled(dependencies, inspection, recovered, 'service choice');
   // Lingering is no longer a separate question. Choosing the systemd service means wanting the broker to
@@ -2587,6 +2882,10 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     quotaWarnings: quota,
     installAgentSkill,
     installOpencodeShim,
+    installClaudeMod,
+    // Only what the presenter actually did. Taking every run as an answer made a `--yes` with any real
+    // work to do put back a mod the person had removed inside Claude.
+    claudeModAnsweredThisRun: dependencies.presenter.claudeModAnsweredThisRun?.() === true,
     replaceLegacyPiBridge,
     upgradeLegacyAgentSkill,
     migrateLegacyCodexDaemon: legacyCodexMigrationPending,
@@ -2623,6 +2922,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   const lock = acquireLock({ command: 'setup', home });
   let migratedCodexEvidence: CodexDaemonOwnershipEvidence | undefined;
   let codexOwnershipRecorded = false;
+  // What the mod step could not finish, if anything. Reported with the result, never as its status.
+  let claudeModOutcome: ClaudeModOutcomeRecord | undefined;
   try {
     inspection = await inspectCandidate();
     const lockedPlan = buildSetupPlan({
@@ -2657,6 +2958,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       installationId,
       aliasPath,
       now: dependencies.now,
+      claudeModReport: (outcome) => { claudeModOutcome = outcome; },
     });
     const catalog = catalogFactory(inputs);
     const hasSystemdAction = lockedPlan.actions.some((action) => action.id === 'service.systemd');
@@ -2757,6 +3059,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       status: 'complete',
       exitCode: 0,
       tokdash,
+      ...(claudeModOutcome ? { claudeMod: claudeModOutcome } : {}),
       summaryCode: inspection.agents.every((agent) => agent.state === 'missing')
         ? 'complete-no-agents'
         : 'complete',
@@ -2800,6 +3103,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       inspection,
       recovered,
       ...(failure ? { failure } : {}),
+      ...(claudeModOutcome ? { claudeMod: claudeModOutcome } : {}),
     });
     await dependencies.presenter.failed(failed);
     return failed;

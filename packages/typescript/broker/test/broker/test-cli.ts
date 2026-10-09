@@ -128,6 +128,53 @@ process.env.COSYNCING_HOME = pureCliHome;
     aliasedUpgrade.code === 0 && aliasedUpgradeCalls === 1
       && help.stdout.includes('(alias: update)'));
 
+  // `cosyncing claude-mod refresh` is the verb the self-upgrade runs on the binary it just installed,
+  // so its argument surface is part of that handoff: --json for the caller to read, and --home because
+  // the child is spawned with a minimal environment and cannot inherit COSYNCING_HOME.
+  {
+    const seen: Array<{ json: boolean; home?: string }> = [];
+    const refreshed = await callCli(['claude-mod', 'refresh', '--json', '--home', '/tmp/state-home'], {
+      runClaudeModRefresh: async (options) => {
+        seen.push({ json: options.json, ...(options.home ? { home: options.home } : {}) });
+        options.stdout.write('{"status":"refreshed","detailCode":"claude-mod-refreshed"}\n');
+        return { exitCode: 0 };
+      },
+    });
+    const notNeeded = await callCli(['claude-mod', 'refresh'], {
+      runClaudeModRefresh: async (options) => {
+        options.stdout.write('The cosyncing Claude mod is not on offer on this host; nothing was changed.\n');
+        return { exitCode: 0 };
+      },
+    });
+    const refused = await callCli(['claude-mod', 'refresh', '--json'], {
+      runClaudeModRefresh: async (options) => {
+        options.stdout.write('{"status":"failed","detailCode":"claude-mod-refresh-refused-policy_blocked"}\n');
+        return { exitCode: 1 };
+      },
+    });
+    const badVerb = await callCli(['claude-mod', 'frobnicate']);
+    const relativeHome = await callCli(['claude-mod', 'refresh', '--home', 'state-home']);
+    const missingHome = await callCli(['claude-mod', 'refresh', '--home']);
+    const duplicate = await callCli(['claude-mod', 'refresh', '--json', '--json']);
+    check('claude-mod refresh takes --json and an absolute --home, and passes both through',
+      refreshed.code === 0 && seen.length === 1 && seen[0]!.json === true && seen[0]!.home === '/tmp/state-home',
+      JSON.stringify({ code: refreshed.code, seen }));
+    check('a refresh the host does not need exits 0 on stdout',
+      notNeeded.code === 0 && notNeeded.stdout.includes('not on offer') && notNeeded.stderr === '',
+      `${notNeeded.code}/${notNeeded.stderr}`);
+    // The upgrade reads the child's JSON, so a refusal has to leave the process as well as the payload.
+    check('a refused claude-mod refresh exits 1 so its caller can say so',
+      refused.code === 1 && refused.stdout.includes('claude-mod-refresh-refused-policy_blocked'),
+      `${refused.code}/${refused.stdout}`);
+    check('claude-mod rejects a verb it does not have',
+      badVerb.code === 2 && badVerb.stderr.includes("expected 'refresh'"), `${badVerb.code}/${badVerb.stderr}`);
+    check('claude-mod refresh refuses a relative, missing or duplicated option',
+      relativeHome.code === 2 && missingHome.code === 2 && duplicate.code === 2,
+      `${relativeHome.code}/${missingHome.code}/${duplicate.code}`);
+    check('the help lists claude-mod refresh next to the commands the upgrade chain uses',
+      help.stdout.includes('claude-mod refresh'), '');
+  }
+
   const cliSource = readFileSync(join(ROOT, 'packages/typescript/broker/src/cli/cli.ts'), 'utf8');
   const upgradeConfirmation = cliSource.match(
     /confirmAction\(\s*'Download, verify, switch, and health-check the next signed cosyncing release\?',\s*(true|false),\s*\)/,

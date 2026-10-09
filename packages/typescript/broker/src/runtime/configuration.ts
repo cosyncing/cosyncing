@@ -47,6 +47,14 @@ export interface BrokerConfig {
   features?: {
     /** Allow authenticated HTTP clients to browse bounded workspace files. */
     httpWorkspaceBrowsing?: boolean;
+    /**
+     * cosyncing's own kill switch for the Claude true-sync mod socket, never Claude's setting.
+     * Read when a hold arrives, so flipping it lands within one 20 s poll: the mod keeps
+     * mirroring, stops holding and stops drawing its band. The startup default is on for Linux
+     * (including WSL) and macOS and off everywhere else, because those are the two hosts the
+     * socket is measured on; `false` here is the operator's answer for any of them.
+     */
+    claudeTrueSyncMod?: boolean;
     /** Allow authenticated HTTP clients to request confirmed transcript exports. */
     httpTranscriptExport?: boolean;
     [key: string]: unknown;

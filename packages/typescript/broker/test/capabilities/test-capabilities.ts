@@ -450,23 +450,51 @@ try {
   //   setup.ts  id === 'codex'         reads the `codex.standalone-install` doctor check, which no
   //                                    other agent emits; only adds a managedRuntimeWarning.
   //   setup.ts  id === 'claude'        display-name fallback when the version matrix has no row.
-  //   setup.ts  behavior[id]           per-agent managed-behavior prose, one entry per agent.
   //   setup.ts  agent.id === 'pi'      (x3) Pi bridge blocker + install step + known-legacy migration
   //                                    prompt; all require Pi to be `supported` and gate only its bridge file.
   //   setup.ts  agent.id === 'codex'   (x2) inspects the Codex-only legacy-daemon migration posture and
   //                                    records `agents.codex` support in persisted setup state.
+  //   setup.ts  agent.id === 'claude'  reads the version the Claude preflight already resolved, so the
+  //                                    mod's host check can tell `below-minimum-version` from `missing-cli`.
+  //                                    It picks a setup skip reason and a plan row; it answers no capability.
+  //   mod-client-messages.ts deps.conn.tool === 'claude' sends an approval or a question answer over the
+  //                                    mod socket when that request is an open mod hold, instead of down
+  //                                    the adapter's `respondPermission`. The routing left runtime.ts for
+  //                                    this module so the seam suite can drive the production path; the
+  //                                    surface is Claude's own mod socket, and the second half of the
+  //                                    test (`isHeld`, scoped by connection) is what decides. The agent
+  //                                    half only keeps a same-shaped id on another agent's connection
+  //                                    from being diverted. The same check also refuses, with a
+  //                                    notice, a tap on a mod card that is no longer held, rather
+  //                                    than hand it to an adapter that never drew the card. No
+  //                                    capability answer is derived here.
+  //   broker-lifecycle.ts candidate.id === 'claude'
+  //                                    `cosy update`'s mod refresh asks the Claude adapter's own
+  //                                    `diagnoseSetup` for the host verdict, the same call setup's
+  //                                    preflight makes, so an upgrade cannot answer the version question
+  //                                    differently from setup. It selects a skip reason (`missing-cli`
+  //                                    vs `below-minimum-version`) for a lifecycle command; it answers
+  //                                    no capability.
+  //   doctor.ts diagnosis.agent === 'claude'
+  //                                    the mod's doctor row reads the version and managed-policy keys
+  //                                    out of the Claude adapter's diagnosis instead of re-deriving
+  //                                    them, so doctor and setup cannot disagree about the same host.
+  //                                    Doctor presentation and remediation only.
   const expectedBrokerBranches = [
+    "packages/typescript/broker/src/installation/broker-lifecycle.ts:candidate.id === 'claude'",
     "packages/typescript/broker/src/installation/doctor.ts:family.agent === 'pi'",
+    "packages/typescript/broker/src/installation/doctor.ts:diagnosis.agent === 'claude'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'pi'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'codex'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'claude'",
-    'packages/typescript/broker/src/installation/setup.ts:behavior[id]',
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'codex'",
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'pi'",
+    "packages/typescript/broker/src/installation/setup.ts:agent.id === 'claude'",
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'codex'",
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'pi'",
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'pi'",
     "packages/typescript/broker/src/runtime/runtime.ts:b.id === 'codex'",
+    "packages/typescript/broker/src/sessions/mod-client-messages.ts:deps.conn.tool === 'claude'",
   ];
   check(
     'tool branch checker matches the reviewed broker setup/runtime baseline exactly',

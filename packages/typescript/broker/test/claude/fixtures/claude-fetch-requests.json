@@ -1,0 +1,103 @@
+{
+  "comment": "Request shapes Claude Code 2.1.288 puts on the wire for the mod protocol, recorded byte for byte from one real session (Linux, real Claude config, plugin loaded with --plugin-dir into a scratch working folder, zero model turns). All five arrived from one peer pid read via SO_PEERCRED. Session ids scrubbed to <sid>. Header names arrive capitalised; a bodiless GET carries no Content-Length and no Content-Type, which is why the mod protocol is POST-only. test:claude-mod-framing replays rawBlockCRLF byte for byte.",
+  "claudeBuild": "2.1.288",
+  "v1Routes": [
+    "/claude/mod/register",
+    "/claude/mod/poll",
+    "/claude/mod/hold",
+    "/claude/mod/event"
+  ],
+  "note": "The probe mod also dialled /claude/mod/status, borrowing the name of the legacy hooks leg. It is not part of the v1 protocol, so it is kept here as evidence of what the client sends and asserted to be refused with unknown_route.",
+  "requests": [
+    {
+      "name": "register",
+      "requestLine": "POST /claude/mod/register?sid=<sid> HTTP/1.1",
+      "method": "POST",
+      "target": "/claude/mod/register?sid=<sid>",
+      "headers": {
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",
+        "User-Agent": "Bun/1.4.3",
+        "Accept": "*/*",
+        "Host": "cosyncing.local",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Content-Length": "117"
+      },
+      "rawBlockCRLF": "POST /claude/mod/register?sid=<sid> HTTP/1.1\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nUser-Agent: Bun/1.4.3\r\nAccept: */*\r\nHost: cosyncing.local\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: 117",
+      "expectedOutcome": "parse",
+      "declaredContentLength": 117
+    },
+    {
+      "name": "poll",
+      "requestLine": "POST /claude/mod/poll?sid=<sid> HTTP/1.1",
+      "method": "POST",
+      "target": "/claude/mod/poll?sid=<sid>",
+      "headers": {
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",
+        "User-Agent": "Bun/1.4.3",
+        "Accept": "*/*",
+        "Host": "cosyncing.local",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Content-Length": "52"
+      },
+      "rawBlockCRLF": "POST /claude/mod/poll?sid=<sid> HTTP/1.1\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nUser-Agent: Bun/1.4.3\r\nAccept: */*\r\nHost: cosyncing.local\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: 52",
+      "expectedOutcome": "parse",
+      "declaredContentLength": 52
+    },
+    {
+      "name": "hold",
+      "requestLine": "POST /claude/mod/hold?sid=<sid> HTTP/1.1",
+      "method": "POST",
+      "target": "/claude/mod/hold?sid=<sid>",
+      "headers": {
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",
+        "User-Agent": "Bun/1.4.3",
+        "Accept": "*/*",
+        "Host": "cosyncing.local",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Content-Length": "101"
+      },
+      "rawBlockCRLF": "POST /claude/mod/hold?sid=<sid> HTTP/1.1\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nUser-Agent: Bun/1.4.3\r\nAccept: */*\r\nHost: cosyncing.local\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: 101",
+      "expectedOutcome": "parse",
+      "declaredContentLength": 101
+    },
+    {
+      "name": "poll-get-no-body",
+      "requestLine": "GET /claude/mod/poll?sid=<sid>&wait=20000 HTTP/1.1",
+      "method": "GET",
+      "target": "/claude/mod/poll?sid=<sid>&wait=20000",
+      "headers": {
+        "Connection": "keep-alive",
+        "User-Agent": "Bun/1.4.3",
+        "Accept": "*/*",
+        "Host": "cosyncing.local",
+        "Accept-Encoding": "gzip, deflate, br, zstd"
+      },
+      "rawBlockCRLF": "GET /claude/mod/poll?sid=<sid>&wait=20000 HTTP/1.1\r\nConnection: keep-alive\r\nUser-Agent: Bun/1.4.3\r\nAccept: */*\r\nHost: cosyncing.local\r\nAccept-Encoding: gzip, deflate, br, zstd\r\n\r\n",
+      "expectedOutcome": "reject 405 method_not_allowed",
+      "rejectReason": "content-length-missing",
+      "measuredOutcome": "reject content-length-missing (what the spike reader answered)",
+      "note": "The spike reader accepted GET and rejected it for a missing Content-Length. The shipped reader is POST-only, so a GET is rejected on method before framing is considered. Kept with the original reason because that is what the client really sends."
+    },
+    {
+      "name": "status",
+      "requestLine": "POST /claude/mod/status?sid=<sid> HTTP/1.1",
+      "method": "POST",
+      "target": "/claude/mod/status?sid=<sid>",
+      "headers": {
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",
+        "User-Agent": "Bun/1.4.3",
+        "Accept": "*/*",
+        "Host": "cosyncing.local",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Content-Length": "52"
+      },
+      "rawBlockCRLF": "POST /claude/mod/status?sid=<sid> HTTP/1.1\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nUser-Agent: Bun/1.4.3\r\nAccept: */*\r\nHost: cosyncing.local\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: 52",
+      "expectedOutcome": "reject 404 unknown_route",
+      "note": "Recorded from the probe mod's own dial list. /claude/mod/status is not a v1 route; the shipped socket answers it with unknown_route, which is what the framing suite asserts."
+    }
+  ]
+}

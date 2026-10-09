@@ -5,6 +5,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/attention/view/attention_page.dart';
@@ -156,7 +157,13 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
   final trail = _DestinationTrail();
   return GoRouter(
     initialLocation: initialLocation,
+    // Any location no route matches: a mistyped or stale link. go_router's
+    // own screen is English only and leads to `/`.
+    errorBuilder: (context, state) => const _RouteNotFoundPage(),
     routes: [
+      // `/` has no page of its own. A bare address, or a link trimmed back to
+      // it, opens where the app does.
+      GoRoute(path: '/', redirect: (context, state) => sessionsRoute),
       ShellRoute(
         builder: (context, state, child) =>
             _AppCommandShell(trail: trail, child: child),
@@ -833,6 +840,62 @@ class _ScaffoldWithNavState extends State<_ScaffoldWithNav> {
       location: GoRouterState.of(context).uri.path,
       onClose: overSessions ? widget.trail.back : null,
       child: widget.navigationShell,
+    );
+  }
+}
+
+/// What a location no route matches shows, such as a hand-typed
+/// `#/notifications` when the inbox lives at [attentionRoute].
+///
+/// It replaces the whole window, outside the shell, so it carries its own
+/// [Scaffold]. Its one action leads to [sessionsRoute], where the app opens.
+class _RouteNotFoundPage extends StatelessWidget {
+  const _RouteNotFoundPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final tokens = context.tokens;
+    final textTheme = Theme.of(context).textTheme;
+    return Scaffold(
+      key: const Key('route-not-found'),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.explore_off_outlined,
+                  size: 64,
+                  color: tokens.textTertiary,
+                ),
+                const SizedBox(height: 16),
+                SelectableText(
+                  l10n.routeNotFoundTitle,
+                  style: textTheme.titleMedium,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                SelectableText(
+                  l10n.routeNotFoundBody,
+                  style: textTheme.bodyMedium?.copyWith(
+                    color: tokens.textSecondary,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                FilledButton.tonal(
+                  key: const Key('route-not-found-go-to-sessions'),
+                  onPressed: () => context.go(sessionsRoute),
+                  child: Text(l10n.routeNotFoundGoToSessions),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -31,8 +31,13 @@ cosy doctor
 ```
 
 cosyncing reads Claude's local transcripts. Sessions begin in Observe mode and
-can be switched to Take over; setup does not edit Claude Code's settings or
-install legacy hooks.
+can be switched to Take over. On Claude Code 2.1.288 or newer, setup can also
+offer [true sync](claude-true-sync.md): a Claude Code mod, installed by Claude's
+own plugin commands, that lets cosyncing mirror a session you are running in
+your terminal and answer its approvals from the app. That install is a separate,
+declinable setup question. Claude's own commands record the install, in two
+settings keys and in Claude's plugin records (`plugins/known_marketplaces.json`
+and `plugins/installed_plugins.json`), and setup installs no legacy hook.
 
 Direct agent-to-user file delivery is not currently available from a local
 Claude CLI/Drive session because that mode does not expose the native

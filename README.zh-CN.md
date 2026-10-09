@@ -70,12 +70,13 @@ Broker 运行在智能体工作的那台机器上，负责观察它们的会话�
 </p>
 
 十二者共用同一套协议；各家智能体开放的能力并不一致，应用会如实显示某个会话实际支持什么。
-Claude Code 的会话在接管之前保持只读。版本与安装方法见
+启用 setup 安装的 Claude mod 后，你在自己终端里运行的 Claude Code 会话会与应用双向同步，包括审批；
+没有该 mod 时，会话在接管之前保持只读。版本与安装方法见
 [支持的智能体](docs/supported_agents/README.md)，逐项能力见
 [适配器支持](docs/protocol/adapter-support.md)（均为英文）。
 
 前台客户端可以加入同一个由 Broker 托管的 Codex、Pi、omp 或 Reasonix Drive 会话，而不会再次启动原生 Resume。
-Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode 继续使用共享实时会话；后台观察连接始终只读。
+没有该 mod 的 Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode 继续使用共享实时会话；后台观察连接始终只读。
 
 **实验性支持：** 源码贡献者可以试用八个暂定适配器。
 [Kimi Code](docs/supported_agents/kimi.md) 对 `kimi web` 服务器上的每个会话提供只读观察，对 cosyncing

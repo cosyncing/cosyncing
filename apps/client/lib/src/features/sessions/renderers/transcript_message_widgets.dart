@@ -125,6 +125,7 @@ class _TranscriptBoxMessage extends StatelessWidget {
     required this.payloadRows,
     this.summary,
     this.readOnlyHint,
+    this.note,
     this.detailContent,
     this.noDetailText,
     this.isError = false,
@@ -137,6 +138,13 @@ class _TranscriptBoxMessage extends StatelessWidget {
   final String? summary;
   final List<MapEntry<String, Object?>> payloadRows;
   final String? readOnlyHint;
+
+  /// One quiet caption under the body, for a fact the card is about rather than
+  /// a
+  /// claim about its own state — which permission mode the tool was in, for
+  /// instance. [readOnlyHint] is the other kind and stays visually distinct: a
+  /// mode line and a read-only badge must not be confused for each other.
+  final String? note;
   final Widget? detailContent;
   final String? noDetailText;
   final bool isError;
@@ -156,6 +164,7 @@ class _TranscriptBoxMessage extends StatelessWidget {
         hasSummary ||
         visibleRows.isNotEmpty ||
         readOnlyHint != null ||
+        note != null ||
         detailContent != null ||
         noDetailText != null;
 
@@ -190,8 +199,21 @@ class _TranscriptBoxMessage extends StatelessWidget {
                         ).readOnlySuffix(readOnlyHint!),
                       ),
                     ],
+                    if (note != null) ...[
+                      if (hasSummary || readOnlyHint != null)
+                        const SizedBox(height: 4),
+                      Text(
+                        note!,
+                        key: const Key('transcript-message-note'),
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: context.tokens.textSecondary,
+                        ),
+                      ),
+                    ],
                     if (visibleRows.isNotEmpty) ...[
-                      if (hasSummary || readOnlyHint != null) ...[
+                      if (hasSummary ||
+                          readOnlyHint != null ||
+                          note != null) ...[
                         const SizedBox(height: 8),
                         const Divider(height: 1),
                         const SizedBox(height: 8),

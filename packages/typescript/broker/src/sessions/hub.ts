@@ -210,14 +210,18 @@ function utf8Prefix(value: string, maxBytes: number): string {
 }
 
 /**
- * Whether one pending-input card BLOCKS the agent on the user. A permission request always does.
- * A `question-request` with `blocking: false` (contract revision 24 — e.g. a Codex
- * `delivery: "async"` question) is different: the agent kept working and merely consumes the answer
- * at a later input boundary. Such a card stays pending — visible, retained, replayed to late
- * joiners — but it never forces `needs-input`, and it never masks a genuinely blocking entry.
+ * Whether one pending-input card BLOCKS the agent on the user.
+ *
+ * Both `permission-request` and `question-request` carry a `blocking` flag (contract revision 24
+ * for the question, 29 for the permission), and both mean the same thing: `false` is an
+ * explanation, not a wait. A Codex `delivery: "async"` question is the oldest case; the newest is
+ * the read-only card the Claude mod raises to say a prompt fell through to the terminal, which the
+ * person can read, or ignore, without the agent going anywhere. Such a card stays pending —
+ * visible, retained, replayed to late joiners — but it never forces `needs-input`, and it never
+ * masks a genuinely blocking entry.
  */
 function isBlockingPendingInput(message: AgentMessage): boolean {
-  if (message.type === 'permission-request') return true;
+  if (message.type === 'permission-request') return message.blocking !== false;
   if (message.type === 'question-request') return message.blocking !== false;
   return false;
 }
@@ -2660,6 +2664,14 @@ export class Hub {
       this.conns.get(this.key(tool, id, 'live')) ??
       this.conns.get(this.key(tool, id))
     );
+  }
+
+  /** Every connection this Hub holds for one session, in {@link getConn}'s order. A fact about the
+   *  session itself, such as its turn ending in the terminal, is news to each of them. */
+  getConns(tool: string, id: string): ManagedConn[] {
+    return [this.key(tool, id, 'resume'), this.key(tool, id, 'live'), this.key(tool, id)]
+      .map((key) => this.conns.get(key))
+      .filter((managed): managed is ManagedConn => managed !== undefined);
   }
 
   /** Snapshot of every broker-owned live connection (attached sessions + pinned bridges) with its

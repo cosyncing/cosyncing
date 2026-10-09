@@ -71,14 +71,15 @@ cliente y el broker.
   <a href="https://kilocode.ai/" title="Kilo Code"><img src="docs/assets/agents/pills/kilocode.svg" alt="Kilo Code" height="34"></a>
 </p>
 
-Un solo protocolo cubre los doce. Lo que puedes controlar cambia según el agente, y las sesiones de
-Claude Code se abren en solo lectura hasta que tomas el control. Consulta la
+Un solo protocolo cubre los doce. Lo que puedes controlar cambia según el agente: con el mod de Claude que
+instala la configuración, una sesión de Claude Code en tu propia terminal se sincroniza con la app en ambos
+sentidos, incluidas las aprobaciones; sin el mod se abre en solo lectura hasta que tomas el control. Consulta la
 [configuración de agentes compatibles](docs/supported_agents/README.md) para versiones e instalación,
 y el [soporte de adaptadores](docs/protocol/adapter-support.md) para la tabla de capacidades.
 
 Los clientes en primer plano pueden unirse a la misma sesión de Codex, Pi, omp o Reasonix que controla el broker sin
-lanzar un segundo Resume nativo. Claude Code mantiene su flujo de Observar/Tomar el control en otro
-cliente, y OpenCode mantiene su comportamiento compartido en vivo. Las conexiones de observación en
+lanzar un segundo Resume nativo. Una sesión de Claude Code sin el mod mantiene su flujo de Observar/Tomar el
+control en otro cliente, y OpenCode mantiene su comportamiento compartido en vivo. Las conexiones de observación en
 segundo plano siguen siendo de solo lectura.
 
 **Experimental:** hay ocho adaptadores provisionales para quienes trabajan desde el código fuente.

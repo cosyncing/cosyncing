@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { UNKNOWN_TRANSCRIPT_TYPE_EVENT } from '@cosyncing/protocol';
 import type {
   AgentMessage,
   AgentRuntimeUpdateStatus,
@@ -52,6 +53,15 @@ export class AttentionPolicy {
         return;
       case 'run-summary':
         await this.handleRunSummary(session, message);
+        return;
+      case 'event':
+        // An adapter met a record type it does not know. It skipped that record and carried on,
+        // which is right for the transcript and silent in a way nobody benefits from: the symptom
+        // of a tool changing its own history is that the app quietly shows less of it. One event
+        // per session and type, never per line.
+        if (message.name === UNKNOWN_TRANSCRIPT_TYPE_EVENT) {
+          await this.handleUnknownTranscriptType(session, message.payload);
+        }
         return;
       case 'goal-state':
         await this.handleGoalState(session, message);
@@ -194,6 +204,42 @@ export class AttentionPolicy {
     requestId: string,
   ): string {
     return `${kind}:${session.tool}:${session.id}:${requestId}`;
+  }
+
+  /**
+   * The adapter met a transcript record type it does not recognize.
+   *
+   * Raised as `sync-degraded` rather than a new kind: the client already presents that kind, it
+   * is severity `maintenance` and never an OS notification, and this is exactly what it means —
+   * the mirror is working but is not showing everything. A new kind would need five new strings
+   * to say something users already have a word for.
+   */
+  private async handleUnknownTranscriptType(session: SessionInfo, payload: unknown): Promise<void> {
+    const lineType = (payload as { lineType?: unknown } | null | undefined)?.lineType;
+    if (typeof lineType !== 'string' || !lineType.trim()) return;
+    const type = lineType.trim().slice(0, 64);
+    const dedupeKey = `sync-degraded:${session.tool}:${session.id}:unknown-type:${type}`;
+    // Once, ever. Replaying the transcript is how this event is produced -- a restart, a re-opened
+    // session, a history refresh all walk the same lines again -- and an upsert of an event the
+    // person has already dismissed reopens it: `AttentionStore.upsertEvent` clears `seenAt` on a
+    // reopen, so the inbox badge came back for a thing they had already read. The adapter says
+    // "this build wrote a record type we have never seen"; a second telling of that is not news.
+    if (this.store.findByDedupeKey(dedupeKey)) return;
+    await this.store.upsertEvent({
+      dedupeKey,
+      kind: 'sync-degraded',
+      state: 'active',
+      severity: 'maintenance',
+      agent: session.tool,
+      sessionId: session.id,
+      ...this.sessionTitleSnapshot(session),
+      title: 'Some session details are not shown',
+      summary: `${session.tool} recorded a session detail labeled "${type}" that this version of `
+        + 'cosyncing does not recognize. The rest of the session is shown normally.',
+      action: { kind: 'open-session', tool: session.tool, sessionId: session.id },
+      presentationRevision: 1,
+      presentationStage: 'immediate',
+    });
   }
 
   private async handleRunSummary(

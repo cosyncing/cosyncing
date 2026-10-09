@@ -448,7 +448,8 @@ class _ReadOnlyHint extends StatelessWidget {
 /// glance.
 ///
 /// Collapsed, the row is a plain human word and nothing else. The origin is an
-/// unedited provider identifier — `@deepseek-ai/dsh-system-prompt` — and putting
+/// unedited provider identifier — `@deepseek-ai/dsh-system-prompt` — and
+/// putting
 /// it in the always-visible header made the resting transcript read as internal
 /// plumbing, which is the raw-identifier leakage this presentation exists to
 /// keep out. It belongs to the reader who opened the block and asked where the
@@ -556,6 +557,126 @@ class _ContextInjectionRowState extends State<_ContextInjectionRow> {
                       ),
                     ),
                   ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A message the user sent from the app into a turn that was already running.
+///
+/// A steering row is the reader's own words, so it gets a row of its own rather
+/// than
+/// the generic event card. Two presentations are wrong here and both were
+/// tempting: as
+/// a user bubble it claims the text was typed at the terminal that is running
+/// the
+/// session, and as an ordinary event row it hides that the message arrived at
+/// all,
+/// which is the fact a reader looking at a long turn needs.
+///
+/// Collapsed it is one quiet line — what was sent is below the fold on purpose,
+/// because
+/// the resting transcript should not be interrupted by its own history.
+/// Expanded it
+/// shows the text whole, the route it came by, and a note when the adapter had
+/// to clip
+/// it, since a steering message that silently stops is a different instruction
+/// than
+/// the one the user wrote.
+class _SteeringRow extends StatefulWidget {
+  const _SteeringRow({required this.message});
+
+  final AgentMessage message;
+
+  @override
+  State<_SteeringRow> createState() => _SteeringRowState();
+}
+
+class _SteeringRowState extends State<_SteeringRow> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context);
+    final steered = widget.message.steeringMessage;
+    if (steered == null) return const SizedBox.shrink();
+    final quiet = theme.colorScheme.onSurfaceVariant;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // One merged semantics node, as with the context row: the label comes
+          // from
+          // the Text, the tap from the InkWell, and the disclosure state is
+          // declared so
+          // a screen reader knows the row opens and whether it is open.
+          MergeSemantics(
+            child: Semantics(
+              button: true,
+              expanded: _expanded,
+              child: InkWell(
+                key: const Key('transcript-steering-toggle'),
+                borderRadius: BorderRadius.circular(context.tokens.radiusMd),
+                onTap: () => setState(() => _expanded = !_expanded),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 40),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.subdirectory_arrow_right_outlined,
+                          size: 16,
+                          color: quiet,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          l10n.transcriptSteeringLabel,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: quiet,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          _expanded ? Icons.expand_less : Icons.expand_more,
+                          size: 18,
+                          color: quiet,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          if (_expanded)
+            Padding(
+              padding: const EdgeInsets.only(left: 8, top: 4, bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    steered.source,
+                    key: const Key('transcript-steering-source'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(color: quiet),
+                  ),
+                  const SizedBox(height: 4),
+                  DefaultTextStyle.merge(
+                    style: TextStyle(color: quiet),
+                    child: _MarkdownBody(source: steered.text),
+                  ),
                 ],
               ),
             ),

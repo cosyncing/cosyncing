@@ -1,0 +1,8 @@
+{
+  "name": "cosyncing-claude",
+  "version": "0.5.13",
+  "description": "Drive this Claude session from cosyncing: prompts in, turn state out, permission decisions answered from either side.",
+  "author": { "name": "cosyncing" },
+  "license": "MIT",
+  "keywords": ["cosyncing", "remote-control", "hooks"]
+}

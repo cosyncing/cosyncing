@@ -383,6 +383,138 @@ void main() {
     );
 
     test(
+      'a shared-terminal row attaches live even when its one mode field '
+      'reads observe',
+      () async {
+        // SessionInfo carries one attach mode, so a read-only attach to a
+        // mod-synced session rewrites it to `observe` while the terminal is
+        // still sharing the session. The field that says whether an app may
+        // write is control.terminalSync, and a foreground attach that ignored
+        // it would park the user behind a socket that can answer nothing.
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Shared with the terminal',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+            control: SessionControlState(
+              drive: SessionDriveControl(
+                state: DriveState.unavailable,
+                supported: false,
+                reason: 'already shared with your terminal',
+              ),
+              terminalSync: SessionTerminalSync(
+                supported: true,
+                syncAvailable: true,
+                active: true,
+                presence: TerminalSyncPresence.shared,
+                input: 'full',
+              ),
+            ),
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach();
+
+        expect(fakeConnection.reattachModes, ['live']);
+      },
+    );
+
+    test(
+      'the same shared-terminal shape on another engine is not a live attach',
+      () async {
+        // The terminalSync fallback below is a Claude-only repair for a
+        // Claude-shaped defect: a mod-synced row's ONE attach mode gets
+        // rewritten to `observe` by a read-only attach while the terminal is
+        // still sharing. Codex and OpenCode drive that field themselves, so a
+        // row they did not advertise `live` -- a drive held elsewhere, a serve
+        // shared read-only -- was still being attached with write authority
+        // here. That is the opposite of what the row said, and it was a
+        // behaviour change on their rows from a lane about Claude.
+        const codexKey = SessionDetailKey(
+          tool: 'codex',
+          sessionId: 'session-1',
+        );
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'codex',
+            title: 'Shared, but not advertised live',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+            control: SessionControlState(
+              drive: SessionDriveControl(
+                state: DriveState.observing,
+                supported: true,
+              ),
+              terminalSync: SessionTerminalSync(
+                supported: true,
+                syncAvailable: true,
+                active: true,
+                presence: TerminalSyncPresence.shared,
+                input: 'full',
+              ),
+            ),
+          ),
+        ]);
+        keepSessionDetailAlive(container, codexKey);
+        final controller = container.read(
+          sessionDetailControllerProvider(codexKey).notifier,
+        );
+
+        await controller.attach();
+
+        expect(fakeConnection.reattachModes, isEmpty);
+      },
+    );
+
+    test(
+      'an answer-only shared row is not a live attach',
+      () async {
+        // The hooks overlay takes permission answers and no prompts. A live
+        // attach would ask the broker for an authority this session has
+        // nowhere to put.
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Answer only',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+            control: SessionControlState(
+              drive: SessionDriveControl(
+                state: DriveState.unavailable,
+                supported: false,
+              ),
+              terminalSync: SessionTerminalSync(
+                supported: true,
+                syncAvailable: true,
+                active: true,
+                input: 'answer-only',
+              ),
+            ),
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach();
+
+        expect(fakeConnection.reattachModes, isEmpty);
+      },
+    );
+
+    test(
       'an unrecognized roster attach mode attaches read-only, not merely bare',
       () async {
         // The decode side is covered in broker_contract; this is the

@@ -17,7 +17,15 @@ import {
 export const INSTALLATION_LOCK_SCHEMA_VERSION = 1 as const;
 export const INSTALLATION_LOCK_FILENAME = 'installation.lock';
 
-export type InstallationMutation = 'setup' | 'repair' | 'upgrade' | 'uninstall';
+/**
+ * The commands that may hold the installation mutation lock.
+ *
+ * `claude-mod-refresh` is its own member rather than a reuse of `upgrade`, because the lock record is
+ * the audit trail for who was mutating the installation: the upgrade's own lock is released before it
+ * delegates the mod refresh, so the file that exists during the refresh names the refresh.
+ */
+export const INSTALLATION_MUTATIONS = ['setup', 'repair', 'upgrade', 'uninstall', 'claude-mod-refresh'] as const;
+export type InstallationMutation = typeof INSTALLATION_MUTATIONS[number];
 
 interface InstallationLockRecord {
   schemaVersion: typeof INSTALLATION_LOCK_SCHEMA_VERSION;
@@ -69,7 +77,10 @@ function parseRecord(path: string): InstallationLockRecord {
   if (record.schemaVersion !== INSTALLATION_LOCK_SCHEMA_VERSION
       || !Number.isSafeInteger(record.pid) || (record.pid as number) <= 0
       || typeof record.nonce !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(record.nonce)
-      || !['setup', 'repair', 'upgrade', 'uninstall'].includes(String(record.command))
+      // Every member, from the one list the type is built from. A hand-written subset here once left out
+      // `claude-mod-refresh`, so the refresh's own release() read its own record as `unsafe`, threw, and left
+      // the lock file behind: every later setup, upgrade, repair and uninstall then refused to start.
+      || !(INSTALLATION_MUTATIONS as readonly string[]).includes(String(record.command))
       || typeof record.acquiredAt !== 'string' || !Number.isFinite(Date.parse(record.acquiredAt))) {
     throw new InstallationLockError('unsafe');
   }

@@ -196,6 +196,39 @@ await (mc as any).refreshPendingQueuedUsers();
 check('G19 a same-id pending refresh that stops blocking restores native idle',
   replayOwner.info.status === 'idle' && mc.status === 'idle');
 
+// ── H: the Claude mod's read-only card (contract revision 29) ──────────────────────────────────
+// When the broker lets a prompt fall through to the terminal it draws a card that EXPLAINS the
+// decision rather than waiting for one. That is a `permission-request` with `blocking: false`, and
+// the flag is the whole difference: without it the row sat at needs-input for the rest of the
+// session, the explanation replayed to every socket that opened, and every later prompt read as
+// mid-turn.
+const roOwner = fakeConn({ ...info('s1'), status: 'working' });
+mc.replaceConnection(roOwner);
+const releaseCard = (requestId: string) => ({
+  type: 'permission-request',
+  requestId,
+  title: 'Bash permission',
+  toolName: 'Bash',
+  readOnly: true,
+  blocking: false,
+  releaseReason: 'viewer:none',
+} as unknown as AgentMessage);
+framesBefore = sessionFrames.length;
+roOwner.emit(releaseCard('ro-1'));
+check('H1 a nonblocking permission-request leaves a working session working',
+  mc.status === 'working' && sessionFrames.length === framesBefore, `status=${mc.status} frames=${sessionFrames.length}`);
+check('H2 ...and the card is still replayed to a late socket', pendingCards().some((m: any) => m.requestId === 'ro-1'),
+  JSON.stringify(pendingCards().map((m: any) => m.requestId)));
+roOwner.emit({ type: 'permission-request', requestId: 'ro-real', title: 'may i' } as AgentMessage);
+check('H3 a real permission-request still wins over a nonblocking one', mc.status === 'needs-input', `status=${mc.status}`);
+roOwner.emit({ type: 'permission-resolved', requestId: 'ro-real', decision: 'approve' } as AgentMessage);
+check('H4 resolving the real one returns to working with the explanation still on screen',
+  mc.status === 'working' && pendingCards().some((m: any) => m.requestId === 'ro-1'), `status=${mc.status}`);
+roOwner.emit({ type: 'permission-resolved', requestId: 'ro-1', decision: 'external' } as AgentMessage);
+roOwner.emit({ type: 'permission-request', requestId: 'ro-unflagged', title: 'may i' } as AgentMessage);
+check('H5 a permission-request WITHOUT the flag still forces needs-input, as it always did',
+  mc.status === 'needs-input', `status=${mc.status}`);
+
 // ── E: one session, several live owners — the roster overlay must pick exactly one ──────────────
 // A read-only Observe tail and an explicit Drive attach are DISTINCT Hub owners of the same session
 // id, and their run states legitimately disagree mid-turn. Applying each in turn let Map iteration

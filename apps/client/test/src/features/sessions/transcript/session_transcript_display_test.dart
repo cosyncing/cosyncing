@@ -406,6 +406,107 @@ void main() {
       expect(entries, hasLength(1));
     });
   });
+
+  group('steering rows survive the summary views', () {
+    // A message the app sent into a running turn is the user's own words. A
+    // view that hides the agent's working must not hide what the human said,
+    // or the send looks like it was dropped.
+    final messages = [
+      _message('user-message', {'key': 'u1', 'text': 'Deploy it'}),
+      _message('event', {
+        'name': kSteeringMessageEvent,
+        'payload': {
+          'text': 'use the staging database',
+          'source': 'cosyncing-claude',
+        },
+      }),
+      _message('model-output', {'key': 'm1', 'text': 'Done', 'final': true}),
+      _message('thinking', {'key': 't1', 'text': 'Checking the host'}),
+    ];
+
+    test('final-messages-only keeps steering, drops thinking', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: messages,
+        mode: ToolDisplayMode.finalMessagesOnly,
+      );
+
+      expect(
+        entries.whereType<MessageTranscriptDisplayEntry>().map(
+          (entry) => entry.message.eventName,
+        ),
+        contains(kSteeringMessageEvent),
+      );
+      expect(
+        entries.whereType<MessageTranscriptDisplayEntry>().map(
+          (entry) => entry.message.type,
+        ),
+        isNot(contains(AgentMessageType.thinking)),
+      );
+    });
+
+    test('is not internal bookkeeping', () {
+      // Bookkeeping is hidden from every view. A steering row is not.
+      expect(
+        isInternalBookkeepingMessage(
+          AgentMessage.fromJson({
+            'type': 'event',
+            'name': kSteeringMessageEvent,
+            'payload': {'text': 'x'},
+          }),
+        ),
+        isFalse,
+      );
+    });
+
+    test('an event with no steering payload is not kept by this rule', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          _message('event', {
+            'name': kSteeringMessageEvent,
+            'payload': {'text': '   '},
+          }),
+        ],
+        mode: ToolDisplayMode.finalMessagesOnly,
+      );
+
+      // The row was never steering the client can show, so the summary view
+      // treats it like any other event: not always-visible.
+      expect(entries, isEmpty);
+    });
+  });
+
+  group('an unrecognised transcript record type', () {
+    // `transcript.unknown-type` describes the mirror, not the session: the
+    // broker files it in the inbox, and as a row it sat between two tool calls
+    // and came back on every replay.
+    final unknownType = _message('event', {
+      'name': 'transcript.unknown-type',
+      'payload': {'lineType': 'fork-context-ref'},
+    });
+
+    test('is internal bookkeeping', () {
+      expect(isInternalBookkeepingMessage(unknownType), isTrue);
+    });
+
+    test('never becomes a row, while an ordinary event beside it does', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          unknownType,
+          _message('event', {
+            'name': 'session.renamed',
+            'payload': {'title': 'x'},
+          }),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+      final names = entries
+          .whereType<MessageTranscriptDisplayEntry>()
+          .map((entry) => entry.message.eventName)
+          .toList();
+      expect(names, isNot(contains('transcript.unknown-type')));
+      expect(names, contains('session.renamed'));
+    });
+  });
 }
 
 AgentMessage _toolCall(String callId, ToolDisplayClass displayClass) =>

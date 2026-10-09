@@ -103,6 +103,10 @@ bool _joinMatchesOwner(
     action.ownerRevision.epoch == owner.revision.epoch &&
     action.ownerRevision.seq == owner.revision.seq;
 
+/// The roster's tool id for Claude, spelled once for the one place the client
+/// has to know it. See [SessionDetailController._rowOffersLiveAttach].
+const _claudeToolId = 'claude';
+
 /// Controller for one live session detail shell.
 ///
 /// Owns the [SessionDetailConnection] lifecycle and exposes only typed
@@ -797,11 +801,38 @@ class SessionDetailController
     for (final session in ref.read(rosterSessionsProvider)) {
       if (session.tool == arg.tool &&
           session.id == arg.sessionId &&
-          session.attachMode == AttachMode.live) {
+          _rowOffersLiveAttach(session)) {
         return const _InteractiveAttachRequest(mode: 'live');
       }
     }
     return const _InteractiveAttachRequest();
+  }
+
+  /// Whether this roster row says an app may attach as a live co-writer now.
+  ///
+  /// `attachMode: live` is the broker's instruction, and for every engine that
+  /// is the whole answer.
+  ///
+  /// The second test is a Claude-only repair, and the engine limit is the
+  /// point of it. A row describes a session through whichever connection the
+  /// broker is holding, and `SessionInfo` carries ONE attach mode, so a
+  /// read-only attach to a mod-synced Claude session rewrites that one field to
+  /// `observe` while leaving the sharing itself alone. `control.terminalSync`
+  /// is the field that says whether an app may write, and `answer-only` (the
+  /// hooks overlay) is excluded: a session that takes answers but no prompts
+  /// has nothing for a live attach to do.
+  ///
+  /// Reading it for Codex or OpenCode was a regression, not a repair. Those
+  /// engines drive the mode field themselves and do not have the
+  /// one-attach-mode defect, so a row they deliberately did not advertise as
+  /// `live` -- a drive held elsewhere, a serve shared read-only -- was still
+  /// being attached with write authority, the opposite of what the row said.
+  bool _rowOffersLiveAttach(SessionInfo session) {
+    if (session.attachMode == AttachMode.live) return true;
+    if (session.tool != _claudeToolId) return false;
+    final sync = session.control?.terminalSync;
+    if (sync == null) return false;
+    return sync.supported && sync.active && sync.input != 'answer-only';
   }
 
   Future<void> _joinExistingDriver(

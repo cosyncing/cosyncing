@@ -9,11 +9,20 @@
  * server advertising the experimental `claude/channel` capability + `notifications/claude/channel`
  * — NOT a SessionStart hook) are later increments; see docs/protocol/adapter-support.md
  *
- * What this maps (verified against 144 real sessions, 2.1.104 → 2.1.178 — see the adapter doc):
- *  - 14 top-level line types exist; only `assistant` / `user` / `system` are conversation. The other
- *    ~10 (`ai-title`, `custom-title`, `mode`, `permission-mode`, `last-prompt`, `bridge-session`,
- *    `queue-operation`, `file-history-snapshot`, `attachment`, `agent-name`, `pr-link`) are un-threaded
- *    sidecar app-state and are SKIPPED (titles are read off `custom-title`/`ai-title` at discovery).
+ * What this maps (re-audited 2026-10-04 over 576 real sessions, builds 2.1.104 → 2.1.289;
+ * the measurement is `scripts/adapters/audit-claude-jsonl-types.ts`, its output under
+ * `output/claude-jsonl-types/`, and the authoritative list is `CLAUDE_KNOWN_LINE_TYPES` below):
+ *  - 24 top-level line types exist in the corpus. Only `assistant` / `user` / `system` /
+ *    `queue-operation` are conversation. The rest are un-threaded sidecar app-state and are
+ *    SKIPPED (titles are read off `custom-title`/`ai-title` at discovery, the permission mode off
+ *    `permission-mode` by the mod's hold gate, context cost off `cost-state`).
+ *  - Every type the 2026-10-05 audit found is in the known list, so all 24 are skipped in silence.
+ *    Nine of them were not when this note was written, and each one raised a `transcript.unknown-type`
+ *    event — an "some session details are not shown" inbox item — on EVERY replay of a transcript
+ *    that contained it. `atis-latch` alone is in 137 of the 576 files scanned. The event is for a
+ *    type nobody has seen, which is a different claim about the mirror and the only one worth
+ *    interrupting somebody's inbox for. (`cost-state` was missing from the list this note used to
+ *    carry; it is read for the context window, so it belongs in the known list and is now in it.)
  *  - assistant.message.content is ALWAYS an array of {text|thinking|redacted_thinking|tool_use} blocks.
  *    Recent versions split each block onto its own line; older ones PACK several into one line — so we
  *    iterate content[] and never assume content[0]. Each line carries a globally-unique, stable `uuid`
@@ -104,9 +113,25 @@ import {
   OwnershipConflictError,
   resolveInvocation,
   spawnResolvedInvocation,
+  STEERING_MESSAGE_EVENT,
+  UNKNOWN_TRANSCRIPT_TYPE_EVENT,
 } from '@cosyncing/adapter-api';
+import { ClaudeModConnection } from './mod-connection.ts';
 import { diagnoseClaudeSetup } from './diagnostics.ts';
 import { JsonlHistorySource } from './history-source.ts';
+import { claudeAnswerRows } from './question-answers.ts';
+import {
+  CLAUDE_MOD_LIVE_CONFLICT,
+  CLAUDE_MOD_LIVE_REFUSAL,
+  claudeCapabilities,
+  claudeModControl,
+  claudeModLostControl,
+  claudeModRowPatch,
+  CLAUDE_MOD_COMMAND_REFUSAL,
+  type ClaudeAdapterOptions,
+  type ClaudeModCommand,
+  type ClaudeModStatus,
+} from './mod-presence.ts';
 
 const CAPS: AgentCapabilities = {
   integrationKind: 'sdk-callback',
@@ -180,6 +205,15 @@ export const CLAUDE_DEMOTED_REFUSAL =
  *  milliseconds of the stdout result; the echo tail polls every 1 s, so one poll interval of grace
  *  covers the lag without giving a real foreign writer meaningful room. */
 export const CLAUDE_TURN_END_GRACE_MS = 2_000;
+/**
+ * How long a turn the cosyncing mod reported as complete may still be closed by the transcript.
+ *
+ * The mod's `turn.complete` and the transcript's closing row are two writes from one process, and
+ * the hook can fire before the row is flushed. A turn the broker did not stop is closed here only
+ * once this has passed with the transcript still silent, so a normal end keeps its own row, time and
+ * tokens. It must sit above the gap measured between the two on the installed Claude.
+ */
+export const CLAUDE_MOD_TURN_END_GRACE_MS = 1_500;
 /** Bound on the never-echoed submitted-prompt FIFO (exoneration list). Real depth is ≤2 (one in
  *  flight, one queued); the cap only bounds a pathological no-echo run. */
 export const CLAUDE_SUBMITTED_TEXTS_LIMIT = 32;
@@ -946,7 +980,15 @@ export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; 
  * `exec claude "$@"` to reach their free/local endpoint, so their inherited env MUST stay intact.
  */
 export function resumeEnv(store: ClaudeStore, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base, CLAUDE_CONFIG_DIR: store.configDir };
+  // The marker tells a mod inside this child that its parent is the broker, which is one of the
+  // two tests the mod socket applies before it accepts a registration. The other is the peer's
+  // ancestry: the socket walks the parent chain from the connecting pid and refuses a process the
+  // broker itself spawned. A marker alone is a string any process could set, so the ancestry is
+  // what carries the decision and the marker only makes cheap what would otherwise be a walk.
+  // Two cosyncing writers on one session is the failure both prevent. Deliberately NOT
+  // `COSYNCING_HOME`, which the spec already spends on socket discovery: one variable should not
+  // mean both "whose socket is this" and "my parent is the broker".
+  const env: NodeJS.ProcessEnv = { ...base, CLAUDE_CONFIG_DIR: store.configDir, COSYNCING_SPAWNED: '1' };
   if (store.isDefault) {
     delete env.ANTHROPIC_API_KEY;
     delete env.ANTHROPIC_AUTH_TOKEN;
@@ -1196,8 +1238,111 @@ export function claudeHooksInstalled(settingsPath?: string): boolean {
 export class ClaudeAdapter implements AgentBackend {
   readonly id = 'claude';
   readonly displayName = 'Claude Code';
-  readonly capabilities = CAPS;
   readonly transcriptExportFormat = 'json' as const;
+  /** The broker's mod registry, or nothing: the one condition under which a row may ever read
+   *  `live`, and so the one the advertised capabilities are computed from. */
+  private readonly options: ClaudeAdapterOptions;
+  private readonly liveCapabilities: AgentCapabilities;
+
+  constructor(options: ClaudeAdapterOptions = {}) {
+    this.options = options;
+    this.liveCapabilities = claudeCapabilities(CAPS, true);
+  }
+
+  /**
+   * `live` is advertised while a mod bridge is wired AND its socket is being served, read each time.
+   *
+   * The adapter is built before the broker binds the socket, and a bind can fail (a path the client
+   * could not dial, a directory it may not write). Deciding at construction advertised a `live` attach
+   * that no terminal could ever reach. A bridge that cannot say whether it is serving is taken at its
+   * word; one whose answer throws is not serving.
+   */
+  get capabilities(): AgentCapabilities {
+    if (this.options.lookupModRegistration) return this.liveCapabilities;
+    const bridge = this.options.modBridge;
+    if (!bridge) return CAPS;
+    let serving: boolean;
+    try {
+      serving = bridge.serving?.() ?? true;
+    } catch {
+      serving = false;
+    }
+    return serving ? this.liveCapabilities : CAPS;
+  }
+
+  /**
+   * The mod's verdict for one Claude session, by its native session id (the UUID Claude names a
+   * session by, not the adapter's row id, which is a transcript path).
+   *
+   * Undefined means "no bridge wired", which is different from "no registration": with no bridge
+   * the adapter must not even look, and a lookup that throws is treated as absent rather than as
+   * live. A dead registry never costs a session its Observe row.
+   */
+  private modStatus(uuid: string): ClaudeModStatus | undefined {
+    try {
+      if (this.options.lookupModRegistration) return this.options.lookupModRegistration(uuid);
+      return this.options.modBridge?.status(uuid);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The control of a session whose mod is live: the one reading under which the app may write to
+   *  the terminal's own session without taking it over. Shared by discovery, by the live attach,
+   *  and by a re-promotion after a mod came back, so the three cannot drift. */
+  private modSyncedControl(): SessionControlState {
+    return claudeModControl(
+      this.options.modBridge?.send ? {} : { blockedReason: 'the broker cannot reach its mod socket' },
+    );
+  }
+
+  /**
+   * Tell every attached session what its registration now says about itself.
+   *
+   * Called from the discovery sweep, which is the one thing that runs on the roster's own clock
+   * and already reads the registry for every row. A mod that dies mid-attach writes no transcript
+   * line, so without this the attached client keeps the control its connection was BORN with: a
+   * row reading "Synced with your terminal" over a terminal that had shut down, a composer whose
+   * prompts were refused, and a Take over refused because a mod was said to be sharing the
+   * session. The spec promises Observe within about a minute, and this is the step that keeps it.
+   *
+   * Driven off `modStatus`, not off `modBridge.status`, so a registry that throws reads as absent
+   * here exactly as it does for the rows -- and the connection's own answer is the one that is
+   * asked, which is what the next frame it publishes will say.
+   *
+   * `readings` are the ones the sweep already took for its rows. A session read for its row is not
+   * read again: each reading can sweep holds, probe the pid and retire the registration, so a second
+   * one in the same tick could restate the connection against something its row never saw.
+   */
+  private restateModAttachments(readings?: ReadonlyMap<string, ClaudeModStatus | undefined>): void {
+    if (this.modSessions.size === 0) return;
+    for (const [uuid, conn] of this.modSessions) {
+      const status = readings?.has(uuid) ? readings.get(uuid) : this.modStatus(uuid);
+      conn.noteModLive(status?.live === true);
+    }
+  }
+
+  /** Whether this session's mod may carry a command right now. Steering waits behind its own flag
+   *  until the app renders the transcript row a mid-turn append leaves. */
+  private modSteeringEnabled(uuid: string): boolean {
+    try {
+      return this.options.modBridge?.steeringEnabled?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Ask the mod to do something. The refusal is spoken to the user, not thrown at the broker. */
+  private modSend(uuid: string, command: ClaudeModCommand): { ok: boolean; code?: string } {
+    const bridge = this.options.modBridge;
+    if (!bridge?.send) return { ok: false, code: 'no_bridge' };
+    try {
+      return bridge.send(uuid, command);
+    } catch (error) {
+      return { ok: false, code: String((error as Error)?.message ?? error).slice(0, 60) };
+    }
+  }
+
   /** uuid → create-time state for DEFERRED sessions (createSession writes no transcript; the first
    *  drive turn materializes it). attach() normally reads cwd/model from the transcript — which does
    *  not exist yet here. Keep the exact optional selection until that first launch so scheduled
@@ -1209,6 +1354,18 @@ export class ClaudeAdapter implements AgentBackend {
    *  client's roster row reports `driving` — not only the client holding the connection. In-memory
    *  is sufficient: a broker restart drops every live connection with it. */
   private readonly drivenSessions = new Map<string, ClaudeResumeConnection>();
+  /**
+   * Live mod attaches, by Claude's own session id.
+   *
+   * The drive registry above exists so every client's row shows a drive; this exists because a
+   * true-sync attach has the opposite failure mode. A terminal that closes, or whose poll chain
+   * stops, writes NO transcript line, so neither the transcript tail nor `watchSessionInfo` ever
+   * fires for it, and the connection kept publishing the control it was built with: a row reading
+   * "Synced with your terminal" above a terminal that had shut down. Discovery already re-reads
+   * the registration for every row it publishes, so it is the tick; this map is what lets that
+   * reading reach the connection that is still attached.
+   */
+  private readonly modSessions = new Map<string, ClaudeModConnection>();
 
   async isAvailable(): Promise<boolean> {
     return claudeStores().some((s) => existsSync(s.projectsRoot)) || resolveBin('claude') !== null;
@@ -1400,6 +1557,10 @@ export class ClaudeAdapter implements AgentBackend {
     // in a bounded pool and retain their input order.
     const liveByStore = await readClaudeStoreStatuses(stores, liveStatusByStore);
     throwIfClaudeDiscoveryAborted(options?.signal);
+    // One reading of the mod per row per tick, shared by the row and by the restatement of attached
+    // sessions below. A reading is not free -- it can sweep holds, probe the pid and retire the row --
+    // so two readings of one row could describe two different terminals.
+    const modReadings = new Map<string, ClaudeModStatus | undefined>();
     for (let storeIndex = 0; storeIndex < stores.length; storeIndex += 1) {
       const store = stores[storeIndex]!;
       throwIfClaudeDiscoveryAborted(options?.signal);
@@ -1490,6 +1651,8 @@ export class ClaudeAdapter implements AgentBackend {
           // exactly the row it had before this feature.
           const parentLineageId = nativeId ?? claudeSessionNativeId(uuid);
           const publishedNativeId = subagents.length ? parentLineageId : nativeId;
+          const mod = this.modStatus(uuid);
+          modReadings.set(uuid, mod);
           out.push({
             id: rowId,
             lineageId: firstUserUuid,
@@ -1509,9 +1672,17 @@ export class ClaudeAdapter implements AgentBackend {
             status,
             // Drivable now: resume is available, but observe is the SAFE default shown in the roster
             // (opening never spends quota); the UI's "Drive" affordance reattaches with ?mode=resume.
-            attachMode: 'observe',
+            // The one exception is a session whose MOD is live right now: its terminal is already
+            // sharing the session with us, so the row reads `live` and the app sends to the
+            // terminal instead of forking the transcript with a second Claude.
+            attachMode: claudeModRowPatch(mod)?.attachMode ?? 'observe',
             // Explicit Observe+Drive / True-Sync state (the app renders from this, never from attachMode).
             control: (() => {
+              // A live mod outranks every other reading of this row: it is the only case where the
+              // app may write to the terminal's own session without taking it over.
+              if (mod?.live) {
+                return this.modSyncedControl();
+              }
               const eligible = eligibleFor(cwd); // first-party (incl. project-settings) check, cwd-cached
               // channel sync archived → a live socket no longer flips terminalSync.active (syncedSet dormant).
               // driving comes from the ADAPTER's registry (issue 15b) so every client's roster row shows
@@ -1559,6 +1730,9 @@ export class ClaudeAdapter implements AgentBackend {
         }
       }
     }
+    // Every attached true-sync session is restated against what its registration says NOW, which
+    // is how a terminal that closed mid-attach stops reading as Synced. See `restateModAttachments`.
+    this.restateModAttachments(modReadings);
     return out;
   }
 
@@ -1603,6 +1777,10 @@ export class ClaudeAdapter implements AgentBackend {
     // session to 'live'/synced. Claude attaches as resume (explicit take-over) or read-only observe.
     // `eligible` still tunes the control reason text (first-party check incl. this session's project settings).
     const eligible = eligibleForChannels(store, cwd);
+    // At most one reading of the mod for this attach, taken when first needed: the control below and
+    // the mode checks after it have to agree, and a reading can sweep holds and retire the row.
+    let modReading: { status: ClaudeModStatus | undefined } | undefined;
+    const modNow = (): ClaudeModStatus | undefined => (modReading ??= { status: this.modStatus(uuid) }).status;
     // The child's own meta sidecar, read once so the attached row carries the SAME title the roster shows.
     const subagentMeta = subagent
       ? parseLineOrNull(readTextSafe(join(dirname(path), subagent.agent + '.meta.json')))
@@ -1654,11 +1832,71 @@ export class ClaudeAdapter implements AgentBackend {
       })(),
       // Explicit control state (never inferred from attachMode by the UI). Resume = driving; a
       // remote-controlled/cwd-gone session is unavailable for Drive. Channel sync is archived.
+      // A live mod outranks all of it: the terminal is already sharing this session with us.
       control: subagent
         ? claudeSubagentControl()
-        : claudeControl({ store, uuid, cwd, bridged, driving: mode === 'resume', channelsEligible: eligible }),
+        : modNow()?.live
+          ? claudeModControl(
+              this.options.modBridge?.send ? {} : { blockedReason: 'the broker cannot reach its mod socket' },
+            )
+          : claudeControl({ store, uuid, cwd, bridged, driving: mode === 'resume', channelsEligible: eligible }),
     };
+    // A live attach is the mod's own path: the app writes to the terminal's session through the
+    // mod rather than forking the transcript with a Claude of its own. It is honored only while
+    // the registration is fresh — with no mod there is nothing to write through, and pretending
+    // otherwise would take prompts into a queue nothing drains.
+    if (mode === 'live') {
+      if (subagent) throw new Error(`Claude subagent transcripts are Observe-only. ${CLAUDE_SUBAGENT_OWNED_REASON}`);
+      if (!modNow()?.live) {
+        info.attachMode = 'observe';
+        info.control = claudeControl({ store, uuid, cwd, bridged, driving: false, channelsEligible: eligible });
+        const staleRow = (await liveStatusByStore(store)).get(uuid);
+        return new ClaudeObserveConnection(path, info, staleRow?.waitingFor, this.observeModTurn(uuid));
+      }
+      // The info above was built for the mode the caller asked for, and every other path keeps it;
+      // this one has to say what it actually is, or the row the client gets reads observe while
+      // the connection behind it writes, and the app gate closes on the frame it was handed.
+      info.attachMode = 'live';
+      const modControl = () => this.modSyncedControl();
+      const conn = new ClaudeModConnection({
+        info,
+        transcriptPath: path,
+        nativeSessionId: uuid,
+        send: (command) => this.modSend(uuid, command),
+        steeringEnabled: () => this.modSteeringEnabled(uuid),
+        ...(this.options.modBridge?.turnRunning
+          ? { turnRunning: () => this.options.modBridge!.turnRunning!(uuid) }
+          : {}),
+        ...(this.options.modBridge?.cardNote
+          ? { cardNote: (requestId: string) => this.options.modBridge!.cardNote!(uuid, requestId) }
+          : {}),
+        ...(this.options.modBridge?.turnEndedAt
+          ? { turnEndedAt: () => this.options.modBridge!.turnEndedAt!(uuid) }
+          : {}),
+        // Both control shapes are the adapter's readings, handed over as closures so the row that
+        // comes back after a mod returns is the same reading that made the attach legitimate.
+        syncedControl: modControl,
+        lostControl: () => claudeModLostControl({
+          reason: 'The cosyncing mod in this session\u2019s terminal stopped reporting, so the '
+            + 'transcript is mirrored read-only. Open Claude in that terminal to resume the sync, '
+            + 'or take over to drive it from here.',
+          resumeCommand: claudeResumeTerminalCommand(uuid, cwd),
+        }),
+        onClosed: () => {
+          if (this.modSessions.get(uuid) === conn) this.modSessions.delete(uuid);
+        },
+      });
+      this.modSessions.set(uuid, conn);
+      return conn;
+    }
     if (mode === 'resume') {
+      // A live mod registration IS an ownership fact: the terminal is writing this session and is
+      // already talking to us. Starting `claude -p --resume` over it would be a second writer on
+      // one transcript, which is the one collision this adapter has never allowed. The refusal
+      // rides the existing DRIVE_OWNERSHIP_CONFLICT path, so the app needs no new copy.
+      if (modNow()?.live) {
+        throw new OwnershipConflictError(CLAUDE_MOD_LIVE_REFUSAL, CLAUDE_MOD_LIVE_CONFLICT);
+      }
       // Single-writer rule (issue 15a — demote, never fork): a live terminal owner MID-TURN makes the
       // takeover a guaranteed two-writer collision, so refuse it instead of forking. An idle terminal
       // is joined in place, and a later terminal write is caught by the connection's foreign-write
@@ -1709,7 +1947,23 @@ export class ClaudeAdapter implements AgentBackend {
     if (st) {
       info.status = await claudeSessionStatus(path, liveRow?.status, Date.now());
     }
-    return new ClaudeObserveConnection(path, info, liveRow?.waitingFor);
+    return new ClaudeObserveConnection(path, info, liveRow?.waitingFor, this.observeModTurn(uuid));
+  }
+
+  /**
+   * What an Observe attach of a mod-registered session needs from the mod: whether a turn is running
+   * and when the last one ended. Without it, an attach made after a Stop from the app replayed the
+   * stopped turn as running. A session no mod registered reads no end, and its replay is unchanged.
+   */
+  private observeModTurn(uuid: string): { modTurn?: { turnRunning: () => boolean; turnEndedAt: () => number | undefined } } {
+    const bridge = this.options.modBridge;
+    if (!bridge?.turnRunning || !bridge.turnEndedAt) return {};
+    return {
+      modTurn: {
+        turnRunning: () => bridge.turnRunning!(uuid),
+        turnEndedAt: () => bridge.turnEndedAt!(uuid),
+      },
+    };
   }
 }
 
@@ -1740,6 +1994,9 @@ export class ClaudeObserveConnection implements SessionConnection {
   private readonly callMeta = new Map<string, ClaudeCall>();
   /** message.id values already emitted as token-count (usage repeats per line of a turn). */
   private readonly seenTokenIds = new Set<string>();
+  /** Unknown top-level types already reported by this connection, so one unseen type is one
+   *  attention event rather than one per line. */
+  private readonly unknownLineTypes = new Set<string>();
   /** Mid-run queued sends pending delivery (seeded from history, consumed by the tail) — lets the
    *  delivering user line reuse its enqueue bubble's key so the queued styling clears in place. */
   private readonly queuedSends = newClaudeQueuedSends();
@@ -1771,6 +2028,10 @@ export class ClaudeObserveConnection implements SessionConnection {
 
   /** Streaming decoder so a line flushed mid-multibyte char isn't corrupted across reads. */
   private readonly decoder = new TextDecoder();
+  /** The wait before a mod-reported turn end the transcript has not closed is settled here. */
+  private turnEndTimer?: ReturnType<typeof setTimeout>;
+  /** Runs this connection closed on the mod's word, so a history replay restates them closed too. */
+  private readonly settledRunKeys = new Set<string>();
 
   constructor(
     private readonly path: string,
@@ -1778,12 +2039,22 @@ export class ClaudeObserveConnection implements SessionConnection {
     /** If this session is currently blocked in its own terminal, the `agents --json` reason (e.g.
      *  'permission prompt') — surfaced on attach as a read-only notice (Issue G). */
     private readonly waitingFor?: string,
+    private readonly options: {
+      turnEndGraceMs?: number;
+      /**
+       * The mod's word on this session's turns, when a mod is registered for it. A Stop from the app
+       * writes no interruption row, so an attach made after the Stop replayed the stopped turn as
+       * running: it never saw the live end that `settledRunKeys` remembers.
+       */
+      modTurn?: { turnRunning: () => boolean; turnEndedAt: () => number | undefined };
+    } = {},
   ) {
     // No HISTORY read here — getHistory() does the single read and baselines the tail (see class doc). The
     // one exception is the session's CURRENT permission mode: doc-14 requires the permission level be VISIBLE
     // whenever the tool can report it, and the broker sends SessionInfo before getHistory runs, so it must be
-    // on `info` at construct time. It's a cheap tail scan of the tiny `permission-mode` sidecar lines, not the
-    // history slurp the class doc warns against. Read-only Observe shows it LOCKED; True-Sync composes this
+    // on `info` at construct time. It's a cheap tail scan for the mode readings (prompt rows and the
+    // `permission-mode` sidecar lines; see claudePermissionModeReading), not the history slurp the class doc
+    // warns against. Read-only Observe shows it LOCKED; True-Sync composes this
     // class and also shows it locked (no mid-session mode change — see ClaudeLiveConnection.listModes). It is
     // NEVER fed to a resume relaunch (ClaudeResumeConnection does not compose this class), so surfacing it
     // can't silently re-arm a permissive mode. Only set when the transcript actually records one (no invented
@@ -1910,9 +2181,17 @@ export class ClaudeObserveConnection implements SessionConnection {
       newClaudeQueuedSends(),
       this.contextWindow,
     );
+    // A run this connection already closed on the mod's word is still open in the file: an app Stop
+    // writes no interruption row. Replay says so again, so a resync draws what the live tail drew. So
+    // does a run the mod says ended, which an attach made after the end never saw close.
+    const openKey = this.runtime.openRunKey();
+    const settled = openKey && (this.settledRunKeys.has(openKey) || this.openRunEndedOnModWord())
+      ? this.runtime.cancelOpen()
+      : [];
     return [
       ...mapped,
       ...this.runtime.flush(),
+      ...settled,
       ...buildActivitySnapshot(claudeActivityDir(this.path), this.resolvedToolUseIds, Date.now(), this.parentActivity()).map((f) => f.msg),
     ];
   }
@@ -1961,6 +2240,7 @@ export class ClaudeObserveConnection implements SessionConnection {
       this.tailBuf = this.tailBuf.slice(nl + 1);
       const ln = parseLineOrNull(raw);
       if (!ln) continue;
+      this.noteSessionFacts(ln);
       accumulateCallMeta(ln, this.callMeta); // a tool_use precedes its result in append order
       collectParentActivity(ln, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity(), true); // completing/notified subagents flip cards
       // User echoes stay UNSTAMPED here: Claude Code writes the JSONL itself and gives an app send
@@ -1973,6 +2253,7 @@ export class ClaudeObserveConnection implements SessionConnection {
         this.queuedSends,
         this.blockOrdinals,
         this.contextWindow,
+        this.unknownLineTypes,
       );
       for (const m of mapped) this.emit(m);
       if (this.taskLedger) for (const m of this.taskLedger.feed(ln)) this.emit(m); // live TaskCreate/TaskUpdate → panel refresh
@@ -1988,6 +2269,138 @@ export class ClaudeObserveConnection implements SessionConnection {
     }
   }
 
+  /**
+   * Keep the mode and model chips on what the session is doing now.
+   *
+   * Attach reads both once, and the tail used to drop every later mode reading, so a mode changed
+   * in the terminal, or a plan turn answered by another model, left the app showing the values
+   * from attach time. The mode is read the way the hold gate reads it
+   * ({@link claudePermissionModeReading}): a prompt row's mode or a `permission-mode` row, and an
+   * approved plan clears it, because nothing records which mode the approval picked. Only the live
+   * tail does this: a history replay starts from the attach reading, which is already the latest. A
+   * sidechain row is a subagent's, and neither its mode nor its model is the session's.
+   */
+  private noteSessionFacts(ln: any): void {
+    const mode = claudePermissionModeReading(ln, (id) => this.callMeta.get(id)?.name === CLAUDE_PLAN_APPROVAL_TOOL);
+    if (mode === null) {
+      if (this.info.currentMode === undefined) return;
+      // No mode, rather than the plan mode the approval just ended: the hub drops the field and the
+      // row it sends again has none.
+      delete this.info.currentMode;
+      this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { currentMode: undefined } });
+      return;
+    }
+    if (mode !== undefined) {
+      if (mode === this.info.currentMode) return;
+      this.info.currentMode = mode;
+      this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { currentMode: mode } });
+      return;
+    }
+    if (ln.type !== 'assistant' || ln.isSidechain === true) return;
+    const model = ln.message?.model;
+    if (typeof model !== 'string' || !model || model === '<synthetic>' || model === this.info.currentModel?.modelID) return;
+    const previous = this.info.currentModel;
+    this.info.model = model;
+    this.info.currentModel = {
+      providerID: previous?.providerID ?? (storeForPath(this.path).isDefault ? 'anthropic' : 'wrapper'),
+      modelID: model,
+      ...labelOf(model),
+      // The effort carries over only where the new model takes it: Haiku takes none.
+      ...(previous?.reasoningEffort && modelSupportsEffort(model, previous.reasoningEffort) ? { reasoningEffort: previous.reasoningEffort } : {}),
+    };
+    this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { model, currentModel: this.info.currentModel } });
+  }
+
+  /**
+   * The cosyncing mod says the terminal's main turn has ended.
+   *
+   * The transcript is still the authority on a turn it closes, so the tail is drained first and a
+   * run it already closed is never touched. What it cannot close is a turn stopped through the mod:
+   * `$.turn.abort` writes no interruption row, unlike Escape, so the run stayed open and the session
+   * read as working until the next prompt fenced it. A turn this broker stopped (`aborted`) is closed
+   * at once. Any other end waits {@link CLAUDE_MOD_TURN_END_GRACE_MS} for the transcript's own
+   * closing row, and is closed only if the same run is still open after it.
+   *
+   * `endedAt` marks an end the mod remembered and said as it registered, after a broker restart: only
+   * a run that started before it is that turn's. A run started since is a turn whose start has not
+   * reached the broker yet, and is left running.
+   */
+  noteModTurnEnded(ended: { turnId?: string; aborted: boolean; endedAt?: number }): void {
+    if (!this.primed || !this.runtime) return; // nothing live was drawn, and replay asks the mod itself
+    if (this.historyFlight) {
+      // A replay is replacing the tracker; settle against the one it leaves behind.
+      void this.historyFlight.then(() => this.noteModTurnEnded(ended), () => undefined);
+      return;
+    }
+    this.drainTail();
+    const key = this.runtime.openRunKey();
+    if (!key) return;
+    if (ended.endedAt !== undefined) {
+      const startedAt = this.runtime.openRunStartedAt();
+      if (startedAt === undefined || startedAt >= ended.endedAt) return;
+    }
+    if (this.turnEndTimer) clearTimeout(this.turnEndTimer);
+    this.turnEndTimer = undefined;
+    if (ended.aborted) {
+      // A Stop reads idle at once. But the turn can end on its own just as the Stop is queued, and
+      // the mod then reports that end as the stopped one; the transcript's own close follows a moment
+      // later. So the run is drawn cancelled now and left open in the tracker for the grace: a close
+      // the transcript writes in that time is the run's summary, done and with its tokens, and only
+      // a run still open after it is closed cancelled.
+      this.markSettled(key);
+      for (const m of this.runtime.provisionalClose('cancelled', Date.now())) {
+        this.emit({ type: 'status', status: 'idle' });
+        this.emit(m);
+      }
+    }
+    const settleLater = (): void => {
+      if (this.historyFlight) {
+        void this.historyFlight.then(settleLater, () => undefined);
+        return;
+      }
+      this.drainTail();
+      this.settleOpenRun(key);
+    };
+    const timer = setTimeout(() => {
+      if (this.turnEndTimer === timer) this.turnEndTimer = undefined;
+      settleLater();
+    }, Math.max(0, this.options.turnEndGraceMs ?? CLAUDE_MOD_TURN_END_GRACE_MS));
+    (timer as { unref?: () => void }).unref?.();
+    this.turnEndTimer = timer;
+  }
+
+  /**
+   * Whether the mod says the open run is over: no turn is running, and its last turn end came after
+   * the run started. A run that started after that end is a turn whose start has not reached the
+   * broker yet, and stands.
+   */
+  private openRunEndedOnModWord(): boolean {
+    const mod = this.options.modTurn;
+    if (!mod || !this.runtime || mod.turnRunning()) return false;
+    const endedAt = mod.turnEndedAt();
+    const startedAt = this.runtime.openRunStartedAt();
+    return endedAt !== undefined && startedAt !== undefined && startedAt < endedAt;
+  }
+
+  /** Remember a run closed on the mod's word, so a replay of a file that leaves it open restates it. */
+  private markSettled(key: string): void {
+    this.settledRunKeys.add(key);
+    if (this.settledRunKeys.size > 64) {
+      const oldest = this.settledRunKeys.values().next().value;
+      if (oldest !== undefined) this.settledRunKeys.delete(oldest);
+    }
+  }
+
+  /** Close the open run as cancelled now, if it is still the run the mod's end was about. */
+  private settleOpenRun(key: string): void {
+    if (!this.runtime || this.runtime.openRunKey() !== key) return;
+    this.markSettled(key);
+    for (const m of this.runtime.finishLive('cancelled', Date.now())) {
+      if (m.type === 'run-summary') this.emit({ type: 'status', status: 'idle' });
+      this.emit(m);
+    }
+  }
+
   // Observe is read-only. Driving a turn needs resume — reattach with ?mode=resume ("Drive" in the app).
   async sendPrompt(): Promise<void> {
     throw new Error('This is a read-only view of the session. Tap “Drive” to take it over and send prompts.');
@@ -2000,6 +2413,8 @@ export class ClaudeObserveConnection implements SessionConnection {
 
   async close(): Promise<void> {
     this.historySource.close();
+    if (this.turnEndTimer) clearTimeout(this.turnEndTimer);
+    this.turnEndTimer = undefined;
     this.watcher?.close();
     this.watcher = undefined;
     this.activity?.close();
@@ -4201,6 +4616,39 @@ function feedClaudeCostState(
 }
 
 /**
+ * Top-level line types this adapter knows about, mapped or deliberately skipped.
+ *
+ * Measured by `scripts/adapters/audit-claude-jsonl-types.ts` over the real transcripts on this
+ * machine (576 files, builds 2.1.104 → 2.1.289) and re-read at each Claude upgrade. A type in
+ * this list is a decision; a type outside it is Claude having changed something we have not
+ * looked at yet, which is exactly what the `transcript.unknown-type` event is for.
+ *
+ * The skipped members are not dead weight. They are why an old transcript still replays: the
+ * titles, the mode rows and the sidecars are read at discovery or by the mode gate, and naming
+ * them here is what keeps "we skip it" different from "we never saw it".
+ */
+export const CLAUDE_KNOWN_LINE_TYPES: ReadonlySet<string> = new Set([
+  // Conversation.
+  'assistant', 'user', 'system', 'queue-operation',
+  // Read elsewhere in the adapter: titles at discovery, mode rows for the hold gate, cost for the
+  // context window, lineage for the resume path.
+  'ai-title', 'custom-title', 'agent-name', 'mode', 'permission-mode', 'last-prompt',
+  'bridge-session', 'file-history-snapshot', 'cost-state', 'pr-link', 'attachment',
+  // The rest of what the audit found on 2026-10-05. Every one of these was raising a
+  // "some session details are not shown" inbox item on every replay of an OLD transcript, which is
+  // the opposite of what that event is for: `atis-latch` alone sits in 137 of the 576 files scanned,
+  // so a month-old session the user reopens told them cosyncing had lost something. These are
+  // Claude's own sidecars and bookkeeping -- skipped, like the block above, and now named rather
+  // than surprising us. A type NOT in this list is still one genuinely new event.
+  'agent-setting', 'artifact-autoreact-ledger', 'artifact-comment-monitor', 'atis-latch',
+  'continued-in', 'file-history-delta', 'frame-link', 'relocated', 'worktree-state',
+  // Written only into Task subagent transcripts (`<uuid>/subagents/agent-*.jsonl`), which the first
+  // audit never read: a pointer from a forked subagent back to the parent context it was forked
+  // from. Bookkeeping, not conversation, so it is skipped like the sidecars above.
+  'fork-context-ref',
+]);
+
+/**
  * Map ONE parsed transcript line to canonical messages (0..n). `callMeta` resolves a tool-result's
  * toolName; `seenTokenIds` dedupes token-count to once per message.id (it is MUTATED here).
  * `queuedSends` (optional, MUTATED) links a mid-run enqueue to the user line that later delivers it.
@@ -4215,6 +4663,10 @@ export function mapLine(
   queuedSends?: ClaudeQueuedSends,
   blocks?: ClaudeBlockOrdinals,
   contextWindow?: ClaudeContextWindowState,
+  /** Types already reported by this mapping run (MUTATED). One report per unknown type per
+   *  session, so a transcript with 10,000 lines of a type we have never seen produces one
+   *  attention event and not 10,000. Omit it where the caller does not care. */
+  unknownTypes?: Set<string>,
 ): AgentMessage[] {
   if (!ln || typeof ln !== 'object') return [];
   const contextCorrection = feedClaudeCostState(contextWindow, ln);
@@ -4243,7 +4695,19 @@ export function mapLine(
       return [];
     }
     default:
-      return []; // sidecar/attachment/title types are not conversation
+      // Sidecar/attachment/title types are not conversation, and an unrecognized one is skipped
+      // for the same reason: a transcript that gains a record type must not start erroring.
+      // Skipping quietly is right for the transcript and wrong for the product — the symptom of
+      // a Claude build changing its own history is that the app shows less and says nothing. So
+      // the first occurrence per mapping run names the type, once, as an event the broker can
+      // turn into an attention event. It carries the type verbatim and nothing else.
+      if (unknownTypes && typeof ln.type === 'string' && ln.type && !CLAUDE_KNOWN_LINE_TYPES.has(ln.type)) {
+        if (!unknownTypes.has(ln.type)) {
+          unknownTypes.add(ln.type);
+          return [{ type: 'event', name: UNKNOWN_TRANSCRIPT_TYPE_EVENT, payload: { lineType: ln.type } }];
+        }
+      }
+      return [];
   }
 }
 
@@ -4520,6 +4984,34 @@ function mapAssistant(
   return out;
 }
 
+/**
+ * The mod's own name, as Claude stamps it onto the provenance of a row the mod inserted.
+ *
+ * Measured on 2.1.289 (probe `steer-rows.json`): a mid-turn `$.session.append` lands as a `user`
+ * line with `isMeta:true` and `origin:{kind:'plugin',name:'cosyncing-claude'}`. Provenance is the
+ * whole test — `isMeta` on its own means "the human did not type this", which is true of tool
+ * output, compaction summaries and injected reminders alike, and rendering those as steering
+ * would be a lie of the worst kind.
+ */
+export const CLAUDE_MOD_PLUGIN_NAME = 'cosyncing-claude';
+
+/** The text of a mod-inserted steering row, or undefined when this line is not one. */
+function claudeModSteeringText(ln: any): string | undefined {
+  if (ln?.isMeta !== true || ln?.type !== 'user') return undefined;
+  const origin = ln.origin;
+  if (!origin || typeof origin !== 'object') return undefined;
+  if (origin.kind !== 'plugin' || origin.name !== CLAUDE_MOD_PLUGIN_NAME) return undefined;
+  const content = ln.message?.content;
+  if (typeof content === 'string') return content.trim() ? content : undefined;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+    .map((b: any) => String(b.text))
+    .join('\n')
+    .trim();
+  return text || undefined;
+}
+
 function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: ClaudeQueuedSends): AgentMessage[] {
   const msg = ln.message;
   if (!msg) return [];
@@ -4533,6 +5025,21 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
   // prompt. Emit its human summary as a structured notice before the generic
   // wrapper suppression below so the client can segment and associate the run.
   if (claudeTaskNotificationLine(ln)) return [claudeTaskNotificationNotice(ln)];
+
+  // A row the MOD inserted, not the human: mid-turn steering. Its provenance is stamped by
+  // Claude, so this is a fact about the line rather than a guess from its shape. It is a named
+  // event rather than a `user-message` because an older client must not present it as a prompt
+  // the human typed and the agent never received; as an event it renders as an ordinary event
+  // there, and as a steering row wherever the app knows the name. Event names are free-form on
+  // the wire, so this moves no registry, no frame kind and no contract revision.
+  const steeringText = claudeModSteeringText(ln);
+  if (steeringText !== undefined) {
+    return [{
+      type: 'event',
+      name: STEERING_MESSAGE_EVENT,
+      payload: { text: steeringText, source: CLAUDE_MOD_PLUGIN_NAME, ...(uuid ? { key: uuid } : {}) },
+    }];
+  }
 
   if (typeof content === 'string') {
     if (ln.isMeta || !content.trim()) return [];
@@ -4598,8 +5105,16 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
       // but ONLY when the original call actually produced a card. A malformed/empty AskUserQuestion fell
       // back to a generic tool-call (see mapAssistant), so its result must stay a normal tool-result, not
       // an orphan question-resolved for a card that was never shown.
-      if (call?.name === 'AskUserQuestion' && askUserQuestionCard({ id: cid, input: call.input }, true)) out.push({ type: 'question-resolved', requestId: cid });
-      else out.push(makeToolResult(ln, b, callMeta));
+      const card = call?.name === 'AskUserQuestion' ? askUserQuestionCard({ id: cid, input: call.input }, true) : null;
+      if (card) {
+        // The answer rides on the resolution, so a settled card shows what was picked or typed,
+        // whichever seat gave it. Claude records it on the line (`toolUseResult.answers`), not in the
+        // block, so it is read only from a line that answers this one call.
+        const answers = b.is_error !== true && content.filter((x: any) => x?.type === 'tool_result').length === 1
+          ? claudeAnswerRows(card.questions, ln.toolUseResult?.answers)
+          : undefined;
+        out.push({ type: 'question-resolved', requestId: cid, ...(answers ? { answers } : {}) });
+      } else out.push(makeToolResult(ln, b, callMeta));
       sawToolResult = true;
     } else if (b?.type === 'image') {
       imageCount++; // keep the user-message chip count
@@ -5222,6 +5737,28 @@ export class ClaudeRuntimeTracker {
 
   flush(): AgentMessage[] {
     return [];
+  }
+
+  /** The key of the run the transcript has opened and not yet closed, if any. */
+  openRunKey(): string | undefined {
+    return this.current?.key;
+  }
+
+  /** When the open run started, if one is open and its start is known. */
+  openRunStartedAt(): number | undefined {
+    return this.current?.startedAt;
+  }
+
+  /** The open run's summary as if it closed now with `status`, leaving it open: what to draw while
+   *  the transcript may still close it with a summary of its own. Totals move only on a real close. */
+  provisionalClose(status: 'cancelled', completedAt: number): AgentMessage[] {
+    return this.current ? [this.summary(this.current, status, completedAt)] : [];
+  }
+
+  /** Close the open run as cancelled with no completion time: a restatement for a turn known to have
+   *  ended that the transcript never closed. Nothing is invented, so no runtime is counted. */
+  cancelOpen(): AgentMessage[] {
+    return this.current ? this.close('cancelled', undefined) : [];
   }
 
   /** Live (resume/Drive) turn boundaries from stream events, which carry no native timestamps → broker
@@ -8004,13 +8541,54 @@ function computePendingBackgroundSpawnMs(path: string): number | undefined {
   return newest;
 }
 
-/** The session's CURRENT permission mode: the most-recent `permission-mode` sidecar line's `permissionMode`
- *  (Claude writes one at launch and on every Shift+Tab mode change — verified shape `{type:'permission-mode',
- *  permissionMode:'auto'}`). Read from the TAIL like {@link readLatestModel} because the mode can change over
- *  a session's life and only the latest is current. The line is SKIPPED from the conversation mapping (sidecar
- *  app-state), but it is the authoritative source for the picker's current value. Returns undefined when no
- *  permission-mode line exists — then the UI shows NO mode value, never an invented default (doc-14:
- *  docs/architecture/client-ui.md "Do not invent values"). */
+/** The tool whose approval ends plan mode, and with it the last mode the transcript recorded. */
+export const CLAUDE_PLAN_APPROVAL_TOOL = 'ExitPlanMode';
+
+/**
+ * What one transcript row says about the session's permission mode.
+ *
+ * Claude records the mode in two places, and neither on every change. Every main-chain prompt row
+ * carries the mode it was sent in (`permissionMode` on the `user` row; a tool-result row never
+ * does), and a `{type:'permission-mode', permissionMode}` row appears in the title block Claude
+ * writes beside `last-prompt`, which is not written every turn and not on a Shift+Tab. Measured on
+ * this build's transcripts, every `permission-mode` row written after a prompt matched that prompt's
+ * mode, so the newest of the two, in file order, is the reading.
+ *
+ * One change writes neither: approving a plan. A successful main-chain `ExitPlanMode` result moves
+ * the session out of plan mode into whichever mode the approval picked, and nothing records which.
+ * From there until the next reading the mode is unknown (`null`), never the `plan` written before.
+ *
+ * Returns a mode, `null` for unknown, or `undefined` when the row says nothing. `isPlanApproval`
+ * names the `ExitPlanMode` calls the caller has seen; a sidechain row is a subagent's and says
+ * nothing about the session's mode.
+ */
+export function claudePermissionModeReading(ln: any, isPlanApproval: (toolUseId: string) => boolean): string | null | undefined {
+  if (ln?.type === 'permission-mode') {
+    return typeof ln.permissionMode === 'string' && ln.permissionMode ? ln.permissionMode : undefined;
+  }
+  if (ln?.type !== 'user' || ln.isSidechain === true) return undefined;
+  if (typeof ln.permissionMode === 'string' && ln.permissionMode) return ln.permissionMode;
+  const content = ln.message?.content;
+  if (!Array.isArray(content)) return undefined;
+  for (const b of content) {
+    if (b?.type === 'tool_result' && b.is_error !== true && typeof b.tool_use_id === 'string' && isPlanApproval(b.tool_use_id)) return null;
+  }
+  return undefined;
+}
+
+/**
+ * The session's CURRENT permission mode, from the transcript's tail: the newest reading
+ * {@link claudePermissionModeReading} finds. One reader for every use -- the hold gate, the hold
+ * card's mode label, the chip at attach -- so they cannot disagree. Read from the TAIL like
+ * {@link readLatestModel} because the mode changes over a session's life and only the latest is
+ * current.
+ *
+ * Undefined when nothing records a mode, and when a plan approval is newer than every recorded mode:
+ * the UI then shows NO mode, never an invented default (doc-14: docs/architecture/client-ui.md "Do
+ * not invent values"), and the hold gate reads it as unreadable and leaves the call to Claude's own
+ * dialog. A Shift+Tab with no prompt after it is not on disk yet, so it is not read until the next
+ * prompt carries it.
+ */
 export function readLatestPermissionMode(path: string): string | undefined {
   return cachedFileFact(path, 'permission-mode', () => computeLatestPermissionMode(path));
 }
@@ -8018,12 +8596,22 @@ function computeLatestPermissionMode(path: string): string | undefined {
   const st = statSafe(path);
   if (!st) return undefined;
   for (const win of [256 * 1024, 4 * 1024 * 1024]) {
-    let mode: string | undefined;
+    let reading: string | null | undefined;
+    const planCalls = new Set<string>();
     for (const seg of readTailLines(path, win)) {
       const o = parseLineOrNull(seg);
-      if (o?.type === 'permission-mode' && typeof o.permissionMode === 'string' && o.permissionMode) mode = o.permissionMode; // keep last → most recent
+      if (!o) continue;
+      if (o.type === 'assistant' && o.isSidechain !== true && Array.isArray(o.message?.content)) {
+        for (const b of o.message.content) {
+          if (b?.type === 'tool_use' && b.name === CLAUDE_PLAN_APPROVAL_TOOL && typeof b.id === 'string') planCalls.add(b.id);
+        }
+      }
+      const said = claudePermissionModeReading(o, (id) => planCalls.has(id));
+      if (said !== undefined) reading = said; // keep last → most recent
     }
-    if (mode) return mode;
+    // An approved plan newer than any mode is an answer too: unknown. A wider window would only
+    // find the older mode it replaced.
+    if (reading !== undefined) return reading ?? undefined;
     if (win >= st.size) break; // whole file already read; a bigger window cannot help
   }
   return undefined;

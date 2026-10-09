@@ -595,6 +595,20 @@ class SessionDetailState {
   /// arrived (see [TranscriptHistoryWindow.withdrawnRequestIds]).
   Set<String> get withdrawnRequestIds => _activeTranscript.withdrawnRequestIds;
 
+  /// Whose answer closed each settled request, by request id.
+  ///
+  /// Folded with the decisions and for the same reason: on a mod-synced row the
+  /// terminal is a seat the user can answer from, and "Resolved in another
+  /// client"
+  /// is not the truth about their own keyboard.
+  Map<String, ResolvedRequestAttribution> get resolvedRequestAttributions =>
+      _activeTranscript.resolvedRequestAttributions;
+
+  /// The answer each settled question closed with, by request id, where the
+  /// broker said (see [TranscriptHistoryWindow.resolvedQuestionAnswers]).
+  Map<String, List<List<String>>> get resolvedQuestionAnswers =>
+      _activeTranscript.resolvedQuestionAnswers;
+
   /// Explicit gap rows between [transcriptMessageSegments].
   List<TranscriptHistoryGapSegment> get transcriptHistoryGaps =>
       _activeTranscript.gaps;
@@ -958,6 +972,28 @@ final Expando<_TranscriptHistoryRunCache> _transcriptHistoryRunCache =
 final Expando<_ConversationTurnsByMode> _conversationTurnsByMessages =
     Expando<_ConversationTurnsByMode>('conversation turns by page messages');
 
+/// Whose answer closed a settled request, and why the broker let it go when
+/// nobody did.
+///
+/// Folded from the request's `*-resolved` frame rather than the request card:
+/// on a mod-synced session the card is drawn before anyone answers, and the
+/// request row is the one that stays on screen. Both parts are optional
+/// because an older broker says neither, and a resolution that named nobody
+/// and gave no reason renders exactly as it did before this existed.
+final class ResolvedRequestAttribution {
+  /// Attribution for one settled request, with either part absent when the
+  /// broker did not say it.
+  const ResolvedRequestAttribution({this.decider, this.releaseReason});
+
+  /// The seat that answered: the app, the terminal's own prompt, or nobody.
+  final PermissionDecidedBy? decider;
+
+  /// Why the broker released the call instead of answering it, where that was
+  /// the resolution. Kept beside the decider because a deadline has both —
+  /// nobody answered, and a reason the asking stopped.
+  final PermissionReleaseReason? releaseReason;
+}
+
 /// Test-only counter for proving live-message work is independent of loaded
 /// history depth.
 final class TranscriptHistoryWorkCounter {
@@ -999,6 +1035,8 @@ final class _TranscriptHistoryPageDerived {
     required this.canonicalMessages,
     required this.transcriptMessages,
     required this.resolvedRequestDecisions,
+    required this.resolvedRequestAttributions,
+    required this.resolvedQuestionAnswers,
     required this.terminalOutputMessages,
     required this.fileArtifactMessages,
     required this.fileArtifactDescriptors,
@@ -1036,6 +1074,8 @@ final class _TranscriptHistoryPageDerived {
       ),
     );
     final resolutions = <String, String?>{};
+    final attributions = <String, ResolvedRequestAttribution>{};
+    final questionAnswers = <String, List<List<String>>>{};
     for (final message in canonical) {
       if (message.type != AgentMessageType.permissionResolved &&
           message.type != AgentMessageType.questionResolved) {
@@ -1046,11 +1086,35 @@ final class _TranscriptHistoryPageDerived {
       resolutions[requestId] = message.raw['decision'] is String
           ? message.raw['decision'] as String
           : null;
+      final answers = message.questionResolvedAnswers;
+      if (answers != null) questionAnswers[requestId] = answers;
+      // Read from the typed accessors, not the raw map: an absent or
+      // unrecognised
+      // attribution is a thing the broker did not say, and only the decode can
+      // tell
+      // that apart from a value this client has not met.
+      final decider =
+          message.permissionDecidedBy ?? message.questionResolvedDecidedBy;
+      final reason =
+          message.permissionReleaseReason ??
+          message.questionResolvedReleaseReason;
+      if (decider == null && reason == null) continue;
+      attributions[requestId] = ResolvedRequestAttribution(
+        decider: decider,
+        releaseReason: reason,
+      );
     }
     return _TranscriptHistoryPageDerived(
       canonicalMessages: List<AgentMessage>.unmodifiable(canonical),
       transcriptMessages: transcript,
       resolvedRequestDecisions: Map<String, String?>.unmodifiable(resolutions),
+      resolvedRequestAttributions:
+          Map<String, ResolvedRequestAttribution>.unmodifiable(
+            attributions,
+          ),
+      resolvedQuestionAnswers: Map<String, List<List<String>>>.unmodifiable(
+        questionAnswers,
+      ),
       terminalOutputMessages: List<AgentMessage>.unmodifiable(
         canonical.where(
           (message) => message.type == AgentMessageType.terminalOutput,
@@ -1076,6 +1140,8 @@ final class _TranscriptHistoryPageDerived {
   final List<AgentMessage> canonicalMessages;
   final List<AgentMessage> transcriptMessages;
   final Map<String, String?> resolvedRequestDecisions;
+  final Map<String, ResolvedRequestAttribution> resolvedRequestAttributions;
+  final Map<String, List<List<String>>> resolvedQuestionAnswers;
   final List<AgentMessage> terminalOutputMessages;
   final List<AgentMessage> fileArtifactMessages;
   final List<SessionArtifactDescriptor> fileArtifactDescriptors;
@@ -1904,6 +1970,15 @@ String? stableTranscriptMessageKey(AgentMessage message) {
   final typeKey = nonEmpty(message.raw['type']) ?? message.type.wireValue;
   final rawKey = nonEmpty(message.raw['key']);
   if (rawKey != null) return '$typeKey:key:$rawKey';
+  // A steering event names its native row inside its payload (the wire's
+  // `SteeringMessagePayload.key`). Without reading it a steering row had no
+  // identity: a replay of it could not be told from a new one, and claimed a
+  // second pending send with the same words.
+  if (message.eventName == kSteeringMessageEvent) {
+    final payload = message.raw['payload'];
+    final steeringKey = payload is Map ? nonEmpty(payload['key']) : null;
+    if (steeringKey != null) return '$typeKey:steering:$steeringKey';
+  }
   final requestId = nonEmpty(message.raw['requestId']);
   if (requestId != null) {
     return '$typeKey:request:$requestId';
@@ -2364,6 +2439,25 @@ AgentMessage mergeStableTranscriptMessage(
   AgentMessage previous,
   AgentMessage incoming,
 ) {
+  // A question's answer, once known, stays known. Its card can close before
+  // the answer is read back (the terminal's own picker took the question), and
+  // the resolution that carries the answer can come first or second.
+  if (incoming.type == AgentMessageType.questionResolved &&
+      incoming.raw['answers'] == null &&
+      previous.type == AgentMessageType.questionResolved &&
+      previous.raw['answers'] != null) {
+    return AgentMessage(
+      type: incoming.type,
+      id: incoming.id ?? previous.id,
+      seq: incoming.seq ?? previous.seq,
+      parentId: incoming.parentId ?? previous.parentId,
+      timestamp: incoming.timestamp ?? previous.timestamp,
+      raw: <String, dynamic>{
+        ...incoming.raw,
+        'answers': previous.raw['answers'],
+      },
+    );
+  }
   // A stale page or native update can contain a reservation after completion.
   // Filling a slot is monotonic: a reservation never erases a completed result.
   if (incoming.type == AgentMessageType.toolResult &&

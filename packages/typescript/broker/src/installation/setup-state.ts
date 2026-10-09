@@ -108,6 +108,14 @@ export interface SetupState {
   /** Consent to route terminal `opencode` to the shared serve via the shell shim (R1 script + R2 rc blocks). */
   opencodeShimRequested?: boolean;
   /**
+   * Consent to the cosyncing Claude mod, which Claude installs through its own `claude plugin` commands.
+   *
+   * `false` is durable on purpose and means something stronger here than it does for the shim. The shim
+   * writes files cosyncing owns; this installs a mod into the user's own Claude, so a decline that repair
+   * or `cosy update` could walk past would put something back that the operator said no to by name.
+   */
+  claudeModRequested?: boolean;
+  /**
    * Wizard language, chosen in setup's first step. Kept as a plain string here so this module stays free of
    * the copy catalog; readers validate it and fall back to English, which is what an older or newer build
    * writing an unknown value degrades to.

@@ -178,11 +178,19 @@ function cancelled<T>(value: T | symbol): SetupPromptResult<T> {
   return isCancel(value) ? SETUP_PROMPT_CANCELLED : value as T;
 }
 
-export function createClackSetupPresenter(): SetupPresenter {
+export function createClackSetupPresenter(options: {
+  /**
+   * `--install-claude-mod` (true) or `--no-install-claude-mod` (false) on an interactive run. Set, it is the
+   * answer and the question is not asked; unset, the question is asked as usual.
+   */
+  installClaudeMod?: boolean;
+} = {}): SetupPresenter {
   // Set by the first prompt and read by every surface after it. Until the operator answers, the wizard has
   // nothing on screen to translate, which is why language selection has to come before the intro panels.
   let language: SetupLanguage = DEFAULT_SETUP_LANGUAGE;
   const text = (): SetupMessages => setupMessages(language);
+  // Set when the mod question is put on screen: the operator's answer to it is this run's answer.
+  let claudeModAsked = false;
   return {
     async chooseLanguage(inspection): Promise<SetupPromptResult<SetupLanguage>> {
       const inherited = setupLanguageFromEnv(process.env);
@@ -278,6 +286,36 @@ export function createClackSetupPresenter(): SetupPresenter {
         initialValue: inspection.setupState.opencodeShimRequested !== false,
       }));
     },
+    claudeModFlag(): boolean | undefined {
+      return options.installClaudeMod;
+    },
+    async confirmClaudeMod(inspection): Promise<SetupPromptResult<boolean>> {
+      // Never ask about a mod this Claude cannot run, but SAY why. The difference between "not offered"
+      // and "not installed" is the whole point of the line: an operator who was never asked still wants to
+      // know their 2.1.240 is the reason, and `claude update` is a fix they can take.
+      if (!inspection.claudeMod.support.supported) {
+        const reason = inspection.claudeMod.support.skipReason;
+        if (reason) {
+          log.info(text().claudeModSkipReason(
+            reason,
+            inspection.claudeMod.support.minimumVersion,
+            inspection.claudeMod.support.policyKeys,
+          ));
+        }
+        return false;
+      }
+      if (options.installClaudeMod !== undefined) return options.installClaudeMod;
+      claudeModAsked = true;
+      return cancelled(await confirm({
+        message: text().claudeModConfirm,
+        // Default yes, and a previous yes or no is the starting point rather than a verdict: the operator
+        // can change their mind at this prompt, and the answer they give is what gets persisted.
+        initialValue: inspection.setupState.claudeModRequested !== false,
+      }));
+    },
+    claudeModAnsweredThisRun(): boolean {
+      return claudeModAsked || options.installClaudeMod !== undefined;
+    },
     async chooseService(inspection): Promise<SetupPromptResult<SetupServiceChoice>> {
       const provider = inspection.durableServiceProvider;
       const value = await select<SetupServiceChoice>({
@@ -324,6 +362,9 @@ export function createClackSetupPresenter(): SetupPresenter {
         ? plan.mutationSteps.map((step, index) => `${index + 1}. ${text().planStep(step)}`).join('\n')
         : text().planEmpty;
       note(rows, text().planTitle);
+      if (plan.claudeModSkip) {
+        log.warn(text().claudeModOwnershipSkip(plan.claudeModSkip.status, plan.claudeModSkip.marketplaceDir));
+      }
     },
     async confirmApply(): Promise<SetupPromptResult<boolean>> {
       return cancelled(await confirm({ message: text().applyConfirm, initialValue: true }));
@@ -336,6 +377,8 @@ export function createClackSetupPresenter(): SetupPresenter {
       log.warn(text().recoveredNote);
     },
     complete(result): void {
+      // Same rule as Tokdash below: a mod step Claude did not finish is a warning on a completed install.
+      if (result.claudeMod) log.warn(text().claudeModOutcome(result.claudeMod));
       // Reported before the outro panel, and never as an error: a Tokdash that could not be set up leaves a
       // complete, working install, and saying so is the difference between a missing feature and a failure.
       const quota = quotaNotice(result, text());
@@ -356,6 +399,7 @@ export function createClackSetupPresenter(): SetupPresenter {
     },
     failed(result): void {
       log.error(resultSummary(result, text()));
+      if (result.claudeMod) log.warn(text().claudeModOutcome(result.claudeMod));
       // A failure the operator cannot act on is the failure they report back. Name the step, quote the real
       // underlying error, and point at the persisted record that outlives the rolled-back transaction. The
       // quoted detail and code stay verbatim — they are what a bug report has to carry.
@@ -390,6 +434,11 @@ export interface NonInteractiveSetupOptions {
   enableSystemdLingering: boolean;
   installAgentSkill: boolean;
   opencodeShim: OpencodeShimSignal;
+  /**
+   * `--install-claude-mod` (true), `--no-install-claude-mod` (false), or neither (absent). Absent is not a
+   * yes: it resolves to the choice an earlier run stored, so a standing decline survives a plain `--yes`.
+   */
+  installClaudeMod?: boolean;
   replaceLegacyPiBridge?: boolean;
   upgradeLegacyAgentSkill?: boolean;
   /** Caller-forced language. Unset means the persisted choice, then COSYNCING_SETUP_LANG, then English —
@@ -409,12 +458,46 @@ export function createNonInteractiveSetupPresenter(
   },
 ): SetupPresenter {
   const line = (value: string): void => writer.write(`${value}\n`);
+  // Tagged and English: the code is what a script branches on, and each `run=` line is one command to type.
+  const claudeModOutcomeLines = (result: Readonly<SetupCommandResult>): void => {
+    if (!result.claudeMod) return;
+    line(`[claude-mod] ${result.claudeMod.status} operation=${result.claudeMod.operation} code=${result.claudeMod.detailCode}`
+      + `${result.claudeMod.failureCode ? ` claude=${result.claudeMod.failureCode}` : ''}`);
+    for (const command of result.claudeMod.commands) line(`[claude-mod] run=${command}`);
+  };
   // Never default-true in the non-interactive path. 'unset' honors only a prior stored opt-in, so a
   // `setup --yes` upgrade of a pre-shim install does NOT silently enable the shim.
   const resolveOpencodeShim = (inspection: Readonly<SetupInspection>): boolean => {
     if (options.opencodeShim === 'off') return false;
     if (options.opencodeShim === 'on') return true;
     return inspection.setupState.opencodeShimRequested === true;
+  };
+  // Unlike the shim, the mod defaults YES here, because that is the `--yes` contract and the interactive
+  // wizard's own default: an operator who ran `setup --yes` on a machine with a
+  // current Claude gets the mod, and `--no-install-claude-mod` is the way to say no. A decline that has to
+  // survive a later `cosy update` is recorded in setup-state by the run that made it, and update reads
+  // stored choices rather than this function, so the yes default cannot walk past it.
+  //
+  // The host check comes first regardless. An unsupported host gets `false` and one printed reason, never
+  // a plan row that Claude would refuse at install time.
+  // Printed once per run, not once per call: `confirmClaudeMod` and `intendedChoices` both resolve the same
+  // question, and a duplicate tagged line would read as two different decisions.
+  let claudeModSkipAnnounced = false;
+  const resolveClaudeMod = (inspection: Readonly<SetupInspection>): boolean => {
+    if (!inspection.claudeMod.support.supported) {
+      const reason = inspection.claudeMod.support.skipReason;
+      if (reason && !claudeModSkipAnnounced) {
+        claudeModSkipAnnounced = true;
+        line(`[claude-mod] skipped:${reason} minimum:${inspection.claudeMod.support.minimumVersion}`
+          + `${inspection.claudeMod.support.policyKeys?.length ? ` keys:${inspection.claudeMod.support.policyKeys.join(',')}` : ''}`);
+      }
+      return false;
+    }
+    // `--yes` alone is not consent to a mod the operator declined. It means "accept the defaults",
+    // and the default for a question already answered is that answer, so an absent flag falls back
+    // to the stored choice. `--install-claude-mod` and `--no-install-claude-mod` are answers, and
+    // the answer given this run is the one this run acts on.
+    return options.installClaudeMod ?? inspection.setupState.claudeModRequested !== false;
   };
   // There is no prompt here, so language comes from what the operator already declared: an explicit flag,
   // then the choice a previous interactive run persisted, then the env override, then English.
@@ -462,15 +545,28 @@ export function createNonInteractiveSetupPresenter(
     async confirmOpencodeShim(inspection): Promise<boolean> {
       return resolveOpencodeShim(inspection);
     },
+    async confirmClaudeMod(inspection): Promise<boolean> {
+      return resolveClaudeMod(inspection);
+    },
+    // Only a flag is an answer: nothing is asked, and `--yes` alone resolves to the stored choice.
+    claudeModAnsweredThisRun(): boolean {
+      return options.installClaudeMod !== undefined;
+    },
     intendedChoices(inspection): {
       installAgentSkill: boolean;
       installOpencodeShim: boolean;
+      installClaudeMod: boolean;
+      claudeModAnsweredThisRun: boolean;
     } {
       // Same resolution the confirm* calls use, but non-prompting, so the committed-setup no-op short-circuit
       // sees the flag-resolved intent.
       return {
         installAgentSkill: options.installAgentSkill,
         installOpencodeShim: resolveOpencodeShim(inspection),
+        installClaudeMod: resolveClaudeMod(inspection),
+        // Only a flag is an answer here. `--yes` resolves to the stored choice, and a stored decline
+        // has to keep standing when nothing contradicted it.
+        claudeModAnsweredThisRun: options.installClaudeMod !== undefined,
       };
     },
     async chooseService(inspection): Promise<SetupServiceChoice> {
@@ -489,6 +585,9 @@ export function createNonInteractiveSetupPresenter(
     },
     showPlan(plan): void {
       for (const action of plan.mutationSummary) line(`[plan] ${action}`);
+      if (plan.claudeModSkip) {
+        line(`[claude-mod] skipped:${plan.claudeModSkip.status} dir=${plan.claudeModSkip.marketplaceDir}`);
+      }
     },
     async confirmApply(): Promise<boolean> { return true; },
     // Machine-readable and therefore English regardless of language, like every other tagged line here.
@@ -519,11 +618,13 @@ export function createNonInteractiveSetupPresenter(
             + `url=${result.tokdash.baseUrl} remedy=pipx upgrade tokdash`);
         }
       }
+      claudeModOutcomeLines(result);
       line(`[${result.status}] ${result.summary}`);
     },
     cancelled(stage): void { line(`[cancelled] ${stage}`); },
     failed(result: Readonly<SetupCommandResult>): void {
       line(`[${result.status}] ${result.summary}`);
+      claudeModOutcomeLines(result);
       if (!result.failure) return;
       line(`[failure] step=${result.failure.step} code=${result.failure.code} rollback=${result.failure.rollback}`);
       line(`[failure] reason=${result.failure.detail}`);

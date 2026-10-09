@@ -149,7 +149,47 @@ extension _SessionDetailStateHelpers on SessionDetailController {
     void Function(String echoKey, String clientMessageId) onLegacyDelivery,
   ) {
     var reconciled = current;
+    // A steering row has no clientKey to correlate by, only its words, so a
+    // replay of one the transcript already carries has to be recognised by its
+    // key, also after the holder it claimed has retired. This runs before the
+    // event is folded in, so `state` is still the transcript as it was.
+    Set<String>? priorKeys;
+    bool transcriptHolds(String key) => (priorKeys ??= {
+      for (final prior in state.canonicalTranscriptMessages)
+        if (stableTranscriptMessageKey(prior) case final String priorKey)
+          priorKey,
+    }).contains(key);
     for (final message in messages) {
+      // A steer has no user-message echo to converge into. The mod writes it
+      // into the session's own transcript as an isMeta row, and the adapter
+      // maps that row to a named steering event, so THIS is the delivery a
+      // steered bubble has to reconcile against. Without the branch the bubble
+      // sat pending for the rest of the session under a steering row that said
+      // the same thing, which reads as a send that never went out.
+      final steered = message.steeringMessage;
+      if (steered != null) {
+        final echoKey = stableTranscriptMessageKey(message);
+        // A replayed steering row must not claim a second bubble with the
+        // same words, which is a different send: neither while a holder has
+        // claimed it nor once the transcript carries it.
+        if (echoKey != null &&
+            (reconciled.any((p) => p.deliveredMessageKey == echoKey) ||
+                transcriptHolds(echoKey))) {
+          continue;
+        }
+        final index = reconciled.indexWhere(
+          (prompt) => !prompt.isDelivered && prompt.text == steered.text,
+        );
+        if (index < 0) continue;
+        reconciled = [
+          for (var i = 0; i < reconciled.length; i++)
+            if (i != index)
+              reconciled[i]
+            else if (echoKey != null)
+              reconciled[i].deliveredBy(echoKey),
+        ];
+        continue;
+      }
       if (message.type != AgentMessageType.userMessage) continue;
       final echoKey = stableTranscriptMessageKey(message);
       // A re-emit of an echo some holder already claimed (streamed update,

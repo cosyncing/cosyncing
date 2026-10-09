@@ -458,6 +458,96 @@ void main() {
       );
     });
 
+    // A steer gets no user-message echo. The mod writes it into the session's
+    // own transcript as an isMeta row, and the adapter maps that row to a named
+    // steering event, so that row is the only delivery a steered bubble will
+    // ever see. Reconciling against user messages alone left the app showing
+    // "sending" under a transcript row carrying the same words, for the rest of
+    // the session -- which reads as a message the broker swallowed.
+    test('a steering row converges the pending bubble it stands for', () async {
+      final controller = await attach();
+      await seedEarlierTurn();
+      await controller.sendPrompt('use the staging database');
+
+      // Somebody else's steering, same session: not this bubble's words, so it
+      // stands.
+      emitMessage(const {
+        'type': 'event',
+        'name': 'steering.message',
+        'payload': {'text': 'a different steer', 'source': 'cosyncing-claude'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(read().optimisticPrompts.single.isDelivered, isFalse);
+
+      emitMessage(const {
+        'type': 'event',
+        'name': 'steering.message',
+        'payload': {
+          'text': 'use the staging database',
+          'source': 'cosyncing-claude',
+          'key': 'native-row-1',
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+      // The bubble is delivered, not pending forever: the authoritative row
+      // carries these words now. A keyed steering row holds the bubble's place
+      // the way a keyed echo does, and is drawn once, in that place.
+      expect(read().optimisticPrompts.where((p) => !p.isDelivered), isEmpty);
+      final steeringRows = [
+        for (final m in read().transcriptMessageEvents)
+          if (m.steeringMessage?.text == 'use the staging database') m,
+      ];
+      expect(steeringRows, hasLength(1));
+    });
+
+    // A replayed frame carries a steering row the app has already reconciled.
+    // Two steers with the same words are two sends, so the replay must not
+    // claim the second, still-pending bubble on the strength of its text.
+    test('a replayed steering row claims nothing a second time', () async {
+      final controller = await attach();
+      await seedEarlierTurn();
+      await controller.sendPrompt('same steer');
+      await controller.sendPrompt('same steer');
+      expect(read().optimisticPrompts, hasLength(2));
+
+      const first = {
+        'type': 'event',
+        'name': 'steering.message',
+        'payload': {
+          'text': 'same steer',
+          'source': 'cosyncing-claude',
+          'key': 'native-steer-1',
+        },
+      };
+      emitMessage(first);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        read().optimisticPrompts.where((p) => !p.isDelivered),
+        hasLength(1),
+      );
+
+      // The same row again, as a replay delivers it.
+      emitMessage(first);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        read().optimisticPrompts.where((p) => !p.isDelivered),
+        hasLength(1),
+        reason: 'the replay claimed the second send',
+      );
+
+      emitMessage(const {
+        'type': 'event',
+        'name': 'steering.message',
+        'payload': {
+          'text': 'same steer',
+          'source': 'cosyncing-claude',
+          'key': 'native-steer-2',
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(read().optimisticPrompts.where((p) => !p.isDelivered), isEmpty);
+    });
+
     test('two identical prompts keep distinct identities and converge '
         'one-to-one by clientMessageId', () async {
       final controller = await attach();

@@ -80,7 +80,12 @@ final class SessionQuestionState {
 
   /// Records live question authority or a settlement. Read-only copies carry
   /// content only; they must not change the authority learned from live events.
-  SessionQuestionState applyMessage(AgentMessage message) {
+  ///
+  /// One live copy is the exception, and only when it arrives [live]: the
+  /// broker restating a card it drew answerable as read-only and open in the
+  /// terminal. The question moved to the agent's own picker, and nothing this
+  /// app sends can answer it now. A history copy keeps the rule above.
+  SessionQuestionState applyMessage(AgentMessage message, {bool live = false}) {
     final id = message.raw['requestId'];
     if (id is! String || id.isEmpty) return this;
     if (message.type == AgentMessageType.questionResolved) {
@@ -89,6 +94,13 @@ final class SessionQuestionState {
         pending: {..._pending}..remove(id),
         resolved: {...resolvedRequestIds, id},
       );
+    }
+    if (live &&
+        message.type == AgentMessageType.questionRequest &&
+        message.requestIsReadOnly &&
+        message.questionRequestAnswerInTerminal &&
+        _pending.contains(id)) {
+      return _copyWith(pending: {..._pending}..remove(id));
     }
     if (message.type != AgentMessageType.questionRequest ||
         message.raw['blocking'] != false ||

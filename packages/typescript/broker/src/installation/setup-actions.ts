@@ -96,6 +96,30 @@ import {
   sameCanonicalPath,
 } from './pi-bridge-ownership.ts';
 
+import {
+  claudeModFailureRecord,
+  claudeModInstallCommands,
+  claudeModManualRemoveCommands,
+  claudeModPlanPrecondition,
+  claudeModReceiptFiles,
+  claudeModReceiptFor,
+  claudeModReceiptProves,
+  claudeModRemoveCommands,
+  defaultClaudeModCommandRunner,
+  inspectClaudeModMarketplace,
+  inspectClaudeModSettings,
+  removeClaudeModMarketplace,
+  restoreClaudeModMarketplace,
+  runClaudeModCommands,
+  snapshotClaudeModMarketplace,
+  writeClaudeModMarketplace,
+  writeClaudeModOutcome,
+  type ClaudeModCommandOutcome,
+  type ClaudeModCommandRunner,
+  type ClaudeModCopyInspection,
+  type ClaudeModOutcomeRecord,
+} from './claude-mod-ownership.ts';
+
 interface FileSnapshot {
   target: string;
   existed: boolean;
@@ -163,6 +187,43 @@ export interface SetupActionInputs {
   opencodeShimPort?: number;
   /** Managed serve host pinned into the rc block; resolved from OPENCODE_URL. Defaults to 127.0.0.1 when omitted. */
   opencodeShimHost?: string;
+  /**
+   * The Claude mod marketplace step, planned by `buildSetupPlan` from the ownership decision.
+   * Absent means this host is not offered the mod at all: no row, no CLI call, no receipt.
+   */
+  claudeMod?: {
+    intent: 'install' | 'remove';
+    /**
+     * True when an install is putting NEW bytes over a copy cosyncing already owns.
+     *
+     * Rollback needs the difference. Reversing a FIRST install means taking Claude's two entries back
+     * as well as the directory; reversing a REFRESH means only putting the previous bytes back,
+     * because the mod was in Claude before this run and a rollback that uninstalled it there would
+     * leave the operator with less than they had.
+     */
+    refreshing?: boolean;
+    marketplaceDir: string;
+    /** Claude's user settings file, read to confirm the two keys the install writes. */
+    settingsPath: string;
+    version: string;
+    claudeBin: string;
+    /** The environment Claude's CLI runs in: the diagnosis context's, so its `CLAUDE_CONFIG_DIR` is the one read. */
+    env?: Readonly<Record<string, string | undefined>>;
+    /** The socket path stamped into the installed `register.js`. Empty leaves the tracked line. */
+    socketPath?: string;
+    /**
+     * The receipt the ledger held when the plan was made. Its hash and file list are the ownership proof
+     * for overwriting or removing the copy, and a removal Claude refuses re-asserts it, because the commit
+     * would otherwise drop it along with the decline.
+     */
+    previousReceipt?: InstalledResourceRecord;
+    /** Locked-plan identity: the same decision the operator consented to must still hold. */
+    precondition?: string;
+    /** Test seam for Claude's CLI. The default spawns the resolved binary. */
+    run?: ClaudeModCommandRunner;
+    /** Where a step that did not finish reports its outcome, for the run's own summary. */
+    report?: (outcome: ClaudeModOutcomeRecord) => void;
+  };
   installMetadata: {
     installationId?: string;
     version: string;
@@ -1076,6 +1137,7 @@ export function createSetupActionCatalog(inputs: SetupActionInputs): {
     createOmpBridgeSetupAction(inputs),
     createAgentSkillSetupAction(inputs),
     createOpencodeShimSetupAction(inputs),
+    createClaudeModSetupAction(inputs),
   ];
   return { actions, commitAction: createInstallCommitAction(inputs) };
 }
@@ -1101,6 +1163,210 @@ export function setupActionContentHash(inputs: SetupActionInputs): string {
     opencodeShimStaleUpgrade: inputs.opencodeShimStaleUpgrade,
     opencodeShimPort: inputs.opencodeShimPort,
     opencodeShimHost: inputs.opencodeShimHost,
+    claudeMod: inputs.claudeMod
+      ? {
+          intent: inputs.claudeMod.intent,
+          refreshing: inputs.claudeMod.refreshing === true,
+          socketPath: inputs.claudeMod.socketPath ?? '',
+          marketplaceDir: inputs.claudeMod.marketplaceDir,
+          settingsPath: inputs.claudeMod.settingsPath,
+          version: inputs.claudeMod.version,
+          precondition: inputs.claudeMod.precondition,
+        }
+      : undefined,
     installMetadata: inputs.installMetadata,
   }));
+}
+
+/** Rollback record of the mod step: everything recovery needs, journaled before the directory is touched. */
+export const CLAUDE_MOD_ROLLBACK_KIND = 'claude-mod-dir-v1';
+
+interface ClaudeModRollbackData extends Record<string, unknown> {
+  dir: string;
+  /** Whether the directory existed before this run; a directory that did not is removed on rollback. */
+  existed: boolean;
+  /** The previous copy, inside the transaction directory, which the journal names. */
+  backupDir: string;
+  intent: 'install' | 'remove';
+  /** True when the mod was already in Claude before this run, so a rollback leaves Claude alone. */
+  refreshing: boolean;
+}
+
+/**
+ * Materialize the Claude mod's marketplace directory and reconcile Claude's view of it.
+ *
+ * The transaction owns the directory; Claude owns its own settings. That split decides the shape:
+ * the directory is snapshotted into the transaction directory before anything is touched, and the
+ * Claude half is reversed by running Claude's own uninstall and marketplace-remove. Re-editing
+ * `~/.claude/settings.json` by hand is the one way to break a plugin cosyncing did not install,
+ * so cosyncing never does it.
+ *
+ * The CLI steps run AFTER the directory is written, because a directory marketplace is registered
+ * by path and Claude validates that path when it is added.
+ *
+ * The mod is never the reason setup fails. When Claude refuses, times out, or answers with nothing
+ * parseable, the directory goes back to the snapshot, Claude's side is reversed only where this run
+ * created it, and the step reports an outcome instead of throwing. What remains on disk is exactly what
+ * the ledger then says, so the next setup or update retries from a state it can prove.
+ *
+ * The rollback record carries the direction, whether this was a refresh, and where the previous copy
+ * is. Recovery of an interrupted run reads those back rather than re-deciding from a disk the
+ * interrupted run had itself rewritten, so recovering a refresh restores the old copy and leaves
+ * Claude's entries alone, and recovering a first install takes both halves back.
+ */
+export function createClaudeModSetupAction(
+  inputs: Pick<SetupActionInputs, 'home' | 'claudeMod' | 'now'>,
+): SetupTransactionAction {
+  const plan = inputs.claudeMod;
+  if (!plan) {
+    return {
+      id: 'claude-mod.marketplace',
+      prepare: () => ({ kind: 'noop-v1', data: {} }),
+      apply: () => undefined,
+      verify: () => true,
+    };
+  }
+  const env = plan.env ?? {};
+  const run: ClaudeModCommandRunner = plan.run ?? defaultClaudeModCommandRunner(plan.claudeBin, env);
+  const socketPath = plan.socketPath ?? '';
+  const receiptFiles = claudeModReceiptFiles(plan.previousReceipt) ?? undefined;
+  const refreshing = plan.refreshing === true;
+  const stateOfDisk = (): ClaudeModDiskState => ({
+    copy: inspectClaudeModMarketplace(plan.marketplaceDir, plan.version, {
+      socketPath,
+      ...(receiptFiles ? { receiptFiles } : {}),
+    }),
+    settings: inspectClaudeModSettings(plan.settingsPath, plan.marketplaceDir),
+  });
+  const report = (record: ClaudeModOutcomeRecord | undefined): void => {
+    writeClaudeModOutcome(inputs.home, record);
+    if (record) plan.report?.(record);
+  };
+  // The previous copy, as this run's prepare snapshotted it.
+  let snapshot: { backupDir: string; existed: boolean } | undefined;
+  // Set when apply soft-failed, so verify accepts the restored state rather than the planned one.
+  let softFailed = false;
+
+  /** A Claude that would not take the mod: put everything back and say so. Never throws for Claude. */
+  const softFailInstall = async (failed: ClaudeModCommandOutcome | undefined): Promise<void> => {
+    softFailed = true;
+    if (snapshot) restoreClaudeModMarketplace(plan.marketplaceDir, snapshot.backupDir, snapshot.existed);
+    let record = claudeModFailureRecord({ operation: refreshing ? 'refresh' : 'install', failed, env, now: inputs.now });
+    if (!refreshing) {
+      // This run is what put the mod into Claude, so this run takes it back out. A refresh does not:
+      // the mod was in Claude before, and its entries still point at the copy just restored.
+      const reversed = await runClaudeModCommands(run, claudeModRemoveCommands(), { reversal: true });
+      if (!reversed.ok) {
+        record = { ...record, status: 'leftovers', commands: [...record.commands, ...claudeModManualRemoveCommands(env)] };
+      }
+    }
+    report(record);
+  };
+
+  return {
+    id: 'claude-mod.marketplace',
+    prepare: (context) => {
+      if (plan.precondition) {
+        const { copy, settings } = stateOfDisk();
+        if (claudeModPlanPrecondition(copy, settings) !== plan.precondition) {
+          throw new Error('claude-mod-precondition-changed');
+        }
+      }
+      const backupDir = join(context.transactionDirectory, 'claude-mod-marketplace');
+      const { existed } = snapshotClaudeModMarketplace(plan.marketplaceDir, backupDir);
+      snapshot = { backupDir, existed };
+      const data: ClaudeModRollbackData = {
+        dir: resolve(plan.marketplaceDir),
+        existed,
+        backupDir,
+        intent: plan.intent,
+        refreshing,
+      };
+      return { kind: CLAUDE_MOD_ROLLBACK_KIND, data };
+    },
+    apply: async () => {
+      softFailed = false;
+      const { copy, settings } = stateOfDisk();
+      if (plan.precondition
+          && claudeModPlanPrecondition(copy, settings) !== plan.precondition) {
+        throw new Error('claude-mod-precondition-changed');
+      }
+      if (plan.intent === 'remove') {
+        if (!(copy.status === 'missing'
+          || claudeModReceiptProves(plan.previousReceipt, plan.marketplaceDir, copy.actualSha256))) {
+          throw new Error(`claude-mod-marketplace-not-removable:${copy.status}`);
+        }
+        if (settings.status === 'foreign') {
+          // The name is not ours any more. Removing it would remove someone else's marketplace,
+          // so the receipt is dropped and the settings are left exactly as they are.
+          removeClaudeModMarketplace(plan.marketplaceDir);
+          report(undefined);
+          return;
+        }
+        const removed = await runClaudeModCommands(run, claudeModRemoveCommands(), { reversal: true });
+        if (!removed.ok) {
+          // Nothing of cosyncing's has been touched yet. Keep the directory AND the receipt, which the
+          // commit would otherwise drop with the decline, so the ledger still names the bytes on disk
+          // and the next run retries the removal.
+          softFailed = true;
+          report(claudeModFailureRecord({ operation: 'remove', failed: removed.failed, env, now: inputs.now }));
+          return plan.previousReceipt ? { resources: [plan.previousReceipt] } : undefined;
+        }
+        removeClaudeModMarketplace(plan.marketplaceDir);
+        report(undefined);
+        return;
+      }
+      const replaceable = copy.status === 'missing'
+        || copy.status === 'owned'
+        || (copy.status === 'drifted'
+          && claudeModReceiptProves(plan.previousReceipt, plan.marketplaceDir, copy.actualSha256));
+      if (!replaceable) throw new Error(`claude-mod-marketplace-not-replaceable:${copy.status}`);
+      const written = writeClaudeModMarketplace(plan.marketplaceDir, plan.version, socketPath);
+      const installed = await runClaudeModCommands(run, claudeModInstallCommands(plan.marketplaceDir));
+      if (!installed.ok) {
+        await softFailInstall(installed.failed);
+        return;
+      }
+      report(undefined);
+      return { resources: [claudeModReceiptFor(plan.marketplaceDir, written.sha256, written.files)] };
+    },
+    verify: async () => {
+      if (softFailed) return true;
+      const { copy, settings } = stateOfDisk();
+      if (plan.intent === 'install') {
+        return copy.status === 'owned' && settings.status === 'enabled';
+      }
+      return copy.status === 'missing'
+        && !['enabled', 'marketplace'].includes(settings.status);
+    },
+    rollback: async (_context, record) => {
+      if (record.kind !== CLAUDE_MOD_ROLLBACK_KIND) {
+        // A journal written before the mod step carried its own record: put the files back and stop.
+        rollbackSetupFiles(record);
+        return;
+      }
+      const data = record.data as Partial<ClaudeModRollbackData>;
+      if (typeof data.dir !== 'string' || typeof data.backupDir !== 'string' || typeof data.existed !== 'boolean') {
+        throw new Error('claude-mod-rollback-record-invalid');
+      }
+      restoreClaudeModMarketplace(data.dir, data.backupDir, data.existed);
+      if (data.intent === 'install' && data.refreshing !== true) {
+        // A first install created Claude's entries; taking the directory back without them leaves
+        // Claude pointing at nothing. A refresh did not create them, and taking them away would leave
+        // the operator with less than they had before the run.
+        const reversed = await runClaudeModCommands(run, claudeModRemoveCommands(), { reversal: true });
+        if (!reversed.ok) {
+          // The cosyncing side is already back. What Claude still lists is reported with the commands
+          // that remove it, rather than failing a rollback that has nothing more it can do.
+          report(claudeModFailureRecord({ operation: 'rollback', failed: reversed.failed, env, now: inputs.now }));
+        }
+      }
+    },
+  };
+}
+
+/** Disk copy plus settings, the two facts the mod's precondition is computed from. */
+interface ClaudeModDiskState {
+  copy: ClaudeModCopyInspection;
+  settings: ReturnType<typeof inspectClaudeModSettings>;
 }

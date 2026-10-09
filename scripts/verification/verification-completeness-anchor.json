@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "15d6f683f7fe84eaaca71f6983f26365f2a15657",
+  "acceptedBase": "dd761563ef3d85765068a0130fdeadd4d8842699",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",
@@ -34,6 +34,25 @@
     "broker.claude-driven-queue",
     "broker.claude-hooks",
     "broker.claude-hooks-surface",
+    "broker.claude-jsonl-type-audit",
+    "broker.claude-mod-framing",
+    "broker.claude-mod-gates",
+    "broker.claude-mod-hold-seam",
+    "broker.claude-mod-holds",
+    "broker.claude-mod-hub-seam",
+    "broker.claude-mod-inventory",
+    "broker.claude-mod-lifecycle-seam",
+    "broker.claude-mod-peer-creds",
+    "broker.claude-mod-real-smoke",
+    "broker.claude-mod-register-unit",
+    "broker.claude-mod-registry",
+    "broker.claude-mod-rows",
+    "broker.claude-mod-seam",
+    "broker.claude-mod-service",
+    "broker.claude-mod-setup",
+    "broker.claude-mod-smoke-harness",
+    "broker.claude-mod-socket",
+    "broker.claude-mod-takeover-exclusion",
     "broker.claude-recency",
     "broker.claude-roster-subagents",
     "broker.claude-runtime",
@@ -211,11 +230,15 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:4bb956dfeb09c164368662900bc1e789c14eec9b5390e305c1f58c2b4285436c"
+      "fingerprint": "sha256:ea636da4dfd6df9719c7bfca54e0f7d195f4ab9697d4fba9b4f12d3dc53a9d88"
     },
     {
       "id": "capabilities",
       "fingerprint": "sha256:1372befe7c341cd9a94cc640dc9d860cbf687bfa61eb7921cee91943f5deed3b"
+    },
+    {
+      "id": "claude-mod-smoke",
+      "fingerprint": "sha256:7231b05bfa16ec3641b4115ee31c603f821e5e647ce24fa24de1ca6e71f62caa"
     },
     {
       "id": "client",
@@ -494,6 +517,82 @@
     {
       "id": "claude-hooks-surface",
       "fingerprint": "sha256:4b17ed9f17b220690ca7078c58011c3f5d4034373641acffc8cc3ac7156f59c8"
+    },
+    {
+      "id": "claude-jsonl-type-audit",
+      "fingerprint": "sha256:00efb37308d41940aefb76f8a528f856d38ad9c5dd0c774492416c4536146a47"
+    },
+    {
+      "id": "claude-mod-framing",
+      "fingerprint": "sha256:898074ac9f7566db68154b527084bf016e037711a32ee1207c34424b2887599d"
+    },
+    {
+      "id": "claude-mod-gates",
+      "fingerprint": "sha256:b1bfde12f202023fe51761eea565d41e4f3299266a6e5b862efa1cc2f02f8eda"
+    },
+    {
+      "id": "claude-mod-hold-seam",
+      "fingerprint": "sha256:b09391f87ccded3dba8753d74f3fa2e3e22ca967d110f586aaa404c980d4d602"
+    },
+    {
+      "id": "claude-mod-holds",
+      "fingerprint": "sha256:3aa7e15aa08411a5d6fab1de94536316ef1f11a4dd3b093bf7e6cbccd0dd4138"
+    },
+    {
+      "id": "claude-mod-hub-seam",
+      "fingerprint": "sha256:2a24cc3aa975b03959ea3d74d8173f70a48fab001703ebe97d6075ea3fcd2611"
+    },
+    {
+      "id": "claude-mod-inventory-gate",
+      "fingerprint": "sha256:368c4ce239a5644975fcfa4bcf11d94c096802af64156c231f1b3ee38bfdfbeb"
+    },
+    {
+      "id": "claude-mod-lifecycle-seam",
+      "fingerprint": "sha256:fc8581fa1db1dfbe546658af366cae57b988d8b47ac48322a9907f82b8468541"
+    },
+    {
+      "id": "claude-mod-peer-creds",
+      "fingerprint": "sha256:a1dcb7e6f506222d6214d8ef12938980b24e0f608e3b0de80a5057adab451909"
+    },
+    {
+      "id": "claude-mod-register-unit",
+      "fingerprint": "sha256:6a9f98ce583661f30a802ab88b0879d2043719f59d7413f4fdb377cfa87ea0dd"
+    },
+    {
+      "id": "claude-mod-registry",
+      "fingerprint": "sha256:dc31f56678141458a18ae6499185d476ea3206e6cad6b417988dcba713f4c2f9"
+    },
+    {
+      "id": "claude-mod-rows",
+      "fingerprint": "sha256:46a29dff35cd18748b328c0dc533efaf3a400181e46eab8ea1ad1c8af206686f"
+    },
+    {
+      "id": "claude-mod-seam",
+      "fingerprint": "sha256:4b2cabddf3138f6757321d6c08bfd4f4f80c4c33ff17b99110b946c2dac9f435"
+    },
+    {
+      "id": "claude-mod-service",
+      "fingerprint": "sha256:58f0d2a07f94ee0e8c41dc6a8193b3941063303cb417f6b04f576743440ab353"
+    },
+    {
+      "id": "claude-mod-setup",
+      "fingerprint": "sha256:d2148c056cec7508cd8450c98785e66f4c66f6c7144a0543d717f3803e4694be"
+    },
+    {
+      "id": "claude-mod-smoke-selftest",
+      "fingerprint": "sha256:ebc1cd560f9b2bce2f9d725ce5f98ae3c9012c2ef4d0dcbb9822b7eaa53f77eb"
+    },
+    {
+      "id": "claude-mod-socket",
+      "fingerprint": "sha256:473d2f01209d992599714640e000ddcbb41409580249e997d21d4706cdb5027c"
+    },
+    {
+      "id": "claude-mod-static-inventory",
+      "fingerprint": "sha256:d444a02db047e3ccf00c6bf0bcdb978d6fb1a1572923c8f20d3c573274e18885"
+    },
+    {
+      "id": "claude-mod-takeover-exclusion",
+      "fingerprint": "sha256:0c5f5d2eae7df200b2ea05196ba8facb600f2c70a6d36b59b2c6aedb38d74ae4"
     },
     {
       "id": "claude-recency",
