@@ -13,9 +13,10 @@
  * Location: `${setupStateHome()}/schedules.json` — survives broker restarts and cache wipes; the
  * runner rearms from this file at startup and applies the missed-fire policy (D7).
  */
+import { atomicWriteOwnerOnly } from '../security/secure-files.ts';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
 import type {
   ScheduleCreate,
   ScheduleCron,
@@ -838,17 +839,12 @@ export class ScheduleStore {
       const drop = new Set(finished.slice(MAX_FINISHED).map((s) => s.id));
       this.state.schedules = this.state.schedules.filter((s) => !drop.has(s.id));
     }
-    const tmp = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      mkdirSync(dirname(this.file), { recursive: true });
-      // The file contains full prompt text. Keep it private on POSIX; rename preserves the mode.
-      writeFileSync(tmp, JSON.stringify(this.state, null, 2), { encoding: 'utf8', mode: 0o600 });
-      renameSync(tmp, this.file);
+      // Full prompt text is private on every host, including Windows.
+      atomicWriteOwnerOnly(this.file, JSON.stringify(this.state, null, 2));
     } catch (error) {
       reportPersistenceError(this.onPersistenceError, error);
       throw error;
-    } finally {
-      try { unlinkSync(tmp); } catch { /* renamed or never created */ }
     }
   }
 

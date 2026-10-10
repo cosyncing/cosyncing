@@ -1,6 +1,6 @@
 import { randomBytes, createHash, createPublicKey, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { PairingErrorCode } from '@cosyncing/protocol';
 import {
   createQrPairingPayload,
@@ -12,8 +12,23 @@ import {
   type QrBrokerDescriptor,
   type WrappedDataKey,
 } from '@cosyncing/crypto';
+import { atomicWriteOwnerOnly, ensureOwnerOnlyDirectory, readOwnerOnlyText, inspectOwnerOnlyFile, enforceOwnerOnlyFile, assertNoSymlinkComponents } from '../security/secure-files.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 import { normalizePairingBrokerUrl, PairingBrokerUrlError } from './pairing-url.ts';
+
+/** Owner-held legacy keys may have inherited permissions. Validate their contents before convergence. */
+function readLocalKeyStoreForPermissionConvergence(path: string): string {
+  const file = inspectOwnerOnlyFile(path);
+  if (file.status === 'ok') return readOwnerOnlyText(path);
+  if (file.status === 'unsafe' && (file.problem === 'unsafe-mode'
+      || (file.problem === 'unsafe-dacl' && [
+        'inherited-access', 'unexpected-principal', 'missing-principal', 'insufficient-access', 'unsafe-inheritance',
+      ].includes(file.daclProblem ?? '')))) {
+    assertNoSymlinkComponents(path);
+    return readFileSync(path, 'utf8');
+  }
+  throw new Error(`transport key store is unsafe (${file.daclProblem ?? file.problem ?? file.status}); run cosy doctor`);
+}
 
 export interface AcceptedTransportPeer {
   peerId: string;
@@ -140,7 +155,12 @@ export class TransportPairingRegistry {
     for (const [id, offer] of this.offers) {
       if (offer.expiresAt <= this.now()) this.offers.delete(id);
     }
-    const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker');
+    const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker', {
+      ensureDirectory: ensureOwnerOnlyDirectory,
+      read: readLocalKeyStoreForPermissionConvergence,
+      secureExisting: enforceOwnerOnlyFile,
+      write: atomicWriteOwnerOnly,
+    });
     const pairingId = this.uniquePairingId();
     const brokerPeerId = this.uniqueBrokerPeerId();
     const brokerPeerToken = randomBytes(24).toString('base64url');
@@ -243,7 +263,12 @@ export class TransportPairingRegistry {
       this.recordPairingAcceptFailure(pairingId);
       throw new PairingHttpError(409, 'PAIRING_ALREADY_ACCEPTED', 'peer identity collides with an existing endpoint');
     }
-    const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker');
+    const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker', {
+      ensureDirectory: ensureOwnerOnlyDirectory,
+      read: readLocalKeyStoreForPermissionConvergence,
+      secureExisting: enforceOwnerOnlyFile,
+      write: atomicWriteOwnerOnly,
+    });
     const dataKey = generateDataKey();
     const wrappedDataKey = wrapDataKeyForPeer(dataKey, exchangePublicKey);
     const previousPeer = this.peers.get(peerId);
@@ -415,11 +440,8 @@ export class TransportPairingRegistry {
   }
 
   private save(peers: ReadonlyMap<string, AcceptedTransportPeer> = this.peers): void {
-    mkdirSync(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp`;
-    // The store holds raw per-peer data keys — owner-only, matching cosyncing-keys.json.
-    writeFileSync(tmp, JSON.stringify({ version: 2, peers: [...peers.values()] } satisfies PairingStoreFile, null, 2) + '\n', { mode: 0o600 });
-    renameSync(tmp, this.path);
+    // The store holds raw per-peer data keys; POSIX modes alone do not protect them on Windows.
+    atomicWriteOwnerOnly(this.path, JSON.stringify({ version: 2, peers: [...peers.values()] } satisfies PairingStoreFile, null, 2) + '\n');
   }
 
   private now(): number {

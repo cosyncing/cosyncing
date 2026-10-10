@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 /** Deterministic lifecycle, repair, signed upgrade/rollback, and owned-uninstall acceptance. */
+import { runDurablePermissionChecks } from '../helpers/durable-permission-checks.ts';
 import type { AgentSetupDiagnosis, SetupCheck } from '@cosyncing/adapter-api';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
@@ -483,6 +484,7 @@ function installAgentSkills(m: Machine): ReturnType<typeof agentSkillTargets> {
 
 const cleanup: string[] = [];
 try {
+  await runDurablePermissionChecks(check);
   {
     const relocationRoot = mkdtempSync(join(tmpdir(), 'cosyncing-lifecycle-cache-'));
     cleanup.push(relocationRoot);

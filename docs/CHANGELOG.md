@@ -11,6 +11,21 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- On Windows, pairing a device keeps its durable files owner-only and no longer
+  leaves a file that blocks `cosy update`. `cosy repair` plans and fixes
+  permission-only drift; doctor and update name the file, the problem, and the
+  next command when they stop.
+- Windows hosts on 0.6.4 or earlier may need a one-time recovery before updating:
+  the installed broker blocks the update, and its `cosy repair` cannot fix
+  inherited permissions. Close the desktop client (including its icon in the
+  notification area) and rerun the one-line installer. If
+  `transport-peers.json` inherits full-control permissions only for your account,
+  SYSTEM, and Administrators, you can instead run
+  `icacls "%USERPROFILE%\.cosyncing\transport-peers.json" /inheritance:d` in
+  Command Prompt, then run `cosy update`.
+
 ## 0.6.4 — 2026-10-10
 
 ### Added

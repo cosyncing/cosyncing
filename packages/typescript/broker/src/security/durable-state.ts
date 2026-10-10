@@ -9,14 +9,17 @@ import { basename, dirname, join, relative } from 'node:path';
 import { artifactCacheRoot } from '../artifacts/artifact-store.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 import { acquireInstallationLock } from '../installation/installation-lock.ts';
-import { migrateBrokerConfigV1 } from '../runtime/configuration.ts';
-import { inspectBrokerInstance } from '../runtime/broker-instance.ts';
+import { normalizeCommittedInstallState } from '../installation/install-state.ts';
+import { migrateBrokerConfigV1, validateBrokerConfig } from '../runtime/configuration.ts';
+import { inspectBrokerInstance, parseBrokerInstanceText } from '../runtime/broker-instance.ts';
 import {
   assertNoSymlinkComponents,
   atomicWriteJsonOwnerOnly,
   atomicWriteOwnerOnly,
   ensureOwnerOnlyDirectory,
   inspectOwnerOnlyFile,
+  enforceOwnerOnlyFile,
+  type SecureFileInspection,
 } from './secure-files.ts';
 
 export interface DurableStateLayout {
@@ -66,6 +69,9 @@ export interface DurableStoreInspection {
   status: 'missing' | 'ok' | 'unsafe' | 'malformed' | 'migration-required' | 'unsupported-version';
   version?: number;
   detailCode: string;
+  permissionProblem?: NonNullable<SecureFileInspection['problem']> | NonNullable<SecureFileInspection['daclProblem']> | 'unreadable' | 'hard-link';
+  permissionRepairable?: boolean;
+  contentProblem?: string;
 }
 
 export interface DurableStatePermissionRepair {
@@ -164,22 +170,27 @@ export function inspectDurableSchemas(layout = durableStateLayout()): DurableSto
       if (inspection.status === 'migration-required') {
         return { id: spec.id, status: 'migration-required', version: 1, detailCode: inspection.detailCode };
       }
+      if (inspection.status === 'malformed') {
+        const content = inspectDurableSchemaContent(spec, join(layout.stateRoot, spec.relativePath));
+        if (content.status === 'unsupported-version') return content;
+      }
       return {
         id: spec.id,
         status: inspection.status === 'unsafe' ? 'unsafe' : 'malformed',
         detailCode: inspection.detailCode,
+        ...(inspection.status === 'unsafe' ? durablePermissionDetails(spec, join(layout.stateRoot, spec.relativePath)) : {}),
       };
     }
     const root = spec.root === 'state' ? layout.stateRoot : layout.cacheRoot;
     const path = join(root, spec.relativePath);
     const file = inspectOwnerOnlyFile(path);
     if (file.status === 'missing') return { id: spec.id, status: 'missing', detailCode: `${spec.id}-missing` };
-    if (file.status !== 'ok') return { id: spec.id, status: 'unsafe', detailCode: `${spec.id}-unsafe` };
+    if (file.status !== 'ok') return { id: spec.id, status: 'unsafe', detailCode: `${spec.id}-unsafe`, ...durablePermissionDetails(spec, path, file) };
     return inspectDurableSchemaContent(spec, path);
   });
 }
 
-function durableSchemaPath(spec: DurableSchemaSpec, layout: DurableStateLayout): string {
+export function durableSchemaPath(spec: DurableSchemaSpec, layout: DurableStateLayout): string {
   return join(spec.root === 'state' ? layout.stateRoot : layout.cacheRoot, spec.relativePath);
 }
 
@@ -235,23 +246,115 @@ function inspectDurableSchemaContent(spec: DurableSchemaSpec, path: string): Dur
  */
 export function inspectDurableStatePermissionRepair(
   repair: Readonly<DurableStatePermissionRepair>,
+  options: { currentVersionOnly?: boolean } = {},
 ): 'current' | 'tightenable' | 'blocked' {
   const spec = DURABLE_SCHEMA_REGISTRY.find((candidate) => candidate.id === repair.id);
-  if (!spec || !spec.sensitive) return 'blocked';
+  if (!spec || (!spec.sensitive && !options.currentVersionOnly)) return 'blocked';
   const file = inspectOwnerOnlyFile(repair.path);
+  if (file.status !== 'missing' && file.status !== 'unreadable' && file.problem !== 'symlink'
+      && lstatSync(repair.path).nlink !== 1) return 'blocked';
   if (file.status === 'ok') {
     if (spec.id === 'broker-instance') {
       return inspectBrokerInstance(dirname(repair.path)).status === 'ok' ? 'current' : 'blocked';
     }
     const inspection = inspectDurableSchemaContent(spec, repair.path);
-    return inspection.status === 'ok' || isRuntimeSecurityMigrationV1(inspection) ? 'current' : 'blocked';
+    return inspection.status === 'ok' || (!options.currentVersionOnly && isRuntimeSecurityMigrationV1(inspection)) ? 'current' : 'blocked';
   }
   if (file.status !== 'unsafe' || (file.problem !== 'unsafe-mode' && file.problem !== 'unsafe-dacl')) {
     return 'blocked';
   }
-  if (spec.id === 'broker-instance') return 'blocked';
+  // Fail closed on ACL faults outside the explicitly repairable permission-drift set.
+  if (file.problem === 'unsafe-dacl' && ![
+    'inherited-access', 'unexpected-principal', 'missing-principal', 'insufficient-access', 'unsafe-inheritance',
+  ].includes(file.daclProblem ?? '')) return 'blocked';
   const inspection = inspectDurableSchemaContent(spec, repair.path);
-  return inspection.status === 'ok' || isRuntimeSecurityMigrationV1(inspection) ? 'tightenable' : 'blocked';
+  if (options.currentVersionOnly && inspection.status !== 'ok') return 'blocked';
+  if (!options.currentVersionOnly && spec.id === 'broker-instance') return 'blocked';
+  try {
+    const text = readFileSync(repair.path, 'utf8');
+    const parsed = JSON.parse(text);
+    if (spec.id === 'broker-instance') parseBrokerInstanceText(text);
+    if (spec.id === 'config') validateBrokerConfig(parsed);
+    if (spec.id === 'install' && !normalizeCommittedInstallState(parsed)) return 'blocked';
+    const arrayField = ({ peers: 'peers', schedules: 'schedules', attention: 'events',
+      'wake-registrations': 'registrations', artifacts: 'records' } as Partial<Record<DurableSchemaSpec['id'], string>>)[spec.id];
+    if (arrayField && !Array.isArray(parsed[arrayField])) return 'blocked';
+  } catch { return 'blocked'; }
+  return inspection.status === 'ok' || (!options.currentVersionOnly && isRuntimeSecurityMigrationV1(inspection))
+    ? 'tightenable' : 'blocked';
+}
+
+function durablePermissionDetails(
+  spec: DurableSchemaSpec, path: string, file = inspectOwnerOnlyFile(path),
+): Pick<DurableStoreInspection, 'permissionProblem' | 'permissionRepairable' | 'contentProblem'> {
+  const permissionRepairable = inspectDurableStatePermissionRepair({ id: spec.id, path }, { currentVersionOnly: true }) === 'tightenable';
+  let contentProblem: string | undefined;
+  // Ownership and link proof always come before reading bytes through an unsafe descriptor.
+  if (file.status === 'unsafe' && (file.problem === 'unsafe-mode' || file.problem === 'unsafe-dacl')) {
+    const content = inspectDurableSchemaContent(spec, path);
+    if (content.status === 'unsupported-version') contentProblem = `unsupported schema version ${content.version}`;
+    else if (content.status === 'migration-required') contentProblem = `schema migration required (${content.detailCode})`;
+    else if (content.status !== 'ok') contentProblem = 'malformed JSON or schema content';
+    else if (!permissionRepairable && lstatSync(path).nlink === 1 && (file.problem === 'unsafe-mode' || [
+      'inherited-access', 'unexpected-principal', 'missing-principal', 'insufficient-access', 'unsafe-inheritance',
+    ].includes(file.daclProblem ?? ''))) contentProblem = 'invalid current-schema content';
+  }
+  return {
+    permissionProblem: file.status === 'unsafe' && (file.problem === 'unsafe-mode' || file.problem === 'unsafe-dacl')
+      && lstatSync(path).nlink !== 1 ? 'hard-link' : file.daclProblem ?? file.problem ?? 'unreadable',
+    permissionRepairable,
+    ...(contentProblem ? { contentProblem } : {}),
+  };
+}
+
+/** Local CLI wording shared by doctor, repair, and the update preflight. Never includes store contents. */
+export function durableStateProblemSummary(inspection: Readonly<DurableStoreInspection>): string {
+  const file = DURABLE_SCHEMA_REGISTRY.find((spec) => spec.id === inspection.id)!.relativePath;
+  const reasons: Record<string, string> = {
+    'inherited-access': 'has inherited Windows permissions instead of owner-only permissions',
+    'unexpected-principal': 'grants access to an unexpected Windows account',
+    'missing-principal': 'is missing a required owner-only Windows permission',
+    'insufficient-access': 'has insufficient Windows access rights for a required account',
+    'unsafe-inheritance': 'has unsafe Windows permission inheritance flags',
+    'deny-access': 'has a Windows deny-access rule',
+    'duplicate-principal': 'has duplicate Windows permission entries',
+    'wrong-owner': 'is owned by another account',
+    'hard-link': 'is hard-linked to another file',
+    symlink: 'contains a symbolic link or junction substitution',
+    'not-file': 'is not a regular file',
+    'unsafe-mode': 'has permissions that allow other accounts to access it',
+    'unsafe-dacl': 'has an unsafe Windows DACL',
+    unreadable: 'could not be inspected or read',
+  };
+  if (inspection.status === 'unsafe') {
+    const reason = reasons[inspection.permissionProblem ?? 'unreadable'] ?? inspection.permissionProblem;
+    const next = inspection.permissionRepairable
+      ? 'run `cosy repair`, then `cosy update`'
+      : inspection.permissionProblem === 'wrong-owner'
+        ? 'restore a backup owned by your account, then run `cosy doctor`'
+        : (inspection.permissionProblem === 'symlink' || inspection.permissionProblem === 'hard-link')
+          ? 'remove the link substitution and restore a regular file from a trusted backup, then run `cosy doctor`'
+          : 'check ownership, permissions and current-schema content with `cosy doctor`; restore a trusted compatible backup before retrying';
+    return `\`${file}\` ${reason}${inspection.contentProblem ? `; ${inspection.contentProblem}` : ''}; ${next}.`;
+  }
+  if (inspection.status === 'migration-required') return `\`${file}\` needs a schema migration (${inspection.detailCode}); run \`cosy repair\`, then \`cosy update\`.`;
+  if (inspection.status === 'unsupported-version') return `\`${file}\` has unsupported schema version ${inspection.version}; use a broker that supports that version or restore a compatible backup, then run \`cosy doctor\`.`;
+  return `\`${file}\` has malformed JSON or schema content (${inspection.detailCode}); restore a trusted compatible backup, then run \`cosy doctor\`.`;
+}
+
+/** Recheck owner, link, ACL classification and current-schema content immediately before tightening. */
+export function repairDurableStatePermissions(repair: Readonly<DurableStatePermissionRepair>): void {
+  const state = inspectDurableStatePermissionRepair(repair, { currentVersionOnly: true });
+  if (state === 'blocked') throw new Error(`permission-repair-precondition-changed:${repair.id}`);
+  if (state === 'tightenable') {
+    const before = lstatSync(repair.path);
+    const content = readFileSync(repair.path);
+    enforceOwnerOnlyFile(repair.path);
+    const after = lstatSync(repair.path);
+    if (before.dev !== after.dev || before.ino !== after.ino || after.nlink !== 1
+        || !readFileSync(repair.path).equals(content)) throw new Error(`permission-repair-target-changed:${repair.id}`);
+  }
+  if (inspectOwnerOnlyFile(repair.path).status !== 'ok') throw new Error(`permission-repair-failed:${repair.id}`);
 }
 
 /** Classify every durable doctor failure before setup is allowed to plan a commit. */

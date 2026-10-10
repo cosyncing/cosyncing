@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { atomicWriteOwnerOnly } from '../security/secure-files.ts';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { HistorySourceIdentity, SessionInfo, SessionLaunchSurface } from '@cosyncing/protocol';
@@ -427,6 +428,10 @@ export class SessionMetadataStore {
   }
 
   private save(): void {
+    if (process.platform === 'win32') {
+      atomicWriteOwnerOnly(this.file, JSON.stringify(this.getProvenanceIndex(), null, 2));
+      return;
+    }
     mkdirSync(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
     const index = this.getProvenanceIndex();

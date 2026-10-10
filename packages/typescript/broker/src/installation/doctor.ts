@@ -27,7 +27,7 @@ import {
   inspectPiIntegration,
   readBrokerToken,
 } from '../security/credentials.ts';
-import { durableStateLayout, inspectDurableSchemas } from '../security/durable-state.ts';
+import { durableStateLayout, inspectDurableSchemas, durableStateProblemSummary } from '../security/durable-state.ts';
 import {
   inspectInstallState,
   installedBinaryPath,
@@ -466,8 +466,8 @@ function durableChecks(
       id: `state.schema.${inspection.id}`,
       status: inspection.status === 'migration-required' ? 'warn' : 'fail',
       detailCode: inspection.detailCode,
-      summary: `${inspection.id} state requires repair or migration.`,
-      remediation: remediation('cosyncing repair', 'Back up and reconcile durable state.'),
+      summary: durableStateProblemSummary(inspection),
+      remediation: remediation(inspection.permissionRepairable || inspection.status === 'migration-required' ? 'cosyncing repair' : 'cosyncing doctor', durableStateProblemSummary(inspection)),
     } satisfies SetupCheck;
   });
 }

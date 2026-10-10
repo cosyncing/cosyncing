@@ -24,13 +24,11 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { resolveInvocation, spawnResolvedInvocation } from '@cosyncing/adapter-api';
@@ -45,6 +43,7 @@ import { MOD_SOCKET_FILENAME, modSocketPathDialable } from '../sessions/mod-sock
 import {
   assertNoSymlinkComponents,
   atomicWriteJsonOwnerOnly,
+  atomicWriteOwnerOnly,
   ensureOwnerOnlyDirectory,
   inspectOwnerOnlyDirectory,
 } from '../security/secure-files.ts';
@@ -891,8 +890,7 @@ export function writeClaudeModMarketplace(
     for (const file of files) {
       const target = join(staging, file.path);
       assertNoSymlinkComponents(dirname(target), true);
-      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-      writeFileSync(target, file.content, { mode: 0o600 });
+      atomicWriteOwnerOnly(target, file.content);
     }
     // Files a newer build dropped go with the directory they came in. Left behind, an orphaned file
     // from an earlier build stays readable to Claude beside the new manifest.
@@ -902,7 +900,7 @@ export function writeClaudeModMarketplace(
       renameSync(staging, dir);
       rmSync(retired, { recursive: true, force: true });
     } else {
-      mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
+      ensureOwnerOnlyDirectory(dirname(dir));
       renameSync(staging, dir);
     }
   } catch (error) {
@@ -932,12 +930,12 @@ export function snapshotClaudeModMarketplace(dir: string, backupDir: string): { 
   const copyTree = (from: string, to: string): void => {
     const stat = lstatSync(from);
     if (stat.isDirectory()) {
-      mkdirSync(to, { recursive: true, mode: 0o700 });
+      ensureOwnerOnlyDirectory(to);
       for (const name of readdirSync(from)) copyTree(join(from, name), join(to, name));
       return;
     }
     if (!stat.isFile()) throw new Error(`claude-mod-snapshot-unsafe-entry:${from}`);
-    writeFileSync(to, readFileSync(from), { mode: stat.mode & 0o700 });
+    atomicWriteOwnerOnly(to, readFileSync(from), { mode: stat.mode & 0o700 });
   };
   rmSync(backupDir, { recursive: true, force: true });
   ensureOwnerOnlyDirectory(dirname(backupDir));
@@ -967,7 +965,7 @@ export function restoreClaudeModMarketplace(dir: string, backupDir: string, exis
     renameSync(staging, dir);
     rmSync(retired, { recursive: true, force: true });
   } else {
-    mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
+    ensureOwnerOnlyDirectory(dirname(dir));
     renameSync(staging, dir);
   }
 }

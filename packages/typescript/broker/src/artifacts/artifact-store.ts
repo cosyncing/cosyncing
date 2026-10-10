@@ -20,6 +20,7 @@ import type { AgentMessage } from '@cosyncing/protocol';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import {
   atomicWriteOwnerOnly,
+  ensureOwnerOnlyDirectory,
   inspectOwnerOnlyFile,
   readOwnerOnlyText,
 } from '../security/secure-files.ts';
@@ -414,7 +415,8 @@ export class ArtifactStore {
       DEFAULT_MAX_INDEX_BYTES,
       HARD_MAX_INDEX_BYTES,
     );
-    mkdirSync(this.blobDir, { recursive: true });
+    if (process.platform === 'win32') ensureOwnerOnlyDirectory(this.blobDir);
+    else mkdirSync(this.blobDir, { recursive: true });
     this.secret = this.loadSecret();
     const idx = this.loadIndex();
     const loaded = idx.records || [];
@@ -572,9 +574,13 @@ export class ArtifactStore {
   ): AgentMessage & { type: 'file-artifact' } {
     const { record } = this.bytesRecord(session, message, bytes, fallbackMimeType, options);
     const filePath = record.filePath;
-    mkdirSync(dirname(filePath), { recursive: true });
+    if (process.platform === 'win32') ensureOwnerOnlyDirectory(dirname(filePath));
+    else mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
-    if (createdBlob) writeFileSync(filePath, bytes);
+    if (createdBlob) {
+      if (process.platform === 'win32') atomicWriteOwnerOnly(filePath, bytes);
+      else writeFileSync(filePath, bytes);
+    }
     const now = this.nextRecency();
     const rec: ArtifactRecord = { ...record, createdAt: now, lastAccessedAt: now };
     this.commitRecord(rec, createdBlob);
@@ -631,9 +637,13 @@ export class ArtifactStore {
     const bytes = Buffer.from(body, 'utf8');
     const identity = this.diffIdentity(keyBase, bytes);
     const filePath = this.blobPath(identity.contentHash);
-    mkdirSync(dirname(filePath), { recursive: true });
+    if (process.platform === 'win32') ensureOwnerOnlyDirectory(dirname(filePath));
+    else mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
-    if (createdBlob) writeFileSync(filePath, bytes);
+    if (createdBlob) {
+      if (process.platform === 'win32') atomicWriteOwnerOnly(filePath, bytes);
+      else writeFileSync(filePath, bytes);
+    }
     const now = this.nextRecency();
     const rec: ArtifactRecord = {
       key: recordKey(this.brokerSource, tool, sessionId, identity.artifactKey),
@@ -710,9 +720,13 @@ export class ArtifactStore {
     const rel = message.path || message.name || contentHash;
     const artifactKey = message.artifactKey || artifactKeyFor(rel, contentHash);
     const filePath = this.blobPath(contentHash);
-    mkdirSync(dirname(filePath), { recursive: true });
+    if (process.platform === 'win32') ensureOwnerOnlyDirectory(dirname(filePath));
+    else mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
-    if (createdBlob) copyFileSync(fullPath, filePath);
+    if (createdBlob) {
+      if (process.platform === 'win32') atomicWriteOwnerOnly(filePath, readFileSync(fullPath));
+      else copyFileSync(fullPath, filePath);
+    }
     const now = this.nextRecency();
     const rec: ArtifactRecord = {
       key: recordKey(this.brokerSource, session.tool, session.id, artifactKey),
@@ -815,9 +829,13 @@ export class ArtifactStore {
     const contentHash = sha256(bytes);
     const artifactKey = randomBytes(24).toString('base64url'); // opaque, not path-derived (rule 14)
     const blob = this.blobPath(contentHash);
-    mkdirSync(dirname(blob), { recursive: true });
+    if (process.platform === 'win32') ensureOwnerOnlyDirectory(dirname(blob));
+    else mkdirSync(dirname(blob), { recursive: true });
     const createdBlob = !existsSync(blob);
-    if (createdBlob) writeFileSync(blob, bytes);
+    if (createdBlob) {
+      if (process.platform === 'win32') atomicWriteOwnerOnly(blob, bytes);
+      else writeFileSync(blob, bytes);
+    }
     const now = Date.now();
     const recency = this.nextRecency();
     const safeName = exportFileName(meta.name, meta.format);
@@ -1224,12 +1242,16 @@ export class ArtifactStore {
     const tempFile = join(dirname(this.indexFile), `.index-${process.pid}-${randomBytes(12).toString('hex')}.tmp`);
     let fd: number | undefined;
     try {
-      fd = openSync(tempFile, 'wx', 0o600);
-      writeFileSync(fd, serialized);
-      fsyncSync(fd);
-      closeSync(fd);
-      fd = undefined;
-      renameSync(tempFile, this.indexFile);
+      if (process.platform === 'win32') {
+        atomicWriteOwnerOnly(this.indexFile, serialized);
+      } else {
+        fd = openSync(tempFile, 'wx', 0o600);
+        writeFileSync(fd, serialized);
+        fsyncSync(fd);
+        closeSync(fd);
+        fd = undefined;
+        renameSync(tempFile, this.indexFile);
+      }
     } catch (error) {
       this.reportPersistence({ ok: false, operation, at: Date.now() });
       throw error;

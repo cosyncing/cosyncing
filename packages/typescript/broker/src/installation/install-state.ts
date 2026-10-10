@@ -148,7 +148,7 @@ export function committedInstallState(committedAt = new Date().toISOString()): C
   };
 }
 
-function normalizeCommittedInstallState(value: unknown): CommittedInstallState | undefined {
+export function normalizeCommittedInstallState(value: unknown): CommittedInstallState | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   if (record.schemaVersion !== INSTALL_STATE_SCHEMA_VERSION) return undefined;

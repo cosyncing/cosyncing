@@ -19,7 +19,7 @@ import {
   verify,
 } from 'node:crypto';
 
-export { loadOrCreateLocalKeyStore, type LocalKeyStore } from './key-store.ts';
+export { loadOrCreateLocalKeyStore, type LocalKeyStore, type LocalKeyStoreStorage } from './key-store.ts';
 
 export interface DataKey {
   algorithm: 'AES-256-GCM';
