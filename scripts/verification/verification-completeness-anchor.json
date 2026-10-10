@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "dd761563ef3d85765068a0130fdeadd4d8842699",
+  "acceptedBase": "c8c1f1a8da8675a3794fbcf7a6bd9d86f47c5d4f",
   "requiredClaimIds": [
     "broker.acp-client",
     "broker.adapter-capability-contract",

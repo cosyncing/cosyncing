@@ -322,9 +322,17 @@ export class ClaudeModConnection implements SessionConnection {
     };
   }
 
-  /** The mod says the terminal's turn ended. The transcript tail decides what that closes. */
+  /** The main turn is running, even if its transcript has not reached the tail yet. */
+  noteModTurnStarted(): void {
+    this.fan({ type: 'status', status: 'running' });
+  }
+
+  /** The mod owns session status; the transcript tail still decides what run that closes. */
   noteModTurnEnded(ended: { turnId?: string; aborted: boolean; endedAt?: number }): void {
     this.content.noteModTurnEnded(ended);
+    // An end remembered at registration must not idle a newer turn already reported by the mod.
+    if (ended.endedAt !== undefined && this.options.turnRunning?.()) return;
+    this.fan({ type: 'status', status: 'idle' });
   }
 
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {

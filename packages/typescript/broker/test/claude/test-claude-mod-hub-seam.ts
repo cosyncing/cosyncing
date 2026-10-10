@@ -289,6 +289,28 @@ async function startTurn(s: HubStack, turnId: string, userUuid: string, rowsAfte
   return until(() => s.live.turnInFlight());
 }
 
+// PR-5: mod turn reports own the live status even when no new transcript rows have landed.
+async function workingStatusSection(): Promise<void> {
+  const s = await hubStack('pr5-working');
+  check('PR-5 start frame: attaching before a prompt reads Idle', s.live.status === 'idle');
+  await s.mod.fire('turn.start', { turnId: 'pr5-no-transcript' });
+  check('PR-5 start frame: the next prompt reads Working before its transcript arrives',
+    await until(() => s.live.status === 'working'), String(s.live.status));
+  check('PR-5 start frame: the roster overlay reads Working too',
+    s.hub.liveSnapshot().find((row) => row.info.id === s.hubId)?.status === 'working');
+  check('PR-5 start frame: the client receives running from the mod',
+    s.liveFrames.some((f) => f.message.type === 'status' && f.message.status === 'running')
+      && s.liveSessions.at(-1)?.status === 'working');
+  await s.mod.fire('turn.complete', { turnId: 'pr5-no-transcript', answer: '', durationMs: 100 });
+  check('PR-5 end frame: turn.complete returns the live row to Idle without a transcript close',
+    await until(() => s.live.status === 'idle'), String(s.live.status));
+  check('PR-5 end frame: the roster and client both receive Idle',
+    s.hub.liveSnapshot().find((row) => row.info.id === s.hubId)?.status === 'idle'
+      && s.liveFrames.some((f) => f.message.type === 'status' && f.message.status === 'idle')
+      && s.liveSessions.at(-1)?.status === 'idle');
+  await s.close();
+}
+
 // ── P-2: a Stop from the app leaves the session idle, and every seat agrees ─────────────────────
 async function appStopSection(): Promise<void> {
   const s = await hubStack('p2-stop', { hubGraceMs: 50 });
@@ -792,6 +814,15 @@ async function forkCallSection(): Promise<void> {
     await until(() => questionFrames(s.liveFrames, 'toolu_main_q').some((m) => m.readOnly !== true), 3000));
   s.mod.tapBand("Answer in Claude's dialog");
   await within(main);
+  // A hot reload or recovered loop may learn the main turn from a step, without turn.start.
+  // The step must close the between-turns fork window as well as learn the new turn id (MA).
+  await s.mod.fire('turn.complete', { turnId: 'turn-after-fork', answer: '', durationMs: 100 });
+  await s.mod.fireIfHooked('turn.step', { turnId: 'turn-from-step' });
+  const recovered = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'toolu_step_q', questions: [COLOUR] });
+  check('P-10 fork seam: a main turn.step closes the fork window and its next question is held',
+    await until(() => questionFrames(s.liveFrames, 'toolu_step_q').some((m) => m.readOnly !== true), 3000));
+  s.mod.tapBand("Answer in Claude's dialog");
+  await within(recovered);
   await s.close();
 }
 
@@ -1060,22 +1091,31 @@ async function terminalCancelSection(): Promise<void> {
 }
 
 try {
-  await appStopSection();
-  await terminalCancelSection();
-  await questionIdentitySection();
-  await terminalAnswerSection();
-  await bandOneSection();
-  await releasedQuestionSection();
-  await questionAttributionSection();
-  await modeGateSection();
-  await resumedAskSection();
-  await normalEndSection();
-  await stopCrossesEndSection();
-  await historyWindowsSection();
-  await restartSection();
-  await lateBandSection();
-  await forkCallSection();
-  await escapeSection();
+  const section = process.argv.find((arg) => arg.startsWith('--section='))?.slice('--section='.length);
+  if (section === 'pr5-status') {
+    await workingStatusSection();
+  } else if (section === 'p10-fork') {
+    await forkCallSection();
+  } else {
+    if (section) throw new Error(`Unknown section: ${section}`);
+    await workingStatusSection();
+    await appStopSection();
+    await terminalCancelSection();
+    await questionIdentitySection();
+    await terminalAnswerSection();
+    await bandOneSection();
+    await releasedQuestionSection();
+    await questionAttributionSection();
+    await modeGateSection();
+    await resumedAskSection();
+    await normalEndSection();
+    await stopCrossesEndSection();
+    await historyWindowsSection();
+    await restartSection();
+    await lateBandSection();
+    await forkCallSection();
+    await escapeSection();
+  }
   check('no unhandled rejection escaped', unhandled.length === 0, unhandled.join(' | '));
 } catch (error) {
   check('the suite ran to the end', false, String((error as Error)?.stack ?? error).slice(0, 600));

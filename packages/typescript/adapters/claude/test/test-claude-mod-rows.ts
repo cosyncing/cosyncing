@@ -23,6 +23,7 @@ export {};
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { ClaudeModConnection } from '../src/mod-connection.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -44,7 +45,8 @@ const slugDir = join(configDir, 'projects', '-test-mod-rows');
 mkdirSync(workspace, { recursive: true });
 mkdirSync(slugDir, { recursive: true });
 mkdirSync(join(ROOT, 'no-wrappers'), { recursive: true });
-writeFileSync(fakeBin, '#!/usr/bin/env bash\nexit 0\n');
+const BUSY = '44444444-4444-4444-8444-444444444444';
+writeFileSync(fakeBin, `#!/usr/bin/env bash\nprintf '%s\\n' '[{"sessionId":"${BUSY}","status":"busy"}]'\n`);
 chmodSync(fakeBin, 0o755);
 
 const UUID = '11111111-1111-4111-8111-111111111111';
@@ -514,6 +516,51 @@ check(
   check('L-2 residual: nor when the end the mod remembers came before the turn started', await newestRun(adapter) === 'running');
   endedAt = startedAt + 60_000;
   check('L-2 residual: an adapter with no mod bridge replays the file as it is', await newestRun(withoutBridge) === 'running');
+}
+
+// PR-5: use the real attach path, so seeding cannot be bypassed by a seam's fake adapter.
+{
+  const { AgentRegistry } = await import('@cosyncing/adapter-api');
+  const { Hub } = await import('../../../broker/src/sessions/hub.ts');
+  const busyPath = join(slugDir, `${BUSY}.jsonl`);
+  writeFileSync(busyPath, line({ type: 'user', uuid: 'u-busy', cwd: workspace,
+    timestamp: new Date().toISOString(), message: { role: 'user', content: 'still running' } }) + '\n');
+  fresh(BUSY);
+  // The live CLI says busy, while the mod has not reported this turn's start to the broker.
+  const adapter = new ClaudeAdapter({ modBridge: { ...bridge, turnRunning: () => false } });
+  const agents = new AgentRegistry();
+  agents.register(adapter);
+  const hub = new Hub(agents);
+  try {
+    const mid = await hub.ensure('claude', enc(busyPath), 'live');
+    await mid.conn.getHistory();
+    check('PR-5 seed: a live attach mid-turn reads Working from transcript and CLI evidence',
+      mid.conn.info.status === 'working' && mid.status === 'working', String(mid.status));
+    check('PR-5 seed: the roster overlay keeps the attached session Working',
+      hub.liveSnapshot().find((row) => row.info.id === enc(busyPath))?.status === 'working');
+    // A pending card outranks that seed; opening a second client does not lose the card.
+    (mid.conn as ClaudeModConnection).ingestRequest({ requestId: 'pr5-held', kind: 'permission', toolName: 'Write' });
+    const joined = await hub.ensure('claude', enc(busyPath), 'live');
+    check('PR-5 held: attaching while a card is held reads Needs input', joined.status === 'needs-input');
+  } finally {
+    await hub.dispose();
+  }
+  stale(BUSY);
+  const fallback = await adapter.attach(enc(busyPath), 'live');
+  check('PR-5 fallback seed: a stale mod attach falls back to Observe with Working status',
+    fallback.info.attachMode === 'observe' && fallback.info.status === 'working', String(fallback.info.status));
+  await fallback.close();
+
+  // The transcript still ends the old turn and the CLI has no busy row, but the mod knows a
+  // new turn began. This isolates the turnRunning raise from the transcript/CLI seed above.
+  fresh(UUID);
+  writeFileSync(transcriptPath, line({ type: 'assistant', uuid: 'a-pr5-ended',
+    timestamp: new Date().toISOString(), message: { id: 'msg_pr5_ended', role: 'assistant',
+      content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn' } }) + '\n');
+  const raised = await new ClaudeAdapter({ modBridge: { ...bridge, turnRunning: () => true } }).attach(enc(transcriptPath), 'live');
+  check('PR-5 turnRunning raise: the mod makes an attach Working before the transcript catches up',
+    raised.info.status === 'working', String(raised.info.status));
+  await raised.close();
 }
 
 rmSync(ROOT, { recursive: true, force: true });
