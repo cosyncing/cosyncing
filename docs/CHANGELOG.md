@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.6.4 — 2026-10-10
+
 ### Added
 
 - Driving a Claude Code session from your phone: on Linux and macOS hosts,
