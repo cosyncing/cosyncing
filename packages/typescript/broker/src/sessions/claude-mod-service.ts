@@ -96,6 +96,8 @@ export interface ModHubConnection {
    * is settled.
    */
   noteModTurnEnded?: (ended: { turnId: string; aborted: boolean; endedAt?: number }) => void;
+  /** The terminal's main turn started; publish Working before its transcript catches up. */
+  noteModTurnStarted?: () => void;
 }
 
 /** Who closed a card, as the broker can say it. Absent fields are things it cannot say. */
@@ -294,6 +296,16 @@ export class ClaudeModService {
       this.retireReleased(this.sessionKeyFor(event.sessionId));
     }
     const child = typeof event.detail?.agentId === 'string' && event.detail.agentId.length > 0;
+    if (event.kind === 'turn.start' && !child) {
+      const rows = this.options.hubAll ? this.safeRows(event.sessionId) : [this.row(event.sessionId)];
+      for (const row of rows) {
+        try {
+          (row?.conn as ModHubConnection | undefined)?.noteModTurnStarted?.();
+        } catch (error) {
+          this.options.log?.warn(`mod turn start not published: ${String((error as Error)?.message ?? error).slice(0, 120)}`);
+        }
+      }
+    }
     if ((event.kind === 'turn.complete' && !child) || event.kind === 'session.end') {
       this.noteTurnEnded(event);
     }

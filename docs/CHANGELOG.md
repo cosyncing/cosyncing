@@ -172,6 +172,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- A Claude session synced through the mod shows Working when you open it mid-turn.
+
 - A question card that had been answered, in the terminal or another app, still
   said "Awaiting answer" above the line saying it was settled. A settled card
   now says only that it is settled; a question still open in the terminal keeps

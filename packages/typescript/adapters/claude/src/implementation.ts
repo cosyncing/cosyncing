@@ -1851,12 +1851,20 @@ export class ClaudeAdapter implements AgentBackend {
         info.attachMode = 'observe';
         info.control = claudeControl({ store, uuid, cwd, bridged, driving: false, channelsEligible: eligible });
         const staleRow = (await liveStatusByStore(store)).get(uuid);
+        info.status = await claudeSessionStatus(path, staleRow?.status, Date.now());
         return new ClaudeObserveConnection(path, info, staleRow?.waitingFor, this.observeModTurn(uuid));
       }
       // The info above was built for the mode the caller asked for, and every other path keeps it;
       // this one has to say what it actually is, or the row the client gets reads observe while
       // the connection behind it writes, and the app gate closes on the frame it was handed.
       info.attachMode = 'live';
+      const liveRow = (await liveStatusByStore(store)).get(uuid);
+      info.status = await claudeSessionStatus(path, liveRow?.status, Date.now());
+      // A mod turn can start before Claude flushes its prompt or updates agents --json.
+      // Pending cards keep their needs-input precedence in the Hub.
+      if (this.options.modBridge?.turnRunning?.(uuid) && info.status !== 'needs-input') {
+        info.status = 'working';
+      }
       const modControl = () => this.modSyncedControl();
       const conn = new ClaudeModConnection({
         info,
