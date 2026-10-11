@@ -3008,6 +3008,21 @@ export class Hub {
         'driver-changed',
       );
     }
+    // The adapter decides whether mutable modes alias one live native writer.
+    // Reuse that owner even when the caller selected the other mode key.
+    const sharedModes = this.registry.get(tool)?.sharedMutableAttachModes;
+    if (sharedModes?.length && (mode === undefined || sharedModes.includes(mode))) {
+      for (const candidateMode of [undefined, ...sharedModes]) {
+        const candidateKey = this.key(tool, id, candidateMode);
+        const candidate = this.conns.get(candidateKey);
+        if (!candidate || candidate.conn.info.attachMode !== 'live') continue;
+        this.cancelEvict(candidateKey);
+        this.attentionLeases.delete(candidate);
+        this.attentionLeaseDenied.delete(candidate);
+        this.reportEnsureBranch('join', candidate);
+        return candidate;
+      }
+    }
     // A mode-scoped attach (?mode=resume) must JOIN an existing canonical connection that is already
     // the drivable owner, instead of spawning a rival broker-owned process on the same session:
     //  - a PINNED conn is a live terminal bridge — the terminal is the sole owner (issues-part2 item 3:

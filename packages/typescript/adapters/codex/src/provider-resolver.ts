@@ -75,6 +75,11 @@ export function codexHomeDir(env: Record<string, string | undefined> = process.e
   return env.CODEX_HOME?.trim() || join(homedir(), '.codex');
 }
 
+export function codexDefaultProvider(options: CodexProviderLookupOptions = {}): string {
+  const home = options.codexHome?.trim() || codexHomeDir();
+  return stringField(parseTomlFile(join(home, BASE_CONFIG))?.model_provider) ?? 'openai';
+}
+
 /**
  * Where is `name` defined? Base config wins over every overlay — that is codex's own layering, and
  * it is what makes "already resolvable, do not inject" decidable. Overlays are visited in sorted

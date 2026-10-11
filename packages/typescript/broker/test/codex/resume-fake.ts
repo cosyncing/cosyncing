@@ -7,6 +7,8 @@ export {};
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { CodexAsyncQuestionTracker } from '../../../adapters/codex/src/async-user-input.ts';
+import { testCodexAppDaemon } from './app-daemon.ts';
+import { FakeCodexDaemon as SharedAppDaemon } from '../helpers/fake-codex-daemon.ts';
 import { testBackgroundLedger, testBackgroundIncrementalReconnect, testBackgroundReconciliation, testBackgroundDaemonAndClients } from './background-commands.ts';
 import {
   appendFileSync,
@@ -3941,40 +3943,25 @@ await test('CR1 explicit takeover keeps the established policy despite private p
   });
 });
 
-await test('CR1 daemon-loaded thread rejects resume as a typed ownership conflict (mode-only message unchanged)', async () => {
-  return await withFakeCodex(RESUME_ONLY_FAKE, async (rollout) => {
-    return await withFakeSock(async () => {
-      const oldSync = process.env.COSYNCING_CODEX_SYNC_SERVER;
-      process.env.COSYNCING_CODEX_SYNC_SERVER = '1';
-      try {
-        const adapter = new CodexAdapter({
-          queryLoadedThreadIds: async () => new Set(['fake-thread']),
-          scanCodexTuiPresence: async () => fakeTuiScan({ attributed: new Set(['fake-thread']) }),
-        });
-        const id = Buffer.from(rollout, 'utf8').toString('base64url');
-        const outcomes: string[] = [];
-        for (const opts of [undefined, { reason: 'app-restore' as const }]) {
-          try {
-            const conn = await adapter.attach(id, 'resume', opts);
-            await conn.close().catch(() => {});
-            outcomes.push('attached');
-          } catch (err) {
-            outcomes.push(
-              isOwnershipConflictError(err) && String((err as Error).message).includes('already using true terminal sync')
-                ? `conflict:${err.conflict}`
-                : `error:${String(err)}`,
-            );
-          }
-        }
-        return [
-          outcomes[0] === 'conflict:terminal-sync-active' && outcomes[1] === 'conflict:terminal-sync-active',
-          outcomes.join(' | '),
-        ];
-      } finally {
-        if (oldSync == null) delete process.env.COSYNCING_CODEX_SYNC_SERVER;
-        else process.env.COSYNCING_CODEX_SYNC_SERVER = oldSync;
+await test('PR2 explicit Drive joins a loaded daemon thread', async () => {
+  return withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => {
+    const daemon = new SharedAppDaemon(join(dir, 'loaded.sock'), {loadedThreadIds:['fake-thread']});
+    await daemon.start();
+    const oldSock = process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = join(dir, 'loaded.sock');
+    try {
+      const adapter = new CodexAdapter({scanCodexTuiPresence:async()=>fakeTuiScan({attributed:new Set(['fake-thread'])})});
+      for (const opts of [undefined, {reason:'app-restore' as const}]) {
+        const conn = await adapter.attach(Buffer.from(rollout).toString('base64url'),'resume',opts);
+        assert.equal(conn.info.attachMode,'live');
+        assert.equal(conn.info.control?.terminalSync.action,'join');
+        await conn.close();
       }
-    });
+      return [true,'loaded threads join without a competing-owner refusal'];
+    } finally {
+      process.env.COSYNCING_CODEX_APP_SERVER_SOCK = oldSock;
+      await daemon.stop();
+    }
   });
 });
 
@@ -4145,7 +4132,9 @@ async function exerciseTransactionalStartupFailure(
     const joinCommand = fallback.conn.info.control?.terminalSync.command ?? '';
     const fallbackUsable = fallback.conn.info.attachMode === 'observe' &&
       fallback.conn.info.control?.drive.state === 'observing' &&
-      joinCommand.includes('resume --remote');
+      !fallback.conn.info.control?.terminalSync.syncAvailable &&
+      joinCommand === '' &&
+      !!fallback.conn.info.control?.terminalSync.reason;
     await hub.dispose();
     // Every case must fail at the stage it names. Without this the family is
     // vacuous under load: a slow child times out at INITIALIZE, and the looser
@@ -4412,59 +4401,9 @@ async function withLoadedDaemon<T>(
   }
 }
 
-await test('CR6 private Codex Drive preserves terminal handoff through refresh and closes before confirmation', async () => {
-  // The handoff command's provider must be resolvable: `fake-provider` is defined in BASE config here
-  // (the syncable case). A provider defined nowhere gets no join command at all — see the drift tests.
-  return withCodexHome(
-    { 'config.toml': '[model_providers.fake-provider]\nname = "Fake"\nbase_url = "http://fake.invalid/v1"\nwire_api = "responses"\n' },
-    () => withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => withLoadedDaemon(dir, [], async () => {
-    const diagnostics: CodexAttachDiagnostic[] = [];
-    const adapter = new CodexAdapter({
-      queryLoadedThreadIds: async () => new Set(),
-      scanCodexTuiPresence: async () => fakeTuiScan(),
-      reportAttachDiagnostic: (event) => diagnostics.push(event),
-    });
-    const registry = new AgentRegistry();
-    registry.register(adapter);
-    const hub = new Hub(registry, 20);
-    const id = Buffer.from(rollout, 'utf8').toString('base64url');
-    try {
-      const observer = await hub.ensure('codex', id, 'observe');
-      const discovered = structuredClone(observer.conn.info);
-      const observingJoin = discovered.attachMode === 'observe' &&
-        discovered.control?.terminalSync.action === 'join';
-      const driver = await hub.ensure('codex', id, 'resume', 'takeover');
-      const privateHandoff = driver.conn.info.attachMode === 'resume' &&
-        driver.conn.info.control?.drive.state === 'driving' &&
-        driver.conn.info.control?.terminalSync.action === 'handoff' &&
-        driver.conn.info.control.terminalSync.command?.includes('-m fake-model') === true &&
-        diagnostics.some((event) => event.event === 'transport-selected' && event.transport === 'stdio');
-
-      // The watcher still reports an unowned, joinable disk session. Its bare
-      // Observe refresh and the roster overlay must retain the live driver's
-      // handoff, including when Observe was inserted before Drive.
-      await hub.refreshExternalSession(discovered);
-      const owners = authoritativeLiveOwners(hub.liveSnapshot());
-      const owner = owners.get(`codex:${id}`);
-      const roster = structuredClone(discovered);
-      if (owner) overlayAuthoritativeOwner(roster, owner);
-      const retainedHandoff = driver.conn.info.control?.terminalSync.action === 'handoff' &&
-        roster.attachMode === 'resume' && roster.control?.terminalSync.action === 'handoff';
-
-      const handedOff = await hub.handoffToTerminal('codex', id, driver);
-      const closedBeforeConfirmation = diagnostics.some((event) =>
-        event.event === 'child-lifecycle' && event.outcome?.startsWith('exited:'));
-      const observingAfterHandoff = handedOff.conn.info.attachMode === 'observe' &&
-        handedOff.conn.info.control?.drive.state === 'observing' &&
-        handedOff.conn.info.control?.terminalSync.action === 'join';
-      return [
-        observingJoin && privateHandoff && retainedHandoff && closedBeforeConfirmation && observingAfterHandoff,
-        `observeJoin=${observingJoin} privateHandoff=${privateHandoff} refreshRetained=${retainedHandoff} childExited=${closedBeforeConfirmation} handoffObserved=${observingAfterHandoff}`,
-      ];
-    } finally {
-      await hub.dispose();
-    }
-  })));
+await test('PR2 app daemon hosting, fallback and restart lifecycle', async () => {
+  await testCodexAppDaemon();
+  return [true, 'shared hosting and interruption lifecycle verified through the Hub'];
 });
 
 const CR4_CHILD_THREAD = '00000000-0000-4000-8000-0000000000c4';
@@ -4990,8 +4929,8 @@ await test('profile-only provider: resume carries the config override, restores 
             models[0]?.providerID === 'vllm-hpc' &&
             models[0]?.providerLabel === 'vllm-hpc' &&
             models[0]?.variant === 'vllm-hpc' &&
-            conn.info.terminalSyncHint?.command.includes('codex -p vllm-hpc resume --remote') === true &&
-            conn.info.terminalSyncHint.command.includes('-m qwen3.8-27B-FP8') &&
+            conn.info.terminalSyncHint?.command === '' &&
+            conn.info.control?.terminalSync.syncAvailable === false &&
             settings?.params?.modelProvider === 'vllm-hpc' &&
             rolloutAfter === rolloutBefore &&
             !rolloutAfter.includes(FIXTURE_PROFILE_TOKEN) &&
@@ -5130,7 +5069,7 @@ for await (const chunk of Bun.stdin.stream()) {
 }
 `;
 
-await test('base-provider drift (no profile match): hint carries the provider name, TOML-quoted, note names base config', async () => {
+await test('base-provider drift (no profile match): private Drive keeps the exact provider with sync unavailable', async () => {
   return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML }, async () => {
     return await withFakeCodex(BASE_DRIFT_RESUME_FAKE, async (rollout, dir, marker) => {
       writeFileSync(rollout, profileRollout(dir, 'volcengine-coding-plan', 'volc-model-drift').join('\n'));
@@ -5140,15 +5079,12 @@ await test('base-provider drift (no profile match): hint carries the provider na
         const resume = readMarkers(marker).find((r) => r.kind === 'thread/resume');
         const hint = conn.info.terminalSyncHint;
         return [
-          // Base-defined provider: no override needed, and the join command is real.
           resume?.config === null &&
             conn.info.currentModel?.providerID === 'volcengine-coding-plan' &&
             conn.info.currentModel?.modelID === 'volc-model-drift' &&
-            // shellQuote single-quotes the value because of the embedded double quotes.
-            hint?.command.includes(`-c 'model_provider="volcengine-coding-plan"'`) === true &&
-            !hint.command.includes('-p ') &&
-            hint.command.includes('-m volc-model-drift') &&
-            hint.note?.includes('base config.toml') === true,
+            hint?.command === '' &&
+            conn.info.control?.terminalSync.syncAvailable === false &&
+            hint.note?.includes('not running or reachable') === true,
           `resumeConfig=${JSON.stringify(resume?.config)} hint=${JSON.stringify(hint)} current=${JSON.stringify(conn.info.currentModel)}`,
         ];
       } finally {

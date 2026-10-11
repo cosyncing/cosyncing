@@ -17,6 +17,7 @@ import { strict as assert } from 'node:assert';
 import { appendFileSync, chmodSync, closeSync, existsSync, ftruncateSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
 import { isolatedBrokerFixtureEnvironment } from '../helpers/isolated-broker-fixture.ts';
 import { historySourceStillContainsSnapshot, IndexedHistoryPageCacheBuilder } from '../../src/sessions/history-page-cache.ts';
 import { backwardHistoryCursor, cursorDurableHistory } from '../../src/sessions/history-delta.ts';
@@ -2293,6 +2294,7 @@ await (async () => {
   const path = join(dir, 'rollout-2026-06-16T00-00-00-019ed00e-aac3-78f1-b373-cd365cf6a9b2.jsonl');
   const fakeCodex = join(dir, 'codex');
   const previousBin = process.env.COSYNCING_CODEX_BIN;
+  const previousSocket = process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
   try {
     // Drive availability is what this fixture exercises. Do not inherit the
     // developer or hosted runner's Codex installation as an undeclared test
@@ -2300,14 +2302,16 @@ await (async () => {
     writeFileSync(fakeCodex, '#!/bin/sh\nexit 0\n');
     chmodSync(fakeCodex, 0o755);
     process.env.COSYNCING_CODEX_BIN = fakeCodex;
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = join(dir, 'absent.sock');
     writeFileSync(path, JSON.stringify({ type: 'session_meta', payload: { cwd: dir, id: '019ed00e-aac3-78f1-b373-cd365cf6a9b2' } }) + '\n');
     const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'));
     try {
       check('default Codex attach is observe/read-only even when idle', conn.info.attachMode === 'observe', conn.info.attachMode);
       check('default Codex control state is observing and drivable', conn.info.control?.drive.state === 'observing' && conn.info.control?.drive.supported === true, JSON.stringify(conn.info.control?.drive));
       check(
-        syncServerEnabled ? 'Codex true-sync state is explicit when enabled but not daemon-loaded' : 'Codex true-sync state is explicit even when disabled',
-        conn.info.control?.terminalSync.active === false && conn.info.control?.terminalSync.supported === syncServerEnabled,
+        syncServerEnabled ? 'Codex sync is unavailable when the shared daemon socket is absent' : 'Codex true-sync state is explicit even when disabled',
+        conn.info.control?.terminalSync.active === false && conn.info.control?.terminalSync.supported === false
+          && (!syncServerEnabled || /daemon/.test(conn.info.control?.terminalSync.reason ?? '')),
         JSON.stringify(conn.info.control?.terminalSync),
       );
     } finally {
@@ -2316,6 +2320,8 @@ await (async () => {
   } finally {
     if (previousBin == null) delete process.env.COSYNCING_CODEX_BIN;
     else process.env.COSYNCING_CODEX_BIN = previousBin;
+    if (previousSocket == null) delete process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+    else process.env.COSYNCING_CODEX_APP_SERVER_SOCK = previousSocket;
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -3357,8 +3363,15 @@ await (async () => {
   writeFileSync(fakeCodex, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${marker}\nexit 0\n`);
   chmodSync(fakeCodex, 0o755);
   const encodedChild = Buffer.from(childPath, 'utf8').toString('base64url');
+  const socketPath = join(dir, 'daemon.sock');
+  // Loaded ids are injected below; the join offer also requires a real reachable socket.
+  const socket = createServer((connection) => connection.end());
 
   try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once('error', reject);
+      socket.listen(socketPath, resolve);
+    });
     // (a) readable in Observe, and (b) the SessionInfo an observe attach produces refuses Drive.
     const conn = await new CodexAdapter().attach(encodedChild, 'observe');
     let tailed: any[] = [];
@@ -3534,7 +3547,7 @@ await (async () => {
           COSYNCING_CODEX_BIN: undefined, // PATH resolution is the point here
           COSYNCING_CODEX_SYNC_SERVER: '1',
           COSYNCING_CODEX_SYNC_WATCH_MS: '250', // the watch needs two polls to publish a loaded-set transition
-          COSYNCING_CODEX_APP_SERVER_SOCK: join(dir, 'absent.sock'), // an explicit socket keeps discovery from managing a daemon
+          COSYNCING_CODEX_APP_SERVER_SOCK: socketPath, // an explicit socket keeps discovery from managing a daemon
         },
       }),
       stdout: 'pipe',
@@ -3649,6 +3662,7 @@ await (async () => {
       JSON.stringify(watchedChild ?? null),
     );
   } finally {
+    await new Promise<void>((resolve) => socket.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });
   }
 })();

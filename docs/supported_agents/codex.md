@@ -60,12 +60,19 @@ auto-connect to a reachable default daemon when its launch settings allow
 reuse; use the generated `--remote` command to select cosyncing's daemon
 explicitly.
 
-For a session currently driven by cosyncing's private Codex process, use
-**Resume in terminal** and wait for handoff confirmation before running the
-copied command. This closes the app's writer and leaves the app in Observe so
-the terminal can resume through the shared daemon. A session already on that
-daemon can be joined directly. If another foreground app client still drives
-the session, close that client before handing off.
+Sessions cosyncing drives run on the shared Codex daemon whenever it is
+reachable. A terminal can join at any time with **Sync with a terminal**,
+including while a turn is running, without interrupting that turn. The app and
+terminal then prompt and stop the same session.
+
+When the daemon cannot host a session, cosyncing drives it with a private
+process and explains why terminal sync is unavailable. This includes a stopped
+or unreachable daemon, disabled terminal sync, and a provider defined only in
+a profile file.
+
+Restarting the shared daemon interrupts unfinished app and terminal turns.
+cosyncing marks an open turn interrupted, clears its terminal presence, and
+reconnects to the replacement daemon when you next prompt it.
 
 ### Codex profiles (`codex -p`)
 
@@ -115,10 +122,40 @@ not attach to the shared daemon by itself: the TUI shows the startup warning
 "Running without the shared background server: --profile requires embedded
 mode."
 
-If a profile sets `approvals_reviewer = "auto_review"`, Codex sends permission
-escalations to a reviewer model, and a provider that does not serve that model
-rejects every escalation. Set `approvals_reviewer = "user"`, or pick **Ask
-permission** in cosyncing, to answer them yourself.
+On Codex 0.162.1, **Approve for me** (`approvals_reviewer = "auto_review"`)
+uses the model catalog loaded when the Codex process starts. The bundled
+catalog selects `codex-auto-review`; a non-OpenAI provider that does not serve
+that model declines escalations. Sending a profile catalog with
+`thread/start` or `thread/resume` does not change the reviewer. This also
+applies to cosyncing's private Codex processes. Plain `codex -p <profile>`
+starts embedded Codex with the profile's catalog, so a reviewer override in
+that startup catalog works.
+
+Choose one of these approaches:
+
+- Point `model_catalog_json` in base `config.toml` at a merged startup catalog
+  containing Codex's bundled models, cached models and your profile models.
+  Keep each complete native model entry, and add a reviewer override to the
+  profile model's entry. For example, these fields belong in that existing
+  entry, rather than being a complete catalog:
+
+  ```json
+  {"slug": "my-model", "auto_review_model_override": "my-model"}
+  ```
+
+  ```toml
+  # Base config.toml
+  model_catalog_json = "/absolute/path/to/merged-models.json"
+  ```
+
+  Restart Codex while nothing is running so the daemon loads the catalog.
+  Regenerate it after Codex updates to keep the native entries current.
+  `cosy doctor` warns when a non-OpenAI model selected in the base config or a
+  profile uses auto-review without its startup reviewer override. cosyncing
+  reads this configuration and never writes it.
+- Set `approvals_reviewer = "user"` in the base config or profile to answer
+  escalations yourself.
+- Select **Ask permission** in cosyncing to answer its approval cards yourself.
 
 </details>
 

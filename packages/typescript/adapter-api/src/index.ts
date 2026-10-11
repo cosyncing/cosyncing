@@ -151,6 +151,10 @@ export interface AgentBackend {
   readonly id: string;
   readonly displayName: string;
   readonly capabilities: AgentCapabilities;
+  /** Internal owner policy: these mutable attach modes alias one live native writer.
+   * The broker may reuse a live owner across them and the canonical mode-less key.
+   * Observe remains separate. This hook is not part of a client DTO. */
+  readonly sharedMutableAttachModes?: readonly string[];
   /** Optional native-host integration described as data for broker orchestration. */
   readonly integration?: import('./integration.ts').AgentIntegration;
   /**

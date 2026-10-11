@@ -121,6 +121,7 @@ import {
   codexBaseHasCustomModelCatalog,
   codexModelCatalogSources,
   codexThreadConfigOverride,
+  codexDefaultProvider,
   resolveCodexModelProvider,
   resolveCodexProfile,
 } from './provider-resolver.ts';
@@ -167,6 +168,7 @@ type CodexTurnRunState = { kind: 'hydrating' } | { kind: 'unknown' } | { kind: '
 type CodexRepairableOwner = {
   readonly info: SessionInfo;
   requestRunStateRepair(): Promise<void>;
+  reconcileDaemonTransport?(): Promise<void>;
 };
 type BootstrapQueuedMessage = { method: string; params: any; rpcId?: number | string };
 type CodexCompletedTurnEvidence = { params: any; emitted: boolean };
@@ -214,6 +216,7 @@ export class CodexAdapter implements AgentBackend {
   readonly id = 'codex';
   readonly displayName = 'Codex';
   readonly capabilities = codexCapabilities();
+  readonly sharedMutableAttachModes = ['resume', 'live'] as const;
   readonly integration = {
     managedRuntime: { kind: 'process', failureJournal: true },
   } as const;
@@ -293,7 +296,7 @@ export class CodexAdapter implements AgentBackend {
   } = {}): Promise<SessionInfo> {
     const cwd = opts.directory?.trim() || homedir();
     if (!existsSync(cwd)) throw new Error(`Codex createSession directory does not exist: ${cwd}`);
-    const started = await createCodexThread(cwd, opts.title, opts.model);
+    const started = await createCodexThread(cwd, opts.title, opts.model, this.capabilities.supportsLiveAttach);
     const thread = started?.thread ?? {};
     const path = typeof thread.path === 'string' && thread.path ? thread.path : undefined;
     if (!path) throw new Error('Codex thread/start did not return a durable rollout path.');
@@ -308,17 +311,15 @@ export class CodexAdapter implements AgentBackend {
     const currentProfile =
       opts.model?.variant ??
       resolveCodexProfile(currentProvider, currentModel)?.name;
-    const terminalSyncHint = this.syncHint(
+    const terminalSyncHint = unavailableCodexSyncHint(this.syncHint(
       threadId,
       actualCwd,
       currentModel,
       false,
       currentProvider,
       currentProfile,
-    );
-    // This thread was created on the short-lived stdio app-server above and has
-    // never been handed to a terminal. A host-wide process/socket scan is both
-    // unnecessary and very expensive on machines with many Codex TUIs.
+    ), started.cosyncingSyncUnavailableReason);
+    // A newly created thread has no terminal yet, even when daemon-hosted.
     const terminalPresence = 'absent' as const;
     const title = opts.title?.trim() || String(thread.name ?? '') || (actualCwd ? basename(actualCwd) : threadId.slice(0, 8) || 'Codex session');
     return {
@@ -361,6 +362,7 @@ export class CodexAdapter implements AgentBackend {
         terminalSyncPresence: terminalPresence,
         terminalSyncAction: 'join',
         syncEnabled: this.capabilities.supportsLiveAttach,
+        syncUnavailableReason: started.cosyncingSyncUnavailableReason,
       }),
     };
   }
@@ -432,7 +434,7 @@ export class CodexAdapter implements AgentBackend {
         cwd,
         surface.model,
         agentOwned,
-        surface.currentModel?.providerID,
+        surface.currentModel?.providerID ?? firstMetadataString([meta], ['modelProvider', 'model_provider', 'provider']),
         surface.currentModel?.variant,
       );
       out.push({
@@ -468,7 +470,7 @@ export class CodexAdapter implements AgentBackend {
         }),
       });
     }
-    return out;
+    return this.preserveOpenOwners(out, liveThreadIds);
   }
 
   watchSessionInfo(onChange: (info: SessionInfo) => void): Unsubscribe {
@@ -644,7 +646,7 @@ export class CodexAdapter implements AgentBackend {
         cwd,
         surface.model,
         agentOwned,
-        surface.currentModel?.providerID,
+        surface.currentModel?.providerID ?? firstMetadataString([meta], ['modelProvider', 'model_provider', 'provider']),
         surface.currentModel?.variant,
       );
       out.push({
@@ -677,6 +679,21 @@ export class CodexAdapter implements AgentBackend {
           syncEnabled: this.capabilities.supportsLiveAttach,
         }),
       });
+    }
+    return this.preserveOpenOwners(out, liveThreadIds);
+  }
+
+  private preserveOpenOwners(out: SessionInfo[], liveThreadIds: Set<string>): SessionInfo[] {
+    // A disconnected daemon proxy still owns its interrupted app session and
+    // reconnects on the next action. A loader snapshot must not replace it with Observe.
+    for (const owner of this.openOwners) {
+      if (!owner.reconcileDaemonTransport || owner.info.attachMode !== 'live') continue;
+      const row = out.find((row) => row.id === owner.info.id);
+      if (!row || liveThreadIds.has(owner.info.nativeId ?? '')) continue;
+      row.attachMode = owner.info.attachMode;
+      row.control = structuredClone(owner.info.control);
+      row.status = owner.info.status;
+      row.terminalSyncHint = owner.info.terminalSyncHint;
     }
     return out;
   }
@@ -869,28 +886,28 @@ export class CodexAdapter implements AgentBackend {
     if (mode === 'live' && !liveLoaded) {
       throw new Error('This Codex thread is not loaded in the managed app-server daemon; start or attach the terminal through Codex remote-control first.');
     }
-    if (mode === 'resume' && liveLoaded) {
-      // Ownership fact, not a generic failure: active daemon-level terminal sync always wins.
-      // A reason-tagged attach downgrades to joining that owner at the broker; a mode-only
-      // attach keeps this as the established hard failure.
-      throw new OwnershipConflictError('This Codex thread is already using true terminal sync; Drive is unavailable for daemon-loaded threads.', 'terminal-sync-active');
-    }
     // `!agentOwned`: a mode-less attach silently becomes the mutable daemon-proxy owner once the thread
     // is daemon-loaded (the roster's sync-upgrade reattach takes exactly that route), which would drive
     // a child thread without any caller asking for Drive. It stays a read-only Observe conn instead.
-    const liveEligible = !agentOwned && liveLoaded && mode !== 'observe' && mode !== 'resume';
+    const providerReason = codexSharedProviderReason(surface.currentModel?.providerID
+      ?? firstMetadataString([meta], ['modelProvider', 'model_provider', 'provider']));
+    const daemonReachable = liveLoaded || (loadedDecision === 'absent'
+      && inspectCodexRuntimeSocket(codexAppServerSock()).state === 'socket');
+    const liveEligible = !agentOwned && !providerReason && daemonReachable
+      && mode !== 'observe' && (liveLoaded || mode === 'resume');
     if (mode === 'resume' && !liveEligible && resolveBin('codex') === null) {
       throw new Error('Codex CLI is not available on PATH; cannot Drive this session.');
     }
     const observe = mode === 'observe' || (!liveEligible && mode !== 'resume');
-    const terminalSyncHint = this.syncHint(
+    const syncUnavailableReason = providerReason ?? (!daemonReachable ? CODEX_DAEMON_UNAVAILABLE_REASON : undefined);
+    const terminalSyncHint = unavailableCodexSyncHint(this.syncHint(
       threadId,
       cwd,
       surface.model,
       agentOwned,
       surface.currentModel?.providerID,
       surface.currentModel?.variant,
-    );
+    ), syncUnavailableReason);
     // Restoration is a control decision, not a badge refresh. It must bypass a cached absence so a
     // terminal that appeared inside the normal 2-second display TTL cannot be overwritten.
     const presenceScan = await this.presenceScan(restorationAttempt);
@@ -911,7 +928,7 @@ export class CodexAdapter implements AgentBackend {
         : undefined,
     };
     const qualifiedRolloutStatus = qualifyCodexRolloutStatus(rolloutStatus, qualification);
-    if (restorationAttempt && terminalPresence !== 'absent') {
+    if (restorationAttempt && terminalPresence !== 'absent' && !(liveEligible && terminalPresence === 'shared')) {
       // An automatic restore must PROVE it is safe. A private terminal writing this rollout,
       // unprovable presence, or shared evidence without a loaded thread are all competing-owner
       // facts; fail closed to Observe and leave the explicit user-confirmed Take over path as
@@ -958,12 +975,10 @@ export class CodexAdapter implements AgentBackend {
         agentOwned,
         terminalSyncActive: liveEligible && terminalPresence === 'shared',
         terminalSyncPresence: terminalPresence,
-        // A private stdio writer must close before the terminal can load this
-        // thread in the shared daemon. The client's handoff action awaits that
-        // close; a direct join would conflict with the still-open writer.
-        terminalSyncAction: !observe && !liveEligible ? 'handoff' : 'join',
+        terminalSyncAction: 'join',
         terminalSyncHint,
         syncEnabled: this.capabilities.supportsLiveAttach,
+        syncUnavailableReason,
       }),
     };
     if (observe) {
@@ -993,6 +1008,10 @@ export class CodexAdapter implements AgentBackend {
       (diagnostic) => this.reportAttachDiagnostic(diagnostic),
       this.options.resumeStartupTimeoutMs,
       this.options.resumeProcessStopTimeoutMs,
+      () => {
+        this.liveThreadCache = undefined;
+        this.liveActivityCache = undefined;
+      },
     );
     await conn.start();
     return this.trackOwner(conn);
@@ -1166,7 +1185,11 @@ export class CodexAdapter implements AgentBackend {
     profile?: string,
   ): SessionInfo['terminalSyncHint'] | undefined {
     if (!this.capabilities.supportsLiveAttach || agentOwned) return undefined;
-    return codexTerminalSyncHint(threadId, cwd, model, provider, profile);
+    const privateOwner = [...this.openOwners].find((owner) => owner.info.nativeId === threadId && owner.info.attachMode === 'resume');
+    const reason = codexSharedProviderReason(provider)
+      ?? (inspectCodexRuntimeSocket(codexAppServerSock()).state !== 'socket' ? CODEX_DAEMON_UNAVAILABLE_REASON : undefined)
+      ?? (privateOwner ? privateOwner.info.control?.terminalSync.reason ?? CODEX_DAEMON_UNAVAILABLE_REASON : undefined);
+    return unavailableCodexSyncHint(codexTerminalSyncHint(threadId, cwd, model, provider, profile), reason);
   }
 
   /** Attach-time presence evidence. Honors the injected test scanner so restore
@@ -1566,6 +1589,7 @@ export function codexControlState(opts: {
   terminalSyncAction?: SessionTerminalAction;
   terminalSyncHint?: SessionInfo['terminalSyncHint'];
   syncEnabled: boolean;
+  syncUnavailableReason?: string;
 }): SessionControlState {
   const terminalSyncPresence = opts.terminalSyncPresence;
   const terminalSyncActive = opts.terminalSyncActive && (terminalSyncPresence === undefined || terminalSyncPresence === 'shared');
@@ -1590,7 +1614,7 @@ export function codexControlState(opts: {
         active: false,
         reason: CODEX_AGENT_OWNED_SYNC_REASON,
       }
-    : opts.syncEnabled
+    : opts.syncEnabled && !opts.syncUnavailableReason && opts.terminalSyncHint?.command !== ''
     ? {
         supported: true,
         // Ability is on (COSYNCING_CODEX_SYNC_SERVER=1) → the managed app-server daemon makes this
@@ -1614,9 +1638,12 @@ export function codexControlState(opts: {
         supported: false,
         syncAvailable: false,
         active: false,
+        presence: terminalSyncPresence,
         reason: process.platform === 'win32'
           ? 'Codex true terminal sync is not available on Windows: there is no app-server control socket for a terminal to join.'
-          : 'Codex true terminal sync is disabled. Configure the standalone Codex daemon, then enable COSYNCING_CODEX_SYNC_SERVER=1.',
+          : opts.syncEnabled
+            ? opts.syncUnavailableReason ?? opts.terminalSyncHint?.note ?? CODEX_DAEMON_UNAVAILABLE_REASON
+            : 'Codex true terminal sync is disabled. Configure the standalone Codex daemon, then enable COSYNCING_CODEX_SYNC_SERVER=1.',
       };
 
   return { drive, terminalSync };
@@ -1944,6 +1971,23 @@ function codexModeOption(value: string): ModeOption {
 
 function shellQuote(s: string): string {
   return /^[A-Za-z0-9_/:=.,@%+\-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+type CodexRpc = <R = any>(method: string, params: unknown, timeoutMs?: number) => Promise<R>;
+const CODEX_DAEMON_UNAVAILABLE_REASON = 'The shared Codex daemon is not running or reachable. Start it to enable terminal sync; the app can still Drive privately.';
+
+function codexSharedProviderReason(providerID?: string): string | undefined {
+  const provider = providerID ?? codexDefaultProvider();
+  if (provider === 'openai' || provider === 'default') return undefined;
+  const resolution = resolveCodexModelProvider(provider);
+  if (resolution?.source === 'base') return undefined;
+  return `Provider ${provider} ${resolution ? `is defined only in ${resolution.file}. Define it` : 'must be defined'} in base config.toml and restart Codex to enable terminal sync; the app can still Drive privately.`;
+}
+
+function unavailableCodexSyncHint(hint: SessionInfo['terminalSyncHint'], reason?: string): SessionInfo['terminalSyncHint'] {
+  return hint && reason
+    ? { label: 'Sync with your terminal (unavailable)', command: '', note: reason }
+    : hint;
 }
 
 async function withCodexDaemonRpc<T>(
@@ -2616,6 +2660,7 @@ async function createCodexThread(
   cwd: string,
   name?: string,
   model?: PromptInput['model'],
+  syncEnabled = codexLiveSyncEnabled(),
 ): Promise<any> {
   // A provider defined only in a `$CODEX_HOME/<profile>.config.toml` overlay does not exist for a
   // broker-spawned app-server, which loads the base config alone: `thread/start` refuses it with
@@ -2627,7 +2672,17 @@ async function createCodexThread(
     model?.modelID,
     model?.variant,
   );
-  return withCodexAppServerRpc(cwd, async (rpc) => {
+  const providerReason = codexSharedProviderReason(model?.providerID);
+  const sock = syncEnabled && !providerReason ? codexAppServerSock() : undefined;
+  let shared = false;
+  if (sock && inspectCodexRuntimeSocket(sock).state === 'socket') {
+    // Probe before creating anything. A failed creation itself must never be retried privately.
+    try { await withCodexDaemonRpc(sock, loadedCodexThreadIds); shared = true; } catch { /* private fallback */ }
+  }
+  const run = shared
+    ? <T>(fn: (rpc: CodexRpc) => Promise<T>) => withCodexDaemonRpc(sock!, (rpc) => fn((method, params, timeoutMs = 30000) => rpc(method, params, timeoutMs)))
+    : <T>(fn: (rpc: CodexRpc) => Promise<T>) => withCodexAppServerRpc(cwd, fn);
+  return run(async (rpc) => {
     const started = await rpc('thread/start', {
       cwd,
       serviceName: brokerClientInfo().name,
@@ -2684,7 +2739,7 @@ async function createCodexThread(
       for (let i = 0; i < 20 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 200));
       if (!existsSync(path)) throw new Error('Codex did not persist the new session rollout after requesting legacy history.');
     }
-    return started;
+    return { ...started, cosyncingSyncUnavailableReason: shared ? undefined : providerReason ?? CODEX_DAEMON_UNAVAILABLE_REASON };
   });
 }
 
@@ -3653,6 +3708,7 @@ class CodexUnixSocketTransport {
     private readonly socketPath: string,
     private readonly onMessage: (line: string) => void,
     private readonly onError?: (message: string) => void,
+    private readonly onClose?: () => void,
   ) {}
 
   connect(timeoutMs = 5000): Promise<void> {
@@ -3708,6 +3764,8 @@ class CodexUnixSocketTransport {
         finish(err instanceof Error ? err : new Error(String(err)));
       });
       socket.on('close', () => {
+        finish(new Error('Codex daemon connection closed'));
+        if (!this.closed) this.onClose?.();
         this.closed = true;
       });
     });
@@ -3734,6 +3792,7 @@ class CodexUnixSocketTransport {
       if (frame.opcode === 0x1) {
         this.onMessage(frame.payload.toString('utf8'));
       } else if (frame.opcode === 0x8) {
+        if (!this.closed) this.onClose?.();
         this.close();
         return;
       } else if (frame.opcode === 0x9 && this.socket && !this.closed) {
@@ -3808,6 +3867,9 @@ class CodexResumeConnection implements SessionConnection {
   private readonly handlers = new Set<AgentMessageHandler>();
   private proc: Bun.Subprocess<'pipe', 'pipe', 'pipe'> | undefined;
   private daemon: CodexUnixSocketTransport | undefined;
+  private daemonRuntimeFingerprint?: string;
+  private daemonDisconnected = false;
+  private reconnectFlight?: Promise<void>;
   private reqId = 0;
   private readonly pendingRpc = new Map<string, PendingRpc>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
@@ -3901,6 +3963,7 @@ class CodexResumeConnection implements SessionConnection {
     private readonly reportDiagnostic: CodexAttachDiagnosticReporter = emitCodexAttachDiagnostic,
     private readonly startupTimeoutMs = CODEX_RESUME_START_TIMEOUT_MS,
     private readonly processStopTimeoutMs = CODEX_RESUME_PROCESS_STOP_TIMEOUT_MS,
+    private readonly onDaemonLost?: () => void,
   ) {}
 
   private diagnostic(diagnostic: Omit<CodexAttachDiagnostic, 'threadId'>): void {
@@ -3947,13 +4010,18 @@ class CodexResumeConnection implements SessionConnection {
     const storedCreateModel = this.info.currentModel
       ? { ...this.info.currentModel }
       : undefined;
-    if (rolloutActiveTurnId) this.markRunning(rolloutActiveTurnId);
+    if (rolloutActiveTurnId && !this.recentlyCompletedTurnIds.has(rolloutActiveTurnId)) this.markRunning(rolloutActiveTurnId);
     const bin = resolveBin('codex') ?? 'codex';
     if (this.transport === 'daemon-proxy') {
       const sock = codexAppServerSock();
       if (!sock) throw new Error('Codex sync server mode is enabled, but the app-server daemon socket is not configured or present.');
-      this.daemon = new CodexUnixSocketTransport(sock, (line) => this.onLine(line), (message) => this.emit({ type: 'error', message: message.slice(0, 220) }));
+      const daemon = new CodexUnixSocketTransport(sock,
+        (line) => { if (this.daemon === daemon) this.onLine(line); },
+        (message) => this.emit({ type: 'error', message: message.slice(0, 220) }),
+        () => { if (this.daemon === daemon && !this.closeFlight) this.daemonLost(); });
+      this.daemon = daemon;
       await this.daemon.connect();
+      this.daemonRuntimeFingerprint = JSON.stringify(inspectCodexRuntimeSocket(sock).fingerprint);
     } else {
       this.proc = spawnCodex(bin, ['app-server', '--stdio'], {
         stdin: 'pipe',
@@ -4182,7 +4250,17 @@ class CodexResumeConnection implements SessionConnection {
     this.baselineSandboxPolicy = safeCodexSandboxPolicy(sandboxPolicy, this.cwd);
     this.info.currentMode = codexModeFromSettings(approvalPolicy, approvalsReviewer, sandboxPolicy);
     if (resumed?.thread?.name) this.info.title = String(resumed.thread.name);
+    const reconnected = this.transport === 'daemon-proxy' && this.daemonDisconnected;
+    if (reconnected) this.daemonDisconnected = false;
     this.refreshSyncHint();
+    if (reconnected) {
+      this.info.control = codexControlState({
+        canResume: true, driveState: 'driving', terminalSyncActive: false,
+        terminalSyncPresence: 'absent', terminalSyncAction: 'join',
+        terminalSyncHint: this.info.terminalSyncHint, syncEnabled: true,
+      });
+      this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { control: this.info.control, terminalSyncHint: this.info.terminalSyncHint } });
+    }
     const backgroundRuntime = this.daemon ? inspectCodexRuntimeSocket(codexAppServerSock()).fingerprint : undefined;
     this.backgroundCommands = new CodexBackgroundCommands(this.threadId,
       JSON.stringify([this.threadId, backgroundRuntime ?? this.waitingPlaceholderEpoch]),
@@ -4264,13 +4342,13 @@ class CodexResumeConnection implements SessionConnection {
   private refreshSyncHint(): void {
     const ts = this.info.control?.terminalSync;
     if (!this.info.terminalSyncHint && !ts?.supported) return; // sync disabled at attach time
-    const hint = codexTerminalSyncHint(
+    const hint = unavailableCodexSyncHint(codexTerminalSyncHint(
       this.threadId,
       this.cwd,
       this.info.currentModel?.modelID ?? this.info.model,
       this.info.currentModel?.providerID,
       this.info.currentModel?.variant,
-    );
+    ), this.transport === 'stdio' || this.daemonDisconnected ? this.info.control?.terminalSync.reason ?? CODEX_DAEMON_UNAVAILABLE_REASON : undefined);
     if (!hint) return;
     this.info.terminalSyncHint = hint;
     if (ts?.supported && !ts.active && ts.command && hint.command) ts.command = hint.command;
@@ -4288,6 +4366,70 @@ class CodexResumeConnection implements SessionConnection {
     } catch {
       /* ignore flush support differences in spawn environment */
     }
+  }
+
+  private daemonLost(): void {
+    this.daemonDisconnected = true;
+    this.daemon = undefined;
+    this.onDaemonLost?.();
+    this.backgroundCommands?.close();
+    for (const p of this.pendingRpc.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error('Codex daemon connection closed.'));
+    }
+    this.pendingRpc.clear();
+    this.bootstrapApplying = false;
+    this.bootstrapQueue = [];
+    const turnId = this.activeTurnId();
+    const reason = 'Codex restarted; this turn was interrupted';
+    if (turnId) {
+      this.rememberCompletedTurn(turnId, { turn: { id: turnId, status: 'interrupted', completedAt: Date.now() }, interruptionMessage: reason });
+    }
+    this.markIdle();
+    if (turnId) this.emitCompletedTurnEvidence(turnId, true, true);
+    else {
+      this.settleExternallyResolved('approval');
+      this.settleExternallyResolved('question');
+      this.emit({ type: 'status', status: 'idle' });
+    }
+    this.asyncQuestions.clear();
+    this.info.terminalSyncHint = unavailableCodexSyncHint(this.info.terminalSyncHint, CODEX_DAEMON_UNAVAILABLE_REASON);
+    this.info.control = codexControlState({
+      canResume: true, driveState: 'driving', terminalSyncActive: false,
+      terminalSyncPresence: 'absent', terminalSyncAction: 'join',
+      terminalSyncHint: this.info.terminalSyncHint, syncEnabled: true,
+      syncUnavailableReason: CODEX_DAEMON_UNAVAILABLE_REASON,
+    });
+    this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { control: this.info.control, terminalSyncHint: this.info.terminalSyncHint } });
+  }
+
+  private async reconnectDaemon(): Promise<void> {
+    if (!this.daemonDisconnected) return;
+    if (this.closeFlight) throw new Error('Codex connection closed.');
+    if (this.reconnectFlight) return this.reconnectFlight;
+    const flight = (async () => {
+      this.bootstrapApplying = true;
+      try { await this.startConnection(); }
+      catch (error) {
+        this.daemon?.close();
+        this.daemon = undefined;
+        this.bootstrapApplying = false;
+        this.bootstrapQueue = [];
+        this.markIdle();
+        throw error;
+      }
+    })().finally(() => { this.reconnectFlight = undefined; });
+    this.reconnectFlight = flight;
+    return flight;
+  }
+
+  async reconcileDaemonTransport(): Promise<void> {
+    if (this.transport !== 'daemon-proxy' || this.closeFlight) return;
+    if (this.daemon && JSON.stringify(inspectCodexRuntimeSocket(codexAppServerSock()).fingerprint) !== this.daemonRuntimeFingerprint) {
+      this.daemon.close();
+      this.daemonLost();
+    }
+    await this.reconnectDaemon();
   }
 
   private rpc<T = any>(method: string, params: unknown, timeoutMs = 30000): Promise<T> {
@@ -4561,13 +4703,14 @@ class CodexResumeConnection implements SessionConnection {
     if (terminalStatus === 'cancelled') {
       this.emit({
         type: 'notice',
-        message: CODEX_INTERRUPTED_NOTICE,
+        message: params.interruptionMessage ?? CODEX_INTERRUPTED_NOTICE,
         semantic: {
           kind: 'interruption',
           reason: 'generic',
           turnId,
         },
       });
+      if (params.interruptionMessage) this.emit({ type: 'notice', message: params.interruptionMessage });
     }
     if (emitIdle) this.emit({ type: 'status', status: 'idle' });
     this.emitNativeRunSummary(params, terminalStatus);
@@ -4603,6 +4746,7 @@ class CodexResumeConnection implements SessionConnection {
    * Callers offer a contradiction, never an answer. Failure is unknown evidence and changes nothing.
    */
   requestRunStateRepair(): Promise<void> {
+    if (this.daemonDisconnected) return this.reconnectDaemon();
     if (this.repairRunStateFlight) return this.repairRunStateFlight;
     const flight = this.repairRunStateFromNative().finally(() => {
       if (this.repairRunStateFlight === flight) this.repairRunStateFlight = undefined;
@@ -5563,6 +5707,7 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   private async submitContent(content: any[], model?: PromptInput['model'], permissionMode?: string, clientMessageId?: string, canSend?: () => boolean): Promise<void> {
+    await this.reconcileDaemonTransport();
     if (canSend?.() === false || !content.length) return;
     const clientUserMessageId = `cosyncing-${Date.now()}-${++this.userSeq}`;
     if (clientMessageId) {
@@ -5704,6 +5849,7 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void> {
+    await this.reconcileDaemonTransport();
     if (name === 'stop' || name === 'abort') {
       const isStarting = this.pendingPromptStarts > 0 || this.turnStartPending;
       let activeTurnId = this.activeTurnId();

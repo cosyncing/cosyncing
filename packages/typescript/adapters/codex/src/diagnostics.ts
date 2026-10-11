@@ -8,6 +8,7 @@ import {
 } from '@cosyncing/adapter-api';
 import { CODEX_MAC_LSOF_PATH, CODEX_MAC_PS_PATH } from './tui-presence.ts';
 import { readCodexDaemonProcess } from './daemon-process.ts';
+import { codexDaemonReviewerCheck } from './daemon-reviewer.ts';
 
 export const CODEX_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.144.5',
@@ -339,6 +340,7 @@ export async function diagnoseCodexSetup(
     }),
     endpoint.check,
     daemonOwnershipCheck(context, codexHome, binary.executable, dependencies.readDaemonProcess ?? readCodexDaemonProcess),
+    codexDaemonReviewerCheck(context, codexHome),
   ];
 
   if (!binary.executable || endpoint.state !== 'usable') {
