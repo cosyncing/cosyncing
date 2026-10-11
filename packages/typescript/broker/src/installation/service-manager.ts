@@ -1647,7 +1647,7 @@ export function createDurableServiceProvider(options: DurableServiceProviderOpti
       agentExecutableOverrides: options.agentExecutableOverrides,
       agentDataPathOverrides: options.agentDataPathOverrides,
       agentConfigurationOverrides: options.agentConfigurationOverrides,
-      webDir: paths.webRoot,
+      webDir: options.context.env?.COSYNCING_WEB_DIR || paths.webRoot,
       platform: 'win32',
     }),
   });

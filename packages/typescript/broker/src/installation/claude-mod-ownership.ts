@@ -669,7 +669,7 @@ export type ClaudeModOwnershipStatus =
   | 'declined'
   | 'disabled'
   /** Our copy and our receipt, with Claude's two entries gone: the user removed the mod inside
-   *  Claude. Sticky, like a decline, and never a reinstall. */
+   *  Claude. Update reinstalls it when setup still records a yes. */
   | 'removed-in-claude'
   | 'foreign-marketplace'
   | 'unowned'
@@ -736,7 +736,7 @@ export function claudeModReceiptProvesDisk(decision: ClaudeModOwnershipDecision)
  *
  * That last ordering is the one a reinstall turns on. A copy cosyncing wrote at an older version, sitting
  * under a Claude whose two entries are gone, is a person who took the mod out of Claude. Comparing the
- * version first called it `owned-stale`, and every `cosy update` then refreshed it straight back in.
+ * version first loses that distinction. Update now explicitly reconciles a removal with setup's choice.
  */
 export function decideClaudeModOwnership(input: {
   install: InstallStateInspection;
@@ -799,7 +799,7 @@ export function decideClaudeModOwnership(input: {
     if (!receipt) return { ...base, status: settings.status === 'disabled' ? 'disabled' : 'absent' };
     // Our receipt names a copy that is gone. If Claude still lists the mod, the directory it loads from
     // has to come back, which is a refresh. If Claude does not, nothing is installed anywhere and the
-    // person's last word on it was taking it out: that is a removal, and it stays one.
+    // person's last action was taking it out: that is a removal, which update reconciles with setup's choice.
     if (settings.status === 'enabled') return { ...base, status: 'owned-stale' };
     if (settings.status === 'disabled') return { ...base, status: 'disabled' };
     return { ...base, status: 'removed-in-claude' };

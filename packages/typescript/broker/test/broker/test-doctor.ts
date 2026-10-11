@@ -62,6 +62,7 @@ import {
   diagnoseAgents,
   doctorColorEnabled,
   machinePeerCredentialCheck,
+  servedWebVersionCheck,
   renderDoctorReport,
   type DoctorReport,
 } from '../../src/installation/doctor.ts';
@@ -89,6 +90,12 @@ const observedDoctorChecks: SetupCheck[] = [];
 function check(name: string, ok: boolean, detail?: string): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+for (const [web, code] of [['1.0.0', 'served-web-version-current'], ['0.9.0', 'served-web-version-mismatch'], [undefined, 'served-web-version-unreadable']] as const) {
+  const item = servedWebVersionCheck('1.0.0', web);
+  observedDoctorChecks.push(item);
+  check(`PR4 doctor ${code}`, item.detailCode === code && (web === '1.0.0' ? item.status === 'pass' : item.status === 'warn' && item.remediation?.command === 'cosy update'));
 }
 
 function checkById(diagnosis: AgentSetupDiagnosis, id: string): SetupCheck {
@@ -1118,11 +1125,13 @@ try {
       // A bare `{ ok: true }` used to satisfy the advertised-endpoint check, because that check only
       // looked at the HTTP status. It now requires the full identity, so the fixture must answer as the
       // configured broker — anything less is exactly the foreign endpoint doctor is meant to reject.
+      if (new URL(url).pathname === '/cosy/version.json') return { status: 'ok', statusCode: 200, json: { version: BUILD_INFO.version } };
       if (new URL(url).pathname === '/api/health') {
         return { status: 'ok', statusCode: 200, json: {
           ok: true,
           product: 'cosyncing',
           machine: defaultBrokerConfig().broker.machineLabel,
+          version: BUILD_INFO.version,
         } };
       }
       return { status: 'ok', statusCode: 200, json: { ok: true } };
@@ -1202,7 +1211,7 @@ try {
   const after = treeSnapshot(userHome);
   const reportJson = JSON.stringify(report);
   const requiredGreenIds = [
-    'service.systemd-user', 'network.internal-endpoint', 'runtime.managed-updates', 'codex.broker-create-readiness',
+    'service.systemd-user', 'network.internal-endpoint', 'network.served-web-version', 'runtime.managed-updates', 'codex.broker-create-readiness',
     'opencode.broker-create-readiness', 'pi.broker-create-readiness', 'claude.broker-create-readiness',
     'state.schema.broker-instance',
   ];

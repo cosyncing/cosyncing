@@ -30,7 +30,10 @@ import {
   type InstalledResourceRecord,
 } from '../installation/install-state.ts';
 import { acquireInstallationLock, type InstallationLockHandle } from '../installation/installation-lock.ts';
-import { claudeModMarketplaceDir, claudeModRefreshEnvironment } from '../installation/claude-mod-ownership.ts';
+import { claudeModRefreshEnvironment } from '../installation/claude-mod-ownership.ts';
+import { planServiceWebEnvironment, ServiceWebEnvironmentError, validServiceWebChanges, writeServiceWebEnvironment, type ServiceWebEnvironmentChange } from '../installation/service-web-environment.ts';
+import { readSetupState } from '../installation/setup-state.ts';
+import { windowsServiceInstallPaths } from '../installation/windows-service-install.ts';
 import type {
   DurableServiceVersionActivation,
   DurableServiceVersionBuild,
@@ -204,6 +207,8 @@ export interface UpgradeServiceController {
    * whose unit execs the installed binary directly.
    */
   versions?: DurableServiceVersions;
+  /** Reload a launchd definition after its journaled environment changed. */
+  reloadDefinition?: (wasActive: boolean) => Promise<void>;
 }
 
 export interface UpgradeBinaryResult {
@@ -227,9 +232,9 @@ export interface UpgradeCommandResult {
    *
    * Recorded rather than folded into `status`: the broker upgrade itself committed and health-checked
    * before the mod was touched, and a mod Claude refused to install must not read as a failed upgrade.
-   * Absent when there was no mod copy to refresh, which is most hosts.
+   * Includes stated skips when the mod was declined, disabled, unavailable or unsafe.
    */
-  claudeMod?: { status: 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string };
+  claudeMod?: { status: 'installed' | 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string };
 }
 
 interface UpgradeJournal {
@@ -253,6 +258,7 @@ interface UpgradeJournal {
   authorizationFenceWasActive?: boolean;
   /** Absent on a host that keeps no versioned service root, and on every journal written before it did. */
   serviceVersion?: DurableServiceVersionRecord;
+  serviceWebEnvironment?: ServiceWebEnvironmentChange[];
   updatedAt: string;
 }
 
@@ -297,6 +303,7 @@ export interface UpgradeDependencies {
   env?: Readonly<Record<string, string | undefined>>;
   service?: UpgradeServiceController;
   verifyBrokerVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
+  verifyWebVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
   healthAttempts?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   acquireLock?: (options: { command: 'upgrade'; home: string }) => InstallationLockHandle;
@@ -714,10 +721,8 @@ async function installReleaseWebSidecar(options: {
 /**
  * Drop web roots that no version still in play needs.
  *
- * Two are kept and both are load-bearing: the version now installed, and the one the RUNNING service is
- * still configured to serve. `setup` has not re-run yet, so the service environment still names the old
- * directory — deleting it would blank the web client of a broker serving it at that moment. Anything older
- * belongs to a previous upgrade and nothing references it.
+ * Keep the installed and previous versions for rollback, plus any custom directory still pinned in the
+ * service environment. A custom pin may name an older installer directory and must survive pruning.
  */
 /**
  * The web root belonging to a version this run installed and then abandoned.
@@ -742,7 +747,7 @@ function withoutPreviousBinaryReceipt(state: CommittedInstallState): CommittedIn
   };
 }
 
-function pruneReleaseWebRoots(applicationPath: string, keep: readonly string[]): void {
+function pruneReleaseWebRoots(applicationPath: string, keep: readonly string[], pinnedRoot?: string): void {
   const binDirectory = dirname(resolve(applicationPath));
   const kept = new Set(keep.map((version) => `${PRODUCT_IDENTITY.releaseAssetPrefix}-web-${version}`));
   const pattern = new RegExp(
@@ -751,7 +756,8 @@ function pruneReleaseWebRoots(applicationPath: string, keep: readonly string[]):
   let entries: string[];
   try { entries = readdirSync(binDirectory); } catch { return; }
   for (const entry of entries) {
-    if (kept.has(entry) || !pattern.test(entry)) continue;
+    if (kept.has(entry) || !pattern.test(entry)
+        || (pinnedRoot && resolve(join(binDirectory, entry)) === resolve(pinnedRoot))) continue;
     // A superseded web root is inert, so failing to remove one must never fail a completed upgrade.
     try { removeOwnedDirectory(join(binDirectory, entry)); } catch { /* leave it for repair */ }
   }
@@ -1120,6 +1126,10 @@ function parseJournal(home: string, targetPath: string): UpgradeJournal | undefi
       || (value.authorizationFenceWasActive !== undefined
         && typeof value.authorizationFenceWasActive !== 'boolean')
       || (value.serviceVersion !== undefined && !validServiceVersionRecord(value.serviceVersion))
+      || (value.serviceWebEnvironment !== undefined && (() => {
+        const install = inspectInstallState(home);
+        return !install.committed || !validServiceWebChanges(value.serviceWebEnvironment, install.state);
+      })())
       || typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt))) {
     throw new Error('upgrade-journal-malformed');
   }
@@ -1197,6 +1207,10 @@ async function recoverUpgrade(options: {
       resources.set(record.id, record);
     }
   }
+  if (journal.serviceWebEnvironment) {
+    for (const record of writeServiceWebEnvironment(journal.serviceWebEnvironment, true)) resources.set(record.id, record);
+    if (journal.serviceWebEnvironment.some((change) => change.resource.id === 'service-launchd')) await options.service?.reloadDefinition?.(journal.serviceWasActive);
+  }
   const installer = plainObject(install.state.installer) ? install.state.installer : {};
   writeInstallState({
     ...install.state,
@@ -1238,6 +1252,17 @@ async function defaultVerifyBrokerVersion(home: string, config: BrokerConfig, ex
   } catch {
     return false;
   }
+}
+
+async function defaultVerifyWebVersion(config: BrokerConfig, expectedVersion: string): Promise<boolean> {
+  try {
+    const response = await fetch(new URL('/cosy/version.json', config.broker.internalUrl), {
+      redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return false;
+    const body = await response.json() as Record<string, unknown>;
+    return body.version === expectedVersion;
+  } catch { return false; }
 }
 
 function updateBinaryReceipt(
@@ -1299,8 +1324,8 @@ function result(
  *
  * The marketplace copy is what Claude loads in place, and it is written from the marketplace embedded
  * in whichever build ran setup. The OLD process cannot update it -- the copy embedded in it IS the old
- * mod -- so the freshly switched binary runs its own `claude-mod refresh`. Gated on a copy existing at
- * all, so a host that never installed the mod spawns nothing.
+ * mod -- so the freshly switched binary runs its own `claude-mod refresh`. The child decides from
+ * the recorded setup choice and ownership, including a wanted copy that is missing.
  *
  * Called after the journal is gone and the receipts are committed, with the upgrade's installation lock
  * already released so the child can take its own: the broker upgrade has succeeded by then, and a mod
@@ -1314,17 +1339,9 @@ async function refreshInstalledClaudeMod(options: {
   runtimePath?: string;
   runBinary: NonNullable<UpgradeDependencies['runBinary']>;
   env: Readonly<Record<string, string | undefined>>;
-}): Promise<{ status: 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string; clause: string }> {
-  const marketplaceDir = claudeModMarketplaceDir(options.home);
-  let installedCopy = false;
-  try {
-    installedCopy = existsSync(marketplaceDir);
-  } catch {
-    installedCopy = false;
-  }
-  if (!installedCopy) {
-    return { status: 'skipped', detailCode: 'claude-mod-refresh-skipped-no-copy', clause: '' };
-  }
+}): Promise<{ status: 'installed' | 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string; clause: string }> {
+  const requested = readSetupState(options.home).claudeModRequested === true;
+  const clause = (text: string): string => requested ? text : '';
   // The same launch pair the self-check used: a JavaScript bundle carries no interpreter, so it goes to
   // the validated runtime rather than whatever `bun` PATH happens to resolve.
   const launch = options.javaScriptCandidate && options.runtimePath
@@ -1334,12 +1351,18 @@ async function refreshInstalledClaudeMod(options: {
   // those two it ran `claude plugin` against the default `~/.claude` whatever CLAUDE_CONFIG_DIR said, used a
   // bare `claude` whatever COSYNCING_CLAUDE_BIN said, and resolved its own state home from scratch. One
   // allowlist, defined beside the mod's ownership rules, so the parent and the child agree on what passes.
-  const ran = await options.runBinary(
-    launch[0] as string,
-    [...launch.slice(1), 'claude-mod', 'refresh', '--json', '--home', options.home],
-    CLAUDE_MOD_REFRESH_TIMEOUT_MS,
-    claudeModRefreshEnvironment(options.env),
-  );
+  let ran: UpgradeBinaryResult;
+  try {
+    ran = await options.runBinary(
+      launch[0] as string,
+      [...launch.slice(1), 'claude-mod', 'refresh', '--json', '--home', options.home],
+      CLAUDE_MOD_REFRESH_TIMEOUT_MS,
+      claudeModRefreshEnvironment(options.env),
+    );
+  } catch {
+    return { status: 'failed', detailCode: 'claude-mod-refresh-launch-failed',
+      clause: clause(' The cosyncing Claude mod could not be reconciled; run cosy doctor, then cosy setup.') };
+  }
   let parsed: { status?: unknown; detailCode?: unknown } | undefined;
   try {
     parsed = JSON.parse(ran.stdout) as { status?: unknown; detailCode?: unknown };
@@ -1350,21 +1373,23 @@ async function refreshInstalledClaudeMod(options: {
     return {
       status: 'failed',
       detailCode: reported ?? `claude-mod-refresh-${ran.status}`,
-      clause: ` The cosyncing Claude mod was not refreshed (${reported ?? `claude-mod-refresh-${ran.status}`}); run cosyncing setup to reconcile it.`,
+      clause: clause(' The cosyncing Claude mod could not be reconciled; run cosy doctor, then cosy setup.'),
     };
   }
-  if (raw === 'refreshed') {
+  if (raw === 'installed' || raw === 'refreshed') {
     return {
-      status: 'refreshed',
-      detailCode: typeof reported === 'string' ? reported : 'claude-mod-refreshed',
-      clause: ` The cosyncing Claude mod was refreshed to ${options.toVersion}.`,
+      status: raw,
+      detailCode: typeof reported === 'string' ? reported : `claude-mod-${raw}`,
+      clause: clause(` The cosyncing Claude mod was ${raw} to ${options.toVersion}.`),
     };
   }
   if (raw === 'current' || raw === 'skipped') {
     return {
       status: raw,
       detailCode: typeof reported === 'string' ? reported : `claude-mod-refresh-${raw}`,
-      clause: '',
+      clause: clause(raw === 'current' ? ' The cosyncing Claude mod is current.'
+        : reported === 'claude-mod-refresh-skipped-disabled' ? ' The cosyncing Claude mod is switched off in Claude and was left alone.'
+          : ' The cosyncing Claude mod was left alone. Run cosy doctor for details.'),
     };
   }
   // The child answered ok but not with a refresh outcome: either it is an older binary without the
@@ -1373,7 +1398,7 @@ async function refreshInstalledClaudeMod(options: {
   return {
     status: 'failed',
     detailCode: reported ?? 'claude-mod-refresh-unparsable',
-    clause: ` The cosyncing Claude mod was not refreshed (${reported ?? 'claude-mod-refresh-unparsable'}); run cosyncing setup to reconcile it.`,
+    clause: clause(' The cosyncing Claude mod could not be reconciled; run cosy doctor, then cosy setup.'),
   };
 }
 
@@ -1584,6 +1609,23 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       );
     }
 
+    let webPlan: ReturnType<typeof planServiceWebEnvironment>;
+    try {
+      webPlan = planServiceWebEnvironment({
+        state: installState,
+        fromRoot: resolveFlutterWebRoot({ packaged: true, executablePath: targetPath, version: fromVersion }),
+        toRoot: resolveFlutterWebRoot({ packaged: true, executablePath: targetPath, version: toVersion }),
+        versionedService: !!activation,
+        ...(activation ? { versionedInstallerRoot: windowsServiceInstallPaths(dependencies.home, activation.record.fromVersionKey).webRoot } : {}),
+      });
+    } catch (error) {
+      unlinkRegular(stagingPath);
+      return result('blocked', 1, error instanceof Error ? error.message : 'upgrade-service-environment-invalid',
+        error instanceof ServiceWebEnvironmentError
+          ? `The service file "${error.target}" could not be safely updated. Run cosy setup to reconcile it.`
+          : 'The service environment could not be safely updated. Run cosy setup to reconcile it.', fromVersion, recovered, toVersion);
+    }
+
     // The web client is versioned with the application, so a swap that moved only the application would
     // leave the new version resolving a web root nothing ever created. Install the paired sidecar while a
     // failure still costs nothing: the journal has not opened and the service has not been stopped.
@@ -1628,6 +1670,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       serviceWasActive,
       authorizationFenceWasActive,
       ...(serviceVersion ? { serviceVersion } : {}),
+      ...(webPlan.changes.length ? { serviceWebEnvironment: webPlan.changes } : {}),
       updatedAt: now(),
     });
     try {
@@ -1640,6 +1683,8 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       previousWritten = true;
       journalAt('switching');
       atomicWriteOwnerOnly(targetPath, readFileSync(stagingPath), { mode: 0o700 });
+      writeServiceWebEnvironment(webPlan.changes);
+      if (webPlan.changes.some((change) => change.resource.id === 'service-launchd')) await dependencies.service?.reloadDefinition?.(serviceWasActive);
       journalAt('switched');
       if (dependencies.faultAfter === 'binary-switched') throw new Error('upgrade-fixture-interrupted');
       // Replacing the binary is the whole of a version change only where the service execs it. On Windows
@@ -1665,6 +1710,11 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           healthy = dependencies.verifyBrokerVersion
             ? await dependencies.verifyBrokerVersion(config.config, toVersion)
             : await defaultVerifyBrokerVersion(dependencies.home, config.config, toVersion);
+          if (healthy && candidate.manifest.webApp && webPlan.checkServedVersion) {
+            healthy = dependencies.verifyWebVersion
+              ? await dependencies.verifyWebVersion(config.config, toVersion)
+              : await defaultVerifyWebVersion(config.config, toVersion);
+          }
           if (healthy) break;
           await (dependencies.sleep ?? Bun.sleep)(100);
         }
@@ -1679,14 +1729,15 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         previousSha256,
         // The version root and its environment file move with the binary, in the same write. A root left
         // on disk without its receipt is the same defect a rollback used to leave behind, in a new place.
-        serviceVersion ? dependencies.service?.versions?.resources(serviceVersion.toVersionKey) ?? [] : [],
+        [...(serviceVersion ? dependencies.service?.versions?.resources(serviceVersion.toVersionKey) ?? [] : []),
+          ...webPlan.changes.map(({ resource, after }) => ({ ...resource, ownership: { ...resource.ownership, installedSha256: sha256(Buffer.from(after)) } }))],
       ), dependencies.home);
       writeBootstrapReceipt(bootstrapReceipt, targetPath, toVersion, candidate.sha256);
       if (dependencies.faultAfter === 'receipt-committed') throw new Error('upgrade-fixture-interrupted');
       unlinkRegular(stagingPath);
       unlinkRegular(upgradeJournalPath(dependencies.home));
       // Only once the upgrade is committed, and only web roots no version in play still needs.
-      if (javaScriptCandidate) pruneReleaseWebRoots(targetPath, [toVersion, fromVersion]);
+      if (javaScriptCandidate) pruneReleaseWebRoots(targetPath, [toVersion, fromVersion], webPlan.pinnedRoot);
       // Strictly after the journal is gone: until that moment the superseded root is what a recovery
       // would point the service back at. A superseded root is inert, so failing to remove one must never
       // fail an upgrade that has already committed.
@@ -1719,7 +1770,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         fromVersion,
         recovered,
         toVersion,
-        modOutcome.status === 'skipped' ? undefined : modOutcome,
+        modOutcome,
       );
     } catch (error) {
       if (!authorizationFenceWasActive
@@ -1761,6 +1812,8 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         if (serviceVersion && dependencies.service?.versions) {
           await dependencies.service.versions.restore(serviceVersion);
         }
+        writeServiceWebEnvironment(webPlan.changes, true);
+        if (webPlan.changes.some((change) => change.resource.id === 'service-launchd')) await dependencies.service?.reloadDefinition?.(serviceWasActive);
         // The pre-upgrade state, minus the rollback copy this run overwrote and removes below. Restoring
         // it unchanged would republish a receipt that measures bytes the copy no longer holds: after one
         // successful upgrade `broker-binary-previous` names the build before THAT one, and this run wrote

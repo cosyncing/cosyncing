@@ -13,6 +13,7 @@ import {
   windowsServiceInstallPaths,
   windowsServiceVersionKey,
   writeWindowsActiveInstall,
+  writeWindowsServiceEnvironment,
 } from '../../src/installation/windows-service-install.ts';
 import { windowsPowerShellChildEnvironment } from '../../../adapter-api/src/host-process.ts';
 import {
@@ -43,7 +44,7 @@ import {
   windowsPriorVersionReceiptTarget,
   windowsServiceVersionResources,
 } from '../../src/installation/windows-task-scheduler-provider.ts';
-import { committedInstallState, type InstalledResourceRecord } from '../../src/installation/install-state.ts';
+import { committedInstallState, writeInstallState, type InstalledResourceRecord } from '../../src/installation/install-state.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
 import {
   brokerServiceEnvironmentEntries,
@@ -63,7 +64,11 @@ import {
   writeBrokerConfig,
 } from '../../src/runtime/configuration.ts';
 import { embeddedRuntimeAsset } from '../../src/runtime/runtime-assets.ts';
-import { ensureOwnerOnlyDirectory } from '../../src/security/secure-files.ts';
+import { BUILD_INFO } from '../../src/runtime/build-info.ts';
+import { createLifecycleServiceVersions } from '../../src/installation/broker-lifecycle.ts';
+import { writeSetupState } from '../../src/installation/setup-state.ts';
+import { atomicWriteOwnerOnly, ensureOwnerOnlyDirectory } from '../../src/security/secure-files.ts';
+import { planServiceWebEnvironment } from '../../src/installation/service-web-environment.ts';
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -1104,6 +1109,70 @@ function check(name: string, ok: boolean, detail?: string): void {
       }));
 }
 
+// PR-4: stage real immutable Windows roots without installing or controlling a Scheduled Task.
+if (process.platform === 'win32') {
+  for (const [custom, nested, olderInstaller] of [[false, false, false], [true, false, false], [true, true, false], [false, false, true]] as const) {
+    const scratch = mkdtempSync(join(tmpdir(), 'cosyncing-pr4-web-pin-'));
+    try {
+      const home = join(scratch, '.cosyncing');
+      const old = windowsServiceInstallPaths(home, 'pr4-old');
+      const from = { ...BUILD_INFO, version: '1.0.0', distribution: 'bootstrap-js' as const, packaged: true, target: 'universal' };
+      const next = { ...from, version: '2.0.0', commit: '2222222' };
+      const newPaths = windowsServiceInstallPaths(home, windowsServiceVersionKey(next));
+      const application = join(home, 'bin', 'cosyncing');
+      const candidateWeb = join(home, 'bin', 'cosyncing-web-2.0.0');
+      const customWeb = nested ? join(old.versionRoot, 'custom-web') : join(scratch, 'custom-web');
+      const label = nested ? 'nested custom' : custom ? 'custom' : olderInstaller ? 'older installer' : 'installer';
+      for (const web of [old.webRoot, candidateWeb, customWeb]) {
+        ensureOwnerOnlyDirectory(web);
+        atomicWriteOwnerOnly(join(web, 'index.html'), '<html>PR4</html>');
+      }
+      atomicWriteOwnerOnly(application, '// scratch application');
+      const pin = custom ? customWeb : olderInstaller ? join(home, 'bin', 'cosyncing-web-0.6.4') : old.webRoot;
+      writeWindowsServiceEnvironment(old.environmentPath, windowsServiceEnvironment([['COSYNCING_WEB_DIR', pin]]));
+      writeWindowsActiveInstall(old.activeManifestPath, windowsActiveInstallManifest('install-pr4', 'pr4-old'));
+      const state = committedInstallState(new Date().toISOString());
+      state.installationId = 'install-pr4';
+      state.resources = [...windowsServiceVersionResources(home, 'pr4-old')];
+      writeInstallState(state, home);
+      writeSetupState({ serviceChoice: 'task-scheduler' }, home);
+      const context = createSetupDiagnosisContext({ homeDir: scratch, env: {
+        ...process.env, HOME: scratch, USERPROFILE: scratch, COSYNCING_HOME: home,
+        XDG_CACHE_HOME: join(scratch, 'cache'), COSYNCING_WEB_DIR: undefined,
+      } });
+      const versions = createLifecycleServiceVersions({ home, context, buildInfo: from, executablePath: application, runtimePath: process.execPath });
+      const activation = versions?.plan(next);
+      if (!versions || !activation) throw new Error('scratch version activation missing');
+      const webPlan = planServiceWebEnvironment({ state, fromRoot: join(home, 'bin', 'cosyncing-web-1.0.0'),
+        toRoot: candidateWeb, versionedService: true, versionedInstallerRoot: old.webRoot });
+      check(`PR4 native Windows ${label} pin checks served version only for an installer folder`, webPlan.checkServedVersion === !custom);
+      await activation.apply();
+      const candidateEnv = parseWindowsServiceEnvironment(JSON.parse(readFileSync(newPaths.environmentPath, 'utf8')));
+      check(`PR4 native Windows ${label} pin is carried into the staged version`,
+        candidateEnv?.variables.COSYNCING_WEB_DIR === (custom ? customWeb : newPaths.webRoot)
+          && inspectWindowsActiveInstall(old.activeManifestPath).status === 'ok', candidateEnv?.variables.COSYNCING_WEB_DIR);
+      const nextState = { ...state, resources: [...versions.resources(activation.record.toVersionKey)] };
+      let nextPreflight = false;
+      try {
+        planServiceWebEnvironment({ state: nextState, fromRoot: candidateWeb, toRoot: join(home, 'bin', 'cosyncing-web-3.0.0'), versionedService: true });
+        nextPreflight = nextState.resources.find((resource) => resource.id === 'service-environment')?.ownership.installedSha256
+          === createHash('sha256').update(readFileSync(newPaths.environmentPath)).digest('hex');
+      } catch { /* the assertion names a receipt which cannot authorize the next update */ }
+      check(`PR4 native Windows ${label} activation records an environment receipt accepted by the next update`, nextPreflight);
+      if (nested) {
+        await versions.finalize(activation.record);
+        check('PR4 native Windows never removes a superseded root containing the custom pin', existsSync(join(customWeb, 'index.html')));
+      }
+      await versions.restore(activation.record);
+      const restored = inspectWindowsActiveInstall(old.activeManifestPath);
+      const restoredEnv = parseWindowsServiceEnvironment(JSON.parse(readFileSync(old.environmentPath, 'utf8')));
+      check(`PR4 native Windows ${label} pin and root restore on rollback`,
+        restored.status === 'ok' && restored.manifest.versionKey === 'pr4-old'
+          && restoredEnv?.variables.COSYNCING_WEB_DIR === pin && !existsSync(newPaths.versionRoot));
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  }
+}
+
 // The removal itself needs a real filesystem addressed by real Windows paths, which only exists here.
 if (process.platform === 'win32') {
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-windows-supersede-'));
@@ -1141,6 +1210,9 @@ if (process.platform === 'win32') {
   check('no pointer means no versioned install to move, and an upgrade there is the binary swap it was',
     missing === undefined, String(missing));
 
+  const originalPaths = windowsServiceInstallPaths(home, 'version-1');
+  writeWindowsServiceEnvironment(originalPaths.environmentPath,
+    windowsServiceEnvironment([['COSYNCING_WEB_DIR', originalPaths.webRoot]]));
   writeWindowsActiveInstall(
     windowsServiceActiveManifestPath(home),
     windowsActiveInstallManifest('install-live', 'version-1'),
@@ -1169,14 +1241,22 @@ if (process.platform === 'win32') {
     `${restored.status}/${existsSync(candidateRoot)}/${existsSync(supersededRoot)}`);
 
   ensureOwnerOnlyDirectory(candidateRoot);
+  const candidatePaths = windowsServiceInstallPaths(home, activation!.record.toVersionKey);
+  writeWindowsServiceEnvironment(candidatePaths.environmentPath,
+    windowsServiceEnvironment([['COSYNCING_WEB_DIR', candidatePaths.webRoot]]));
+  writeWindowsActiveInstall(windowsServiceActiveManifestPath(home),
+    windowsActiveInstallManifest('install-live', activation!.record.toVersionKey));
   await versions!.finalize(activation!.record);
   check('finalize drops the superseded root and never the one the record moved to',
     !existsSync(supersededRoot) && existsSync(candidateRoot),
     `${existsSync(supersededRoot)}/${existsSync(candidateRoot)}`);
 
-  check('the receipts the seam commits are the ones the provider itself writes for that key',
-    JSON.stringify(versions!.resources(activation!.record.toVersionKey))
-      === JSON.stringify(windowsServiceVersionResources(home, activation!.record.toVersionKey)));
+  const receipts = versions!.resources(activation!.record.toVersionKey);
+  check('the receipts the seam commits carry the provider targets plus the environment content receipt',
+    JSON.stringify(receipts.map(({ ownership, ...resource }) => ({
+      ...resource, ownership: { proof: ownership.proof, marker: ownership.marker },
+    }))) === JSON.stringify(windowsServiceVersionResources(home, activation!.record.toVersionKey))
+      && typeof receipts.find((resource) => resource.id === 'service-environment')?.ownership.installedSha256 === 'string');
   rmSync(home, { recursive: true, force: true });
 }
 

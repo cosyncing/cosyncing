@@ -1057,7 +1057,7 @@ function claudeModDecisionLines(
         'Switch it back on inside Claude (`claude plugin` settings). Setup leaves a switched-off mod alone.')];
     case 'removed-in-claude':
       return [check('pass', 'claude-mod-removed-in-claude',
-        'The cosyncing Claude mod was removed inside Claude. cosyncing keeps its own copy out of the way and will not put it back.',
+        'The cosyncing Claude mod was removed inside Claude. The next cosy update reinstalls it while setup records yes; decline it in setup to keep it removed.',
         'To use it again, run `cosyncing setup --install-claude-mod`. To finish the removal, run `cosyncing setup --no-install-claude-mod`, which takes cosyncing\'s own directory back.')];
     case 'declined':
       // Only warn when there is actually something on disk. A decline with nothing installed is
@@ -1442,6 +1442,18 @@ async function installedBrokerServiceChecks(
   }];
 }
 
+export function servedWebVersionCheck(brokerVersion: string, webVersion: unknown): SetupCheck {
+  const matches = typeof webVersion === 'string' && webVersion === brokerVersion;
+  return {
+    id: 'network.served-web-version',
+    status: matches ? 'pass' : 'warn',
+    detailCode: matches ? 'served-web-version-current' : typeof webVersion === 'string' ? 'served-web-version-mismatch' : 'served-web-version-unreadable',
+    summary: matches ? 'The served web app matches the broker version.' : 'The served web app is missing or does not match the broker version.',
+    evidence: { brokerVersion, ...(typeof webVersion === 'string' ? { webVersion } : {}) },
+    ...(matches ? {} : { remediation: remediation('cosy update', 'Update the broker and its served web app together. If already current, run cosy setup to reconcile the service web directory.') }),
+  };
+}
+
 function installedState(home: string): ReturnType<typeof inspectInstallState> {
   try { return inspectInstallState(home); } catch {
     return { committed: false, path: '', reason: 'unreadable' };
@@ -1491,6 +1503,13 @@ async function endpointAndRuntimeChecks(options: {
       evidence: { endpoint: 'internal-loopback', status },
       ...(status === 'healthy' ? {} : { remediation: remediation('cosyncing repair', 'Inspect and repair failing broker health components.') }),
     });
+
+    const identity = await options.context.fetchJson(new URL('/api/health', internal).toString(), headers);
+    const brokerVersion = identity.status === 'ok' ? (identity.json as { version?: unknown })?.version : undefined;
+    if (typeof brokerVersion === 'string') {
+      const web = await options.context.fetchJson(new URL('/cosy/version.json', internal).toString(), headers);
+      network.push(servedWebVersionCheck(brokerVersion, web.status === 'ok' ? (web.json as { version?: unknown })?.version : undefined));
+    }
 
     const updates = await options.context.fetchJson(new URL('/api/agent-runtime-updates', internal).toString(), headers);
     if (updates.status === 'ok' && Array.isArray((updates.json as any)?.updates)) {
