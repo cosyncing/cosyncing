@@ -1,6 +1,10 @@
 import type { CodexDaemonVersion } from './implementation.ts';
 import type { CodexDaemonProcess, CodexDaemonProcessRead } from './daemon-process.ts';
 
+export function codexDaemonOwnershipFailure(detail: string): Error {
+  return new Error(`cosyncing could not confirm it manages the Codex daemon: ${detail} While nothing is running, you can restart it yourself with \`codex app-server daemon restart\`.`);
+}
+
 export interface CodexRestartOptions { confirmed?: boolean }
 export interface CodexDaemonCommandResult { code: number; stdout: string; stderr: string; timedOut?: boolean }
 export interface CodexRestartDependencies {
@@ -23,7 +27,7 @@ export async function restartCodexDaemonVerified(deps: CodexRestartDependencies,
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const before = await deps.readVersion();
   const captured = deps.captureProcess();
-  if (captured.state === 'unknown') throw new Error(captured.detail);
+  if (captured.state === 'unknown') throw codexDaemonOwnershipFailure(captured.detail);
   const old = captured.state === 'running' ? captured.process : undefined;
   if (before?.status === 'running' && !old) {
     throw new Error('Codex is answering without a verified daemon PID receipt; this backend cannot be restarted safely.');
@@ -62,7 +66,7 @@ export async function restartCodexDaemonVerified(deps: CodexRestartDependencies,
   // Preserve any concurrent replacement, including one that appears while the captured daemon
   // drains. Start is the only receipt-following command: it never stops a pre-existing daemon.
   const current = deps.captureProcess();
-  if (current.state === 'unknown') throw new Error(current.detail);
+  if (current.state === 'unknown') throw codexDaemonOwnershipFailure(current.detail);
   if (current.state === 'running') {
     if (await wait(replacement, deps.verifyMs ?? 2_000)) {
       log('restart verified; previous process exited and replacement daemon is answering');

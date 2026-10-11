@@ -8,6 +8,7 @@ export interface CodexDaemonProcess extends HostProcessIdentity {
   argv: string[];
   home: string;
   cli: string;
+  unknownFlags?: string[];
 }
 
 export type CodexDaemonProcessRead =
@@ -19,13 +20,54 @@ const processes = new HostProcessProvider();
 const unknown = (detail: string): CodexDaemonProcessRead => ({ state: 'unknown', detail });
 const normalizeStart = (value: string) => value.trim().replace(/\s+/g, ' ');
 
-/** Exact native daemon forms, including the explicit marker observed on 0.156.
+export type CodexDaemonArguments =
+  | { valid: true; unknownFlags: string[] }
+  | { valid: false; detail: string };
+
+/** Structural native daemon form; new bare flags do not change the control endpoint.
  * This is only one ownership check; a matching argument list never grants ownership alone. */
+export function parseManagedCodexDaemonArguments(args: readonly string[]): CodexDaemonArguments {
+  // Name recognizable tokens without echoing private values or paths into restart errors.
+  const refused = (token: string | undefined, reason: string): CodexDaemonArguments => {
+    const flag = token?.match(/^--?[A-Za-z0-9][A-Za-z0-9_-]*/)?.[0];
+    const inline = flag !== undefined && token?.startsWith(`${flag}=`);
+    const value = inline ? token!.slice(flag.length + 1) : undefined;
+    const label = flag
+      ? `${flag}${inline ? `=${/^(?:0|1|true|false|unix:\/\/)$/.test(value!) ? value : '<value>'}` : ''}`
+      : token === 'daemon' || token === 'pid-update-loop' ? token : undefined;
+    return { valid: false, detail: `Codex daemon launch argument ${label ? `\`${label}\`` : 'at an unexpected position'} ${reason}.` };
+  };
+  if (args[0] !== 'app-server') return refused(args[0], 'must start with app-server');
+  let listens = 0;
+  const unknownFlags: string[] = [];
+  for (let i = 1; i < args.length; i++) {
+    const token = args[i]!;
+    if (token === '--listen' || token.startsWith('--listen=')) {
+      if (++listens !== 1) return refused(token, 'appears more than once');
+      const address = token === '--listen' ? args[++i] : token.slice('--listen='.length);
+      if (address !== 'unix://') return refused(token, 'must use the default unix:// control socket');
+    } else if (!/^--[a-z0-9][a-z0-9-]*$/.test(token)) {
+      return refused(token, 'is not a recognized bare long flag');
+    } else {
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith('--')) return refused(token, 'carries a value');
+      if (token !== '--remote-control' && token !== '--managed-daemon') unknownFlags.push(token);
+    }
+  }
+  if (listens !== 1) return refused('--listen', 'is required exactly once');
+  return { valid: true, unknownFlags };
+}
+
 export function managedCodexDaemonArguments(args: readonly string[]): boolean {
-  const legacy = args.at(-1) === '--managed-daemon' ? args.slice(0, -1) : args;
-  const signature = legacy.join('\0');
-  return signature === 'app-server\0--remote-control\0--listen\0unix://'
-    || signature === 'app-server\0--listen\0unix://';
+  return parseManagedCodexDaemonArguments(args).valid;
+}
+
+/** ps may preserve a symlinked comm path; match it or its realpath without splitting path spaces. */
+export function codexDaemonCommandArguments(command: string | undefined, executable: string, comm = executable): string[] | undefined {
+  if (!command) return undefined;
+  const prefix = [comm, executable].find((path) => command.startsWith(path) && /\s/.test(command[path.length] ?? ''));
+  if (!prefix) return undefined;
+  return [prefix, ...command.slice(prefix.length).trim().split(/\s+/)];
 }
 
 function psField(pid: number, field: string): string | undefined {
@@ -71,20 +113,21 @@ function inspectProcess(pid: number, home: string, cli: string): CodexDaemonProc
       if (Number(psField(pid, 'uid')) !== process.getuid?.()) return unknown('Codex daemon belongs to another user.');
       executable = realpathSync(live.identity.comm);
       const command = psField(pid, 'command');
-      const suffix = command?.match(/ (app-server(?: --remote-control)? --listen unix:\/\/(?: --managed-daemon)?)$/)?.[1];
-      if (!suffix) return unknown('Codex daemon launch arguments could not be verified.');
-      argv = [command!.slice(0, -suffix.length - 1), ...suffix.split(' ')];
+      const parsed = codexDaemonCommandArguments(command, executable, live.identity.comm);
+      if (!parsed) return unknown('Codex daemon launch executable could not be verified.');
+      argv = parsed;
     } else {
       return unknown('Codex daemon process recovery is unavailable on this platform.');
     }
     const resolvedCli = realpathSync(cli);
     if (!sameCodexInstallation(executable, resolvedCli)) return unknown('Codex daemon executable does not match this installation.');
-    if (!managedCodexDaemonArguments(argv.slice(1))) return unknown('Codex daemon launch arguments do not match the managed daemon.');
+    const argumentsRead = parseManagedCodexDaemonArguments(argv.slice(1));
+    if (!argumentsRead.valid) return unknown(argumentsRead.detail);
     const after = processes.liveProcess(pid, { fresh: true });
     if (after.state !== 'running' || after.identity.start !== live.identity.start || after.identity.boot !== live.identity.boot) {
       return unknown('Codex daemon identity changed during inspection.');
     }
-    return { state: 'running', process: { ...live.identity, executable, argv, home, cli: resolvedCli } };
+    return { state: 'running', process: { ...live.identity, executable, argv, home, cli: resolvedCli, unknownFlags: argumentsRead.unknownFlags } };
   } catch {
     return unknown('Codex daemon executable or launch identity could not be read.');
   }
