@@ -512,6 +512,18 @@ try {
   check('Codex doctor passes the real 0.162.1 shape and reports unfamiliar bare flags',
     ownershipVerified.status === 'pass' && ownershipVerified.detailCode === 'daemon-ownership-verified'
       && ownershipVerified.evidence?.unknownFlags === '--analytics-default-enabled');
+  for (const receiptLayouts of [['app-server.pid'], ['daemon.pid'], ['app-server.pid', 'daemon.pid']] as const) {
+    const ownership = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
+      readDaemonProcess: () => ({ state: 'running', process: {
+        pid: 12345, start: 'fixture start', boot: 'fixture boot', comm: 'codex',
+        executable: '/fixture/bin/codex', cli: '/fixture/bin/codex', home: join('/fixture/home', '.codex'),
+        argv: ['/fixture/bin/codex', ...modernArguments], receiptLayouts: [...receiptLayouts],
+      } }),
+    }), 'codex.daemon-ownership');
+    check(`Codex doctor reports verified receipt layout ${receiptLayouts.join(', ')}`,
+      ownership.status === 'pass' && ownership.evidence?.receiptLayouts === receiptLayouts.join(', ')
+        && receiptLayouts.every((layout) => ownership.summary.includes(layout)));
+  }
   const linuxCodex = await diagnoseCodexSetup(codexSocketContext('linux'));
   const darwinDaemon = checkById(darwinCodex, 'codex.daemon-status');
   const linuxDaemon = checkById(linuxCodex, 'codex.daemon-status');

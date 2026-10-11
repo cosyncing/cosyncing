@@ -9,7 +9,10 @@ export interface CodexDaemonProcess extends HostProcessIdentity {
   home: string;
   cli: string;
   unknownFlags?: string[];
+  receiptLayouts?: CodexDaemonReceiptLayout[];
 }
+
+export type CodexDaemonReceiptLayout = 'app-server.pid' | 'daemon.pid';
 
 export type CodexDaemonProcessRead =
   | { state: 'running'; process: CodexDaemonProcess }
@@ -79,23 +82,39 @@ function psField(pid: number, field: string): string | undefined {
 }
 
 /** Updates can retarget current while the previous standalone release still owns threads. */
-export function sameCodexInstallation(executable: string, cli: string): boolean {
+export function sameCodexInstallation(executable: string, cli: string, home?: string): boolean {
   if (executable === cli) return true;
   const release = dirname(dirname(executable));
   const currentRelease = dirname(dirname(cli));
-  return basename(executable) === 'codex' && basename(cli) === 'codex'
+  const standalone = basename(executable) === 'codex' && basename(cli) === 'codex'
     && dirname(release) === dirname(currentRelease)
     && basename(dirname(release)) === 'releases'
     && basename(dirname(dirname(release))) === 'standalone'
     && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$/.test(basename(release))
     && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$/.test(basename(currentRelease));
+  if (standalone) return true;
+  if (!home) return false;
+  // New native installs give the daemon its own package. Admit only canonical release binaries
+  // beside the selected standalone CLI in this CODEX_HOME, never an arbitrary sibling executable.
+  const packages = join(realpathSync(home), 'packages');
+  const packageBinary = (path: string, name: string) => basename(path) === 'codex'
+    && basename(dirname(path)) === 'bin'
+    && dirname(dirname(dirname(path))) === join(packages, name, 'releases')
+    && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$/.test(basename(dirname(dirname(path))));
+  return packageBinary(cli, 'standalone') && packageBinary(executable, 'app-server-daemon');
 }
 
-function inspectProcess(pid: number, home: string, cli: string): CodexDaemonProcessRead {
+function inspectProcess(pid: number, home: string, cli: string, receiptStart?: string): CodexDaemonProcessRead {
   if (pid === process.pid || !Number.isSafeInteger(pid) || pid <= 0) return unknown('Invalid Codex daemon PID.');
   const live = processes.liveProcess(pid, { fresh: true });
   if (live.state !== 'running') return live.state === 'absent' ? live : unknown('Codex process identity is unreadable.');
   try {
+    if (receiptStart !== undefined) {
+      const start = psField(pid, 'lstart');
+      if (!start) return unknown('Codex daemon process start time could not be read.');
+      // A reused PID does not make an old receipt authoritative for the replacement process.
+      if (normalizeStart(start) !== receiptStart) return { state: 'absent' };
+    }
     let executable: string;
     let argv: string[];
     if (process.platform === 'linux') {
@@ -120,7 +139,7 @@ function inspectProcess(pid: number, home: string, cli: string): CodexDaemonProc
       return unknown('Codex daemon process recovery is unavailable on this platform.');
     }
     const resolvedCli = realpathSync(cli);
-    if (!sameCodexInstallation(executable, resolvedCli)) return unknown('Codex daemon executable does not match this installation.');
+    if (!sameCodexInstallation(executable, resolvedCli, home)) return unknown('Codex daemon executable does not match this installation.');
     const argumentsRead = parseManagedCodexDaemonArguments(argv.slice(1));
     if (!argumentsRead.valid) return unknown(argumentsRead.detail);
     const after = processes.liveProcess(pid, { fresh: true });
@@ -135,26 +154,38 @@ function inspectProcess(pid: number, home: string, cli: string): CodexDaemonProc
 
 /** The native PID receipt survives a lost control socket. Never infer process exit from an RPC failure. */
 export function readCodexDaemonProcess(home: string, cli: string): CodexDaemonProcessRead {
-  const path = join(home, 'app-server-daemon', 'app-server.pid');
-  let record: { pid?: unknown; processStartTime?: unknown };
-  try {
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.size > 4096 || stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0) {
-      return unknown('Codex daemon PID receipt has unsafe ownership or permissions.');
+  const records: { layout: CodexDaemonReceiptLayout; pid: number; processStartTime: string }[] = [];
+  for (const layout of ['app-server.pid', 'daemon.pid'] as const) {
+    const path = join(home, 'app-server-daemon', layout);
+    let record: { pid?: unknown; processStartTime?: unknown };
+    try {
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.size > 4096 || stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0) {
+        return unknown(`Codex daemon PID receipt ${layout} has unsafe ownership or permissions.`);
+      }
+      record = JSON.parse(readFileSync(path, 'utf8'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      return unknown(`Codex daemon PID receipt ${layout} is unreadable.`);
     }
-    record = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (error) {
-    return (error as NodeJS.ErrnoException)?.code === 'ENOENT'
-      ? { state: 'absent' } : unknown('Codex daemon PID receipt is unreadable.');
+    if (!record || typeof record.pid !== 'number' || typeof record.processStartTime !== 'string' || !record.processStartTime.trim()) {
+      return unknown(`Codex daemon PID receipt ${layout} is malformed.`);
+    }
+    records.push({ layout, pid: record.pid, processStartTime: normalizeStart(record.processStartTime) });
   }
-  if (!record || typeof record.pid !== 'number' || typeof record.processStartTime !== 'string' || !record.processStartTime.trim()) {
-    return unknown('Codex daemon PID receipt is malformed.');
+  const verified: { layout: CodexDaemonReceiptLayout; process: CodexDaemonProcess }[] = [];
+  for (const record of records) {
+    const inspected = inspectProcess(record.pid, home, cli, record.processStartTime);
+    if (inspected.state === 'absent') continue;
+    if (inspected.state === 'unknown') return inspected;
+    verified.push({ layout: record.layout, process: inspected.process });
   }
-  const inspected = inspectProcess(record.pid, home, cli);
-  if (inspected.state !== 'running') return inspected;
-  const start = psField(record.pid, 'lstart');
-  return start && normalizeStart(start) === normalizeStart(record.processStartTime)
-    ? inspected : unknown('Codex daemon PID receipt no longer matches the running process.');
+  const daemon = verified[0]?.process;
+  if (!daemon) return { state: 'absent' };
+  if (verified.some(({ process: other }) => other.pid !== daemon.pid || other.start !== daemon.start || other.boot !== daemon.boot)) {
+    return unknown('Codex daemon PID receipts app-server.pid and daemon.pid conflict.');
+  }
+  return { state: 'running', process: { ...daemon, receiptLayouts: verified.map(({ layout }) => layout) } };
 }
 
 export function codexDaemonProcessState(expected: CodexDaemonProcess): 'running' | 'exited' | 'unknown' {

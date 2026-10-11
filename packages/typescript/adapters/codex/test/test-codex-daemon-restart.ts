@@ -328,3 +328,4 @@ assert.equal(sameCodexInstallation('/x/standalone/releases/0.153.4-x86_64/bin/co
 assert.equal(sameCodexInstallation('/other/standalone/releases/0.153.4-x86_64/bin/codex', '/x/standalone/releases/0.154.0-x86_64/bin/codex'), false);
 assert.equal(sameCodexInstallation('/x/standalone/releases/untrusted/bin/codex', '/x/standalone/releases/0.154.0-x86_64/bin/codex'), false);
 console.log('PASS daemon recovery confines executable identity to the same standalone installation');
+await import('./test-codex-daemon-receipts.ts');
