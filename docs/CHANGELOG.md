@@ -24,6 +24,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   ownership and names launch flags that prevent a safe restart.
 - Restart Codex also works on a fresh Codex install.
 
+- Reopened Codex sessions keep each reply under its own prompt after a stopped
+  turn, and history shows each command's exit status.
 - A Claude session synced through the mod shows Working when you open it mid-turn.
 - On Windows, pairing a device keeps its durable files owner-only and no longer
   leaves a file that blocks `cosy update`. `cosy repair` plans and fixes

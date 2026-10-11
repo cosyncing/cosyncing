@@ -14,6 +14,7 @@
  */
 export {};
 import { strict as assert } from 'node:assert';
+import unifiedExecFixture from './fixtures/unified-exec-0.162.1.json';
 import { appendFileSync, chmodSync, closeSync, existsSync, ftruncateSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +65,47 @@ function check(name: string, ok: boolean, detail = ''): void {
       && merged.terminalTurnIds.has('turn-paged')
       && merged.activeTurnId === undefined,
   );
+}
+
+// PR-2b: outputs copied verbatim from a scratch native 0.162.1 server, not
+// hand-authored parser examples. See the fixture's capture description.
+{
+  const replay = (output: string, extra: any[] = [], name = 'exec_command') => mapRollout([
+    { type: 'response_item', payload: { type: 'function_call', name, call_id: 'native-exec', arguments: JSON.stringify({ cmd: 'fixture command' }) } },
+    ...extra,
+    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'native-exec', output } },
+  ]).find((m): m is Extract<AgentMessage, { type: 'tool-result' }> => m.type === 'tool-result')!;
+  for (const sample of unifiedExecFixture.cases) {
+    const out = mapRollout([
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'measured' } },
+      { type: 'response_item', payload: { type: 'function_call', name: sample.toolName, call_id: 'native-exec', arguments: JSON.stringify(sample.arguments) } },
+      { type: 'response_item', payload: { type: 'function_call_output', call_id: 'native-exec', output: sample.output } },
+      // Even the native RUNNING case ended its turn, while the process outlived it.
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'measured' } },
+    ]);
+    const result = out.find((m): m is Extract<AgentMessage, { type: 'tool-result' }> => m.type === 'tool-result');
+    check(`PR-2b measured unified-exec ${sample.name} keeps exit, lifecycle and wall time`,
+      result?.exitCode === (sample.exitCode ?? undefined)
+      && result?.semantic?.kind === 'command' && result.semantic.state === sample.state
+      && result.durationMs === sample.durationMs
+      && result.isError === (sample.exitCode !== null && sample.exitCode !== 0)
+      && result.result === sample.output,
+      JSON.stringify(result));
+  }
+  const running = unifiedExecFixture.cases[2]!.output;
+  const spoof = replay(running + 'Process exited with code 0');
+  const plain = replay('Process exited with code 0');
+  const terminal = unifiedExecFixture.cases[0]!.output;
+  const nonExec = replay(terminal, [], 'web_search');
+  check('PR-2b stdout and non-exec outputs cannot invent a terminal exit',
+    spoof.exitCode === undefined && spoof.semantic?.kind === 'command' && spoof.semantic.state === 'running'
+    && plain.exitCode === undefined && plain.semantic?.kind === 'command' && plain.semantic.state === 'unknown'
+    && nonExec.exitCode === undefined,
+    JSON.stringify([spoof, plain, nonExec]));
+  const native = replay(terminal, [{ type: 'event_msg', payload: { type: 'exec_command_end', call_id: 'native-exec', exit_code: 9, duration_ms: 12, aborted: true } }]);
+  check('PR-2b rich native exec evidence outranks the textual wrapper',
+    native.exitCode === 9 && native.durationMs === 12 && native.semantic?.kind === 'command' && native.semantic.state === 'interrupted',
+    JSON.stringify(native));
 }
 
 // ── 1. synthetic double-free mapping ────────────────────────────────────────────
@@ -1046,6 +1088,34 @@ await (async () => {
         summaries[0].userMessageKey === 'codex:t1:u0' &&
         summaries[1].userMessageKey === 'codex:t2:u0',
       JSON.stringify(summaries.map((s) => [s.turnId, s.userMessageKey])),
+    );
+  }
+
+  {
+    // PR-2b: measured reload shape — answered, two empty Stop turns, answered.
+    const stopped = (turnId: string) => [
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } },
+      { type: 'event_msg', payload: { type: 'user_message', message: `stop ${turnId}` } },
+      { type: 'event_msg', payload: { type: 'turn_aborted', turn_id: turnId, reason: 'interrupted' } },
+    ];
+    const out = mapRollout([
+      ...turn('answered-before', 'first', 'before-answer', 'first reply'),
+      ...stopped('stop-app'),
+      ...stopped('stop-terminal'),
+      ...turn('answered-after', 'last', 'after-answer', 'last reply'),
+    ]);
+    const summaries = out.filter((m): m is Extract<AgentMessage, { type: 'run-summary' }> => m.type === 'run-summary' && m.status !== 'running');
+    check(
+      'PR-2b answered and empty stopped turns own only their own assistant keys',
+      summaries.length === 4 && summaries.every((run) =>
+        run.userMessageKey === `codex:${run.turnId}:u0`
+        && run.status === (run.turnId.startsWith('stop-') ? 'cancelled' : 'done')
+        && run.assistantMessageKey === (
+          run.turnId === 'answered-before' ? 'codex:answered-before:before-answer:t'
+          : run.turnId === 'answered-after' ? 'codex:answered-after:after-answer:t'
+          : undefined
+        )),
+      JSON.stringify(summaries),
     );
   }
 
@@ -3042,6 +3112,25 @@ await (async () => {
       'an unpaired tailed answer is still emitted, on the line-index fallback',
       flushed && answers()[1]?.key === 'c4' && answers()[1]?.text === 'Never paired.',
       JSON.stringify(answers()[1] ?? null),
+    );
+    appendFileSync(
+      path,
+      line({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 't-tail' } }) +
+        line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't-empty-stop' } }) +
+        line({ type: 'event_msg', payload: { type: 'user_message', message: 'Stop' } }) +
+        line({ type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 't-empty-stop' } }),
+    );
+    const terminal = () => messages.filter((m) => m.type === 'run-summary' && m.status !== 'running');
+    const finished = await settle(() => terminal().length === 2, 4000);
+    check(
+      'PR-2b a primed Observe turn keeps its own answer and the next empty Stop has none',
+      finished && terminal()[0]?.turnId === 't-tail'
+        && terminal()[0]?.status === 'done'
+        && terminal()[0]?.assistantMessageKey === answers()[1]?.key
+        && terminal()[1]?.turnId === 't-empty-stop'
+        && terminal()[1]?.status === 'cancelled'
+        && terminal()[1]?.assistantMessageKey === undefined,
+      JSON.stringify(terminal()),
     );
   } finally {
     unsubscribe();

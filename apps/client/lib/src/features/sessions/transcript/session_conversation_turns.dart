@@ -500,12 +500,16 @@ List<AgentMessage> _reorderDeliveredPrompts(List<AgentMessage> messages) {
   }
 
   final presentPromptKeys = <String>{};
+  final promptOrderByKey = <String, int>{};
   final presentAssistantKeys = <String>{};
   for (final message in result) {
     switch (message.type) {
       case AgentMessageType.userMessage when !message.userMessageQueued:
         final key = message.userMessageKey;
-        if (key != null) presentPromptKeys.add(key);
+        if (key != null) {
+          presentPromptKeys.add(key);
+          promptOrderByKey.putIfAbsent(key, () => promptOrderByKey.length);
+        }
       case AgentMessageType.modelOutput:
         final key = message.modelOutputKey;
         if (key != null && key.isNotEmpty) presentAssistantKeys.add(key);
@@ -520,11 +524,23 @@ List<AgentMessage> _reorderDeliveredPrompts(List<AgentMessage> messages) {
     if (message.type != AgentMessageType.runSummary) continue;
     final assistant = _stringField(message.raw['assistantMessageKey']);
     final user = _stringField(message.raw['userMessageKey']);
-    if (assistant == null || user == null) continue;
+    final turn = _stringField(message.raw['turnId']);
+    if (assistant == null) continue;
     // Only summaries that describe output actually on screen take part; an
     // older turn whose answer fell outside the retained window cannot decide
     // where a visible prompt belongs.
     if (!presentAssistantKeys.contains(assistant)) continue;
+    // Older brokers can let an empty, stopped turn claim a preceding answer.
+    // Conflicting owners cannot prove a boundary. Use original prompt order,
+    // before any interruption repair above. Never parse adapter key syntax.
+    final knownUser = ownerByAssistantKey[assistant];
+    final knownTurn = turnByAssistantKey[assistant];
+    if ((knownUser != null && user != null && knownUser != user) ||
+        (knownTurn != null && turn != null && knownTurn != turn)) {
+      return List<AgentMessage>.unmodifiable(messages);
+    }
+    if (turn != null) turnByAssistantKey[assistant] = turn;
+    if (user == null) continue;
     // Fail closed (CR4b). A summary that names an owner no rendered prompt
     // carries means the transcript and the summaries disagree about prompt
     // identity — which is exactly what a mixed live/replay Codex transcript
@@ -536,7 +552,6 @@ List<AgentMessage> _reorderDeliveredPrompts(List<AgentMessage> messages) {
       return List<AgentMessage>.unmodifiable(result);
     }
     ownerByAssistantKey[assistant] = user;
-    turnByAssistantKey[assistant] = _stringField(message.raw['turnId']);
   }
   if (ownerByAssistantKey.isEmpty) {
     return List<AgentMessage>.unmodifiable(result);
@@ -577,6 +592,9 @@ List<AgentMessage> _reorderDeliveredPrompts(List<AgentMessage> messages) {
       final owner = ownerByAssistantKey[message.modelOutputKey];
       if (owner == promptKey) break; // this prompt's own answer begins here
       if (owner != null) {
+        // A later opener proves a later answer. An unanswered Stop prompt
+        // must not move past it, even without native turn ids.
+        if (promptOrderByKey[owner]! > promptOrderByKey[promptKey]!) break;
         final ownerTurnId = turnByAssistantKey[message.modelOutputKey];
         // An exact native turn id proves this is a steer boundary inside the
         // same turn, not a queued next-turn prompt sitting above an earlier

@@ -1,0 +1,45 @@
+{
+  "version": "codex-cli 0.162.1",
+  "description": "Native function_call arguments and output captured from a scratch Codex 0.162.1 server with a loopback synthetic provider; output strings are verbatim. The running command outlived turn completion.",
+  "cases": [
+    {
+      "name": "zero",
+      "toolName": "exec_command",
+      "arguments": {
+        "cmd": "printf native-exit-zero",
+        "yield_time_ms": 1000,
+        "max_output_tokens": 200
+      },
+      "output": "Chunk ID: c5168a\nWall time: 0.0001 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nnative-exit-zero",
+      "exitCode": 0,
+      "state": "completed",
+      "durationMs": 0.1
+    },
+    {
+      "name": "seven",
+      "toolName": "exec_command",
+      "arguments": {
+        "cmd": "printf native-exit-seven; exit 7",
+        "yield_time_ms": 1000,
+        "max_output_tokens": 200
+      },
+      "output": "Chunk ID: 191465\nWall time: 0.0001 seconds\nProcess exited with code 7\nOriginal token count: 5\nOutput:\nnative-exit-seven",
+      "exitCode": 7,
+      "state": "failed",
+      "durationMs": 0.1
+    },
+    {
+      "name": "running",
+      "toolName": "exec_command",
+      "arguments": {
+        "cmd": "sleep 90; printf native-background-complete",
+        "yield_time_ms": 1000,
+        "max_output_tokens": 200
+      },
+      "output": "Chunk ID: 752fbb\nWall time: 1.0015 seconds\nProcess running with session ID 44992\nOriginal token count: 0\nOutput:\n",
+      "exitCode": null,
+      "state": "running",
+      "durationMs": 1001.5
+    }
+  ]
+}
