@@ -264,6 +264,10 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'OpenCode is eligible for the broker-managed shared server.': 'OpenCode 可使用由 broker 管理的共享服务器。',
   'Managed serve eligibility was not checked because OpenCode is missing.': '缺少 OpenCode，因此未检查托管 serve 资格。',
   'Codex daemon status was not queried because its binary or safe socket is unavailable.': 'Codex 可执行文件或安全套接字不可用，因此未查询 daemon 状态。',
+  'Managed Codex daemon ownership was not checked because its binary, managed endpoint, or process inspection is unavailable.': 'Codex 可执行文件、托管端点或进程检查不可用，因此未检查托管 daemon 的归属。',
+  'No managed Codex daemon process is recorded.': '没有记录托管的 Codex daemon 进程。',
+  'The Codex daemon process ownership is verified.': 'Codex daemon 进程的归属已验证。',
+  'While nothing is running, restart Codex yourself, then rerun `cosy doctor`.': '请在没有任务运行时自行重启 Codex，然后重新运行 `cosy doctor`。',
   'The standalone Codex package was not checked because Codex is missing.': '缺少 Codex，因此未检查独立版安装。',
   'An external Codex daemon is configured, so cosyncing does not require the standalone package.': '已配置外部 Codex daemon，因此 cosyncing 不要求安装独立版。',
   'The official standalone Codex package is installed for the managed daemon and terminal sync.': '官方独立版 Codex 已安装，可用于托管 daemon 和终端同步。',
@@ -391,6 +395,7 @@ export function translateDoctorTextToChinese(source: string): string | undefined
   if (durable) return durable;
   const dynamic =
     replaceMatch(source, /^(.*) is present and verified\.$/, (asset) => `${asset} 存在且已验证。`)
+    ?? replaceMatch(source, /^cosyncing could not confirm it manages the Codex daemon: (.*)$/, (detail) => `cosyncing 无法确认它管理此 Codex daemon：${detail}`)
     ?? replaceMatch(source, /^Installed (.*) bridge matches the packaged asset\.$/, (name) => `已安装的 ${name} bridge 与发行包资源一致。`)
     ?? replaceMatch(source, /^The (.*) bridge extension is not installed\.$/, (name) => `未安装 ${name} bridge 扩展。`)
     ?? replaceMatch(source, /^Install the packaged (.*) bridge through setup\.$/, (name) => `请通过 setup 安装发行包中的 ${name} bridge。`)

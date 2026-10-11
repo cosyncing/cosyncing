@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { HostProcessProvider } from '@cosyncing/adapter-api';
 import { restartCodexDaemonVerified, type CodexRestartDependencies } from '../src/daemon-restart.ts';
-import { managedCodexDaemonArguments, sameCodexInstallation, signalCodexDaemonProcess, type CodexDaemonProcess } from '../src/daemon-process.ts';
+import { codexDaemonCommandArguments, parseManagedCodexDaemonArguments, readCodexDaemonProcess, managedCodexDaemonArguments, sameCodexInstallation, signalCodexDaemonProcess, type CodexDaemonProcess } from '../src/daemon-process.ts';
 
 for (const remote of [[], ['--remote-control']]) {
   const legacy = ['app-server', ...remote, '--listen', 'unix://'];
   assert.equal(managedCodexDaemonArguments(legacy), true);
   assert.equal(managedCodexDaemonArguments([...legacy, '--managed-daemon']), true);
   for (const unsafe of [
-    [...legacy, '--managed-daemon', '--managed-daemon'],
-    [...legacy, '--managed-daemon', '--extra'],
     ['--managed-daemon', ...legacy],
     [...legacy.slice(0, -1), 'unix:///other/socket', '--managed-daemon'],
     [...legacy.slice(0, -1), 'ws://127.0.0.1:1234', '--managed-daemon'],
@@ -16,7 +18,103 @@ for (const remote of [[], ['--remote-control']]) {
   ]) assert.equal(managedCodexDaemonArguments(unsafe), false, JSON.stringify(unsafe));
 }
 assert.equal(managedCodexDaemonArguments(['app-server', '--stdio', '--managed-daemon']), false);
-console.log('PASS exact legacy and marked daemon arguments; extra flags and alternate listeners refused');
+const modern = ['app-server', '--remote-control', '--listen', 'unix://', '--analytics-default-enabled', '--managed-daemon'];
+for (const accepted of [
+  modern,
+  ['app-server', '--managed-daemon', '--analytics-default-enabled', '--listen', 'unix://', '--remote-control'],
+  ['app-server', '--future-flag', '--listen=unix://'],
+]) assert.equal(managedCodexDaemonArguments(accepted), true, JSON.stringify(accepted));
+assert.deepEqual(parseManagedCodexDaemonArguments(modern), { valid: true, unknownFlags: ['--analytics-default-enabled'] });
+assert.deepEqual(parseManagedCodexDaemonArguments(['app-server', '--listen=unix://', '--future-flag']), { valid: true, unknownFlags: ['--future-flag'] });
+for (const unsafe of [
+  ['app-server', '--listen', 'ws://127.0.0.1:4500'],
+  ['app-server', '--listen', 'unix:///tmp/other.sock'],
+  ['app-server', '--listen=ws://127.0.0.1:4500'],
+  ['app-server', '--listen=unix:///tmp/other.sock'],
+  ['app-server', '--listen', 'unix://', '--listen=unix://'],
+  ['app-server', '--listen=unix://', '--listen', 'unix://'],
+  ['app-server', '--listen', 'unix://', '--config', 'x=y'],
+  ['app-server', '--listen', 'unix://', '-c', 'x'],
+  ['app-server', 'daemon', 'pid-update-loop'],
+  ['app-server'],
+  ['app-server', '--listen'],
+  ['app-server', '--listen', 'unix://', '--x=1'],
+  ['app-server', '--listen', 'unix://', '--UPPER'],
+  ['app-server', '--listen', 'unix://', '--bad_flag'],
+]) assert.equal(managedCodexDaemonArguments(unsafe), false, JSON.stringify(unsafe));
+for (const [token, rest, named] of [
+  ['--config', ['x=y'], '--config'], ['-c', ['x'], '-c'], ['--x=1', [], '--x=1'],
+  ['--listen', ['unix:///private/path/control.sock'], '--listen'],
+  ['--x=/private/path/config', [], '--x=<value>'],
+  ['--UPPER', [], '--UPPER'], ['--bad_flag', [], '--bad_flag'], ['daemon', [], 'daemon'],
+] as const) {
+  const refused = parseManagedCodexDaemonArguments(['app-server', '--listen', 'unix://', token, ...rest]);
+  assert.equal(refused.valid, false);
+  if (!refused.valid) {
+    assert.ok(refused.detail.includes(`\`${named}\``));
+    assert.equal(refused.detail.includes('/private/path'), false);
+  }
+}
+console.log('PASS legacy, 0.162.1, reordered and future bare flags; values, positionals and alternate listeners refused with named flags');
+
+// Exercise the macOS inspection branch, not just its parser, on any POSIX test host.
+if (process.platform !== 'win32') {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-codex-mac-argv-'));
+  const executable = realpathSync(process.execPath);
+  const aliasDirectory = join(home, 'Symlinked Codex');
+  mkdirSync(aliasDirectory);
+  const symlinked = join(aliasDirectory, 'codex');
+  symlinkSync(executable, symlinked);
+  const receipt = join(home, 'app-server-daemon', 'app-server.pid');
+  mkdirSync(join(home, 'app-server-daemon'));
+  writeFileSync(receipt, JSON.stringify({ pid: 12345, processStartTime: 'fixture start' }), { mode: 0o600 });
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const originalLiveProcess = HostProcessProvider.prototype.liveProcess;
+  const originalSpawnSync = Bun.spawnSync;
+  let comm = executable;
+  let command = `${executable} ${modern.join(' ')}`;
+  try {
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+    HostProcessProvider.prototype.liveProcess = () => ({ state: 'running', identity: { pid: 12345, start: 'fixture start', boot: '', comm } });
+    Bun.spawnSync = ((args: string[]) => {
+      assert.equal(args[0], '/bin/ps');
+      const field = args[2];
+      const value = field === 'uid=' ? String(process.getuid!()) : field === 'lstart=' ? 'fixture start' : command;
+      return { exitCode: 0, stdout: Buffer.from(value), stderr: Buffer.alloc(0) };
+    }) as unknown as typeof Bun.spawnSync;
+    const inspected = readCodexDaemonProcess(home, executable);
+    assert.equal(inspected.state, 'running', JSON.stringify(inspected));
+    if (inspected.state === 'running') assert.deepEqual(inspected.process.unknownFlags, ['--analytics-default-enabled']);
+    comm = symlinked;
+    command = `${symlinked} ${modern.join(' ')}`;
+    const aliased = readCodexDaemonProcess(home, symlinked);
+    assert.equal(aliased.state, 'running', JSON.stringify(aliased));
+    if (aliased.state === 'running') {
+      assert.equal(aliased.process.executable, executable, 'installation proof uses the resolved executable');
+      assert.deepEqual(aliased.process.argv, [symlinked, ...modern], 'ps may preserve the unresolved comm path');
+    }
+    command = `${executable} ${modern.join(' ')}`;
+    assert.equal(readCodexDaemonProcess(home, symlinked).state, 'running', 'resolved command path remains accepted with a symlinked comm');
+    command = `${symlinked}-other ${modern.join(' ')}`;
+    assert.equal(readCodexDaemonProcess(home, symlinked).state, 'unknown', 'comm prefix must end at a whitespace boundary');
+    comm = executable;
+    command = `${executable} app-server --listen unix:// --config x=y`;
+    const refused = readCodexDaemonProcess(home, executable);
+    assert.equal(refused.state, 'unknown');
+    if (refused.state === 'unknown') assert.match(refused.detail, /--config/);
+    command = `/private/other/codex ${modern.join(' ')}`;
+    assert.equal(readCodexDaemonProcess(home, executable).state, 'unknown');
+  } finally {
+    Bun.spawnSync = originalSpawnSync;
+    HostProcessProvider.prototype.liveProcess = originalLiveProcess;
+    Object.defineProperty(process, 'platform', platform);
+    rmSync(home, { recursive: true, force: true });
+  }
+  const spaced = '/fixture/Codex Install/bin/codex';
+  assert.deepEqual(codexDaemonCommandArguments(`${spaced} ${modern.join(' ')}`, spaced)?.slice(1), modern);
+  assert.equal(codexDaemonCommandArguments(`${spaced}-other ${modern.join(' ')}`, spaced), undefined);
+  console.log('PASS macOS inspection verifies resolved and symlinked comm paths, including spaces and executable boundaries');
+}
 
 const target: CodexDaemonProcess = {
   pid: 123, start: '100', boot: 'boot', comm: 'codex', executable: '/fixture/codex',
@@ -102,7 +200,12 @@ function fixture() {
 {
   const { state, deps } = fixture();
   deps.captureProcess = () => ({ state: 'unknown', detail: 'PID receipt belongs to another process' });
-  await assert.rejects(restartCodexDaemonVerified(deps, { confirmed: true }), /PID receipt/);
+  await assert.rejects(restartCodexDaemonVerified(deps, { confirmed: true }), (error: Error) => {
+    assert.match(error.message, /could not confirm it manages the Codex daemon: PID receipt/);
+    assert.match(error.message, /While nothing is running/);
+    assert.match(error.message, /codex app-server daemon restart/);
+    return true;
+  });
   assert.deepEqual(state.commands, []);
   console.log('PASS stale or foreign PID receipts prevent all lifecycle mutations');
 }

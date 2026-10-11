@@ -7,6 +7,7 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { CODEX_MAC_LSOF_PATH, CODEX_MAC_PS_PATH } from './tui-presence.ts';
+import { readCodexDaemonProcess } from './daemon-process.ts';
 
 export const CODEX_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.144.5',
@@ -239,7 +240,49 @@ function unixSocketTableListensFor(table: string, socketPath: string): boolean {
   });
 }
 
-export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
+function daemonOwnershipCheck(
+  context: SetupDiagnosisContext,
+  home: string,
+  executable: string | undefined,
+  readProcess: typeof readCodexDaemonProcess,
+): SetupCheck {
+  const id = 'codex.daemon-ownership';
+  if (!executable || context.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim()
+      || (context.platform !== 'linux' && context.platform !== 'darwin')) {
+    return {
+      id, status: 'skip', detailCode: 'daemon-ownership-unavailable',
+      summary: 'Managed Codex daemon ownership was not checked because its binary, managed endpoint, or process inspection is unavailable.',
+    };
+  }
+  const daemon = readProcess(home, executable);
+  if (daemon.state === 'unknown') {
+    return {
+      id, status: 'warn', detailCode: 'daemon-ownership-unknown',
+      summary: `cosyncing could not confirm it manages the Codex daemon: ${daemon.detail}`,
+      remediation: {
+        kind: 'command',
+        message: 'While nothing is running, restart Codex yourself, then rerun `cosy doctor`.',
+        command: 'codex app-server daemon restart',
+      },
+    };
+  }
+  if (daemon.state === 'absent') {
+    return {
+      id, status: 'skip', detailCode: 'daemon-ownership-absent',
+      summary: 'No managed Codex daemon process is recorded.',
+    };
+  }
+  return {
+    id, status: 'pass', detailCode: 'daemon-ownership-verified',
+    summary: 'The Codex daemon process ownership is verified.',
+    evidence: { pid: daemon.process.pid, unknownFlags: (daemon.process.unknownFlags ?? []).join(', ') },
+  };
+}
+
+export async function diagnoseCodexSetup(
+  context: SetupDiagnosisContext,
+  dependencies: { readDaemonProcess?: typeof readCodexDaemonProcess } = {},
+): Promise<AgentSetupDiagnosis> {
   const binary = await diagnoseBinaryVersion({
     context,
     checkPrefix: 'codex',
@@ -291,6 +334,7 @@ export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promis
       missingStatus: binary.executable ? 'warn' : 'skip',
     }),
     endpoint.check,
+    daemonOwnershipCheck(context, codexHome, binary.executable, dependencies.readDaemonProcess ?? readCodexDaemonProcess),
   ];
 
   if (!binary.executable || endpoint.state !== 'usable') {

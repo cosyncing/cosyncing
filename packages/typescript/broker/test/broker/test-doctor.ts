@@ -32,6 +32,7 @@ import {
   CODEX_STANDALONE_INSTALL_COMMAND,
   diagnoseCodexSetup,
 } from '../../../adapters/codex/src/diagnostics.ts';
+import { parseManagedCodexDaemonArguments } from '../../../adapters/codex/src/daemon-process.ts';
 import {
   OPENCODE_MINIMUM_VERSION,
   diagnoseOpenCodeSetup,
@@ -478,6 +479,32 @@ try {
     runReadOnly: async () => ({ status: 'ok', stdout: 'codex-cli 0.144.5', stderr: '' }),
   });
   const darwinCodex = await diagnoseCodexSetup(codexSocketContext('darwin'));
+  const ownershipDetail = 'Codex daemon launch argument `--config` carries a value.';
+  const ownershipUnknown = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
+    readDaemonProcess: (home, cli) => {
+      check('Codex doctor inspects the diagnosed home and executable', home === join('/fixture/home', '.codex') && cli === '/fixture/bin/codex');
+      return { state: 'unknown', detail: ownershipDetail };
+    },
+  }), 'codex.daemon-ownership');
+  check('Codex doctor warns with ownership detail and an idle-only manual restart command',
+    ownershipUnknown.status === 'warn' && ownershipUnknown.detailCode === 'daemon-ownership-unknown'
+      && ownershipUnknown.summary.includes(ownershipDetail)
+      && ownershipUnknown.remediation?.command === 'codex app-server daemon restart'
+      && ownershipUnknown.remediation.message.includes('While nothing is running'));
+  const modernArguments = ['app-server', '--remote-control', '--listen', 'unix://', '--analytics-default-enabled', '--managed-daemon'];
+  const parsedArguments = parseManagedCodexDaemonArguments(modernArguments);
+  const ownershipVerified = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
+    readDaemonProcess: () => parsedArguments.valid ? {
+      state: 'running', process: {
+        pid: 12345, start: 'fixture start', boot: 'fixture boot', comm: 'codex',
+        executable: '/fixture/bin/codex', cli: '/fixture/bin/codex', home: join('/fixture/home', '.codex'),
+        argv: ['/fixture/bin/codex', ...modernArguments], unknownFlags: parsedArguments.unknownFlags,
+      },
+    } : { state: 'unknown', detail: parsedArguments.detail },
+  }), 'codex.daemon-ownership');
+  check('Codex doctor passes the real 0.162.1 shape and reports unfamiliar bare flags',
+    ownershipVerified.status === 'pass' && ownershipVerified.detailCode === 'daemon-ownership-verified'
+      && ownershipVerified.evidence?.unknownFlags === '--analytics-default-enabled');
   const linuxCodex = await diagnoseCodexSetup(codexSocketContext('linux'));
   const darwinDaemon = checkById(darwinCodex, 'codex.daemon-status');
   const linuxDaemon = checkById(linuxCodex, 'codex.daemon-status');

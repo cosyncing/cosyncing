@@ -13,6 +13,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Restart Codex works again with Codex 0.161 and newer. `cosy doctor` checks daemon
+  ownership and names launch flags that prevent a safe restart.
+
 - A Claude session synced through the mod shows Working when you open it mid-turn.
 - On Windows, pairing a device keeps its durable files owner-only and no longer
   leaves a file that blocks `cosy update`. `cosy repair` plans and fixes
