@@ -6077,6 +6077,8 @@ export interface CodexEnrich {
   stderr?: string;
   /** Native lifecycle from `exec_command_end`, when it publishes one. */
   aborted?: boolean;
+  /** Unified-exec returned a live process handle, rather than a terminal exit. */
+  running?: boolean;
 }
 
 /** Codex records an exec command as an argv array or a plain string. */
@@ -6103,7 +6105,7 @@ function codexExecArgs(args: unknown): { command?: string; cwd?: string } {
 /** Turns Codex exit/abort evidence into the canonical lifecycle. */
 function codexCommandState(e: CodexEnrich, hasResult: boolean): ToolCommandState {
   if (e.aborted === true) return 'interrupted';
-  if (!hasResult) return 'running';
+  if (!hasResult || (e.running === true && e.exitCode === undefined)) return 'running';
   if (e.exitCode === undefined) return 'unknown';
   return e.exitCode === 0 ? 'completed' : 'failed';
 }
@@ -6229,8 +6231,16 @@ export function accumulateEnrich(ln: any, m: Map<string, CodexEnrich>): void {
       m.set(id, e);
     } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
       const e = m.get(id) ?? {};
+      if (e.name && codexToolDisplayClass(e.name) === 'execute') {
+        const outcome = codexUnifiedExecOutcome(p.output);
+        if (outcome) {
+          // Rich native exec events remain authoritative when both forms exist.
+          e.exitCode ??= outcome.exitCode;
+          e.running = outcome.running;
+        }
+      }
       const durationMs = codexToolOutputDurationMs(p.output);
-      if (durationMs !== undefined) e.durationMs = durationMs;
+      if (durationMs !== undefined) e.durationMs ??= durationMs;
       m.set(id, e);
     }
     return;
@@ -6342,13 +6352,28 @@ function codexToolOutputText(value: unknown): string {
   return '';
 }
 
+/**
+ * Codex 0.162.1 unified-exec's measured native header. Parse only its leading
+ * metadata, never command stdout that happens to mention an exit or session ID.
+ * A completed turn can still leave this command running in the background.
+ */
+function codexUnifiedExecOutcome(output: unknown): { exitCode?: number; running: boolean } | undefined {
+  const header = codexToolOutputText(output).slice(0, 512);
+  const match = /^Chunk ID: [^\r\n]+\r?\nWall time: [0-9]+(?:\.[0-9]+)? seconds\r?\n(?:Process exited with code (-?[0-9]+)|Process running with session ID [0-9]+)(?:\r?\n|$)/.exec(header);
+  if (!match) return undefined;
+  if (match[1] === undefined) return { running: true };
+  const exitCode = Number(match[1]);
+  return Number.isSafeInteger(exitCode) ? { exitCode, running: false } : undefined;
+}
+
 /** New Codex exec tool outputs record `Wall time N seconds`; older rollouts use duration.secs/nanos. */
 function codexToolOutputDurationMs(output: unknown): number | undefined {
   const native = nativeDurationMs(output);
   if (native !== undefined) return native;
   const text = codexToolOutputText(output);
   const wall = /\bwall[_ ]time(?:_seconds)?\b[\s:"=]+([0-9]+(?:\.[0-9]+)?)/i.exec(text);
-  return wall?.[1] !== undefined ? Number(wall[1]) * 1000 : undefined;
+  const ms = wall?.[1] !== undefined ? Number(wall[1]) * 1000 : undefined;
+  return ms !== undefined && Number.isFinite(ms) ? ms : undefined;
 }
 
 /** Codex owns this native-name mapping; clients consume only the canonical semantic class. */
@@ -6503,7 +6528,6 @@ class CodexRuntimeTracker {
   private readonly active = new Map<string, ActiveRun>();
   private readonly order: string[] = [];
   private lastUserMessageKey: string | undefined;
-  private lastAssistantMessageKey: string | undefined;
   /** Legacy Codex writes an assistant event immediately before the response item for the same
    * text. Newer rollouts omit that event and retain only the response item. Remember only the last
    * real record's legacy text so the next response item is suppressed when it is the duplicate
@@ -6836,9 +6860,11 @@ class CodexRuntimeTracker {
   }
 
   recordAssistant(key: string): void {
-    this.lastAssistantMessageKey = key;
-    const turnId = this.order.at(-1);
+    const turnId = this.activeTurnId;
     if (turnId) {
+      // Observe can attach after task_started. Seed bookkeeping for that exact
+      // primed turn when its output arrives; no native turn is started here.
+      if (!this.active.has(turnId)) this.start(turnId);
       const run = this.active.get(turnId);
       if (run) run.assistantMessageKey = key;
     }
@@ -6869,13 +6895,13 @@ class CodexRuntimeTracker {
       turnId: fallbackId,
       key: codexRunKey(fallbackId, this.runGeneration.get(fallbackId)),
       userMessageKey: this.openingUserKey(id),
-      assistantMessageKey: this.lastAssistantMessageKey,
     };
     // The prompt line is written after `task_started`, so this is where a real turn's ownership
     // becomes knowable. Fail closed: a turn whose prompt this read never saw stays unowned rather
     // than borrowing the previous turn's.
     resolved.userMessageKey = resolved.userMessageKey ?? this.openingUserKey(id);
-    resolved.assistantMessageKey = resolved.assistantMessageKey ?? this.lastAssistantMessageKey;
+    // Assistant ownership comes only from output recorded while this run was open.
+    // A stopped, empty turn must not inherit the preceding turn's answer.
     const msg = this.summary(resolved, status, completedAt);
     if (id) {
       this.active.delete(id);

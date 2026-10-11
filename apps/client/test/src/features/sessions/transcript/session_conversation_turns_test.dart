@@ -663,6 +663,168 @@ void main() {
       );
     });
 
+    test(
+      'conflicting summaries keep answered and empty Stop prompts in place',
+      () {
+        for (final reversed in [false, true]) {
+          final claims = [
+            _runSummary(
+              status: 'done',
+              turnId: 'answered',
+              userMessageKey: 'u2',
+              assistantMessageKey: 'a2',
+            ),
+            _runSummary(
+              status: 'cancelled',
+              turnId: 'stop-app',
+              userMessageKey: 'u3',
+              assistantMessageKey: 'a2',
+            ),
+            _runSummary(
+              status: 'cancelled',
+              turnId: 'stop-terminal',
+              userMessageKey: 'u4',
+              assistantMessageKey: 'a2',
+            ),
+          ];
+          final turns = buildConversationTurns(
+            messages: [
+              _user('u1', 'First'),
+              _model('a1', 'First answer'),
+              _runSummary(
+                status: 'done',
+                turnId: 'first',
+                userMessageKey: 'u1',
+                assistantMessageKey: 'a1',
+              ),
+              _user('u2', 'Second'),
+              _toolCall('command', ToolDisplayClass.execute),
+              _toolResult('command', ToolDisplayClass.execute),
+              _model('a2', 'Second answer'),
+              _user('u3', 'Stop app'),
+              _user('u4', 'Stop terminal'),
+              ...(reversed ? claims.reversed : claims),
+              _user('u5', 'Last'),
+              _model('a5', 'Last answer'),
+              _runSummary(
+                status: 'done',
+                turnId: 'last',
+                userMessageKey: 'u5',
+                assistantMessageKey: 'a5',
+              ),
+            ],
+            mode: ToolDisplayMode.responsive,
+          );
+          expect(turns.map((turn) => turn.userMessage?.userMessageKey), [
+            'u1',
+            'u2',
+            'u3',
+            'u4',
+            'u5',
+          ]);
+          expect(turns.map((turn) => turn.modelText), [
+            'First answer',
+            'Second answer',
+            '',
+            '',
+            'Last answer',
+          ]);
+          expect(
+            turns[1].content.whereType<ToolTranscriptDisplayEntry>(),
+            hasLength(1),
+          );
+        }
+      },
+    );
+
+    for (final nativeTurns in [false, true]) {
+      test(
+        'empty Stops stay before a later answer with native ids $nativeTurns',
+        () {
+          AgentMessage summary(String user, String? assistant, String status) =>
+              _msg('run-summary', {
+                'key': 'summary-$user',
+                'userMessageKey': user,
+                if (assistant != null) 'assistantMessageKey': assistant,
+                if (nativeTurns) 'turnId': 'turn-$user',
+                'status': status,
+              });
+          final turns = buildConversationTurns(
+            messages: [
+              _user('first', 'First'),
+              _toolCall('command', ToolDisplayClass.execute),
+              _toolResult('command', ToolDisplayClass.execute),
+              _model('first-answer', 'First answer'),
+              summary('first', 'first-answer', 'done'),
+              _user('stop-app', 'Stop app'),
+              summary('stop-app', null, 'cancelled'),
+              _user('stop-terminal', 'Stop terminal'),
+              summary('stop-terminal', null, 'cancelled'),
+              _user('last', 'Last'),
+              _model('last-answer', 'Last answer'),
+              summary('last', 'last-answer', 'done'),
+            ],
+            mode: ToolDisplayMode.responsive,
+          );
+          expect(turns.map((turn) => turn.userMessage?.userMessageKey), [
+            'first',
+            'stop-app',
+            'stop-terminal',
+            'last',
+          ]);
+          expect(turns.map((turn) => turn.modelText), [
+            'First answer',
+            '',
+            '',
+            'Last answer',
+          ]);
+          expect(
+            turns.first.content.whereType<ToolTranscriptDisplayEntry>(),
+            hasLength(1),
+          );
+          expect(turns[1].runSummary?.status, ConversationRunStatus.cancelled);
+          expect(turns[2].runSummary?.status, ConversationRunStatus.cancelled);
+        },
+      );
+    }
+
+    for (final sameUser in [false, true]) {
+      test(
+        'conflicting ${sameUser ? 'turn' : 'prompt'} ownership fails closed',
+        () {
+          final turns = buildConversationTurns(
+            messages: [
+              _user('u1', 'First'),
+              _model('a1', 'Preamble'),
+              _user('u2', 'Second'),
+              _model('a2', 'Late answer'),
+              _runSummary(
+                status: 'done',
+                turnId: 'first',
+                userMessageKey: 'u1',
+                assistantMessageKey: 'a2',
+              ),
+              _runSummary(
+                status: 'cancelled',
+                turnId: sameUser ? 'other' : 'first',
+                userMessageKey: sameUser ? 'u1' : 'u2',
+                assistantMessageKey: 'a2',
+              ),
+            ],
+            mode: ToolDisplayMode.responsive,
+          );
+          expect(turns.map((turn) => turn.userMessage?.userMessageKey), [
+            'u1',
+            'u2',
+          ]);
+          expect(turns.map((turn) => turn.modelText), [
+            'Preamble',
+            'Late answer',
+          ]);
+        },
+      );
+    }
+
     test('a coherent ownership graph still relocates a mid-turn prompt', () {
       // The positive control for the guard above: every summary that describes
       // visible output names a prompt that is visible too, so relocation runs.
