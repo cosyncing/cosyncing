@@ -13,6 +13,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- `cosy update` now serves the new web app and installs the Claude mod you asked for if it is missing. Installer web pins left behind by earlier updates move to the new app, and obsolete folders are pruned. A mod removed inside Claude returns while setup records yes; a switched-off mod stays off.
+
 - Restart Codex works again with Codex 0.161 and newer. `cosy doctor` checks daemon
   ownership and names launch flags that prevent a safe restart.
 

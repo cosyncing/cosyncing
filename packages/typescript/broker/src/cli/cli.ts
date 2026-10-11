@@ -531,7 +531,7 @@ async function defaultRunRepair(options: {
  * upgrade, from inside its own version of the embedded marketplace -- the OLD process cannot do
  * that, because the marketplace embedded in it is the OLD mod.
  *
- * Exit codes: 0 for refreshed, already-current and skipped (a host that cannot have the mod is a
+ * Exit codes: 0 for installed, refreshed, already-current and skipped (a host that cannot have the mod is a
  * correct outcome, not a failure), 1 for refused or failed. The caller is `upgrade`, which reports
  * the outcome inside a result that stays `complete`; a human running it by hand gets a real status.
  */
@@ -548,7 +548,7 @@ async function defaultRunClaudeModRefresh(options: {
   const home = options.home ?? setupStateHome();
   const context = createSetupDiagnosisContext({ homeDir: homedir() });
   const outcome = await lifecycle.refreshClaudeMod({ buildInfo: options.buildInfo, home, context });
-  const ok = outcome.status === 'refreshed' || outcome.status === 'current' || outcome.status === 'skipped';
+  const ok = outcome.status === 'installed' || outcome.status === 'refreshed' || outcome.status === 'current' || outcome.status === 'skipped';
   if (options.json) {
     options.stdout.write(`${JSON.stringify(outcome)}\n`);
   } else {
@@ -593,6 +593,18 @@ async function defaultRunUpgrade(options: {
           inspect: async () => ({ active: (await provider.inspect()).active === 'active' }),
           stop: () => provider.stop(),
           start: () => provider.start(),
+          ...(provider.id === 'launchd' ? { reloadDefinition: async (wasActive: boolean) => {
+            // RunAtLoad starts an enabled launchd job on bootstrap. Preserve an inactive service.
+            const before = await provider.inspect();
+            if (before.enabled === 'disabled') return; // its next enable reads the new plist
+            await provider.reloadDefinition();
+            if (!wasActive) {
+              const { awaitServiceState } = await import('../installation/service-manager.ts');
+              await awaitServiceState({ provider, expected: 'active' });
+              await provider.stop();
+              await awaitServiceState({ provider, expected: 'inactive' });
+            }
+          } } : {}),
           ...(versions ? { versions } : {}),
         };
       })()

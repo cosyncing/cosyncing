@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { parseBrokerServiceEnvironment } from '../../src/installation/service-manager.ts';
 /** Deterministic lifecycle, repair, signed upgrade/rollback, and owned-uninstall acceptance. */
 import { runDurablePermissionChecks } from '../helpers/durable-permission-checks.ts';
 import type { AgentSetupDiagnosis, SetupCheck } from '@cosyncing/adapter-api';
@@ -2587,6 +2588,7 @@ try {
   // copy; the old one cannot, because the marketplace embedded in it IS the old mod. (Review U2.)
   const claudeModCopy = (home: string) => {
     mkdirSync(join(home, 'claude-mod', 'marketplace'), { recursive: true });
+    writeSetupState({ ...readSetupState(home), claudeModRequested: true }, home);
   };
   {
     const fixture = upgradeMachine();
@@ -2631,12 +2633,13 @@ try {
         && upgraded.claudeMod?.status === 'failed'
         && upgraded.claudeMod.detailCode === 'claude-mod-refresh-timeout'
         && readFileSync(fixture.m.binary, 'utf8') === candidate.toString()
-        && upgraded.summary.includes('run cosyncing setup'),
+        && upgraded.summary.includes('run cosy doctor, then cosy setup'),
       `${upgraded.exitCode}/${upgraded.detailCode}/${JSON.stringify(upgraded.claudeMod)}`);
   }
   {
     const fixture = upgradeMachine();
     const launches: string[][] = [];
+    writeSetupState({ ...readSetupState(fixture.m.home), claudeModRequested: true }, fixture.m.home);
     const upgraded = await runUpgrade({
       ...upgradeOptions(fixture),
       runBinary: async (_executable, args) => {
@@ -2644,10 +2647,10 @@ try {
         return { status: 'ok' as const, exitCode: 0, stdout: JSON.stringify(CANDIDATE_SELF_CHECK), stderr: '' };
       },
     });
-    check('an upgrade on a host with no Claude mod copy spawns no refresh child and says nothing about one',
-      upgraded.exitCode === 0 && upgraded.claudeMod === undefined
-        && launches.every((args) => !args.includes('claude-mod'))
-        && upgraded.summary === `Upgraded cosyncing from 1.0.0 to 2.0.0.`,
+    check('PR4 an upgrade with no copy delegates the ownership decision and reports its result',
+      upgraded.exitCode === 0 && upgraded.claudeMod !== undefined
+        && launches.some((args) => args.includes('claude-mod'))
+        && upgraded.summary.includes('Claude mod'),
       `${JSON.stringify(launches)}/${upgraded.summary}`);
   }
 
@@ -2670,6 +2673,45 @@ try {
         && refreshed.detailCode === 'claude-mod-refresh-skipped-native-windows'
         && claudeCalls === 0 && !existsSync(installationLockPath(m.home)),
       `${refreshed.status}/${refreshed.detailCode}/${claudeCalls}`);
+  }
+
+  for (const reason of ['disabled', 'unsupported', 'receipt-invalid']) {
+    const fixture = upgradeMachine();
+    writeSetupState({ ...readSetupState(fixture.m.home), claudeModRequested: true }, fixture.m.home);
+    const upgraded = await runUpgrade({ ...upgradeOptions(fixture), runBinary: async (_executable, args) => ({
+      status: 'ok', stdout: JSON.stringify(args.includes('claude-mod')
+        ? { status: 'skipped', detailCode: `claude-mod-refresh-skipped-${reason}` } : CANDIDATE_SELF_CHECK), stderr: '',
+    }) });
+    check(`PR4 skipped requested ${reason} is recorded with plain words`,
+      upgraded.status === 'complete' && upgraded.claudeMod?.status === 'skipped'
+        && upgraded.claudeMod.detailCode === `claude-mod-refresh-skipped-${reason}`
+        && !upgraded.summary.includes('claude-mod-refresh-')
+        && upgraded.summary.includes(reason === 'disabled' ? 'switched off in Claude' : 'cosy doctor'));
+  }
+  for (const [name, requested, reason] of [
+    ['never requested', undefined, 'absent'], ['declined', false, 'declined'],
+    ['Windows unavailable and never requested', undefined, 'native-windows'],
+  ] as const) {
+    const fixture = upgradeMachine();
+    writeSetupState({ ...readSetupState(fixture.m.home), claudeModRequested: requested }, fixture.m.home);
+    const upgraded = await runUpgrade({ ...upgradeOptions(fixture), runBinary: async (_executable, args) => ({
+      status: 'ok', stdout: JSON.stringify(args.includes('claude-mod')
+        ? { status: 'skipped', detailCode: `claude-mod-refresh-skipped-${reason}` } : CANDIDATE_SELF_CHECK), stderr: '',
+    }) });
+    check(`PR4 ${name} leaves the update summary silent about the mod`,
+      upgraded.status === 'complete' && !upgraded.summary.includes('Claude mod')
+        && upgraded.claudeMod?.detailCode === `claude-mod-refresh-skipped-${reason}`);
+  }
+  {
+    const fixture = upgradeMachine();
+    writeSetupState({ ...readSetupState(fixture.m.home), claudeModRequested: true }, fixture.m.home);
+    const upgraded = await runUpgrade({ ...upgradeOptions(fixture), runBinary: async (_executable, args) => ({
+      status: 'ok', stdout: JSON.stringify(args.includes('claude-mod')
+        ? { status: 'installed', detailCode: 'claude-mod-installed' } : CANDIDATE_SELF_CHECK), stderr: '',
+    }) });
+    check('PR4 first mod installation is reported as installed in a complete update',
+      upgraded.status === 'complete' && upgraded.claudeMod?.status === 'installed'
+        && upgraded.summary.includes('Claude mod was installed') && !upgraded.summary.includes('claude-mod-installed'));
   }
 
   if (process.platform === 'linux' || process.platform === 'darwin') {
@@ -2757,6 +2799,18 @@ try {
       childEnvironments.length === 1 && childEnvironments[0]!.CLAUDE_CONFIG_DIR === fake.configDir
         && !('COSYNCING_TEST_SECRET' in childEnvironments[0]!),
       JSON.stringify(Object.keys(childEnvironments[0] ?? {})));
+    const first = upgradeMachine();
+    const firstClaude = fakeClaude(first.m.root, 'upgrade-first-install', '2.1.289');
+    writeSetupState({ ...readSetupState(first.m.home), claudeModRequested: true }, first.m.home);
+    const installed = await defaultRunBinary(process.execPath,
+      [bundle, 'claude-mod', 'refresh', '--json', '--home', first.m.home], undefined,
+      { HOME: first.m.userHome, PATH: firstClaude.binDir, COSYNCING_CLAUDE_BIN: firstClaude.bin,
+        CLAUDE_CONFIG_DIR: firstClaude.configDir, COSYNCING_HOME: first.m.home });
+    const installedOutcome = JSON.parse(installed.stdout);
+    check('PR4 real CLI first installation exits successfully and reports installed',
+      installed.status === 'ok' && installed.exitCode === 0 && installedOutcome.status === 'installed'
+        && installedOutcome.summary.startsWith('Installed') && firstClaude.calls().length === 4,
+      `${installed.status}/${installedOutcome.status}`);
   }
 
   {
@@ -2867,12 +2921,146 @@ try {
       },
       service: fixture.service,
       verifyBrokerVersion: async () => true,
+      verifyWebVersion: async () => true,
       healthAttempts: 1,
       sleep: async () => undefined,
     });
 
+    const pinService = (fixture: ReturnType<typeof upgradeMachine>, pin: string, backend = 'systemd') => {
+      const path = join(fixture.m.home, 'service', 'broker.env');
+      const before = backend === 'windows'
+        ? JSON.stringify({ schemaVersion: 1, variables: { COSYNCING_WEB_DIR: pin, KEEP_ME: 'unchanged' } }) + '\n'
+        : `COSYNCING_WEB_DIR=${JSON.stringify(pin)}\nKEEP_ME="unchanged"\n`;
+      atomicWriteOwnerOnly(path, before);
+      const install = inspectInstallState(fixture.m.home);
+      if (!install.committed) throw new Error('missing install');
+      install.state.resources = install.state.resources.filter((entry) => entry.id !== 'service-environment');
+      install.state.resources.push({ id: 'service-environment', kind: 'environment-file', target: path,
+        ownership: { proof: backend === 'windows' ? 'receipt' : 'package-hash', installedSha256: hash(before) } });
+      let plist: string | undefined;
+      if (backend === 'launchd') {
+        plist = join(fixture.m.home, 'service', 'broker.plist');
+        const definition = `<plist><dict><key>EnvironmentVariables</key><dict><key>COSYNCING_WEB_DIR</key><string>${pin}</string><key>KEEP_ME</key><string>unchanged</string></dict></dict></plist>`;
+        atomicWriteOwnerOnly(plist, definition);
+        install.state.resources.push({ id: 'service-launchd', kind: 'service', target: plist,
+          ownership: { proof: 'package-hash', installedSha256: hash(definition) } });
+      }
+      writeInstallState(install.state, fixture.m.home);
+      return { path, before, plist };
+    };
+    for (const reported of ['2.0.0', '1.0.0', undefined]) {
+      const fixture = upgradeMachine();
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0,
+        fetch: () => Response.json(reported ? { version: reported } : { build_number: 'old' }) });
+      try {
+        writeBrokerConfig({ ...fixture.m.config, broker: { ...fixture.m.config.broker, port: server.port!, internalUrl: server.url.origin } }, fixture.m.home);
+        const options = jsUpgradeOptions(fixture);
+        delete (options as Partial<typeof options>).verifyWebVersion;
+        const upgraded = await runUpgrade(options);
+        check(`PR4 real served version ${reported ?? 'missing'} is checked after restart`,
+          reported === '2.0.0' ? upgraded.status === 'complete' : upgraded.status === 'rolled-back', upgraded.detailCode);
+      } finally { server.stop(true); }
+    }
+    for (const backend of ['systemd', 'launchd', 'windows']) {
+      const fixture = upgradeMachine();
+      const old = join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0');
+      const next = join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0');
+      const files = pinService(fixture, old, backend);
+      let reloaded = false;
+      fixture.service.reloadDefinition = async () => { reloaded = readFileSync(files.plist!, 'utf8').includes(next); };
+      const upgraded = await runUpgrade(jsUpgradeOptions(fixture));
+      const state = inspectInstallState(fixture.m.home);
+      const receipt = state.committed ? state.state.resources.find((entry) => entry.id === 'service-environment') : undefined;
+      const decoded = backend === 'windows' ? JSON.parse(readFileSync(files.path, 'utf8')).variables : parseBrokerServiceEnvironment(readFileSync(files.path, 'utf8'));
+      check(`PR4 ${backend} stale web pin moves with its receipt and other variables survive`,
+        upgraded.status === 'complete' && decoded?.COSYNCING_WEB_DIR === next && decoded?.KEEP_ME === 'unchanged'
+          && receipt?.ownership.installedSha256 === hash(readFileSync(files.path))
+          && (backend !== 'launchd' || reloaded), upgraded.detailCode);
+    }
     {
       const fixture = upgradeMachine();
+      const custom = join(fixture.m.home, 'custom-app', 'cosyncing-web-0.8.0');
+      ensureOwnerOnlyDirectory(custom);
+      const files = pinService(fixture, custom);
+      let webChecks = 0;
+      const upgraded = await runUpgrade({ ...jsUpgradeOptions(fixture), verifyWebVersion: async () => { webChecks++; return false; } });
+      check('PR4 a version-shaped custom pin outside the application directory is unchanged and survives pruning',
+        upgraded.status === 'complete' && readFileSync(files.path, 'utf8') === files.before && existsSync(custom) && webChecks === 0);
+    }
+    for (const backend of ['systemd', 'launchd', 'windows']) {
+      const fixture = upgradeMachine();
+      // The first update used 0.6.4's updater: this pin predates the broker's from version (1.0.0).
+      const older = join(fixture.m.home, 'bin', 'cosyncing-web-0.6.4');
+      const from = join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0');
+      const next = join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0');
+      ensureOwnerOnlyDirectory(older);
+      ensureOwnerOnlyDirectory(from);
+      const files = pinService(fixture, older, backend);
+      let webChecks = 0;
+      let reloaded = false;
+      fixture.service.reloadDefinition = async () => { reloaded = readFileSync(files.plist!, 'utf8').includes(next); };
+      const upgraded = await runUpgrade({ ...jsUpgradeOptions(fixture), verifyWebVersion: async () => { webChecks++; return true; } });
+      const decoded = backend === 'windows' ? JSON.parse(readFileSync(files.path, 'utf8')).variables : parseBrokerServiceEnvironment(readFileSync(files.path, 'utf8'));
+      check(`PR4 Round 2 ${backend} older installer pin is rewritten, checked and pruned`,
+        upgraded.status === 'complete' && decoded?.COSYNCING_WEB_DIR === next && webChecks === 1
+          && !existsSync(older) && existsSync(from) && existsSync(next)
+          && (backend !== 'launchd' || reloaded), upgraded.detailCode);
+    }
+    for (const backend of ['systemd', 'launchd', 'windows']) {
+      for (const pin of ['', join(tmpdir(), 'custom-pr4-app')]) {
+        const fixture = upgradeMachine();
+        const files = pinService(fixture, pin, backend);
+        // An unrelated operator edit changes the receipt hash without requiring a pin rewrite.
+        const edited = files.before.replace('unchanged', 'operator-edited');
+        atomicWriteOwnerOnly(files.path, edited);
+        const upgraded = await runUpgrade(jsUpgradeOptions(fixture));
+        check(`PR4 ${backend} receipt drift with ${pin ? 'custom' : 'no'} pin permits update without rewriting`,
+          upgraded.status === 'complete' && readFileSync(files.path, 'utf8') === edited, upgraded.summary);
+      }
+      const fixture = upgradeMachine();
+      const files = pinService(fixture, join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'), backend);
+      atomicWriteOwnerOnly(files.path, files.before.replace('unchanged', 'operator-edited'));
+      const blocked = await runUpgrade(jsUpgradeOptions(fixture));
+      check(`PR4 ${backend} receipt drift blocks a needed rewrite and names the file and setup command`,
+        blocked.status === 'blocked' && blocked.detailCode === 'upgrade-service-environment-drifted'
+          && blocked.summary.includes(files.path) && blocked.summary.includes('cosy setup')
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1', blocked.summary);
+    }
+    for (const backend of ['systemd', 'launchd', 'windows']) {
+      const fixture = upgradeMachine();
+      const old = join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0');
+      const files = pinService(fixture, old, backend);
+      const reloaded: string[] = [];
+      fixture.service.reloadDefinition = async () => { reloaded.push(readFileSync(files.plist!, 'utf8')); };
+      const rolled = await runUpgrade({ ...jsUpgradeOptions(fixture), verifyWebVersion: async () => false });
+      check(`PR4 ${backend} served-version mismatch rolls back binary, pin and receipts`,
+        rolled.status === 'rolled-back' && readFileSync(files.path, 'utf8') === files.before
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+          && (backend !== 'launchd' || reloaded.at(-1)?.includes(old) === true));
+    }
+    {
+      const fixture = upgradeMachine();
+      const files = pinService(fixture, join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'));
+      const interrupted = await runUpgrade({ ...jsUpgradeOptions(fixture), faultAfter: 'receipt-committed' });
+      const recovered = await runUpgrade(jsUpgradeOptions(fixture));
+      check('PR4 interrupted recovery restores the journaled pin after new receipts committed',
+        interrupted.status === 'cleanup-required' && recovered.recoveredInterruptedUpgrade
+          && readFileSync(files.path, 'utf8') === files.before);
+    }
+    {
+      const fixture = upgradeMachine();
+      const refused = await runUpgrade({ ...jsUpgradeOptions(fixture), runBinary: async (_exe, args) => {
+        if (args.includes('claude-mod')) throw new Error('launch refused');
+        return { status: 'ok', stdout: JSON.stringify({ ...CANDIDATE_SELF_CHECK, target: 'universal', distribution: 'bootstrap-js' }), stderr: '' };
+      } });
+      check('PR4 a refresh launch exception cannot roll back a committed broker',
+        refused.status === 'complete' && refused.claudeMod?.detailCode === 'claude-mod-refresh-launch-failed'
+          && readFileSync(fixture.m.binary, 'utf8') === jsBundle.toString());
+    }
+
+    {
+      const fixture = upgradeMachine();
+      launches.length = 0;
       // Two superseded roots and the one the running service is still configured to serve.
       mkdirSync(join(fixture.m.home, 'bin', 'cosyncing-web-0.9.0'), { recursive: true });
       mkdirSync(join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'), { recursive: true });
@@ -2896,7 +3084,7 @@ try {
       // A bundle cannot identify itself: exec'ing it would resolve `bun` through PATH, which may not be the
       // runtime this install recorded. The candidate is handed to that exact runtime instead.
       check('the JavaScript candidate self-checks through the recorded runtime, not through its own shebang',
-        launches.length === 1 && launches[0]?.executable === runtimePath
+        launches.length === 2 && launches[0]?.executable === runtimePath
           && launches[0]?.args[0]?.includes('cosyncing.staging-2.0.0') === true
           && launches[0]?.args[1] === 'version',
         JSON.stringify(launches));

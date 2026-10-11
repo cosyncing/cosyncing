@@ -10,7 +10,7 @@ import {
   statSync,
   unlinkSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, resolve, sep, win32 } from 'node:path';
 import {
   CLAUDE_HOOK_LEGACY_MARKER,
   CLAUDE_MOD_MIN_VERSION,
@@ -95,7 +95,7 @@ import {
   type InstallationMutation,
 } from './installation-lock.ts';
 import { INTERNAL_AGENT_ROSTER_PATH, PRODUCT_IDENTITY } from '@cosyncing/protocol';
-import { inspectRuntimeAssets, serviceFlutterWebRoot } from '../runtime/runtime-assets.ts';
+import { inspectRuntimeAssets, isInstallerWebPin, serviceFlutterWebRoot } from '../runtime/runtime-assets.ts';
 import {
   inspectAgentSkill,
   inspectAgentSkills,
@@ -144,6 +144,7 @@ import {
 import {
   assertNoSymlinkComponents,
   atomicWriteOwnerOnly,
+  inspectOwnerOnlyFile,
 } from '../security/secure-files.ts';
 import {
   inspectOmpBridgeReceiptTarget,
@@ -185,6 +186,7 @@ import {
   windowsActiveInstallManifest,
   windowsServiceActiveManifestPath,
   windowsServiceInstallPaths,
+  parseWindowsServiceEnvironment,
   windowsServiceVersionKey,
   writeWindowsActiveInstall,
 } from './windows-service-install.ts';
@@ -536,15 +538,28 @@ export function createLifecycleServiceVersions(
   const supersede = (remove: string, keep: string): void => {
     if (remove === keep) return;
     const superseded = windowsServiceInstallPaths(home, remove);
+    const active = windowsServiceInstallPaths(home, keep);
+    // A custom pin may live inside an otherwise superseded root. Keep the root it still needs.
+    if (inspectOwnerOnlyFile(active.environmentPath).status !== 'ok') return;
+    const environment = parseWindowsServiceEnvironment(JSON.parse(readFileSync(active.environmentPath, 'utf8')));
+    if (!environment) return;
+    const pin = environment.variables.COSYNCING_WEB_DIR;
+    const removedRoot = win32.resolve(superseded.versionRoot).toLowerCase();
+    if (pin && (win32.resolve(pin).toLowerCase() === removedRoot
+        || win32.resolve(pin).toLowerCase().startsWith(removedRoot + '\\'))) return;
     removeWindowsServiceVersionRoot({
       versionsRoot: superseded.versionsRoot,
       target: superseded.versionRoot,
-      activeVersionRoot: windowsServiceInstallPaths(home, keep).versionRoot,
+      activeVersionRoot: active.versionRoot,
     });
   };
   return {
     resources(versionKey) {
-      return windowsServiceVersionResources(home, versionKey);
+      return windowsServiceVersionResources(home, versionKey).map((resource) => {
+        if (resource.id !== 'service-environment') return resource;
+        if (inspectOwnerOnlyFile(resource.target).status !== 'ok') throw new Error('windows-service-environment-unsafe');
+        return { ...resource, ownership: { ...resource.ownership, installedSha256: sha256(readFileSync(resource.target)) } };
+      });
     },
     plan(build: Readonly<DurableServiceVersionBuild>) {
       const pointer = inspectWindowsActiveInstall(windowsServiceActiveManifestPath(home));
@@ -554,6 +569,12 @@ export function createLifecycleServiceVersions(
       // A pointer that EXISTS and cannot be read is the one case that must not be papered over. Writing a
       // new root and pointing the service at it would leave nothing to point back to.
       if (pointer.status !== 'ok') throw new Error('windows-active-install-unreadable');
+      const oldPaths = windowsServiceInstallPaths(home, pointer.manifest.versionKey);
+      const oldEnvironment = parseWindowsServiceEnvironment(JSON.parse(readFileSync(oldPaths.environmentPath, 'utf8')));
+      if (!oldEnvironment) throw new Error('windows-service-environment-invalid');
+      const pin = oldEnvironment.variables.COSYNCING_WEB_DIR;
+      const samePath = (a: string, b: string): boolean => a.replaceAll('\\', '/').toLowerCase() === b.replaceAll('\\', '/').toLowerCase();
+      const customPin = pin && !samePath(pin, oldPaths.webRoot) && !isInstallerWebPin(pin, dirname(installedBinaryPath(home))) ? pin : undefined;
       const record: DurableServiceVersionRecord = {
         installationId: pointer.manifest.installationId,
         fromVersionKey: pointer.manifest.versionKey,
@@ -569,7 +590,7 @@ export function createLifecycleServiceVersions(
           const provider = createLifecycleDurableServiceProvider({
             ...options,
             home,
-            context,
+            context: { ...context, env: { ...context.env, COSYNCING_WEB_DIR: customPin } },
             buildInfo: { ...options.buildInfo, ...build, packaged: build.distribution !== 'source' },
             executablePath: installedBinaryPath(home),
           });
@@ -1638,7 +1659,7 @@ export async function refreshClaudeMod(options: {
   claudePolicyRoots?: readonly string[];
   now?: () => Date;
 }): Promise<{
-  status: 'refreshed' | 'current' | 'skipped' | 'refused' | 'failed';
+  status: 'installed' | 'refreshed' | 'current' | 'skipped' | 'refused' | 'failed';
   detailCode: string;
   summary: string;
   /** What Claude did not finish, with the commands that finish it, when the refresh was put back. */
@@ -1685,13 +1706,14 @@ export async function refreshClaudeMod(options: {
       options.claudePolicyRoots,
     );
     const install = inspectInstallState(options.home);
+    const requested = readSetupState(options.home).claudeModRequested;
     const decision = decideClaudeModOwnership({
       install,
       support,
       stateHome: options.home,
       version: options.buildInfo.version,
       settingsPath: claudeUserSettingsPath(options.context.homeDir, options.context.env),
-      requested: readSetupState(options.home).claudeModRequested,
+      requested,
     });
     if (!decision.support.supported) {
       return {
@@ -1707,14 +1729,15 @@ export async function refreshClaudeMod(options: {
         summary: 'The cosyncing Claude mod is already this build\'s version.',
       };
     }
-    // Only a copy the ownership decision calls OURS and still IN CLAUDE is written. A decline, a mod
-    // switched off or removed inside Claude, and anything the receipt cannot prove are all left exactly as
-    // they are: the person's last word on the mod is not something an upgrade gets to overrule.
-    if (decision.status !== 'owned-stale' || decision.settings.status !== 'enabled') {
+    const installing = requested === true && ['absent', 'removed-in-claude'].includes(decision.status);
+    const refreshing = decision.status === 'owned-stale' && decision.settings.status === 'enabled';
+    if (!installing && !refreshing) {
+      const safeSkip = ['declined', 'disabled', 'absent', 'removed-in-claude'].includes(decision.status);
       return {
         status: 'skipped',
         detailCode: `claude-mod-refresh-skipped-${decision.status}`,
-        summary: `The cosyncing Claude mod is not cosyncing's to refresh here (${decision.status}); nothing was changed.`,
+        summary: decision.status === 'disabled' ? 'The cosyncing Claude mod is switched off in Claude and was left alone.'
+          : `The cosyncing Claude mod was left alone.${safeSkip ? '' : ' Run cosy doctor to reconcile ownership.'}`,
       };
     }
 
@@ -1728,7 +1751,7 @@ export async function refreshClaudeMod(options: {
       ...(options.now ? { now: options.now } : {}),
       claudeMod: {
         intent: 'install',
-        refreshing: true,
+        refreshing,
         marketplaceDir: decision.marketplaceDir,
         settingsPath: decision.settings.settingsPath,
         version: options.buildInfo.version,
@@ -1806,9 +1829,9 @@ export async function refreshClaudeMod(options: {
       };
     }
     return {
-      status: 'refreshed',
-      detailCode: 'claude-mod-refreshed',
-      summary: `Refreshed the cosyncing Claude mod to ${options.buildInfo.version} in ${decision.marketplaceDir}.`,
+      status: installing ? 'installed' : 'refreshed',
+      detailCode: installing ? 'claude-mod-installed' : 'claude-mod-refreshed',
+      summary: `${installing ? 'Installed' : 'Refreshed'} the cosyncing Claude mod to ${options.buildInfo.version} in ${decision.marketplaceDir}.`,
     };
   } finally {
     lock.release();

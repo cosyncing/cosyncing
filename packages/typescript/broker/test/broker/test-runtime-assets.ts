@@ -446,6 +446,22 @@ async function withSourceBroker(
 
 // Resolver staging and visible doctor failures are deterministic and directly testable.
 {
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-stale-web-pin-'));
+  try {
+    const executablePath = join(root, 'cosyncing');
+    const own = join(root, 'cosyncing-web-1.2.3');
+    const stale = join(root, 'cosyncing-web-1.2.2');
+    const custom = join(root, 'my-web-app');
+    mkdirSync(own);
+    const resolvePin = (override: string) => resolveFlutterWebRoot({ override, packaged: true,
+      executablePath, version: '1.2.3', sourceRoot: custom });
+    check('PR4 new broker recovers an old updater stale installer pin', resolvePin(stale) === own);
+    check('PR4 new broker honors a custom pin even with its own folder available', resolvePin(custom) === custom);
+    rmSync(own, { recursive: true });
+    check('PR4 missing own web folder preserves the stale pin', resolvePin(stale) === stale);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+{
   const explicit = resolveFlutterWebRoot({
     override: './fixture-web',
     packaged: true,

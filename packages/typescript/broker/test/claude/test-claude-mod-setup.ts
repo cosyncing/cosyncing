@@ -1173,9 +1173,13 @@ const codexDaemonProbe = async (): Promise<CodexDaemonStatus> => ({ binaryAvaila
   check('U4 the next setup run does not reinstall over their removal',
     rerun.status === 'already-configured' && fixture.fake.calls().length === 0,
     `${rerun.status} calls=${fixture.fake.calls().length}`);
-  check('U4 the removal is sticky: the stored yes is not enough to put it back',
+  check('PR4 U4 the stored yes remains the standing choice for update reinstatement',
     readSetupState(fixture.home).claudeModRequested === true,
     String(readSetupState(fixture.home).claudeModRequested));
+  const updated = await refreshClaudeMod({ buildInfo: BUILD_INFO, home: fixture.home, context: fixture.context });
+  check('PR4 U4 update puts a current copy removed inside Claude back while the choice is yes',
+    updated.status === 'installed' && fixture.fake.calls().length === 4
+      && inspectClaudeModSettings(fixture.settingsPath, fixture.marketplaceDir).status === 'enabled');
 }
 
 {
@@ -2130,19 +2134,49 @@ async function wizardSetup(
 }
 
 {
-  // SU6. Through refresh and setup: a removal inside Claude survives an older copy and a newer broker.
+  for (const wanted of [true, false]) {
+    const fixture = modFixture(`pr4-missing-${wanted}`);
+    await fixture.run({ claudeMod: wanted });
+    rmSync(fixture.marketplaceDir, { recursive: true, force: true });
+    const install = inspectInstallState(fixture.home);
+    if (!install.committed) throw new Error('missing install');
+    writeInstallState({ ...install.state, resources: install.state.resources.filter((r) => r.id !== CLAUDE_MOD_RESOURCE_ID) }, fixture.home);
+    fixture.fake.forgetInsideClaude({ keepMarketplace: false });
+    fixture.fake.reset();
+    const refreshed = await refreshClaudeMod({ buildInfo: BUILD_INFO, home: fixture.home, context: fixture.context });
+    check(`PR4 wanted=${wanted} missing mod follows the recorded choice`, wanted
+      ? refreshed.status === 'installed' && refreshed.summary.startsWith('Installed') && existsSync(fixture.marketplaceDir) && fixture.fake.calls().length === 4
+        && inspectClaudeModSettings(fixture.settingsPath, fixture.marketplaceDir).status === 'enabled'
+      : refreshed.status === 'skipped' && refreshed.detailCode === 'claude-mod-refresh-skipped-declined' && fixture.fake.calls().length === 0);
+  }
+}
+
+{
+  const fixture = modFixture('pr4-missing-refused');
+  await fixture.run({ claudeMod: false });
+  writeSetupState({ ...readSetupState(fixture.home), claudeModRequested: true }, fixture.home);
+  fixture.fake.refuse('install');
+  const refreshed = await refreshClaudeMod({ buildInfo: BUILD_INFO, home: fixture.home, context: fixture.context });
+  check('PR4 refused missing mod install is reported without leaving a copy or receipt',
+    refreshed.status === 'failed' && !!refreshed.outcome && !existsSync(fixture.marketplaceDir) && !hasReceipt(fixture.home));
+}
+
+{
+  // SU6. Update reinstalls a removed older copy while the recorded choice is yes; disabled stays off.
   const fixture = modFixture('su6-removed-older');
   await fixture.run();
   ageCopy(fixture);
   fixture.fake.forgetInsideClaude({ keepMarketplace: true });
   fixture.fake.reset();
   const refreshed = await refreshClaudeMod({ buildInfo: BUILD_INFO, home: fixture.home, context: fixture.context });
-  check('SU6 the refresh leaves an older copy that was removed inside Claude alone',
-    refreshed.status === 'skipped' && refreshed.detailCode === 'claude-mod-refresh-skipped-removed-in-claude'
-      && fixture.fake.calls().length === 0 && copyAt(fixture, '0.6.0').status === 'owned',
+  check('PR4 SU6 refresh reinstalls an older copy removed inside Claude while setup records yes',
+    refreshed.status === 'installed'
+      && fixture.fake.calls().length === 4 && copyAt(fixture, BUILD_INFO.version).status === 'owned'
+      && inspectClaudeModSettings(fixture.settingsPath, fixture.marketplaceDir).status === 'enabled',
     `${refreshed.status}/${refreshed.detailCode}`);
+  fixture.fake.reset();
   const rerun = await fixture.run();
-  check('SU6 a setup on a newer broker does not reinstall it either',
+  check('SU6 setup leaves the now current reinstalled mod alone',
     !rerun.actions.includes(modActionId) && fixture.fake.calls().length === 0,
     `${rerun.status} ${rerun.actions.join(',')}`);
   const disabled = modFixture('su6-disabled-older');

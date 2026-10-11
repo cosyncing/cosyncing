@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { PI_BRIDGE_EMBEDDED_SOURCE } from '@cosyncing/adapter-pi/bridge-asset';
 import { OMP_BRIDGE_EMBEDDED_SOURCE } from '@cosyncing/adapter-omp/bridge-asset';
 // @ts-expect-error Bun's text loader supports service templates that have no TypeScript module declaration.
@@ -270,6 +270,18 @@ export function embeddedRuntimeAsset(id: RuntimeAssetId): RuntimeAsset {
   return asset;
 }
 
+/** Every versioned web folder beside the application is an installer pin, including older versions. */
+export function isInstallerWebPin(pin: string, binDirectory: string): boolean {
+  const pinned = resolve(pin);
+  const installerName = `${PRODUCT_IDENTITY.releaseAssetPrefix}-web-`;
+  const name = basename(pinned);
+  const sameDirectory = process.platform === 'win32'
+    ? dirname(pinned).toLowerCase() === resolve(binDirectory).toLowerCase()
+    : dirname(pinned) === resolve(binDirectory);
+  return sameDirectory && name.startsWith(installerName)
+    && /^\d+\.\d+\.\d+[-\w.]*$/.test(name.slice(installerName.length));
+}
+
 export function resolveFlutterWebRoot(options: {
   override?: string;
   packaged: boolean;
@@ -278,7 +290,17 @@ export function resolveFlutterWebRoot(options: {
   sourceRoot?: string;
 }): string {
   const override = options.override?.trim();
-  if (override) return resolve(override);
+  if (override) {
+    const pinned = resolve(override);
+    const binDirectory = dirname(resolve(options.executablePath));
+    const ownRoot = join(binDirectory, `${PRODUCT_IDENTITY.releaseAssetPrefix}-web-${options.version}`);
+    // The first update runs the old updater, which cannot rewrite its stale installer pin. Recover
+    // in the new broker, while preserving custom roots and a pin whose replacement is unavailable.
+    if (options.packaged && isInstallerWebPin(pinned, binDirectory) && pinned !== ownRoot) {
+      try { if (statSync(ownRoot).isDirectory()) return ownRoot; } catch { /* keep the pin */ }
+    }
+    return pinned;
+  }
   if (options.packaged) {
     return join(
       dirname(resolve(options.executablePath)),
