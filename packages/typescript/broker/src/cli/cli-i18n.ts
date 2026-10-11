@@ -345,10 +345,50 @@ function zhLabel(label: string): string {
   return translated[label] ?? label;
 }
 
+/** Durable CLI explanations preserve filenames, stable codes and executable commands. */
+function translateDurableDoctorText(source: string): string | undefined {
+  const matched = /^(`[^`]+`) (.*)\.$/.exec(source);
+  if (!matched) return undefined;
+  const translations: Record<string, string> = {
+    'has inherited Windows permissions instead of owner-only permissions': '具有继承的 Windows 权限，而非仅所有者权限',
+    'grants access to an unexpected Windows account': '允许非预期的 Windows 账户访问',
+    'is missing a required owner-only Windows permission': '缺少必需的仅所有者 Windows 权限',
+    'has insufficient Windows access rights for a required account': '必需账户的 Windows 访问权限不足',
+    'has unsafe Windows permission inheritance flags': '具有不安全的 Windows 权限继承标志',
+    'has a Windows deny-access rule': '具有 Windows 拒绝访问规则',
+    'has duplicate Windows permission entries': '具有重复的 Windows 权限条目',
+    'is owned by another account': '归另一个账户所有',
+    'contains a symbolic link or junction substitution': '存在符号链接或目录联接替换',
+    'is hard-linked to another file': '与另一个文件存在硬链接',
+    'is not a regular file': '不是常规文件',
+    'has permissions that allow other accounts to access it': '具有允许其他账户访问的权限',
+    'has an unsafe Windows DACL': '具有不安全的 Windows DACL',
+    'could not be inspected or read': '无法检查或读取',
+    'malformed JSON or schema content': 'JSON 或 schema 内容格式错误',
+    'invalid current-schema content': '当前 schema 内容无效',
+    'run `cosy repair`, then `cosy update`': '请先运行 `cosy repair`，再运行 `cosy update`',
+    'restore a backup owned by your account, then run `cosy doctor`': '请恢复归您账户所有的备份，再运行 `cosy doctor`',
+    'remove the link substitution and restore a regular file from a trusted backup, then run `cosy doctor`': '请移除链接替换，从可信备份恢复常规文件，再运行 `cosy doctor`',
+    'check ownership, permissions and current-schema content with `cosy doctor`': '请用 `cosy doctor` 检查归属、权限和当前 schema 内容',
+    'restore a trusted compatible backup before retrying': '请在重试前恢复可信且兼容的备份',
+    'use a broker that supports that version or restore a compatible backup, then run `cosy doctor`': '请使用支持该版本的 broker 或恢复兼容备份，再运行 `cosy doctor`',
+    'restore a trusted compatible backup, then run `cosy doctor`': '请恢复可信且兼容的备份，再运行 `cosy doctor`',
+  };
+  const clauses = matched[2]!.split('; ').map((clause) => translations[clause]
+    ?? replaceMatch(clause, /^needs a schema migration \((.*)\)$/, (code) => `需要 schema 迁移（${code}）`)
+    ?? replaceMatch(clause, /^(?:has )?unsupported schema version (-?\d+)$/, (version) => `schema 版本 ${version} 不受支持`)
+    ?? replaceMatch(clause, /^schema migration required \((.*)\)$/, (code) => `需要 schema 迁移（${code}）`)
+    ?? replaceMatch(clause, /^has malformed JSON or schema content \((.*)\)$/, (code) => `JSON 或 schema 内容格式错误（${code}）`));
+  if (clauses.some((clause) => clause === undefined)) return undefined;
+  return `${matched[1]} ${clauses.join('；')}。`;
+}
+
 /** Translate current dynamic doctor sentences; callers use a Chinese detail-code fallback for unknown copy. */
 export function translateDoctorTextToChinese(source: string): string | undefined {
   const exact = ZH_HUMAN_TEXT[source];
   if (exact) return exact;
+  const durable = translateDurableDoctorText(source);
+  if (durable) return durable;
   const dynamic =
     replaceMatch(source, /^(.*) is present and verified\.$/, (asset) => `${asset} 存在且已验证。`)
     ?? replaceMatch(source, /^Installed (.*) bridge matches the packaged asset\.$/, (name) => `已安装的 ${name} bridge 与发行包资源一致。`)

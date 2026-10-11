@@ -57,7 +57,12 @@ function normalizeLegacyArtifactSource(raw: string): string {
 }
 
 function parseBrokerInstanceFile(path: string): BrokerInstanceFile | LegacyBrokerInstanceFile {
-  const parsed = JSON.parse(readOwnerOnlyText(path)) as Partial<BrokerInstanceFile | LegacyBrokerInstanceFile>;
+  return parseBrokerInstanceText(readOwnerOnlyText(path));
+}
+
+/** Parse already owner-proven bytes during a permission-only repair inspection. */
+export function parseBrokerInstanceText(text: string): BrokerInstanceFile | LegacyBrokerInstanceFile {
+  const parsed = JSON.parse(text) as Partial<BrokerInstanceFile | LegacyBrokerInstanceFile>;
   if ((parsed.version !== 1 && parsed.version !== 2)
       || typeof parsed.instanceId !== 'string' || !INSTANCE_ID.test(parsed.instanceId)) {
     throw new Error('broker-instance-invalid');

@@ -19,6 +19,7 @@ import { authorizationMigrationRollbackFenceActive } from '../runtime/broker-ins
 import {
   durableStateLayout,
   inspectDurableSchemas,
+  durableStateProblemSummary,
   isRuntimeCompatibleConfigV1,
   isRuntimeSecurityMigrationV1,
 } from '../security/durable-state.ts';
@@ -1491,7 +1492,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         // that boundary; the old schema is never accepted as current authorization state.
         && !isRuntimeSecurityMigrationV1(store));
     if (schemaProblems.length > 0) {
-      return result('blocked', 1, 'upgrade-schema-repair-required', 'Repair or migrate durable state before changing binary versions.', fromVersion, recovered);
+      return result('blocked', 1, 'upgrade-schema-repair-required', schemaProblems.map(durableStateProblemSummary).join(' '), fromVersion, recovered);
     }
 
     const manifestUrl = dependencies.manifestUrl ?? defaultManifestUrl();

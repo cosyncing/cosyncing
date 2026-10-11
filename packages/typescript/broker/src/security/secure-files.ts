@@ -23,6 +23,7 @@ import {
   enforceWindowsOwnerOnlyDacl,
   inspectWindowsOwnerOnlyDacl,
   type WindowsSecurePathKind,
+  type WindowsDaclProblem,
 } from './windows-dacl.ts';
 
 export type SecurePathProblem =
@@ -112,6 +113,7 @@ export interface SecureFileInspection {
   status: 'missing' | 'ok' | 'unsafe' | 'unreadable';
   path: string;
   problem?: SecurePathProblem;
+  daclProblem?: WindowsDaclProblem;
 }
 
 /** Read-only owner/mode/symlink inspection for configuration and credential files. */
@@ -126,7 +128,9 @@ function inspectOwnerOnlyPath(target: string, kind: WindowsSecurePathKind): Secu
     if (process.platform === 'win32') {
       const dacl = inspectWindowsOwnerOnlyDacl(target, kind);
       if (!dacl.ok) {
-        throw new SecurePathError(dacl.problem === 'wrong-owner' ? 'wrong-owner' : 'unsafe-dacl', target);
+        return { status: 'unsafe', path: target,
+          problem: dacl.problem === 'wrong-owner' ? 'wrong-owner' : 'unsafe-dacl',
+          daclProblem: dacl.problem };
       }
     } else {
       assertOwned(stat, target);

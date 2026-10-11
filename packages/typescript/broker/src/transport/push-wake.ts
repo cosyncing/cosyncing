@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type {
   WakePlatform,
   WakePushDispatchResult,
@@ -8,6 +8,7 @@ import type {
   WakeRegistrationInput,
   WakeRegistrationPublic,
 } from '@cosyncing/protocol';
+import { atomicWriteOwnerOnly } from '../security/secure-files.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 import {
   normalizeWebPushContext,
@@ -349,10 +350,7 @@ export class WakePushRegistry {
   }
 
   private save(): void {
-    mkdirSync(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ version: 2, registrations: [...this.registrations.values()] } satisfies WakeStoreFile, null, 2) + '\n', { mode: 0o600 });
-    renameSync(tmp, this.path);
+    atomicWriteOwnerOnly(this.path, JSON.stringify({ version: 2, registrations: [...this.registrations.values()] } satisfies WakeStoreFile, null, 2) + '\n');
   }
 
   private dispatchable(registration: WakeRegistration): boolean {

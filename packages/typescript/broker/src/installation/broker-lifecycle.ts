@@ -73,6 +73,11 @@ import {
   applyDurableStateMigrationsWithLockHeld,
   durableStateLayout,
   planDurableStateMigrations,
+  DURABLE_SCHEMA_REGISTRY,
+  durableSchemaPath,
+  durableStateProblemSummary,
+  inspectDurableSchemas,
+  repairDurableStatePermissions,
   purgeDataInventory,
 } from '../security/durable-state.ts';
 import {
@@ -1366,21 +1371,39 @@ export async function inspectRepair(options: LifecycleBaseOptions): Promise<Repa
   const actions: RepairPlan['actions'] = [];
   const blockers: RepairPlan['blockers'] = [];
   const warnings: RepairPlan['warnings'] = [];
-  if (!env.install.committed) blockers.push({ detailCode: 'repair-installation-uncommitted', summary: 'Run setup before repair.' });
+  const layout = durableStateLayout({ stateRoot: env.home, cacheRoot: env.cacheRoot });
+  const inspections = inspectDurableSchemas(layout);
+  const migrationPlan = planDurableStateMigrations(layout);
+  for (const blocker of migrationPlan.blockers) {
+    const inspection = inspections.find((store) => store.id === blocker.store)!;
+    if (inspection.permissionRepairable) {
+      const spec = DURABLE_SCHEMA_REGISTRY.find((store) => store.id === blocker.store)!;
+      actions.push({ id: `state.permissions.${spec.id}`, legacy: false,
+        summary: `Restore owner-only permissions on \`${spec.relativePath}\` without changing its contents.` });
+    } else {
+      blockers.push({ detailCode: blocker.detailCode, summary: durableStateProblemSummary(inspection) });
+    }
+  }
   // A pending setup journal means an interrupted transaction still owns part of the machine. Repair
   // reconciles COMMITTED state and never consumes those journals, so proceeding would compare against a
   // half-applied installation and report "already matches declared state" while the transaction sits
   // unresolved. Setup owns its own recovery; say so instead of silently doing nothing.
   if (readSetupTransactionJournal(env.home)) {
-    blockers.push({
-      detailCode: 'repair-setup-transaction-pending',
-      summary: `An interrupted setup transaction is still pending. Rerun \`${PRODUCT_IDENTITY.primaryBinary} setup\`, which rolls it back before replanning.`,
-    });
+    blockers.push({ detailCode: 'repair-setup-transaction-pending',
+      summary: `An interrupted setup transaction is still pending. Rerun \`${PRODUCT_IDENTITY.primaryBinary} setup\`, which rolls it back before replanning.` });
   }
-  if (!env.config) blockers.push({ detailCode: 'repair-config-invalid', summary: 'The broker configuration is missing or unsafe.' });
-  const migrationPlan = planDurableStateMigrations(durableStateLayout({ stateRoot: env.home, cacheRoot: env.cacheRoot }));
-  for (const blocker of migrationPlan.blockers) {
-    blockers.push({ detailCode: blocker.detailCode, summary: `Durable ${blocker.store} state requires explicit recovery.` });
+  // If the configuration or ledger itself has permission drift, first repair only the displayed
+  // files. Never use unsafe install-state contents to authorize service or integration mutations.
+  if (!env.install.committed || !env.config) {
+    if (!env.install.committed && !inspections.find((store) => store.id === 'install')?.permissionRepairable
+        && !blockers.some((blocker) => blocker.detailCode.startsWith('install-'))) {
+      blockers.push({ detailCode: 'repair-installation-uncommitted', summary: 'Run setup before repair.' });
+    }
+    if (!env.config && !inspections.find((store) => store.id === 'config')?.permissionRepairable
+        && !blockers.some((blocker) => blocker.detailCode.startsWith('config-'))) {
+      blockers.push({ detailCode: 'repair-config-invalid', summary: '`config.json` is missing or invalid; run `cosy doctor` and restore a compatible backup or run `cosy setup`.' });
+    }
+    return { schemaVersion: 1, actions, blockers, warnings };
   }
   if (migrationPlan.steps.length > 0) {
     actions.push({ id: 'schema.migrate', summary: 'Back up both durable roots and apply the displayed backward-compatible schema migration.', legacy: false });
@@ -1804,6 +1827,28 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
   if (plan.actions.some((action) => action.legacy) && !options.allowLegacyIntegrations) {
     return commandResult('blocked', 2, 'legacy-integration-confirmation-required', 'Legacy marker evidence requires separate confirmation.');
   }
+  if (plan.actions.every((action) => action.id.startsWith('state.permissions.'))) {
+    const context = options.context ?? createSetupDiagnosisContext();
+    const home = options.home ?? setupStateHome();
+    const acquire = options.acquireLock ?? ((input) => acquireInstallationLock(input));
+    let permissionLock: InstallationLockHandle;
+    try { permissionLock = acquire({ command: 'repair', home }); }
+    catch { return commandResult('blocked', 1, 'installation-lock-unavailable', 'Another installation mutation is active or the lock is unsafe.'); }
+    const completed: string[] = [];
+    try {
+      if (!samePlan(plan, await inspectRepair(options))) return commandResult('blocked', 1, 'repair-plan-changed', 'Repair state changed after confirmation; inspect and confirm the new plan.');
+      const layout = durableStateLayout({ stateRoot: home, cacheRoot: cacheRoot(options, context) });
+      for (const action of plan.actions) {
+        const spec = DURABLE_SCHEMA_REGISTRY.find((store) => action.id === `state.permissions.${store.id}`);
+        if (!spec) throw new Error('permission-repair-store-invalid');
+        repairDurableStatePermissions({ id: spec.id, path: durableSchemaPath(spec, layout) });
+        completed.push(action.id);
+      }
+      return commandResult('complete', 0, 'repair-complete', 'Restored owner-only durable state permissions. Run `cosy doctor`, then retry `cosy update`.', { actions: completed });
+    } catch (error) {
+      return commandResult('failed', 1, 'permission-repair-failed', error instanceof Error ? error.message : 'Permission repair failed; rerun `cosy doctor`.', { actions: completed });
+    } finally { permissionLock.release(); }
+  }
   let env = await environment(options);
   if (!env.install.committed || !env.config) return commandResult('blocked', 1, 'repair-precondition-changed', 'Repair preconditions changed; rerun inspection.');
   const acquire = options.acquireLock ?? ((input) => acquireInstallationLock(input));
@@ -1825,7 +1870,12 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
     }
     nextState = env.install.state;
     for (const action of plan.actions) {
-      if (action.id === 'schema.migrate') {
+      if (action.id.startsWith('state.permissions.')) {
+        const spec = DURABLE_SCHEMA_REGISTRY.find((store) => action.id === `state.permissions.${store.id}`);
+        if (!spec) throw new Error('permission-repair-store-invalid');
+        const layout = durableStateLayout({ stateRoot: env.home, cacheRoot: env.cacheRoot });
+        repairDurableStatePermissions({ id: spec.id, path: durableSchemaPath(spec, layout) });
+      } else if (action.id === 'schema.migrate') {
         snapshots.push(
           snapshot(setupStatePath(env.home)),
           snapshot(brokerConfigPath(env.home)),
@@ -2053,7 +2103,9 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
       try { restore(item); } catch { complete = false; }
     }
     return complete
-      ? commandResult('rolled-back', 3, 'repair-rolled-back', 'Repair failed and all completed file mutations were restored.', { actions: completed })
+      ? commandResult('rolled-back', 3, 'repair-rolled-back', completed.some((id) => id.startsWith('state.permissions.'))
+        ? 'Repair failed. Other completed file mutations were restored; owner-only permission repairs remain applied. Rerun `cosy doctor`.'
+        : 'Repair failed and all completed file mutations were restored.', { actions: completed })
       : commandResult('cleanup-required', 4, 'repair-rollback-incomplete', 'Repair failed and manual cleanup remains.', { actions: completed });
   } finally {
     lock.release();

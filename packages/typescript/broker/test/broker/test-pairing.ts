@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { atomicWriteOwnerOnly } from '../../src/security/secure-files.ts';
 import { join } from 'node:path';
 import { generateIdentityKeyPair, generateX25519KeyPair, parseQrPairingPayload } from '@cosyncing/crypto';
 import {
@@ -78,11 +79,11 @@ try {
     try {
       const writeRegistry = new TransportPairingRegistry({ home: writeHome });
       const offer = writeRegistry.createOffer();
-      chmodSync(writeHome, 0o500);
+      symlinkSync(join(writeHome, 'outside-peers.json'), join(writeHome, 'transport-peers.json'));
       assert.throws(() => writeRegistry.accept(offer.pairingId, validInput('w')), Error);
       assert.deepEqual(writeRegistry.listPeers(), []);
       assert.equal(writeRegistry.getOfferStatus(offer.pairingId)?.state, 'pending');
-      chmodSync(writeHome, 0o700);
+      rmSync(join(writeHome, 'transport-peers.json'));
       assert.equal(writeRegistry.accept(offer.pairingId, validInput('w')).peer.peerId, 'client-w');
     } finally {
       chmodSync(writeHome, 0o700);
@@ -105,10 +106,12 @@ try {
     const before = renameRegistry.authenticatePeerToken(accepted.broker.peerToken);
     assert.equal(before?.authGeneration, 1);
     assert.deepEqual([...before!.roles].sort(), ['drive', 'files', 'observe']);
-    mkdirSync(join(renameHome, 'transport-peers.json.tmp'));
+    renameSync(join(renameHome, 'transport-peers.json'), join(renameHome, 'peers-backup.json'));
+    mkdirSync(join(renameHome, 'transport-peers.json'));
     assert.throws(() => renameRegistry.revokeWithState('client-r'), Error);
     assert.equal(renameRegistry.verifyAnyPeerToken(accepted.broker.peerToken), 'ok');
-    rmSync(join(renameHome, 'transport-peers.json.tmp'), { recursive: true });
+    rmSync(join(renameHome, 'transport-peers.json'), { recursive: true });
+    renameSync(join(renameHome, 'peers-backup.json'), join(renameHome, 'transport-peers.json'));
     const revocation = renameRegistry.revokeWithState('client-r');
     assert.equal(revocation?.authGeneration, 2);
     assert.equal(renameRegistry.verifyAnyPeerToken(accepted.broker.peerToken), 'unknown');
@@ -124,12 +127,12 @@ try {
     const peerStorePath = join(renameHome, 'transport-peers.json');
     const stored = JSON.parse(readFileSync(peerStorePath, 'utf8')) as { version: number; peers: Array<Record<string, unknown>> };
     stored.peers[0]!.roles = [];
-    writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
+    atomicWriteOwnerOnly(peerStorePath, `${JSON.stringify(stored)}\n`);
     const zeroRoleReload = new TransportPairingRegistry({ home: renameHome });
     assert.deepEqual([...zeroRoleReload.authenticatePeerToken(repaired.broker.peerToken)!.roles], []);
 
     stored.peers[0]!.roles = ['invalid-role'];
-    writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
+    atomicWriteOwnerOnly(peerStorePath, `${JSON.stringify(stored)}\n`);
     const malformedRoleReload = new TransportPairingRegistry({ home: renameHome });
     assert.equal(
       malformedRoleReload.authenticatePeerToken(repaired.broker.peerToken),
@@ -140,7 +143,7 @@ try {
     const legacyStore = structuredClone(stored);
     legacyStore.version = 1;
     delete legacyStore.peers[0]!.roles;
-    writeFileSync(peerStorePath, `${JSON.stringify(legacyStore)}\n`);
+    atomicWriteOwnerOnly(peerStorePath, `${JSON.stringify(legacyStore)}\n`);
     const legacyRoleReload = new TransportPairingRegistry({ home: renameHome });
     assert.equal(
       legacyRoleReload.authenticatePeerToken(repaired.broker.peerToken),
@@ -176,17 +179,17 @@ try {
     authGeneration: 1,
   });
   try {
-    writeFileSync(join(migrationHome, 'broker-instance.json'), JSON.stringify({
+    atomicWriteOwnerOnly(join(migrationHome, 'broker-instance.json'), JSON.stringify({
       version: 1,
       instanceId: 'broker_legacy_authorization_fixture_1234567890',
     }), { mode: 0o600 });
     const peerAToken = 'legacy-peer-a-token';
     const hiddenPeerBToken = 'legacy-hidden-peer-b-token';
-    writeFileSync(join(migrationHome, 'transport-peers.json'), JSON.stringify({
+    atomicWriteOwnerOnly(join(migrationHome, 'transport-peers.json'), JSON.stringify({
       version: 1,
       peers: [legacyPeer('peer-a', peerAToken), legacyPeer('hidden-peer-b', hiddenPeerBToken)],
     }), { mode: 0o600 });
-    writeFileSync(join(migrationHome, 'schedules.json'), JSON.stringify({
+    atomicWriteOwnerOnly(join(migrationHome, 'schedules.json'), JSON.stringify({
       version: 1,
       schedules: [
         {
@@ -200,7 +203,7 @@ try {
         },
       ],
     }), { mode: 0o600 });
-    writeFileSync(join(migrationHome, 'push-wake-tokens.json'), JSON.stringify({
+    atomicWriteOwnerOnly(join(migrationHome, 'push-wake-tokens.json'), JSON.stringify({
       version: 1,
       registrations: [{
         deviceId: 'legacy-attacker-phone', platform: 'fcm', token: 'legacy-push-token',
@@ -266,19 +269,19 @@ try {
   // store even when a later replacement or the completion marker fails.
   const boundaryHome = (name: string) => mkdtempSync(join(tmpdir(), `cosyncing-auth-boundary-${name}-`));
   const seedBoundary = (target: string) => {
-    writeFileSync(join(target, 'broker-instance.json'), JSON.stringify({
+    atomicWriteOwnerOnly(join(target, 'broker-instance.json'), JSON.stringify({
       version: 1,
       instanceId: 'broker_boundary_fixture_identity_1234567890',
     }), { mode: 0o600 });
-    writeFileSync(join(target, 'transport-peers.json'), JSON.stringify({ version: 1, peers: [] }), { mode: 0o600 });
-    writeFileSync(join(target, 'push-wake-tokens.json'), JSON.stringify({
+    atomicWriteOwnerOnly(join(target, 'transport-peers.json'), JSON.stringify({ version: 1, peers: [] }), { mode: 0o600 });
+    atomicWriteOwnerOnly(join(target, 'push-wake-tokens.json'), JSON.stringify({
       version: 1,
       registrations: [{
         deviceId: 'legacy-boundary-phone', platform: 'fcm', token: 'legacy-token',
         createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
       }],
     }), { mode: 0o600 });
-    writeFileSync(join(target, 'schedules.json'), JSON.stringify({
+    atomicWriteOwnerOnly(join(target, 'schedules.json'), JSON.stringify({
       version: 1,
       schedules: [{
         id: 'legacy-boundary-schedule', revision: 1, kind: 'message', tool: 'codex',

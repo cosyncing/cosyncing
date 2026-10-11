@@ -5,8 +5,9 @@
  * are represented only by SHA-256 hashes; terminal wire outcomes contain stable codes/messages.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
+import { atomicWriteOwnerOnly } from '../security/secure-files.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 
 export interface ProtocolJournalScope {
@@ -325,14 +326,11 @@ export class ProtocolJournal {
   }
 
   private save(): void {
-    mkdirSync(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp`;
     const file: JournalFileV1 = {
       version: 1,
       idempotency: [...this.idempotency.values()],
       tickets: [...this.tickets.values()],
     };
-    writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-    renameSync(tmp, this.path);
+    atomicWriteOwnerOnly(this.path, `${JSON.stringify(file, null, 2)}\n`);
   }
 }

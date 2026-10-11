@@ -11,11 +11,26 @@ export interface LocalKeyStore {
   createdAt: string;
 }
 
-export function loadOrCreateLocalKeyStore(dir: string, owner: string): LocalKeyStore {
+export interface LocalKeyStoreStorage {
+  ensureDirectory(path: string): void;
+  read(path: string): string;
+  write(path: string, content: string): void;
+  /** Converge existing file permissions only after the stored keys validate. */
+  secureExisting?(path: string): void;
+}
+
+export function loadOrCreateLocalKeyStore(
+  dir: string, owner: string, storage?: LocalKeyStoreStorage,
+): LocalKeyStore {
   if (!owner.trim()) throw new Error('key store owner is required');
-  mkdirSync(dir, { recursive: true });
+  if (storage) storage.ensureDirectory(dir);
+  else mkdirSync(dir, { recursive: true });
   const path = join(dir, 'cosyncing-keys.json');
-  if (existsSync(path)) return validateLocalKeyStore(JSON.parse(readFileSync(path, 'utf8')));
+  if (existsSync(path)) {
+    const store = validateLocalKeyStore(JSON.parse(storage ? storage.read(path) : readFileSync(path, 'utf8')));
+    storage?.secureExisting?.(path);
+    return store;
+  }
   const store: LocalKeyStore = {
     version: 1,
     owner,
@@ -23,7 +38,8 @@ export function loadOrCreateLocalKeyStore(dir: string, owner: string): LocalKeyS
     exchange: generateLocalX25519KeyPair(),
     createdAt: new Date().toISOString(),
   };
-  writeFileSync(path, JSON.stringify(store, null, 2), { mode: 0o600 });
+  if (storage) storage.write(path, JSON.stringify(store, null, 2));
+  else writeFileSync(path, JSON.stringify(store, null, 2), { mode: 0o600 });
   return store;
 }
 
