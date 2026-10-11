@@ -399,6 +399,7 @@ export function translateDoctorTextToChinese(source: string): string | undefined
   const dynamic =
     replaceMatch(source, /^(.*) is present and verified\.$/, (asset) => `${asset} 存在且已验证。`)
     ?? replaceMatch(source, /^cosyncing could not confirm it manages the Codex daemon: (.*)$/, (detail) => `cosyncing 无法确认它管理此 Codex daemon：${detail}`)
+    ?? replaceMatch(source, /^The Codex daemon process ownership is verified \((.*)\)\.$/, (layouts) => `Codex daemon 进程的归属已验证（${layouts}）。`)
     ?? replaceMatch(source, /^Installed (.*) bridge matches the packaged asset\.$/, (name) => `已安装的 ${name} bridge 与发行包资源一致。`)
     ?? replaceMatch(source, /^The (.*) bridge extension is not installed\.$/, (name) => `未安装 ${name} bridge 扩展。`)
     ?? replaceMatch(source, /^Install the packaged (.*) bridge through setup\.$/, (name) => `请通过 setup 安装发行包中的 ${name} bridge。`)

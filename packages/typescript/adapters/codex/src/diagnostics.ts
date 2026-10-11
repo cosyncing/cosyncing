@@ -274,8 +274,12 @@ function daemonOwnershipCheck(
   }
   return {
     id, status: 'pass', detailCode: 'daemon-ownership-verified',
-    summary: 'The Codex daemon process ownership is verified.',
-    evidence: { pid: daemon.process.pid, unknownFlags: (daemon.process.unknownFlags ?? []).join(', ') },
+    summary: `The Codex daemon process ownership is verified${daemon.process.receiptLayouts?.length ? ` (${daemon.process.receiptLayouts.join(', ')})` : ''}.`,
+    evidence: {
+      pid: daemon.process.pid,
+      receiptLayouts: (daemon.process.receiptLayouts ?? []).join(', '),
+      unknownFlags: (daemon.process.unknownFlags ?? []).join(', '),
+    },
   };
 }
 
