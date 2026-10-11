@@ -10,11 +10,12 @@ adapter = Path('packages/typescript/adapters/codex/src/implementation.ts')
 reviewer = Path('packages/typescript/adapters/codex/src/daemon-reviewer.ts')
 runtime = Path('packages/typescript/broker/src/updates/runtime-update-providers.ts')
 hub = Path('packages/typescript/broker/src/sessions/hub.ts')
-out = Path('output/review/lane-a2/pr2-mutations')
-out.mkdir(parents=True, exist_ok=True)
 parser = argparse.ArgumentParser()
 parser.add_argument('--names', nargs='*')
+parser.add_argument('--output', type=Path, default=Path('output/review/lane-a2/pr2-mutations'))
 args = parser.parse_args()
+out = args.output
+out.mkdir(parents=True, exist_ok=True)
 # Each mutation targets a behavior asserted by a production adapter/Hub or doctor fixture.
 cases = [
  ('force-stdio-new', adapter, '  const run = shared\n', '  const run = false\n', 'app'),

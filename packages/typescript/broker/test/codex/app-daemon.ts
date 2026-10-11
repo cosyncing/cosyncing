@@ -171,6 +171,10 @@ for await (const chunk of Bun.stdin.stream()) {
     } finally { await replacement.stop(); }
     process.env.COSYNCING_CODEX_APP_SERVER_SOCK=socket;
     await daemon.stop();
+    // Older Bun leaves the closed Unix socket inode behind. This fixture
+    // exercises an absent endpoint, so remove its owned path explicitly.
+    rmSync(socket, { force: true });
+    assert.equal(existsSync(socket), false, 'private fallback requires an absent endpoint');
     const missing = await adapter.attach(id,'resume');
     assert.equal(missing.info.control?.terminalSync.syncAvailable,false);
     assert.match(missing.info.control!.terminalSync.reason!,/not running or reachable/);
