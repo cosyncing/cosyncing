@@ -54,6 +54,7 @@ import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/config
 import { loadOrCreateBrokerInstanceId } from '../../src/runtime/broker-instance.ts';
 import { ensureInstallationCredentials } from '../../src/security/credentials.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
+import { codexDaemonReviewerCheck } from '../../../adapters/codex/src/daemon-reviewer.ts';
 import { ensureOwnerOnlyDirectory } from '../../src/security/secure-files.ts';
 import { isOwnerOnlyFile } from '../helpers/isolated-broker-fixture.ts';
 import {
@@ -120,6 +121,7 @@ function literalDoctorCopy(): Array<{ file: string; text: string }> {
     'packages/typescript/broker/src/installation/doctor.ts',
     'packages/typescript/adapter-api/src/index.ts',
     'packages/typescript/adapters/codex/src/diagnostics.ts',
+    'packages/typescript/adapters/codex/src/daemon-reviewer.ts',
     'packages/typescript/adapters/opencode/src/diagnostics.ts',
     'packages/typescript/adapters/pi/src/diagnostics.ts',
     'packages/typescript/adapters/claude/src/diagnostics.ts',
@@ -342,6 +344,65 @@ const cliHome = join(testRoot, 'cli-home');
 makeOwnerOnlyDirectory(cliHome);
 process.env.COSYNCING_HOME = cliHome;
 try {
+  const reviewerHome = join(testRoot, 'reviewer-home');
+  mkdirSync(reviewerHome);
+  const reviewerContext = createSetupDiagnosisContext({homeDir:reviewerHome,env:{CODEX_HOME:reviewerHome}});
+  const missingReviewerHome = join(testRoot, 'missing-reviewer-home');
+  let missingReviewer: ReturnType<typeof codexDaemonReviewerCheck> | undefined;
+  try { missingReviewer = codexDaemonReviewerCheck(reviewerContext, missingReviewerHome); } catch { /* asserted below */ }
+  check('Codex reviewer accepts a fresh home with no profiles',
+    missingReviewer?.status === 'pass');
+  let disappearingReviewer: ReturnType<typeof codexDaemonReviewerCheck> | undefined;
+  try {
+    disappearingReviewer = codexDaemonReviewerCheck({ ...reviewerContext, listDirectory: () => { throw new Error('ENOENT'); } }, missingReviewerHome);
+  } catch { /* asserted below */ }
+  check('Codex reviewer tolerates a directory disappearing during enumeration',
+    disappearingReviewer?.status === 'pass');
+  const reviewerProfile = join(reviewerHome,'fixture.config.toml');
+  const reviewerBase = join(reviewerHome, 'config.toml');
+  const baseAutoReview = 'model_provider="fixture"\nmodel="base-model"\napprovals_reviewer="auto_review"\n';
+  writeFileSync(reviewerBase, baseAutoReview);
+  const baseWarning = codexDaemonReviewerCheck(reviewerContext, reviewerHome);
+  observedDoctorChecks.push(baseWarning);
+  check('Codex reviewer warns for a non-OpenAI base config with bundled startup catalog',
+    baseWarning.status === 'warn' && baseWarning.summary.includes('config.toml (base-model)'));
+  writeFileSync(reviewerProfile, 'model_provider="openai"\nmodel="profile-model"\n');
+  check('Codex reviewer keeps the base warning when a profile selects OpenAI',
+    codexDaemonReviewerCheck(reviewerContext, reviewerHome).status === 'warn');
+  rmSync(reviewerProfile);
+  writeFileSync(reviewerBase, baseAutoReview + 'model_catalog_json="merged.json"\n');
+  writeFileSync(join(reviewerHome, 'merged.json'), JSON.stringify({ models: [{ slug: 'base-model' }] }));
+  check('Codex reviewer requires an override for the base config model',
+    codexDaemonReviewerCheck(reviewerContext, reviewerHome).status === 'warn');
+  writeFileSync(join(reviewerHome, 'merged.json'), JSON.stringify({
+    models: [{ slug: 'base-model', auto_review_model_override: 'base-model' }],
+  }));
+  const baseReady = codexDaemonReviewerCheck(reviewerContext, reviewerHome);
+  observedDoctorChecks.push(baseReady);
+  check('Codex reviewer passes a base config startup override', baseReady.status === 'pass');
+  writeFileSync(reviewerBase, baseAutoReview.replace('auto_review', 'user'));
+  check('Codex reviewer skips base config user approvals',
+    codexDaemonReviewerCheck(reviewerContext, reviewerHome).status === 'pass');
+  writeFileSync(reviewerBase, baseAutoReview.replace('fixture', 'openai'));
+  check('Codex reviewer skips an OpenAI base config',
+    codexDaemonReviewerCheck(reviewerContext, reviewerHome).status === 'pass');
+  writeFileSync(join(reviewerHome,'config.toml'), '');
+  writeFileSync(reviewerProfile, 'model_provider="fixture"\nmodel="fixture-model"\napprovals_reviewer="auto_review"\n');
+  let reviewer = codexDaemonReviewerCheck(reviewerContext,reviewerHome);
+  observedDoctorChecks.push(reviewer);
+  check('Codex reviewer warns for non-OpenAI auto-review with bundled startup catalog', reviewer.status==='warn' && reviewer.summary.includes('fixture (fixture-model)'));
+  writeFileSync(join(reviewerHome,'config.toml'), 'model_catalog_json="merged.json"\n');
+  writeFileSync(join(reviewerHome,'merged.json'), JSON.stringify({models:[{slug:'fixture-model'}]}));
+  check('Codex reviewer requires the startup entry override', codexDaemonReviewerCheck(reviewerContext,reviewerHome).status==='warn');
+  writeFileSync(join(reviewerHome,'merged.json'), JSON.stringify({models:[{slug:'fixture-model',auto_review_model_override:'fixture-model'}]}));
+  reviewer = codexDaemonReviewerCheck(reviewerContext,reviewerHome);
+  observedDoctorChecks.push(reviewer);
+  check('Codex reviewer passes a startup override',reviewer.status==='pass');
+  writeFileSync(join(reviewerHome,'config.toml'), '');
+  writeFileSync(reviewerProfile, 'model_provider="fixture"\nmodel="fixture-model"\napprovals_reviewer="user"\n');
+  check('Codex reviewer skips user approvals',codexDaemonReviewerCheck(reviewerContext,reviewerHome).status==='pass');
+  writeFileSync(reviewerProfile, 'model_provider="openai"\nmodel="fixture-model"\napprovals_reviewer="auto_review"\n');
+  check('Codex reviewer skips OpenAI profiles',codexDaemonReviewerCheck(reviewerContext,reviewerHome).status==='pass');
   for (const agent of Object.keys(matrix) as MatrixAgent[]) {
     for (const fixture of [
       { label: 'below', value: matrix[agent].below, status: 'fail', code: 'version-below-minimum' },

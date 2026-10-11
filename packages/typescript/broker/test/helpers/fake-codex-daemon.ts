@@ -119,6 +119,7 @@ class FakeDaemonClient {
 }
 
 export interface FakeCodexDaemonOptions {
+  startResult?: (params: any) => unknown;
   /** Methods accepted at the socket but deliberately left unanswered. */
   ignoreMethods?: string[];
   /** Threads `thread/loaded/list` reports. */
@@ -139,6 +140,7 @@ export class FakeCodexDaemon {
   private readonly clients = new Set<FakeDaemonClient>();
   /** Every method name this daemon answered, in order. */
   readonly calls: string[] = [];
+  readonly requests: { method: string; params: any }[] = [];
 
   constructor(
     private readonly socketPath: string,
@@ -181,6 +183,7 @@ export class FakeCodexDaemon {
   private handle(client: FakeDaemonClient, message: any): void {
     if (!message?.method) return;
     this.calls.push(String(message.method));
+    this.requests.push({ method: String(message.method), params: message.params });
     if (this.options.ignoreMethods?.includes(String(message.method))) return;
     const reply = (result: unknown | Promise<unknown>): void => {
       if (message.id == null) return;
@@ -194,6 +197,10 @@ export class FakeCodexDaemon {
         return reply({ userAgent: 'codex-fake/0.0.0' });
       case 'thread/loaded/list':
         return reply({ data: this.options.loadedThreadIds ?? [], nextCursor: null });
+      case 'thread/start':
+        return reply(this.options.startResult?.(message.params) ?? {});
+      case 'turn/start':
+        return reply({ turn: { id: `fake-turn-${this.calls.length}`, status: 'inProgress' } });
       case 'thread/resume':
         return reply(this.options.resumeResult?.(message.params) ?? {
           thread: { id: String(message.params?.threadId ?? ''), name: 'fake daemon thread' },

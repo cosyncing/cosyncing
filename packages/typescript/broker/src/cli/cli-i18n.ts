@@ -267,6 +267,8 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Managed Codex daemon ownership was not checked because its binary, managed endpoint, or process inspection is unavailable.': 'Codex 可执行文件、托管端点或进程检查不可用，因此未检查托管 daemon 的归属。',
   'No managed Codex daemon process is recorded.': '没有记录托管的 Codex daemon 进程。',
   'The Codex daemon process ownership is verified.': 'Codex daemon 进程的归属已验证。',
+  'Non-OpenAI auto-review configurations have a reviewer override in the daemon startup catalog, or no such configuration requires one.': '非 OpenAI 自动审查配置已在 daemon 启动模型目录中指定审查模型，或没有需要此设置的配置。',
+  'Add each model with auto_review_model_override to the merged catalog selected by model_catalog_json in base config.toml, then restart Codex while idle. Or set approvals_reviewer = "user" in config.toml or the profile, or select Ask permission in the app. See the Codex profile guide; regenerate the catalog after Codex updates.': '将各模型及其 auto_review_model_override 加入基础 config.toml 中 model_catalog_json 指定的合并模型目录，并在空闲时重启 Codex。也可以在基础 config.toml 或配置文件中设置 approvals_reviewer = "user"，或在应用中选择“请求权限”。请参阅 Codex 配置指南；更新 Codex 后重新生成模型目录。',
   'While nothing is running, restart Codex yourself, then rerun `cosy doctor`.': '请在没有任务运行时自行重启 Codex，然后重新运行 `cosy doctor`。',
   'The standalone Codex package was not checked because Codex is missing.': '缺少 Codex，因此未检查独立版安装。',
   'An external Codex daemon is configured, so cosyncing does not require the standalone package.': '已配置外部 Codex daemon，因此 cosyncing 不要求安装独立版。',
@@ -400,6 +402,7 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     replaceMatch(source, /^(.*) is present and verified\.$/, (asset) => `${asset} 存在且已验证。`)
     ?? replaceMatch(source, /^cosyncing could not confirm it manages the Codex daemon: (.*)$/, (detail) => `cosyncing 无法确认它管理此 Codex daemon：${detail}`)
     ?? replaceMatch(source, /^The Codex daemon process ownership is verified \((.*)\)\.$/, (layouts) => `Codex daemon 进程的归属已验证（${layouts}）。`)
+    ?? replaceMatch(source, /^Codex auto-review cannot use these non-OpenAI models from the daemon startup catalog: (.*)\.$/, (configurations) => `Codex daemon 的启动模型目录无法用于以下非 OpenAI 配置的自动审查：${configurations}。`)
     ?? replaceMatch(source, /^Installed (.*) bridge matches the packaged asset\.$/, (name) => `已安装的 ${name} bridge 与发行包资源一致。`)
     ?? replaceMatch(source, /^The (.*) bridge extension is not installed\.$/, (name) => `未安装 ${name} bridge 扩展。`)
     ?? replaceMatch(source, /^Install the packaged (.*) bridge through setup\.$/, (name) => `请通过 setup 安装发行包中的 ${name} bridge。`)
