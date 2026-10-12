@@ -704,6 +704,22 @@ async function main(): Promise<void> {
     await h.conn.close();
   }
   {
+    // A driven session learns of a background agent from its child's stdout, but an agent that finishes
+    // while the session is busy is reported only on the transcript's queued carriers, never on stdout.
+    // The echo tail is the one reader of those lines here; missing them left the agent's card Running.
+    const h = newConn();
+    const queued = '<task-notification>\n<task-id>bgdrive</task-id>\n<tool-use-id>toolu_bg_drive</tool-use-id>\n<status>completed</status>\n</task-notification>';
+    (h.conn as any).handleEvent({ type: 'assistant', message: { id: 'msg_spawn', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_bg_drive', name: 'Agent', input: { description: 'Drive bg', prompt: 'x', run_in_background: true } }], stop_reason: 'tool_use' } });
+    (h.conn as any).handleEvent({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_bg_drive', content: [{ type: 'text', text: 'Async agent launched successfully. agentId: bgdrive (internal ID).' }] }] } });
+    check('q: a driven background-agent launch is pending until it reports',
+      (h.conn as any).backgroundToolUseIds.has('toolu_bg_drive') && !(h.conn as any).notifiedToolUseIds.has('toolu_bg_drive'));
+    h.append({ type: 'queue-operation', operation: 'enqueue', timestamp: nowIso(), content: queued });
+    h.drain();
+    check('q: a queued notification on the transcript ends a driven background agent',
+      (h.conn as any).notifiedToolUseIds.has('toolu_bg_drive'), JSON.stringify([...(h.conn as any).notifiedToolUseIds]));
+    await h.conn.close();
+  }
+  {
     const h = newConn(); // the detector itself is intact
     h.append(assistantLine('f-1', 'msg_f', 'foreign with no window and no streamed id', null));
     h.drain();

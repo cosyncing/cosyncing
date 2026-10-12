@@ -3212,8 +3212,10 @@ export class ClaudeResumeConnection implements SessionConnection {
       // sidecar line that only ever lands in the transcript. Without this the card would tick
       // "Running" for the rest of the session — and the client's idle-sweep exemption guarantees
       // nothing else would ever clear it. Terminal state only; the subagent and roster sets are
-      // deliberately untouched here, since those are fed from stdout in this mode.
+      // otherwise fed from stdout in this mode — except a background AGENT's queued notification,
+      // which reaches the transcript on the same sidecar carriers and never reaches stdout.
       collectBackgroundCommandTerminal(ln, this.backgroundCommands, true);
+      collectQueuedAgentNotification(ln, this.backgroundToolUseIds, this.notifiedToolUseIds, this.agentIdToToolUseId);
       if (ln.type === 'user') {
         // A task-notification line is the CLI waking OUR OWN CHILD for a background-agent result: the
         // continuation's assistant rows follow it IN TRANSCRIPT ORDER, so opening the exoneration
@@ -6627,7 +6629,10 @@ export function collectParentActivity(
       // The spawn ack ("Async agent launched… agentId: X") maps agent id → spawning tool_use_id, so a
       // later TaskStop of X can resolve the pending-background entry keyed by that tool_use_id.
       const ack = /agentId:\s*([A-Za-z0-9_-]+)/.exec(blockText);
-      if (ack?.[1]) extra?.agentIdToToolUseId?.set(ack[1], tuid);
+      // The FIRST block to name an agent id is that agent's own launch result: ids are minted at launch.
+      // A later block that merely mentions it — a grep over transcripts, a SendMessage reply — must not
+      // remap it, or the agent's real notification and TaskStop would no longer find their launch.
+      if (ack?.[1] && !extra?.agentIdToToolUseId?.has(ack[1])) extra?.agentIdToToolUseId?.set(ack[1], tuid);
       const stopped = extra?.stopRequests?.get(tuid);
       if (stopped && b.is_error !== true) {
         extra?.killedAgentIds?.add(stopped);

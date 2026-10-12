@@ -560,6 +560,25 @@ check('claudeSubagentStatus never probes a child whose lifetime is over', probeC
   check('a queued notification cannot end a foreground agent, even under its own agent id', !notified.has('toolu_fgq') && !background.has('toolu_fgq'), JSON.stringify([...notified]));
 }
 
+{
+  // An agent id belongs to the launch that minted it. A later tool result that merely quotes the id —
+  // a grep over transcripts, a SendMessage reply — must not take it over, or the agent's own queued
+  // notification would no longer find its launch and the child would read Working for 30 minutes.
+  const background = new Set<string>();
+  const notified = new Set<string>();
+  const extra = { killedAgentIds: new Set<string>(), agentIdToToolUseId: new Map<string, string>(), stopRequests: new Map<string, string>() };
+  for (const ln of [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_own', name: 'Agent', input: { description: 'Own', run_in_background: true } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_own', content: 'Async agent launched successfully. agentId: ownagent (internal ID).' }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_grep', name: 'Bash', input: { command: 'grep agentId *.jsonl' } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_grep', content: 'x.jsonl: agentId: ownagent (internal ID).' }] } },
+    { type: 'queue-operation', operation: 'enqueue', content: queuedNotification('ownagent', 'toolu_own') },
+  ]) collectParentActivity(ln, new Set(), background, notified, new Map(), extra);
+  check('a later tool result quoting an agent id does not take it from its launch',
+    extra.agentIdToToolUseId.get('ownagent') === 'toolu_own' && notified.has('toolu_own'),
+    JSON.stringify({ map: [...extra.agentIdToToolUseId], notified: [...notified] }));
+}
+
 // ── 7. background agents outlive their parent's turn ────────────────────────────────────────────
 // The parent ended its turn after launching them; its own row says so. The work shows on the children.
 const bgParentRow = byId.get(enc(transcriptOf(bgParentUuid)));
