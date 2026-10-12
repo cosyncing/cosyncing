@@ -32,6 +32,7 @@ import {
   RELEASE_MANIFEST_SCHEMA_VERSION,
   UPGRADE_JOURNAL_SCHEMA_VERSION,
   verifySignedManifest,
+  releaseManifestSigningPayload,
   verifyUpgradeCandidate,
   verifyReleasePairing,
 } from '../../../../packages/typescript/broker/src/updates/release-upgrade.ts';
@@ -68,6 +69,7 @@ import { PRODUCT_IDENTITY } from '../../../../packages/typescript/protocol/src/p
 import { forbiddenArtifactContent } from '../../release/package-evidence.ts';
 
 import { javaScriptReleaseRegressions } from './javascript-release-regressions.ts';
+import { legacyVerifySignedManifest } from '../../../../packages/typescript/broker/test/helpers/legacy-064-release-manifest.ts';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
 import { installerOnboardingRegressions } from './installer-onboarding-regressions.ts';
@@ -944,6 +946,48 @@ try {
   const clientRowText = (rows: ReturnType<typeof parseRenderedClientTable>): string =>
     rows.map((row) => `${row.host} ${row.name} ${row.sha256} ${row.size}`).sort().join('\n');
   const expectedClientRows = clientRowText(expectedClients);
+  check('PR6B signed desktop rows match the exact installer table and release URLs outside broker artifacts',
+    Object.keys(assembled.manifest.desktopClients ?? {}).sort().join(',') === Object.keys(CLIENT_HOSTS).sort().join(',')
+      && expectedClients.every((client) => {
+        const row = assembled.manifest.desktopClients?.[client.host];
+        return row?.name === client.name && row.version === version && row.size === client.size
+          && row.sha256 === client.sha256 && row.url === `https://releases.example/cosyncing/v${version}/${client.name}`;
+      }) && assembled.manifest.artifacts.length === 0);
+  let legacyAccepted = false;
+  try { legacyAccepted = legacyVerifySignedManifest(assembled.manifest, { 'test-2026': publicPem }).version === version; } catch { /* assertion below */ }
+  check('PR6B frozen 0.6.4-shaped parser accepts the new signed desktop table', legacyAccepted);
+  const tableTampered = structuredClone(assembled.manifest);
+  const tamperedDesktopRow = tableTampered.desktopClients!['linux-x64']!;
+  tamperedDesktopRow.sha256 = (tamperedDesktopRow.sha256.startsWith('a') ? 'b' : 'a') + tamperedDesktopRow.sha256.slice(1);
+  let tamperRejected = false; let legacyTamperRejected = false;
+  try { verifySignedManifest(tableTampered, { 'test-2026': publicPem }); }
+  catch (error) { tamperRejected = (error as Error).message === 'release-manifest-signature-invalid'; }
+  try { legacyVerifySignedManifest(tableTampered, { 'test-2026': publicPem }); }
+  catch (error) { legacyTamperRejected = (error as Error).message === 'release-manifest-signature-invalid'; }
+  check('PR6B table-only tampering is rejected by current and frozen legacy signatures', tamperRejected && legacyTamperRejected);
+  for (const [label, change] of [
+    ['version', { version: '99.0.0' }], ['asset name', { name: 'another-client.tar.gz' }],
+    ['size', { size: 0 }], ['digest', { sha256: 'not-a-digest' }], ['URL', { url: 'http://releases.example/client' }],
+  ] as const) {
+    const { signature, ...unsigned } = structuredClone(assembled.manifest);
+    Object.assign(unsigned.desktopClients!['linux-x64']!, change);
+    const value = { ...unsigned, signature: { ...signature,
+      value: sign(null, releaseManifestSigningPayload(unsigned), privateKey).toString('base64') } };
+    let rejected = false;
+    try { verifySignedManifest(value, { 'test-2026': publicPem }); }
+    catch (error) { rejected = (error as Error).message === 'release-manifest-invalid'; }
+    check(`PR6B signed desktop row rejects invalid ${label}`, rejected);
+  }
+  {
+    const { signature, ...unsigned } = structuredClone(assembled.manifest);
+    Object.assign(unsigned.desktopClients!, { 'unsupported-host': unsigned.desktopClients!['linux-x64'] });
+    const value = { ...unsigned, signature: { ...signature,
+      value: sign(null, releaseManifestSigningPayload(unsigned), privateKey).toString('base64') } };
+    let rejected = false;
+    try { verifySignedManifest(value, { 'test-2026': publicPem }); }
+    catch (error) { rejected = (error as Error).message === 'release-manifest-invalid'; }
+    check('PR6B signed desktop table rejects unknown host keys', rejected);
+  }
   check('every installer carries the same client table, with the digests the clients actually have',
     Object.values(installers)
       .every((script) => clientRowText(parseRenderedClientTable(script)) === expectedClientRows)
@@ -955,7 +999,7 @@ try {
     expectedClients.every((client) =>
       signedChecksums.includes(`${client.sha256}  ${client.name}\n`))
       && signedChecksums.includes(`${expectedAndroid.sha256}  ${expectedAndroid.name}\n`)
-      // Desktop clients stay out of the manifest; Android has its own typed field and is never a broker
+      // Desktop clients stay out of broker artifacts; Android has its own typed field and is never a broker
       // artifact target.
       && !assembled.manifest.artifacts.some((item) => item.name.includes('client')));
   // A release assembled with a client missing for one host must fail rather than publish an all-in-one
@@ -1205,6 +1249,20 @@ try {
       && readFileSync(desktopEntry, 'utf8').includes(`Exec=${join(installedClient, 'cosyncing')}\n`)
       && allInOne.stdout.includes(`Desktop client: ${installedClient}`),
     `${allInOne.exitCode}: ${allInOne.stdout.trim().split('\n').slice(-4).join(' | ')} ${allInOne.stderr.trim().slice(0, 200)}`);
+  const clientReceiptPath = join(allInOneHome, '.cosyncing', 'client-receipt');
+  const clientReceipt = existsSync(clientReceiptPath) ? readFileSync(clientReceiptPath, 'utf8') : '';
+  check('PR6B shell installer records actual client path, version, archive and executable digests owner-only',
+    clientReceipt.includes(`path=${installedClient}\n`) && clientReceipt.includes(`version=${version}\n`)
+      && clientReceipt.includes(`sha256=${assembled.manifest.desktopClients!['linux-x64']!.sha256}\n`)
+      && clientReceipt.includes(`executableSha256=${sha256(readFileSync(join(installedClient, 'cosyncing')))}\n`)
+      && (lstatSync(clientReceiptPath).mode & 0o077) === 0);
+  check('PR6B PowerShell template records actual placed client and protects receipt and executable tree',
+    powerShellInstaller.includes("$clientReceipt = Join-Path $stateHome 'client-receipt'")
+      && powerShellInstaller.includes('path=$CLIENT_ROOT') && powerShellInstaller.includes('version=$VERSION')
+      && powerShellInstaller.includes('sha256=$($clientPin.Sha256)')
+      && powerShellInstaller.includes('executableSha256=$(Get-Sha256 -Path $clientLaunch)')
+      && powerShellInstaller.includes('Set-ClientTreeOwnerOnly -Path $CLIENT_ROOT')
+      && powerShellInstaller.includes("Set-OwnerOnlySecurity -Path $StagedClientReceipt -Kind 'file'"));
 
   // The desktop menu and LaunchServices both start the client with their own environment, not the one the
   // installer ran in. A relocated home therefore has to travel in the launcher, or the client reads

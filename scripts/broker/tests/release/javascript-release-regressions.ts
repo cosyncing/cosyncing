@@ -30,7 +30,13 @@ export function javaScriptReleaseRegressions(options: ReleaseAssemblyOptions): v
   assert.equal(verifySignedManifest(manifest, trusted).jsApp?.target, 'universal');
   assert.throws(() => verifyReleaseManifest({ value: manifest, target: 'linux-x64', trustedKeys: trusted }), /release-target-unavailable/);
   assert.throws(() => verifySignedManifest(manifest, {}), /release-signing-key-untrusted/);
-  assert.throws(() => verifySignedManifest({ ...manifest, version: '99.0.0' }, trusted), /release-manifest-signature-invalid/);
+  const unsignedVersionChange = structuredClone(manifest);
+  unsignedVersionChange.version = '99.0.0';
+  for (const row of Object.values(unsignedVersionChange.desktopClients ?? {})) {
+    row.name = row.name.replace(`-${manifest.version}-`, `-${unsignedVersionChange.version}-`);
+    row.version = unsignedVersionChange.version;
+  }
+  assert.throws(() => verifySignedManifest(unsignedVersionChange, trusted), /release-manifest-signature-invalid/);
   for (const key of ['jsApp', 'webApp', 'contract'] as const) {
     const incomplete = structuredClone(manifest);
     delete incomplete[key];

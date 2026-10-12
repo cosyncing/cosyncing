@@ -39,6 +39,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Resizing a portrait Status or Files view keeps that view open instead of
   replacing it with a previously opened file.
 
+- `cosy update` updates the desktop client recorded by the signed installer, asks you to quit it first, and preserves the previous client if replacement fails. It recognizes eligible older clients at the installer's exact destination and can update the client even when the broker is current. Missing or invalid client ownership skips the client while the broker updates. On Windows and macOS, a client installed by 0.6.4 or earlier needs the new all-in-one installer once.
+
 - A terminal can join a Codex session the app is running without interrupting it.
   Restarting Codex marks unfinished app turns interrupted and reconnects on the
   next prompt. `cosy doctor` explains missing reviewer overrides for non-OpenAI

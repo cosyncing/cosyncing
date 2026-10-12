@@ -91,6 +91,8 @@ it continues:
    `~/.local/share/applications` entry on Linux, `~/Applications/Cosyncing.app` on macOS, and
    `%LOCALAPPDATA%\cosyncing\client` on Windows. The client is verified against the signed checksum list
    and a digest baked into the installer, exactly as the broker's own artifacts are.
+   The installer records the placed path, version and archive digest in an owner-only
+   `client-receipt`, so future updates can identify this installation.
 2. **Runs `setup`.** With input read from the terminal rather than from the `curl | sh` pipe, so the
    plan-and-confirm prompt still asks and you still answer it. It never passes `--yes` or
    `--accept-managed-runtime-ownership` for you. With no terminal attached — CI, a container, a remote
@@ -121,6 +123,41 @@ it continues:
 Two hosts get no client and are told so, and the install still succeeds as a server install: Linux
 arm64, for which no client is built, and a Linux machine with neither `DISPLAY` nor `WAYLAND_DISPLAY`
 set, where a GUI is a package nothing can start.
+
+### Updating the installer-owned desktop client
+
+`cosy update` updates the desktop client recorded by the all-in-one installer.
+Quit that client first, including its notification-area icon if its window is
+closed. A running recorded client stops the update before installation files
+change. The updater verifies the signed desktop archive, then replaces the
+client after the broker switch and health check. If replacement fails, it
+preserves or restores the previous client and keeps the healthy broker updated;
+the summary reports the separate desktop result. Open the client again after
+a successful update to connect.
+
+A missing client, invalid ownership record or unknown running state skips the
+client while the broker update proceeds. The summary explains the reason and
+remedy. For an unknown running state, close the client and run `cosy update`
+again. Ownership problems require the signed all-in-one installer.
+
+If the broker is already current but its recorded client is older, the command
+updates only the client. An updater running older broker code cannot perform
+this step; after upgrading to a broker that supports it, a second `cosy update`
+can reconcile a recorded older client.
+
+Installers predating `client-receipt` did not record the desktop installation.
+The updater can recognize an older client only at `$COSYNCING_HOME/client`,
+`%LOCALAPPDATA%\cosyncing\client` or `~/Applications/Cosyncing.app`: it must be
+owned by you, have no links in the destination path, contain its executable,
+and have readable Flutter `version.json` identifying `cosyncing_client` and an
+older version. A Mac bundle must also identify `com.cosyncing.client`. The new
+receipt is written only after a verified replacement succeeds; newer clients
+are never downgraded.
+
+The public 0.6.4 Linux archive has this version metadata. The 0.6.4 Windows and
+Mac archives do not, so run the new signed all-in-one installer once with those
+clients closed to register them. Unrecognized clients and applications outside
+the exact destinations, including a macOS app in `/Applications`, stay unchanged.
 
 ### If the Linux desktop client opens without authentication
 

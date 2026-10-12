@@ -13,6 +13,12 @@ import type { BuildInfo } from '../runtime/build-info.ts';
 import { bunVersionAtLeast, type DistributionKind } from '../runtime/application-identity.ts';
 import { resolveFlutterWebRoot } from '../runtime/runtime-assets.ts';
 import type { BrokerConfig } from '../runtime/configuration.ts';
+import { validDesktopClients, type ReleaseDesktopClients, type DesktopClientOutcome } from './desktop-client-types.ts';
+import {
+  assertDesktopClientStopped, assertDesktopClientUnchanged, inspectDesktopClient,
+  DesktopClientRunningError, skippedDesktopClient,
+  reconcileDesktopClient, type DesktopClientContext, type PreparedDesktopClient,
+} from './desktop-client.ts';
 import { inspectBrokerConfig } from '../runtime/configuration.ts';
 import { brokerTokenPath, inspectBrokerToken, readBrokerToken } from '../security/credentials.ts';
 import { authorizationMigrationRollbackFenceActive } from '../runtime/broker-instance.ts';
@@ -165,6 +171,8 @@ export interface ReleaseManifest {
   jsApp?: ReleaseJavaScriptApp;
   /** Signed Android update metadata. Omitted by releases predating in-app Android updates. */
   androidApp?: ReleaseAndroidApp;
+  /** Optional installer-owned desktop archives, covered by the full manifest signature. */
+  desktopClients?: ReleaseDesktopClients;
   signature: {
     algorithm: 'ed25519';
     keyId: string;
@@ -235,6 +243,8 @@ export interface UpgradeCommandResult {
    * Includes stated skips when the mod was declined, disabled, unavailable or unsafe.
    */
   claudeMod?: { status: 'installed' | 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string };
+  /** Independent desktop reconciliation, after the broker is committed and healthy. CLI only. */
+  desktopClient?: { status: DesktopClientOutcome['status']; detailCode: string };
 }
 
 interface UpgradeJournal {
@@ -301,6 +311,8 @@ export interface UpgradeDependencies {
   ) => Promise<UpgradeBinaryResult>;
   /** The environment the refresh child's allowlist is taken from. Defaults to this process's own. */
   env?: Readonly<Record<string, string | undefined>>;
+  /** Native process/filesystem seams for installer-owned desktop acceptance. */
+  desktop?: Pick<DesktopClientContext, 'isRunning' | 'rename' | 'writeReceipt' | 'remove'>;
   service?: UpgradeServiceController;
   verifyBrokerVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
   verifyWebVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
@@ -439,6 +451,7 @@ function parseManifest(value: unknown): ReleaseManifest {
       || (value.webApp !== undefined && !validReleaseWebSidecar(value.webApp))
       || (value.jsApp !== undefined && !validReleaseJavaScriptApp(value.jsApp))
       || (value.androidApp !== undefined && !validReleaseAndroidApp(value.androidApp))
+      || (value.desktopClients !== undefined && !validDesktopClients(value.desktopClients, value.version as string))
       || !plainObject(value.signature)
       || value.signature.algorithm !== 'ed25519'
       || typeof value.signature.keyId !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(value.signature.keyId)
@@ -1305,6 +1318,7 @@ function result(
   recoveredInterruptedUpgrade: boolean,
   toVersion?: string,
   claudeMod?: UpgradeCommandResult['claudeMod'],
+  desktopClient?: DesktopClientOutcome,
 ): UpgradeCommandResult {
   return {
     schemaVersion: 1,
@@ -1316,6 +1330,7 @@ function result(
     recoveredInterruptedUpgrade,
     ...(toVersion ? { toVersion } : {}),
     ...(claudeMod ? { claudeMod: { status: claudeMod.status, detailCode: claudeMod.detailCode } } : {}),
+    ...(desktopClient ? { desktopClient: { status: desktopClient.status, detailCode: desktopClient.detailCode } } : {}),
   };
 }
 
@@ -1455,6 +1470,21 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     return result('blocked', 1, error instanceof Error ? error.message : 'installed-binary-invalid', 'The installed binary receipt is missing or unsafe.', fromVersion, false);
   }
 
+  const desktopContext: DesktopClientContext = { home: dependencies.home,
+    ...(dependencies.env ? { env: dependencies.env } : {}), ...dependencies.desktop };
+  let desktop: PreparedDesktopClient | undefined;
+  let desktopProblem: DesktopClientOutcome | undefined;
+  try {
+    desktop = inspectDesktopClient(desktopContext);
+    assertDesktopClientStopped(desktop, desktopContext);
+  } catch (error) {
+    if (error instanceof DesktopClientRunningError) {
+      return result('blocked', 1, error.detailCode, error.message, fromVersion, false);
+    }
+    desktopProblem = skippedDesktopClient(error);
+    desktop = undefined;
+  }
+
   const acquire = dependencies.acquireLock ?? ((options) => acquireInstallationLock(options));
   let lock: InstallationLockHandle;
   try { lock = acquire({ command: 'upgrade', home: dependencies.home }); }
@@ -1463,6 +1493,14 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
   }
   let recovered = false;
   try {
+    try { if (!desktopProblem) assertDesktopClientUnchanged(desktop, desktopContext); }
+    catch (error) {
+      if (error instanceof DesktopClientRunningError) {
+        return result('blocked', 1, error.detailCode, error.message, fromVersion, false);
+      }
+      desktopProblem = skippedDesktopClient(error);
+      desktop = undefined;
+    }
     try {
       recovered = await recoverUpgrade({ home: dependencies.home, targetPath, service: dependencies.service });
     } catch (error) {
@@ -1534,7 +1572,13 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       catch { throw new Error('release-manifest-malformed'); }
       candidate = verifyUpgradeCandidate({ value: manifestValue, buildInfo: dependencies.buildInfo, trustedKeys });
       if (compareVersions(candidate.manifest.version, fromVersion) === 0) {
-        return result('already-current', 0, 'release-already-current', `cosyncing ${fromVersion} is already current.`, fromVersion, recovered, fromVersion);
+        const client = desktopProblem ?? await reconcileDesktopClient({ prepared: desktop, context: desktopContext,
+          ...(desktop ? { row: candidate.manifest.desktopClients?.[desktop.receipt.host] } : {}),
+          download: (url, maximum) => boundedDownload(dependencies.fetch ?? fetch, url, maximum), compareVersions });
+        return result(client.status === 'updated' ? 'complete' : 'already-current', 0,
+          client.status === 'updated' ? 'desktop-client-only-updated' : 'release-already-current',
+          `cosyncing ${fromVersion} is already current.${client.clause}`, fromVersion, recovered, fromVersion,
+          undefined, client);
       }
       if (compareVersions(candidate.manifest.version, fromVersion) < 0) throw new Error('release-downgrade-refused');
       // The interpreter floor is checked BEFORE the download, and against the version the running runtime
@@ -1746,6 +1790,9 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           await dependencies.service.versions.finalize(serviceVersion);
         } catch { /* leave it for repair */ }
       }
+      const clientOutcome = desktopProblem ?? await reconcileDesktopClient({ prepared: desktop, context: desktopContext,
+        ...(desktop ? { row: candidate.manifest.desktopClients?.[desktop.receipt.host] } : {}),
+        download: (url, maximum) => boundedDownload(dependencies.fetch ?? fetch, url, maximum), compareVersions });
       // The upgrade is committed and healthy: journal gone, receipts written, candidate answering on its
       // own port. Release the installation lock BEFORE delegating the mod refresh so the child can take
       // its own -- one lock, one owner at a time -- and a refused refresh stays a note on a complete
@@ -1766,11 +1813,12 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         'complete',
         0,
         'upgrade-complete',
-        `Upgraded cosyncing from ${fromVersion} to ${toVersion}.${modOutcome.clause}`,
+        `Upgraded cosyncing from ${fromVersion} to ${toVersion}.${clientOutcome.clause}${modOutcome.clause}`,
         fromVersion,
         recovered,
         toVersion,
         modOutcome,
+        clientOutcome,
       );
     } catch (error) {
       if (!authorizationFenceWasActive
@@ -1858,6 +1906,7 @@ export function releaseManifestForTests(options: {
   contract?: ReleaseContractIdentity;
   webApp?: ReleaseWebSidecar;
   jsApp?: ReleaseJavaScriptApp;
+  desktopClients?: ReleaseDesktopClients;
 }): ReleaseManifest {
   const unsigned: Omit<ReleaseManifest, 'signature'> = {
     schemaVersion: RELEASE_MANIFEST_SCHEMA_VERSION,
@@ -1870,6 +1919,7 @@ export function releaseManifestForTests(options: {
     ...(options.contract ? { contract: options.contract } : {}),
     ...(options.webApp ? { webApp: options.webApp } : {}),
     ...(options.jsApp ? { jsApp: options.jsApp } : {}),
+    ...(options.desktopClients ? { desktopClients: options.desktopClients } : {}),
   };
   return {
     ...unsigned,

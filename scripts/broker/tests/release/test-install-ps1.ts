@@ -47,7 +47,9 @@ import {
   enforceOwnerOnlyFile,
   ensureOwnerOnlyDirectory,
   inspectOwnerOnlyDirectory,
+  inspectOwnerOnlyFile,
 } from '../../../../packages/typescript/broker/src/security/secure-files.ts';
+import { inspectDesktopClient } from '../../../../packages/typescript/broker/src/updates/desktop-client.ts';
 import { windowsPowerShellChildEnvironment } from '../../../../packages/typescript/adapter-api/src/host-process.ts';
 import {
   BROKER_CONTRACT,
@@ -1162,6 +1164,15 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
     check('the desktop client directory passes the product\'s own owner-only inspection',
       inspectOwnerOnlyDirectory(clientRoot).status === 'ok',
       `${inspectOwnerOnlyDirectory(clientRoot).status}/${inspectOwnerOnlyDirectory(clientRoot).problem ?? ''}`);
+    const clientReceipt = join(allInOne.home, 'client-receipt');
+    let recordedClient;
+    try { recordedClient = inspectDesktopClient({ home: allInOne.home,
+      env: { LOCALAPPDATA: allInOne.localAppData } }); } catch { /* assertion below */ }
+    check('PR6B native PowerShell client receipt binds the actual placed path, version and digests with protected tree DACLs',
+      inspectOwnerOnlyFile(clientReceipt).status === 'ok'
+        && recordedClient?.receipt.path === clientRoot && recordedClient.receipt.version === VERSION
+        && recordedClient.receipt.sha256 === windowsClient?.sha256
+        && recordedClient.receipt.executableSha256 === sha256(readFileSync(join(clientRoot, 'cosyncing.exe'))));
     check('the Start Menu shortcut stays inside the fixture roaming profile',
       existsSync(join(root, 'roaming-appdata', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'cosyncing.lnk'))
         && allInOne.stdout.includes(join(root, 'roaming-appdata')));
@@ -1171,6 +1182,21 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
         && allInOne.stdout.includes(`'${join(allInOne.home, 'bin', 'cosyncing')}' setup`)
         && !existsSync(join(allInOne.home, 'client-pairing.json')),
       allInOne.stdout.trim().split('\n').slice(-3).join(' | '));
+
+    // Native ReplaceFile retains the destination DACL, including an inherited drifted one.
+    const inheritedRecordScript = join(root, 'inherited-client-receipt.ps1');
+    writeFileSync(inheritedRecordScript, `param([string]$TaskRecord)
+$ErrorActionPreference = 'Stop'
+$TaskAcl = New-Object Security.AccessControl.FileSecurity
+$TaskAcl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
+$TaskAcl.SetAccessRuleProtection($false, $false)
+[IO.File]::SetAccessControl($TaskRecord, $TaskAcl)
+`);
+    const driftedRecord = await runPowerShell({ script: inheritedRecordScript,
+      arguments: [clientReceipt], stage: 'PR6B inherited client receipt fixture' });
+    check('PR6B native PowerShell receipt drift fixture is inherited but owned',
+      driftedRecord.exitCode === 0
+        && inspectOwnerOnlyFile(clientReceipt).daclProblem === 'inherited-access');
 
     // A second run over an existing client must retire and replace it, leaving no staging directory.
     const again = await install({
@@ -1186,6 +1212,13 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
         && existsSync(join(clientRoot, 'cosyncing.exe'))
         && readdirSync(join(again.localAppData, 'cosyncing')).join(',') === 'client',
       `${again.exitCode}: ${readdirSync(join(again.localAppData, 'cosyncing')).join(',')} ${again.stderr.trim().slice(0, 200)}`);
+
+    let repairedClient;
+    try { repairedClient = inspectDesktopClient({ home: allInOne.home,
+      env: { LOCALAPPDATA: allInOne.localAppData } }); } catch { /* assertion below */ }
+    check('PR6B native PowerShell rerun repairs inherited receipt DACL before atomic replacement',
+      again.exitCode === 0 && inspectOwnerOnlyFile(clientReceipt).status === 'ok'
+        && repairedClient?.receipt.path === clientRoot && repairedClient.receipt.version === VERSION);
 
     // The server installer is the broker half and nothing else.
     const serverOnly = await install({
