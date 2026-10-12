@@ -460,8 +460,9 @@ Write-Output $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Admini
   });
   const HOST_IS_ELEVATED = /^\s*True\s*$/i.test(elevationProbe.stdout);
   const pristineInstaller = readFileSync(join(releaseDirectory, SERVER_INSTALLER), 'utf8');
+  const pristineAllInOneInstaller = readFileSync(join(releaseDirectory, ALL_IN_ONE_INSTALLER), 'utf8');
   function normalizeElevatedClientFixture(installer: string): void {
-    const source = readFileSync(installer, 'utf8');
+    const source = readFileSync(installer, 'utf8').replace(/\r\n/g, '\n');
     const declaration = 'function Set-ClientTreeOwnerOnly {';
     const call = "      $shortcutPath = ''\n    }";
     if (source.split(declaration).length !== 2 || source.split(call).length !== 2) {
@@ -493,6 +494,18 @@ Write-Output $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Admini
 `;
     writeFileSync(installer, source.replace(declaration, normalize + declaration)
       .replace(call, call + '\n    Set-FixtureCreatedClientOwner -Path $CLIENT_ROOT'));
+  }
+  {
+    const installer = join(root, 'client-owner-fixture-crlf.ps1');
+    writeFileSync(installer, pristineAllInOneInstaller.replace(/\r?\n/g, '\r\n'));
+    let normalized = false; let detail = '';
+    try {
+      normalizeElevatedClientFixture(installer);
+      const rendered = readFileSync(installer, 'utf8');
+      normalized = rendered.includes('    Set-FixtureCreatedClientOwner -Path $CLIENT_ROOT')
+        && !rendered.includes('\r\n');
+    } catch (error) { detail = (error as Error).message; }
+    check('PR6B native client owner fixture accepts CRLF rendered installers', normalized, detail);
   }
   if (HOST_IS_ELEVATED) {
     for (const name of [SERVER_INSTALLER, ALL_IN_ONE_INSTALLER]) {
