@@ -6571,6 +6571,7 @@ export function collectParentActivity(
       }
     }
   }
+  collectQueuedAgentNotification(ln, background, notified, extra?.agentIdToToolUseId);
   if (ln?.type !== 'user') return;
   // A background COMMAND's ack. `toolUseResult.backgroundTaskId` is structured, unlike the prose
   // beside it that names the output file, so it is what the path is bound to. Stream-json uses
@@ -6652,6 +6653,34 @@ export function collectParentActivity(
   let m: RegExpExecArray | null;
   const text = claudeUserLineText(ln);
   while ((m = re.exec(text))) if (m[1]) notified.add(m[1]);
+}
+
+/**
+ * A background AGENT's completion that reached the transcript only on a `queue-operation` or
+ * `attachment` carrier — the CLI queues the notification when it lands while the parent is busy, and
+ * 152 of 449 background-agent completions in the 400 newest transcripts on one real workstation
+ * arrived no other way. Reading the `user` carrier alone left those agents pending: the child row read
+ * Working until its freshness bound ran out, and a takeover stayed refused for the whole pending
+ * window after the agent had finished.
+ *
+ * A `queue-operation` record has no provenance field (see {@link claudeTaskNotificationPayload}), so a
+ * pasted prompt carrying the tag looks the same. What it may do is bounded the way the command lane
+ * bounds it: it can only end a launch this parent recorded as BACKGROUND, and its `<task-id>` must be
+ * the agent id that launch's own ack named — which all 152 real ones were.
+ */
+function collectQueuedAgentNotification(
+  ln: any,
+  background: Set<string>,
+  notified: Set<string>,
+  agentIdToToolUseId: Map<string, string> | undefined,
+): void {
+  if (ln?.type !== 'queue-operation' && ln?.type !== 'attachment') return;
+  const payload = claudeTaskNotificationPayload(ln);
+  if (!payload) return;
+  const n = parseTaskNotification(payload);
+  if (!n.toolUseId || !n.taskId || !background.has(n.toolUseId)) return;
+  if (agentIdToToolUseId?.get(n.taskId) !== n.toolUseId) return;
+  notified.add(n.toolUseId);
 }
 
 function safeReaddir(dir: string): string[] {

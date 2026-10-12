@@ -718,6 +718,14 @@ const lines = [
     const staleIso = (offsetMs: number) => new Date(now - 40 * 60_000 + offsetMs).toISOString();
     writeFileSync(staleSpawn, spawnLines.map((line) => JSON.stringify({ ...line, timestamp: staleIso(0) })).join('\n') + '\n');
     check('a 40-minute-old unnotified spawn with no live child no longer holds a takeover off', !claudeBackgroundAgentsOut(staleSpawn, now));
+    // A notification that landed while the parent was busy reaches the transcript only QUEUED.
+    const queued = (taskId: string) => `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>toolu_flagless</tool-use-id>\n<status>completed</status>\n</task-notification>`;
+    const queuedOnly = join(dir, 'queued-only.jsonl');
+    writeFileSync(queuedOnly, [...spawnLines, { type: 'queue-operation', operation: 'enqueue', timestamp: iso(-60_000), content: queued('agt1') }].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    check('a launch whose notification was only queued no longer holds a takeover off', !claudeBackgroundAgentsOut(queuedOnly, now));
+    const forged = join(dir, 'queued-forged.jsonl');
+    writeFileSync(forged, [...spawnLines, { type: 'queue-operation', operation: 'enqueue', timestamp: iso(-60_000), content: queued('someone-else') }].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    check('  but one under a task id the launch\'s ack never named does not end it', claudeBackgroundAgentsOut(forged, now));
     const staleCont = join(dir, 'stale-continuation.jsonl');
     writeFileSync(staleCont, [...spawnLines, { type: 'user', uuid: 'bgn2', timestamp: staleIso(1000), origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<tool-use-id>toolu_flagless</tool-use-id>\n<status>completed</status>\n</task-notification>' } }].map((line) => JSON.stringify({ ...line, timestamp: staleIso(0) })).join('\n') + '\n');
     check('a 40-minute-old unterminated continuation has expired', await claudeSessionStatus(staleCont, undefined, now) === 'idle');

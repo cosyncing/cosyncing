@@ -185,6 +185,8 @@ const bgParentUuid = 'ffffffff-1111-4222-8333-ffffffffffff';
 const bgLines: unknown[] = [
   { type: 'user', uuid: 'bgp-u1', timestamp: '2026-08-20T10:00:00.000Z', cwd, message: { content: 'Review and benchmark in the background' } },
 ];
+const queuedNotification = (taskId: string, toolUseId: string): string =>
+  `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>completed</status>\n<summary>Agent finished</summary>\n</task-notification>`;
 const bgSpawn = (id: string, input: Record<string, unknown>, ack: string, n: number): void => {
   bgLines.push(
     { type: 'assistant', uuid: `bgp-a${n}`, timestamp: '2026-08-20T10:00:10.000Z', message: { model: 'claude-haiku-4-5-20251001', stop_reason: 'tool_use', content: [{ type: 'tool_use', id, name: 'Agent', input }] } },
@@ -201,10 +203,19 @@ bgSpawn('toolu_bg_notified', { description: 'Reported back' }, 'Async agent laun
 bgSpawn('toolu_bg_stopped', { description: 'Stopped by the parent' }, 'Async agent launched successfully. agentId: bgstopped (internal ID).', 5);
 // A FOREGROUND agent: answered in the parent's turn, so it lives inside that turn.
 bgSpawn('toolu_fg', { description: 'Foreground helper' }, 'The helper finished: all good.', 6);
+// Finished while the parent was busy: the CLI QUEUED its notification, so it reaches the transcript
+// only as `queue-operation` enqueue/remove plus an `attachment` — never as a `user` line.
+bgSpawn('toolu_bg_queued', { description: 'Queued report' }, 'Async agent launched successfully. agentId: bgqueued (internal ID).', 7);
 bgLines.push(
   { type: 'assistant', uuid: 'bgp-stop', timestamp: '2026-08-20T10:00:20.000Z', message: { model: 'claude-haiku-4-5-20251001', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_taskstop', name: 'TaskStop', input: { task_id: 'bgstopped' } }] } },
   { type: 'user', uuid: 'bgp-stopr', timestamp: '2026-08-20T10:00:21.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_taskstop', content: 'Stopped.' }] } },
   { type: 'user', uuid: 'bgp-n1', timestamp: '2026-08-20T10:00:30.000Z', origin: { kind: 'task-notification' }, message: { content: '<task-notification>\n<tool-use-id>toolu_bg_notified</tool-use-id>\n<status>completed</status>\n</task-notification>' } },
+  { type: 'queue-operation', operation: 'enqueue', timestamp: '2026-08-20T10:00:31.000Z', content: queuedNotification('bgqueued', 'toolu_bg_queued') },
+  { type: 'attachment', timestamp: '2026-08-20T10:00:31.000Z', attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: queuedNotification('bgqueued', 'toolu_bg_queued') } },
+  { type: 'queue-operation', operation: 'remove', timestamp: '2026-08-20T10:00:32.000Z', content: queuedNotification('bgqueued', 'toolu_bg_queued') },
+  // The same carrier has no provenance, so a pasted prompt can carry the tag. Naming a running agent
+  // is not enough to end it: the task id must be the one that agent's own ack recorded.
+  { type: 'queue-operation', operation: 'enqueue', timestamp: '2026-08-20T10:00:33.000Z', content: queuedNotification('not-bgquiet', 'toolu_bg_quiet') },
   { type: 'assistant', uuid: 'bgp-end', timestamp: '2026-08-20T10:00:40.000Z', message: { model: 'claude-haiku-4-5-20251001', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Launched them; I will report back.' }] } },
 );
 writeFileSync(transcriptOf(bgParentUuid), bgLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
@@ -214,6 +225,7 @@ const bgSettledPath = writeSubagent(subDirOf(bgParentUuid), 'agent-bg-settled', 
 const bgNotifiedPath = writeSubagent(subDirOf(bgParentUuid), 'agent-bg-notified', { description: 'Reported back', toolUseId: 'toolu_bg_notified' }, 'reported');
 const bgStoppedPath = writeOpenToolSubagent(subDirOf(bgParentUuid), 'agent-bg-stopped', { description: 'Stopped by the parent', toolUseId: 'toolu_bg_stopped' });
 const fgPath = writeSubagent(subDirOf(bgParentUuid), 'agent-fg', { description: 'Foreground helper', toolUseId: 'toolu_fg' }, 'helped');
+const bgQueuedPath = writeSubagent(subDirOf(bgParentUuid), 'agent-bg-queued', { description: 'Queued report', toolUseId: 'toolu_bg_queued', requestShape: 'background' }, 'reported');
 // Launched where this parent's tail cannot see it (the launch scrolled out under a long continuation):
 // only the newer CLIs' meta `requestShape` says it is a background agent.
 const bgShapePath = writeSubagent(
@@ -239,7 +251,7 @@ utimesSync(quietWorkingKidPath, quiet, quiet);
 utimesSync(quietSettledKidPath, quiet, quiet);
 utimesSync(openStaleKidPath, abandoned, abandoned);
 utimesSync(coldKidPath, old, old);
-for (const p of [transcriptOf(bgParentUuid), bgStringPath, bgNotifiedPath, bgStoppedPath, fgPath, bgShapePath]) {
+for (const p of [transcriptOf(bgParentUuid), bgStringPath, bgNotifiedPath, bgStoppedPath, fgPath, bgShapePath, bgQueuedPath]) {
   utimesSync(p, new Date(now), new Date(now));
 }
 utimesSync(bgQuietPath, quiet, quiet);
@@ -270,6 +282,7 @@ const {
   ClaudeAdapter,
   drainClaudeLiveStatusProbes,
   claudeBackgroundAgentsOut,
+  collectParentActivity,
   CLAUDE_SUBAGENT_OWNED_REASON,
   CLAUDE_TERMINAL_BUSY_CONFLICT,
   claudeSessionNativeId,
@@ -533,6 +546,20 @@ check(
 claudeSubagentStatus('idle', { mtimeMs: now - 10 * 60_000, openTurn: countingProbe, background: 'ended' }, now);
 check('claudeSubagentStatus never probes a child whose lifetime is over', probeCalls === 0, `probes=${probeCalls}`);
 
+{
+  // A queued carrier may only end a BACKGROUND launch. A foreground agent's result can name its own
+  // agent id too, so the ack binding alone would let a pasted notification end it.
+  const background = new Set<string>();
+  const notified = new Set<string>();
+  const extra = { killedAgentIds: new Set<string>(), agentIdToToolUseId: new Map<string, string>(), stopRequests: new Map<string, string>() };
+  for (const ln of [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_fgq', name: 'Agent', input: { description: 'Foreground' } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_fgq', content: 'All good. agentId: fgq (use SendMessage to continue)' }] } },
+    { type: 'queue-operation', operation: 'enqueue', content: queuedNotification('fgq', 'toolu_fgq') },
+  ]) collectParentActivity(ln, new Set(), background, notified, new Map(), extra);
+  check('a queued notification cannot end a foreground agent, even under its own agent id', !notified.has('toolu_fgq') && !background.has('toolu_fgq'), JSON.stringify([...notified]));
+}
+
 // ── 7. background agents outlive their parent's turn ────────────────────────────────────────────
 // The parent ended its turn after launching them; its own row says so. The work shows on the children.
 const bgParentRow = byId.get(enc(transcriptOf(bgParentUuid)));
@@ -544,7 +571,7 @@ check(
 );
 check(
   '  every one of its agents is still a child of that row',
-  [bgStringPath, bgQuietPath, bgSettledPath, bgNotifiedPath, bgStoppedPath, fgPath, bgShapePath].every(
+  [bgStringPath, bgQuietPath, bgSettledPath, bgNotifiedPath, bgStoppedPath, fgPath, bgShapePath, bgQueuedPath].every(
     (path) => byId.get(enc(path))?.parentThreadId === bgParentRow?.nativeId,
   ),
 );
@@ -555,6 +582,8 @@ check('a background agent whose last record settled decays to idle', bgStatus(bg
 check('a background agent the parent was notified about is idle however fresh', bgStatus(bgNotifiedPath) === 'idle', `status=${bgStatus(bgNotifiedPath)}`);
 check('a background agent the parent stopped is idle however open', bgStatus(bgStoppedPath) === 'idle', `status=${bgStatus(bgStoppedPath)}`);
 check('a FOREGROUND agent does not outlive its parent\'s turn', bgStatus(fgPath) === 'idle', `status=${bgStatus(fgPath)}`);
+check('a background agent whose notification was only QUEUED is idle however fresh', bgStatus(bgQueuedPath) === 'idle', `status=${bgStatus(bgQueuedPath)}`);
+check('  while a queued notification that names a running agent under the wrong task id ends nothing', bgStatus(bgQuietPath) === 'working', `status=${bgStatus(bgQuietPath)}`);
 const bgQuietConn = await adapter.attach(enc(bgQuietPath), 'observe');
 check('attaching a working background agent agrees with its roster row', bgQuietConn.info.status === 'working', `status=${bgQuietConn.info.status}`);
 await bgQuietConn.close();
