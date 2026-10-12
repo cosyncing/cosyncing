@@ -109,8 +109,10 @@ export async function runDesktopClientChecks(check: Check): Promise<void> {
   const makeLegacy = (f: ReturnType<typeof fixture>, version = '0.6.4', appName = 'cosyncing_client'): string => {
     rmSync(f.receiptPath);
     const path = legacyDesktopVersionPath(f.path, host);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ ...legacyIdentityFixtures.linux.version, version, app_name: appName }));
+    // An elevated Windows token otherwise stamps Administrators on the raw metadata nodes.
+    // Model the user-owned prior install with the same explicit-owner creators as the installer.
+    ensureOwnerOnlyDirectory(dirname(path));
+    atomicWriteOwnerOnly(path, JSON.stringify({ ...legacyIdentityFixtures.linux.version, version, app_name: appName }));
     if (process.platform !== 'win32') {
       chmodSync(f.path, 0o775); chmodSync(f.executable, 0o755); chmodSync(path, 0o644);
     }
