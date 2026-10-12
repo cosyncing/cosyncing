@@ -418,6 +418,12 @@ if (existsSync(REAL)) {
   mkdirSync(tasksDir, { recursive: true });
   const outPath = join(tasksDir, 'btask01.output');
   writeFileSync(outPath, 'building…\nstep 1 ok\nstep 2 ok\n');
+  // The output's mtime is evidence of life, so it must sit on the fixture's clock (spawned 10:00,
+  // `cardFor` reads at 10:05), not the wall clock. Left at the real write time it was "recent" to
+  // every fixed instant before it, and the week-old check below began failing once the wall clock
+  // passed that week.
+  const outputWrittenSec = Date.parse('2026-09-20T10:04:30.000Z') / 1000;
+  utimesSync(outPath, outputWrittenSec, outputWrittenSec);
 
   const cmdDir = join(CMD_ROOT, 'sess');
   mkdirSync(cmdDir, { recursive: true });
