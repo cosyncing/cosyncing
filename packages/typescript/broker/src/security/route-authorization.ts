@@ -92,6 +92,7 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/sessions/{id}/{id}/artifact/{id}/ticket', methods: ['POST'], policy: OBSERVE_FILES },
   { route: '/api/sessions/{id}/{id}/fs', methods: ['GET'], policy: FILES },
   { route: '/api/sessions/{id}/{id}/fs/read', methods: ['GET'], policy: FILES },
+  { route: '/api/sessions/{id}/{id}/fs/search', methods: ['GET'], policy: FILES },
   { route: '/api/sessions/{id}/{id}/fs/download', methods: ['GET'], policy: FILES },
   { route: '/api/sessions/{id}/{id}/uploads', methods: ['POST'], policy: FILES },
   { route: '/api/sessions/{id}/{id}/uploads/{id}', methods: ['DELETE', 'GET', 'PATCH'], policy: FILES },

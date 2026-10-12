@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { chromium, type BrowserContext, type Page } from 'playwright-core';
+import { chromium, type BrowserContext, type Locator, type Page } from 'playwright-core';
 import {
   captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
@@ -137,9 +137,16 @@ async function waitForFlutter(page: Page): Promise<void> {
   await enableFlutterSemantics(page);
 }
 
+function transcriptDownload(page: Page): Locator {
+  // Wide layouts retain Chat beside Files, so both surfaces have a Download
+  // action. Keep the transcript regression scoped to its delivered-file card.
+  return page.getByRole('group', { name: /^report\.txt\s+Sent to you\b/ })
+    .getByRole('button', { name: 'Download', exact: true });
+}
+
 async function waitForArtifact(page: Page): Promise<void> {
   try {
-    await page.getByRole('button', { name: 'Download', exact: true }).waitFor({
+    await transcriptDownload(page).waitFor({
       timeout: 30_000,
     });
   } catch (error) {
@@ -411,6 +418,9 @@ try {
   await openView(page, 'Files');
   await page.waitForTimeout(1_000);
   assert(workspaceFailures > 0, 'Files view did not exercise its failing broker route');
+  await page.getByRole('group', { name: /^File artifacts \(1\)\s+report\.txt/ })
+    .getByRole('button', { name: 'Download', exact: true }).waitFor();
+  await waitForArtifact(page);
   await openView(page, 'Chat');
   await page.unroute('**/api/sessions/pi/*/fs*');
   await waitForArtifact(page);
@@ -435,7 +445,7 @@ try {
       },
     });
   });
-  await page.getByRole('button', { name: 'Download', exact: true }).click();
+  await transcriptDownload(page).click();
   await page.waitForTimeout(1_000);
   page.off('download', recordUnexpectedDownload);
   await page.unroute('**/api/sessions/pi/*/artifact/*');
@@ -457,10 +467,7 @@ try {
     }
     await route.continue();
   });
-  const downloadButton = page.getByRole('button', {
-    name: 'Download',
-    exact: true,
-  });
+  const downloadButton = transcriptDownload(page);
   await downloadButton.click();
   await page.waitForTimeout(1_000);
   assert.equal(rejectArtifactOnce, false, 'transient artifact route was not exercised');

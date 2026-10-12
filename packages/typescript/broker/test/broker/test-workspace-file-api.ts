@@ -19,6 +19,7 @@ import {
   toWorkspaceRelative,
   validateBrowsePath,
 } from '../../src/artifacts/fs-browse.ts';
+import { searchSessionFiles } from '../../src/artifacts/fs-search.ts';
 import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../../src/artifacts/fs-browse.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
 import {
@@ -115,6 +116,33 @@ async function startBrokerWithEnv(env: Record<string, string>): Promise<{ broker
 }
 
 const TOK = 'w3-workspace-route-token';
+
+await test('filename search finds suffixes, preserves ambiguity, and bounds work without following symlinks', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-file-search-'));
+  try {
+    for (const folder of ['transfer', 'other', 'node_modules', '.git']) {
+      mkdirSync(join(root, folder));
+      writeFileSync(join(root, folder, 'report.md'), 'report');
+    }
+    symlinkSync(join(root, 'transfer'), join(root, 'alias'));
+    symlinkSync(join(root, 'transfer', 'report.md'), join(root, 'report.md'));
+    const matches = await searchSessionFiles(root, 'report.md');
+    assert.deepEqual(matches.matches.map(file => file.path), ['other/report.md', 'transfer/report.md']);
+    assert.equal(matches.truncated, false);
+    assert.deepEqual((await searchSessionFiles(root, 'transfer/report.md')).matches.map(file => file.path), ['transfer/report.md']);
+    assert.equal((await searchSessionFiles(root, 'missing.md')).matches.length, 0);
+    const partial = await searchSessionFiles(root, 'report.md', { maxMatches: 1 });
+    assert.equal(partial.matches.length, 1);
+    assert.equal(partial.truncated, true);
+    assert.equal((await searchSessionFiles(root, 'report.md', { maxEntries: 1 })).truncated, true);
+    assert.equal((await searchSessionFiles(root, 'report.md', { maxDepth: 0 })).truncated, true);
+    for (const query of ['', '../report.md', '/etc/passwd', 'a/../report.md', 'bad\0name']) {
+      await assert.rejects(searchSessionFiles(root, query), (error: any) => error.code === 'BAD_PARAM');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 await test('helper primitives validate browse path safety', () => {
   const root = mkdtempSync(join(tmpdir(), 'cosyncing-w3-helper-'));
@@ -309,6 +337,15 @@ await test('w3 session workspace API is read-only, bounded, and safe', async () 
     const fileStat = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs?path=hello.txt`);
     assert.equal(fileStat.res.status, 200);
     assert.equal(fileStat.body.stat.type, 'file');
+
+    const search = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/search?query=note.txt`);
+    assert.equal(search.res.status, 200);
+    assert.deepEqual(search.body.matches.map((file: any) => file.path), ['nested/note.txt']);
+    assert.equal(search.body.truncated, false);
+    const rejectedSearch = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/search?query=../secret.txt`);
+    assert.equal(rejectedSearch.res.status, 400);
+    const unauthorizedSearch = await fetch(`${base}/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/search?query=note.txt`);
+    assert.equal(unauthorizedSearch.status, 401);
 
     const readText = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/read?path=hello.txt&maxBytes=5`);
     assert.equal(readText.res.status, 200);
@@ -534,7 +571,7 @@ await test('workspace file API is default-denied to authenticated HTTP clients u
   });
 
   try {
-    for (const route of ['/fs', '/fs/read?path=secret.env', '/fs/download?path=secret.env']) {
+    for (const route of ['/fs', '/fs/read?path=secret.env', '/fs/search?query=secret.env', '/fs/download?path=secret.env']) {
       const denied = await fetch(`${base}/api/sessions/opencode/${encodeURIComponent(sessionId)}${route}`, {
         headers: { 'x-cosyncing-token': TOK },
       });

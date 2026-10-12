@@ -12,6 +12,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_rename_region.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_roster_disclosure.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/cached_roster_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
@@ -1512,80 +1513,89 @@ class _SessionRow extends StatelessWidget {
       label: lineageLabel,
       button: true,
       selected: selected,
-      child: Material(
-        color: selected ? tokens.surfaceHover : tokens.sidebar,
-        borderRadius: radius,
-        child: InkWell(
-          onTap: onTap,
+      child: SessionRenameRegion(
+        tool: session.tool,
+        sessionId: session.id,
+        title: session.title,
+        child: Material(
+          color: selected ? tokens.surfaceHover : tokens.sidebar,
           borderRadius: radius,
-          hoverColor: tokens.surfaceHover,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: compact ? 40 : 36),
-            child: Padding(
-              padding: EdgeInsets.only(
-                left: 28 + _kSessionRowIndentStep * indentDepth,
-                right: 12,
-              ),
-              child: Row(
-                children: [
-                  SessionHarnessLogo(tool: session.tool, tooltip: false),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Tooltip(
-                      message: [
-                        title,
-                        if (session.currentAgent != null) session.currentAgent!,
-                        _subtitle(context, session),
-                      ].join('\n'),
-                      waitDuration: const Duration(milliseconds: 600),
-                      child: Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        // 13dp between the body roles, matching the reviewed
-                        // roster density.
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          fontSize: 13,
-                          color: selected
-                              ? tokens.textPrimary
-                              : tokens.textSecondary,
-                          fontWeight: selected
-                              ? FontWeight.w700
-                              : FontWeight.w400,
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (childCount > 0) _childDisclosure(context),
-                  if (liveStatus && readyToReview) ...[
-                    const SizedBox(width: 4),
-                    Tooltip(
-                      message: l10n.sessionRosterReadyToReview,
-                      child: Padding(
-                        padding: const EdgeInsets.all(4),
-                        child: StatusDot(
-                          key: ValueKey(
-                            'session-ready-'
-                            '${sessionCompositeRosterKey(session)}',
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: radius,
+            hoverColor: tokens.surfaceHover,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: compact ? 40 : 36),
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 28 + _kSessionRowIndentStep * indentDepth,
+                  right: 12,
+                ),
+                child: Row(
+                  children: [
+                    SessionHarnessLogo(tool: session.tool, tooltip: false),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Tooltip(
+                        // Hover still reveals the full title. A touch hold
+                        // belongs to the row's rename menu.
+                        triggerMode: TooltipTriggerMode.manual,
+                        message: [
+                          title,
+                          if (session.currentAgent != null)
+                            session.currentAgent!,
+                          _subtitle(context, session),
+                        ].join('\n'),
+                        waitDuration: const Duration(milliseconds: 600),
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          // 13dp between the body roles, matching the reviewed
+                          // roster density.
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            fontSize: 13,
+                            color: selected
+                                ? tokens.textPrimary
+                                : tokens.textSecondary,
+                            fontWeight: selected
+                                ? FontWeight.w700
+                                : FontWeight.w400,
                           ),
-                          color: tokens.statusError,
-                          size: 6,
                         ),
                       ),
                     ),
-                  ],
-                  if (!liveStatus)
-                    Text(
-                      l10n.sessionRosterCachedRowLabel,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: tokens.textTertiary,
+                    if (childCount > 0) _childDisclosure(context),
+                    if (liveStatus && readyToReview) ...[
+                      const SizedBox(width: 4),
+                      Tooltip(
+                        message: l10n.sessionRosterReadyToReview,
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: StatusDot(
+                            key: ValueKey(
+                              'session-ready-'
+                              '${sessionCompositeRosterKey(session)}',
+                            ),
+                            color: tokens.statusError,
+                            size: 6,
+                          ),
+                        ),
                       ),
-                    ),
-                  if (liveStatus && session.status != SessionStatus.idle) ...[
-                    const SizedBox(width: 4),
-                    sessionStatusPill(context, session.status, dense: true),
+                    ],
+                    if (!liveStatus)
+                      Text(
+                        l10n.sessionRosterCachedRowLabel,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: tokens.textTertiary,
+                        ),
+                      ),
+                    if (liveStatus && session.status != SessionStatus.idle) ...[
+                      const SizedBox(width: 4),
+                      sessionStatusPill(context, session.status, dense: true),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),

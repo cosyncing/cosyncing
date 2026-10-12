@@ -23,7 +23,7 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
   ///
   /// Bounded: a profile may never arrive, and this must not grow with every
   /// navigation while that is true.
-  final List<FilePaneKey> _deferredOpens = [];
+  final List<SidePaneKey> _deferredOpens = [];
 
   /// How many deferred opens are kept; the last still wins the active tab.
   static const int _deferredOpenBudget = 8;
@@ -51,18 +51,18 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
     String sourceKey,
   ) {
     if (_deferredOpens.isEmpty) return restored;
-    final pending = List<FilePaneKey>.of(_deferredOpens);
+    final pending = List<SidePaneKey>.of(_deferredOpens);
     _deferredOpens.clear();
     var next = restored;
     for (final pane in pending) {
-      next = next.opened(pane.session, pane.path);
+      next = next.openedPane(pane);
     }
     unawaited(_store.save(sourceKey, next));
     return next;
   }
 
   /// Holds [pane] until a build with a source can replay it.
-  void _defer(FilePaneKey pane) {
+  void _defer(SidePaneKey pane) {
     _deferredOpens
       ..removeWhere((held) => held.key == pane.key)
       ..add(pane);
@@ -73,27 +73,35 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
 
   /// Opens [path] in [session], or activates it when already open.
   Future<void> open(SessionDetailKey session, String path) async {
-    final pane = FilePaneKey(session: session, path: path);
+    return openPane(FilePaneKey(session: session, path: path));
+  }
+
+  /// Opens a file, delivered artifact, or session view.
+  Future<void> openPane(SidePaneKey pane) async {
+    final requestedSource = RosterSource.of(
+      ref.read(activeBrokerProfileProvider),
+    )?.storageKey;
     // The restore has to land before the source is knowable: `_sourceKey` is
     // only written by a build, and a cold deep link arrives before the first
     // one has finished.
     await future;
+    if (requestedSource != null && requestedSource != _sourceKey) return;
     if (_sourceKey == null) {
       _defer(pane);
       return;
     }
-    await _mutate((current) => current.opened(session, path));
+    await _mutate((current) => current.openedPane(pane));
     _followFocus(pane);
   }
 
   /// Closes one file pane.
-  Future<void> close(FilePaneKey pane) async {
+  Future<void> close(SidePaneKey pane) async {
     await _mutate((current) => current.closed(pane));
     _releaseFocus(pane.key);
   }
 
   /// Makes [pane] the active file within its session.
-  Future<void> activate(FilePaneKey pane) async {
+  Future<void> activate(SidePaneKey pane) async {
     await _mutate((current) => current.activated(pane));
     _followFocus(pane);
   }
@@ -113,7 +121,7 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
   /// Deliberately does nothing when the session pane holds focus. Opening a
   /// file from the transcript is a click in the transcript, and the design's
   /// rule is that focus follows the click, not the content.
-  void _followFocus(FilePaneKey pane) {
+  void _followFocus(SidePaneKey pane) {
     final notifier = ref.read(focusedPaneProvider.notifier);
     final current = notifier.state;
     if (current == null || !isWorkspaceFilePaneKey(current)) return;
@@ -138,6 +146,7 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
   }
 
   Future<void> _mutate(FilePanesState Function(FilePanesState) change) {
+    final requestedSource = _sourceKey;
     // Serialized: two rapid opens must not both read the same prior state and
     // write back a set missing one of them.
     final work = _tail.then((_) async {
@@ -148,7 +157,7 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
       // pane it opened would vanish every single time.
       final current = await future;
       final sourceKey = _sourceKey;
-      if (sourceKey == null) return;
+      if (sourceKey == null || sourceKey != requestedSource) return;
       final next = change(current);
       state = AsyncData(next);
       await _store.save(sourceKey, next);

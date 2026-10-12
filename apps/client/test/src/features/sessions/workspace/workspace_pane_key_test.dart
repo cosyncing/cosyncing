@@ -88,14 +88,16 @@ void main() {
         (_b, 'lib/other.dart'),
         (_a, 'lib/two.dart'),
       ]);
-      expect(state.forSession(_a).map((pane) => pane.path), [
+      expect(state.forSession(_a).map((pane) => (pane as FilePaneKey).path), [
         'lib/one.dart',
         'lib/two.dart',
       ]);
-      expect(state.forSession(_b).map((pane) => pane.path), ['lib/other.dart']);
+      expect(state.forSession(_b).map((pane) => (pane as FilePaneKey).path), [
+        'lib/other.dart',
+      ]);
       // Switching the session tab swaps the strip rather than merging them.
-      expect(state.activeFor(_a)?.path, 'lib/two.dart');
-      expect(state.activeFor(_b)?.path, 'lib/other.dart');
+      expect((state.activeFor(_a) as FilePaneKey?)?.path, 'lib/two.dart');
+      expect((state.activeFor(_b) as FilePaneKey?)?.path, 'lib/other.dart');
     });
 
     test('reopening an open file activates it without duplicating it', () {
@@ -105,7 +107,7 @@ void main() {
         (_a, 'lib/one.dart'),
       ]);
       expect(state.forSession(_a), hasLength(2));
-      expect(state.activeFor(_a)?.path, 'lib/one.dart');
+      expect((state.activeFor(_a) as FilePaneKey?)?.path, 'lib/one.dart');
     });
 
     test('closing the active file falls to a sibling, not to nothing', () {
@@ -113,7 +115,7 @@ void main() {
       state = state.closed(state.activeFor(_a)!);
       // The split must not collapse under the user while files remain.
       expect(state.isEmpty, isFalse);
-      expect(state.activeFor(_a)?.path, 'lib/one.dart');
+      expect((state.activeFor(_a) as FilePaneKey?)?.path, 'lib/one.dart');
     });
 
     test('closing the last file in a session leaves no active entry', () {
@@ -135,8 +137,11 @@ void main() {
       }
       expect(state.panes, hasLength(limit));
       // The oldest go, in strip order, and the newest stay.
-      expect(state.panes.first.path, 'lib/file20.dart');
-      expect(state.panes.last.path, 'lib/file${limit + 19}.dart');
+      expect((state.panes.first as FilePaneKey).path, 'lib/file20.dart');
+      expect(
+        (state.panes.last as FilePaneKey).path,
+        'lib/file${limit + 19}.dart',
+      );
     });
 
     test('a row written before the bound is trimmed on the way in', () {
@@ -159,8 +164,11 @@ void main() {
 
       expect(state.panes, hasLength(limit));
       // The active pane is the oldest one here, and it is still spared.
-      expect(state.activeFor(_a)?.path, 'lib/file0.dart');
-      expect(state.panes.last.path, 'lib/file${limit + 39}.dart');
+      expect((state.activeFor(_a) as FilePaneKey?)?.path, 'lib/file0.dart');
+      expect(
+        (state.panes.last as FilePaneKey).path,
+        'lib/file${limit + 39}.dart',
+      );
     });
 
     test('the bound never takes a session away from under its reader', () {
@@ -173,7 +181,7 @@ void main() {
       // _b's only file is its active one, so trimming must skip it rather
       // than collapse a pane the other session is still reading.
       expect(state.forSession(_b), hasLength(1));
-      expect(state.activeFor(_b)?.path, 'lib/pinned.dart');
+      expect((state.activeFor(_b) as FilePaneKey?)?.path, 'lib/pinned.dart');
       expect(state.panes, hasLength(limit));
     });
 
@@ -186,12 +194,15 @@ void main() {
         (_a, 'three'),
       ]);
       state = state.reordered(_a, 2, 0);
-      expect(state.forSession(_a).map((pane) => pane.path), [
+      expect(state.forSession(_a).map((pane) => (pane as FilePaneKey).path), [
         'three',
         'one',
         'two',
       ]);
-      expect(state.forSession(_b).map((pane) => pane.path), ['x', 'y']);
+      expect(state.forSession(_b).map((pane) => (pane as FilePaneKey).path), [
+        'x',
+        'y',
+      ]);
     });
 
     test('an out-of-range reorder is a no-op rather than a throw', () {
@@ -203,8 +214,11 @@ void main() {
     test('the working set round-trips through persistence', () {
       final state = opened([(_a, 'lib/one.dart'), (_b, 'lib/other.dart')]);
       final restored = FilePanesState.fromJsonString(state.toJsonString());
-      expect(restored.forSession(_a).single.path, 'lib/one.dart');
-      expect(restored.activeFor(_b)?.path, 'lib/other.dart');
+      expect(
+        (restored.forSession(_a).single as FilePaneKey).path,
+        'lib/one.dart',
+      );
+      expect((restored.activeFor(_b) as FilePaneKey?)?.path, 'lib/other.dart');
     });
 
     test("a newer client's rows are dropped, not fatal", () {
@@ -217,7 +231,9 @@ void main() {
       final restored = FilePanesState.fromJsonString(stored);
       // The unknown kind goes, the session pane is not a file pane, and the
       // one row this client understands survives.
-      expect(restored.panes.map((pane) => pane.path), ['keep.dart']);
+      expect(restored.panes.map((pane) => (pane as FilePaneKey).path), [
+        'keep.dart',
+      ]);
     });
 
     test('malformed storage decodes to empty rather than wedging startup', () {

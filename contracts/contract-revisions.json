@@ -178,6 +178,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "Approval and question cards say what happened to them when two seats can answer. `permission-request` gains `permissionMode` (`PermissionModeName`), `releaseReason` (`PermissionReleaseReason`), `inputPreview` (bounded to 240 characters; the existing `detail` now carries the whole call, bounded to 8,000) and `blocking` (as `question-request` took it in revision 24). `permission-resolved` gains `decidedBy` (`PermissionDecidedBy`) and `releaseReason`. `question-resolved` gains `answers`, `decidedBy` and `releaseReason`. `question-request` gains `answerInTerminal`, and each question gains `freeText` and `kind` (`text` or `number`), with `min`, `max`, `step` and `unit` for a number. `transcript.unknown-type` (`{ lineType }`) and `steering.message` (`{ text, source, key? }`) gain constants and typed payloads; event names stay free-form on the wire. No route, frame kind, client message kind, message type or error code is added, so the surface hash is unchanged from revision 28; the number moves because the DTOs did. The minimum client revision stays at 17: an older client ignores every new field and draws the two events as ordinary event rows."
+    },
+    {
+      "revision": 30,
+      "surfaceHash": "fnv1a32:07da6b97",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Add bounded workspace filename search under existing file permissions, with typed matches and partial-result reporting."
     }
   ]
 }

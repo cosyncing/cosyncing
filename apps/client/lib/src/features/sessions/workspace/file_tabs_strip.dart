@@ -10,15 +10,9 @@ const double fileTabStripHeight = 32;
 /// Width of the rail shown in place of a collapsed file pane.
 const double workspaceDocumentRailWidth = 44;
 
-/// The file pane's own tab strip.
-///
-/// Deliberately not the top scroller. That one is sessions-only (owner
-/// direction), so the two kinds never share a strip and can never be confused
-/// there. Everything here says "document, not session": a document mark
-/// instead of a status dot, neutral ink instead of the tool identity colour,
-/// and a trailing read-only marker. There is no status affordance of any kind
-/// — no pulse, no ring, no badge, no spinner — because a file never does
-/// anything.
+/// The right panel's tabs: files, delivered artifacts, and session views.
+/// Session tabs remain in the main strip. File previews carry a read-only
+/// marker; Status and Files keep their own available actions.
 class FileTabsStrip extends StatelessWidget {
   /// Creates the strip for one session's open files.
   const FileTabsStrip({
@@ -31,16 +25,16 @@ class FileTabsStrip extends StatelessWidget {
   });
 
   /// The active session's open files, in strip order.
-  final List<FilePaneKey> panes;
+  final List<SidePaneKey> panes;
 
-  /// The [FilePaneKey.key] of the shown file.
+  /// The [SidePaneKey.key] of the shown file.
   final String? activeKey;
 
   /// Selects one file.
-  final ValueChanged<FilePaneKey> onSelect;
+  final ValueChanged<SidePaneKey> onSelect;
 
   /// Closes one file.
-  final ValueChanged<FilePaneKey> onClose;
+  final ValueChanged<SidePaneKey> onClose;
 
   /// Moves a tab within this session's strip.
   ///
@@ -85,17 +79,20 @@ class FileTabsStrip extends StatelessWidget {
                 },
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: Text(
-                l10n.fileViewerReadOnly,
-                key: const Key('file-tabs-read-only'),
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: tokens.textTertiary,
-                  letterSpacing: 0.6,
+            if (!panes.any(
+              (pane) => pane.key == activeKey && pane is SessionPanelKey,
+            ))
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Text(
+                  l10n.fileViewerReadOnly,
+                  key: const Key('file-tabs-read-only'),
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: tokens.textTertiary,
+                    letterSpacing: 0.6,
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -112,7 +109,7 @@ class _FileTab extends StatelessWidget {
     required this.onClose,
   });
 
-  final FilePaneKey pane;
+  final SidePaneKey pane;
   final bool selected;
   final AppTokens tokens;
   final VoidCallback onSelect;
@@ -121,7 +118,8 @@ class _FileTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final name = pane.path.split('/').last;
+    final l10n = AppLocalizations.of(context);
+    final name = sidePaneLabel(pane, l10n);
     return InkWell(
       onTap: onSelect,
       child: DecoratedBox(
@@ -129,23 +127,34 @@ class _FileTab extends StatelessWidget {
           color: selected ? tokens.surface2 : null,
           border: Border(
             bottom: BorderSide(
-              color: selected ? tokens.accent : Colors.transparent,
+              color: selected
+                  ? tokens.accent
+                  : tokens.surface.withValues(alpha: 0),
               width: 2,
             ),
           ),
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               // Neutral ink, never the tool colour: the owning session is
               // named once in the pane header, not colour-coded per tab.
-              FileMarkGlyph(
-                color: tokens.textSecondary,
-                foldColor: selected ? tokens.surface2 : tokens.surface,
-                height: 11,
-              ),
+              if (pane case SessionPanelKey(:final kind))
+                StrokeIcon(
+                  kind == SessionPanelKind.files
+                      ? StrokeGlyph.folder
+                      : StrokeGlyph.overview,
+                  size: 16,
+                  color: tokens.textSecondary,
+                )
+              else
+                FileMarkGlyph(
+                  color: tokens.textSecondary,
+                  foldColor: selected ? tokens.surface2 : tokens.surface,
+                  height: 11,
+                ),
               const SizedBox(width: 8),
               ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 160),
@@ -196,7 +205,7 @@ class WorkspaceDocumentRail extends StatelessWidget {
   });
 
   /// The active session's open files.
-  final List<FilePaneKey> panes;
+  final List<SidePaneKey> panes;
 
   /// Resting 1dp line colour.
   final Color separatorColor;
@@ -231,7 +240,7 @@ class WorkspaceDocumentRail extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(vertical: 4),
                 itemCount: panes.length,
                 itemBuilder: (context, index) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  padding: const EdgeInsets.symmetric(vertical: 8),
                   child: Center(
                     child: FileMarkGlyph(
                       color: tokens.textTertiary,
@@ -247,3 +256,11 @@ class WorkspaceDocumentRail extends StatelessWidget {
     );
   }
 }
+
+/// Localized name shared by the tab strip and its accessible labels.
+String sidePaneLabel(SidePaneKey pane, AppLocalizations l10n) => switch (pane) {
+  FilePaneKey(:final path) => path.split('/').last,
+  ArtifactPaneKey(:final name) => name,
+  SessionPanelKey(kind: SessionPanelKind.status) => l10n.sessionViewStatus,
+  SessionPanelKey(kind: SessionPanelKind.files) => l10n.sessionFilesTitle,
+};

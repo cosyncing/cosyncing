@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(59));
+      expect(brokerRoutes, hasLength(60));
     });
 
     test('contains the aggregated usage-report route', () {
@@ -17,6 +17,7 @@ void main() {
         containsAll(<String>[
           '/api/sessions/{id}/{id}/fs',
           '/api/sessions/{id}/{id}/fs/read',
+          '/api/sessions/{id}/{id}/fs/search',
           '/api/sessions/{id}/{id}/fs/download',
           '/api/sessions/{id}/{id}/uploads',
           '/api/sessions/{id}/{id}/uploads/{id}',

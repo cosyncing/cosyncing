@@ -6,6 +6,7 @@ import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_rename_region.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -249,7 +250,6 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
                                     key: Key('open-session-tab-${ref.key}'),
                                     index: index,
                                     child: _Tab(
-                                      longPressToClose: false,
                                       ref: ref,
                                       selected: ref.key == widget.activeKey,
                                       promptTarget:
@@ -297,7 +297,7 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
   }
 }
 
-/// Finger/stylus drags scroll first; a deliberate hold picks up the tab.
+/// Finger/stylus drags scroll; a deliberate hold opens the session menu.
 /// Pointer kind, rather than platform or viewport, also handles touch laptops
 /// and a mouse connected to a phone correctly.
 class _TabReorderListener extends StatelessWidget {
@@ -313,9 +313,11 @@ class _TabReorderListener extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Listener(
     onPointerDown: (event) {
-      final recognizer = event.kind == PointerDeviceKind.mouse
-          ? ImmediateMultiDragGestureRecognizer(debugOwner: this)
-          : DelayedMultiDragGestureRecognizer(debugOwner: this);
+      if (event.kind != PointerDeviceKind.mouse ||
+          event.buttons != kPrimaryMouseButton) {
+        return;
+      }
+      final recognizer = ImmediateMultiDragGestureRecognizer(debugOwner: this);
       SliverReorderableList.of(context).startItemDragReorder(
         index: index,
         event: event,
@@ -540,7 +542,6 @@ class _Tab extends StatelessWidget {
     this.promptTarget = false,
     this.showLiveStatus = true,
     this.unreadCompletion = false,
-    this.longPressToClose = true,
     super.key,
   });
 
@@ -548,7 +549,6 @@ class _Tab extends StatelessWidget {
   final bool selected;
   final bool showLiveStatus;
   final bool unreadCompletion;
-  final bool longPressToClose;
 
   /// Whether this tab still receives typing while a file pane holds focus.
   final bool promptTarget;
@@ -581,126 +581,129 @@ class _Tab extends StatelessWidget {
     // left the title riding the top of its tab.
     final closeExtent = compact ? 40.0 : 28.0;
     final radius = BorderRadius.circular(tokens.radiusMd);
-    final tab = Padding(
-      padding: EdgeInsets.symmetric(
-        vertical: compact
-            ? 2
-            : (OpenSessionsTabStrip.height - OpenSessionsTabStrip.tabHeight) /
-                  2,
-        horizontal: 2,
-      ),
-      // Middle-click closes the tab — the one Chrome tab affordance that needs
-      // no chord and no reservation, so it works identically on native and on
-      // web. A `Listener` rather than a gesture recognizer because Flutter's
-      // tap recognizers only report the primary button; the auxiliary button
-      // is readable on the raw pointer event and nowhere else.
-      child: Listener(
-        onPointerDown: (event) {
-          if (event.kind != PointerDeviceKind.mouse) return;
-          if (event.buttons & kMiddleMouseButton == 0) return;
-          onClose();
-        },
-        child: Material(
-          color: selected ? tokens.surface2 : tokens.canvas,
-          borderRadius: radius,
-          child: InkWell(
-            onTap: onSelect,
-            // Reorderable tabs reserve the hold for picking up the tab.
-            onLongPress: longPressToClose ? onClose : null,
+    final tab = SessionRenameRegion(
+      tool: ref.tool,
+      sessionId: ref.id,
+      title: ref.title,
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          vertical: compact
+              ? 2
+              : (OpenSessionsTabStrip.height - OpenSessionsTabStrip.tabHeight) /
+                    2,
+          horizontal: 2,
+        ),
+        // Middle-click closes the tab. This Chrome tab affordance needs
+        // no chord and no reservation, so it works identically on native and on
+        // web. A `Listener` rather than a gesture recognizer because Flutter's
+        // tap recognizers only report the primary button; the auxiliary button
+        // is readable on the raw pointer event and nowhere else.
+        child: Listener(
+          onPointerDown: (event) {
+            if (event.kind != PointerDeviceKind.mouse) return;
+            if (event.buttons & kMiddleMouseButton == 0) return;
+            onClose();
+          },
+          child: Material(
+            color: selected ? tokens.surface2 : tokens.canvas,
             borderRadius: radius,
-            hoverColor: tokens.surface2,
-            child: Container(
-              constraints: BoxConstraints(
-                maxWidth: compact
-                    ? MediaQuery.sizeOf(context).width - 140
-                    : 240,
-              ),
-              padding: const EdgeInsets.only(left: 12, right: 4),
-              child: Stack(
-                alignment: AlignmentDirectional.centerStart,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Hover names the harness; the tab's accessible name
-                      // stays its title, as the logo's label and tooltip
-                      // would otherwise read the harness twice before it.
-                      ExcludeSemantics(
-                        child: SessionHarnessLogo(tool: ref.tool, size: 12),
-                      ),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: selected
-                                ? tokens.textPrimary
-                                : tokens.textSecondary,
-                            fontWeight: needsInput || selected
-                                ? FontWeight.w600
-                                : FontWeight.w400,
+            child: InkWell(
+              onTap: onSelect,
+              borderRadius: radius,
+              hoverColor: tokens.surface2,
+              child: Container(
+                constraints: BoxConstraints(
+                  maxWidth: compact
+                      ? MediaQuery.sizeOf(context).width - 140
+                      : 240,
+                ),
+                padding: const EdgeInsets.only(left: 12, right: 4),
+                child: Stack(
+                  alignment: AlignmentDirectional.centerStart,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Hover names the harness; the tab's accessible name
+                        // stays its title, as the logo's label and tooltip
+                        // would otherwise read the harness twice before it.
+                        ExcludeSemantics(
+                          child: SessionHarnessLogo(tool: ref.tool, size: 12),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: selected
+                                  ? tokens.textPrimary
+                                  : tokens.textSecondary,
+                              fontWeight: needsInput || selected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
                           ),
                         ),
-                      ),
-                      if (needsInput) ...[
-                        const SizedBox(width: 4),
-                        StatusDot(color: tokens.statusNeedsInput, size: 4),
-                      ],
-                      if (unreadCompletion) ...[
-                        const SizedBox(width: 4),
-                        Tooltip(
-                          message: l10n.workspaceUnreadCompletions,
-                          child: StatusDot(
-                            key: Key('open-session-tab-unread-${ref.key}'),
-                            color: tokens.statusError,
-                            size: 4,
+                        if (needsInput) ...[
+                          const SizedBox(width: 4),
+                          StatusDot(color: tokens.statusNeedsInput, size: 4),
+                        ],
+                        if (unreadCompletion) ...[
+                          const SizedBox(width: 4),
+                          Tooltip(
+                            message: l10n.workspaceUnreadCompletions,
+                            child: StatusDot(
+                              key: Key('open-session-tab-unread-${ref.key}'),
+                              color: tokens.statusError,
+                              size: 4,
+                            ),
                           ),
-                        ),
-                      ],
-                      const SizedBox(width: 4),
-                      SizedBox.square(
-                        dimension: closeExtent,
-                        child: IconButton(
-                          key: Key('open-session-tab-close-${ref.key}'),
-                          onPressed: onClose,
-                          icon: const StrokeIcon(StrokeGlyph.close, size: 14),
-                          tooltip: l10n.close,
-                          color: tokens.textTertiary,
-                          style: IconButton.styleFrom(
-                            padding: EdgeInsets.zero,
-                            visualDensity: VisualDensity.standard,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            minimumSize: Size.square(closeExtent),
-                            maximumSize: Size.square(closeExtent),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(
-                                tokens.radiusSm,
+                        ],
+                        const SizedBox(width: 4),
+                        SizedBox.square(
+                          dimension: closeExtent,
+                          child: IconButton(
+                            key: Key('open-session-tab-close-${ref.key}'),
+                            onPressed: onClose,
+                            icon: const StrokeIcon(StrokeGlyph.close, size: 14),
+                            tooltip: l10n.close,
+                            color: tokens.textTertiary,
+                            style: IconButton.styleFrom(
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.standard,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              minimumSize: Size.square(closeExtent),
+                              maximumSize: Size.square(closeExtent),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(
+                                  tokens.radiusSm,
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                  // The prompt-target underline remains separate from the
-                  // harness artwork and trailing attention markers.
-                  if (promptTarget)
-                    Positioned(
-                      key: Key('open-session-tab-prompt-target-${ref.key}'),
-                      left: 0,
-                      right: 8,
-                      bottom: 1,
-                      height: 2,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: tokens.accent,
-                          borderRadius: BorderRadius.circular(1),
+                      ],
+                    ),
+                    // The prompt-target underline remains separate from the
+                    // harness artwork and trailing attention markers.
+                    if (promptTarget)
+                      Positioned(
+                        key: Key('open-session-tab-prompt-target-${ref.key}'),
+                        left: 0,
+                        right: 8,
+                        bottom: 1,
+                        height: 2,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: tokens.accent,
+                            borderRadius: BorderRadius.circular(1),
+                          ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),

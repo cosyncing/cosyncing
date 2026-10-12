@@ -139,9 +139,11 @@ class _FilesPanel extends ConsumerStatefulWidget {
     required this.onPreviewArtifact,
     required this.onPreviewFile,
     required this.onDownloadFile,
+    this.showInlinePreview = true,
     super.key,
   });
 
+  final bool showInlinePreview;
   final SessionDetailKey sessionKey;
 
   /// Owning session as `tool · title`, for the file viewer's owner meta.
@@ -212,7 +214,8 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
     // An open file takes the whole slot. The viewer is a pane, so it needs a
     // bounded viewport of its own — nesting it inside this ListView would give
     // it unbounded height and cost it the sticky header that is the point.
-    if (state?.preview case final SessionFilePreview preview) {
+    if (widget.showInlinePreview && state?.preview != null) {
+      final preview = state!.preview!;
       return FileViewerPane(
         key: const Key('session-detail-files-viewer'),
         content: FileViewerSource(preview: preview),
@@ -309,6 +312,8 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
             onOpenEntry: (entry) {
               if (entry.type == 'directory') {
                 _loadPath(entry.path);
+              } else if (entry.type == 'file') {
+                unawaited(widget.onPreviewFile(entry));
               }
             },
             onPreviewFile: widget.onPreviewFile,
@@ -609,13 +614,13 @@ class _SessionFileEntryRow extends StatelessWidget {
     return ListTile(
       key: ValueKey('session-detail-files-row-${entry.path}'),
       leading: Icon(_iconForSessionFileEntry(entry)),
-      title: SelectableText(
+      title: Text(
         entry.name.isEmpty ? l10n.sessionFilesUnnamed : entry.name,
         key: ValueKey('session-detail-files-name-${entry.path}'),
       ),
       subtitle: SelectableText(_sessionFileEntrySubtitle(l10n, entry)),
       enabled: !isSymlink,
-      onTap: isDirectory ? () => onOpenEntry(entry) : null,
+      onTap: isDirectory || isFile ? () => onOpenEntry(entry) : null,
       trailing: isFile
           ? Wrap(
               spacing: 4,

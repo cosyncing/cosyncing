@@ -19,12 +19,11 @@ import 'package:cosyncing_client/src/features/schedules/controller/inline_schedu
 import 'package:cosyncing_client/src/features/schedules/view/inline_schedule_action_message.dart';
 import 'package:cosyncing_client/src/features/schedules/view/inline_scheduled_message_card.dart';
 import 'package:cosyncing_client/src/features/schedules/view/schedule_message_sheet.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/artifact_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
-import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_presenter.dart';
-import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_result.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_transfer.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_transfer_worker.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
@@ -44,6 +43,7 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_drive_inte
 import 'package:cosyncing_client/src/features/sessions/detail/session_live_state.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_live_state_view_store.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_telemetry.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/token_count_format.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_freshness.dart';
@@ -63,10 +63,13 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_file_l
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_progress.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/transcript_file_resolution.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/transcript_prefetch.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_surface.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/session_viewport_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/side_pane_scope.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
@@ -87,12 +90,15 @@ import 'package:cosyncing_client/src/platform/update/web_handoff_participants.da
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/foundation.dart'
     show ValueListenable, kIsWeb, listEquals, setEquals;
-import 'package:flutter/gestures.dart' show PointerScrollEvent;
+import 'package:flutter/gestures.dart'
+    show HitTestResult, PointerDownEvent, PointerScrollEvent, kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show
         GrowthDirection,
+        MatrixUtils,
         RenderProxyBox,
+        RenderSemanticsAnnotations,
         RenderSliver,
         RenderSliverMultiBoxAdaptor,
         RenderViewport,
@@ -115,6 +121,7 @@ part 'session_detail_composer.dart';
 part 'session_detail_conversation_turn.dart';
 part 'session_detail_debug.dart';
 part 'session_detail_files_terminal.dart';
+part 'session_detail_file_search.dart';
 part 'session_detail_live_cards.dart';
 part 'session_detail_message_actions.dart';
 part 'session_detail_model_label.dart';
@@ -123,6 +130,7 @@ part 'session_detail_transcript.dart';
 part 'session_detail_transfers_artifacts.dart';
 part 'session_detail_view_chrome.dart';
 part 'session_detail_view_menu.dart';
+part 'session_side_panel.dart';
 
 /// Live attach shell for one broker session.
 ///
@@ -278,10 +286,15 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// session frame until its queued attach finishes tearing the old connection
   /// down, and acting on that frame means showing, saving, or keying on the
   /// wrong broker's session. See [SessionDetailState.forActiveSource].
+  bool _findingFile = false;
+
   SessionDetailState get _sessionState => readQualifiedDetail(ref, _key);
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _registerSidePanel();
+    });
     _key = SessionDetailKey(
       tool: widget.tool,
       sessionId: widget.sessionId,
@@ -378,9 +391,34 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     unawaited(controller.offerDurableDraftToComposer());
   }
 
+  bool? _wasSideAvailable;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final sideAvailable = SidePaneScope.maybeOf(context)?.available ?? false;
+    if ((_wasSideAvailable ?? false) && !sideAvailable) {
+      final pane = ref
+          .read(filePanesControllerProvider)
+          .valueOrNull
+          ?.activeFor(_key);
+      if (pane is SessionPanelKey) {
+        _view = pane.kind == SessionPanelKind.status
+            ? _SessionDetailView.status
+            : _SessionDetailView.files;
+      }
+    } else if (_wasSideAvailable == false &&
+        sideAvailable &&
+        (_view == _SessionDetailView.status ||
+            _view == _SessionDetailView.files)) {
+      final view = _view;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && (SidePaneScope.maybeOf(context)?.available ?? false)) {
+          _selectView(view);
+        }
+      });
+    }
+    _wasSideAvailable = sideAvailable;
     final onstage = TickerMode.valuesOf(context).enabled;
     if (_onstage == onstage) return;
     _onstage = onstage;
@@ -549,6 +587,21 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
 
   @override
   void dispose() {
+    final binding = _sidePanelBinding;
+    final sideContainer = _providerContainer;
+    if (binding != null && sideContainer != null) {
+      Future.microtask(() {
+        try {
+          final provider = _sidePanelBindingProvider(_key);
+          if (sideContainer.exists(provider) &&
+              identical(sideContainer.read(provider), binding)) {
+            sideContainer.read(provider.notifier).state = null;
+          }
+        } on Object {
+          /* The containing scope has already retired. */
+        }
+      });
+    }
     _foregroundRestoreGeneration++;
     WidgetsBinding.instance.removeObserver(this);
     // N3b: leave the handoff registry before the controllers below are torn
@@ -1343,45 +1396,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         .downloadArtifact(descriptor);
   }
 
-  Future<void> _previewArtifact(SessionArtifactDescriptor descriptor) async {
-    final controller = ref.read(sessionDetailControllerProvider(_key).notifier);
-    final l10n = AppLocalizations.of(context);
-    if (!isSessionArtifactPreviewAvailable) {
-      controller.recordArtifactPreviewResult(
-        descriptor,
-        opened: false,
-        message: l10n.sessionArtifactPreviewUnsupported,
-      );
-      return;
-    }
-
-    final cached = await controller.prepareArtifactPreview(descriptor);
-    if (!mounted || cached == null) {
-      return;
-    }
-
-    final result = await showSessionArtifactPreview(context, cached);
-    if (!mounted) {
-      return;
-    }
-    final previewCompleted = result.completed;
-    controller.recordArtifactPreviewResult(
-      descriptor,
-      opened: previewCompleted,
-      message: switch (result.status) {
-        SessionArtifactPreviewPresentationStatus.opened =>
-          l10n.sessionArtifactPreviewOpened,
-        SessionArtifactPreviewPresentationStatus.unsupported =>
-          l10n.sessionArtifactPreviewUnsupported,
-        SessionArtifactPreviewPresentationStatus.blockedNavigation =>
-          l10n.sessionArtifactPreviewBlocked,
-        SessionArtifactPreviewPresentationStatus.externalOpenFallback =>
-          l10n.sessionArtifactPreviewExternalStarted,
-        SessionArtifactPreviewPresentationStatus.externalOpenFailed =>
-          l10n.sessionArtifactPreviewExternalFailed,
-      },
-    );
-  }
+  Future<void> _previewArtifact(SessionArtifactDescriptor descriptor) =>
+      openSessionArtifact(context, ref, _key, descriptor);
 
   Future<void> _downloadSessionFile(FsDirEntry entry) async {
     final result = await ref
@@ -1509,10 +1525,12 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// Returns false at narrower widths, where the caller keeps the in-place
   /// behaviour rather than opening a pane the layout will not render.
   bool _openInFilePane(String path, int? line) {
-    final width = MediaQuery.sizeOf(context).width;
-    if (WindowSizeClass.fromWidth(width) != WindowSizeClass.expanded) {
-      return false;
-    }
+    final scope = SidePaneScope.maybeOf(context);
+    final canOpen =
+        scope?.available ??
+        (WindowSizeClass.of(context) == WindowSizeClass.expanded);
+    if (!canOpen) return false;
+    scope?.expand();
     final pane = FilePaneKey(session: _key, path: path);
     if (line != null) {
       ref
@@ -1542,6 +1560,25 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
           .read(sessionFileBrowserControllerProvider(_fileBrowserKey).notifier)
           .probeGate(),
     );
+  }
+
+  _SidePanelBinding? _sidePanelBinding;
+
+  void _registerSidePanel() {
+    if (!mounted) return;
+    final binding = _SidePanelBinding(
+      source: RosterSource.of(ref.read(activeBrokerProfileProvider)),
+      draft: _promptController,
+      onExport: () => unawaited(_startTranscriptExport()),
+      onFork: () => unawaited(_forkSession()),
+      onClone: () => unawaited(_cloneSession()),
+      onDownloadArtifact: _downloadArtifact,
+      onPreviewArtifact: _previewArtifact,
+      onPreviewFile: _previewSessionFile,
+      onDownloadFile: _downloadSessionFile,
+    );
+    _sidePanelBinding = binding;
+    ref.read(_sidePanelBindingProvider(_key).notifier).state = binding;
   }
 
   /// Commits an inline title edit. The strip's title *is* the rename control
@@ -1710,6 +1747,26 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// same rule the old tab followed.
   void _selectView(_SessionDetailView view) {
     if (!mounted) return;
+    final scope = SidePaneScope.maybeOf(context);
+    if ((scope?.available ?? false) &&
+        (view == _SessionDetailView.status ||
+            view == _SessionDetailView.files)) {
+      scope!.expand();
+      unawaited(
+        ref
+            .read(filePanesControllerProvider.notifier)
+            .openPane(
+              SessionPanelKey(
+                session: _key,
+                kind: view == _SessionDetailView.status
+                    ? SessionPanelKind.status
+                    : SessionPanelKind.files,
+              ),
+            ),
+      );
+      setState(() => _view = _SessionDetailView.chat);
+      return;
+    }
     setState(() {
       _view = view;
       if (view == _SessionDetailView.terminal) _terminalFresh = false;
@@ -2661,6 +2718,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                             sessionKey: _key,
                             gate: fileLinkGate,
                             onOpen: _onOpenFileReference,
+                            onFind: _onFindFileReference,
+                            onFindParent: _onFindFileParentReference,
                             onProbeNeeded: _probeFileLinkGate,
                             child: _ChatPanel(
                               key: const Key('session-detail-tab-panel-chat'),
@@ -2818,6 +2877,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   }
 
   Future<void> _changeProfileAfterDraftBarrier() async {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _registerSidePanel();
+    });
     final generation = ++_profileTransitionGeneration;
     _foregroundRestoreGeneration++;
     _cancelAttachmentIntakeForSourceChange();

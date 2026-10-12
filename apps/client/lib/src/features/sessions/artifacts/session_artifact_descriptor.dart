@@ -127,6 +127,86 @@ class SessionArtifactDescriptor {
         lowercaseSource.endsWith('.htm');
   }
 
+  /// Whether the delivered file has a text renderer in the in-app viewer.
+  bool get isTextPreviewCandidate {
+    if (deliveryClass != SessionArtifactDeliveryClass.interactive) return false;
+    final mime = mimeType?.split(';').first.trim().toLowerCase() ?? '';
+    if (mime.startsWith('text/') ||
+        const {
+          'application/json',
+          'application/javascript',
+          'application/xml',
+          'application/xhtml+xml',
+          'application/yaml',
+          'application/x-yaml',
+        }.contains(mime)) {
+      return true;
+    }
+    final file = (name ?? path ?? '').toLowerCase();
+    final extension = file.split('.').last;
+    return const {
+      'md',
+      'markdown',
+      'html',
+      'htm',
+      'xhtml',
+      'py',
+      'pyi',
+      'txt',
+      'js',
+      'jsx',
+      'ts',
+      'tsx',
+      'mjs',
+      'cjs',
+      'json',
+      'jsonl',
+      'yaml',
+      'yml',
+      'xml',
+      'css',
+      'scss',
+      'sass',
+      'less',
+      'dart',
+      'rs',
+      'go',
+      'java',
+      'kt',
+      'c',
+      'h',
+      'cpp',
+      'hpp',
+      'cs',
+      'sh',
+      'bash',
+      'zsh',
+      'fish',
+      'ps1',
+      'rb',
+      'php',
+      'swift',
+      'sql',
+      'toml',
+      'ini',
+      'cfg',
+      'conf',
+      'log',
+      'csv',
+      'tsv',
+      'diff',
+      'patch',
+      'r',
+      'tex',
+      'vue',
+      'svelte',
+      'ipynb',
+      'svg',
+      'dockerfile',
+      'makefile',
+    }.contains(extension);
+  }
+
   /// Primary action label for available artifact download.
   String get downloadActionLabel =>
       isInlineDataUrl ? 'Fetch data URL' : 'Download';

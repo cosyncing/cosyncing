@@ -52,6 +52,7 @@ const List<String> brokerRoutes = <String>[
   '/api/sessions/{id}/{id}/artifact/{id}/ticket',
   '/api/sessions/{id}/{id}/fs',
   '/api/sessions/{id}/{id}/fs/read',
+  '/api/sessions/{id}/{id}/fs/search',
   '/api/sessions/{id}/{id}/fs/download',
   '/api/sessions/{id}/{id}/uploads',
   '/api/sessions/{id}/{id}/uploads/{id}',

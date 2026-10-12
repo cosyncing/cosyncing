@@ -772,6 +772,18 @@ class BrokerClient {
     return FsReadResult.fromJson(response);
   }
 
+  /// Searches workspace filenames without reading file contents.
+  Future<FsSearchResult> searchSessionFiles(
+    String tool,
+    String id, {
+    required String query,
+  }) async {
+    final response = await _get<Map<String, dynamic>>(
+      _appendQuery(_resolver.fsSearchEndpoint(tool, id), {'query': query}),
+    );
+    return FsSearchResult.fromJson(response);
+  }
+
   /// Lists a directory in the session workspace.
   ///
   /// `GET /api/sessions/:tool/:id/fs?path=`

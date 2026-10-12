@@ -1604,6 +1604,7 @@ export const BROKER_ROUTES = [
   '/api/sessions/{id}/{id}/artifact/{id}/ticket',
   '/api/sessions/{id}/{id}/fs',
   '/api/sessions/{id}/{id}/fs/read',
+  '/api/sessions/{id}/{id}/fs/search',
   '/api/sessions/{id}/{id}/fs/download',
   '/api/sessions/{id}/{id}/uploads',
   '/api/sessions/{id}/{id}/uploads/{id}',
@@ -2128,7 +2129,9 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * inside the window, so a revision-28-or-later client has to ship before a
  * revision-29 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 29 as const;
+/** Revision 30 adds bounded, on-demand workspace filename search. Existing
+ * browsing permissions and minimum client revision are unchanged. */
+export const BROKER_CONTRACT_REVISION = 30 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -2391,6 +2394,14 @@ export interface FsDirectoryResult {
   path: string;
   stat: FsNodeInfo;
   entries: FsDirEntry[];
+}
+
+/** Result of a bounded workspace filename/path-suffix search. */
+export interface FsSearchResult {
+  query: string;
+  matches: FsNodeInfo[];
+  /** More matches may exist beyond the time, entry, depth or result budget. */
+  truncated: boolean;
 }
 
 export interface FsReadResult {

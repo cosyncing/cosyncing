@@ -60,6 +60,8 @@ class SessionFileLinkScope extends InheritedWidget {
     required this.onOpen,
     required this.onProbeNeeded,
     required super.child,
+    this.onFind,
+    this.onFindParent,
     super.key,
   });
 
@@ -71,6 +73,12 @@ class SessionFileLinkScope extends InheritedWidget {
 
   /// Opens [SessionFileReference] in this session's Files surface.
   final void Function(SessionFileReference reference) onOpen;
+
+  /// Resolves a report mention or selected text, with filename search fallback.
+  final void Function(SessionFileReference reference)? onFind;
+
+  /// Resolves a report mention before opening the matched file's folder.
+  final void Function(SessionFileReference reference)? onFindParent;
 
   /// Asks for the once-per-attach gate probe, raised the first time a mention
   /// actually needs the answer.
@@ -97,5 +105,7 @@ class SessionFileLinkScope extends InheritedWidget {
       oldWidget.gate != gate ||
       oldWidget.sessionKey != sessionKey ||
       oldWidget.onOpen != onOpen ||
+      oldWidget.onFind != onFind ||
+      oldWidget.onFindParent != onFindParent ||
       oldWidget.onProbeNeeded != onProbeNeeded;
 }

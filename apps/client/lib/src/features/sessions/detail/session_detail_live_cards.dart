@@ -556,7 +556,7 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
           widget.activity.agentsDone!,
           widget.activity.agentsTotal!,
         ),
-      if (tokenFigure != null) l10n.tokensCount(_formatTokenCount(tokenFigure)),
+      if (tokenFigure != null) l10n.tokensCount(formatTokenCount(tokenFigure)),
       if (widget.activity.toolCalls case final calls?) l10n.toolsCount(calls),
       if (widget.activity.exitCode case final code?) l10n.exitCode(code),
     ];
@@ -1183,16 +1183,6 @@ String _formatElapsedMilliseconds(int milliseconds) {
   final minutes = seconds ~/ 60;
   if (seconds < 3600) return '${minutes}m ${seconds % 60}s';
   return '${minutes ~/ 60}h ${minutes % 60}m';
-}
-
-String _formatTokenCount(int tokens) {
-  if (tokens < 1000) return '$tokens';
-  if (tokens < 1000000) {
-    final value = (tokens / 1000).toStringAsFixed(tokens < 100000 ? 1 : 0);
-    return '${value.replaceFirst(RegExp(r'\.0$'), '')}k';
-  }
-  final value = (tokens / 1000000).toStringAsFixed(1);
-  return '${value.replaceFirst(RegExp(r'\.0$'), '')}m';
 }
 
 /// Inline read-only reason shown above the composer when the app is connected

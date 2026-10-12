@@ -11,7 +11,33 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Open workspace file links and inline-code filenames directly from reports,
+  including tables. Selected text now offers “Find file in workspace”; Ctrl/Cmd-click
+  uses the same lookup, with a chooser for ambiguous filenames and clear partial
+  search results.
+- Open delivered Markdown, HTML, source code, and other supported text files
+  beside the conversation, with Download still available.
+- On wide landscape screens, Status and Files open as session-scoped tabs in
+  the right panel. The Files explorer stays available beside opened previews;
+  portrait and smaller layouts retain the main session view.
+- Right-click or long-press a session tab or roster row to rename the session.
+
+### Changed
+
+- Workspace dividers can use the available window width without the previous
+  720 px file-panel and 480 px roster caps.
+- Session token counts use compact k, M, and B units, and the transcript filter
+  is now named “Hide tool calls.”
+
 ### Fixed
+
+- Hiding tool calls keeps delivered files visible, with their Open and Download
+  actions available alongside the report.
+- Delivered filenames remain readable in narrow conversations and phone layouts.
+- Resizing a portrait Status or Files view keeps that view open instead of
+  replacing it with a previously opened file.
 
 - A terminal can join a Codex session the app is running without interrupting it.
   Restarting Codex marks unfinished app turns interrupted and reconnects on the

@@ -33,11 +33,11 @@ class FilePanesState {
       final decoded = jsonDecode(value);
       if (decoded is! Map<String, dynamic>) return empty;
       final rawPanes = decoded['panes'];
-      final panes = <FilePaneKey>[
+      final panes = <SidePaneKey>[
         if (rawPanes is List)
           for (final entry in rawPanes)
             if (entry is Map<String, dynamic>)
-              if (WorkspacePaneKey.fromJson(entry) case final FilePaneKey pane)
+              if (WorkspacePaneKey.fromJson(entry) case final SidePaneKey pane)
                 pane,
       ];
       final rawActive = decoded['active'];
@@ -65,7 +65,7 @@ class FilePanesState {
   static const FilePanesState empty = FilePanesState();
 
   /// Every open file pane, in strip order, across all sessions.
-  final List<FilePaneKey> panes;
+  final List<SidePaneKey> panes;
 
   /// Session key to the pane key active within that session's strip.
   final Map<String, String> activeBySession;
@@ -74,13 +74,13 @@ class FilePanesState {
   ///
   /// File working sets are per session: switching the session tab swaps the
   /// strip's contents rather than carrying one session's files into another.
-  List<FilePaneKey> forSession(SessionDetailKey session) => [
+  List<SidePaneKey> forSession(SessionDetailKey session) => [
     for (final pane in panes)
       if (pane.session == session) pane,
   ];
 
   /// The active pane within [session], or null when that session has none.
-  FilePaneKey? activeFor(SessionDetailKey session) {
+  SidePaneKey? activeFor(SessionDetailKey session) {
     final wanted = activeBySession[_sessionKey(session)];
     for (final pane in panes) {
       if (pane.session == session && pane.key == wanted) return pane;
@@ -100,8 +100,13 @@ class FilePanesState {
 
   /// Opens [path] in [session], or activates it when already open.
   FilePanesState opened(SessionDetailKey session, String path) {
-    final pane = FilePaneKey(session: session, path: path);
-    final next = <FilePaneKey>[
+    return openedPane(FilePaneKey(session: session, path: path));
+  }
+
+  /// Opens or activates any right-panel tab.
+  FilePanesState openedPane(SidePaneKey pane) {
+    final session = pane.session;
+    final next = <SidePaneKey>[
       for (final existing in panes)
         if (existing.key != pane.key) existing,
       pane,
@@ -124,8 +129,8 @@ class FilePanesState {
   static const int workingSetLimit = 200;
 
   /// [next] trimmed to [workingSetLimit], oldest first, active tabs spared.
-  static List<FilePaneKey> _bounded(
-    List<FilePaneKey> next,
+  static List<SidePaneKey> _bounded(
+    List<SidePaneKey> next,
     Map<String, String> active,
   ) {
     if (next.length <= workingSetLimit) return next;
@@ -143,7 +148,7 @@ class FilePanesState {
   }
 
   /// Closes one file pane.
-  FilePanesState closed(FilePaneKey pane) {
+  FilePanesState closed(SidePaneKey pane) {
     final remaining = [
       for (final existing in panes)
         if (existing.key != pane.key) existing,
@@ -170,7 +175,7 @@ class FilePanesState {
   }
 
   /// Makes [pane] active within its own session.
-  FilePanesState activated(FilePaneKey pane) => FilePanesState(
+  FilePanesState activated(SidePaneKey pane) => FilePanesState(
     panes: panes,
     activeBySession: {..._active, _sessionKey(pane.session): pane.key},
   );
@@ -214,7 +219,7 @@ class FilePanesState {
 
   /// Returns a copy with [panes] and [activeBySession] replaced.
   FilePanesState copyWith({
-    List<FilePaneKey>? panes,
+    List<SidePaneKey>? panes,
     Map<String, String>? activeBySession,
   }) => FilePanesState(
     panes: panes ?? this.panes,

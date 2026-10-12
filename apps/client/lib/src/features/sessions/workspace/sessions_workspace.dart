@@ -18,6 +18,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_cont
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_tabs_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/retained_session_pages.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/side_pane_scope.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_overview.dart';
@@ -47,18 +48,14 @@ class SessionsWorkspace extends ConsumerStatefulWidget {
   const SessionsWorkspace({this.detailBuilder, super.key});
 
   /// The detail pane's workable minimum beside the file pane.
-  static const double detailMinPaneWidth = WorkspaceFrame.mainMinPaneWidth;
+  static const double detailMinPaneWidth = 280;
 
   /// The file pane's resting minimum. Narrower than this and a source line is
   /// no longer legible beside its gutter, so the pane collapses instead.
-  static const double minFilePaneWidth = 320;
+  static const double minFilePaneWidth = 240;
 
   /// Dragging the file pane below this snaps it to the document rail.
-  static const double fileCollapseSnapWidth = 240;
-
-  /// The file pane never grows past `windowWidth - detailMinPaneWidth`, so the
-  /// transcript it was opened from stays readable beside it.
-  static const double maxFilePaneWidth = 720;
+  static const double fileCollapseSnapWidth = 160;
 
   /// How long a resize settles before it is written to the store.
   static const Duration resizePersistDebounce =
@@ -129,9 +126,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace> {
   /// [available] is the whole window; the frame's sidebar footprint comes off
   /// it first.
   double _clampFileWidth(double width, double available) {
-    var upper = SessionsWorkspace.maxFilePaneWidth;
-    final windowUpper = available - SessionsWorkspace.detailMinPaneWidth;
-    if (windowUpper < upper) upper = windowUpper;
+    var upper = available - SessionsWorkspace.detailMinPaneWidth;
     if (upper < SessionsWorkspace.minFilePaneWidth) {
       upper = SessionsWorkspace.minFilePaneWidth;
     }
@@ -364,11 +359,12 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace> {
         final activeSession = active == null
             ? null
             : SessionDetailKey(tool: active.tool, sessionId: active.id);
-        final fileState =
-            ref.watch(filePanesControllerProvider).valueOrNull ??
-            FilePanesState.empty;
+        final fileAsync = ref.watch(filePanesControllerProvider);
+        final fileState = fileAsync.isLoading || fileAsync.hasError
+            ? FilePanesState.empty
+            : fileAsync.valueOrNull ?? FilePanesState.empty;
         final filePanes = activeSession == null
-            ? const <FilePaneKey>[]
+            ? const <SidePaneKey>[]
             : fileState.forSession(activeSession);
         // The split is an Expanded-width affordance. Below that the compact
         // route carries the file instead, so a narrow window never has to fit
@@ -401,107 +397,113 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace> {
             SessionPaneKey(session: pane.session).key,
           ),
         );
+        final sideAvailable = canShowSidePane(
+          MediaQuery.sizeOf(context),
+          available,
+          drawerLayout: drawerLayout,
+        );
         final showFilePane =
-            !drawerLayout &&
-            activeSession != null &&
-            hasReachableFilePane &&
-            available >=
-                SessionsWorkspace.detailMinPaneWidth +
-                    SessionsWorkspace.minFilePaneWidth;
-        return Material(
-          color: tokens.canvas,
-          child: SafeArea(
-            child: Row(
-              children: [
-                Expanded(
-                  child: WorkspaceFocusablePane(
-                    paneKey: sessionPaneKey,
-                    enabled: showFilePane,
-                    child: Column(
-                      children: [
-                        OpenSessionsTabStrip(
-                          refs: open.refs,
-                          activeKey: active?.key,
-                          onOverview: _showOverview,
-                          unreadCompletionKeys: ref.watch(
-                            workspaceUnreadCompletionKeysProvider,
-                          ),
-                          onCloseAll: () => unawaited(_closeAllTabs()),
-                          onOpenRoster: drawerLayout ? frame?.openDrawer : null,
-                          showLiveStatus:
-                              listState.cachedRoster == null &&
-                              listState.status != SessionListStatus.error &&
-                              listState.status != SessionListStatus.loading,
-                          onReorder: (oldIndex, newIndex) => ref
-                              .read(openSessionsControllerProvider.notifier)
-                              .reorder(oldIndex, newIndex),
-                          onSelect: (key) => ref
-                              .read(openSessionsControllerProvider.notifier)
-                              .activate(key),
-                          onClose: (key) => unawaited(
-                            ref
+            sideAvailable && activeSession != null && hasReachableFilePane;
+        return SidePaneScope(
+          available: sideAvailable,
+          expand: _expandFilePane,
+          child: Material(
+            color: tokens.canvas,
+            child: SafeArea(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: WorkspaceFocusablePane(
+                      paneKey: sessionPaneKey,
+                      enabled: showFilePane,
+                      child: Column(
+                        children: [
+                          OpenSessionsTabStrip(
+                            refs: open.refs,
+                            activeKey: active?.key,
+                            onOverview: _showOverview,
+                            unreadCompletionKeys: ref.watch(
+                              workspaceUnreadCompletionKeysProvider,
+                            ),
+                            onCloseAll: () => unawaited(_closeAllTabs()),
+                            onOpenRoster: drawerLayout
+                                ? frame?.openDrawer
+                                : null,
+                            showLiveStatus:
+                                listState.cachedRoster == null &&
+                                listState.status != SessionListStatus.error &&
+                                listState.status != SessionListStatus.loading,
+                            onReorder: (oldIndex, newIndex) => ref
                                 .read(openSessionsControllerProvider.notifier)
-                                .close(key),
+                                .reorder(oldIndex, newIndex),
+                            onSelect: (key) => ref
+                                .read(openSessionsControllerProvider.notifier)
+                                .activate(key),
+                            onClose: (key) => unawaited(
+                              ref
+                                  .read(openSessionsControllerProvider.notifier)
+                                  .close(key),
+                            ),
+                            promptTargetKey: promptTargetKey,
                           ),
-                          promptTargetKey: promptTargetKey,
-                        ),
-                        Expanded(
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              RetainedSessionPages(
-                                source: activeSource,
-                                open: open,
-                                visibleKeys: active == null
-                                    ? const {}
-                                    : {active.key},
-                                builder: buildDetail,
-                              ),
-                              if (active == null)
-                                hasActiveBrokerClient
-                                    ? WorkspaceOverview(onOpen: _openSession)
-                                    : const SessionsEmptyState(
-                                        hasActiveBrokerClient: false,
-                                        creationAvailability:
-                                            SessionCreationAvailability
-                                                .checking,
-                                      ),
-                            ],
+                          Expanded(
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                RetainedSessionPages(
+                                  source: activeSource,
+                                  open: open,
+                                  visibleKeys: active == null
+                                      ? const {}
+                                      : {active.key},
+                                  builder: buildDetail,
+                                ),
+                                if (active == null)
+                                  hasActiveBrokerClient
+                                      ? WorkspaceOverview(onOpen: _openSession)
+                                      : const SessionsEmptyState(
+                                          hasActiveBrokerClient: false,
+                                          creationAvailability:
+                                              SessionCreationAvailability
+                                                  .checking,
+                                        ),
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (showFilePane) ...[
-                  if (_fileCollapsed)
-                    WorkspaceDocumentRail(
-                      panes: filePanes,
-                      separatorColor: tokens.separator,
-                      tokens: tokens,
-                      onExpand: _expandFilePane,
-                    )
-                  else ...[
-                    WorkspaceSplitSash(
-                      key: const Key('workspace-file-split-sash'),
-                      separatorColor: tokens.separator,
-                      onDragStart: _onFileDragStart,
-                      onDragDelta: (dx) => _onFileDragDelta(dx, available),
-                      onDragEnd: _schedulePersist,
-                      onReset: _resetFileSplit,
-                      onStep: (delta) => _stepFileSplit(delta, available),
-                    ),
-                    SizedBox(
-                      key: const Key('workspace-file-pane'),
-                      width: fileWidth,
-                      child: WorkspaceFocusablePane(
-                        paneKey: fileState.activeFor(activeSession)?.key,
-                        child: FilePaneSurface(session: activeSession),
+                        ],
                       ),
                     ),
+                  ),
+                  if (showFilePane) ...[
+                    if (_fileCollapsed)
+                      WorkspaceDocumentRail(
+                        panes: filePanes,
+                        separatorColor: tokens.separator,
+                        tokens: tokens,
+                        onExpand: _expandFilePane,
+                      )
+                    else ...[
+                      WorkspaceSplitSash(
+                        key: const Key('workspace-file-split-sash'),
+                        separatorColor: tokens.separator,
+                        onDragStart: _onFileDragStart,
+                        onDragDelta: (dx) => _onFileDragDelta(dx, available),
+                        onDragEnd: _schedulePersist,
+                        onReset: _resetFileSplit,
+                        onStep: (delta) => _stepFileSplit(delta, available),
+                      ),
+                      SizedBox(
+                        key: const Key('workspace-file-pane'),
+                        width: fileWidth,
+                        child: WorkspaceFocusablePane(
+                          paneKey: fileState.activeFor(activeSession)?.key,
+                          child: FilePaneSurface(session: activeSession),
+                        ),
+                      ),
+                    ],
                   ],
                 ],
-              ],
+              ),
             ),
           ),
         );

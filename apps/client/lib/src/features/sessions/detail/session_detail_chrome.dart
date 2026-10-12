@@ -67,13 +67,25 @@ class _TelemetryPanel extends StatelessWidget {
           _describeContext(telemetry),
         ),
       if (telemetry.inputTokens case final value?)
-        (l10n.sessionDetailTelemetryInput, _formatGroupedCount(value)),
+        (
+          l10n.sessionDetailTelemetryInput,
+          l10n.sessionTokenCount(formatTokenCount(value)),
+        ),
       if (telemetry.outputTokens case final value?)
-        (l10n.sessionDetailTelemetryOutput, _formatGroupedCount(value)),
+        (
+          l10n.sessionDetailTelemetryOutput,
+          l10n.sessionTokenCount(formatTokenCount(value)),
+        ),
       if (telemetry.cacheReadTokens case final value?)
-        (l10n.sessionDetailTelemetryCacheRead, _formatGroupedCount(value)),
+        (
+          l10n.sessionDetailTelemetryCacheRead,
+          l10n.sessionTokenCount(formatTokenCount(value)),
+        ),
       if (telemetry.cacheWriteTokens case final value?)
-        (l10n.sessionDetailTelemetryCacheWrite, _formatGroupedCount(value)),
+        (
+          l10n.sessionDetailTelemetryCacheWrite,
+          l10n.sessionTokenCount(formatTokenCount(value)),
+        ),
       if (telemetry.cost case final value?)
         (l10n.sessionDetailTelemetryCost, '\$${value.toStringAsFixed(4)}'),
       if (telemetry.totalRuntimeMs case final value?)
@@ -122,17 +134,23 @@ class _TelemetryPanel extends StatelessWidget {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      label,
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: context.tokens.textSecondary,
+                    Flexible(
+                      child: Text(
+                        label,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: context.tokens.textSecondary,
+                        ),
                       ),
                     ),
-                    Text(
-                      value,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: context.tokens.textPrimary,
-                        fontFeatures: const [FontFeature.tabularFigures()],
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        value,
+                        textAlign: TextAlign.end,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: context.tokens.textPrimary,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
                       ),
                     ),
                   ],
@@ -157,19 +175,8 @@ class _TelemetryPanel extends StatelessWidget {
     final max = telemetry.contextMaxTokens;
     if (used == null || max == null) return percent;
     return '$percent  '
-        '(${_formatGroupedCount(used)} / ${_formatGroupedCount(max)})';
+        '(${formatTokenCount(used)} / ${formatTokenCount(max)})';
   }
-}
-
-/// Renders a count with thousands separators for the detailed panel.
-String _formatGroupedCount(int value) {
-  final digits = value.abs().toString();
-  final buffer = StringBuffer(value < 0 ? '-' : '');
-  for (var index = 0; index < digits.length; index++) {
-    if (index > 0 && (digits.length - index) % 3 == 0) buffer.write(',');
-    buffer.write(digits[index]);
-  }
-  return buffer.toString();
 }
 
 /// Bottom inset below the chat composer, in logical pixels.

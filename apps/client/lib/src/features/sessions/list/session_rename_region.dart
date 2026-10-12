@@ -1,0 +1,210 @@
+import 'dart:async';
+
+import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+/// Shared context menu for session tabs and roster rows.
+class SessionRenameRegion extends StatelessWidget {
+  /// Adds right-click, long-press and accessible rename to [child].
+  const SessionRenameRegion({
+    required this.tool,
+    required this.sessionId,
+    required this.title,
+    required this.child,
+    super.key,
+  });
+
+  /// Owning agent.
+  final String tool;
+
+  /// Native session identity.
+  final String sessionId;
+
+  /// Known title, before presentation placeholders.
+  final String title;
+
+  /// Navigation surface whose normal tap remains unchanged.
+  final Widget child;
+
+  Future<void> _menu(
+    BuildContext context,
+    Offset position,
+  ) async {
+    final container = ProviderScope.containerOf(context, listen: false);
+    final source = RosterSource.of(container.read(activeBrokerProfileProvider));
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final selected = await showMenu<bool>(
+      context: context,
+      position: RelativeRect.fromRect(
+        position & Size.zero,
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: true,
+          child: Text(AppLocalizations.of(context).sessionDetailRenameTooltip),
+        ),
+      ],
+    );
+    if ((selected ?? false) && context.mounted) await _rename(context, source);
+  }
+
+  Future<void> _rename(BuildContext context, RosterSource? source) async {
+    final ref = ProviderScope.containerOf(context, listen: false);
+    final l10n = AppLocalizations.of(context);
+    if (source == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.sessionRenameRequiresServer)));
+      return;
+    }
+    if (RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
+      return;
+    }
+    bool current() =>
+        context.mounted &&
+        RosterSource.of(ref.read(activeBrokerProfileProvider)) == source;
+    final next = await WebHandoffParticipants.instance.holdOpen(
+      () => showDialog<String>(
+        context: context,
+        builder: (_) => _RenameDialog(
+          initial: knownSessionTitle([title], sessionId: sessionId) ?? '',
+        ),
+      ),
+    );
+    if (next == null || !current()) return;
+    var message = l10n.sessionRenameRejected;
+    try {
+      final client = await ref.read(brokerClientProvider.future);
+      if (!current()) return;
+      if (client == null) {
+        message = l10n.sessionRenameRequiresServer;
+      } else {
+        final result = await client.renameSession(
+          tool,
+          sessionId,
+          next.trim().isEmpty ? null : next.trim(),
+        );
+        if (!current()) return;
+        if (result.ok) {
+          final accepted = result.session?.title ?? result.title ?? next.trim();
+          ref
+              .read(sessionListControllerProvider.notifier)
+              .renameSessionTitle(tool, sessionId, accepted);
+          await ref.read(openSessionsControllerProvider.future);
+          if (!current()) return;
+          ref
+              .read(openSessionsControllerProvider.notifier)
+              .renameSessionTitle(tool, sessionId, accepted);
+          final provider = sessionDetailControllerProvider(
+            SessionDetailKey(tool: tool, sessionId: sessionId),
+          );
+          if (ref.exists(provider)) {
+            ref.read(provider.notifier).acceptRenamedTitle(source, accepted);
+          }
+          message = l10n.sessionRenameSucceeded;
+        }
+      }
+    } on BrokerException {
+      message = l10n.sessionRenameRejected;
+    } on Object {
+      message = l10n.failureLeadRenameSession;
+    }
+    if (!context.mounted || !current()) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    customSemanticsActions: {
+      CustomSemanticsAction(
+        label: AppLocalizations.of(context).sessionDetailRenameTooltip,
+      ): () => unawaited(
+        _rename(
+          context,
+          RosterSource.of(
+            ProviderScope.containerOf(
+              context,
+              listen: false,
+            ).read(activeBrokerProfileProvider),
+          ),
+        ),
+      ),
+    },
+    child: GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onSecondaryTapUp: (event) =>
+          unawaited(_menu(context, event.globalPosition)),
+      onLongPressStart: (event) =>
+          unawaited(_menu(context, event.globalPosition)),
+      child: child,
+    ),
+  );
+}
+
+class _RenameDialog extends StatefulWidget {
+  const _RenameDialog({required this.initial});
+  final String initial;
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final _text = TextEditingController(text: widget.initial)
+    ..selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: widget.initial.length,
+    );
+  bool get _changed => _text.text.trim() != widget.initial.trim();
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return AlertDialog(
+      title: Text(l10n.sessionDetailRenameTooltip),
+      content: TextField(
+        key: const Key('session-rename-dialog-input'),
+        controller: _text,
+        autofocus: true,
+        decoration: InputDecoration(
+          labelText: l10n.sessionDetailRenameFieldLabel,
+        ),
+        onChanged: (_) => setState(() {}),
+        onSubmitted: (_) {
+          if (_changed) Navigator.of(context).pop(_text.text);
+        },
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(l10n.cancel),
+        ),
+        TextButton(
+          onPressed: _changed
+              ? () => Navigator.of(context).pop(_text.text)
+              : null,
+          child: Text(l10n.save),
+        ),
+      ],
+    );
+  }
+}

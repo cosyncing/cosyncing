@@ -203,7 +203,7 @@ void main() {
       );
       expectFullySelected(tester, 'Driving');
       expectFullySelected(tester, 'Output');
-      expectFullySelected(tester, '567');
+      expectFullySelected(tester, '567 tokens');
       expectFullySelected(tester, 'Session actions');
       expect(tester.takeException(), isNull);
     });

@@ -450,3 +450,32 @@ class UploadCompleteResult {
     'expiresAt': expiresAt,
   };
 }
+
+/// Bounded workspace filename lookup; [truncated] means more matches may exist.
+class FsSearchResult {
+  /// Creates a search result.
+  const FsSearchResult({
+    required this.query,
+    required this.matches,
+    this.truncated = false,
+  });
+
+  /// Decodes the broker result.
+  factory FsSearchResult.fromJson(Map<String, dynamic> json) => FsSearchResult(
+    query: json['query'] as String? ?? '',
+    matches: [
+      for (final item in json['matches'] as List? ?? const [])
+        FsNodeInfo.fromJson(Map<String, dynamic>.from(item as Map)),
+    ],
+    truncated: json['truncated'] == true,
+  );
+
+  /// Requested relative filename or path suffix.
+  final String query;
+
+  /// Matching files, with workspace-relative paths.
+  final List<FsNodeInfo> matches;
+
+  /// The search reached a work or result limit.
+  final bool truncated;
+}
