@@ -40,6 +40,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
+import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -441,6 +442,65 @@ void main() {
           .open(SessionDetailKey(tool: tool, sessionId: id), path);
       await tester.pumpAndSettle();
     }
+
+    for (final secondary in [false, true]) {
+      testWidgets(
+        'a roster ${secondary ? "right click" : "long press"} '
+        'exposes rename without opening the row',
+        (
+          tester,
+        ) async {
+          final container = await openSession(tester);
+          final before = container
+              .read(openSessionsControllerProvider)
+              .requireValue
+              .activeKey;
+          final row = find.byKey(const Key('session-row-codex/b'));
+          if (secondary) {
+            await tester.tap(
+              row,
+              buttons: kSecondaryMouseButton,
+              kind: PointerDeviceKind.mouse,
+            );
+          } else {
+            await tester.longPress(row);
+          }
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Rename session'));
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const Key('session-rename-dialog-input')),
+            findsOneWidget,
+          );
+          expect(
+            container
+                .read(openSessionsControllerProvider)
+                .requireValue
+                .activeKey,
+            before,
+          );
+          await tester.tap(find.text('Cancel'));
+          await tester.pumpAndSettle();
+        },
+      );
+    }
+
+    testWidgets('the file pane can grow beyond the former 720 pixel cap', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      await tester.drag(
+        find.byKey(const Key('workspace-file-split-sash')),
+        const Offset(-900, 0),
+      );
+      await tester.pumpAndSettle();
+      final width = tester
+          .getSize(find.byKey(const Key('workspace-file-pane')))
+          .width;
+      expect(width, greaterThan(720));
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets('with no file open there is no second pane and no sash', (
       tester,
@@ -1883,23 +1943,29 @@ void main() {
       expect(rosterWidth(tester), 440);
     });
 
-    testWidgets('dragging right grows the roster and clamps at 480', (
-      tester,
-    ) async {
-      await tester.binding.setSurfaceSize(const Size(1200, 800));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await useWideSurface(tester);
-      await tester.pumpWidget(buildSubject(const []));
-      await tester.pumpAndSettle();
-      expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
+    testWidgets(
+      'dragging right grows the roster and uses the available window width',
+      (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(const Size(1200, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await useWideSurface(tester);
+        await tester.pumpWidget(buildSubject(const []));
+        await tester.pumpAndSettle();
+        expect(rosterWidth(tester), WorkspaceFrame.defaultSidebarWidth);
 
-      await dragSash(tester, 60);
-      expect(rosterWidth(tester), greaterThan(320));
-      expect(rosterWidth(tester), lessThanOrEqualTo(480));
+        await dragSash(tester, 60);
+        expect(rosterWidth(tester), greaterThan(320));
+        expect(
+          rosterWidth(tester),
+          lessThanOrEqualTo(1200 - WorkspaceFrame.mainMinPaneWidth),
+        );
 
-      await dragSash(tester, 1000);
-      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
-    });
+        await dragSash(tester, 1000);
+        expect(rosterWidth(tester), 1200 - WorkspaceFrame.mainMinPaneWidth);
+      },
+    );
 
     testWidgets('split sash stays neutral while hovered', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
@@ -1986,14 +2052,14 @@ void main() {
       await tester.pumpAndSettle();
 
       await dragSash(tester, 1000);
-      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
+      expect(rosterWidth(tester), 1200 - WorkspaceFrame.mainMinPaneWidth);
 
       await dragSash(tester, -1000);
       expect(expandTab, findsOneWidget);
 
       await tester.tap(expandTab);
       await tester.pumpAndSettle();
-      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
+      expect(rosterWidth(tester), 1200 - WorkspaceFrame.mainMinPaneWidth);
     });
 
     testWidgets('double-clicking the sash resets to the default width', (
@@ -2006,7 +2072,7 @@ void main() {
       await tester.pumpAndSettle();
 
       await dragSash(tester, 1000);
-      expect(rosterWidth(tester), WorkspaceFrame.maxSidebarWidth);
+      expect(rosterWidth(tester), 1200 - WorkspaceFrame.mainMinPaneWidth);
 
       await tester.tap(sash);
       await tester.pump(const Duration(milliseconds: 50));
@@ -2037,7 +2103,7 @@ void main() {
 
       await tester.pump(SessionsWorkspace.resizePersistDebounce);
       expect(store.saveCount, savesBefore + 1);
-      expect(store.saved?.width, WorkspaceFrame.maxSidebarWidth);
+      expect(store.saved?.width, 1200 - WorkspaceFrame.mainMinPaneWidth);
       expect(store.saved?.collapsed, isFalse);
     });
 

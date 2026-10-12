@@ -1383,7 +1383,7 @@
   "@sessionComposerMenuSlashCommands": {
     "description": "Composer overflow menu item that opens the slash-command picker."
   },
-  "sessionComposerMenuReportView": "Report view",
+  "sessionComposerMenuReportView": "Hide tool calls",
   "@sessionComposerMenuReportView": {
     "description": "Composer overflow menu item toggling the report (user/model only) transcript filter."
   },
@@ -1483,7 +1483,7 @@
   "@sessionDetailTranscriptEmpty": {
     "description": "Genuine empty transcript shown only after authoritative history arrives with no messages."
   },
-  "sessionDetailTranscriptReportEmpty": "No user or assistant messages match report view.",
+  "sessionDetailTranscriptReportEmpty": "No user or assistant messages to show.",
   "@sessionDetailTranscriptReportEmpty": {
     "description": "Empty result shown when report view filters out a non-empty transcript."
   },
@@ -2709,6 +2709,13 @@
       "total": {
         "type": "int"
       }
+    }
+  },
+  "sessionTokenCount": "{count} tokens",
+  "@sessionTokenCount": {
+    "description": "Compact token count in session status, including the unit.",
+    "placeholders": {
+      "count": { "type": "String" }
     }
   },
   "tokensCount": "↓{count} tokens",
@@ -4663,7 +4670,7 @@
   "toolDisplayPageTitle": "Tool display",
   "toolDisplayIntro": "Choose how much work detail appears in every session. You can still expand individual cards in the first two modes.",
   "toolDisplayResponsiveTitle": "Responsive",
-  "toolDisplayResponsiveBody": "Start tool cards collapsed. Session transcripts include Expand all and Report view controls.",
+  "toolDisplayResponsiveBody": "Start tool cards collapsed. Session transcripts include Expand all and Hide tool calls controls.",
   "toolDisplayCollapsedTitle": "Collapsed tool cards",
   "toolDisplayCollapsedBody": "Start every tool card collapsed.",
   "toolDisplayFinalTitle": "Final messages only",
@@ -6234,5 +6241,12 @@
   },
   "themeQuietWorkspaceName": "Quiet Workspace",
   "themeQuietWorkspaceDescription": "Quiet neutral surfaces with green and amber activity cues.",
-  "usageEnhancementLeaders": "Leaders"
+  "usageEnhancementLeaders": "Leaders",
+  "artifactPreviewTooLarge": "This file is too large to preview. Download it to read the full file.",
+  "artifactPreviewFailed": "Could not open this file. Retry or download it from the message.",
+  "sessionSelectionFindFile": "Find file in workspace",
+  "sessionFileSearchLoading": "Finding matching files…",
+  "sessionFileSearchNoMatches": "No matching files found.",
+  "sessionFileSearchChoose": "Choose a file to open.",
+  "sessionFileSearchPartial": "Search reached its limit. More matches may exist; use a more specific path to narrow the search."
 }

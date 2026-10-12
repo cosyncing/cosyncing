@@ -40,18 +40,24 @@ Text the parser does not recognize must survive byte for byte. Inline scanning i
 also length-bounded, because unbounded rescans of pathological input are
 quadratic.
 
-Tappable links are an **allowlist of `http` and `https`**, not a blocklist of
-unwanted schemes. `file:`, `mailto:`, absolute and relative device paths, and
-every scheme nobody has thought of yet stay plain text by default. A blocklist
-here fails open, and the thing it would fail open into is opening arbitrary
-model-authored paths on the user's machine.
+Web links allow only `http` and `https` and use the external URL launcher.
+Explicit local Markdown targets and path-like inline code (including table cells)
+use the session's workspace file resolver. Local `file:` URLs are decoded as broker
+host paths; they never open files on the viewing device. Other URI schemes remain
+plain text. Workspace links follow the same browsing capability gate as tool paths.
 
-Local file references are therefore deliberately inert for now. Making them
-useful is what [open workspace file references](../project/roadmap.md) exists to
-do properly — resolved against the broker-owned workspace through its jailed
-read-only file API, with traversal and symlink escape rejected there rather than
-re-litigated in the client. That work likewise rejects host-local `file:` URLs.
-Until it lands, such references stay selectable, copyable text.
+Resolution first stats the exact path, then checks matching structured paths from
+that session's tool history and delivered-file metadata. If neither resolves, an
+on-demand broker filename search looks for an exact basename or path suffix. One
+complete match opens directly; ambiguous or partial results show a chooser. The
+selected-text menu's **Find file in workspace** action and Ctrl/Cmd-click of a
+selection use this same flow. Ordinary prose is not automatically scanned.
+
+The read-only search API shares the existing file permissions and workspace gate.
+It rejects traversal, skips symlinks and common dependency/cache directories, and
+bounds entries, depth, elapsed time and matches. The UI reports partial results
+instead of assuming they are complete. Files open beside the transcript on wide
+landscape screens and through the compact file route on smaller screens.
 
 ## Session telemetry
 

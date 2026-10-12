@@ -1219,10 +1219,8 @@ List<MarkdownTableAlignment>? _parseDelimiterRow(String line) {
 
 /// Whether [href] is an http/https URL the transcript may open on tap.
 ///
-/// This is the single source of truth for the product rule that only web URLs
-/// are tappable. `file://`, absolute or relative device paths, `mailto:`, and
-/// every other scheme return false, so the renderer leaves them as plain text.
-/// Opening local files is a future roadmap item and deliberately not enabled.
+/// Only these schemes use the external URL launcher. Workspace references
+/// have a separate session-scoped resolver; other URI schemes stay inert.
 bool isTranscriptHttpUrl(String? href) {
   if (href == null) {
     return false;

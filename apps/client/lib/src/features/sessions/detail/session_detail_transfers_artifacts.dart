@@ -762,7 +762,7 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
     final contentHash = descriptor.contentHash ?? '';
     final size = descriptor.size;
     final hasDownloadOrFetch = descriptor.isDownloadable;
-    final hasPreview = descriptor.isHtmlPreviewCandidate;
+    final hasPreview = descriptor.isTextPreviewCandidate;
     final isBusy = _artifactActionIsBusy(actionState.phase);
     final exportAttachmentMetadata = _artifactExportAttachmentMetadata(
       l10n,
@@ -774,7 +774,6 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
         (descriptor.isInlineDataUrl || hasActiveBrokerClient);
     final canPreview =
         hasPreview &&
-        isSessionArtifactPreviewAvailable &&
         hasDownloadOrFetch &&
         !isBusy &&
         (descriptor.isInlineDataUrl || hasActiveBrokerClient);

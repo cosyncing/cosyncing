@@ -563,8 +563,17 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Copy'), findsOneWidget);
-      expect(find.text('Fork from here'), findsOneWidget);
-      expect(find.text('Details'), findsOneWidget);
+      final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+        find.byType(AdaptiveTextSelectionToolbar),
+      );
+      expect(
+        menu.buttonItems!.map((item) => item.label),
+        containsAll([
+          'Fork from here',
+          'Details',
+          'Find file in workspace',
+        ]),
+      );
       expect(find.byType(SelectionArea), findsWidgets);
     });
 
@@ -866,9 +875,10 @@ void main() {
       expect(find.text('Fork from here'), findsOneWidget);
     });
 
-    testWidgets('report view hides tools and expand all reveals details', (
+    testWidgets('hiding tools preserves delivered files and report text', (
       tester,
     ) async {
+      useRoomyTestViewport(tester);
       await tester.pumpWidget(
         buildSessionDetailTestPage(
           events: [
@@ -907,6 +917,20 @@ void main() {
                 id: 'model-1',
                 type: AgentMessageType.modelOutput,
                 raw: {'type': 'model-output', 'text': 'Report ready'},
+              ),
+            ),
+            const MessageWireEvent(
+              seq: 5,
+              message: AgentMessage(
+                id: 'report-file',
+                type: AgentMessageType.fileArtifact,
+                raw: {
+                  'type': 'file-artifact',
+                  'artifactKey': 'report-file',
+                  'name': 'report.zip',
+                  'mimeType': 'application/zip',
+                  'url': 'data:application/zip;base64,UEs=',
+                },
               ),
             ),
           ],
@@ -955,6 +979,12 @@ void main() {
         find.byKey(const ValueKey('session-message-context-model-1')),
         findsOneWidget,
       );
+      final download = find.byKey(
+        const Key('session-detail-chat-artifact-download-report-file'),
+      );
+      expect(download, findsOneWidget);
+      expect(tester.widget<TextButton>(download).onPressed, isNotNull);
+      expect(find.text('report.zip'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('session-message-context-thinking-1')),
         findsNothing,

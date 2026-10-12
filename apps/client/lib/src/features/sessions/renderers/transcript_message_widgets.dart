@@ -322,7 +322,7 @@ class _PermissionRequestDetailState extends State<_PermissionRequestDetail> {
   }
 }
 
-/// One-line file-artifact presentation with the existing download widget.
+/// Responsive file-artifact presentation with the existing action widgets.
 ///
 /// An artifact the user SENT (one carrying a `userMessageKey`) reads user-side
 /// here too: right-aligned on the user surface colour. This is the fallback for
@@ -372,9 +372,67 @@ class _TranscriptArtifactRow extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: LayoutBuilder(
               builder: (context, constraints) {
-                final compactAtLargeText =
-                    MediaQuery.textScalerOf(context).scale(1) >= 1.5 &&
-                    constraints.maxWidth < 400;
+                final nameStyle = theme.textTheme.bodySmall?.copyWith(
+                  color: tokens.textPrimary,
+                  fontWeight: FontWeight.w600,
+                );
+                final compact =
+                    constraints.maxWidth <
+                    520 * MediaQuery.textScalerOf(context).scale(1);
+                if (compact) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.insert_drive_file_outlined,
+                            size: 16,
+                            color: tokens.textSecondary,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: nameStyle,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (sentToYou || size != null) ...[
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            if (sentToYou)
+                              MetadataChip(
+                                label: l10n.sessionArtifactSentToYou,
+                              ),
+                            if (size != null)
+                              Text(
+                                l10n.bytesCount(size),
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: tokens.textTertiary,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
+                      if (action != null) ...[
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: action,
+                        ),
+                      ],
+                    ],
+                  );
+                }
                 return Row(
                   children: [
                     Icon(
@@ -395,10 +453,7 @@ class _TranscriptArtifactRow extends StatelessWidget {
                               name,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: tokens.textPrimary,
-                                fontWeight: FontWeight.w600,
-                              ),
+                              style: nameStyle,
                             ),
                           ),
                           if (sentToYou) ...[
@@ -410,7 +465,7 @@ class _TranscriptArtifactRow extends StatelessWidget {
                         ],
                       ),
                     ),
-                    if (size != null && !compactAtLargeText) ...[
+                    if (size != null) ...[
                       const SizedBox(width: 8),
                       Text(
                         l10n.bytesCount(size),
@@ -423,9 +478,7 @@ class _TranscriptArtifactRow extends StatelessWidget {
                       const SizedBox(width: 8),
                       ConstrainedBox(
                         constraints: BoxConstraints(
-                          maxWidth:
-                              constraints.maxWidth *
-                              (compactAtLargeText ? 0.62 : 0.45),
+                          maxWidth: constraints.maxWidth * 0.45,
                         ),
                         child: action,
                       ),

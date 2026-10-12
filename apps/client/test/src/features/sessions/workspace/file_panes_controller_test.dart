@@ -3,6 +3,7 @@ import 'package:cosyncing_client/src/features/connection/provider/connection_pro
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -48,9 +49,12 @@ void main() {
       await _settle();
 
       final state = container.read(filePanesControllerProvider).requireValue;
-      expect(state.forSession(_session).map((pane) => pane.path), [
-        'lib/one.dart',
-      ]);
+      expect(
+        state.forSession(_session).map((pane) => (pane as FilePaneKey).path),
+        [
+          'lib/one.dart',
+        ],
+      );
       expect(store.saved?.panes, hasLength(1));
     });
 
@@ -68,10 +72,13 @@ void main() {
 
       // Otherwise a bookmarked `?path=` link opens the session and no file:
       // the mutation is refused outright against a sourceless build.
-      expect(state.forSession(_session).map((pane) => pane.path), [
-        'lib/one.dart',
-      ]);
-      expect(state.activeFor(_session)?.path, 'lib/one.dart');
+      expect(
+        state.forSession(_session).map((pane) => (pane as FilePaneKey).path),
+        [
+          'lib/one.dart',
+        ],
+      );
+      expect((state.activeFor(_session) as FilePaneKey?)?.path, 'lib/one.dart');
     });
 
     test('and is persisted, not merely shown', () async {
@@ -85,7 +92,9 @@ void main() {
       await container.read(filePanesControllerProvider.future);
       await _settle();
 
-      expect(store.saved?.panes.map((pane) => pane.path), ['lib/one.dart']);
+      expect(store.saved?.panes.map((pane) => (pane as FilePaneKey).path), [
+        'lib/one.dart',
+      ]);
     });
 
     test('a profile that never arrives opens nothing', () async {
@@ -120,11 +129,17 @@ void main() {
 
       // The deep link is an addition to the working set, never a replacement
       // of it: the tabs the reader left open are still theirs.
-      expect(state.forSession(_session).map((pane) => pane.path), [
-        'lib/kept.dart',
+      expect(
+        state.forSession(_session).map((pane) => (pane as FilePaneKey).path),
+        [
+          'lib/kept.dart',
+          'lib/deep-linked.dart',
+        ],
+      );
+      expect(
+        (state.activeFor(_session) as FilePaneKey?)?.path,
         'lib/deep-linked.dart',
-      ]);
-      expect(state.activeFor(_session)?.path, 'lib/deep-linked.dart');
+      );
     });
   });
 }

@@ -91,6 +91,7 @@ import {
   prepareSessionDownload,
   readSessionStat,
 } from '../artifacts/fs-browse.ts';
+import { searchSessionFiles } from '../artifacts/fs-search.ts';
 import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../artifacts/fs-browse.ts';
 import { PiBridgeRegistry } from '@cosyncing/adapter-pi';
 import { ClaudeHooksRegistry } from '@cosyncing/adapter-claude';
@@ -6188,6 +6189,20 @@ server = Bun.serve<WsData>({
           return json({ ok: true, path: directory.path, stat: directory.stat, entries: directory.entries });
         }
         return json({ ok: true, path: stat.path, stat });
+      } catch (err) {
+        return sessionBrowseErrorResponse(err);
+      }
+    }
+
+    const fsSearch = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/fs\/search$/);
+    if (fsSearch && req.method === 'GET') {
+      const trustDenied = fsTrustGate();
+      if (trustDenied) return trustDenied;
+      const base = await discoverSession(decodeURIComponent(fsSearch[1]!), decodeURIComponent(fsSearch[2]!));
+      if (!base) return json({ ok: false, error: 'session not found', code: 'NOT_FOUND' }, 404);
+      if (!base.cwd) return json({ ok: false, error: 'session has no workspace directory', code: 'NO_CWD' }, 404);
+      try {
+        return json({ ok: true, ...await searchSessionFiles(base.cwd, url.searchParams.get('query'), { signal: req.signal }) });
       } catch (err) {
         return sessionBrowseErrorResponse(err);
       }

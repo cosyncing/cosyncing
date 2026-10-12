@@ -37,7 +37,8 @@ import '../../../../support/session_detail_page_test_harness.dart'
         InMemorySessionModelPreferenceStore,
         InMemorySessionNotificationSettingsStore,
         InMemorySessionOutboxRepository,
-        InMemorySessionTranscriptRepository;
+        InMemorySessionTranscriptRepository,
+        openSessionDetailTestTab;
 
 void main() {
   Widget buildAt(Size size) {
@@ -300,6 +301,53 @@ void main() {
       expect(router.state.uri.queryParameters['path'], 'x.dart');
       expect(find.text('file stub x.dart'), findsOneWidget);
     });
+
+    for (final view in ['status', 'files']) {
+      testWidgets('portrait $view survives narrowing with a remembered file', (
+        tester,
+      ) async {
+        final store = _FakeOpenSessionsStore()
+          ..saved['p1'] = const OpenSessionsSnapshot(
+            refs: [
+              SessionRef(
+                tool: 'claude',
+                id: 'a',
+                title: 'First',
+                status: SessionStatus.idle,
+              ),
+            ],
+            activeKey: 'claude/a',
+          );
+        resize(tester, const Size(900, 1200));
+        await tester.pumpWidget(buildRouted(store: store));
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SessionsWorkspace)),
+        );
+        await container
+            .read(filePanesControllerProvider.notifier)
+            .open(
+              const SessionDetailKey(tool: 'claude', sessionId: 'a'),
+              'older.txt',
+            );
+        await tester.pumpAndSettle();
+        await openSessionDetailTestTab(tester, 'session-detail-tab-$view');
+        expect(
+          find.byKey(Key('session-detail-tab-panel-$view')),
+          findsOneWidget,
+        );
+
+        resize(tester, const Size(390, 844));
+        await tester.pumpAndSettle();
+        expect(router.state.uri.path, '/sessions');
+        expect(
+          find.byKey(Key('session-detail-tab-panel-$view')),
+          findsOneWidget,
+        );
+        expect(find.text('file stub older.txt'), findsNothing);
+        expect(tester.takeException(), isNull);
+      });
+    }
 
     testWidgets(
       'repeated breakpoint crossings preserve a real open detail '

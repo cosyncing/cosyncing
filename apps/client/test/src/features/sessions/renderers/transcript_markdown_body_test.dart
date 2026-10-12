@@ -191,6 +191,54 @@ void main() {
     });
   });
 
+  testWidgets(
+    'report links and table filenames resolve in their session',
+    (tester) async {
+      final opened = <SessionFileReference>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: SessionFileLinkScope(
+              sessionKey: const SessionDetailKey(
+                tool: 'pi',
+                sessionId: 'report-session',
+              ),
+              gate: SessionFileLinkGate.open,
+              onOpen: (_) => fail('report mentions should use resolution'),
+              onFind: opened.add,
+              onProbeNeeded: () {},
+              child: Builder(
+                builder: (context) => buildAgentMessageRenderer(
+                  context,
+                  AgentMessage.fromJson({
+                    'type': 'model-output',
+                    'text':
+                        '[source](src/main.py:12)\n\n| File |\n|---|\n| `PLAN.md` |',
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(
+        find.byKey(
+          const ValueKey('transcript-file-mention-source (src/main.py:12)'),
+        ),
+      );
+      expect(opened.single.rawPath, 'src/main.py');
+      expect(opened.single.line, 12);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.tap(
+        find.byKey(const ValueKey('transcript-file-mention-PLAN.md')),
+      );
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      expect(opened.last.rawPath, 'PLAN.md');
+    },
+  );
+
   group('transcript markdown tables', () {
     testWidgets('a pipe table renders cells in a horizontal scroller', (
       tester,

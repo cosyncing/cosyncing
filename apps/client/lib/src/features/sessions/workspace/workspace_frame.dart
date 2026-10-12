@@ -66,9 +66,6 @@ class WorkspaceFrame extends ConsumerStatefulWidget {
   /// Narrowest sidebar the user can drag to.
   static const double minSidebarWidth = 120;
 
-  /// Widest sidebar the user can drag to.
-  static const double maxSidebarWidth = 480;
-
   /// Dragging the pointer past this collapses the sidebar to its rail.
   static const double collapseSnapWidth = 100;
 
@@ -167,9 +164,7 @@ class _WorkspaceFrameState extends ConsumerState<WorkspaceFrame>
   /// `available - mainMinPaneWidth` so the main pane keeps a workable
   /// minimum. A window too narrow to satisfy both pins it to the floor.
   double _clampWidth(double width, double available) {
-    var upper = WorkspaceFrame.maxSidebarWidth;
-    final windowUpper = available - WorkspaceFrame.mainMinPaneWidth;
-    if (windowUpper < upper) upper = windowUpper;
+    var upper = available - WorkspaceFrame.mainMinPaneWidth;
     if (upper < WorkspaceFrame.minSidebarWidth) {
       upper = WorkspaceFrame.minSidebarWidth;
     }

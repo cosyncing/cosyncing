@@ -113,6 +113,62 @@ void main() {
       );
     });
 
+    for (final secondary in [false, true]) {
+      testWidgets(
+        '${secondary ? "right click" : "long press"} renames a session tab',
+        (tester) async {
+          final client = FakeBrokerClient();
+          final tabs = InMemoryOpenSessionsStore(
+            snapshot: const OpenSessionsSnapshot(
+              refs: [
+                SessionRef(
+                  tool: 'claude',
+                  id: 'session-1',
+                  title: 'Before',
+                  status: SessionStatus.idle,
+                ),
+              ],
+              activeKey: 'claude/session-1',
+            ),
+          );
+          await tester.binding.setSurfaceSize(const Size(600, 800));
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          await tester.pumpWidget(
+            buildSessionDetailTestPage(
+              events: [sessionEvent('Before')],
+              brokerClient: client,
+              openSessionsStore: tabs,
+            ),
+          );
+          await tester.pumpAndSettle();
+          final tab = find.byKey(
+            const Key('open-session-tab-claude/session-1'),
+          );
+          if (secondary) {
+            await tester.tap(tab, buttons: kSecondaryMouseButton);
+          } else {
+            await tester.longPress(tab);
+          }
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Rename session'));
+          await tester.pumpAndSettle();
+          await tester.enterText(
+            find.byKey(const Key('session-rename-dialog-input')),
+            'From tab',
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Save'));
+          await tester.pumpAndSettle();
+          expect(client.renameSessionCount, 1);
+          expect(client.lastRenameTitle, 'From tab');
+          expect(
+            find.descendant(of: tab, matching: find.text('From tab')),
+            findsOneWidget,
+          );
+        },
+      );
+    }
+
     testWidgets('hides rename when the broker capability is unavailable', (
       tester,
     ) async {

@@ -34,13 +34,34 @@ abstract interface class SessionFileBrowserRepository {
   });
 }
 
+/// Optional filename search capability of a workspace repository.
+// A separate capability keeps browse-only repositories usable.
+// ignore: one_member_abstracts
+abstract interface class SessionFileSearchRepository {
+  /// Searches relative filenames or path suffixes on demand.
+  Future<FsSearchResult> searchFiles(
+    SessionDetailKey sessionKey, {
+    required String query,
+  });
+}
+
 /// Broker-backed file browser repository.
 class BrokerSessionFileBrowserRepository
-    implements SessionFileBrowserRepository {
+    implements SessionFileBrowserRepository, SessionFileSearchRepository {
   /// Creates a broker-backed repository.
   const BrokerSessionFileBrowserRepository(this._client);
 
   final BrokerClient _client;
+
+  @override
+  Future<FsSearchResult> searchFiles(
+    SessionDetailKey sessionKey, {
+    required String query,
+  }) => _client.searchSessionFiles(
+    sessionKey.tool,
+    sessionKey.sessionId,
+    query: query,
+  );
 
   @override
   Future<FsDirectoryResult> listPath(

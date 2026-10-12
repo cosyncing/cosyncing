@@ -101,15 +101,29 @@ try {
   assert.equal(page.events[0].sessionTitle, 'Review session');
   assert.equal(page.baselineThroughCursor, page.cursor, 'new clients should receive the current feed head as baseline');
   const cursor = page.cursor;
-  const waiting = fetch(`${base}/api/attention-events?after=${cursor}&waitMs=5000&clientId=phone`, { headers: auth });
+  // Health notifications can arrive independently while the acknowledgement is
+  // in flight. Continue from their cursor until the seeded event is published.
+  const waiting = (async () => {
+    const deadline = Date.now() + 5000;
+    let after = cursor;
+    while (Date.now() < deadline) {
+      const waitMs = Math.max(1, deadline - Date.now());
+      const response = await fetch(`${base}/api/attention-events?after=${after}&waitMs=${waitMs}&clientId=phone`, { headers: auth });
+      assert.equal(response.status, 200);
+      const update = await response.json();
+      if (update.events.some((event: any) => event.id === seed.event.id && event.readAt)) return update;
+      after = update.cursor;
+    }
+    assert.fail('client-state mutation must wake the long poll with the acknowledged event');
+  })();
   await Bun.sleep(30);
   const ack = await fetch(`${base}/api/attention-events/${seed.event.id}/ack`, {
     method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ clientId: 'phone' }),
   });
   assert.equal(ack.status, 200);
-  const changed = await (await waiting).json();
-  assert.equal(changed.events[0].id, seed.event.id, 'client-state mutation wakes the long poll');
-  assert.ok(changed.events[0].readAt);
+  const changed = await waiting;
+  assert.ok(changed.events.find((event: any) => event.id === seed.event.id)?.readAt,
+    'client-state mutation wakes the long poll');
 
   const bulk = await fetch(`${base}/api/attention-events/dismiss-batch`, {
     method: 'POST',
@@ -126,7 +140,7 @@ try {
     `${base}/api/attention-events?after=${changed.cursor}&clientId=phone`,
     { headers: auth },
   )).json() as any;
-  assert.ok(afterBulk.events[0].dismissedAt,
+  assert.ok(afterBulk.events.find((event: any) => event.id === seed.event.id)?.dismissedAt,
     'the route publishes one durable client-state mutation');
 
   const oversized = await fetch(`${base}/api/attention-events/dismiss-batch`, {

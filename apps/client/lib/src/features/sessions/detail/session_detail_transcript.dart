@@ -595,10 +595,12 @@ final class _TurnRowCache {
   _ChatFooterItem? footer;
 }
 
+// Delivered files are report content, including download-only attachments.
 bool _reportVisibleEntry(SessionTranscriptDisplayEntry entry) =>
     entry is MessageTranscriptDisplayEntry &&
     (entry.message.type == AgentMessageType.modelOutput ||
-        entry.message.type == AgentMessageType.userMessage);
+        entry.message.type == AgentMessageType.userMessage ||
+        entry.message.type == AgentMessageType.fileArtifact);
 
 _ChatUserItem _chatUserRow(
   AgentMessage message, {
@@ -792,6 +794,8 @@ class _TranscriptSurface extends ConsumerStatefulWidget {
   ConsumerState<_TranscriptSurface> createState() => _TranscriptSurfaceState();
 }
 
+class _FileSelectionDelegate extends StaticSelectionContainerDelegate {}
+
 class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// Owned so the list is not the `primary` view (which would add a second,
   /// pixel-estimate-driven scrollbar on desktop), and so tail/paging behavior
@@ -805,6 +809,9 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   final _TranscriptSelectionRegistry _selectionRegistry =
       _TranscriptSelectionRegistry();
   String? _selectedTranscriptText;
+  SessionFileReference? _pointerSelectedFile;
+  Offset? _fileSelectionPointerOrigin;
+  final _fileSelectionDelegate = _FileSelectionDelegate();
 
   /// How close to the end counts as "at the bottom", in logical pixels.
   ///
@@ -1053,6 +1060,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
 
   @override
   void dispose() {
+    _fileSelectionDelegate.dispose();
     _tickerMode?.removeListener(_reportHostVisible);
     _scheduleCapturedViewportCommit(_semanticViewportCapture());
     _progressFadeTimer?.cancel();
@@ -2120,6 +2128,51 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     _historyShortcutFocusNode.requestFocus();
   }
 
+  void _preparePointerFileSelection(PointerDownEvent event) {
+    _pointerSelectedFile = null;
+    _fileSelectionPointerOrigin = null;
+    final keyboard = HardwareKeyboard.instance;
+    if (event.buttons != kPrimaryButton ||
+        !(keyboard.isControlPressed || keyboard.isMetaPressed)) {
+      return;
+    }
+    final selected = transcriptFileReference(
+      _selectedTranscriptText ?? '',
+      explicit: true,
+    );
+    if (selected == null) return;
+    final hits = HitTestResult();
+    WidgetsBinding.instance.hitTestInView(hits, event.position, event.viewId);
+    // Interactive children keep their own action, even with a stale selection.
+    if (hits.path.any((hit) {
+      final target = hit.target;
+      return target is RenderSemanticsAnnotations &&
+          ((target.properties.link ?? false) ||
+              (target.properties.button ?? false));
+    })) {
+      return;
+    }
+    final transform = _fileSelectionDelegate.getTransformTo(null);
+    if (_fileSelectionDelegate.value.selectionRects.any(
+      (rect) =>
+          MatrixUtils.transformRect(transform, rect).contains(event.position),
+    )) {
+      _pointerSelectedFile = selected;
+      _fileSelectionPointerOrigin = event.position;
+    }
+  }
+
+  void _openPointerFileSelection() {
+    final selected = _pointerSelectedFile;
+    _pointerSelectedFile = null;
+    if (selected == null) return;
+    final scope = SessionFileLinkScope.maybeOf(context);
+    if (scope?.onFind != null &&
+        (scope!.linksEnabled || scope.gate == SessionFileLinkGate.unknown)) {
+      scope.onFind!(selected);
+    }
+  }
+
   void _readTranscriptSelection(
     SelectableRegionState selection,
     List<_TranscriptSelectionMessage> selectedMessages,
@@ -2144,6 +2197,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     BuildContext context,
     SelectableRegionState selection,
   ) {
+    final fileScope = SessionFileLinkScope.maybeOf(this.context);
+    final selectedFile = transcriptFileReference(
+      _selectedTranscriptText ?? '',
+      explicit: true,
+    );
     final selectedMessages = _selectionRegistry.selectedMessages;
     final singleMessage = selectedMessages.length == 1
         ? selectedMessages.single
@@ -2158,6 +2216,17 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       buttonItems: [
         for (final item in selection.contextMenuButtonItems)
           if (item.type != ContextMenuButtonType.selectAll) item,
+        if (selectedFile != null &&
+            fileScope?.onFind != null &&
+            (fileScope!.linksEnabled ||
+                fileScope.gate == SessionFileLinkGate.unknown))
+          ContextMenuButtonItem(
+            label: AppLocalizations.of(context).sessionSelectionFindFile,
+            onPressed: () {
+              selection.hideToolbar();
+              fileScope.onFind!(selectedFile);
+            },
+          ),
         if (canReadAloud && (_selectedTranscriptText?.isNotEmpty ?? false))
           ContextMenuButtonItem(
             label: AppLocalizations.of(context).sessionSelectionReadAloud,
@@ -3217,9 +3286,16 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
               onNotification: _onScrollNotification,
               child: Listener(
                 behavior: HitTestBehavior.translucent,
+                onPointerDown: _preparePointerFileSelection,
+                onPointerUp: (_) => _openPointerFileSelection(),
                 // A drag moves the content with the finger, so the reader
                 // heads the other way; a wheel scrolls the way it turns.
                 onPointerMove: (event) {
+                  if (_fileSelectionPointerOrigin case final origin?) {
+                    if ((event.position - origin).distance > 4) {
+                      _pointerSelectedFile = null;
+                    }
+                  }
                   if (event.delta.dy.abs() > 0.01) {
                     _recordRealScrollMovement(
                       upward: event.delta.dy > 0,
@@ -3229,6 +3305,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                   }
                 },
                 onPointerCancel: (_) {
+                  _pointerSelectedFile = null;
                   _prefetchSettleTimer?.cancel();
                   _prefetch.settle();
                 },
@@ -3270,6 +3347,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                       onSelectionChanged: _onTranscriptSelectionChanged,
                       contextMenuBuilder: _transcriptSelectionMenu,
                       child: _TranscriptSelectionScope(
+                        selectionDelegate: _fileSelectionDelegate,
                         registry: _selectionRegistry,
                         child: Stack(
                           children: [

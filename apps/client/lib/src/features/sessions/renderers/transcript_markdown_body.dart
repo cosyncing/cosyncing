@@ -7,10 +7,10 @@ typedef TranscriptLinkOpener = void Function(Uri uri);
 ///
 /// The render layer stays dependency-free: the app wires this once at startup
 /// to a real launcher (e.g. `url_launcher`'s `launchUrl`), and tests inject a
-/// fake. While null, an http(s) link still renders as a tappable link but the
+/// fake. While null, a web link still renders as tappable but the
 /// tap is inert, so the render layer never hard-depends on a launcher and never
-/// throws. Only http/https links are ever tappable — the scheme gate lives in
-/// [isTranscriptHttpUrl]; local paths and other schemes render as plain text.
+/// throws. Web URLs use [isTranscriptHttpUrl]; workspace paths use the
+/// enclosing session file-link scope and its broker resolver.
 TranscriptLinkOpener? transcriptLinkOpener;
 
 /// Renders a transcript message body as markdown.
@@ -49,6 +49,7 @@ class _MarkdownBody extends StatefulWidget {
 
 class _MarkdownBodyState extends State<_MarkdownBody> {
   ThemeData? _theme;
+  bool _fileScopePresent = false;
   String? _source;
   List<MarkdownBlock> _blocks = const [];
 
@@ -62,7 +63,9 @@ class _MarkdownBodyState extends State<_MarkdownBody> {
     final source = widget.source;
     final work = debugTranscriptRenderWork;
     final previous = _built;
-    final sameTheme = _sameLook(theme, _theme);
+    final fileScopePresent = SessionFileLinkScope.maybeOf(context) != null;
+    final sameTheme =
+        _sameLook(theme, _theme) && fileScopePresent == _fileScopePresent;
     if (previous != null &&
         sameTheme &&
         (identical(source, _source) || source == _source)) {
@@ -143,6 +146,7 @@ class _MarkdownBodyState extends State<_MarkdownBody> {
         children: children,
       );
     }
+    _fileScopePresent = fileScopePresent;
     _theme = theme;
     _source = source;
     _blocks = blocks;
@@ -343,9 +347,8 @@ class _MarkdownBodyState extends State<_MarkdownBody> {
     );
   }
 
-  /// Builds one inline run. http(s) links become a tappable [WidgetSpan]; every
-  /// other run — including the parser's visible non-web target run — is a
-  /// selectable plain [TextSpan].
+  /// Builds web and workspace links as selectable, tappable widget spans.
+  /// Ordinary prose and unsupported URI schemes remain plain text spans.
   InlineSpan _spanFor(
     ThemeData theme,
     TextStyle baseStyle,
@@ -361,6 +364,24 @@ class _MarkdownBodyState extends State<_MarkdownBody> {
           child: _TranscriptLink(uri: uri, text: span.text, style: style),
         );
       }
+    }
+    final reference = span.href != null
+        ? transcriptMarkdownFileReference(span.href!)
+        : span.code
+        ? transcriptFileReference(span.text)
+        : null;
+    if (reference != null && SessionFileLinkScope.maybeOf(context) != null) {
+      return WidgetSpan(
+        alignment: PlaceholderAlignment.baseline,
+        baseline: TextBaseline.alphabetic,
+        child: _TranscriptFileLink(
+          reference: reference,
+          text: span.text,
+          style: style,
+          resolveMention: true,
+          linkKey: ValueKey('transcript-file-mention-${span.text}'),
+        ),
+      );
     }
     return TextSpan(text: span.text, style: style);
   }
@@ -387,9 +408,8 @@ class _MarkdownBodyState extends State<_MarkdownBody> {
       );
     }
     if (span.href != null && isTranscriptHttpUrl(span.href)) {
-      // Only http(s) links look like links. Local/device paths and other
-      // schemes carry an href in the model but render as plain text, matching
-      // the product rule that only web URLs are actionable.
+      // Workspace link decoration is owned by _TranscriptFileLink so it
+      // follows the capability gate; external URLs are styled here.
       style = style.copyWith(
         color: theme.colorScheme.primary,
         decoration: TextDecoration.underline,

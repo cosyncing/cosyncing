@@ -79,6 +79,7 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
   '/api/sessions/{id}/{id}/artifact/{id}/ticket': _adopted,
   '/api/sessions/{id}/{id}/fs': _adopted,
   '/api/sessions/{id}/{id}/fs/read': _adopted,
+  '/api/sessions/{id}/{id}/fs/search': _adopted,
   '/api/sessions/{id}/{id}/fs/download': _adopted,
   '/api/sessions/{id}/{id}/uploads': _adopted,
   '/api/sessions/{id}/{id}/uploads/{id}': _adopted,

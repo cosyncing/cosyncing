@@ -3,12 +3,14 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:flutter/gestures.dart'
     show PointerDeviceKind, kMiddleMouseButton;
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 SessionRef _ref(
@@ -26,15 +28,18 @@ SessionRef _ref(
 void main() {
   // The strip labels unnamed tabs through `AppLocalizations` (U3), so its host
   // needs the app's delegates like any other localized surface.
-  Widget host(Widget child, {Locale? locale}) => MaterialApp(
-    localizationsDelegates: AppLocalizations.localizationsDelegates,
-    supportedLocales: AppLocalizations.supportedLocales,
-    locale: locale,
-    theme: buildAppTheme(
-      themeSpecById(kDefaultThemeId).light,
-      Brightness.light,
+  Widget host(Widget child, {Locale? locale}) => ProviderScope(
+    overrides: [activeBrokerProfileProvider.overrideWith((ref) => null)],
+    child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      locale: locale,
+      theme: buildAppTheme(
+        themeSpecById(kDefaultThemeId).light,
+        Brightness.light,
+      ),
+      home: Scaffold(body: child),
     ),
-    home: Scaffold(body: child),
   );
 
   group('OpenSessionsTabStrip', () {
@@ -212,7 +217,9 @@ void main() {
     });
 
     for (final kind in [PointerDeviceKind.touch, PointerDeviceKind.mouse]) {
-      testWidgets('$kind can deliberately reorder tabs', (tester) async {
+      testWidgets('$kind uses drag for reorder and hold for the menu', (
+        tester,
+      ) async {
         tester.view
           ..physicalSize = const Size(390, 844)
           ..devicePixelRatio = 1;
@@ -257,7 +264,12 @@ void main() {
         await tester.pump(const Duration(milliseconds: 300));
         await gesture.up();
         await tester.pumpAndSettle();
-        expect(moves, [(1, 0)]);
+        if (kind == PointerDeviceKind.mouse) {
+          expect(moves, [(1, 0)]);
+        } else {
+          expect(moves, isEmpty);
+          expect(find.text('Rename session'), findsOneWidget);
+        }
         expect(closed, isEmpty);
       });
     }

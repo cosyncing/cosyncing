@@ -171,7 +171,7 @@ class _MessageRow extends StatelessWidget {
   }
 }
 
-class _TranscriptArtifactDownloadAction extends StatelessWidget {
+class _TranscriptArtifactDownloadAction extends ConsumerWidget {
   const _TranscriptArtifactDownloadAction({
     required this.descriptor,
     required this.actionState,
@@ -185,7 +185,7 @@ class _TranscriptArtifactDownloadAction extends StatelessWidget {
   final Future<bool> Function() onDownload;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final tokens = context.tokens;
@@ -200,19 +200,42 @@ class _TranscriptArtifactDownloadAction extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextButton.icon(
-            key: ValueKey(
-              'session-detail-chat-artifact-download-$sourceId',
-            ),
-            style: _transcriptActionButtonStyle(context),
-            onPressed: canDownload ? () => unawaited(onDownload()) : null,
-            icon: isBusy
-                ? const SizedBox.square(
-                    dimension: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.download_outlined, size: 14),
-            label: Text(l10n.download),
+          Wrap(
+            spacing: 4,
+            children: [
+              if (descriptor.isTextPreviewCandidate &&
+                  SessionFileLinkScope.maybeOf(context) != null)
+                TextButton.icon(
+                  key: ValueKey('session-detail-chat-artifact-open-$sourceId'),
+                  style: _transcriptActionButtonStyle(context),
+                  onPressed: canDownload
+                      ? () => unawaited(
+                          openSessionArtifact(
+                            context,
+                            ref,
+                            SessionFileLinkScope.maybeOf(context)!.sessionKey,
+                            descriptor,
+                          ),
+                        )
+                      : null,
+                  icon: const Icon(Icons.open_in_new, size: 16),
+                  label: Text(l10n.openFile),
+                ),
+              TextButton.icon(
+                key: ValueKey(
+                  'session-detail-chat-artifact-download-$sourceId',
+                ),
+                style: _transcriptActionButtonStyle(context),
+                onPressed: canDownload ? () => unawaited(onDownload()) : null,
+                icon: isBusy
+                    ? const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.download_outlined, size: 14),
+                label: Text(l10n.download),
+              ),
+            ],
           ),
           if (stateLabel.isNotEmpty) ...[
             const SizedBox(height: 4),
@@ -296,10 +319,13 @@ final class _TranscriptSelectionRegistry extends ChangeNotifier {
 }
 
 class _TranscriptSelectionScope extends InheritedWidget {
-  const _TranscriptSelectionScope({
+  _TranscriptSelectionScope({
     required this.registry,
-    required super.child,
-  });
+    required Widget child,
+    required SelectionContainerDelegate selectionDelegate,
+  }) : super(
+         child: SelectionContainer(delegate: selectionDelegate, child: child),
+       );
 
   final _TranscriptSelectionRegistry registry;
 

@@ -2564,6 +2564,16 @@ class SessionDetailController
 
   Future<bool> renameSession(String title) => _renameSessionCoordinated(title);
 
+  /// Applies a broker-accepted rename made from a tab or roster context menu.
+  void acceptRenamedTitle(RosterSource source, String title) {
+    if (!_canPublishRenameFor(source)) return;
+    final info = state.sessionInfo;
+    if (info == null) return;
+    state = state.copyWith(
+      sessionInfo: SessionInfo.fromJson({...info.toJson(), 'title': title}),
+    );
+  }
+
   Future<SessionInfo?> forkSession({String? messageId}) =>
       _forkSessionCoordinated(messageId: messageId);
 

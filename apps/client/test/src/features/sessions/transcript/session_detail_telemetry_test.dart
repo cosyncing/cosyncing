@@ -148,8 +148,8 @@ void main() {
         find.byKey(const Key('session-detail-telemetry-panel')),
         findsOneWidget,
       );
-      expect(find.text('10,800,000'), findsOneWidget);
-      expect(find.text('212,000'), findsOneWidget);
+      expect(find.text('10.8M tokens'), findsOneWidget);
+      expect(find.text('212k tokens'), findsOneWidget);
       expect(find.text('4m'), findsOneWidget);
     });
 
@@ -237,10 +237,10 @@ void main() {
         find.byKey(const Key('session-detail-telemetry-panel')),
         findsOneWidget,
       );
-      expect(find.text('10,800,000'), findsOneWidget);
-      expect(find.text('212,000'), findsOneWidget);
-      expect(find.text('332,792'), findsOneWidget);
-      expect(find.text('656'), findsOneWidget);
+      expect(find.text('10.8M tokens'), findsOneWidget);
+      expect(find.text('212k tokens'), findsOneWidget);
+      expect(find.text('332.8k tokens'), findsOneWidget);
+      expect(find.text('656 tokens'), findsOneWidget);
       expect(find.text('Session summary'), findsOneWidget);
       expect(find.text('Total tokens'), findsNothing);
       expect(find.textContaining('cache hit'), findsNothing);
@@ -260,7 +260,7 @@ void main() {
       );
       final textTheme = Theme.of(context).textTheme;
       final inputLabel = tester.widget<Text>(find.text('Input'));
-      final inputValue = tester.widget<Text>(find.text('10,800,000'));
+      final inputValue = tester.widget<Text>(find.text('10.8M tokens'));
       expect(inputLabel.style?.fontSize, textTheme.labelMedium?.fontSize);
       expect(inputLabel.style?.fontWeight, textTheme.labelMedium?.fontWeight);
       expect(inputValue.style?.fontSize, textTheme.bodyMedium?.fontSize);

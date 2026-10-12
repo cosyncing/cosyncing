@@ -72,10 +72,8 @@ const hardHash = evaluateBrokerClientCompatibility({
   surfaceHash: 'fnv1a32:00000000',
 });
 const legacy = evaluateBrokerClientCompatibility();
-// Published identities, read from the registry rather than re-pinned. Revision 28 is the newest
-// published revision (public main) and revision 26 is the one the shipped 0.5.13 clients and brokers
-// advertise. With a one-revision overlap window this revision is writable against 28 and read-only
-// against 26, as `evaluateBrokerClientCompatibility` says.
+// Recorded identities keep the previous-revision overlap distinct from the
+// older shipped revision-26 peers, which remain read-only.
 const publishedRegistry = JSON.parse(readFileSync(
   new URL('../../../../../contracts/contract-revisions.json', import.meta.url),
   'utf8',
@@ -194,22 +192,18 @@ check('a client requiring a newer broker degrades to read-only', hardMinimum.sta
 check('same revision with a different public surface fails closed', hardHash.status === 'hard-incompatible' && hardHash.readOnly);
 check('pre-handshake negotiation remains unknown; stream auth enforces the ticket boundary separately',
   legacy.status === 'unknown' && !legacy.readOnly);
-// Revision 29 adds optional DTO fields and two event constants for cards two seats can answer, so
-// it stays inside the overlap window with the newest published revision (28). Against the shipped
-// revision 26 it is three revisions away: both sides stay connected but read-only, until the
-// overlap policy or the release order changes.
-check('the newest published identity is revision 28',
-  previous?.revision === 28 && previous.surfaceHash === 'fnv1a32:6fcab2c5'
+check('the preceding recorded identity is inside the overlap window',
+  previous?.revision === BROKER_CONTRACT.revision - 1
     && previous.minimumClientRevision === 17 && previous.clientMinimumBrokerRevision === 16,
-  `${previous?.revision}/${previous?.surfaceHash}`);
+  `${previous?.revision}`);
 check('the shipped revision-26 identity is the one 0.5.13 peers advertise',
   shipped?.revision === 26 && shipped.surfaceHash === 'fnv1a32:caf34ce7'
     && shipped.minimumClientRevision === 17 && shipped.clientMinimumBrokerRevision === 16,
   `${shipped?.revision}/${shipped?.surfaceHash}`);
-check('a revision-28 client on this broker stays writable',
+check('the preceding-revision client on this broker stays writable',
   previousClientOnCurrentBroker.status === 'client-behind' && !previousClientOnCurrentBroker.readOnly,
   previousClientOnCurrentBroker.reason);
-check('this client on a revision-28 broker stays writable',
+check('this client on the preceding-revision broker stays writable',
   currentClientOnPreviousBroker.status === 'broker-behind' && !currentClientOnPreviousBroker.readOnly,
   currentClientOnPreviousBroker.reason);
 check('a shipped revision-26 client on this broker is outside the overlap window and read-only',
@@ -527,7 +521,7 @@ try {
   check('hard WebSocket mismatch explicitly degrades to read-only',
     hardHello.kind === 'hello' && hardHello.compatibility?.status === 'hard-incompatible'
       && hardHello.compatibility?.readOnly === true);
-  check('a revision-28 client attaching to this broker is writable',
+  check('a preceding-revision client attaching to this broker is writable',
     previousClientHello.kind === 'hello'
       && previousClientHello.compatibility?.status === 'client-behind'
       && previousClientHello.compatibility?.readOnly === false,

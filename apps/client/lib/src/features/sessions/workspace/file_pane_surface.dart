@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/artifact_pane.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_page.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
@@ -67,15 +69,19 @@ class FilePaneSurface extends ConsumerWidget {
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
     final async = ref.watch(filePanesControllerProvider);
-    final state = async.valueOrNull;
-    final panes = state?.forSession(session) ?? const <FilePaneKey>[];
+    final state = async.isLoading || async.hasError ? null : async.valueOrNull;
+    final panes = state?.forSession(session) ?? const <SidePaneKey>[];
     final activeFile = state?.activeFor(session);
     final controller = ref.read(filePanesControllerProvider.notifier);
 
     // `hasValue` matters: the working set is restored asynchronously, so an
     // unguarded emptiness check reads "no files" on the very first frame and
     // would send the compact route straight back out again.
-    if (async.hasValue && panes.isEmpty && onLastClosed != null) {
+    if (!async.isLoading &&
+        !async.hasError &&
+        async.hasValue &&
+        panes.isEmpty &&
+        onLastClosed != null) {
       // Deferred: this runs during build, and a pop from the build phase is
       // rejected the same way a navigation is.
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -99,17 +105,27 @@ class FilePaneSurface extends ConsumerWidget {
           Expanded(
             child: activeFile == null
                 ? const _NoFilesOpen()
-                : WorkspaceFilePaneBody(
-                    key: ValueKey<String>(activeFile.key),
-                    pane: activeFile,
-                    sessionLabel: workspaceSessionLabel(
-                      session: session,
-                      open: ref
-                          .watch(openSessionsControllerProvider)
-                          .valueOrNull,
-                      l10n: l10n,
+                : switch (activeFile) {
+                    FilePaneKey() => WorkspaceFilePaneBody(
+                      key: ValueKey(activeFile.key),
+                      pane: activeFile,
+                      sessionLabel: workspaceSessionLabel(
+                        session: session,
+                        open: ref
+                            .watch(openSessionsControllerProvider)
+                            .valueOrNull,
+                        l10n: l10n,
+                      ),
                     ),
-                  ),
+                    ArtifactPaneKey() => ArtifactPaneBody(
+                      key: ValueKey(activeFile.key),
+                      pane: activeFile,
+                    ),
+                    SessionPanelKey() => SessionSidePanel(
+                      key: ValueKey(activeFile.key),
+                      pane: activeFile,
+                    ),
+                  },
           ),
         ],
       ),
@@ -146,7 +162,7 @@ class _NoFilesOpen extends StatelessWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             Text(
               l10n.fileViewerNoFilesBody,
               textAlign: TextAlign.center,

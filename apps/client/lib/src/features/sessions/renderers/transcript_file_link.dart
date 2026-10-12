@@ -132,6 +132,7 @@ class _TranscriptFileLink extends StatelessWidget {
     required this.text,
     required this.style,
     this.linkKey,
+    this.resolveMention = false,
     this.maxLines,
     this.overflow,
   });
@@ -145,6 +146,9 @@ class _TranscriptFileLink extends StatelessWidget {
   /// The surface's own text style; the link decoration is layered onto it so a
   /// path keeps the monospace face it reads in.
   final TextStyle? style;
+
+  /// Report mentions may require resolving a short filename.
+  final bool resolveMention;
 
   final Key? linkKey;
   final int? maxLines;
@@ -183,17 +187,22 @@ class _TranscriptFileLink extends StatelessWidget {
     // relying on colour, and it says which of the two shapes this is.
     final glyphSize = (base.fontSize ?? 12) + 1;
 
+    final open = resolveMention ? scope.onFind ?? scope.onOpen : scope.onOpen;
     return _TranscriptLinkBase(
       key: linkKey,
       semanticsLabel: l10n.transcriptFileLinkSemantics(reference.displayPath),
       tooltip: reference.displayPath,
-      onActivate: () => scope.onOpen(reference),
+      onActivate: () => open(reference),
       onSecondary: (position) => unawaited(
         _showTranscriptFileLinkMenu(
           context: context,
           position: position,
           reference: reference,
-          onOpen: scope.onOpen,
+          onOpenFolder: resolveMention
+              ? scope.onFindParent == null
+                    ? null
+                    : () => scope.onFindParent!(reference)
+              : () => scope.onOpen(reference.parent),
         ),
       ),
       child: Text.rich(
@@ -244,7 +253,7 @@ Future<void> _showTranscriptFileLinkMenu({
   required BuildContext context,
   required Offset position,
   required SessionFileReference reference,
-  required void Function(SessionFileReference reference) onOpen,
+  required VoidCallback? onOpenFolder,
 }) async {
   final l10n = AppLocalizations.of(context);
   final messenger = ScaffoldMessenger.maybeOf(context);
@@ -268,15 +277,16 @@ Future<void> _showTranscriptFileLinkMenu({
           title: Text(l10n.transcriptFileLinkCopyPath),
         ),
       ),
-      PopupMenuItem(
-        value: _TranscriptFileLinkAction.openFolder,
-        child: ListTile(
-          key: const Key('transcript-file-link-open-folder'),
-          dense: true,
-          leading: const Icon(Icons.folder_open_outlined),
-          title: Text(l10n.transcriptFileLinkOpenFolder),
+      if (onOpenFolder != null)
+        PopupMenuItem(
+          value: _TranscriptFileLinkAction.openFolder,
+          child: ListTile(
+            key: const Key('transcript-file-link-open-folder'),
+            dense: true,
+            leading: const Icon(Icons.folder_open_outlined),
+            title: Text(l10n.transcriptFileLinkOpenFolder),
+          ),
         ),
-      ),
     ],
   );
   switch (action) {
@@ -284,7 +294,7 @@ Future<void> _showTranscriptFileLinkMenu({
       await Clipboard.setData(ClipboardData(text: reference.displayPath));
       messenger?.showSnackBar(SnackBar(content: Text(copied)));
     case _TranscriptFileLinkAction.openFolder:
-      onOpen(reference.parent);
+      onOpenFolder?.call();
     case null:
       break;
   }

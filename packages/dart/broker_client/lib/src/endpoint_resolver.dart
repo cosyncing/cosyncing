@@ -275,6 +275,10 @@ class EndpointResolver {
   String fsDirectoryEndpoint(String tool, String id) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/fs';
 
+  /// Filename search in one session's workspace.
+  String fsSearchEndpoint(String tool, String id) =>
+      '${fsDirectoryEndpoint(tool, id)}/search';
+
   /// Session filesystem read endpoint.
   String fsReadEndpoint(String tool, String id) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/fs/read';

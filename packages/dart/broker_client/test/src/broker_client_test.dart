@@ -1730,6 +1730,37 @@ void main() {
         expect(response.mimeType, 'text/plain');
       });
 
+      test(
+        'searchSessionFiles encodes the query and decodes partial matches',
+        () async {
+          dioAdapter.onGet(
+            'http://127.0.0.1:7734/api/sessions/pi/session-1/fs/search?query=my%20notes.md',
+            (server) => server.reply(200, {
+              'query': 'my notes.md',
+              'truncated': true,
+              'matches': [
+                {
+                  'path': 'transfer/my notes.md',
+                  'type': 'file',
+                  'size': 3,
+                  'mtimeMs': 0,
+                  'isDirectory': false,
+                  'isRegularFile': true,
+                  'isSymbolicLink': false,
+                },
+              ],
+            }),
+          );
+          final found = await client.searchSessionFiles(
+            'pi',
+            'session-1',
+            query: 'my notes.md',
+          );
+          expect(found.matches.single.path, 'transfer/my notes.md');
+          expect(found.truncated, isTrue);
+        },
+      );
+
       test('listSessionDirectory returns FsDirectoryResult', () async {
         dioAdapter.onGet(
           'http://127.0.0.1:7734/api/sessions/opencode/session-1/fs?path=src',
