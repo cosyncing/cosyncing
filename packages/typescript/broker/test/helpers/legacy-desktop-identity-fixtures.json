@@ -1,0 +1,12 @@
+{
+  "sourceRelease": "https://github.com/cosyncing/cosyncing/releases/tag/client-v0.6.4",
+  "linux": {
+    "versionPath": "data/flutter_assets/version.json",
+    "version": { "app_name": "cosyncing_client", "version": "0.6.4", "build_number": "24", "package_name": "cosyncing_client" }
+  },
+  "windows": { "versionJsonPresent": false },
+  "macos": {
+    "versionJsonPresent": false,
+    "bundle": { "CFBundleIdentifier": "com.cosyncing.client", "CFBundleShortVersionString": "0.6.4", "CFBundleVersion": "24" }
+  }
+}

@@ -301,6 +301,9 @@ CLIENT_RUNNING=''
 CLIENT_CONTAINER=''
 STAGED_CLIENT=''
 RETIRED_CLIENT=''
+STAGED_CLIENT_RECEIPT=''
+CLIENT_PLACED=''
+CLIENT_RECEIPT_COMMITTED=''
 STAGED_DESKTOP=''
 STAGED_PAIRING=''
 cleanup() {
@@ -310,6 +313,7 @@ cleanup() {
   [ -z "$STAGED_SHELL_ENV" ] || rm -f "$STAGED_SHELL_ENV"
   [ -z "$STAGED_WEB" ] || rm -rf "$STAGED_WEB"
   [ -z "$STAGED_CLIENT" ] || rm -rf "$STAGED_CLIENT"
+  [ -z "$STAGED_CLIENT_RECEIPT" ] || rm -f "$STAGED_CLIENT_RECEIPT"
   [ -z "$STAGED_DESKTOP" ] || rm -f "$STAGED_DESKTOP"
   [ -z "$STAGED_PAIRING" ] || rm -f "$STAGED_PAIRING"
   # A retired web root is the operator's previous client, held only for the instant between two renames.
@@ -324,11 +328,14 @@ cleanup() {
   # The same rule for the desktop client the all-in-one places: a retired install goes back unless its
   # replacement is already in position.
   if [ -n "$RETIRED_CLIENT" ] && [ -n "$CLIENT_ROOT" ] && [ -d "$RETIRED_CLIENT" ]; then
-    if [ -e "$CLIENT_ROOT" ] || [ -L "$CLIENT_ROOT" ]; then
+    if [ -n "$CLIENT_RECEIPT_COMMITTED" ]; then
       rm -rf "$RETIRED_CLIENT"
     else
+      [ -z "$CLIENT_PLACED" ] || rm -rf "$CLIENT_ROOT"
       mv "$RETIRED_CLIENT" "$CLIENT_ROOT" 2>/dev/null || true
     fi
+  elif [ -n "$CLIENT_PLACED" ] && [ -z "$CLIENT_RECEIPT_COMMITTED" ]; then
+    rm -rf "$CLIENT_ROOT"
   fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -950,8 +957,36 @@ else
     mv "$CLIENT_ROOT" "$RETIRED_CLIENT" || fail 'could not retire the previous desktop client'
   fi
   mv "$EXTRACTED_CLIENT" "$CLIENT_ROOT" || fail 'could not install the desktop client'
+  CLIENT_PLACED=1
   rmdir "$STAGED_CLIENT" 2>/dev/null || rm -rf "$STAGED_CLIENT"
   STAGED_CLIENT=''
+  # This separate receipt records only a client this installer actually placed. Broker-only installs
+  # leave it alone. Preserve framework links and executable bits while protecting the placed tree.
+  CLIENT_RECEIPT="$STATE_HOME/client-receipt"
+  if [ -e "$CLIENT_RECEIPT" ] || [ -L "$CLIENT_RECEIPT" ]; then
+    [ -f "$CLIENT_RECEIPT" ] && [ ! -L "$CLIENT_RECEIPT" ] \
+      && [ "$(stat_owner "$CLIENT_RECEIPT")" = "$(id -u)" ] \
+      || fail 'existing desktop client receipt is unsafe'
+  fi
+  find "$CLIENT_ROOT" -type d -exec chmod go-rwx {} + \
+    || fail 'could not protect desktop client directories'
+  find "$CLIENT_ROOT" -type f -exec chmod go-rwx {} + \
+    || fail 'could not protect desktop client files'
+  if [ "$OS" = Darwin ]; then
+    CLIENT_EXECUTABLE="$CLIENT_ROOT/Contents/MacOS/Cosyncing"
+  else
+    CLIENT_EXECUTABLE="$CLIENT_ROOT/cosyncing"
+  fi
+  STAGED_CLIENT_RECEIPT="$(mktemp "$STATE_HOME/.client-receipt.XXXXXXXX")"
+  {
+    printf 'schemaVersion=1\nproduct=cosyncing\nhost=%s\npath=%s\n' "$CLIENT_HOST" "$CLIENT_ROOT"
+    printf 'version=%s\nsha256=%s\nexecutableSha256=%s\n' \
+      "$VERSION" "$CLIENT_SHA256" "$(sha256_of "$CLIENT_EXECUTABLE")"
+  } > "$STAGED_CLIENT_RECEIPT"
+  chmod 600 "$STAGED_CLIENT_RECEIPT"
+  mv "$STAGED_CLIENT_RECEIPT" "$CLIENT_RECEIPT" || fail 'could not commit desktop client receipt'
+  STAGED_CLIENT_RECEIPT=''
+  CLIENT_RECEIPT_COMMITTED=1
   if [ -n "$RETIRED_CLIENT" ]; then
     rm -rf "$RETIRED_CLIENT"
     RETIRED_CLIENT=''

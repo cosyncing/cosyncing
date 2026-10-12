@@ -31,3 +31,14 @@ check, and rollback process in the
 [release documentation](../release/broker-release-signing.md). npm-owned
 installations (`bun-js`) update through the global npm package, followed by
 `cosyncing setup`; they do not switch ownership to the signed installer channel.
+
+`cosy update` also reconciles an installer-recorded desktop client from the
+signed release manifest after the broker is healthy. Close the client before
+updating. A failed client replacement restores the previous client while the
+broker stays updated. A current broker can update an older recorded client
+without restarting the service. Eligible older clients can be recognized at the
+installer's exact destination using ownership, executable and Flutter version
+metadata, with a new record committed only after replacement. Invalid client
+ownership or an unknown running state skips the client without blocking the
+broker update. Unrecognized clients stay unchanged; see the
+[installer registration and upgrade instructions](../installation/script-install.md#updating-the-installer-owned-desktop-client).

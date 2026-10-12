@@ -77,6 +77,9 @@ $AdoptedNpmInstall = $false
 $CLIENT_ROOT = ''
 $StagedClient = ''
 $RetiredClient = ''
+$StagedClientReceipt = ''
+$ClientPlaced = $false
+$ClientReceiptCommitted = $false
 
 function Fail {
   param([Parameter(Mandatory = $true)][string] $Message)
@@ -326,6 +329,22 @@ function Set-OwnerOnlySecurity {
     }
   } catch {
     Fail "could not secure the $Kind at $Path ($($_.Exception.Message))"
+  }
+}
+
+# ZIP children inherit the protected staging descriptor. Protect each owned node before recording it.
+function Set-ClientTreeOwnerOnly {
+  param([Parameter(Mandatory = $true)][string] $Path)
+  $item = Get-Item -LiteralPath $Path -Force
+  if (Test-ReparsePoint -Item $item) { Fail 'desktop client contains a reparse point' }
+  if ((Get-PathOwnerSid -Path $Path) -ne $CURRENT_USER_SID) { Fail 'desktop client has a foreign owner' }
+  if ($item.PSIsContainer) {
+    Set-OwnerOnlySecurity -Path $Path -Kind 'directory'
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force)) {
+      Set-ClientTreeOwnerOnly -Path $child.FullName
+    }
+  } else {
+    Set-OwnerOnlySecurity -Path $Path -Kind 'file'
   }
 }
 
@@ -933,7 +952,7 @@ function Invoke-InstallCleanup {
   if ($WORK -and (Test-Path -LiteralPath $WORK)) {
     Remove-Item -LiteralPath $WORK -Recurse -Force -ErrorAction SilentlyContinue
   }
-  foreach ($path in @($StagedApplication, $StagedReceipt, $StagedWeb, $StagedClient)) {
+  foreach ($path in @($StagedApplication, $StagedReceipt, $StagedWeb, $StagedClient, $StagedClientReceipt)) {
     if ($path -and (Test-Path -LiteralPath $path)) {
       Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -950,11 +969,16 @@ function Invoke-InstallCleanup {
   # The same rule for the desktop client the all-in-one places.
   if ($RetiredClient -and $CLIENT_ROOT -and
       (Test-Path -LiteralPath $RetiredClient -PathType Container)) {
-    if (Test-Path -LiteralPath $CLIENT_ROOT) {
+    if ($ClientReceiptCommitted) {
       Remove-Item -LiteralPath $RetiredClient -Recurse -Force -ErrorAction SilentlyContinue
     } else {
+      if ($ClientPlaced -and (Test-Path -LiteralPath $CLIENT_ROOT)) {
+        Remove-Item -LiteralPath $CLIENT_ROOT -Recurse -Force -ErrorAction SilentlyContinue
+      }
       Move-Item -LiteralPath $RetiredClient -Destination $CLIENT_ROOT -Force -ErrorAction SilentlyContinue
     }
+  } elseif ($ClientPlaced -and (-not $ClientReceiptCommitted) -and $CLIENT_ROOT) {
+    Remove-Item -LiteralPath $CLIENT_ROOT -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -1494,8 +1518,7 @@ try {
   if ($null -eq $clientPin) {
     Write-Output "Desktop client: skipped - this release publishes no desktop client for $HOST_KEY."
   } else {
-    # Verified by exactly the rule the broker's own artifacts are verified by, minus the manifest - which
-    # names broker upgrades and deliberately does not name a client. See `Assert-SignedArtifact`.
+    # The signed manifest and embedded table identify the same archives from one assembly step.
     Assert-ChecksumPin -Pin $clientPin -ChecksumRows $checksumRows
     $clientSource = Get-VerifiedArtifact -Pin $clientPin
 
@@ -1551,12 +1574,9 @@ try {
       Move-Item -LiteralPath $CLIENT_ROOT -Destination $RetiredClient -Force
     }
     Move-Item -LiteralPath $extracted[0] -Destination $CLIENT_ROOT -Force
+    $ClientPlaced = $true
     Remove-Item -LiteralPath $StagedClient -Recurse -Force -ErrorAction SilentlyContinue
     $StagedClient = ''
-    if ($RetiredClient) {
-      Remove-Item -LiteralPath $RetiredClient -Recurse -Force -ErrorAction SilentlyContinue
-      $RetiredClient = ''
-    }
     $clientLaunch = Join-Path $CLIENT_ROOT 'cosyncing.exe'
     # A Start Menu entry, so the client is startable after this run rather than only by absolute path.
     # Linux gets a .desktop entry and macOS an .app the launcher already indexes; Windows had neither,
@@ -1602,6 +1622,34 @@ try {
       # An unwritable Start Menu is not a failed install: the client is placed and launchable either way,
       # and saying so beats failing a run whose broker and client are both correct.
       $shortcutPath = ''
+    }
+    Set-ClientTreeOwnerOnly -Path $CLIENT_ROOT
+    $clientReceipt = Join-Path $stateHome 'client-receipt'
+    if (Test-Path -LiteralPath $clientReceipt) {
+      $recordItem = Get-Item -LiteralPath $clientReceipt -Force
+      if ($recordItem.PSIsContainer -or (Test-ReparsePoint -Item $recordItem) -or
+          (Get-PathOwnerSid -Path $clientReceipt) -ne $CURRENT_USER_SID) {
+        Fail 'existing desktop client receipt is unsafe'
+      }
+    }
+    $StagedClientReceipt = New-StagingPath -Parent $stateHome -Prefix '.client-receipt.'
+    [IO.File]::WriteAllText($StagedClientReceipt,
+      "schemaVersion=1`nproduct=cosyncing`nhost=windows-x64`npath=$CLIENT_ROOT`n" +
+      "version=$VERSION`nsha256=$($clientPin.Sha256)`nexecutableSha256=$(Get-Sha256 -Path $clientLaunch)`n",
+      (New-Object Text.UTF8Encoding $false))
+    Set-OwnerOnlySecurity -Path $StagedClientReceipt -Kind 'file'
+    if (Test-Path -LiteralPath $clientReceipt) {
+      # ReplaceFile preserves destination security, so repair our receipt before replacement.
+      Set-OwnerOnlySecurity -Path $clientReceipt -Kind 'file'
+      [IO.File]::Replace($StagedClientReceipt, $clientReceipt, [NullString]::Value)
+    } else {
+      [IO.File]::Move($StagedClientReceipt, $clientReceipt)
+    }
+    $StagedClientReceipt = ''
+    $ClientReceiptCommitted = $true
+    if ($RetiredClient) {
+      Remove-Item -LiteralPath $RetiredClient -Recurse -Force -ErrorAction SilentlyContinue
+      $RetiredClient = ''
     }
     if ($shortcutPath) {
       Write-Output "Desktop client: $CLIENT_ROOT (Start Menu: $shortcutPath)"

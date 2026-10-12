@@ -154,9 +154,8 @@ export function resolveAndroidClientArtifact(
 /**
  * Read the client table back out of a RENDERED installer.
  *
- * The installers are the only place a client artifact's expected digest is written down — the release
- * manifest deliberately does not name them — so a reader that wants to check a published directory
- * against what its installers promise has to read the promise from the installer. Both templates spell
+ * The signed manifest and installers are rendered from the same resolved archives. A reader checking
+ * a published directory against what its installers promise can read that promise here. Both templates spell
  * the assignment differently (`CLIENT_TABLE='…'` and `$CLIENT_TABLE = '…'`) and neither value can contain
  * a quote, because {@link renderBootstraps} refuses to embed one.
  */
@@ -932,6 +931,13 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     sourceCommit: options.sourceCommit,
     publishedAt,
     artifacts: [],
+    desktopClients: Object.fromEntries(clients.map((client) => [client.host, {
+      name: client.name,
+      version: releaseVersion,
+      size: client.size,
+      sha256: client.sha256,
+      url: `${releaseBase}/${client.name}`,
+    }])),
     contract: { ...jsEvidence.contract },
     jsApp: {
       name: RELEASE_JAVASCRIPT_APP_NAME,
@@ -991,10 +997,8 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   );
 
   // The desktop clients, copied in BEFORE the installers are rendered because their digests are baked
-  // into the rendered scripts. They are deliberately NOT in the release manifest: the manifest describes
-  // what a broker can upgrade ITSELF to, and a GUI client is not a broker upgrade. The signed SHA256SUMS
-  // row plus the digest baked into the installer is the whole guarantee, and both release signatures
-  // already cover SHA256SUMS.
+  // into the rendered scripts. The same descriptors populate desktopClients in the signed manifest;
+  // broker artifacts remain separate. Both release signatures also cover the SHA256SUMS client rows.
   for (const client of clients) {
     writeFileSync(
       join(options.outputDirectory, client.name),

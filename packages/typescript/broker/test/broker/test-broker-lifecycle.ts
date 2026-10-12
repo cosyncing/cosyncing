@@ -2,6 +2,7 @@
 import { parseBrokerServiceEnvironment } from '../../src/installation/service-manager.ts';
 /** Deterministic lifecycle, repair, signed upgrade/rollback, and owned-uninstall acceptance. */
 import { runDurablePermissionChecks } from '../helpers/durable-permission-checks.ts';
+import { runDesktopClientChecks } from '../helpers/desktop-client-checks.ts';
 import type { AgentSetupDiagnosis, SetupCheck } from '@cosyncing/adapter-api';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
@@ -486,6 +487,7 @@ function installAgentSkills(m: Machine): ReturnType<typeof agentSkillTargets> {
 const cleanup: string[] = [];
 try {
   await runDurablePermissionChecks(check);
+  await runDesktopClientChecks(check);
   {
     const relocationRoot = mkdtempSync(join(tmpdir(), 'cosyncing-lifecycle-cache-'));
     cleanup.push(relocationRoot);

@@ -47,7 +47,9 @@ import {
   enforceOwnerOnlyFile,
   ensureOwnerOnlyDirectory,
   inspectOwnerOnlyDirectory,
+  inspectOwnerOnlyFile,
 } from '../../../../packages/typescript/broker/src/security/secure-files.ts';
+import { inspectDesktopClient } from '../../../../packages/typescript/broker/src/updates/desktop-client.ts';
 import { windowsPowerShellChildEnvironment } from '../../../../packages/typescript/adapter-api/src/host-process.ts';
 import {
   BROKER_CONTRACT,
@@ -458,10 +460,58 @@ Write-Output $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Admini
   });
   const HOST_IS_ELEVATED = /^\s*True\s*$/i.test(elevationProbe.stdout);
   const pristineInstaller = readFileSync(join(releaseDirectory, SERVER_INSTALLER), 'utf8');
+  const pristineAllInOneInstaller = readFileSync(join(releaseDirectory, ALL_IN_ONE_INSTALLER), 'utf8');
+  function normalizeElevatedClientFixture(installer: string): void {
+    const source = readFileSync(installer, 'utf8').replace(/\r\n/g, '\n');
+    const declaration = 'function Set-ClientTreeOwnerOnly {';
+    const call = "      $shortcutPath = ''\n    }";
+    if (source.split(declaration).length !== 2 || source.split(call).length !== 2) {
+      throw new Error('rendered installer has no unique desktop tree finalization');
+    }
+    // ZIP extraction and the launcher use ordinary creators. Only this elevated fixture gives
+    // their fresh nodes the user owner an unelevated install would give them. Keep every DACL
+    // unchanged so the real protection walk and its mutations still decide the receipt's safety.
+    const normalize = `function Set-FixtureCreatedClientOwner {
+  param([string] $Path)
+  $fixtureRoot = [IO.Path]::GetFullPath('${root.replace(/'/g, "''")}').TrimEnd('\\') + '\\'
+  if (-not [IO.Path]::GetFullPath($Path).StartsWith($fixtureRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'client owner fixture escaped its temporary root'
+  }
+  $item = Get-Item -LiteralPath $Path -Force
+  if (Test-ReparsePoint -Item $item) { throw 'client owner fixture contains a reparse point' }
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $security = if ($item.PSIsContainer) { [IO.Directory]::GetAccessControl($Path) } else { [IO.File]::GetAccessControl($Path) }
+  $owner = $security.GetOwner([Security.Principal.SecurityIdentifier]).Value
+  if ($owner -eq $identity.Owner.Value) {
+    $security.SetOwner($identity.User)
+    if ($item.PSIsContainer) { [IO.Directory]::SetAccessControl($Path, $security) } else { [IO.File]::SetAccessControl($Path, $security) }
+  }
+  if ($item.PSIsContainer) {
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force)) { Set-FixtureCreatedClientOwner -Path $child.FullName }
+  }
+}
+
+`;
+    writeFileSync(installer, source.replace(declaration, normalize + declaration)
+      .replace(call, call + '\n    Set-FixtureCreatedClientOwner -Path $CLIENT_ROOT'));
+  }
+  {
+    const installer = join(root, 'client-owner-fixture-crlf.ps1');
+    writeFileSync(installer, pristineAllInOneInstaller.replace(/\r?\n/g, '\r\n'));
+    let normalized = false; let detail = '';
+    try {
+      normalizeElevatedClientFixture(installer);
+      const rendered = readFileSync(installer, 'utf8');
+      normalized = rendered.includes('    Set-FixtureCreatedClientOwner -Path $CLIENT_ROOT')
+        && !rendered.includes('\r\n');
+    } catch (error) { detail = (error as Error).message; }
+    check('PR6B native client owner fixture accepts CRLF rendered installers', normalized, detail);
+  }
   if (HOST_IS_ELEVATED) {
     for (const name of [SERVER_INSTALLER, ALL_IN_ONE_INSTALLER]) {
       stubProbe(join(releaseDirectory, name), ELEVATION_PROBE, '$false');
     }
+    normalizeElevatedClientFixture(join(releaseDirectory, ALL_IN_ONE_INSTALLER));
   }
   console.log(`      (host is ${HOST_IS_ELEVATED ? 'ELEVATED, probe neutralised' : 'unelevated, script pristine'})`);
 
@@ -623,6 +673,45 @@ exit $LASTEXITCODE
     rmSync(copy, { recursive: true, force: true });
     cpSync(releaseDirectory, copy, { recursive: true });
     return copy;
+  }
+
+  // Exercise the emitted fixture helper on both token kinds. Only a disposable copy is changed
+  // on an unelevated host; the normal installer cases continue to use the pristine script.
+  {
+    const copy = releaseCopy('client-owner-fixture');
+    const installer = join(copy, ALL_IN_ONE_INSTALLER);
+    if (!HOST_IS_ELEVATED) normalizeElevatedClientFixture(installer);
+    const probe = join(root, 'client-owner-fixture.ps1');
+    writeFileSync(probe, `param([string] $TaskInstaller)
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($TaskInstaller, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'rendered owner fixture is not valid PowerShell' }
+foreach ($name in @('Test-ReparsePoint', 'Set-FixtureCreatedClientOwner')) {
+  $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+  if ($null -eq $definition) { throw 'rendered owner fixture function is missing' }
+  . ([scriptblock]::Create($definition.Extent.Text))
+}
+$target = Join-Path '${root.replace(/'/g, "''")}' 'owner-fixture-smoke'
+[void][IO.Directory]::CreateDirectory($target)
+$leaf = Join-Path $target 'fixture.txt'
+[IO.File]::WriteAllText($leaf, 'fixture')
+$before = [IO.File]::GetAccessControl($leaf).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+Set-FixtureCreatedClientOwner -Path $target
+$after = [IO.File]::GetAccessControl($leaf)
+$owned = $after.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$same = $before -eq $after.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+$outside = '${root.replace(/'/g, "''")}-outside-does-not-exist'
+if (Test-Path -LiteralPath $outside) { throw 'unexpected fixture sibling exists' }
+$scoped = $false
+try { Set-FixtureCreatedClientOwner -Path $outside } catch { $scoped = $_.Exception.Message -eq 'client owner fixture escaped its temporary root' }
+Write-Output "ownerMatches=$owned; daclUnchanged=$same; scoped=$scoped"
+if (-not ($owned -and $same -and $scoped)) { throw 'client owner fixture checks failed' }
+`);
+    const smoke = await runPowerShell({ script: probe, arguments: [installer], stage: 'client owner fixture' });
+    check('PR6B native client owner fixture preserves the DACL and refuses paths outside its temporary root',
+      smoke.exitCode === 0 && smoke.stdout.includes('ownerMatches=True; daclUnchanged=True; scoped=True'),
+      `${smoke.exitCode}: ${smoke.stdout.trim()} ${smoke.stderr.trim().slice(0, 200)}`);
   }
 
   /** Rewrite one single-quoted assignment in a RENDERED installer, the way the shell suite repins Bun. */
@@ -1162,6 +1251,15 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
     check('the desktop client directory passes the product\'s own owner-only inspection',
       inspectOwnerOnlyDirectory(clientRoot).status === 'ok',
       `${inspectOwnerOnlyDirectory(clientRoot).status}/${inspectOwnerOnlyDirectory(clientRoot).problem ?? ''}`);
+    const clientReceipt = join(allInOne.home, 'client-receipt');
+    let recordedClient;
+    try { recordedClient = inspectDesktopClient({ home: allInOne.home,
+      env: { LOCALAPPDATA: allInOne.localAppData } }); } catch { /* assertion below */ }
+    check('PR6B native PowerShell client receipt binds the actual placed path, version and digests with protected tree DACLs',
+      inspectOwnerOnlyFile(clientReceipt).status === 'ok'
+        && recordedClient?.receipt.path === clientRoot && recordedClient.receipt.version === VERSION
+        && recordedClient.receipt.sha256 === windowsClient?.sha256
+        && recordedClient.receipt.executableSha256 === sha256(readFileSync(join(clientRoot, 'cosyncing.exe'))));
     check('the Start Menu shortcut stays inside the fixture roaming profile',
       existsSync(join(root, 'roaming-appdata', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'cosyncing.lnk'))
         && allInOne.stdout.includes(join(root, 'roaming-appdata')));
@@ -1171,6 +1269,21 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
         && allInOne.stdout.includes(`'${join(allInOne.home, 'bin', 'cosyncing')}' setup`)
         && !existsSync(join(allInOne.home, 'client-pairing.json')),
       allInOne.stdout.trim().split('\n').slice(-3).join(' | '));
+
+    // Native ReplaceFile retains the destination DACL, including an inherited drifted one.
+    const inheritedRecordScript = join(root, 'inherited-client-receipt.ps1');
+    writeFileSync(inheritedRecordScript, `param([string]$TaskRecord)
+$ErrorActionPreference = 'Stop'
+$TaskAcl = New-Object Security.AccessControl.FileSecurity
+$TaskAcl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
+$TaskAcl.SetAccessRuleProtection($false, $false)
+[IO.File]::SetAccessControl($TaskRecord, $TaskAcl)
+`);
+    const driftedRecord = await runPowerShell({ script: inheritedRecordScript,
+      arguments: [clientReceipt], stage: 'PR6B inherited client receipt fixture' });
+    check('PR6B native PowerShell receipt drift fixture is inherited but owned',
+      driftedRecord.exitCode === 0
+        && inspectOwnerOnlyFile(clientReceipt).daclProblem === 'inherited-access');
 
     // A second run over an existing client must retire and replace it, leaving no staging directory.
     const again = await install({
@@ -1186,6 +1299,13 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
         && existsSync(join(clientRoot, 'cosyncing.exe'))
         && readdirSync(join(again.localAppData, 'cosyncing')).join(',') === 'client',
       `${again.exitCode}: ${readdirSync(join(again.localAppData, 'cosyncing')).join(',')} ${again.stderr.trim().slice(0, 200)}`);
+
+    let repairedClient;
+    try { repairedClient = inspectDesktopClient({ home: allInOne.home,
+      env: { LOCALAPPDATA: allInOne.localAppData } }); } catch { /* assertion below */ }
+    check('PR6B native PowerShell rerun repairs inherited receipt DACL before atomic replacement',
+      again.exitCode === 0 && inspectOwnerOnlyFile(clientReceipt).status === 'ok'
+        && repairedClient?.receipt.path === clientRoot && repairedClient.receipt.version === VERSION);
 
     // The server installer is the broker half and nothing else.
     const serverOnly = await install({
