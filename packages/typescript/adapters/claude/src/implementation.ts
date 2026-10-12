@@ -183,7 +183,13 @@ export const CLAUDE_TERMINAL_BUSY_REFUSAL =
   'A terminal attached to this Claude session is running a turn right now. cosyncing will not take '
   + 'over mid-turn — two writers on one session fork its history into sibling branches. Wait for the '
   + 'turn to finish, or quit the terminal, then take over.';
-/** Machine conflict category for the refusal above; the broker relays it as an `attach-conflict`. */
+/** The same refusal when the terminal's own turn is over but background agents it launched are still
+ *  out: each one wakes the terminal with a notification and it writes a continuation into this session. */
+export const CLAUDE_TERMINAL_BACKGROUND_REFUSAL =
+  'A terminal attached to this Claude session still has background agents running. When they finish it '
+  + 'picks the session up again, so cosyncing will not take over yet — two writers on one session fork '
+  + 'its history into sibling branches. Wait for the agents to finish, or quit the terminal, then take over.';
+/** Machine conflict category for both refusals above; the broker relays it as an `attach-conflict`. */
 export const CLAUDE_TERMINAL_BUSY_CONFLICT = 'claude-terminal-busy';
 
 /** Machine `drive.reason` for a connection demoted after a foreign write was proven (issue 15a).
@@ -1714,11 +1720,7 @@ export class ClaudeAdapter implements AgentBackend {
               currentModel: childModel
                 ? { providerID: store.isDefault ? 'anthropic' : 'wrapper', modelID: childModel, ...labelOf(childModel) }
                 : undefined,
-              status: claudeSubagentStatus(
-                status,
-                { mtimeMs: child.mtimeMs, openTurn: () => claudeSubagentTailState(child.path) },
-                now,
-              ),
+              status: claudeSubagentStatus(status, claudeSubagentStatusEvidence(full, child), now),
               attachMode: 'observe',
               control: claudeSubagentControl(),
               // A subagent transcript has none of the timestamp-less sidecar churn the parent has
@@ -1918,6 +1920,11 @@ export class ClaudeAdapter implements AgentBackend {
         if (status === 'working' || status === 'needs-input') {
           throw new OwnershipConflictError(CLAUDE_TERMINAL_BUSY_REFUSAL, CLAUDE_TERMINAL_BUSY_CONFLICT);
         }
+        // The terminal's turn is over, but not its work: this used to be caught above only because a
+        // pending background launch inflated the session's own status, which it no longer does.
+        if (existsSync(path) && claudeBackgroundAgentsOut(path, Date.now())) {
+          throw new OwnershipConflictError(CLAUDE_TERMINAL_BACKGROUND_REFUSAL, CLAUDE_TERMINAL_BUSY_CONFLICT);
+        }
       }
       // Identity-aware registration: the hub's replaceForTakeover attaches the replacement BEFORE
       // closing the stale (demoted) incumbent, so an unconditional delete on close would deregister
@@ -1939,9 +1946,10 @@ export class ClaudeAdapter implements AgentBackend {
       const parentStatus = existsSync(subagent.parentTranscript)
         ? await claudeSessionStatus(subagent.parentTranscript, parentRaw, now)
         : parentRaw;
+      const meta = parseLineOrNull(readTextSafe(join(dirname(path), `${subagent.agent}.meta.json`))) ?? undefined;
       info.status = claudeSubagentStatus(
         parentStatus,
-        { mtimeMs: statSafe(path)?.mtimeMs, openTurn: () => claudeSubagentTailState(path) },
+        claudeSubagentStatusEvidence(subagent.parentTranscript, { path, meta, mtimeMs: statSafe(path)?.mtimeMs }),
         now,
       );
       return new ClaudeObserveConnection(path, info);
@@ -6107,9 +6115,10 @@ export function claudeSubagentTitle(agent: string, meta: Record<string, any> | u
  *
  *  This is the SAME ceiling the activity card applies to the same tail evidence, which is what stops the
  *  two from disagreeing about how long one quiet-but-open child may claim to work. It does NOT make the
- *  verdicts identical and it is not meant to: the roster row ALSO gates on the parent having a turn in
- *  flight, because a child row has no lifecycle of its own to close, while the card describes the child on
- *  its own terms and settles on final text, a parent answer, or a TaskStop. So a child whose parent's turn
+ *  verdicts identical and it is not meant to: the roster row ALSO bounds a child by its launch — a
+ *  foreground child by its parent's turn, a background one by the parent hearing back from it — because a
+ *  child row has no lifecycle of its own to close, while the card describes the child on its own terms
+ *  and settles on final text, a parent answer, or a TaskStop. So a foreground child whose parent's turn
  *  has closed can read idle in the roster while its card still says running — intended, and documented at
  *  {@link claudeSubagentStatus}. Bounded either way, so a child that dies without its settle line stops
  *  claiming 'working' on its own. */
@@ -6165,23 +6174,34 @@ export interface ClaudeSubagentStatusEvidence {
   /** Absent (or undefined) when the child transcript could not be stat'd — no mtime is no evidence. */
   mtimeMs?: number;
   /** The child's own open-turn probe, consulted ONLY in the window between the freshness bound and the
-   *  open-turn bound, and only under a parent whose turn is still in flight. */
+   *  open-turn bound, and only for a child whose lifetime is not already over. */
   openTurn?: () => ClaudeSubagentTailState | undefined;
+  /** A background agent the parent has not heard back from (`pending`) or has (`ended`); absent for a
+   *  foreground child. See {@link claudeSubagentBackground}. */
+  background?: 'pending' | 'ended';
 }
 
 /** Status for a child row. A subagent has NO `agents --json` row of its own (the CLI reports the parent),
- *  so 'working' always requires the parent to have a turn in flight. On top of that the child's own
- *  transcript either appended recently, or has been quiet WHILE its last record left a tool call
- *  unanswered — the quiet-but-working case the flat window used to misread as idle. A child whose last
- *  record settled (final text, or a resolved tool call) still decays on the freshness bound, and the
- *  parent gate bounds everything: when the parent's turn closes the row goes idle, because nothing else
- *  ever "finishes" a child row. */
+ *  so what bounds its lifetime depends on how it was launched:
+ *
+ *  - a FOREGROUND child lives inside its parent's turn, so 'working' requires that turn to be in flight;
+ *  - a BACKGROUND child outlives its parent's turn by design — the real flow ends the turn right after
+ *    the async-launch ack — so it is bounded instead by its parent hearing back from it (a notification
+ *    or a TaskStop), after which it is idle however recently it wrote.
+ *
+ *  Inside that lifetime the child's OWN transcript decides: it appended recently, or it has been quiet
+ *  WHILE its last record left a tool call unanswered — the quiet-but-working case the flat window used to
+ *  misread as idle. A child whose last record settled (final text, or a resolved tool call) still decays
+ *  on the freshness bound, so a child that dies without anyone hearing back stops claiming 'working' on
+ *  its own. This row is the ONLY place a background agent's work shows in the roster: the parent's own
+ *  status says what the parent is doing, and the client rolls a working child up to its parent's pill. */
 export function claudeSubagentStatus(
   parentStatus: RawStatus | undefined,
   child: ClaudeSubagentStatusEvidence,
   now: number,
 ): RawStatus {
-  if (parentStatus !== 'working' || child.mtimeMs == null) return 'idle';
+  if (child.mtimeMs == null || child.background === 'ended') return 'idle';
+  if (parentStatus !== 'working' && child.background !== 'pending') return 'idle';
   const quietMs = now - child.mtimeMs;
   if (quietMs <= WORKING_FRESH_MS) return 'working';
   if (quietMs > CLAUDE_SUBAGENT_OPEN_TURN_STALE_MS) return 'idle';
@@ -6205,10 +6225,10 @@ export interface ParentActivityState {
    * Background SHELL commands (`Bash` with `run_in_background`), keyed by tool_use_id.
    *
    * Deliberately NOT folded into {@link backgroundToolUseIds}: that set is also read by
-   * `computePendingBackgroundSpawnMs` to pin the session's roster row to 'working' for
+   * `computeBackgroundAgentLedger`, which makes a child row Working and refuses a takeover for
    * BACKGROUND_PENDING_MS, and a background command is precisely the case where the session
-   * legitimately goes idle while work continues. Putting commands in there would leave every
-   * such session stuck on Working.
+   * legitimately goes idle while work continues. Putting commands in there would refuse every
+   * takeover of such a session.
    */
   backgroundCommands?: Map<string, ClaudeBackgroundCommand>;
 }
@@ -6491,6 +6511,14 @@ export function collectToolResultIds(ln: any, set: Set<string>): void {
   for (const b of c) if (b?.type === 'tool_result' && b.tool_use_id != null) set.add(String(b.tool_use_id));
 }
 
+/** Whether a tool_use asked to run in the background. The model writes this flag, and it does not always
+ *  write a boolean: 52 of the 168 flagged Agent/Task spawns in the 400 newest transcripts on one real
+ *  workstation carry the STRING "true", which the CLI honours. Reading only `=== true` lost the flag on
+ *  those, leaving the async-launch ack as the only classifier, and a Bash spawn's card without labels. */
+function claudeRunsInBackground(input: any): boolean {
+  return input?.run_in_background === true || input?.run_in_background === 'true';
+}
+
 export function collectParentActivity(
   ln: any,
   resolved: Set<string>,
@@ -6516,7 +6544,7 @@ export function collectParentActivity(
   if (ln?.type === 'assistant' && Array.isArray(c)) {
     for (const b of c) {
       if (b?.type !== 'tool_use' || b.id == null) continue;
-      if ((b.name === 'Task' || b.name === 'Agent') && b.input?.run_in_background === true) {
+      if ((b.name === 'Task' || b.name === 'Agent') && claudeRunsInBackground(b.input)) {
         const id = String(b.id);
         background.add(id);
         const ts = timestampToMs(ln.timestamp);
@@ -6527,7 +6555,7 @@ export function collectParentActivity(
       // A background SHELL command. The spawn contributes only the labels; the ack below is the
       // authoritative classifier, so a CLI that stops writing `run_in_background` (as Task/Agent
       // spawns already did) degrades to a card without its command line rather than to no card.
-      if (b.name === 'Bash' && b.input?.run_in_background === true && extra?.backgroundCommands) {
+      if (b.name === 'Bash' && claudeRunsInBackground(b.input) && extra?.backgroundCommands) {
         const id = String(b.id);
         const prev = extra.backgroundCommands.get(id);
         // Clamped HERE, not at emit: the ledger is rebuilt from the whole transcript per connection
@@ -8080,18 +8108,23 @@ function rememberClaudeTurnAuthority(path: string, entry: ClaudeTurnAuthorityEnt
   claudeTurnAuthorityCache.set(path, entry);
 }
 
-/** One status projection shared by discovery and Observe attach.
+/** One status projection shared by discovery and Observe attach: what the session ITSELF is doing.
  *
- * Exact terminal transcript authority wins over the live row, with ONE upgrade: an
- * unnotified background spawn is still real work after the parent's turn ends (the real
- * flow ends with end_turn right after the async-launch ack), so a fresh pending spawn
- * keeps the row Working until the task notification lands. Exact active authority
+ * Exact terminal transcript authority wins over the live row. Exact active authority
  * preserves a live process through arbitrarily quiet tools, but cannot manufacture
  * Working after that process has exited: it must be qualified by the current
- * `agents --json` row, a pending background spawn, or a pending notification-woken
- * continuation (whose live row may read idle or carry no `status` at all). The
- * freshness fallback applies only when the transcript has no exact latest-turn
- * evidence. */
+ * `agents --json` row or a pending notification-woken continuation (whose live row may
+ * read idle or carry no `status` at all). The freshness fallback applies only when the
+ * transcript has no exact latest-turn evidence.
+ *
+ * Background agents the session launched do NOT make it Working. The real flow ends the
+ * parent's turn right after the async-launch ack, and from then on the terminal sits at
+ * its prompt: a session reported Working there offered Stop over a turn that had ended
+ * and queued every prompt behind it. Those agents are reported where they run, on their
+ * own child rows ({@link claudeSubagentStatus}), and the client rolls a working child up
+ * to its parent's roster pill. Takeover still treats them as busy
+ * ({@link claudeBackgroundAgentsOut}). When one finishes and its notification wakes the
+ * parent, that continuation IS the parent working, and reads so here. */
 export async function claudeSessionStatus(
   path: string,
   raw: RawStatus | undefined,
@@ -8102,28 +8135,21 @@ export async function claudeSessionStatus(
   const continuationPending =
     authorityResult.continuationOpenedAt !== undefined
     && now - authorityResult.continuationOpenedAt < CONTINUATION_PENDING_MS;
-  if (authority === 'terminal') {
-    // A terminal marker AFTER the notification resolves the continuation fact, so only
-    // the pending spawn can upgrade here. needs-input keeps today's terminal verdict: a
-    // stale waiting row must not outlive its turn.
-    return pendingBackgroundSpawnMs(path, now) != null && raw !== 'needs-input' ? 'working' : 'idle';
-  }
+  // A terminal marker AFTER the notification resolves the continuation fact. needs-input
+  // keeps the terminal verdict too: a stale waiting row must not outlive its turn.
+  if (authority === 'terminal') return 'idle';
   if (authority === 'active') {
     if (raw === 'needs-input') return 'needs-input';
     if (raw === 'working') return 'working';
-    // Exact active evidence proves a turn was OPEN, not that the CLI is busy now, so this branch would
-    // otherwise settle to idle. Two things still make that verdict wrong: a fresh unnotified
-    // background spawn (the spawning tool_use line is itself an exact active marker), and a
-    // notification-woken continuation (the notification consumed the pending spawn while the live row
-    // shows nothing). Upgrade only — live busy/needs-input evidence above keeps its precedence.
-    return pendingBackgroundSpawnMs(path, now) != null || continuationPending
-      ? 'working'
-      : 'idle';
+    // Exact active evidence proves a turn was OPEN, not that the CLI is busy now, so this branch
+    // settles to idle unless the open turn is a notification-woken continuation, which the live
+    // row may show as nothing at all. Upgrade only — live busy/needs-input evidence above keeps its
+    // precedence.
+    return continuationPending ? 'working' : 'idle';
   }
   const st = statSafe(path);
   const conversationTs = lastConversationTs(path) ?? st?.mtimeMs ?? 0;
-  const pendingBg = pendingBackgroundSpawnMs(path, now);
-  if ((pendingBg != null || continuationPending) && raw !== 'needs-input') return 'working';
+  if (continuationPending && raw !== 'needs-input') return 'working';
   const gateMtime = raw === 'working'
     ? Math.max(conversationTs, activityHeartbeatMs(path))
     : conversationTs;
@@ -8132,9 +8158,10 @@ export async function claudeSessionStatus(
 
 /** Fallback recency for raw busy rows whose transcript has no exact latest-turn evidence. */
 const WORKING_FRESH_MS = 120_000;
-/** A parent-launched background Task/Agent is still real work even after the parent has emitted the
- *  immediate async-launch acknowledgement and `agents --json` reads idle. Keep the roster working until
- *  the parent receives the task notification, or the launch is old enough to be treated as abandoned. */
+/** A parent-launched background Task/Agent is still out after the parent has emitted the immediate
+ *  async-launch acknowledgement and `agents --json` reads idle. Until the parent receives the task
+ *  notification, or the launch is old enough to be treated as abandoned, a takeover would race the
+ *  continuation that notification wakes ({@link claudeBackgroundAgentsOut}). */
 const BACKGROUND_PENDING_MS = 1_800_000; // 30 min
 /** Abandonment bound for a notification-woken continuation with no terminal marker yet.
  *  Interactive rows re-earn Working from `agents --json` anyway; this is the ceiling for
@@ -8525,12 +8552,21 @@ function computeLastConversationTs(path: string): number | undefined {
   return latest;
 }
 
-function pendingBackgroundSpawnMs(path: string, now: number): number | undefined {
-  const ts = cachedFileFact(path, 'pending-background-spawn-ms', () => computePendingBackgroundSpawnMs(path));
-  return ts !== undefined && now - ts < BACKGROUND_PENDING_MS ? ts : undefined;
+/** What a parent transcript's tail says about the background agents it launched. */
+interface ClaudeBackgroundAgentLedger {
+  /** Spawning tool_use_ids of background Task/Agent launches. */
+  readonly background: ReadonlySet<string>;
+  /** The launches the parent has since heard back from: a task notification, or its own TaskStop. */
+  readonly ended: ReadonlySet<string>;
+  /** Launch time of the newest background launch the parent has not heard back from. */
+  readonly newestPendingSpawnMs?: number;
 }
 
-function computePendingBackgroundSpawnMs(path: string): number | undefined {
+function claudeBackgroundAgentLedger(path: string): ClaudeBackgroundAgentLedger {
+  return cachedFileFact(path, 'background-agent-ledger', () => computeBackgroundAgentLedger(path));
+}
+
+function computeBackgroundAgentLedger(path: string): ClaudeBackgroundAgentLedger {
   const resolved = new Set<string>();
   const background = new Set<string>();
   const notified = new Set<string>();
@@ -8546,7 +8582,59 @@ function computePendingBackgroundSpawnMs(path: string): number | undefined {
     const ts = spawnMs.get(id);
     if (ts !== undefined && (newest === undefined || ts > newest)) newest = ts;
   }
-  return newest;
+  return { background, ended: notified, ...(newest !== undefined ? { newestPendingSpawnMs: newest } : {}) };
+}
+
+function pendingBackgroundSpawnMs(path: string, now: number): number | undefined {
+  const ts = claudeBackgroundAgentLedger(path).newestPendingSpawnMs;
+  return ts !== undefined && now - ts < BACKGROUND_PENDING_MS ? ts : undefined;
+}
+
+/**
+ * Whether a child row is one of its parent's BACKGROUND agents, and if so whether the parent has heard
+ * back from it. `undefined` is a foreground child (or one this tail cannot place), which lives inside its
+ * parent's turn.
+ *
+ * Two sources say "background", and either is enough: the parent's own launch record (the flag, or the
+ * async-launch ack), and the child meta's `requestShape`, which newer CLIs write. The meta matters when
+ * the launch has scrolled out of the parent's 512 KiB tail under a long continuation; older CLIs omit it,
+ * which is why the launch record is still read. Only the parent can say "ended", and it outranks both.
+ */
+export function claudeSubagentBackground(
+  parentTranscript: string,
+  meta: { toolUseId?: unknown; requestShape?: unknown } | undefined,
+): 'pending' | 'ended' | undefined {
+  if (meta?.toolUseId == null) return undefined;
+  const id = String(meta.toolUseId);
+  const ledger = claudeBackgroundAgentLedger(parentTranscript);
+  if (ledger.ended.has(id)) return 'ended';
+  return ledger.background.has(id) || meta.requestShape === 'background' ? 'pending' : undefined;
+}
+
+/** The evidence for one child row, gathered the same way by discovery and by a child attach. */
+export function claudeSubagentStatusEvidence(
+  parentTranscript: string,
+  child: { path: string; meta?: { toolUseId?: unknown; requestShape?: unknown }; mtimeMs?: number },
+): ClaudeSubagentStatusEvidence {
+  return {
+    mtimeMs: child.mtimeMs,
+    openTurn: () => claudeSubagentTailState(child.path),
+    background: claudeSubagentBackground(parentTranscript, child.meta),
+  };
+}
+
+/**
+ * Whether the terminal that owns this transcript still has background agents out. The terminal's own
+ * turn is over, but each of them will wake it with a notification and it will write a continuation here,
+ * so for single-writer purposes the session is busy. Either signal counts: a launch it has not heard back
+ * from inside the pending window, or a child whose own transcript still shows it working, which outlives
+ * that window for a long agent.
+ */
+export function claudeBackgroundAgentsOut(path: string, now: number): boolean {
+  if (pendingBackgroundSpawnMs(path, now) != null) return true;
+  return claudeSubagentTranscripts(path).some(
+    (child) => claudeSubagentStatus('idle', claudeSubagentStatusEvidence(path, child), now) === 'working',
+  );
 }
 
 /** The tool whose approval ends plan mode, and with it the last mode the transcript recorded. */

@@ -18,9 +18,15 @@
  *   4. observe-only — a child advertises no Drive and no take-over, offers no terminal command that
  *      cannot work, and a driving attach on a child is refused before any process path.
  *   5. budget — a parent OUTSIDE the discovery cutoff contributes no child rows.
- *   6. status — Working needs an in-flight parent AND (a recently-appended child transcript OR a quiet one
- *      whose OWN last record leaves a tool call unanswered, bounded). A settled child decays on the flat
- *      window; the quiet-mid-tool-call case is the one the flat window used to misread as Idle.
+ *   6. status — Working needs the child to be alive by its launch (a foreground child inside an
+ *      in-flight parent turn; a background child its parent has not heard back from) AND (a
+ *      recently-appended child transcript OR a quiet one whose OWN last record leaves a tool call
+ *      unanswered, bounded). A settled child decays on the flat window; the quiet-mid-tool-call case is
+ *      the one the flat window used to misread as Idle.
+ *   7. background agents — the real flow ends the parent's turn right after the async-launch ack, so the
+ *      PARENT reads idle on its own status (no Stop over a terminal at its prompt) while each agent it is
+ *      still waiting on reads Working on its OWN row; a notified or stopped agent is idle however fresh,
+ *      and the session is still refused to a takeover while any agent is out.
  *
  *   bun run packages/typescript/adapters/claude/test/test-claude-roster-subagents.ts   (exit 0 = pass)
  */
@@ -172,6 +178,54 @@ const quietSettledKidPath = writeSubagent(subDirOf(busyUuid), 'agent-quiet-settl
 const openStaleKidPath = writeOpenToolSubagent(subDirOf(busyUuid), 'agent-open-stale', { description: 'Abandoned open call', toolUseId: 'toolu_os' });
 const openFreshKidPath = writeOpenToolSubagent(subDirOf(busyUuid), 'agent-open-fresh', { description: 'Fresh open call', toolUseId: 'toolu_of' });
 
+// A parent whose OWN turn is over while agents it launched in the background are still out — the
+// shape of a real session after "Async agent launched" + end_turn. Each launch differs in exactly the
+// way a child's verdict depends on.
+const bgParentUuid = 'ffffffff-1111-4222-8333-ffffffffffff';
+const bgLines: unknown[] = [
+  { type: 'user', uuid: 'bgp-u1', timestamp: '2026-08-20T10:00:00.000Z', cwd, message: { content: 'Review and benchmark in the background' } },
+];
+const bgSpawn = (id: string, input: Record<string, unknown>, ack: string, n: number): void => {
+  bgLines.push(
+    { type: 'assistant', uuid: `bgp-a${n}`, timestamp: '2026-08-20T10:00:10.000Z', message: { model: 'claude-haiku-4-5-20251001', stop_reason: 'tool_use', content: [{ type: 'tool_use', id, name: 'Agent', input }] } },
+    { type: 'user', uuid: `bgp-r${n}`, timestamp: '2026-08-20T10:00:11.000Z', message: { content: [{ type: 'tool_result', tool_use_id: id, content: ack }] } },
+  );
+};
+// The model wrote the flag as a STRING, and this ack is not the async-launch text, so only the flag
+// classifies it.
+bgSpawn('toolu_bg_string', { description: 'String flag', run_in_background: 'true' }, 'Agent started.', 1);
+// Flagless, the ≥2.1.25x shape: the async-launch ack is the classification.
+bgSpawn('toolu_bg_quiet', { description: 'Quiet benchmark' }, 'Async agent launched successfully. agentId: bgquiet (internal ID).', 2);
+bgSpawn('toolu_bg_settled', { description: 'Settled review' }, 'Async agent launched successfully. agentId: bgsettled (internal ID).', 3);
+bgSpawn('toolu_bg_notified', { description: 'Reported back' }, 'Async agent launched successfully. agentId: bgnotified (internal ID).', 4);
+bgSpawn('toolu_bg_stopped', { description: 'Stopped by the parent' }, 'Async agent launched successfully. agentId: bgstopped (internal ID).', 5);
+// A FOREGROUND agent: answered in the parent's turn, so it lives inside that turn.
+bgSpawn('toolu_fg', { description: 'Foreground helper' }, 'The helper finished: all good.', 6);
+bgLines.push(
+  { type: 'assistant', uuid: 'bgp-stop', timestamp: '2026-08-20T10:00:20.000Z', message: { model: 'claude-haiku-4-5-20251001', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_taskstop', name: 'TaskStop', input: { task_id: 'bgstopped' } }] } },
+  { type: 'user', uuid: 'bgp-stopr', timestamp: '2026-08-20T10:00:21.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_taskstop', content: 'Stopped.' }] } },
+  { type: 'user', uuid: 'bgp-n1', timestamp: '2026-08-20T10:00:30.000Z', origin: { kind: 'task-notification' }, message: { content: '<task-notification>\n<tool-use-id>toolu_bg_notified</tool-use-id>\n<status>completed</status>\n</task-notification>' } },
+  { type: 'assistant', uuid: 'bgp-end', timestamp: '2026-08-20T10:00:40.000Z', message: { model: 'claude-haiku-4-5-20251001', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Launched them; I will report back.' }] } },
+);
+writeFileSync(transcriptOf(bgParentUuid), bgLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
+const bgStringPath = writeSubagent(subDirOf(bgParentUuid), 'agent-bg-string', { description: 'String flag', toolUseId: 'toolu_bg_string' }, 'still going');
+const bgQuietPath = writeOpenToolSubagent(subDirOf(bgParentUuid), 'agent-bg-quiet', { description: 'Quiet benchmark', toolUseId: 'toolu_bg_quiet' });
+const bgSettledPath = writeSubagent(subDirOf(bgParentUuid), 'agent-bg-settled', { description: 'Settled review', toolUseId: 'toolu_bg_settled' }, 'done, waiting to be read');
+const bgNotifiedPath = writeSubagent(subDirOf(bgParentUuid), 'agent-bg-notified', { description: 'Reported back', toolUseId: 'toolu_bg_notified' }, 'reported');
+const bgStoppedPath = writeOpenToolSubagent(subDirOf(bgParentUuid), 'agent-bg-stopped', { description: 'Stopped by the parent', toolUseId: 'toolu_bg_stopped' });
+const fgPath = writeSubagent(subDirOf(bgParentUuid), 'agent-fg', { description: 'Foreground helper', toolUseId: 'toolu_fg' }, 'helped');
+// Launched where this parent's tail cannot see it (the launch scrolled out under a long continuation):
+// only the newer CLIs' meta `requestShape` says it is a background agent.
+const bgShapePath = writeSubagent(
+  subDirOf(bgParentUuid),
+  'agent-bg-shape',
+  { description: 'Shape only', toolUseId: 'toolu_bg_shape', requestShape: 'background' },
+  'still going',
+);
+// The parent's terminal is live (an alive pid = this process), so a takeover consults its owner.
+mkdirSync(join(configDir, 'sessions'), { recursive: true });
+writeFileSync(join(configDir, 'sessions', '9101.json'), JSON.stringify({ sessionId: bgParentUuid, pid: process.pid, cwd }));
+
 // Recency: everything fresh except the cold parent (and its child), which sits 3h back.
 const now = Date.now();
 const old = new Date(now - 3 * 60 * 60_000);
@@ -185,15 +239,22 @@ utimesSync(quietWorkingKidPath, quiet, quiet);
 utimesSync(quietSettledKidPath, quiet, quiet);
 utimesSync(openStaleKidPath, abandoned, abandoned);
 utimesSync(coldKidPath, old, old);
+for (const p of [transcriptOf(bgParentUuid), bgStringPath, bgNotifiedPath, bgStoppedPath, fgPath, bgShapePath]) {
+  utimesSync(p, new Date(now), new Date(now));
+}
+utimesSync(bgQuietPath, quiet, quiet);
+utimesSync(bgSettledPath, quiet, quiet);
 
-// A fake `claude agents --json` reporting exactly ONE busy row — the in-flight parent. Every other parent
-// stays idle, so the fixture is clock-independent.
+// A fake `claude agents --json` reporting two busy rows: the in-flight parent, and the background-agent
+// parent, which the real CLI was observed reporting busy while it sat at its prompt waiting on its agents
+// (its transcript's exact end_turn outranks that). Every other parent stays idle, so the fixture is
+// clock-independent.
 const fakeClaude = join(ROOT, 'fake-claude');
 writeFileSync(
   fakeClaude,
   `#!/usr/bin/env bash
 if [ "$1" = "agents" ] && [ "$2" = "--json" ]; then
-  printf '%s\\n' '[{"sessionId":"${busyUuid}","status":"busy"}]'
+  printf '%s\\n' '[{"sessionId":"${busyUuid}","status":"busy"},{"sessionId":"${bgParentUuid}","status":"busy"}]'
   exit 0
 fi
 exit 0
@@ -208,7 +269,9 @@ process.env.COSYNCING_CLAUDE_WRAPPER_DIR = binDir;
 const {
   ClaudeAdapter,
   drainClaudeLiveStatusProbes,
+  claudeBackgroundAgentsOut,
   CLAUDE_SUBAGENT_OWNED_REASON,
+  CLAUDE_TERMINAL_BUSY_CONFLICT,
   claudeSessionNativeId,
   claudeSubagentNativeId,
   claudeSubagentPathInfo,
@@ -451,6 +514,65 @@ claudeSubagentStatus('working', { mtimeMs: now - 20 * 60_000, openTurn: counting
 check('claudeSubagentStatus never probes where the answer cannot change', probeCalls === 0, `probes=${probeCalls}`);
 check('claudeSubagentStatus: parent idle → idle whatever the child mtime', claudeSubagentStatus('idle', { mtimeMs: now }, now) === 'idle');
 check('claudeSubagentStatus: no parent evidence → idle', claudeSubagentStatus(undefined, { mtimeMs: now }, now) === 'idle');
+check(
+  'claudeSubagentStatus: a pending background child outlives its parent\'s turn',
+  claudeSubagentStatus('idle', { mtimeMs: now - 1_000, background: 'pending' }, now) === 'working'
+    && claudeSubagentStatus(undefined, { mtimeMs: now - 1_000, background: 'pending' }, now) === 'working',
+);
+check(
+  'claudeSubagentStatus: a pending background child still answers to its own transcript',
+  claudeSubagentStatus('idle', { mtimeMs: now - 10 * 60_000, openTurn: () => 'in-tool-call', background: 'pending' }, now) === 'working'
+    && claudeSubagentStatus('idle', { mtimeMs: now - 10 * 60_000, openTurn: () => 'final-text', background: 'pending' }, now) === 'idle'
+    && claudeSubagentStatus('idle', { mtimeMs: now - 16 * 60_000, openTurn: () => 'in-tool-call', background: 'pending' }, now) === 'idle',
+);
+check(
+  'claudeSubagentStatus: a background child its parent heard back from is idle however fresh',
+  claudeSubagentStatus('working', { mtimeMs: now, background: 'ended' }, now) === 'idle'
+    && claudeSubagentStatus('idle', { mtimeMs: now, background: 'ended' }, now) === 'idle',
+);
+claudeSubagentStatus('idle', { mtimeMs: now - 10 * 60_000, openTurn: countingProbe, background: 'ended' }, now);
+check('claudeSubagentStatus never probes a child whose lifetime is over', probeCalls === 0, `probes=${probeCalls}`);
+
+// ── 7. background agents outlive their parent's turn ────────────────────────────────────────────
+// The parent ended its turn after launching them; its own row says so. The work shows on the children.
+const bgParentRow = byId.get(enc(transcriptOf(bgParentUuid)));
+const bgStatus = (path: string): string | undefined => byId.get(enc(path))?.status;
+check(
+  'a parent whose turn ended after launching background agents reads idle on its own row',
+  bgParentRow?.status === 'idle',
+  `status=${bgParentRow?.status}`,
+);
+check(
+  '  every one of its agents is still a child of that row',
+  [bgStringPath, bgQuietPath, bgSettledPath, bgNotifiedPath, bgStoppedPath, fgPath, bgShapePath].every(
+    (path) => byId.get(enc(path))?.parentThreadId === bgParentRow?.nativeId,
+  ),
+);
+check('a background agent launched with a STRING flag reads working while it writes', bgStatus(bgStringPath) === 'working', `status=${bgStatus(bgStringPath)}`);
+check('a flagless background agent quiet mid-tool-call reads working', bgStatus(bgQuietPath) === 'working', `status=${bgStatus(bgQuietPath)}`);
+check('a background agent known only by its meta requestShape reads working', bgStatus(bgShapePath) === 'working', `status=${bgStatus(bgShapePath)}`);
+check('a background agent whose last record settled decays to idle', bgStatus(bgSettledPath) === 'idle', `status=${bgStatus(bgSettledPath)}`);
+check('a background agent the parent was notified about is idle however fresh', bgStatus(bgNotifiedPath) === 'idle', `status=${bgStatus(bgNotifiedPath)}`);
+check('a background agent the parent stopped is idle however open', bgStatus(bgStoppedPath) === 'idle', `status=${bgStatus(bgStoppedPath)}`);
+check('a FOREGROUND agent does not outlive its parent\'s turn', bgStatus(fgPath) === 'idle', `status=${bgStatus(fgPath)}`);
+const bgQuietConn = await adapter.attach(enc(bgQuietPath), 'observe');
+check('attaching a working background agent agrees with its roster row', bgQuietConn.info.status === 'working', `status=${bgQuietConn.info.status}`);
+await bgQuietConn.close();
+check('the session is still busy for a takeover while its agents are out', claudeBackgroundAgentsOut(transcriptOf(bgParentUuid), Date.now()));
+let bgTakeover: any;
+try {
+  const conn = await adapter.attach(enc(transcriptOf(bgParentUuid)), 'resume');
+  await conn.close();
+} catch (e) {
+  bgTakeover = e;
+}
+check(
+  '  so a takeover of its live terminal is refused, and says the agents are why',
+  bgTakeover?.name === 'OwnershipConflictError'
+    && bgTakeover?.conflict === CLAUDE_TERMINAL_BUSY_CONFLICT
+    && /background agents/i.test(String(bgTakeover?.message)),
+  String(bgTakeover),
+);
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
