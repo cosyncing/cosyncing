@@ -370,9 +370,12 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
     final lineage = SessionRosterLineage.build(widget.sessions);
     final unread = widget.unreadCompletionKeys;
     if (unread == null) {
+      // Judged by display status, so a parent is not announced ready while a
+      // descendant is still working.
       _readyToReviewKeys = (_reviewTracker ??= ReadyToReviewTracker()).observe(
         widget.sessions,
         activeKey: widget.activeKey,
+        statusOf: lineage.effectiveStatusFor,
       );
     } else {
       // Discard fallback history when a feed is attached; it must not resurrect
@@ -1590,9 +1593,17 @@ class _SessionRow extends StatelessWidget {
                           color: tokens.textTertiary,
                         ),
                       ),
-                    if (liveStatus && session.status != SessionStatus.idle) ...[
+                    // The display status: a parent whose own turn has ended
+                    // still reads Working while a subagent under it works.
+                    // Display only; Session Detail keeps the canonical status.
+                    if (liveStatus &&
+                        row.effectiveStatus != SessionStatus.idle) ...[
                       const SizedBox(width: 4),
-                      sessionStatusPill(context, session.status, dense: true),
+                      sessionStatusPill(
+                        context,
+                        row.effectiveStatus,
+                        dense: true,
+                      ),
                     ],
                   ],
                 ),
