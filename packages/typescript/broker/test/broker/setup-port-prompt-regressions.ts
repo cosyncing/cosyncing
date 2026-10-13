@@ -1,4 +1,7 @@
 /** Exercise clack's actual Enter/default and cancellation behavior through a pseudo-terminal. */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createClackSetupPresenter } from '../../src/installation/setup-presenter.ts';
 import { SETUP_PROMPT_CANCELLED, type SetupInspection } from '../../src/installation/setup.ts';
 
@@ -9,12 +12,28 @@ export async function setupPortPromptRegressions(check: Check): Promise<void> {
   // Windows PowerShell has its own installer tests; script(1) provides the terminal for the shared
   // TypeScript presenter on POSIX. Every child only prompts, and never inspects or configures a host.
   if (process.platform === 'win32') return;
+  // The pinned runtime can stall loading this large module graph in a fresh PTY. Bundle the
+  // current source once, then exercise the real presenter without a runtime import traversal.
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-setup-port-prompt-'));
+  try {
+    const entry = join(root, 'prompt.mjs');
+    const build = await Bun.build({
+      entrypoints: [import.meta.path], target: 'bun', outdir: root, naming: 'prompt.mjs',
+    });
+    if (!build.success) throw new AggregateError(build.logs, 'Could not build terminal prompt fixture');
+    await runPromptCases(check, entry);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function runPromptCases(check: Check, entry: string): Promise<void> {
   for (const [name, input, expected] of [
     ['default', '\r', '7735'],
     ['custom', '8800\r', '8800'],
     ['cancel', '\x03', 'cancelled'],
   ]) {
-    const command = `stty cols 120 rows 30 && exec ${shellQuote(process.execPath)} ${shellQuote(import.meta.path)} --child`;
+    const command = `stty cols 120 rows 30 && exec ${shellQuote(process.execPath)} ${shellQuote(entry)} --child`;
     const argv = process.platform === 'darwin'
       ? ['script', '-q', '/dev/null', 'sh', '-c', command]
       : ['script', '-q', '-e', '-c', command, '/dev/null'];
@@ -23,7 +42,7 @@ export async function setupPortPromptRegressions(check: Check): Promise<void> {
       stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });
     const stderr = new Response(child.stderr).text();
-    const timeout = setTimeout(() => child.kill(), 10_000);
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 10_000);
     let output = '';
     let answered = false;
     const reader = child.stdout.getReader();
