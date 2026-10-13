@@ -55,6 +55,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Reopened Codex sessions keep each reply under its own prompt after a stopped
   turn, and history shows each command's exit status.
 - A Claude session synced through the mod shows Working when you open it mid-turn.
+- A Claude session whose background agents are still running reads Working in
+  the roster again, including when its subagents are collapsed or the session
+  is open in the app. The agents' own rows say which ones are still working. The
+  session's last turn keeps its "Ran for … · Finished at …" footer. The app no
+  longer offers Stop or queues new prompts behind a turn that has already
+  ended. Taking the session over waits until the agents have reported back.
 - On Windows, pairing a device keeps its durable files owner-only and no longer
   leaves a file that blocks `cosy update`. `cosy repair` plans and fixes
   permission-only drift; doctor and update name the file, the problem, and the

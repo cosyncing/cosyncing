@@ -13,7 +13,7 @@ import { mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync, writeSync }
 import { homedir } from 'node:os';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { claudeSessionStatus, claudeTaskNotificationLine, claudeTranscriptTurnAuthorityResult, mapTranscript, ClaudeRuntimeTracker, ClaudeObserveConnection, selectClaudeLiveStatusAfterProbe } from '../../../adapters/claude/src/index.ts';
+import { claudeBackgroundAgentsOut, claudeSessionStatus, claudeTaskNotificationLine, claudeTranscriptTurnAuthorityResult, mapTranscript, ClaudeRuntimeTracker, ClaudeObserveConnection, selectClaudeLiveStatusAfterProbe } from '../../../adapters/claude/src/index.ts';
 import { AttentionService } from '../../src/attention/attention-service.ts';
 import type { AgentMessage } from '../../../adapter-api/src/index.ts';
 
@@ -661,7 +661,10 @@ const lines = [
 
 // ── status projection: ack-classified background spawns and continuation pending ──
 // Real ≥2.1.25x spawns omit run_in_background; the async-launch ack is the classification.
-// The notification then consumes the pending spawn, so the continuation must hold Working
+// A launched background agent does not make the PARENT Working: its turn ends right after the
+// ack and the terminal sits at its prompt (the agent's own child row carries its work — see
+// test-claude-roster-subagents.ts). It does keep the session busy for a takeover. When the
+// notification wakes the parent, that continuation IS the parent working, and must hold Working
 // on its own bounded evidence — including for sdk-cli live rows that omit `status`.
 {
   const dir = mkdtempSync(join(tmpdir(), 'claude-continuation-'));
@@ -676,13 +679,15 @@ const lines = [
       { type: 'assistant', uuid: 'bgd', timestamp: iso(-113_000), message: { id: 'bgm2', role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'launched; will report back' }] } },
     ];
     writeFileSync(file, spawnLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
-    check('flagless spawn + ack + end_turn holds Working with NO live row', await claudeSessionStatus(file, undefined, now) === 'working');
-    check('flagless spawn + ack + end_turn holds Working over an idle live row', await claudeSessionStatus(file, 'idle', now) === 'working');
+    check('flagless spawn + ack + end_turn: the parent\'s own turn is over with NO live row', await claudeSessionStatus(file, undefined, now) === 'idle');
+    check('flagless spawn + ack + end_turn: the parent\'s own turn is over under an idle live row', await claudeSessionStatus(file, 'idle', now) === 'idle');
     check('terminal needs-input still yields to the terminal verdict', await claudeSessionStatus(file, 'needs-input', now) === 'idle');
+    check('an unnotified background launch keeps the session busy for a takeover', claudeBackgroundAgentsOut(file, now));
 
     const notificationLine = { type: 'user', uuid: 'bgn', timestamp: iso(-60_000), origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<tool-use-id>toolu_flagless</tool-use-id>\n<status>completed</status>\n</task-notification>' } };
     appendFileSync(file, JSON.stringify(notificationLine) + '\n');
     check('notification consumed the spawn: continuation holds Working with NO live row', await claudeSessionStatus(file, undefined, now) === 'working');
+    check('a notified launch no longer holds a takeover off', !claudeBackgroundAgentsOut(file, now));
     check('continuation holds Working over an idle live row', await claudeSessionStatus(file, 'idle', now) === 'working');
 
     const longThinking = Array.from({ length: 620 }, (_, index) => ({
@@ -712,7 +717,15 @@ const lines = [
     const staleSpawn = join(dir, 'stale-spawn.jsonl');
     const staleIso = (offsetMs: number) => new Date(now - 40 * 60_000 + offsetMs).toISOString();
     writeFileSync(staleSpawn, spawnLines.map((line) => JSON.stringify({ ...line, timestamp: staleIso(0) })).join('\n') + '\n');
-    check('a 40-minute-old unnotified spawn has expired', await claudeSessionStatus(staleSpawn, undefined, now) === 'idle');
+    check('a 40-minute-old unnotified spawn with no live child no longer holds a takeover off', !claudeBackgroundAgentsOut(staleSpawn, now));
+    // A notification that landed while the parent was busy reaches the transcript only QUEUED.
+    const queued = (taskId: string) => `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>toolu_flagless</tool-use-id>\n<status>completed</status>\n</task-notification>`;
+    const queuedOnly = join(dir, 'queued-only.jsonl');
+    writeFileSync(queuedOnly, [...spawnLines, { type: 'queue-operation', operation: 'enqueue', timestamp: iso(-60_000), content: queued('agt1') }].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    check('a launch whose notification was only queued no longer holds a takeover off', !claudeBackgroundAgentsOut(queuedOnly, now));
+    const forged = join(dir, 'queued-forged.jsonl');
+    writeFileSync(forged, [...spawnLines, { type: 'queue-operation', operation: 'enqueue', timestamp: iso(-60_000), content: queued('someone-else') }].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    check('  but one under a task id the launch\'s ack never named does not end it', claudeBackgroundAgentsOut(forged, now));
     const staleCont = join(dir, 'stale-continuation.jsonl');
     writeFileSync(staleCont, [...spawnLines, { type: 'user', uuid: 'bgn2', timestamp: staleIso(1000), origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<tool-use-id>toolu_flagless</tool-use-id>\n<status>completed</status>\n</task-notification>' } }].map((line) => JSON.stringify({ ...line, timestamp: staleIso(0) })).join('\n') + '\n');
     check('a 40-minute-old unterminated continuation has expired', await claudeSessionStatus(staleCont, undefined, now) === 'idle');

@@ -76,6 +76,15 @@ writeFileSync(
   ].join('\n') + '\n',
 );
 utimesSync(bgTranscript, new Date(now), new Date(now));
+// The launched agent's own transcript, still writing. Its row is where the background work shows.
+const bgSubagents = join(projectDir, bgUuid, 'subagents');
+mkdirSync(bgSubagents, { recursive: true });
+writeFileSync(join(bgSubagents, 'agent-bgworker.meta.json'), JSON.stringify({ agentType: 'general-purpose', description: 'sleep', toolUseId: 'toolu_bg' }));
+writeFileSync(
+  join(bgSubagents, 'agent-bgworker.jsonl'),
+  JSON.stringify({ type: 'user', uuid: 'bgc1', isSidechain: true, timestamp: new Date(now - 4 * 60_000).toISOString(), message: { content: 'sleep' } }) + '\n',
+);
+utimesSync(join(bgSubagents, 'agent-bgworker.jsonl'), new Date(now - 10_000), new Date(now - 10_000));
 
 for (const file of [forkA, forkB]) {
   writeFileSync(
@@ -157,7 +166,12 @@ const forkBRow = rows.find((s: any) => s.id === forkBId);
 check('fixture row discovered', !!row, `rows=${rows.length}`);
 check('discoverSessions updatedAt uses last timestamped conversation line, not fresh mtime', !!row && Math.abs((row.updatedAt ?? 0) - oldTs) <= 1000, `updatedAt=${row?.updatedAt} expected=${oldTs}`);
 check('fresh sidecar mtime does not keep raw busy row working', row?.status === 'idle', `status=${row?.status}`);
-check('recent unnotified background task keeps roster row working even without agents-json busy', bgRow?.status === 'working', `status=${bgRow?.status}`);
+// A launched background agent is the CHILD's work, not the parent's: the parent row reports its own
+// turn, so opening it never offers Stop over a terminal sitting at its prompt, and the child row reads
+// Working on its own evidence (the client rolls it up to the parent's roster pill).
+check('recent unnotified background task leaves the parent row on its own status', bgRow?.status === 'idle', `status=${bgRow?.status}`);
+const bgChildRow = rows.find((s: any) => s.origin === 'subagent' && s.title?.includes('sleep'));
+check('  while the background agent\'s own row reads working', bgChildRow?.status === 'working', `status=${bgChildRow?.status} title=${bgChildRow?.title}`);
 check('fork fixtures carry the same first-user lineageId', forkARow?.lineageId === firstUserUuid && forkBRow?.lineageId === firstUserUuid, JSON.stringify([forkARow?.lineageId, forkBRow?.lineageId]));
 const wrapperConn = await adapter.attach(wrapperId, 'observe') as any;
 check('wrapper attach currentModel uses transcript tail model over wrapper default', wrapperConn.info.currentModel?.modelID === 'wrapper-tail-model', JSON.stringify(wrapperConn.info.currentModel));

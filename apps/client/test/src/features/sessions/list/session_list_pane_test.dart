@@ -1674,35 +1674,86 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets(
-      'the parent keeps its own status while children show their status',
-      (
-        tester,
-      ) async {
+    // R1c rollup. A parent whose own turn ended reads Working while a
+    // subagent under it still works (a Claude background agent outlives the
+    // turn that launched it). Display only: the parent row's canonical status
+    // is untouched, so Session Detail offers no Stop over an ended turn.
+    testWidgets("a working child promotes its idle parent's pill", (
+      tester,
+    ) async {
+      final parent = node('p1');
+      await tester.pumpWidget(
+        roster([
+          parent,
+          node('c1', parentId: 'p1', status: SessionStatus.working),
+        ]),
+      );
+      await tester.pumpAndSettle();
+      await openProject(tester);
+      await openChildren(tester, 'p1');
+
+      final parentPill = find.descendant(
+        of: find.byKey(const Key('session-row-opencode/p1')),
+        matching: find.text('Working'),
+      );
+      final childPill = find.descendant(
+        of: find.byKey(const Key('session-row-opencode/c1')),
+        matching: find.text('Working'),
+      );
+      expect(parentPill, findsOneWidget);
+      expect(childPill, findsOneWidget);
+      expect(find.text('Idle'), findsNothing);
+      expect(parent.status, SessionStatus.idle);
+    });
+
+    testWidgets('a collapsed subtree still promotes its parent', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        roster([
+          node('p1'),
+          node('c1', parentId: 'p1', status: SessionStatus.working),
+        ], showBackground: false),
+      );
+      await tester.pumpAndSettle();
+      await openProject(tester);
+
+      // Subtrees start closed: the parent row is the only place the work shows.
+      expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('session-row-opencode/p1')),
+          matching: find.text('Working'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a parent is not ready to review while a child still works', (
+      tester,
+    ) async {
+      final readyKey = ValueKey(
+        'session-ready-${sessionCompositeRosterKey(node('p1'))}',
+      );
+      Future<void> pump(SessionStatus parent, SessionStatus child) async {
         await tester.pumpWidget(
           roster([
-            node('p1'),
-            node('c1', parentId: 'p1', status: SessionStatus.working),
+            node('p1', status: parent),
+            node('c1', parentId: 'p1', status: child),
           ]),
         );
         await tester.pumpAndSettle();
-        await openProject(tester);
-        await openChildren(tester, 'p1');
+      }
 
-        // Idle parents remain quiet; a working child keeps its own pill.
-        final parentPill = find.descendant(
-          of: find.byKey(const Key('session-row-opencode/p1')),
-          matching: find.text('Working'),
-        );
-        final childPill = find.descendant(
-          of: find.byKey(const Key('session-row-opencode/c1')),
-          matching: find.text('Working'),
-        );
-        expect(parentPill, findsNothing);
-        expect(childPill, findsOneWidget);
-        expect(find.text('Idle'), findsNothing);
-      },
-    );
+      await pump(SessionStatus.working, SessionStatus.working);
+      await openProject(tester);
+      // The parent's own turn ends, but its subagent is still working.
+      await pump(SessionStatus.idle, SessionStatus.working);
+      expect(find.byKey(readyKey), findsNothing);
+      // The subtree settles: now the parent's work is ready to review.
+      await pump(SessionStatus.idle, SessionStatus.idle);
+      expect(find.byKey(readyKey), findsOneWidget);
+    });
 
     testWidgets('a roster delta updates the row and project dot in place', (
       tester,
