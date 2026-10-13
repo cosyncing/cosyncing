@@ -74,90 +74,210 @@ Restarting the shared daemon interrupts unfinished app and terminal turns.
 cosyncing marks an open turn interrupted, clears its terminal presence, and
 reconnects to the replacement daemon when you next prompt it.
 
-### Codex profiles (`codex -p`)
+## Third-party models (Codex profiles)
 
-<details>
-<summary>Using a separate Codex profile with its own model provider</summary>
+Use a profile to select a third-party provider and model. This setup also
+applies to Codex used without cosyncing. The steps below were checked with
+Codex 0.162.1. cosyncing reads your Codex configuration and never edits it.
+If you set `CODEX_HOME`, use that folder in place of `~/.codex` below.
 
-cosyncing drives and syncs Codex through one shared Codex daemon, and that
-daemon reads only your base `~/.codex/config.toml`, never a profile file such
-as `~/.codex/my-profile.config.toml`. cosyncing does not edit your Codex
-configuration for you.
+### 1. Define the provider in the base configuration
 
-If a profile uses a model provider of its own, define the provider in the base
-file and keep only the selection in the profile:
+Put the provider definition in `~/.codex/config.toml`. Use the environment
+variable named by `env_key` to supply its API key:
 
 ```toml
-# ~/.codex/config.toml: the provider definition
+# ~/.codex/config.toml
 [model_providers.my-provider]
 name = "My provider"
 base_url = "https://llm.example.com/v1"
 wire_api = "responses"
-env_key = "MY_PROVIDER_API_KEY"   # read the key from the environment
+env_key = "MY_PROVIDER_API_KEY"
 ```
+
+The provider must support the configured API.
+
+Codex 0.162.1 loads `$CODEX_HOME/.env` when its runtime processes start,
+including a daemon started without the provider key in its environment.
+With the default Codex home, put the key in `~/.codex/.env`:
+
+```dotenv
+MY_PROVIDER_API_KEY=your-provider-key
+```
+
+Protect the file, using your configured Codex home if it differs:
+
+```bash
+chmod 600 "${CODEX_HOME:-$HOME/.codex}/.env"
+```
+
+Restart the affected Codex processes after changing the file. A variable
+exported only in a terminal that connects to an already-running daemon does
+not change that daemon's environment. cosyncing's service does not inherit
+arbitrary variables exported in your shell; the file supplies the key when
+cosyncing starts or restarts the daemon.
+
+### 2. Select the provider, model and catalog in a profile
+
+Create `~/.codex/my-profile.config.toml` and select it with
+`codex -p my-profile`:
 
 ```toml
-# ~/.codex/my-profile.config.toml: what the profile selects
+# ~/.codex/my-profile.config.toml
 model_provider = "my-provider"
 model = "my-model"
-model_reasoning_effort = "high"
+model_catalog_json = "/absolute/path/to/my-profile-models.json"
+approvals_reviewer = "auto_review"
 ```
 
-Prefer `env_key` over writing a token into the file. If you do keep a token in
-`config.toml`, make the file readable only by you (`chmod 600`).
+Replace the names and catalog path with your own. The catalog must contain
+complete native model entries supported by your Codex version, including the
+entry whose `slug` is `my-model`. Keep the other fields those entries require;
+a model name alone is not a complete catalog.
 
-With the provider defined only in the profile file you can still drive the
-session from cosyncing, but no terminal can sync with it: the app shows
-**Sync with your terminal (unavailable)** and says why.
+A plain `codex -p my-profile` starts an embedded session on its own app-server
+and cannot live-sync with cosyncing. Codex 0.162.1 shows this startup warning:
+“Running without the shared background server: --profile requires embedded mode.”
 
-The daemon reads the base file when it starts. cosyncing notices the change
-and restarts the managed Codex runtime when it is safe to (by default, once no
-session is attached), or restart it yourself while nothing is running:
-`codex app-server daemon restart`.
+To join an existing profile session from a terminal, use the app's **Sync
+with a terminal** command. It includes the session's model, profile or provider.
 
-To work on a profile session from a terminal, use the **Sync with a
-terminal** command cosyncing shows and run it: it includes `-p <profile>` and
-the session's model. On Codex 0.160 a fresh `codex -p <profile>` launch does
-not attach to the shared daemon by itself: the TUI shows the startup warning
-"Running without the shared background server: --profile requires embedded
-mode."
+### 3. Set the reviewer override in the profile catalog
 
-On Codex 0.162.1, **Approve for me** (`approvals_reviewer = "auto_review"`)
-uses the model catalog loaded when the Codex process starts. The bundled
-catalog selects `codex-auto-review`; a non-OpenAI provider that does not serve
-that model declines escalations. Sending a profile catalog with
-`thread/start` or `thread/resume` does not change the reviewer. This also
-applies to cosyncing's private Codex processes. Plain `codex -p <profile>`
-starts embedded Codex with the profile's catalog, so a reviewer override in
-that startup catalog works.
+On Codex 0.162.1, automatic permission review sends its request through the
+session's provider. The default reviewer model is `codex-auto-review`; a
+third-party provider that does not serve it declines the escalation.
 
-Choose one of these approaches:
+In each third-party entry in the profile catalog, set
+`auto_review_model_override` to that entry's own slug. For example, these
+fields belong in an existing complete entry, rather than forming a complete
+catalog:
 
-- Point `model_catalog_json` in base `config.toml` at a merged startup catalog
-  containing Codex's bundled models, cached models and your profile models.
-  Keep each complete native model entry, and add a reviewer override to the
-  profile model's entry. For example, these fields belong in that existing
-  entry, rather than being a complete catalog:
+```json
+{"slug": "my-model", "auto_review_model_override": "my-model"}
+```
 
-  ```json
-  {"slug": "my-model", "auto_review_model_override": "my-model"}
-  ```
+An embedded `codex -p my-profile` session loads the profile's catalog at
+startup. Its reviewer needs the override there even when cosyncing is not
+used. An override selects a model; approval still depends on the reviewer's
+decision.
 
-  ```toml
-  # Base config.toml
-  model_catalog_json = "/absolute/path/to/merged-models.json"
-  ```
+### 4. Give the shared daemon a merged base catalog
 
-  Restart Codex while nothing is running so the daemon loads the catalog.
-  Regenerate it after Codex updates to keep the native entries current.
-  `cosy doctor` warns when a non-OpenAI model selected in the base config or a
-  profile uses auto-review without its startup reviewer override. cosyncing
-  reads this configuration and never writes it.
-- Set `approvals_reviewer = "user"` in the base config or profile to answer
-  escalations yourself.
-- Select **Ask permission** in cosyncing to answer its approval cards yourself.
+The shared daemon and unprofiled app-server read the base configuration.
+Passing a profile catalog with `thread/start` or `thread/resume` does not
+change the reviewer catalog already loaded by that process.
 
-</details>
+Get the installed release's complete bundled catalog with
+`codex debug models --bundled`. Build a merged catalog from those entries,
+`~/.codex/models_cache.json` when available, and the profile catalogs you pass
+as arguments. Keep one entry per slug, with cached OpenAI entries taking
+precedence over bundled entries, and preserve their reviewer settings.
+Use distinct third-party slugs so they do not replace native models.
+
+For example, after setting the profile overrides in step 3:
+
+```sh
+codex_config_home="${CODEX_HOME:-$HOME/.codex}"
+codex debug models --bundled > "$codex_config_home/bundled-models.json"
+python3 - "$codex_config_home/bundled-models.json" "$codex_config_home/merged-models.json" \
+  "$codex_config_home/my-profile-models.json" <<'PYTHON'
+import json
+import sys
+from pathlib import Path
+
+bundled, output, *profiles = map(Path, sys.argv[1:])
+models = {}
+for source in (bundled, bundled.parent / 'models_cache.json'):
+    if source.exists():
+        for entry in json.loads(source.read_text())['models']:
+            models[entry['slug']] = entry
+native_slugs = set(models)
+for source in profiles:
+    for entry in json.loads(source.read_text())['models']:
+        slug = entry['slug']
+        if slug in native_slugs:
+            continue  # Keep the bundled/cached native entry and its reviewer settings.
+        entry = dict(entry, auto_review_model_override=slug)
+        if slug in models and models[slug] != entry:
+            raise SystemExit(f'Conflicting profile entries for {slug}; use distinct slugs.')
+        models[slug] = entry
+output.write_text(json.dumps({'models': list(models.values())}, indent=2) + '\n')
+print(f'Wrote {len(models)} models to {output}')
+PYTHON
+```
+
+Add more profile catalog paths to the command when needed. The script writes
+the merged catalog; it keeps native entries with bundled/cached slugs and adds
+own-slug reviewer overrides to the other entries. Keep the overrides in each
+profile catalog too, as in step 3.
+
+Set the generated `merged-models.json` path at the top level of the base
+configuration, **before any `[model_providers.…]` table**. Replace
+`<Codex home>` below with the absolute Codex home used by the command above:
+
+```toml
+# Top-level settings in ~/.codex/config.toml
+model_catalog_json = "<Codex home>/merged-models.json"
+
+# The provider tables from step 1 follow these top-level settings.
+```
+
+Run `codex debug models`, without `-p`, to check the catalog the base
+configuration loads.
+
+Keep the profile-specific catalog setting from step 2. It supplies the
+embedded profile session; the merged base catalog supplies the daemon.
+The plain OpenAI `codex` picker also lists third-party models from the merged
+catalog. Select those models through their provider profile.
+
+With a provider defined only in a profile file, cosyncing can still drive
+that session, but terminal sync is unavailable: the shared daemon cannot
+resolve its provider. The app shows **Sync with your terminal (unavailable)**
+and explains why.
+
+### 5. Restart the daemon from home
+
+While nothing is running, restart from your home folder so the daemon loads
+the updated base configuration and catalog:
+
+```bash
+cd ~ && codex app-server daemon restart
+```
+
+A restarted daemon takes the folder the restart ran from. Restarting also
+interrupts unfinished turns, so wait until they have finished. Restart an
+embedded profile session separately to reload its profile catalog.
+
+cosyncing also notices base configuration changes and can restart its managed
+Codex runtime when its safety condition is met (by default, once no session is
+attached).
+
+### 6. Regenerate catalogs after updates
+
+The merged catalog is a snapshot. Regenerate it after a Codex update or any
+profile catalog edit, preserving the new native entries and the third-party
+reviewer overrides. Then restart the affected processes as in step 5.
+
+### 7. Check the cosyncing setup
+
+If you use cosyncing, run:
+
+```bash
+cosy doctor
+```
+
+It warns when a non-OpenAI model selected in the base configuration or a
+profile uses automatic review without its startup reviewer override.
+
+### 8. Choose manual approval when preferred
+
+Set `approvals_reviewer = "user"` in the base configuration or profile to
+answer eligible permission escalations yourself. In cosyncing, selecting
+**Ask permission** lets you answer its approval cards yourself.
+
+For the configuration keys and profile-file locations, see the
+[official Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 ## Questions from Codex
 
