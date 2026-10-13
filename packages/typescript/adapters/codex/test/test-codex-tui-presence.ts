@@ -8,6 +8,8 @@
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { remoteFolderChecks } from './remote-folder-checks.ts';
+import { daemonHomeChecks } from './daemon-home-checks.ts';
 import {
   codexAttachedTuis,
   codexAttachedTuisAsync,
@@ -333,5 +335,7 @@ try {
   rmSync(workDir, { recursive: true, force: true });
 }
 
+await remoteFolderChecks(check);
+await daemonHomeChecks(check);
 console.log(failures ? `\nFAIL: ${failures} check(s) failed.` : '\nAll codex tui-presence checks passed.');
 process.exit(failures ? 1 : 0);

@@ -39,6 +39,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- A Codex session started from a terminal with `--remote` shows Synced even when the terminal and the shared daemon run in different folders. cosyncing starts and restarts the shared daemon from your home folder, and the Sync command for a session with no turns yet includes its provider.
+
 - Hiding tool calls keeps delivered files visible, with their Open and Download
   actions available alongside the report.
 - An agent card with nothing more to show no longer expands onto a placeholder

@@ -36,7 +36,7 @@ import {
 } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 
 export const CODEX_TUI_BIRTH_WINDOW_MS = 15 * 60_000;
 const CODEX_SOCKET_DIAG_MAX_BYTES = 1024 * 1024;
@@ -62,6 +62,11 @@ export interface CodexTuiCandidate {
   /** Bounded Unix-socket names observed for this process. */
   socketPaths?: string[];
   proof: CodexSocketProof;
+  /** Native process folder and parsed -C/--cd stay separate from the matching folder. */
+  processCwd?: string;
+  cwdOverride?: string;
+  matchCwd?: string;
+  usesDaemonCwd?: boolean;
 }
 
 export interface CodexRemoteArgvFacts {
@@ -73,6 +78,43 @@ export interface CodexRemoteArgvFacts {
 export interface CodexTuiUnattributedCandidate {
   cwd?: string;
   startedAtMs?: number;
+  processCwd?: string;
+  cwdOverride?: string;
+  matchCwd?: string;
+  usesDaemonCwd?: boolean;
+}
+
+/** A no-id terminal matches where its next new thread runs, without changing process-owner evidence.
+ * The TUI's own /resume picker names no id and gives no fresh birth, so it cannot prove an older thread.
+ * A thread created before a restart that changed the daemon folder can also miss this folder rule.
+ */
+export function codexNewThreadFolders(scan: CodexTuiScan, daemonCwd?: string): CodexTuiScan {
+  const folder = (candidate: CodexTuiUnattributedCandidate, proof: CodexSocketProof) => {
+    const override = candidate.cwdOverride;
+    const usesDaemonCwd = proof === 'shared' && override === undefined;
+    const matchCwd = override !== undefined
+      ? isAbsolute(override) ? resolve(override)
+        : candidate.processCwd ? resolve(candidate.processCwd, override) : undefined
+      : usesDaemonCwd ? daemonCwd : candidate.processCwd ?? candidate.cwd;
+    return { matchCwd, usesDaemonCwd };
+  };
+  const bucket = (values: CodexTuiUnattributedCandidate[], proof: CodexSocketProof) =>
+    values.map((candidate) => { const facts = folder(candidate, proof); return { ...candidate, ...facts, cwd: facts.matchCwd }; });
+  return { ...scan,
+    candidates: scan.candidates.map((candidate) => candidate.threadIds?.length
+      ? candidate : { ...candidate, ...folder(candidate, candidate.proof) }),
+    unattributed: bucket(scan.unattributed, 'shared'),
+    privateUnattributed: bucket(scan.privateUnattributed, 'private'),
+    unknownUnattributed: bucket(scan.unknownUnattributed, 'unknown'),
+  };
+}
+
+export function codexCandidateBirthMatches(
+  candidate: CodexTuiUnattributedCandidate, createdAtMs: number, threadSource?: string,
+): boolean {
+  const age = createdAtMs - (candidate.startedAtMs ?? Number.NaN);
+  return Math.abs(age) <= CODEX_TUI_BIRTH_WINDOW_MS
+    && (!candidate.usesDaemonCwd || (threadSource === 'user' && age >= -5_000));
 }
 
 /** `scan` keeps existing public fields (`attributed` and `unattributed`) unchanged.
@@ -748,7 +790,8 @@ function addMacCandidate(scan: CodexTuiScan, candidate: CodexTuiCandidate): void
     }
     return;
   }
-  const unattributed = { cwd: candidate.cwd, startedAtMs: candidate.startedAtMs };
+  const unattributed = { cwd: candidate.cwd, startedAtMs: candidate.startedAtMs,
+    processCwd: candidate.processCwd, cwdOverride: candidate.cwdOverride };
   if (candidate.proof === 'shared') scan.unattributed.push(unattributed);
   else if (candidate.proof === 'private') scan.privateUnattributed.push(unattributed);
   else scan.unknownUnattributed.push(unattributed);
@@ -861,6 +904,8 @@ export async function scanCodexRemoteTuisMac(
       pid: candidate.pid,
       ...(candidate.facts.threadIds.length ? { threadIds: candidate.facts.threadIds } : {}),
       cwd,
+      processCwd: cwd,
+      cwdOverride: candidate.facts.cwdOverride,
       startedAtMs: candidate.startedAtMs,
       startToken: candidate.startToken,
       argv: candidate.argv,
@@ -1092,10 +1137,13 @@ function scanCodexRemoteTuisWithSocketDiag(
     } else if (socketDiagRaw) {
       proof = socketProofByPid?.get(Number(pid)) ?? 'unknown';
     }
+    const terminalCwd = processCwd(procRoot, pid);
     const candidateBase = {
       pid: Number(pid),
       threadIds: facts.threadIds.length ? facts.threadIds : undefined,
-      cwd: facts.cwdOverride ?? processCwd(procRoot, pid),
+      cwd: facts.cwdOverride ?? terminalCwd,
+      processCwd: terminalCwd,
+      cwdOverride: facts.cwdOverride,
       startedAtMs: processStartedAtMs(procRoot, pid, nowMs),
       proof,
     };
@@ -1117,16 +1165,22 @@ function scanCodexRemoteTuisWithSocketDiag(
       scan.unattributed.push({
         cwd: candidateBase.cwd,
         startedAtMs: candidateBase.startedAtMs,
+        processCwd: terminalCwd,
+        cwdOverride: facts.cwdOverride,
       });
     } else if (proof === 'private') {
       scan.privateUnattributed.push({
         cwd: candidateBase.cwd,
         startedAtMs: candidateBase.startedAtMs,
+        processCwd: terminalCwd,
+        cwdOverride: facts.cwdOverride,
       });
     } else {
       scan.unknownUnattributed.push({
         cwd: candidateBase.cwd,
         startedAtMs: candidateBase.startedAtMs,
+        processCwd: terminalCwd,
+        cwdOverride: facts.cwdOverride,
       });
     }
   }
@@ -1141,6 +1195,7 @@ export function codexTuiThreadAttached(
   threadId: string,
   cwd?: string,
   createdAtMs?: number,
+  threadSource?: string,
 ): boolean {
   if (scan.attributed.has(threadId.toLowerCase())) return true;
   if (!cwd || createdAtMs === undefined || !scan.unattributed.length) return false;
@@ -1150,7 +1205,7 @@ export function codexTuiThreadAttached(
       t.cwd !== undefined &&
       t.startedAtMs !== undefined &&
       safeRealpath(t.cwd) === want &&
-      Math.abs(createdAtMs - t.startedAtMs) <= CODEX_TUI_BIRTH_WINDOW_MS,
+      codexCandidateBirthMatches(t, createdAtMs, threadSource),
   );
 }
 

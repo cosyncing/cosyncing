@@ -1,6 +1,6 @@
 /** Shared-daemon app hosting and transport-loss regression tests, with no native runtime. */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync, existsSync, symlinkSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, existsSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentRegistry, type AgentMessage } from '../../../adapter-api/src/index.ts';
@@ -223,6 +223,64 @@ for await (const chunk of Bun.stdin.stream()) {
     assert.match(privateDrive.info.control!.terminalSync.reason!, /base config.toml/);
     await privateDrive.close();
     rmSync(marker);
+    // No turn means no currentModel: the base-defined provider still belongs in every join hint.
+    writeFileSync(join(home, 'config.toml'), '[model_providers.base_empty]\nname="Empty fixture"\nbase_url="http://fixture.invalid"\nwire_api="responses"\n');
+    const emptyRollout = join(sessions, 'rollout-base-empty.jsonl');
+    writeFileSync(emptyRollout, JSON.stringify({ type: 'session_meta', payload: { id: 'base-empty', cwd, model_provider: 'base_empty' } }) + '\n');
+    const emptyId = Buffer.from(emptyRollout).toString('base64url');
+    const emptyRow = (await adapter.discoverSessions()).find((row) => row.id === emptyId)!;
+    assert.match(emptyRow.terminalSyncHint!.command, /model_provider="base_empty"/, 'PR3 empty-thread discovery carries its base provider');
+    const emptyObserver = await adapter.attach(emptyId, 'observe');
+    try {
+      assert.match(emptyObserver.info.terminalSyncHint!.command, /model_provider="base_empty"/, 'PR3 empty-thread attach carries its base provider');
+      assert.equal(emptyObserver.info.control?.terminalSync.command, emptyObserver.info.terminalSyncHint!.command);
+    } finally { await emptyObserver.close(); }
+    const emptyRenamed = await adapter.renameSession(emptyId, 'Empty provider fixture');
+    assert.match(emptyRenamed.terminalSyncHint!.command, /model_provider="base_empty"/, 'PR3 empty-thread rename carries its base provider');
+    assert.equal(readFileSync(emptyRollout, 'utf8').trim().split('\n').length, 1, 'empty-provider fixture still has no turns');
+    console.log('PASS PR3 empty-thread provider from session_meta survives discovery/attach/rename');
+    // Exercise the watcher itself: a raw process-folder scan must go through
+    // the same native-folder preparation as discovery/attach before publishing.
+    const watchBorn = Date.now();
+    const watchRollout = join(sessions, 'rollout-watch-user.jsonl');
+    writeFileSync(watchRollout, JSON.stringify({ type: 'session_meta', payload: {
+      id: 'watch-user', cwd: home, timestamp: new Date(watchBorn).toISOString(), thread_source: 'user',
+    } }) + '\n');
+    const watchAppRollout = join(sessions, 'rollout-watch-app.jsonl');
+    writeFileSync(watchAppRollout, JSON.stringify({ type: 'session_meta', payload: {
+      id: 'watch-app', cwd: home, timestamp: new Date(watchBorn).toISOString(),
+    } }) + '\n');
+    const rawWatchScan = () => ({ ...emptyPresence(),
+      unattributed: [{ cwd, processCwd: cwd, startedAtMs: watchBorn - 1000 }],
+      candidates: [{ pid: 77, cwd, processCwd: cwd, startedAtMs: watchBorn - 1000, proof: 'shared' as const }],
+    });
+    const watcher = new CodexAdapter({ scanCodexTuiPresence: async () => rawWatchScan(),
+      queryLoadedThreadIds: async () => new Set(['watch-user', 'watch-app']),
+      queryLoadedThreadActivities: async () => [],
+    });
+    const { codexNewThreadFolders } = await import('../../../adapters/codex/src/tui-presence.ts');
+    // Substitute only native folder acquisition; retain the real preparation,
+    // classification, rollout reading and asynchronous watcher publication.
+    (watcher as any).presenceScan = async () => codexNewThreadFolders(rawWatchScan(), home);
+    const watchFrames: any[] = [];
+    let resolveWatch!: () => void;
+    const watchPublished = new Promise<void>((resolve) => { resolveWatch = resolve; });
+    const unwatch = watcher.watchSessionInfo((info) => {
+      watchFrames.push(info);
+      if (watchFrames.some((row) => row.nativeId === 'watch-user')
+        && watchFrames.some((row) => row.nativeId === 'watch-app')) resolveWatch();
+    });
+    const watchDeadline = setTimeout(resolveWatch, 2000);
+    try {
+      await watchPublished;
+      const userFrame = watchFrames.find((row) => row.nativeId === 'watch-user');
+      assert.equal(userFrame?.control?.terminalSync.presence, 'shared', 'PR3 watcher preserves daemon-folder terminal sync');
+      assert.equal(userFrame?.control?.terminalSync.label, 'Synced with Codex terminal');
+      const appFrame = watchFrames.find((row) => row.nativeId === 'watch-app');
+      assert.equal(appFrame?.control?.terminalSync.presence, 'absent', 'PR3 watcher does not match an app-only daemon-folder thread');
+      assert.equal(appFrame?.control?.drive.state, 'driving');
+      console.log('PASS PR3 watcher preserves daemon-folder terminal sync and keeps app-only Driving');
+    } finally { clearTimeout(watchDeadline); unwatch(); }
     process.env.COSYNCING_CODEX_SYNC_SERVER='0';
     const disabled = await new CodexAdapter().createSession({directory:cwd});
     assert(existsSync(marker));

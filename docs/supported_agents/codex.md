@@ -74,6 +74,22 @@ Restarting the shared daemon interrupts unfinished app and terminal turns.
 cosyncing marks an open turn interrupted, clears its terminal presence, and
 reconnects to the replacement daemon when you next prompt it.
 
+**Start a synced terminal session in the current project.** Define a shell function, replacing `my-profile`
+with your profile:
+```sh
+codex-my() { codex -p my-profile --remote "unix://$HOME/.codex/app-server-control/app-server-control.sock" -C "$PWD" "$@"; }
+```
+Keep `-C "$PWD"`. Without it, Codex starts the new session in the shared daemon's folder instead of your
+project. cosyncing starts and restarts the daemon from your home folder.
+
+**Rejoin an existing session** with the app's **Sync with a terminal** command, not `codex-my resume <id>`.
+The shorthand's `-C` would move the session to your current folder. The app's command keeps the session where
+it is and includes its model, profile or provider. cosyncing keeps listing a moved session under the folder it
+was created in.
+
+The shorthand runs on the shared daemon, so the merged base catalog in
+[Third-party models](#third-party-models-codex-profiles) decides its reviewer.
+
 ## Third-party models (Codex profiles)
 
 Use a profile to select a third-party provider and model. This setup also

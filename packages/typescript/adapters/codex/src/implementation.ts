@@ -107,14 +107,15 @@ import {
   resolveInvocation,
 } from '@cosyncing/adapter-api';
 import {
-  CODEX_TUI_BIRTH_WINDOW_MS,
+  codexCandidateBirthMatches,
+  type CodexTuiUnattributedCandidate,
   type CodexTuiScan,
   type CodexMacConfiguredExecutable,
   codexAttachedTuisAsync,
   resolveCodexMacConfiguredExecutable,
 } from './tui-presence.ts';
 import { diagnoseCodexSetup } from './diagnostics.ts';
-import { readCodexDaemonProcess, codexDaemonProcessState, gracefullyStopCodexDaemonProcess, forceStopCodexDaemonProcess } from './daemon-process.ts';
+import { readCodexDaemonProcess, createCodexNewThreadFolderScan, codexDaemonProcessState, gracefullyStopCodexDaemonProcess, forceStopCodexDaemonProcess } from './daemon-process.ts';
 import { restartCodexDaemonVerified, type CodexRestartOptions, type CodexDaemonCommandResult } from './daemon-restart.ts';
 export type { CodexRestartOptions } from './daemon-restart.ts';
 import {
@@ -412,7 +413,7 @@ export class CodexAdapter implements AgentBackend {
       const cwd = meta?.cwd ? String(meta.cwd) : undefined;
       const surface = facts.surface;
       const launchSurface = facts.launchSurface;
-      const terminalPresence = classifyCodexTerminalPresence(presenceScan, id, cwd, timestampToMs(meta?.timestamp));
+      const terminalPresence = classifyCodexTerminalPresence(presenceScan, id, cwd, timestampToMs(meta?.timestamp), meta?.thread_source);
       const name = (id && titles.get(id)) || (cwd ? `${basename(cwd)} · ${id.slice(0, 8)}` : basename(full));
       const liveLoaded = liveThreadIds.has(id);
       const agentOwned = codexAgentOwned(originTag.origin);
@@ -483,15 +484,7 @@ export class CodexAdapter implements AgentBackend {
     let lastPresenceKey = '';
     let lastActivityKey = '';
     let lastInfoKeys = new Map<string, string>();
-    const readScan = async (): Promise<CodexTuiScan> => {
-      const sock = codexAppServerSock();
-      if (!sock) return emptyCodexTuiScan();
-      return this.options.scanCodexTuiPresence
-        ? this.options.scanCodexTuiPresence(sock)
-        : codexAttachedTuisAsync(sock, undefined, {
-            macConfiguredExecutable: macConfiguredCodexExecutableIdentity(),
-          });
-    };
+    const readScan = (): Promise<CodexTuiScan> => this.presenceScan();
     // Fingerprint of the TUI presence scan. A terminal join/exit usually changes NOTHING in the
     // loaded list (it is a one-way latch), so presence flips are only visible here. startedAt is
     // included because downgrade safety depends on not losing a live shared candidate.
@@ -626,7 +619,7 @@ export class CodexAdapter implements AgentBackend {
       const cwd = meta?.cwd ? String(meta.cwd) : undefined;
       const surface = facts.surface;
       const launchSurface = facts.launchSurface;
-      const terminalPresence = classifyCodexTerminalPresence(scan, id, cwd, timestampToMs(meta?.timestamp));
+      const terminalPresence = classifyCodexTerminalPresence(scan, id, cwd, timestampToMs(meta?.timestamp), meta?.thread_source);
       const liveLoaded = liveThreadIds.has(id);
       const agentOwned = codexAgentOwned(originTag.origin);
       const parentThreadId = originTag.parentThreadId;
@@ -714,7 +707,8 @@ export class CodexAdapter implements AgentBackend {
     const originTag = codexSessionOrigin(meta);
     const agentOwned = codexAgentOwned(originTag.origin);
     const canResume = resolveBin('codex') !== null;
-    const terminalSyncHint = this.syncHint(threadId, cwd, undefined, agentOwned);
+    const terminalSyncHint = this.syncHint(threadId, cwd, undefined, agentOwned,
+      firstMetadataString([meta], ['modelProvider', 'model_provider', 'provider']));
     // thread/name/set acknowledges success but returns no Thread. The submitted
     // normalized name is therefore the immediate native title authority; do
     // not rediscover the index and risk returning its delayed old value.
@@ -905,13 +899,13 @@ export class CodexAdapter implements AgentBackend {
       cwd,
       surface.model,
       agentOwned,
-      surface.currentModel?.providerID,
+      surface.currentModel?.providerID ?? firstMetadataString([meta], ['modelProvider', 'model_provider', 'provider']),
       surface.currentModel?.variant,
     ), syncUnavailableReason);
     // Restoration is a control decision, not a badge refresh. It must bypass a cached absence so a
     // terminal that appeared inside the normal 2-second display TTL cannot be overwritten.
     const presenceScan = await this.presenceScan(restorationAttempt);
-    const terminalPresence = classifyCodexTerminalPresence(presenceScan, threadId, cwd, timestampToMs(meta?.timestamp));
+    const terminalPresence = classifyCodexTerminalPresence(presenceScan, threadId, cwd, timestampToMs(meta?.timestamp), meta?.thread_source);
     const liveActivities = await this.liveLoadedThreadActivities();
     const parentThreadId = originTag.parentThreadId;
     const st = statSafe(path);
@@ -992,6 +986,7 @@ export class CodexAdapter implements AgentBackend {
           agentOwned,
           cwd,
           createdAtMs: timestampToMs(meta?.timestamp),
+          threadSource: meta?.thread_source,
         }),
       );
       await observeConn.start();
@@ -1046,6 +1041,7 @@ export class CodexAdapter implements AgentBackend {
     agentOwned: boolean;
     cwd?: string;
     createdAtMs?: number;
+    threadSource?: string;
   }): Promise<CodexRolloutQualificationContext> {
     const base: CodexRolloutQualificationContext = {
       liveLoaded: false,
@@ -1063,7 +1059,7 @@ export class CodexAdapter implements AgentBackend {
     // from a failed probe would hand the qualifier a fabricated absence of an owner.
     const daemon = ids !== undefined && activities !== undefined ? { ids, activities } : undefined;
     const presence = (threadId: string): SessionTerminalPresence => scan
-      ? classifyCodexTerminalPresence(scan, threadId, target.cwd, target.createdAtMs)
+      ? classifyCodexTerminalPresence(scan, threadId, target.cwd, target.createdAtMs, target.threadSource)
       : 'unknown';
     return {
       liveLoaded: daemon?.ids.has(target.threadId) ?? false,
@@ -1403,7 +1399,7 @@ async function ensureCodexDaemonAsync(
     return;
   }
   try {
-    const proc = spawnCodex(bin, ['app-server', 'daemon', 'start'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    const proc = spawnCodex(bin, ['app-server', 'daemon', 'start'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', cwd: homedir() });
     const stdout = boundedStreamCapture(proc.stdout);
     const stderr = boundedStreamCapture(proc.stderr);
     _codexDaemonEnsureProcess = proc;
@@ -1497,15 +1493,19 @@ function emptyCodexTuiScan(): CodexTuiScan {
   };
 }
 
+const readCodexNewThreadFolders = createCodexNewThreadFolderScan();
+
 /** Async presence scan for discovery/create/open paths: the socket probe must never run a
  *  synchronous `ss` on the broker event loop (same rule as the watch poll). Shares the sync
  *  variant's TTL cache, so cached results stay consistent across both paths. */
 async function codexPresenceScanAsync(sockPath?: string, fresh = false): Promise<CodexTuiScan> {
   const sock = sockPath?.trim() ? sockPath : codexAppServerSock();
-  return sock ? codexAttachedTuisAsync(sock, undefined, {
+  if (!sock) return emptyCodexTuiScan();
+  const scan = await codexAttachedTuisAsync(sock, undefined, {
     fresh,
     macConfiguredExecutable: macConfiguredCodexExecutableIdentity(),
-  }) : emptyCodexTuiScan();
+  });
+  return readCodexNewThreadFolders(scan, sock, CODEX_HOME, resolveBin('codex') ?? undefined);
 }
 
 /** Resolve an explicit Codex override to both the invocation path and canonical executable target.
@@ -1519,16 +1519,16 @@ function macConfiguredCodexExecutableIdentity(): CodexMacConfiguredExecutable | 
 function codexPresenceFingerprint(scan: CodexTuiScan): string {
   const setKey = (values: Set<string>) => [...values].sort().join(',');
   const compact = (value?: string) => value ?? '';
-  const formatCandidates = (list: Array<{ pid: number; proof: string; cwd?: string; startedAtMs?: number; threadIds?: string[] }>) =>
+  const formatCandidates = (list: Array<{ pid: number; proof: string; cwd?: string; matchCwd?: string; usesDaemonCwd?: boolean; startedAtMs?: number; threadIds?: string[] }>) =>
     list
       .map((candidate) =>
-        `${candidate.pid}|${candidate.proof}|${candidate.threadIds?.slice().sort().join(',') || '-'}|${compact(candidate.cwd)}|${candidate.startedAtMs ?? ''}`,
+        `${candidate.pid}|${candidate.proof}|${candidate.threadIds?.slice().sort().join(',') || '-'}|${compact(candidate.cwd)}|${compact(candidate.matchCwd)}|${candidate.usesDaemonCwd ? 1 : 0}|${candidate.startedAtMs ?? ''}`,
       )
       .sort()
       .join('^');
-  const formatUnattributed = (list: Array<{ cwd?: string; startedAtMs?: number }>) =>
+  const formatUnattributed = (list: CodexTuiUnattributedCandidate[]) =>
     list
-      .map((candidate) => `${compact(candidate.cwd)}|${candidate.startedAtMs ?? ''}`)
+      .map((candidate) => `${compact(candidate.cwd)}|${candidate.usesDaemonCwd ? 1 : 0}|${candidate.startedAtMs ?? ''}`)
       .sort()
       .join('^');
 
@@ -1711,16 +1711,17 @@ function canonicalizePathForPresence(cwd?: string): string | undefined {
   }
 }
 
-function scanCandidateByProof(candidates: Array<{ cwd?: string; startedAtMs?: number }>, cwd?: string, createdAtMs?: number): boolean {
+function scanCandidateByProof(candidates: CodexTuiUnattributedCandidate[], cwd?: string, createdAtMs?: number, threadSource?: string): boolean {
   if (!cwd || createdAtMs === undefined) return false;
   let targetCwd: string | undefined;
   return candidates.some(
-    (candidate) =>
-      candidate.cwd !== undefined &&
-      Math.abs(createdAtMs - (candidate.startedAtMs ?? Number.NaN)) <= CODEX_TUI_BIRTH_WINDOW_MS &&
+    (candidate) => {
+      const folder = 'matchCwd' in candidate ? candidate.matchCwd : candidate.cwd;
+      return folder !== undefined && codexCandidateBirthMatches(candidate, createdAtMs, threadSource) &&
       // Archived sessions rarely pass the birth test. Do not resolve their
       // paths (possibly on a mounted filesystem) until there is a candidate.
-      canonicalizePathForPresence(candidate.cwd) === (targetCwd ??= canonicalizePathForPresence(cwd)),
+      canonicalizePathForPresence(folder) === (targetCwd ??= canonicalizePathForPresence(cwd));
+    },
   );
 }
 
@@ -1735,6 +1736,7 @@ export function classifyCodexTerminalPresence(
   threadId: string,
   cwd?: string,
   createdAtMs?: number,
+  threadSource?: string,
 ): SessionTerminalPresence {
   if (!scan.processScanAvailable) return 'unknown';
   const canonicalThreadId = threadId.toLowerCase();
@@ -1744,53 +1746,51 @@ export function classifyCodexTerminalPresence(
     const matchingCandidates = scan.candidates.filter((candidate) => {
       if (candidate.threadIds?.some((id) => id.toLowerCase() === canonicalThreadId)) return true;
       if (candidate.threadIds?.length) return false;
-      return scanCandidateByProof([candidate], cwd, createdAtMs);
+      return scanCandidateByProof([candidate], cwd, createdAtMs, threadSource);
     });
     // One stable process identity is required for positive macOS ownership. Multiple matches could
     // be duplicate launchers, PID churn, or competing owners, so automatic restore must not guess.
-    if (matchingCandidates.length > 1) return 'unknown';
-    const candidate = matchingCandidates[0];
-    if (candidate && (
-      !candidate.startToken ||
-      !candidate.argv?.length ||
-      !candidate.cwd ||
-      !candidate.socketPaths
-    )) return 'unknown';
+    // Multiple proven shared new-thread terminals are enough for a badge, not an exclusive owner.
+    // Preserve the existing ambiguity refusal for every other macOS matching path.
+    if (matchingCandidates.length > 1 && !matchingCandidates.every((candidate) =>
+      candidate.proof === 'shared' && candidate.usesDaemonCwd)) return 'unknown';
+    if (matchingCandidates.some((candidate) => !candidate.startToken || !candidate.argv?.length
+      || !candidate.cwd || !candidate.socketPaths)) return 'unknown';
   }
 
   const sharedEvidence =
     scan.attributed.has(canonicalThreadId) ||
-    scanCandidateByProof(scan.unattributed, cwd, createdAtMs) ||
+    scanCandidateByProof(scan.unattributed, cwd, createdAtMs, threadSource) ||
     scanCandidateByProof(
       scan.candidates
-        .filter((candidate) => candidate.proof === 'shared' && isUnattributedCandidate(candidate))
-        .map((candidate) => ({ cwd: candidate.cwd, startedAtMs: candidate.startedAtMs })),
+        .filter((candidate) => candidate.proof === 'shared' && isUnattributedCandidate(candidate)),
       cwd,
       createdAtMs,
+      threadSource,
     );
   if (sharedEvidence) return 'shared';
 
   const privateEvidence =
     scan.privateThreadIds.has(canonicalThreadId) ||
-    scanCandidateByProof(scan.privateUnattributed, cwd, createdAtMs) ||
+    scanCandidateByProof(scan.privateUnattributed, cwd, createdAtMs, threadSource) ||
     scanCandidateByProof(
       scan.candidates
-        .filter((candidate) => candidate.proof === 'private' && isUnattributedCandidate(candidate))
-        .map((candidate) => ({ cwd: candidate.cwd, startedAtMs: candidate.startedAtMs })),
+        .filter((candidate) => candidate.proof === 'private' && isUnattributedCandidate(candidate)),
       cwd,
       createdAtMs,
+      threadSource,
     );
   if (privateEvidence) return 'private';
 
   const unknownEvidence =
     scan.unknownThreadIds.has(canonicalThreadId) ||
-    scanCandidateByProof(scan.unknownUnattributed, cwd, createdAtMs) ||
+    scanCandidateByProof(scan.unknownUnattributed, cwd, createdAtMs, threadSource) ||
     scanCandidateByProof(
       scan.candidates
-        .filter((candidate) => candidate.proof === 'unknown' && isUnattributedCandidate(candidate))
-        .map((candidate) => ({ cwd: candidate.cwd, startedAtMs: candidate.startedAtMs })),
+        .filter((candidate) => candidate.proof === 'unknown' && isUnattributedCandidate(candidate)),
       cwd,
       createdAtMs,
+      threadSource,
     );
 
   return unknownEvidence ? 'unknown' : 'absent';
@@ -2435,7 +2435,7 @@ export function parseCodexDaemonVersionOutput(output: string): CodexDaemonVersio
   }
 }
 
-async function runCodexDaemonCommand(
+export async function runCodexDaemonCommand(
   command: 'version' | 'restart' | 'stop' | 'start',
   timeoutMs: number,
   binOverride?: string,
@@ -2447,6 +2447,7 @@ async function runCodexDaemonCommand(
     stdout: 'pipe',
     stderr: 'pipe',
     env: { ...process.env },
+    cwd: homedir(),
   });
   const stdout = boundedStreamCapture(proc.stdout);
   const stderr = boundedStreamCapture(proc.stderr);
