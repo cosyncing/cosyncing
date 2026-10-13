@@ -138,7 +138,14 @@ void main() {
           ),
           findsNothing,
         );
-        expect(find.text('+1'), findsOneWidget);
+        // The strip counts the band by phase instead of a bare "+1": the
+        // paused goal fronts it, and the finished list is the one done.
+        expect(
+          find.byKey(const Key('session-live-strip-count-paused')),
+          findsOneWidget,
+        );
+        expect(find.text('1 paused'), findsOneWidget);
+        expect(find.text('1 done'), findsOneWidget);
         expect(find.text('Goal state'), findsNothing);
         expect(find.text('Task list state'), findsNothing);
 
@@ -155,6 +162,16 @@ void main() {
           ),
           findsOneWidget,
         );
+        // The finished checklist is an outcome, so it folds behind the
+        // Finished header while the goal is still live.
+        expect(find.text('Launch checklist'), findsNothing);
+        final finishedToggle = find.byKey(
+          const Key('session-live-state-finished-toggle'),
+        );
+        await tester.ensureVisible(finishedToggle);
+        await tester.pumpAndSettle();
+        await tester.tap(finishedToggle);
+        await tester.pumpAndSettle();
         expect(
           find.ancestor(
             of: find.text('Launch checklist'),

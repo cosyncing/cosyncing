@@ -3,7 +3,7 @@ part of 'session_detail_page.dart';
 class _ArchivableLiveStateItem extends StatefulWidget {
   const _ArchivableLiveStateItem({
     required this.item,
-    required this.additionalCount,
+    required this.summary,
     required this.initiallyExpanded,
     required this.onArchive,
     required this.archiveTargetKey,
@@ -12,7 +12,9 @@ class _ArchivableLiveStateItem extends StatefulWidget {
   });
 
   final _LiveStateItem item;
-  final int additionalCount;
+
+  /// Counts across the whole band; null when the strip holds one item.
+  final _LiveStateSummary? summary;
   final bool initiallyExpanded;
   final VoidCallback onArchive;
   final GlobalKey archiveTargetKey;
@@ -38,12 +40,12 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
   OverlayEntry? _flightOverlay;
 
   // There is no auto-archive. A finished card stays until the reader dismisses
-  // it (swipe or the archive button): the protocol keeps a done task list
-  // pinned until `cleared`, and done goals/activities are dropped from the
-  // projection before they reach here, so the old 3-second timer only ever
-  // deleted a finished list out from under whoever had just opened it. It also
-  // keyed on the LOCALIZED status label, so it fired in English and never in
-  // Chinese.
+  // it (swipe, the archive button, a row's dismiss, or Clear finished): the
+  // protocol keeps a done task list pinned until `cleared` and the projection
+  // keeps finished activities as evidence, while done goals are dropped before
+  // they reach here. The old 3-second timer only ever deleted a finished list
+  // out from under whoever had just opened it. It also keyed on the LOCALIZED
+  // status label, so it fired in English and never in Chinese.
   @override
   void didUpdateWidget(covariant _ArchivableLiveStateItem oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -66,6 +68,10 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
 
   Future<void> _commitArchive() async {
     if (_committing) return;
+    // Bound now. The strip outlives the item it fronts, and a frame that lands
+    // during the flight can re-sort the band, so reading `widget` after the
+    // await would archive whichever card fronts it by then.
+    final onArchive = widget.onArchive;
     final reduceMotion =
         MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     final source = _globalRect(_flightSourceKey);
@@ -148,7 +154,11 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
     } else if (!reduceMotion) {
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    if (mounted) widget.onArchive();
+    if (!mounted) return;
+    onArchive();
+    // The same strip goes on to front the next item, so it must not stay in
+    // the archiving state. If nothing is left the band unmounts it instead.
+    setState(() => _committing = false);
   }
 
   Rect? _globalRect(GlobalKey key) {
@@ -173,9 +183,98 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
     }
   }
 
+  List<Widget> _stripChildren(BuildContext context, {required bool compact}) {
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
+    final item = widget.item;
+    final summary = widget.summary;
+    final secondary = theme.textTheme.labelMedium?.copyWith(
+      color: tokens.textSecondary,
+    );
+    final counts = summary == null
+        ? const <(String, int, Color, String)>[]
+        : [
+            if (summary.running > 0)
+              (
+                'running',
+                summary.running,
+                tokens.statusWorking,
+                l10n.liveStateRunningCount(summary.running),
+              ),
+            if (summary.paused > 0)
+              (
+                'paused',
+                summary.paused,
+                tokens.statusIdle,
+                l10n.liveStatePausedCount(summary.paused),
+              ),
+            if (summary.failed > 0)
+              (
+                'failed',
+                summary.failed,
+                tokens.statusError,
+                l10n.liveStateFailedCount(summary.failed),
+              ),
+            if (summary.done > 0)
+              (
+                'done',
+                summary.done,
+                tokens.textTertiary,
+                l10n.liveStateDoneCount(summary.done),
+              ),
+          ];
+    return [
+      const SizedBox(width: 12),
+      Icon(item.icon, size: 16),
+      const SizedBox(width: 8),
+      if (!compact || counts.isEmpty)
+        Text(item.label, style: theme.textTheme.labelLarge),
+      for (final (index, (phase, count, color, label)) in counts.indexed) ...[
+        if (index > 0 || !compact || counts.isEmpty) const SizedBox(width: 8),
+        _LiveStateCountChip(
+          key: Key('session-live-strip-count-$phase'),
+          color: color,
+          text: compact ? '$count' : label,
+          semanticLabel: label,
+        ),
+      ],
+      if (item.total != null) ...[
+        const SizedBox(width: 8),
+        Text(
+          '${widget.item.done ?? 0}/${widget.item.total}',
+          key: const Key('session-live-strip-progress'),
+          style: secondary,
+        ),
+      ],
+      const SizedBox(width: 8),
+      Expanded(
+        child: Text(
+          item.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: tokens.textSecondary,
+          ),
+        ),
+      ),
+      StatusPill(
+        label: item.statusLabel,
+        color: _liveStatePhaseColor(tokens, item.phase),
+      ),
+      Icon(_expanded ? Icons.expand_less : Icons.expand_more, size: 18),
+      IconButton(
+        key: ValueKey('session-live-strip-archive-${item.id}'),
+        tooltip: l10n.archiveToStatus,
+        visualDensity: VisualDensity.compact,
+        onPressed: () => unawaited(_commitArchive()),
+        icon: const Icon(Icons.close, size: 16),
+      ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final tokens = context.tokens;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final duration = reduceMotion
@@ -217,78 +316,17 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
                           ),
                           onTap: () => setState(() => _expanded = !_expanded),
                           child: SizedBox(
-                            height: 38,
-                            child: Row(
-                              children: [
-                                const SizedBox(width: 10),
-                                Icon(widget.item.icon, size: 17),
-                                const SizedBox(width: 7),
-                                Text(
-                                  widget.item.label,
-                                  style: theme.textTheme.labelLarge,
+                            height: 40,
+                            child: LayoutBuilder(
+                              builder: (context, constraints) => Row(
+                                children: _stripChildren(
+                                  context,
+                                  // Below 420 the counts go dot-and-number
+                                  // and the kind label yields to them: the
+                                  // front item's icon already names its kind.
+                                  compact: constraints.maxWidth < 420,
                                 ),
-                                if (widget.additionalCount > 0) ...[
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    '+${widget.additionalCount}',
-                                    key: const Key(
-                                      'session-live-strip-additional-count',
-                                    ),
-                                    style: theme.textTheme.labelMedium
-                                        ?.copyWith(
-                                          color: tokens.textSecondary,
-                                        ),
-                                  ),
-                                ],
-                                if (widget.item.total != null) ...[
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    '${widget.item.done ?? 0}/${widget.item.total}',
-                                    key: const Key(
-                                      'session-live-strip-progress',
-                                    ),
-                                    style: theme.textTheme.labelMedium
-                                        ?.copyWith(
-                                          color: tokens.textSecondary,
-                                        ),
-                                  ),
-                                ],
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    widget.item.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color: tokens.textSecondary,
-                                    ),
-                                  ),
-                                ),
-                                StatusPill(
-                                  label: widget.item.statusLabel,
-                                  color: widget.item.actionRequired
-                                      ? tokens.statusNeedsInput
-                                      : tokens.statusWorking,
-                                ),
-                                Icon(
-                                  _expanded
-                                      ? Icons.expand_less
-                                      : Icons.expand_more,
-                                  size: 18,
-                                ),
-                                IconButton(
-                                  key: ValueKey(
-                                    'session-live-strip-archive-'
-                                    '${widget.item.id}',
-                                  ),
-                                  tooltip: AppLocalizations.of(
-                                    context,
-                                  ).archiveToStatus,
-                                  visualDensity: VisualDensity.compact,
-                                  onPressed: () => unawaited(_commitArchive()),
-                                  icon: const Icon(Icons.close, size: 16),
-                                ),
-                              ],
+                              ),
                             ),
                           ),
                         ),
@@ -297,7 +335,7 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
                         Offstage(
                           offstage: !_expanded,
                           child: Padding(
-                            padding: const EdgeInsets.only(top: 6),
+                            padding: const EdgeInsets.only(top: 8),
                             child: widget.fullCard,
                           ),
                         )
@@ -309,7 +347,7 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
                               : CrossFadeState.showFirst,
                           firstChild: const SizedBox.shrink(),
                           secondChild: Padding(
-                            padding: const EdgeInsets.only(top: 6),
+                            padding: const EdgeInsets.only(top: 8),
                             child: widget.fullCard,
                           ),
                         ),
@@ -327,6 +365,223 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
       duration: duration,
       alignment: Alignment.topCenter,
       child: content,
+    );
+  }
+}
+
+/// The semantic color of a band phase, shared by the strip and its counts.
+Color _liveStatePhaseColor(AppTokens tokens, _LiveStatePhase phase) =>
+    switch (phase) {
+      _LiveStatePhase.needsInput => tokens.statusNeedsInput,
+      _LiveStatePhase.running => tokens.statusWorking,
+      _LiveStatePhase.failed => tokens.statusError,
+      _LiveStatePhase.paused || _LiveStatePhase.done => tokens.statusIdle,
+    };
+
+/// One per-phase count on the strip: a static dot and a number.
+///
+/// The dot never pulses. The strip can sit on screen for an hour, and a
+/// perpetual animation repaints the whole web frame (see the design README).
+class _LiveStateCountChip extends StatelessWidget {
+  const _LiveStateCountChip({
+    required this.color,
+    required this.text,
+    required this.semanticLabel,
+    super.key,
+  });
+
+  final Color color;
+  final String text;
+  final String semanticLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final chip = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        StatusDot(color: color, size: 8),
+        const SizedBox(width: 4),
+        Text(
+          text,
+          style: theme.textTheme.labelMedium?.copyWith(
+            color: context.tokens.textSecondary,
+          ),
+        ),
+      ],
+    );
+    if (text == semanticLabel) return chip;
+    return Tooltip(
+      message: semanticLabel,
+      child: Semantics(
+        label: semanticLabel,
+        child: ExcludeSemantics(child: chip),
+      ),
+    );
+  }
+}
+
+/// The outcomes in the expanded band: a foldable header carrying their count
+/// and one action that dismisses them all, then the cards themselves.
+///
+/// The fold follows [openByDefault] until the reader toggles it, and from then
+/// on keeps the reader's choice for as long as the section exists. Clearing
+/// every outcome removes the section, so the next one starts from the default
+/// again.
+class _FinishedLiveStateSection extends StatefulWidget {
+  const _FinishedLiveStateSection({
+    required this.count,
+    required this.openByDefault,
+    required this.onClear,
+    required this.children,
+    super.key,
+  });
+
+  final int count;
+  final bool openByDefault;
+  final VoidCallback onClear;
+  final List<Widget> children;
+
+  @override
+  State<_FinishedLiveStateSection> createState() =>
+      _FinishedLiveStateSectionState();
+}
+
+class _FinishedLiveStateSectionState extends State<_FinishedLiveStateSection> {
+  late bool _open = widget.openByDefault;
+  bool _toggled = false;
+
+  @override
+  void didUpdateWidget(covariant _FinishedLiveStateSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_toggled) _open = widget.openByDefault;
+  }
+
+  void _toggle() {
+    setState(() {
+      _toggled = true;
+      _open = !_open;
+    });
+    if (!_open) return;
+    // The band's height is capped well below the transcript, so the cards
+    // that just opened sit under its bottom edge. Bring the section's top to
+    // the top of the band, cards beneath it, once they are laid out.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_open) return;
+      unawaited(
+        Scrollable.ensureVisible(
+          context,
+          duration: MediaQuery.disableAnimationsOf(context)
+              ? Duration.zero
+              : const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Semantics(
+                button: true,
+                expanded: _open,
+                child: InkWell(
+                  key: const Key('session-live-state-finished-toggle'),
+                  borderRadius: BorderRadius.circular(tokens.radiusSm),
+                  onTap: _toggle,
+                  child: ConstrainedBox(
+                    // A touch target, not just a label.
+                    constraints: const BoxConstraints(minHeight: 40),
+                    child: Row(
+                      children: [
+                        const SizedBox(width: 4),
+                        Icon(
+                          _open ? Icons.expand_less : Icons.expand_more,
+                          size: 16,
+                          color: tokens.textSecondary,
+                        ),
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: Text(
+                            l10n.liveStateFinishedSection(widget.count),
+                            key: const Key(
+                              'session-live-state-finished-header',
+                            ),
+                            style: theme.textTheme.labelMedium?.copyWith(
+                              color: tokens.textSecondary,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            TextButton(
+              key: const Key('session-live-state-clear-finished'),
+              onPressed: widget.onClear,
+              child: Text(l10n.liveStateClearFinished),
+            ),
+          ],
+        ),
+        if (_open)
+          for (var index = 0; index < widget.children.length; index++) ...[
+            const SizedBox(height: 8),
+            widget.children[index],
+          ],
+      ],
+    );
+  }
+}
+
+/// One card in the expanded band, with its own dismiss beside it.
+///
+/// The strip's archive only ever reached the item that fronts it, so clearing
+/// fifteen finished agents took fifteen trips through the strip. A card that
+/// needs an answer cannot be archived, so it reserves the space instead and the
+/// cards stay aligned.
+class _DismissibleLiveStateRow extends StatelessWidget {
+  const _DismissibleLiveStateRow({
+    required this.item,
+    required this.onDismiss,
+    required this.child,
+    super.key,
+  });
+
+  final _LiveStateItem item;
+  final VoidCallback? onDismiss;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: child),
+        const SizedBox(width: 4),
+        SizedBox(
+          width: 40,
+          child: onDismiss == null
+              ? null
+              : IconButton(
+                  key: ValueKey('session-live-state-dismiss-${item.id}'),
+                  tooltip: AppLocalizations.of(context).dismiss,
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onDismiss,
+                  icon: const Icon(Icons.close, size: 16),
+                ),
+        ),
+      ],
     );
   }
 }
@@ -550,8 +805,9 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
         widget.activity.tokens?.input ?? widget.activity.tokens?.output;
     final details = <String>[
       if (widget.activity.subtitle case final subtitle?) subtitle,
+      // A lone agent's "1/1 agents" restates the status pill beside it.
       if (widget.activity.agentsDone != null &&
-          widget.activity.agentsTotal != null)
+          (widget.activity.agentsTotal ?? 0) > 1)
         l10n.agentsProgress(
           widget.activity.agentsDone!,
           widget.activity.agentsTotal!,
@@ -561,6 +817,31 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
       if (widget.activity.exitCode case final code?) l10n.exitCode(code),
     ];
 
+    // A shell is not an agent, and the band can hold both at once.
+    final leading = Icon(
+      isCommand ? Icons.terminal : Icons.psychology,
+      color: statusColor,
+    );
+    final title = Text(widget.activity.title);
+    final subtitle = Text(
+      [
+        label,
+        if (elapsedText != null) elapsedText,
+        ...details,
+      ].join(' · '),
+      key: const Key('session-agent-activity-summary'),
+    );
+    final trailing = StatusPill(label: statusLabel, color: statusColor);
+    // Only a card with something to reveal expands. On every harness today a
+    // plain agent sends neither children (only Claude workflows do) nor output
+    // (only shells do), so its card used to open onto a placeholder that said
+    // progress "remains live" — beside a Done pill too. A command always
+    // expands: "No output yet" and "No output" are facts about it.
+    final hasBody =
+        isCommand ||
+        widget.activity.children.isNotEmpty ||
+        widget.activity.output != null;
+
     return Material(
       color: tokens.surface2,
       shape: RoundedRectangleBorder(
@@ -568,77 +849,70 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
         side: BorderSide(color: statusColor.withValues(alpha: 0.45)),
       ),
       clipBehavior: Clip.antiAlias,
-      child: ExpansionTile(
-        // A shell is not an agent, and the band can hold both at once.
-        leading: Icon(
-          isCommand ? Icons.terminal : Icons.psychology,
-          color: statusColor,
-        ),
-        title: Text(widget.activity.title),
-        subtitle: Text(
-          [
-            label,
-            if (elapsedText != null) elapsedText,
-            ...details,
-          ].join(' · '),
-          key: const Key('session-agent-activity-summary'),
-        ),
-        trailing: StatusPill(label: statusLabel, color: statusColor),
-        children: [
-          for (final child in widget.activity.children)
-            ListTile(
-              dense: true,
-              leading: Icon(
-                child.status == 'done'
-                    ? Icons.check_circle_outline
-                    : child.status == 'error'
-                    ? Icons.error_outline
-                    : Icons.pending_outlined,
-                size: 20,
-              ),
-              title: Text(child.title),
-              subtitle: Text(
-                [
-                  _activityChildStatus(l10n, child.status),
-                  if (child.elapsedMs case final childElapsed?)
-                    _formatElapsedMilliseconds(childElapsed),
-                ].join(' · '),
-              ),
-            ),
-          if (widget.activity.output case final output?)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-              child: CommandOutputBlock(
-                key: const Key('session-agent-activity-output'),
-                text: output.text,
-                truncated: output.truncated,
-                truncationLabel: l10n.outputEarlierLinesDropped,
-              ),
-            ),
-          if (widget.activity.children.isEmpty &&
-              widget.activity.output == null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  // A running command with nothing on stdout yet is not the
-                  // same fact as an agent whose progress is live elsewhere —
-                  // and neither is a command that has already FINISHED without
-                  // writing anything. That one used to read "progress remains
-                  // live until the Server reports completion" beside its own
-                  // Done pill and measured duration.
-                  isCommand
-                      ? (running
+      child: !hasBody
+          ? ListTile(
+              key: const Key('session-agent-activity-row'),
+              leading: leading,
+              title: title,
+              subtitle: subtitle,
+              trailing: trailing,
+            )
+          : ExpansionTile(
+              leading: leading,
+              title: title,
+              subtitle: subtitle,
+              trailing: trailing,
+              children: [
+                for (final child in widget.activity.children)
+                  ListTile(
+                    dense: true,
+                    leading: Icon(
+                      child.status == 'done'
+                          ? Icons.check_circle_outline
+                          : child.status == 'error'
+                          ? Icons.error_outline
+                          : Icons.pending_outlined,
+                      size: 20,
+                    ),
+                    title: Text(child.title),
+                    subtitle: Text(
+                      [
+                        _activityChildStatus(l10n, child.status),
+                        if (child.elapsedMs case final childElapsed?)
+                          _formatElapsedMilliseconds(childElapsed),
+                      ].join(' · '),
+                    ),
+                  ),
+                if (widget.activity.output case final output?)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    child: CommandOutputBlock(
+                      key: const Key('session-agent-activity-output'),
+                      text: output.text,
+                      truncated: output.truncated,
+                      truncationLabel: l10n.outputEarlierLinesDropped,
+                    ),
+                  ),
+                // Reached only by a command: anything else with no children
+                // and no output is the plain row above. A running command
+                // with nothing on stdout yet is not the same fact as one that
+                // has FINISHED without writing anything.
+                if (widget.activity.children.isEmpty &&
+                    widget.activity.output == null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        running
                             ? l10n.commandNoOutputYet
-                            : l10n.commandNoOutput)
-                      : l10n.activityProgressLive,
-                  style: theme.textTheme.bodySmall,
-                ),
-              ),
+                            : l10n.commandNoOutput,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                  ),
+              ],
             ),
-        ],
-      ),
     );
   }
 }

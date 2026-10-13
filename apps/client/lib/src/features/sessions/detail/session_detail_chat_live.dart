@@ -73,7 +73,7 @@ class _ChatPanel extends ConsumerWidget {
   final FocusNode promptFocusNode;
   final List<SessionStagedAttachment> stagedAttachments;
   final Map<String, String> archivedLiveState;
-  final ValueChanged<_LiveStateItem> onArchiveLiveState;
+  final ValueChanged<List<_LiveStateItem>> onArchiveLiveState;
   final GlobalKey archiveTargetKey;
   final bool reportView;
   final bool toolsExpanded;
@@ -395,7 +395,7 @@ class _SessionLiveStateSurface extends StatelessWidget {
   final bool isConnected;
   final bool canPrompt;
   final Map<String, String> archivedIdentities;
-  final ValueChanged<_LiveStateItem> onArchive;
+  final ValueChanged<List<_LiveStateItem>> onArchive;
   final GlobalKey archiveTargetKey;
 
   @override
@@ -417,62 +417,81 @@ class _SessionLiveStateSurface extends StatelessWidget {
         key: Key('session-live-state-surface'),
       );
     }
-    // Which single item fronts the stack. Anything needing an answer wins. A
-    // background command is ranked last: nothing about it is actionable and it
-    // is expected to sit there for minutes, so letting one front the band would
-    // bury a subagent or a plan behind a progress line nobody has to read. That
-    // is one ranking, so it is read as one — the first item holding the lowest
-    // rank, which is exactly what the two separate scans used to compute.
-    int rankOf(_LiveStateItem item) => item.actionRequired
-        ? 0
-        : _isBackgroundCommand(item)
-        ? 2
-        : 1;
-    var primary = visibleItems.first;
-    for (final item in visibleItems) {
-      if (rankOf(item) < rankOf(primary)) primary = item;
-    }
-    final orderedItems = <_LiveStateItem>[
-      primary,
-      for (final item in visibleItems)
-        if (!identical(item, primary)) item,
+    // One ordering, read by both the strip and the expanded list: whatever
+    // needs an answer, then live work, then outcomes. The strip fronts the
+    // first item, so a finished card can no longer stand in front of two that
+    // are still running.
+    final orderedItems = _orderLiveStateItems(visibleItems);
+    final primary = orderedItems.first;
+    // Every outcome ranks below all live work, so this splits the order
+    // without disturbing it.
+    final liveItems = [
+      for (final item in orderedItems)
+        if (!item.isFinished) item,
     ];
+    final finishedItems = [
+      for (final item in orderedItems)
+        if (item.isFinished) item,
+    ];
+    final goalCommand = _findGoalCommand(commands);
+    Widget row(_LiveStateItem item) => _DismissibleLiveStateRow(
+      key: ValueKey('session-live-state-row-${item.id}'),
+      item: item,
+      onDismiss: item.actionRequired ? null : () => onArchive([item]),
+      child: _buildFullLiveStateItem(
+        item,
+        goalCommand: goalCommand,
+        controller: controller,
+        isConnected: isConnected,
+        canPrompt: canPrompt,
+      ),
+    );
     return Column(
       key: const Key('session-live-state-surface'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 200),
-          transitionBuilder: (child, animation) => SizeTransition(
-            sizeFactor: animation,
-            alignment: Alignment.topCenter,
-            child: FadeTransition(opacity: animation, child: child),
+        // One strip for the whole band, keyed by the band and not by whichever
+        // item fronts it. Fronting now follows status, so the front changes
+        // whenever a card finishes, and a per-item key collapsed the panel the
+        // reader had open at exactly that moment.
+        _ArchivableLiveStateItem(
+          key: const ValueKey('session-live-state-band'),
+          item: primary,
+          summary: orderedItems.length > 1
+              ? _LiveStateSummary.of(orderedItems)
+              : null,
+          initiallyExpanded: visibleItems.any(
+            (item) => item.actionRequired,
           ),
-          child: _ArchivableLiveStateItem(
-            key: ValueKey('visible-${primary.id}'),
-            item: primary,
-            additionalCount: visibleItems.length - 1,
-            initiallyExpanded: visibleItems.any(
-              (item) => item.actionRequired,
-            ),
-            onArchive: () => onArchive(primary),
-            archiveTargetKey: archiveTargetKey,
-            fullCard: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (var index = 0; index < orderedItems.length; index++) ...[
-                  _buildFullLiveStateItem(
-                    orderedItems[index],
-                    goalCommand: _findGoalCommand(commands),
-                    controller: controller,
-                    isConnected: isConnected,
-                    canPrompt: canPrompt,
-                  ),
-                  if (index < orderedItems.length - 1)
-                    const SizedBox(height: 6),
-                ],
+          onArchive: () => onArchive([primary]),
+          archiveTargetKey: archiveTargetKey,
+          fullCard: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var index = 0; index < liveItems.length; index++) ...[
+                row(liveItems[index]),
+                if (index < liveItems.length - 1 || finishedItems.isNotEmpty)
+                  const SizedBox(height: 8),
               ],
-            ),
+              // A lone card needs no section around it; its own dismiss is
+              // enough.
+              if (finishedItems.isNotEmpty && orderedItems.length == 1)
+                row(finishedItems.single)
+              else if (finishedItems.isNotEmpty)
+                _FinishedLiveStateSection(
+                  // Keyed by the band, so the reader's fold choice survives
+                  // cards arriving, finishing and being dismissed.
+                  key: const ValueKey('session-live-state-finished'),
+                  count: finishedItems.length,
+                  // Folded while anything is live: outcomes pile up over a
+                  // long session and would push the work still running out
+                  // of the band's capped height. With nothing live, the
+                  // outcomes ARE the content, so the section opens.
+                  openByDefault: liveItems.isEmpty,
+                  onClear: () => onArchive(finishedItems),
+                  children: [for (final item in finishedItems) row(item)],
+                ),
+            ],
           ),
         ),
       ],
@@ -500,10 +519,12 @@ class _FullLiveStatePanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final goalCommand = _findGoalCommand(commands);
-    final items = _liveStateItemsFromParts(
-      AppLocalizations.of(context),
-      liveState,
-      commandProgress,
+    final items = _orderLiveStateItems(
+      _liveStateItemsFromParts(
+        AppLocalizations.of(context),
+        liveState,
+        commandProgress,
+      ),
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -538,6 +559,10 @@ SlashCommand? _findGoalCommand(List<SlashCommand> commands) {
 
 enum _LiveStateItemKind { command, activity, goal, taskList }
 
+/// Where an item stands, harness-neutral: every adapter's activity frame, goal
+/// and plan maps onto these five.
+enum _LiveStatePhase { needsInput, running, paused, failed, done }
+
 class _LiveStateItem {
   const _LiveStateItem({
     required this.id,
@@ -549,8 +574,11 @@ class _LiveStateItem {
     required this.statusLabel,
     required this.icon,
     required this.actionRequired,
+    required this.phase,
     this.done,
     this.total,
+    this.startedAtMs,
+    this.order,
   });
 
   final String id;
@@ -562,8 +590,101 @@ class _LiveStateItem {
   final String statusLabel;
   final IconData icon;
   final bool actionRequired;
+  final _LiveStatePhase phase;
   final int? done;
   final int? total;
+
+  /// The adapter's wall-clock start, when it reports one.
+  final int? startedAtMs;
+
+  /// The projection's own first-seen and finished ordinals for an activity.
+  final SessionActivityOrder? order;
+
+  /// Whether this is an outcome rather than live work.
+  bool get isFinished =>
+      phase == _LiveStatePhase.failed || phase == _LiveStatePhase.done;
+}
+
+/// The band's rank for [item]: lower fronts the strip.
+///
+/// A running background command sits below other live work — nothing about it
+/// is actionable and it is expected to sit there for minutes — but above every
+/// outcome, because it is still live.
+int _liveStateRank(_LiveStateItem item) => switch (item.phase) {
+  _LiveStatePhase.needsInput => 0,
+  _LiveStatePhase.running ||
+  _LiveStatePhase.paused => _isBackgroundCommand(item) ? 2 : 1,
+  _LiveStatePhase.failed => 3,
+  _LiveStatePhase.done => 4,
+};
+
+/// Orders [items] for display: by rank, then live work oldest-first (so a new
+/// card joins the end instead of shuffling the rows above it) and outcomes
+/// newest-first. Ties keep source order.
+///
+/// Live work orders by the adapter's start time when it reports one, else by
+/// when the projection first saw it. Not every adapter stamps a start, so the
+/// first-seen ordinal is what keeps the order stable for all of them.
+List<_LiveStateItem> _orderLiveStateItems(List<_LiveStateItem> items) {
+  // Present before absent, then ascending. Spelled out rather than with a
+  // large sentinel: the web build's ints are doubles and its shifts 32-bit.
+  int nullsLast(int? a, int? b, {bool descending = false}) {
+    if (a == null || b == null) {
+      return (a == null ? 1 : 0).compareTo(b == null ? 1 : 0);
+    }
+    return descending ? b.compareTo(a) : a.compareTo(b);
+  }
+
+  int compareWithinRank(_LiveStateItem a, _LiveStateItem b) {
+    if (a.isFinished) {
+      // Newest outcome first. An item without an ordinal (a finished task
+      // list) follows the activities that have one.
+      return nullsLast(a.order?.ended, b.order?.ended, descending: true);
+    }
+    final started = nullsLast(a.startedAtMs, b.startedAtMs);
+    if (started != 0) return started;
+    return nullsLast(a.order?.seen, b.order?.seen);
+  }
+
+  final indexed =
+      [
+        for (var index = 0; index < items.length; index++)
+          (index, items[index]),
+      ]..sort((a, b) {
+        final rank = _liveStateRank(a.$2).compareTo(_liveStateRank(b.$2));
+        if (rank != 0) return rank;
+        final within = compareWithinRank(a.$2, b.$2);
+        if (within != 0) return within;
+        return a.$1.compareTo(b.$1);
+      });
+  return [for (final entry in indexed) entry.$2];
+}
+
+/// Per-phase counts across the band, shown on the strip when it holds more
+/// than one item.
+final class _LiveStateSummary {
+  const _LiveStateSummary({
+    required this.running,
+    required this.paused,
+    required this.failed,
+    required this.done,
+  });
+
+  factory _LiveStateSummary.of(List<_LiveStateItem> items) {
+    int count(_LiveStatePhase phase) =>
+        items.where((item) => item.phase == phase).length;
+    return _LiveStateSummary(
+      running: count(_LiveStatePhase.running),
+      paused: count(_LiveStatePhase.paused),
+      failed: count(_LiveStatePhase.failed),
+      done: count(_LiveStatePhase.done),
+    );
+  }
+
+  final int running;
+  final int paused;
+  final int failed;
+  final int done;
 }
 
 /// Whether an item is a background shell command, the band's lowest rank.
@@ -590,6 +711,7 @@ List<_LiveStateItem> _liveStateItemsFromParts(
         statusLabel: l10n.running,
         icon: Icons.compress_rounded,
         actionRequired: false,
+        phase: _LiveStatePhase.running,
       ),
     for (final activity in liveState.activities)
       _LiveStateItem(
@@ -634,8 +756,19 @@ List<_LiveStateItem> _liveStateItemsFromParts(
             ? Icons.terminal_outlined
             : Icons.psychology_outlined,
         actionRequired: false,
-        done: activity.agentsDone,
-        total: activity.agentsTotal,
+        phase: switch (activity.status) {
+          AgentActivityStatus.running => _LiveStatePhase.running,
+          AgentActivityStatus.error => _LiveStatePhase.failed,
+          AgentActivityStatus.done ||
+          AgentActivityStatus.retired ||
+          AgentActivityStatus.unknown => _LiveStatePhase.done,
+        },
+        // A lone agent's "0/1" or "1/1" restates the status pill. The count is
+        // only news when a workflow fans out to more than one.
+        done: (activity.agentsTotal ?? 0) > 1 ? activity.agentsDone : null,
+        total: (activity.agentsTotal ?? 0) > 1 ? activity.agentsTotal : null,
+        startedAtMs: activity.startedAtMs,
+        order: liveState.activityOrder(activity.key),
       ),
     for (final goal in liveState.goals)
       _LiveStateItem(
@@ -652,6 +785,11 @@ List<_LiveStateItem> _liveStateItemsFromParts(
         },
         icon: Icons.track_changes_outlined,
         actionRequired: goal.status == GoalStateStatus.blocked,
+        phase: switch (goal.status) {
+          GoalStateStatus.blocked => _LiveStatePhase.needsInput,
+          GoalStateStatus.paused => _LiveStatePhase.paused,
+          _ => _LiveStatePhase.running,
+        },
       ),
     for (final taskList in liveState.taskLists)
       _LiveStateItem(
@@ -668,6 +806,11 @@ List<_LiveStateItem> _liveStateItemsFromParts(
             : l10n.running,
         icon: Icons.checklist_rounded,
         actionRequired: taskList.semantic?.state == PlanSemanticState.proposed,
+        phase: taskList.semantic?.state == PlanSemanticState.proposed
+            ? _LiveStatePhase.needsInput
+            : taskList.status == TaskListStateStatus.done
+            ? _LiveStatePhase.done
+            : _LiveStatePhase.running,
         done: taskList.items
             .where((item) => item.status == TaskItemStatus.done)
             .length,

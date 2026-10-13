@@ -23,9 +23,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   the right panel. The Files explorer stays available beside opened previews;
   portrait and smaller layouts retain the main session view.
 - Right-click or long-press a session tab or roster row to rename the session.
+- The activity band dismisses one card at a time from the expanded list, and
+  “Clear finished” dismisses every finished card at once. Finished cards fold
+  away behind their count while work is still running.
 
 ### Changed
 
+- The activity band shows how many items are running, paused, failed, and done
+  instead of a bare “+N”, and running work always fronts it. Running items list
+  oldest first and finished ones newest first, for every agent harness.
 - Workspace dividers can use the available window width without the previous
   720 px file-panel and 480 px roster caps.
 - Session token counts use compact k, M, and B units, and the transcript filter
@@ -35,6 +41,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 - Hiding tool calls keeps delivered files visible, with their Open and Download
   actions available alongside the report.
+- An agent card with nothing more to show no longer expands onto a placeholder
+  claiming its progress “remains live”, which also appeared on finished agents.
 - Delivered filenames remain readable in narrow conversations and phone layouts.
 - Resizing a portrait Status or Files view keeps that view open instead of
   replacing it with a previously opened file.
