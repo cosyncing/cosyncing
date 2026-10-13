@@ -5,72 +5,62 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.6.4 lets the app drive a Claude Code session. On a Linux or macOS Server, setup
-can install a Claude Code mod so the app and your terminal share one session:
-prompts, steering and stop work from either side, and Claude's permission and
-question prompts arrive as cards you can settle from your phone. Update the
-Server first. The mod, the socket it talks to, and the answer detail on a settled
-card all come from a 0.6.4 Server; a 0.6.4 client against an older one still
-works and simply never sees those prompts.
+0.6.5 opens files from the conversation. A filename or workspace link in a
+report, including one inside a table or inline code, opens the file, and
+selected text offers Find file in workspace. Delivered Markdown, HTML, source
+and other text files open beside the conversation, and on a wide landscape
+screen Status and Files sit as tabs in the right panel. Update the Server
+first: searching the workspace for a bare filename needs a 0.6.5 Server, while
+a link that carries the file's path still opens against an older one.
 
-The other change you notice without opening a session is on Android: an app
-update now keeps downloading after you leave Cosyncing, its progress in a
-notification, and Android's installer opens when you come back.
+The broker contract moves to revision 30, which adds that file search and
+nothing else, and the compatibility window stays one revision wide, so a 0.6.4
+native client can still drive a 0.6.5 Server. A native client from 0.5.13 or
+earlier can watch a 0.6.x Server but cannot drive it: it cannot answer a
+permission request or send a prompt. The web client needs nothing: it ships
+inside the broker package and always matches it. A 0.4.1 or older client also
+sits below the minimum accepted client contract, still revision 17, and stays
+read-only against current brokers.
 
-The broker contract moves to revision 29 and the compatibility window stays one
-revision wide, so a 0.6.0 or newer native client can still drive a 0.6.4 Server.
-It draws a settled question card as it always has, without the answer and
-attribution this client adds. A native client from 0.5.13 or earlier can watch a
-0.6.x Server but cannot drive it: it cannot answer a permission request or send a
-prompt. The web client needs nothing: it ships inside the broker package and
-always matches it. A 0.4.1 or older client also sits below the minimum accepted
-client contract, still revision 17, and stays read-only against current brokers.
+On a Server installed with the signed one-line installer, `cosy update` now
+updates the desktop client too, after asking you to quit it. On Windows and
+macOS, a client installed by 0.6.4 or earlier needs the new all-in-one
+installer once before `cosy update` can take it over.
 
-## What's new in 0.6.4
+## What's new in 0.6.5
 
-- A Claude Code session you are watching answers to the app. Setup offers to
-  install a Claude Code mod on Linux and macOS hosts, for Claude Code 2.1.288 or
-  newer, and once it is in place the app sends prompts, steers a running turn and
-  stops one while you keep the terminal. An approval card leads with the command
-  or path and opens to the whole call, and whichever side answers first wins.
-  Questions asked with Claude's picker reach the app in `auto` mode too, and the
-  app answers each kind the picker asks: one or several choices, typed text, and
-  a number within Claude's range. In `bypassPermissions`, `dontAsk`, or a mode
-  Cosyncing cannot read, Claude's own dialog keeps answering and the app shows a
-  read-only note naming the mode. See
-  [Claude true sync](../supported_agents/claude-true-sync.md).
-- A settled question card says how it ended: the options picked or checked, any
-  typed answer, and whether you answered it in the app or in your terminal. A
-  question closed with nothing picked, by Escape in the terminal or Stop in the
-  app, says it was closed without an answer.
-- The mode and model shown for a Claude session you are watching keep up. A turn
-  answered by another model updates the model while the session runs, and a
-  subagent's model or mode is no longer shown as the session's.
-- An Android update keeps downloading after you leave the app, with its progress
-  in a notification, and Android's installer opens when you come back.
-- Progress bars fill over a visible track. The Android download, the context bar
-  in a session's details and the artifact preview's loading bar all drew full
-  from the start.
-- The server switcher at the bottom of the sidebar switches servers. It used to
-  close the menu and leave you where you were; now it moves, and says so when a
-  server can no longer be selected.
-- Opening the app at an address it has no page for shows a page in your language
-  with one button to Sessions, instead of an English-only error whose Home button
-  led nowhere.
-- A Codex session whose model no longer matches its profile no longer offers a
-  terminal-sync command that would silently relabel it. Driving that session from
-  Cosyncing still works.
-- When an agent records a session detail this version of Cosyncing does not
-  recognize, you get one inbox note naming it rather than the detail silently
-  missing from the transcript.
-- DeepSeek Harness hosts on the 0.2 contract sign in once, with
-  `cosyncing dsh connect`, and a session tab that goes offscreen releases its
-  live transport and reattaches when you come back to it, keeping its transcript
-  and unsent draft.
+- Workspace file links and filenames in reports open the file. Ctrl/Cmd-click
+  and Find file in workspace use the same lookup, show a chooser when a name
+  matches more than one file, and say when the search stopped early.
+- Delivered Markdown, HTML, source code and other supported text files open
+  beside the conversation, with Download still available.
+- On wide landscape screens, Status and Files open as session tabs in the right
+  panel, with the Files explorer beside the opened previews. Portrait and
+  smaller layouts keep the main session view, and resizing a portrait Status or
+  Files view keeps that view open.
+- Right-click or long-press a session tab or roster row to rename the session.
+- The activity band counts what is running, paused, failed and done instead of
+  showing a bare "+N". Running work leads, oldest first; finished work follows,
+  newest first, and folds behind its count while anything still runs. Dismiss
+  one card from the expanded list, or every finished card with Clear finished.
+- Workspace dividers can use the whole window width, token counts use compact
+  k, M and B units, and the transcript filter is named Hide tool calls. Hiding
+  tool calls keeps delivered files and their Open and Download actions visible.
+- A Claude session whose background agents are still running reads Working in
+  the roster again, and the agents' rows say which ones are still working. The
+  app no longer offers Stop or queues a prompt behind a turn that has already
+  ended. A Claude session synced through the mod shows Working when you open it
+  mid-turn.
+- A Codex session you reopen keeps each reply under its own prompt after a
+  stopped turn, and its history shows each command's exit status. A terminal
+  can join a Codex session the app is running without interrupting it.
+- An agent card with nothing more to show no longer opens onto a "remains live"
+  placeholder, and delivered filenames stay readable in narrow conversations and
+  on phones.
 
 The 0.6.0 features that need both ends of the wire, notifications with every
 browser tab closed, per-type notification settings and cross-device read and
-clear, still need a 0.6.0 or newer Server. 0.6.4 is one.
+clear, still need a 0.6.0 or newer Server. 0.6.5 is one.
 
 ## Downloads
 
