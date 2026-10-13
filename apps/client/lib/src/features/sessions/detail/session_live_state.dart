@@ -11,9 +11,18 @@ final class SessionLiveState {
     required List<GoalStateSnapshot> goals,
     required List<TaskListStateSnapshot> taskLists,
     required List<AgentActivitySnapshot> activities,
-  }) : goals = List.unmodifiable(goals),
-       taskLists = List.unmodifiable(taskLists),
-       activities = List.unmodifiable(activities);
+  }) : this._(goals, taskLists, activities, const {}, 0);
+
+  SessionLiveState._(
+    List<GoalStateSnapshot> goals,
+    List<TaskListStateSnapshot> taskLists,
+    List<AgentActivitySnapshot> activities,
+    Map<String, SessionActivityOrder> activityOrder,
+    this._nextOrdinal,
+  ) : goals = List.unmodifiable(goals),
+      taskLists = List.unmodifiable(taskLists),
+      activities = List.unmodifiable(activities),
+      _activityOrder = Map.unmodifiable(activityOrder);
 
   /// Builds the latest visible state for every canonical upsert key.
   factory SessionLiveState.fromMessages(Iterable<AgentMessage> messages) {
@@ -28,6 +37,12 @@ final class SessionLiveState {
     return state;
   }
 
+  /// How many order entries may outlive their activity, beyond the live ones.
+  ///
+  /// A swept subagent keeps its entry so the next progress frame puts it back
+  /// where it was; one that never comes back is pruned past this slack.
+  static const int _orderSlack = 64;
+
   /// Applies one live delta without rescanning retained transcript history.
   SessionLiveState applyMessage(AgentMessage message) {
     final goals = {for (final value in this.goals) value.key: value};
@@ -37,6 +52,8 @@ final class SessionLiveState {
     final activities = {
       for (final value in this.activities) value.key: value,
     };
+    final order = Map<String, SessionActivityOrder>.of(_activityOrder);
+    var nextOrdinal = _nextOrdinal;
 
     // An incremental reconnect preserves old cards. A bounded broker ledger can
     // forget withdrawals, so reconcile only Codex running identities.
@@ -48,13 +65,15 @@ final class SessionLiveState {
           keys.length <= 128 &&
           keys.every((key) => key is String && key.startsWith('cmd:codex:'))) {
         final retained = keys.toSet();
-        activities.removeWhere(
-          (key, activity) =>
+        activities.removeWhere((key, activity) {
+          final forgotten =
               key.startsWith('cmd:codex:') &&
               activity.kind == AgentActivityKind.command &&
               activity.status == AgentActivityStatus.running &&
-              !retained.contains(key),
-        );
+              !retained.contains(key);
+          if (forgotten) order.remove(key);
+          return forgotten;
+        });
       }
     }
 
@@ -69,6 +88,11 @@ final class SessionLiveState {
     // which is the whole reason it is surfaced. Sweeping it here would retire
     // the card at the exact moment it becomes the only sign that work is still
     // running, and its own terminal frame is what retires it instead.
+    //
+    // A swept card keeps its order entry. A background subagent outlives the
+    // turn too, so its next progress frame often brings it straight back, and
+    // re-entering the map would otherwise file it behind every card that
+    // finished in the meantime.
     if (message.type == AgentMessageType.status &&
         message.agentMessageStatus == AgentMessageStatus.idle) {
       activities.removeWhere(
@@ -115,21 +139,51 @@ final class SessionLiveState {
         case AgentActivityStatus.done:
         case AgentActivityStatus.error:
           activities[activity.key] = activity;
+          final previous = order[activity.key];
+          final seen = previous?.seen ?? nextOrdinal++;
+          final ended = activity.status == AgentActivityStatus.running
+              ? null
+              : previous?.ended ?? nextOrdinal++;
+          if (previous == null ||
+              previous.seen != seen ||
+              previous.ended != ended) {
+            order[activity.key] = SessionActivityOrder(
+              seen: seen,
+              ended: ended,
+            );
+          }
         // `retired` is a withdrawal, not an outcome: the server can no longer
         // vouch for the card. It shares the fail-closed removal that an
         // unrecognized future value already gets.
         case AgentActivityStatus.retired:
         case AgentActivityStatus.unknown:
           activities.remove(activity.key);
+          order.remove(activity.key);
       }
     } else if (message.type == AgentMessageType.agentActivity) {
       final key = _stateKey(message);
-      if (key != null) activities.remove(key);
+      if (key != null) {
+        activities.remove(key);
+        order.remove(key);
+      }
     }
-    return SessionLiveState(
-      goals: goals.values.toList(growable: false),
-      taskLists: taskLists.values.toList(growable: false),
-      activities: activities.values.toList(growable: false),
+    if (order.length > activities.length + _orderSlack) {
+      final stale =
+          order.entries
+              .where((entry) => !activities.containsKey(entry.key))
+              .toList()
+            ..sort((a, b) => a.value.seen.compareTo(b.value.seen));
+      for (final entry in stale) {
+        if (order.length <= activities.length + _orderSlack) break;
+        order.remove(entry.key);
+      }
+    }
+    return SessionLiveState._(
+      goals.values.toList(growable: false),
+      taskLists.values.toList(growable: false),
+      activities.values.toList(growable: false),
+      order,
+      nextOrdinal,
     );
   }
 
@@ -140,10 +194,40 @@ final class SessionLiveState {
   final List<TaskListStateSnapshot> taskLists;
 
   /// Latest subagent/workflow state, including terminal evidence until archived.
+  ///
+  /// The list is in map order, which is NOT a display order: read
+  /// [activityOrder] for when each card was first seen and when it finished.
   final List<AgentActivitySnapshot> activities;
+
+  final Map<String, SessionActivityOrder> _activityOrder;
+  final int _nextOrdinal;
+
+  /// When the activity under [key] was first seen and, once terminal, when it
+  /// first reported finishing — as ordinals of this projection, so they compare
+  /// across every harness whether or not its adapter stamps a start time.
+  SessionActivityOrder? activityOrder(String key) => _activityOrder[key];
 
   /// Whether there is any state surface to display.
   bool get isEmpty => goals.isEmpty && taskLists.isEmpty && activities.isEmpty;
+}
+
+/// Where one activity sits in the projection's timeline.
+///
+/// Both values are ordinals of the frames that set them, not clock times: a
+/// replayed history and a live stream assign them in the same order, and no
+/// adapter has to report a start or end time for them to exist.
+final class SessionActivityOrder {
+  /// Creates an order entry.
+  const SessionActivityOrder({required this.seen, this.ended});
+
+  /// Ordinal of the frame that first surfaced the activity.
+  ///
+  /// It survives the idle sweep, so a swept card that comes back keeps it.
+  final int seen;
+
+  /// Ordinal of the frame that first reported it done or failed; null while it
+  /// runs.
+  final int? ended;
 }
 
 /// Whether [message] belongs on the pinned session-state surface.

@@ -194,7 +194,9 @@ final class _SubmittedPromptSnapshot {
 
 class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     with WidgetsBindingObserver {
-  static const int _maxArchivedLiveStateEntries = 32;
+  // Clear finished archives a whole band in one go. At 32, a long session's
+  // oldest dismissals were evicted to make room and their cards came back.
+  static const int _maxArchivedLiveStateEntries = 256;
   late final SessionDetailKey _key;
   late final TextEditingController _promptController;
   late final TextEditingController _commandArgsController;
@@ -1675,10 +1677,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     });
   }
 
-  void _archiveLiveStateItem(_LiveStateItem item) {
+  void _archiveLiveStateItems(List<_LiveStateItem> items) {
+    if (items.isEmpty) return;
     final next = <String, String>{
       ..._archivedLiveState,
-      item.id: item.archiveIdentity,
+      for (final item in items) item.id: item.archiveIdentity,
     };
     while (next.length > _maxArchivedLiveStateEntries) {
       next.remove(next.keys.first);
@@ -2747,7 +2750,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                               promptFocusNode: _promptFocusNode,
                               stagedAttachments: state.stagedAttachments,
                               archivedLiveState: archivedLiveState,
-                              onArchiveLiveState: _archiveLiveStateItem,
+                              onArchiveLiveState: _archiveLiveStateItems,
                               archiveTargetKey: _statusTabFlightTargetKey,
                               reportView: _reportView,
                               toolsExpanded: _toolsExpanded,

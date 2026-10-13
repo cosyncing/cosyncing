@@ -2738,7 +2738,55 @@
   "done": "Done",
   "failed": "Failed",
   "pending": "Pending",
-  "activityProgressLive": "Progress remains live until the Server reports completion.",
+  "liveStateRunningCount": "{count} running",
+  "@liveStateRunningCount": {
+    "description": "Activity strip count of live items (agents, commands, plans).",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "liveStatePausedCount": "{count} paused",
+  "@liveStatePausedCount": {
+    "description": "Activity strip count of paused items.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "liveStateFailedCount": "{count} failed",
+  "@liveStateFailedCount": {
+    "description": "Activity strip count of items that ended with an error.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "liveStateDoneCount": "{count} done",
+  "@liveStateDoneCount": {
+    "description": "Activity strip count of items that finished.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "liveStateFinishedSection": "Finished · {count}",
+  "@liveStateFinishedSection": {
+    "description": "Header above the finished items in the expanded activity band.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "liveStateClearFinished": "Clear finished",
+  "@liveStateClearFinished": {
+    "description": "Dismisses every finished item in the activity band at once."
+  },
   "updateGoalObjective": "Update goal objective",
   "objective": "Objective",
   "goalPursuing": "Pursuing goal",
