@@ -1,7 +1,8 @@
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, basename, join, resolve } from 'node:path';
+import { dirname, basename, isAbsolute, join, resolve } from 'node:path';
 import { HostProcessProvider, type HostProcessIdentity } from '@cosyncing/adapter-api';
+import { CODEX_TUI_PRESENCE_TTL_MS, codexNewThreadFolders, runBoundedMacCommand, type CodexMacCommandRunner, type CodexTuiScan } from './tui-presence.ts';
 
 export interface CodexDaemonProcess extends HostProcessIdentity {
   executable: string;
@@ -22,6 +23,69 @@ export type CodexDaemonProcessRead =
 const processes = new HostProcessProvider();
 const unknown = (detail: string): CodexDaemonProcessRead => ({ state: 'unknown', detail });
 const normalizeStart = (value: string) => value.trim().replace(/\s+/g, ' ');
+
+/** The receipt selects the proven daemon PID, never the broker's or a terminal's folder. */
+export async function readCodexDaemonCwd(home: string, cli: string, dependencies: {
+  readProcess?: typeof readCodexDaemonProcess;
+  readLink?: (path: string) => string;
+  liveProcess?: HostProcessProvider['liveProcess'];
+  platform?: NodeJS.Platform;
+  macRunner?: CodexMacCommandRunner;
+} = {}): Promise<string | undefined> {
+  try {
+    const read = (dependencies.readProcess ?? readCodexDaemonProcess)(home, cli);
+    if (read.state !== 'running') return undefined;
+    const platform = dependencies.platform ?? process.platform;
+    let folder: string | undefined;
+    if (platform === 'linux') folder = (dependencies.readLink ?? readlinkSync)(`/proc/${read.process.pid}/cwd`);
+    else if (platform === 'darwin') {
+      const result = await (dependencies.macRunner ?? runBoundedMacCommand)('/usr/sbin/lsof',
+        ['-a', '-p', String(read.process.pid), '-d', 'cwd', '-Fn'], { timeoutMs: 1_000, maxOutputBytes: 8_192 });
+      if (result.exitCode !== 0 || result.timedOut || result.outputLimitExceeded) return undefined;
+      const paths = result.stdout.split('\n').filter((line) => line.startsWith('n')).map((line) => line.slice(1));
+      if (paths.length === 1) folder = paths[0];
+    }
+    // Recheck the captured process identity after the read; PID reuse is not folder evidence.
+    if (!folder || !isAbsolute(folder)) return undefined;
+    const after = dependencies.liveProcess
+      ? dependencies.liveProcess(read.process.pid, { fresh: true })
+      : processes.liveProcess(read.process.pid, { fresh: true });
+    return after.state === 'running' && after.identity.start === read.process.start
+      && after.identity.boot === read.process.boot ? folder : undefined;
+  } catch { return undefined; }
+}
+
+/** Only plain proven-shared terminals need the daemon folder; share the raw scan's TTL. */
+export function createCodexNewThreadFolderScan(dependencies: {
+  readFolder?: typeof readCodexDaemonCwd;
+  now?: () => number;
+} = {}) {
+  const readFolder = dependencies.readFolder ?? readCodexDaemonCwd;
+  const now = dependencies.now ?? Date.now;
+  const folders = new Map<string, { at: number; folder: string | undefined }>();
+  const inFlight = new Map<string, Promise<string | undefined>>();
+  const cachedFolder = (key: string, home: string, cli: string): Promise<string | undefined> => {
+    const hit = folders.get(key);
+    if (hit && now() - hit.at < CODEX_TUI_PRESENCE_TTL_MS) return Promise.resolve(hit.folder);
+    const pending = inFlight.get(key);
+    if (pending) return pending;
+    const read = readFolder(home, cli).catch(() => undefined).then((folder) => {
+      // Socket settings can change, so bound retained cache keys as well as their lifetime.
+      if (!folders.has(key) && folders.size >= 32) folders.delete(folders.keys().next().value!);
+      folders.set(key, { at: now(), folder });
+      return folder;
+    }).finally(() => inFlight.delete(key));
+    inFlight.set(key, read);
+    return read;
+  };
+  return async (scan: CodexTuiScan, socket: string, home: string, cli?: string): Promise<CodexTuiScan> => {
+    const needsDaemonCwd = scan.candidates.some((candidate) => candidate.proof === 'shared'
+      && !candidate.threadIds?.length && candidate.cwdOverride === undefined);
+    const daemonCwd = needsDaemonCwd && cli
+      ? await cachedFolder(JSON.stringify([socket, home, cli]), home, cli) : undefined;
+    return codexNewThreadFolders(scan, daemonCwd);
+  };
+}
 
 export type CodexDaemonArguments =
   | { valid: true; unknownFlags: string[] }
