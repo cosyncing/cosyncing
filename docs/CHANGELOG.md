@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.6.5 — 2026-10-13
+
 ### Added
 
 - Open workspace file links and inline-code filenames directly from reports,
@@ -39,38 +41,38 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
-- A Codex session started from a terminal with `--remote` shows Synced even when the terminal and the shared daemon run in different folders. cosyncing starts and restarts the shared daemon from your home folder, and the Sync command for a session with no turns yet includes its provider.
-
-- Hiding tool calls keeps delivered files visible, with their Open and Download
-  actions available alongside the report.
-- An agent card with nothing more to show no longer expands onto a placeholder
-  claiming its progress “remains live”, which also appeared on finished agents.
-- Delivered filenames remain readable in narrow conversations and phone layouts.
-- Resizing a portrait Status or Files view keeps that view open instead of
-  replacing it with a previously opened file.
-
-- `cosy update` updates the desktop client recorded by the signed installer, asks you to quit it first, and preserves the previous client if replacement fails. It recognizes eligible older clients at the installer's exact destination and can update the client even when the broker is current. Missing or invalid client ownership skips the client while the broker updates. On Windows and macOS, a client installed by 0.6.4 or earlier needs the new all-in-one installer once.
-
-- A terminal can join a Codex session the app is running without interrupting it.
-  Restarting Codex marks unfinished app turns interrupted and reconnects on the
-  next prompt. `cosy doctor` explains missing reviewer overrides for non-OpenAI
-  auto-review configurations.
-
-- `cosy update` now serves the new web app and installs the Claude mod you asked for if it is missing. Installer web pins left behind by earlier updates move to the new app, and obsolete folders are pruned. A mod removed inside Claude returns while setup records yes; a switched-off mod stays off.
-
-- Restart Codex works again with Codex 0.161 and newer. `cosy doctor` checks daemon
-  ownership and names launch flags that prevent a safe restart.
-- Restart Codex also works on a fresh Codex install.
-
+- Restart Codex works again with Codex 0.161 and newer, and on a fresh Codex
+  install. `cosy doctor` checks daemon ownership and names launch flags that
+  prevent a safe restart.
+- A terminal can join a Codex session the app is running without interrupting
+  it. Restarting Codex marks unfinished app turns interrupted and reconnects on
+  the next prompt. `cosy doctor` explains missing reviewer overrides for
+  non-OpenAI auto-review configurations.
+- A Codex session started from a terminal with `--remote` shows Synced even when
+  the terminal and the shared daemon run in different folders. cosyncing starts
+  and restarts the shared daemon from your home folder, and the Sync command for
+  a session with no turns yet includes its provider.
 - Reopened Codex sessions keep each reply under its own prompt after a stopped
   turn, and history shows each command's exit status.
-- A Claude session synced through the mod shows Working when you open it mid-turn.
+- A Claude session synced through the mod shows Working when you open it
+  mid-turn.
 - A Claude session whose background agents are still running reads Working in
   the roster again, including when its subagents are collapsed or the session
   is open in the app. The agents' own rows say which ones are still working. The
   session's last turn keeps its "Ran for … · Finished at …" footer. The app no
   longer offers Stop or queues new prompts behind a turn that has already
   ended. Taking the session over waits until the agents have reported back.
+- `cosy update` now serves the new web app and installs the Claude mod you asked
+  for if it is missing. Installer web pins left behind by earlier updates move
+  to the new app, and obsolete folders are pruned. A mod removed inside Claude
+  returns while setup records yes; a switched-off mod stays off.
+- `cosy update` updates the desktop client recorded by the signed installer,
+  asks you to quit it first, and preserves the previous client if replacement
+  fails. It recognizes eligible older clients at the installer's exact
+  destination and can update the client even when the broker is current.
+  Missing or invalid client ownership skips the client while the broker
+  updates. On Windows and macOS, a client installed by 0.6.4 or earlier needs
+  the new all-in-one installer once.
 - On Windows, pairing a device keeps its durable files owner-only and no longer
   leaves a file that blocks `cosy update`. `cosy repair` plans and fixes
   permission-only drift; doctor and update name the file, the problem, and the
@@ -83,6 +85,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   SYSTEM, and Administrators, you can instead run
   `icacls "%USERPROFILE%\.cosyncing\transport-peers.json" /inheritance:d` in
   Command Prompt, then run `cosy update`.
+- Hiding tool calls keeps delivered files visible, with their Open and Download
+  actions available alongside the report.
+- An agent card with nothing more to show no longer expands onto a placeholder
+  claiming its progress “remains live”, which also appeared on finished agents.
+- Delivered filenames remain readable in narrow conversations and phone layouts.
+- Resizing a portrait Status or Files view keeps that view open instead of
+  replacing it with a previously opened file.
 
 ## 0.6.4 — 2026-10-10
 
