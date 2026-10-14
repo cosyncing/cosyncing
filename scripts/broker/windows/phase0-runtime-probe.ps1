@@ -94,15 +94,15 @@ $toolchainRoot = Join-Path $runRoot 'toolchains'
 $downloadRoot = Join-Path $toolchainRoot 'downloads'
 New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
 
-$bunFloorArchive = Join-Path $downloadRoot 'bun-1.3.8-windows-x64.zip'
+$bunFloorArchive = Join-Path $downloadRoot 'bun-1.3.14-windows-x64.zip'
 $bunCurrentArchive = Join-Path $downloadRoot 'bun-1.4.0-windows-x64.zip'
 $nodeArchive = Join-Path $downloadRoot 'node-v24.19.0-win-x64.zip'
-$bunFloorRoot = Join-Path $toolchainRoot 'bun-1.3.8'
+$bunFloorRoot = Join-Path $toolchainRoot 'bun-1.3.14'
 $bunCurrentRoot = Join-Path $toolchainRoot 'bun-1.4.0'
 $nodeRoot = Join-Path $toolchainRoot 'node-24.19.0'
 
 Install-Archive `
-  -Url 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.8/bun-windows-x64.zip' `
+  -Url 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64.zip' `
   -Archive $bunFloorArchive `
   -Destination $bunFloorRoot
 Install-Archive `
@@ -187,7 +187,7 @@ $report = [ordered]@{
   generatedAt = [DateTime]::UtcNow.ToString('o')
   toolchains = [ordered]@{
     bunFloor = [ordered]@{
-      expected = '1.3.8'
+      expected = '1.3.14'
       observed = $bunFloorVersion.output
       exitCode = $bunFloorVersion.exitCode
     }

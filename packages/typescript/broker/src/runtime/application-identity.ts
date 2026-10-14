@@ -129,14 +129,12 @@ function assertExecutableFile(path: string, label: string, detailCode: string): 
  * Runtime enforcement remains necessary regardless of how the application was acquired. This is also
  * the `minimumBunVersion` every release manifest declares.
  *
- * Held at 1.3.8 for one bridge release. A release's floor is judged by the PREVIOUS build's updater, and
- * updaters up to 0.6.5 cannot install a runtime: a release declaring a higher floor is declined on every
- * host they manage that still runs 1.3.8. This release carries the updater that installs the release's
- * pinned Bun itself, so the floor can rise to {@link PINNED_BUN_RUNTIME_VERSION} in a later release.
- * Until then new installs already get that version, because 1.3.8 can stall silently while loading modules
- * (13 of 18,500 processes measured, none on 1.3.14).
+ * 1.3.14 is the Bun every build and every gate run actually executes the bundle under. It was raised from
+ * 1.3.8, which can stall silently while loading modules (13 of 18,500 processes measured, none on 1.3.14),
+ * only after a bridge release had shipped the updater that installs a release's pinned Bun itself: a
+ * release's floor is judged by the PREVIOUS build's updater, and updaters up to 0.6.5 cannot install one.
  */
-export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.8';
+export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.14';
 
 /**
  * The Bun version every build in {@link PINNED_BUN_RUNTIME_ARCHIVES} is: what the installers place, and what

@@ -13,7 +13,7 @@ param(
   [Parameter(Mandatory = $false)][string]$BunCache = '',
   # Which runtimes to exercise. Both for evidence; one while iterating. A report names the runtime of
   # every lane it ran, so a single-lane run cannot be mistaken for a two-lane one.
-  [Parameter(Mandatory = $false)][string]$Lanes = '1.3.8,1.4.0',
+  [Parameter(Mandatory = $false)][string]$Lanes = '1.3.14,1.4.0',
   # Probe-specific settings, as `NAME=value` pairs separated by `;`. Environment does not cross the
   # WSL boundary on its own (see ExclusiveAgent above), and a probe that takes options had no way to
   # receive them. Names are restricted to this project's own prefix so this cannot be used to reach

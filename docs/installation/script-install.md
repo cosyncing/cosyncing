@@ -45,7 +45,7 @@ A Bun that is already at the pinned version or newer is reused instead: one on
 `PATH`, or one in `$BUN_INSTALL/bin` (default `~/.bun/bin`), which is where
 earlier installers placed Bun. An older Bun there is left alone, and the pinned
 one is placed beside it. A Bun named by `COSYNCING_BUN_BIN` only has to meet the
-release's minimum (1.3.8), and so does any Bun found when
+release's minimum (1.3.14), and so does any Bun found when
 `COSYNCING_SKIP_BUN_INSTALL=1` forbids installing one. Nothing is written to
 `$BUN_INSTALL` any more, so re-running an installer never replaces a Bun that a
 running broker is using.

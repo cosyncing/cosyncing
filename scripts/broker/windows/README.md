@@ -19,7 +19,7 @@ or changes a proxy, tunnel, VPN, or mesh route.
 
 If `output/windows-broker/candidate/cosyncing` exists, the launcher also stages
 that JavaScript bundle and runs the isolated runtime probe. The runtime probe
-downloads the official Bun 1.3.8, current Bun 1.4.0, and Node 24.19.0 Windows
+downloads the official Bun 1.3.14, current Bun 1.4.0, and Node 24.19.0 Windows
 x64 archives into the run directory. It does not change machine or user PATH.
 It runs the bundle with both Bun versions and uses the portable npm to install
 a probe package into a run-local prefix so npm's `cosyncing.cmd` and `cosy.cmd`
@@ -65,7 +65,7 @@ Phase 3 process qualification also stages and runs entirely on NTFS:
 bash scripts/broker/windows/stage-phase3-process.sh
 ```
 
-It runs the shared provider under Bun 1.3.8 and 1.4.0, proving stable process
+It runs the shared provider under Bun 1.3.14 and 1.4.0, proving stable process
 identity, listener attribution, fail-closed unreadable executable evidence,
 hidden child launch, and complete `taskkill /PID /T /F` tree cleanup. Set
 `COSYNCING_WINDOWS_PHASE3_REQUIRE_CLEAN=0` only for an exploratory run.
@@ -76,7 +76,7 @@ Phase 4 qualifies the durable Task Scheduler service on NTFS:
 bash scripts/broker/windows/stage-phase4-service.sh
 ```
 
-It registers a real run-scoped task under Bun 1.3.8 and 1.4.0 and proves first
+It registers a real run-scoped task under Bun 1.3.14 and 1.4.0 and proves first
 install convergence, repeated setup and drift repair, start/stop, bounded log
 reads, immutable upgrade and rollback, bootstrap failure retry, fatal-start
 logging, post-commit prior-version cleanup, and ownership-aware uninstall. It

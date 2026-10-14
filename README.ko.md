@@ -117,7 +117,7 @@ sync와 파일 입력은 지원하지 않습니다. [Grok Build](docs/supported_
 
 ## 사전 요구 사항
 
-서버는 [Bun](https://bun.sh) 1.3.8 이상으로 실행됩니다. 한 줄 설치 스크립트가 필요할 때 Bun을
+서버는 [Bun](https://bun.sh) 1.3.14 이상으로 실행됩니다. 한 줄 설치 스크립트가 필요할 때 Bun을
 설치합니다. Node.js/npm은 필요하지 않습니다.
 Broker는 기본적으로 로컬 전용입니다. 여러 기기에서 쓰려면 프록시, 터널, VPN, 메시
 네트워크 등 [운영자가 관리하는 연결 방법](docs/connectivity/README.md)이 필요합니다. 간단한 사설

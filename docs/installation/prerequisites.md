@@ -9,9 +9,8 @@ after completing the local installation.
 
 ## Required on the broker host: Bun
 
-cosyncing requires Bun 1.3.8 or newer. Use 1.3.14 or newer where you can:
-1.3.8 can occasionally stall while starting, and the one-command installers
-place 1.3.14. The broker contains JavaScript and does not embed the Bun runtime.
+cosyncing requires Bun 1.3.14 or newer. The broker contains JavaScript and does not
+embed the Bun runtime.
 
 The official installer works on Linux and macOS:
 

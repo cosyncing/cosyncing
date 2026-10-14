@@ -55,6 +55,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 - npm distribution ends at 0.6.6; use the shell or PowerShell installer for installation and migration.
 
+- The minimum Bun version rises from 1.3.8 to 1.3.14. On an installer-owned
+  server, `cosy update` installs Bun 1.3.14 itself before it switches to this
+  release. A Bun chosen with `COSYNCING_BUN_BIN` needs upgrading first. A
+  server on 0.6.5 or earlier with an older Bun refuses this update without
+  changing anything; update it by re-running the installer instead.
+
 - Large session-stream frames and JSON responses use negotiated compression
   to reduce mobile data transfer.
 

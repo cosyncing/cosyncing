@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import { BUILD_INFO } from '../../src/runtime/build-info.ts';
 import {
-  BUN_RELEASE_DOWNLOAD_BASE, PINNED_BUN_RUNTIME_ARCHIVES, PINNED_BUN_RUNTIME_VERSION, bunVersionAtLeast,
+  BUN_RELEASE_DOWNLOAD_BASE, MINIMUM_BUN_RUNTIME_VERSION, PINNED_BUN_RUNTIME_ARCHIVES, PINNED_BUN_RUNTIME_VERSION,
+  bunVersionAtLeast,
 } from '../../src/runtime/application-identity.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
 import {
@@ -161,6 +162,14 @@ async function planChecks(check: Check): Promise<void> {
   const compiled = planBunRuntimeUpgrade({
     minimumBunVersion: PINNED_BUN_RUNTIME_VERSION, runtimeVersion: '1.3.8', host: 'linux-x64', toVersion: '2.0.0',
   });
+  // This build's OWN floor, offered to a host still on the previous one: what every bridge-release host
+  // meets on its first update past it. The pinned Bun is installed rather than the update refused.
+  const ownFloor = planBunRuntimeUpgrade({
+    minimumBunVersion: MINIMUM_BUN_RUNTIME_VERSION, runtimeVersion: '1.3.8', host: 'linux-x64', toVersion: '2.0.0',
+  });
+  check('runtime plan: a host on Bun 1.3.8 offered this build\'s floor gets the pinned Bun installed',
+    ownFloor.kind === 'install' && ownFloor.version === PINNED_BUN_RUNTIME_VERSION,
+    JSON.stringify(ownFloor));
   check('runtime plan: without release pins, this build\'s compiled pins serve a floor they satisfy',
     compiled.kind === 'install' && compiled.version === PINNED_BUN_RUNTIME_VERSION
       && JSON.stringify(compiled.archives) === JSON.stringify(PINNED_BUN_RUNTIME_ARCHIVES['linux-x64']),
