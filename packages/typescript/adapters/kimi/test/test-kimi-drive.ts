@@ -255,10 +255,47 @@ const gate = (): { hold: Promise<void>; release: () => void } => {
   return { hold, release };
 };
 
+/**
+ * HTTP requests the fixture is working on, and how many of those a test parked on purpose. A barrier ({@link settle})
+ * may not call the fixture quiet while an UNPARKED request is still being served: a fixed sleep did, and a slow
+ * machine turned that into a missed reconciliation.
+ */
+let servingNow = 0;
+let parkedNow = 0;
+const parkedOn = async (gate: Promise<void>): Promise<void> => {
+  parkedNow += 1;
+  try {
+    await gate;
+  } finally {
+    parkedNow -= 1;
+  }
+};
+
+/**
+ * Requests the ADAPTER has issued and not yet had answered. The server-side count alone misses the window between
+ * a client calling fetch and the server seeing the request, which on a loaded machine is long enough for a barrier
+ * to call the fixture quiet with a read still on its way. The adapters call the global `fetch` at call time.
+ */
+let fetching = 0;
+const realFetch = globalThis.fetch;
+globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  fetching += 1;
+  return realFetch(input, init).finally(() => { fetching -= 1; });
+}) as typeof fetch;
+
 const server = Bun.serve({
   hostname: '127.0.0.1',
   port: 0,
   async fetch(request) {
+    servingNow += 1;
+    try {
+      return await serve(request);
+    } finally {
+      servingNow -= 1;
+    }
+  },
+});
+async function serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname);
     let body: unknown;
@@ -292,7 +329,7 @@ const server = Bun.serve({
       if (holdMeta) {
         const parked = holdMeta;
         holdMeta = undefined;
-        await parked;
+        await parkedOn(parked);
       }
       return Response.json(ok(SERVER_META));
     }
@@ -348,7 +385,7 @@ const server = Bun.serve({
         if (holdPrompt) {
           const parked = holdPrompt;
           holdPrompt = undefined;
-          await parked;
+          await parkedOn(parked);
         }
         return Response.json(promptAnswer);
       }
@@ -357,7 +394,7 @@ const server = Bun.serve({
         if (holdMessages) {
           const parked = holdMessages;
           holdMessages = undefined;
-          await parked;
+          await parkedOn(parked);
         }
         const beforeId = url.searchParams.get('before_id');
         const pageSize = Number(url.searchParams.get('page_size') ?? '100');
@@ -382,7 +419,7 @@ const server = Bun.serve({
         if (holdApprovals) {
           const parked = holdApprovals;
           holdApprovals = undefined;
-          await parked;
+          await parkedOn(parked);
         }
         return Response.json(ok({ items }));
       }
@@ -394,8 +431,7 @@ const server = Bun.serve({
       if (!tail) return Response.json(sessionRowAnswer);
     }
     return Response.json({ code: 40401, msg: 'not found', data: null, request_id: 'r' });
-  },
-});
+}
 
 const baseUrl = `http://127.0.0.1:${server.port ?? 0}`;
 const liveScan: KimiInstanceScan = {
@@ -501,7 +537,44 @@ function silentSocketFactory(): KimiSocketLike {
 }
 
 
-const settle = () => Bun.sleep(30);
+/**
+ * Everything the fixture can observe the adapter doing: requests served, sockets built, frames sent. A barrier
+ * that waits for this to stop moving waits for the work, however slow the machine; a fixed sleep waited for a
+ * clock and was right only on a quiet one.
+ */
+const activity = (): number =>
+  requests.length + sockets.length + sockets.reduce((frames, socket) => frames + socket.sent.length, 0);
+
+/**
+ * Wait until the adapter has gone quiet: no unparked request is being served and nothing it does to the fixture
+ * has changed for several consecutive turns of the event loop (socket opens are macrotasks; response bodies
+ * decode in microtasks). Bounded, and it THROWS on expiry, so work that never ends says so instead of riding the
+ * suite timeout.
+ */
+async function settle(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = activity();
+  let quiet = 0;
+  while (quiet < 5) {
+    if (Date.now() > deadline) throw new Error(`the adapter never went quiet within ${timeoutMs}ms`);
+    await Bun.sleep(1);
+    const now = activity();
+    if (servingNow - parkedNow <= 0 && fetching - parkedNow <= 0 && now === last) quiet += 1;
+    else {
+      quiet = 0;
+      last = now;
+    }
+  }
+}
+
+/** Wait for a condition on fixture state, bounded and loud: the honest replacement for "sleep long enough". */
+async function until(condition: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`${what} did not happen within ${timeoutMs}ms`);
+    await Bun.sleep(1);
+  }
+}
 
 /**
  * Waits for a promotion to REACH its commit barrier — the socket exists and
@@ -3628,6 +3701,9 @@ try {
     sockets.at(-1)!.fire('close', {});
     await settle();
     intervalHandler?.();
+    // The reconnect re-resolves the generation over HTTP before it reconciles: wait for the read itself, then for
+    // the adapter to go quiet, so "once" is judged over the whole incident rather than over a guessed interval.
+    await until(() => approvalReads() > beforeControl, 'the reconnect\'s pending-interaction read');
     await settle();
     check('the same reconnect with a subscriber present still reconciles, once',
       approvalReads() === beforeControl + 1, `reads=${approvalReads() - beforeControl}`);

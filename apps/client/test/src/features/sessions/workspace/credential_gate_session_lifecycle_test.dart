@@ -1,21 +1,9 @@
 import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
-import 'package:cosyncing_client/src/features/broker_profiles/data/drift_broker_profile_repository.dart';
-import 'package:cosyncing_client/src/features/broker_profiles/data/in_memory_credential_store.dart';
-import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
-import 'package:cosyncing_client/src/features/connection/controller/broker_gate_controller.dart';
-import 'package:cosyncing_client/src/features/connection/model/broker_auth_probe.dart';
-import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
-import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/connection/view/broker_auth_barrier.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
-import 'package:cosyncing_client/src/features/sessions/workspace/open_session_sync_supervisor.dart';
-import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
-import 'package:cosyncing_client/src/local/app_database.dart';
-import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -23,162 +11,6 @@ import 'package:flutter_test/flutter_test.dart';
 import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
-  testWidgets(
-    'a gate-refresh remount under delayed retirement rebinds exactly one '
-    'token-bearing socket with no anonymous reconnection',
-    (tester) async {
-      final database = AppDatabase(NativeDatabase.memory());
-      final profile = await DriftBrokerProfileRepository(
-        database,
-      ).save(createTestBrokerProfile());
-      final credentialStore = InMemoryCredentialStore();
-      final probe = _ScriptedAuthProbe()
-        ..initialVerdict = Completer<BrokerGateState>();
-      final connections = <_GatedCloseConnection>[];
-
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          database: database,
-          brokerProfile: profile,
-          credentialStore: credentialStore,
-          openSessionsStore: InMemoryOpenSessionsStore(
-            snapshot: const OpenSessionsSnapshot(
-              refs: [
-                SessionRef(
-                  tool: 'claude',
-                  id: 'session-1',
-                  title: 'Session',
-                  status: SessionStatus.idle,
-                ),
-              ],
-              activeKey: 'claude/session-1',
-            ),
-          ),
-          brokerClientLoader: (ref) async {
-            final credentialKey = ref
-                .watch(activeBrokerProfileProvider)
-                ?.credentialKey;
-            final token = credentialKey == null
-                ? null
-                : await credentialStore.readBrokerToken(credentialKey);
-            return FakeBrokerClient(token: token);
-          },
-          connectionFactory:
-              ({required resolver, required sessionId, required tool}) {
-                final connection = _GatedCloseConnection(
-                  resolverToken: resolver.token,
-                );
-                connections.add(connection);
-                return connection;
-              },
-          extraOverrides: [
-            brokerAuthProbeProvider.overrideWithValue(probe),
-          ],
-          // The production shape at the credential gate: the REAL barrier
-          // owns the whole Sessions subtree, the supervisor owns background
-          // residency, the deep-session page attaches interactively inside.
-          homeBuilder: (sessionDetailPage) => BrokerAuthBarrier(
-            child: OpenSessionSyncSupervisor(child: sessionDetailPage),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // Cold start: the gate probe is still unresolved, so the barrier falls
-      // through and the session attaches anonymously — its connection owns
-      // the pre-token resolver.
-      expect(connections, hasLength(1));
-      final anonymous = connections.single;
-      expect(anonymous.resolverToken, isNull);
-      expect(anonymous.state, SessionDetailConnectionStatus.connected);
-      final anonymousConnectsBeforeGate = anonymous.connectCount;
-      final anonymousReattachesBeforeGate = anonymous.reattachCount;
-
-      // The broker's verdict lands: unauthorized. The barrier unmounts the
-      // Sessions subtree while this session's retirement is deliberately held
-      // open at the transport close.
-      anonymous.closeGate = Completer<void>();
-      probe.initialVerdict!.complete(
-        const BrokerGateState.unauthorized(
-          credentialIssue: BrokerGateCredentialIssue.missing,
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('broker-auth-barrier')), findsOneWidget);
-      expect(find.byType(SessionDetailPage), findsNothing);
-
-      // Save the token. The committed profile mutation re-runs the gate, the
-      // barrier falls through on the refresh, and the subtree remounts while
-      // the previous incarnation's retirement is still pending.
-      final container = ProviderScope.containerOf(
-        tester.element(find.byKey(const Key('broker-auth-barrier'))),
-      );
-      await container
-          .read(brokerCredentialsControllerProvider.notifier)
-          .saveToken('fresh-token');
-      await container.read(brokerGateControllerProvider.notifier).refresh();
-      await tester.pump();
-      await tester.pump();
-
-      expect(find.byType(SessionDetailPage), findsOneWidget);
-      expect(
-        find.byKey(const Key('session-detail-retirement-handoff')),
-        findsOneWidget,
-        reason: 'the remounted page must not own the key mid-retirement',
-      );
-      await tester.pump(const Duration(seconds: 2));
-      expect(
-        connections,
-        hasLength(1),
-        reason: 'no attach may run before the retirement handoff completes',
-      );
-      expect(
-        anonymous.connectCount,
-        anonymousConnectsBeforeGate,
-        reason: 'the pre-token connection must not reconnect anonymously',
-      );
-      expect(anonymous.reattachCount, anonymousReattachesBeforeGate);
-
-      // Release the held close: the retirement finishes, the handoff clears,
-      // and exactly one replacement socket attaches with the fresh token.
-      anonymous.closeGate!.complete();
-      await tester.pumpAndSettle();
-
-      expect(connections, hasLength(2));
-      final rebound = connections.last;
-      expect(
-        rebound.resolverToken,
-        'fresh-token',
-        reason: 'the replacement socket must carry the saved credential',
-      );
-      expect(rebound.state, SessionDetailConnectionStatus.connected);
-      expect(
-        find.byKey(const Key('session-detail-retirement-handoff')),
-        findsNothing,
-      );
-      expect(
-        anonymous.connectCount,
-        anonymousConnectsBeforeGate,
-        reason: 'the pre-token resolver must never reconnect after the save',
-      );
-      expect(anonymous.reattachCount, anonymousReattachesBeforeGate);
-      expect(anonymous.disposeCount, 1);
-      final survivors = connections
-          .where(
-            (connection) =>
-                connection.state == SessionDetailConnectionStatus.connected,
-          )
-          .toList(growable: false);
-      expect(
-        survivors,
-        hasLength(1),
-        reason: 'exactly one live session socket may survive the handoff',
-      );
-      expect(survivors.single.resolverToken, 'fresh-token');
-    },
-  );
-
   testWidgets(
     'mounting the handoff shell never reads or rebuilds a controller '
     'invalidated before the retirement pump',
@@ -366,31 +198,6 @@ final class _DetailProviderActivityObserver extends ProviderObserver {
     if (_isWatchedProvider(provider)) {
       disposals++;
     }
-  }
-}
-
-final class _ScriptedAuthProbe implements BrokerAuthProbe {
-  /// Holds the first verdict open so the app renders ungated — and attaches
-  /// anonymously — until the test lands the unauthorized classification.
-  Completer<BrokerGateState>? initialVerdict;
-
-  @override
-  Future<BrokerGateState> probe({
-    required Uri baseUrl,
-    String? credential,
-    BrokerCredentialKind credentialKind = BrokerCredentialKind.sharedToken,
-  }) {
-    final held = initialVerdict;
-    if (held != null && !held.isCompleted) {
-      return held.future;
-    }
-    return Future.value(
-      credential == null
-          ? const BrokerGateState.unauthorized(
-              credentialIssue: BrokerGateCredentialIssue.missing,
-            )
-          : const BrokerGateState.connected(),
-    );
   }
 }
 

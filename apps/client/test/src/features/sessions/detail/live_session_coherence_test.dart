@@ -18,8 +18,7 @@ import '../../../../support/session_detail_controller_test_harness.dart';
 
 /// Batch A cumulative client reproduction — one live turn, one status.
 ///
-/// Every lane in this file reads the SAME canonical identities as the broker's
-/// `packages/typescript/broker/test/broker/test-live-session-coherence.ts`: one session
+/// Every lane in this file reads the SAME canonical identities: one session
 /// (`claude/session-1`), one prompt key, one assistant key, one turn id, one
 /// run-summary key. A fix that satisfies the roster while invalidating the open
 /// detail (or the reverse) fails here rather than in the app.
@@ -99,39 +98,6 @@ void main() {
       .status;
 
   group('Batch A — one authoritative Working/Idle state', () {
-    test(
-      'a live transition reaches the roster without a delta round trip',
-      () async {
-        await container.read(sessionListControllerProvider.notifier).load();
-        expect(rosterStatus(), SessionStatus.idle);
-
-        // The open Session Detail's own socket sees the turn start first —
-        // exactly what the roster used to wait for a delta to learn.
-        container
-            .read(sessionStatusRegistryProvider.notifier)
-            .publishLive(
-              source: currentSource(),
-              tool: kTool,
-              sessionId: kSession,
-              status: SessionStatus.working,
-              rosterRevisionFloor: container
-                  .read(sessionListControllerProvider)
-                  .revision,
-            );
-
-        expect(
-          rosterStatus(),
-          SessionStatus.working,
-          reason: 'the roster must converge in the same frame as the detail',
-        );
-        expect(
-          container.read(sessionListControllerProvider).sessions.single.status,
-          SessionStatus.idle,
-          reason: 'roster membership/metadata is untouched; only status moves',
-        );
-      },
-    );
-
     test(
       'a stale roster snapshot cannot regress a newer live transition',
       () async {

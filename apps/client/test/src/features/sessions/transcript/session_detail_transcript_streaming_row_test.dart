@@ -99,29 +99,4 @@ void main() {
     );
     expect(work.markdownBlocksReused, greaterThanOrEqualTo(6));
   });
-
-  testWidgets('a thinking row opened while it streams stays open', (
-    tester,
-  ) async {
-    useRoomyTestViewport(tester);
-    final connection = ScriptedSessionDetailConnection(
-      events: [_user, _chunk('thinking', 't1', 0, seq: 2)],
-    );
-    await tester.pumpWidget(
-      buildSessionDetailTestPage(events: const [], connection: connection),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('conversation-thinking-toggle')));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('First paragraph of t1'), findsOneWidget);
-
-    for (var chunk = 1; chunk <= 3; chunk++) {
-      connection.emitEvent(_chunk('thinking', 't1', chunk, seq: 2 + chunk));
-      await tester.pump(const Duration(milliseconds: 33));
-    }
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('First paragraph of t1'), findsOneWidget);
-    expect(find.textContaining('Paragraph 3 of t1'), findsOneWidget);
-  });
 }

@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "blank, non-JSON, truncated, primitive, array, null, wrongly-typed and binary lines in history and on the tail are skipped without a throw and never become a user bubble; the real rows around them still map",
+  "userTexts": [
+    "before the noise",
+    "prompt after garbage on the tail"
+  ],
+  "sessionId": "a14c0c56-ec8c-4dc0-8dc0-a14c0c56ec8c"
+}

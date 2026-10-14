@@ -1,0 +1,26 @@
+{
+  "history": [
+    {"type":"file-artifact","path":"kimi:p_1:0","name":"image.png","mimeType":"image/png","artifactKey":"kimi:p_1:0","url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk","userMessageKey":"kimi:p_1:1"},
+    {"type":"user-message","text":"what is in this screenshot","key":"kimi:p_1:1","imageCount":1},
+    {"type":"user-message","text":"","key":"kimi:p_2:u","imageCount":1},
+    {"type":"file-artifact","path":"kimi:p_2:0","name":"image.png","mimeType":"image/png","artifactKey":"kimi:p_2:0","url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk","userMessageKey":"kimi:p_2:u"}
+  ],
+  "live": [
+    {"type":"event","name":"kimi.image","payload":{"key":"kimi:p_3:0"}},
+    {"type":"event","name":"kimi.video","payload":{"key":"kimi:p_4:0"}},
+    {"type":"event","name":"kimi.image","payload":{"key":"kimi:p_4:1"}},
+    {"type":"event","name":"kimi.image","payload":{"key":"kimi:p_4:2"}},
+    {"type":"model-output","text":"seen","final":true,"key":"kimi:p_5:0"}
+  ],
+  "replay": [
+    {"type":"file-artifact","path":"kimi:p_1:0","name":"image.png","mimeType":"image/png","artifactKey":"kimi:p_1:0","url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk","userMessageKey":"kimi:p_1:1"},
+    {"type":"user-message","text":"what is in this screenshot","key":"kimi:p_1:1","imageCount":1},
+    {"type":"user-message","text":"","key":"kimi:p_2:u","imageCount":1},
+    {"type":"file-artifact","path":"kimi:p_2:0","name":"image.png","mimeType":"image/png","artifactKey":"kimi:p_2:0","url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk","userMessageKey":"kimi:p_2:u"},
+    {"type":"event","name":"kimi.image","payload":{"key":"kimi:p_3:0"}},
+    {"type":"event","name":"kimi.video","payload":{"key":"kimi:p_4:0"}},
+    {"type":"event","name":"kimi.image","payload":{"key":"kimi:p_4:1"}},
+    {"type":"event","name":"kimi.image","payload":{"key":"kimi:p_4:2"}},
+    {"type":"model-output","text":"seen","final":true,"key":"kimi:p_5:0"}
+  ]
+}

@@ -1,0 +1,9 @@
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t147live"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","id":"dev_a1","content":[{"type":"input_text","text":"bootstrap developer context"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","id":"boot_a1","content":[{"type":"input_text","text":"bootstrap environment context"}]}}
+{"type":"turn_context","payload":{"turn_id":"t147live","model":"gpt-5.3-codex-spark"}}
+{"type":"response_item","payload":{"type":"message","role":"user","id":"item_a1","content":[{"type":"input_text","text":"tailed prompt"}]}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-4000-8000-000000000147","turn_id":"t147live","started_at_ms":1755200000000,"completed_at_ms":1755200000001,"item":{"type":"UserMessage","id":"item_a1","content":[{"type":"text","text":"tailed prompt","text_elements":[]}]}}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-4000-8000-000000000147","turn_id":"t147live","item":{"type":"AgentMessage","id":"msg_a1","content":[{"type":"Text","text":"answer a1"}],"phase":"final_answer"}}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_a1","phase":"final_answer","content":[{"type":"output_text","text":"answer a1"}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t147live"}}

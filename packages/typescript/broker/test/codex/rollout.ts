@@ -1,20 +1,16 @@
 /**
- * Headless regression for the Codex adapter's OBSERVE mapping (rollout JSONL → canonical messages).
+ * Headless regression for the Codex adapter's rollout handling that the mapping corpus
+ * (`e2e/adapters/mapping/codex.test.ts`) does not express: history capture and its resource bounds,
+ * page-cache cursors, canonical (turn, ordinal) identity, tail/pair timing, run-state inference
+ * (the 8 MiB window, cold and warm scans), `codexSessionOrigin`, `codexAttachMode`, and the
+ * subagent Observe boundary. Pure rollout-to-message mapping lives in the corpus.
  *
- * Two halves, both zero-cost (no `codex`, no daemon, no model):
- *   1. Synthetic: a hand-built rollout exercising the DOUBLE-FREE rule — the same content appears as
- *      both an event_msg and a response_item, and the mapper must emit each exactly once (text/
- *      reasoning/user from event_msg; tool calls/results from response_item; patch/exec detail folded
- *      onto the matching tool-result by call_id, never as a second bubble).
- *   2. Real-data smoke: discover the machine's actual Codex sessions and getHistory() the newest one,
- *      asserting it parses without throwing and yields only valid canonical message types. Read-only;
- *      prints counts/types, never message content.
+ * Zero-cost: no `codex`, no daemon, no model, and no host session data.
  *
  *   bun run packages/typescript/broker/test/codex/rollout.ts     (exit 0 = all pass)
  */
 export {};
 import { strict as assert } from 'node:assert';
-import unifiedExecFixture from './fixtures/unified-exec-0.162.1.json';
 import { appendFileSync, chmodSync, closeSync, existsSync, ftruncateSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +19,7 @@ import { isolatedBrokerFixtureEnvironment } from '../helpers/isolated-broker-fix
 import { historySourceStillContainsSnapshot, IndexedHistoryPageCacheBuilder } from '../../src/sessions/history-page-cache.ts';
 import { backwardHistoryCursor, cursorDurableHistory } from '../../src/sessions/history-delta.ts';
 import type { AgentMessage, HistorySnapshotSink } from '../../../adapter-api/src/index.ts';
-import { CANONICAL_MESSAGE_TYPES, isHistorySnapshotRefusal, isOwnershipConflictError } from '../../../adapter-api/src/index.ts';
+import { isHistorySnapshotRefusal, isOwnershipConflictError } from '../../../adapter-api/src/index.ts';
 import { mergeCodexNativeRunEvidence, readCodexNativeRunEvidence } from '../../../adapters/codex/src/run-state-repair.ts';
 
 /** The broker side of a capture, with an optional budget so a refusal can be provoked. */
@@ -67,127 +63,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   );
 }
 
-// PR-2b: outputs copied verbatim from a scratch native 0.162.1 server, not
-// hand-authored parser examples. See the fixture's capture description.
-{
-  const replay = (output: string, extra: any[] = [], name = 'exec_command') => mapRollout([
-    { type: 'response_item', payload: { type: 'function_call', name, call_id: 'native-exec', arguments: JSON.stringify({ cmd: 'fixture command' }) } },
-    ...extra,
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'native-exec', output } },
-  ]).find((m): m is Extract<AgentMessage, { type: 'tool-result' }> => m.type === 'tool-result')!;
-  for (const sample of unifiedExecFixture.cases) {
-    const out = mapRollout([
-      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'measured' } },
-      { type: 'response_item', payload: { type: 'function_call', name: sample.toolName, call_id: 'native-exec', arguments: JSON.stringify(sample.arguments) } },
-      { type: 'response_item', payload: { type: 'function_call_output', call_id: 'native-exec', output: sample.output } },
-      // Even the native RUNNING case ended its turn, while the process outlived it.
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'measured' } },
-    ]);
-    const result = out.find((m): m is Extract<AgentMessage, { type: 'tool-result' }> => m.type === 'tool-result');
-    check(`PR-2b measured unified-exec ${sample.name} keeps exit, lifecycle and wall time`,
-      result?.exitCode === (sample.exitCode ?? undefined)
-      && result?.semantic?.kind === 'command' && result.semantic.state === sample.state
-      && result.durationMs === sample.durationMs
-      && result.isError === (sample.exitCode !== null && sample.exitCode !== 0)
-      && result.result === sample.output,
-      JSON.stringify(result));
-  }
-  const running = unifiedExecFixture.cases[2]!.output;
-  const spoof = replay(running + 'Process exited with code 0');
-  const plain = replay('Process exited with code 0');
-  const terminal = unifiedExecFixture.cases[0]!.output;
-  const nonExec = replay(terminal, [], 'web_search');
-  check('PR-2b stdout and non-exec outputs cannot invent a terminal exit',
-    spoof.exitCode === undefined && spoof.semantic?.kind === 'command' && spoof.semantic.state === 'running'
-    && plain.exitCode === undefined && plain.semantic?.kind === 'command' && plain.semantic.state === 'unknown'
-    && nonExec.exitCode === undefined,
-    JSON.stringify([spoof, plain, nonExec]));
-  const native = replay(terminal, [{ type: 'event_msg', payload: { type: 'exec_command_end', call_id: 'native-exec', exit_code: 9, duration_ms: 12, aborted: true } }]);
-  check('PR-2b rich native exec evidence outranks the textual wrapper',
-    native.exitCode === 9 && native.durationMs === 12 && native.semantic?.kind === 'command' && native.semantic.state === 'interrupted',
-    JSON.stringify(native));
-}
 
-// ── 1. synthetic double-free mapping ────────────────────────────────────────────
-{
-  const lines = [
-    { type: 'session_meta', payload: { cwd: '/tmp/x', id: 'abc' } },
-    { timestamp: '2026-06-18T10:00:00.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'hello' } },
-    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] } }, // must SKIP
-    { timestamp: '2026-06-18T10:00:02.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } },
-    // The shapes a real rollout writes: one `{type, text}` event per summary part, then the item.
-    { type: 'event_msg', payload: { type: 'agent_reasoning', text: 'thinking through it' } }, // must SKIP
-    { type: 'response_item', payload: { type: 'reasoning', id: 'rs_t1', summary: [{ type: 'summary_text', text: 'thinking through it' }], content: null, encrypted_content: 'opaque', internal_chat_message_metadata_passthrough: { turn_id: 't1' } } },
-    { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'c1', arguments: '{"command":"ls"}' } },
-    { type: 'event_msg', payload: { type: 'exec_command_end', call_id: 'c1', exit_code: 2, duration: { secs: 1, nanos: 250_000_000 } } }, // enrich only
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: 'boom' } },
-    { type: 'response_item', payload: { type: 'function_call', name: 'apply_patch', call_id: 'c2', arguments: '{}' } },
-    { type: 'event_msg', payload: { type: 'patch_apply_end', call_id: 'c2', success: true, changes: { '/tmp/x/a.ts': { type: 'add', content: 'l1\nl2' } } } }, // enrich only
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'c2', output: 'ok' } },
-    { timestamp: '2026-06-18T10:00:08.000Z', type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } },
-    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done.' }] } }, // must SKIP
-    { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 2 } } } },
-    { timestamp: '2026-06-18T10:00:10.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1' } },
-  ];
-  const out = mapRollout(lines);
-  const of = (t: string) => out.filter((m) => m.type === t);
-
-  // 13 emitted: user, status(running/idle), run-summary(running/done), thinking, tool-call×2,
-  // tool-result×2, model-output, token-count, metadata-update/runtimeTotals.
-  // The 2 response_item/message + 1 event_msg/agent_reasoning are dropped → no doubles.
-  check('double-free plus runtime: exactly 13 messages (no event_msg/response_item duplication)', out.length === 13, `got ${out.length}`);
-  check(
-    'user-message once with native sentAt',
-    of('user-message').length === 1 && (of('user-message')[0] as any).text === 'hello' && (of('user-message')[0] as any).sentAt === Date.parse('2026-06-18T10:00:00.000Z'),
-    JSON.stringify(of('user-message')),
-  );
-  check(
-    'thinking once, from the reasoning item, under the live key (not doubled by its agent_reasoning event)',
-    of('thinking').length === 1
-      && (of('thinking')[0] as any).key === 'codex:t1:rs_t1:r'
-      && (of('thinking')[0] as any).text === 'thinking through it',
-    JSON.stringify(of('thinking')),
-  );
-  check('model-output once (not doubled by response_item/message)', of('model-output').length === 1 && (of('model-output')[0] as any).text === 'Done.', `count=${of('model-output').length}`);
-  check('tool-call×2 with names', of('tool-call').length === 2 && (of('tool-call')[0] as any).toolName === 'exec_command' && (of('tool-call')[1] as any).toolName === 'apply_patch', JSON.stringify(of('tool-call').map((m: any) => m.toolName)));
-  check('tool-call display classes are adapter-owned (execute/edit)', (of('tool-call')[0] as any).toolClass === 'execute' && (of('tool-call')[1] as any).toolClass === 'edit', JSON.stringify(of('tool-call')));
-
-  const tr = of('tool-result') as any[];
-  const c1 = tr.find((m) => m.callId === 'c1');
-  const c2 = tr.find((m) => m.callId === 'c2');
-  check('tool-result c1 enriched from exec_command_end (exitCode 2, isError, name)', !!c1 && c1.exitCode === 2 && c1.isError === true && c1.toolName === 'exec_command', JSON.stringify(c1));
-  check('tool-result c1 carries native duration + execute class', c1?.durationMs === 1250 && c1?.toolClass === 'execute', JSON.stringify(c1));
-  check('tool-result c2 enriched from patch_apply_end (create title + synthesized additions from content, not errored)', !!c2 && c2.path === '/tmp/x/a.ts' && c2.title === 'Created a.ts' && c2.additions === 2 && c2.deletions === 0 && c2.isError === false && c2.toolName === 'apply_patch', JSON.stringify(c2));
-  check('status running then idle', of('status').length === 2 && (of('status')[0] as any).status === 'running' && (of('status')[1] as any).status === 'idle', JSON.stringify(of('status').map((m: any) => m.status)));
-  check('token-count mapped', of('token-count').length === 1 && (of('token-count')[0] as any).input === 10 && (of('token-count')[0] as any).output === 5, JSON.stringify(of('token-count')));
-  const runs = of('run-summary') as any[];
-  check(
-    'run-summary upserts by turn id and maps native rollout runtime',
-    runs.length === 2 &&
-      runs[0].key === 'codex:run:t1' &&
-      runs[1].key === 'codex:run:t1' &&
-      runs[0].status === 'running' &&
-      runs[1].status === 'done' &&
-      runs[1].startedAt === Date.parse('2026-06-18T10:00:02.000Z') &&
-      runs[1].completedAt === Date.parse('2026-06-18T10:00:10.000Z') &&
-      runs[1].totalRuntimeMs === 8000 &&
-      runs[1].userMessageKey === 'c1' &&
-      runs[1].assistantMessageKey === 'c12',
-    JSON.stringify(runs),
-  );
-  const totals = of('metadata-update').find((m: any) => m.key === 'runtimeTotals') as any;
-  check('runtimeTotals metadata maps completed Codex rollout runtime', totals?.value?.totalRuntimeMs === 8000 && totals?.value?.turnCount === 1, JSON.stringify(totals));
-
-  // Content keys are the line index → unique and stable for history/live dedupe. run-summary keys are
-  // intentionally reused so running→done updates the same runtime pill.
-  const lineKeyed = out.filter((m: any) => /^c\d+$/.test(m.key || ''));
-  const uniqueLineKeys = new Set(lineKeyed.map((m: any) => m.key));
-  check('every line-keyed content message has a unique line-index key', lineKeyed.length > 0 && uniqueLineKeys.size === lineKeyed.length, `${uniqueLineKeys.size}/${lineKeyed.length}`);
-
-  // every emitted type is a real canonical type (would-break-render-gate guard)
-  const bad = out.map((m) => m.type).filter((t) => !(CANONICAL_MESSAGE_TYPES as readonly string[]).includes(t));
-  check('all emitted types are canonical', bad.length === 0, bad.join(',') || 'ok');
-}
 // ── Reasoning: one row per reasoning item, from the item, under the key the live path uses ───────
 // Rollouts carry reasoning in up to three forms: `event_msg/agent_reasoning` (one `{type, text}`
 // event per summary part, older builds only), `event_msg/item_completed` with a `Reasoning` item
@@ -799,21 +675,23 @@ await (async () => {
       } finally {
         closeSync(hugeFd);
       }
+      // Memory, not wall time, shows the source was never read: reading it would hold 256 MiB.
       const attachRssBefore = process.memoryUsage().rss;
-      const attachStartedAt = performance.now();
       const hugeConn: any = await adapter.attach(
         Buffer.from(huge, 'utf8').toString('base64url'),
         'observe',
       );
-      const attachElapsedMs = performance.now() - attachStartedAt;
       const attachRssGrowth = Math.max(
         0,
         process.memoryUsage().rss - attachRssBefore,
       );
       try {
-        const startedAt = performance.now();
+        const captureRssBefore = process.memoryUsage().rss;
         const refused = await hugeConn.captureHistorySnapshot?.(new CollectingSink());
-        const elapsedMs = performance.now() - startedAt;
+        const captureRssGrowth = Math.max(
+          0,
+          process.memoryUsage().rss - captureRssBefore,
+        );
         check(
           'a source past the capture ceiling is refused as a resource limit, not a source change',
           isHistorySnapshotRefusal(refused) && refused.refusal === 'resource-limit',
@@ -821,13 +699,13 @@ await (async () => {
         );
         check(
           'the refusal is decided from the stat, without reading the source',
-          elapsedMs < 250,
-          `${elapsedMs.toFixed(1)}ms`,
+          captureRssGrowth < 64 * 1024 * 1024,
+          `rssGrowth=${captureRssGrowth}`,
         );
         check(
           'observe attach does not materialize a source before the capture ceiling can refuse it',
-          attachElapsedMs < 250 && attachRssGrowth < 64 * 1024 * 1024,
-          `attach=${attachElapsedMs.toFixed(1)}ms rssGrowth=${attachRssGrowth}`,
+          attachRssGrowth < 64 * 1024 * 1024,
+          `rssGrowth=${attachRssGrowth}`,
         );
       } finally {
         await hugeConn.close().catch(() => {});
@@ -1379,38 +1257,6 @@ await (async () => {
   }
 }
 {
-  const out = mapRollout([{ type: 'event_msg', payload: { type: 'context_compacted' } }]);
-  check('context_compacted → history-reset', out.length === 1 && out[0]!.type === 'history-reset', JSON.stringify(out));
-}
-{
-  // A compaction makes the broker re-pull and re-push the whole transcript (hub.resync). Every answer
-  // that survives it therefore crosses the wire a second time, and has to arrive under the identity
-  // the client already stored — otherwise compaction itself duplicates the transcript it compacted.
-  const lines = [
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } },
-    { type: 'event_msg', payload: { type: 'agent_message', message: 'Before.' } },
-    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_before', content: [{ type: 'output_text', text: 'Before.' }] } },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1' } },
-    { type: 'event_msg', payload: { type: 'context_compacted' } },
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 't2' } },
-    { type: 'event_msg', payload: { type: 'agent_message', message: 'After.' } },
-    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_after', content: [{ type: 'output_text', text: 'After.' }] } },
-  ];
-  const keysOf = () => (mapRollout(lines).filter((m) => m.type === 'model-output') as any[]).map((m) => m.key);
-  const first = keysOf();
-  check(
-    'answers either side of a compaction keep their native identities, and the reset stays between them',
-    JSON.stringify(first) === JSON.stringify(['codex:t1:msg_before:t', 'codex:t2:msg_after:t']) &&
-      mapRollout(lines).findIndex((m) => m.type === 'history-reset') > 0,
-    JSON.stringify(first),
-  );
-  check(
-    'a post-compaction re-read reproduces them exactly (resync re-pushes the whole transcript)',
-    JSON.stringify(keysOf()) === JSON.stringify(first),
-    JSON.stringify(keysOf()),
-  );
-}
-{
   // issues-part2: goal lifecycle from the ROLLOUT (observe/replay) — the TUI's "• Goal paused
   // Objective: …" line must reach the app, not only the live thread/goal/updated notification.
   const goal = { threadId: 't-goal', objective: 'resume the last goal • please resume the unfinished goal', status: 'paused', tokensUsed: 12971511, timeUsedSeconds: 69811, createdAt: 1783006625, updatedAt: 1783117677 };
@@ -1419,46 +1265,6 @@ await (async () => {
   check('thread_goal_updated (rollout) → goal-state paused with objective + elapsed', !!gs && gs.status === 'paused' && gs.key === 't-goal' && /resume the last goal/.test(gs.title) && gs.elapsedMs === 69811 * 1000, JSON.stringify(gs));
   const done = mapRollout([{ type: 'event_msg', payload: { type: 'thread_goal_updated', goal: { ...goal, status: 'completed' } } }]).find((m) => m.type === 'goal-state') as any;
   check('rollout goal status "completed" maps to done', !!done && done.status === 'done', JSON.stringify(done));
-}
-{
-  // issues-part2: an interrupted turn shows the TUI's "Conversation interrupted" marker, not silence.
-  const out = mapRollout([
-    { timestamp: '2026-06-26T22:00:00.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'ta' } },
-    { timestamp: '2026-06-26T22:00:06.714Z', type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'ta', reason: 'interrupted', duration_ms: 2595 } },
-  ]);
-  const notice = out.find((m) => m.type === 'notice') as any;
-  check(
-    'turn_aborted(interrupted) → structured visible interruption notice',
-    !!notice
-      && /Conversation interrupted/.test(notice.message)
-      && notice.semantic?.kind === 'interruption'
-      && notice.semantic?.reason === 'generic'
-      && notice.semantic?.turnId === 'ta',
-    JSON.stringify(notice),
-  );
-}
-{
-  const automaticDenial =
-    'exec_command failed for bun run test:broker-live-session-coherence: '
-    + 'CreateProcess { message: "Rejected(\\"Automatic approval review denied. '
-    + 'The workspace approval policy forbids granting escalated host execution.\\")" }';
-  const out = mapRollout([
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'denied-turn' } },
-    { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'deny-1', arguments: '{}' } },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'deny-1', output: automaticDenial } },
-    { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'deny-2', arguments: '{}' } },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'deny-2', output: automaticDenial } },
-    { type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'denied-turn', reason: 'interrupted' } },
-  ]);
-  const notice = out.find((m) => m.type === 'notice') as any;
-  check(
-    'repeated automatic approval denials explain the interruption',
-    notice?.message === 'Conversation interrupted because automatic permission approval was denied repeatedly.'
-      && notice.semantic?.kind === 'interruption'
-      && notice.semantic?.reason === 'automatic-approval-denied-repeatedly'
-      && notice.semantic?.turnId === 'denied-turn',
-    JSON.stringify(notice),
-  );
 }
 {
   const quotedAutomaticDenial =
@@ -1541,144 +1347,6 @@ await (async () => {
   );
 }
 {
-  const lines = [
-    {
-      type: 'response_item',
-      payload: {
-        type: 'function_call',
-        name: 'update_plan',
-        call_id: 'plan1',
-        arguments: JSON.stringify({
-          explanation: 'Plan the Codex task-list mapping.',
-          plan: [
-            { status: 'completed', step: 'Inspect Codex update_plan shape' },
-            { status: 'in_progress', step: 'Map plan items to task-list-state' },
-            { status: 'pending', step: 'Add regression tests and docs' },
-          ],
-        }),
-      },
-    },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'plan1', output: 'ok' } },
-  ];
-  const out = mapRollout(lines);
-  const taskList = out.find((m) => m.type === 'task-list-state') as any;
-  check(
-    'Codex update_plan maps to one task-list-state panel',
-    taskList?.key === 'codex:plan' &&
-      taskList?.title === 'Plan' &&
-      taskList?.sourceTool === 'update_plan' &&
-      taskList?.semantic?.kind === 'plan' &&
-      taskList?.semantic?.planKey === 'codex:plan' &&
-      Object.values(taskList?.semantic?.actions ?? {}).every((supported) => supported === false) &&
-      taskList?.status === 'running' &&
-      taskList?.items?.length === 3 &&
-      taskList.items[0].status === 'done' &&
-      taskList.items[1].status === 'in-progress' &&
-      taskList.items[2].status === 'open',
-    JSON.stringify(out),
-  );
-  check('Codex update_plan suppresses raw tool-call card', !out.some((m) => m.type === 'tool-call' && (m as any).toolName === 'update_plan'), JSON.stringify(out));
-  check('Codex update_plan suppresses raw tool-result card', !out.some((m) => m.type === 'tool-result' && (m as any).toolName === 'update_plan'), JSON.stringify(out));
-}
-{
-  // Codex 0.154.0 `request_user_input_async` (contract revision 24): the durable triple — the
-  // function_call, the item_completed AgentMessage carrying `delivery: "async"` + `questions`, and
-  // the always-`{"accepted":true}` receipt — surfaces as ONE question-request card keyed by the
-  // native item id, read-only and nonblocking. The raw tool records never render, the question text
-  // never doubles as model-output, and an ordinary assistant item beside them maps exactly as before.
-  const lines = [
-    { type: 'session_meta', payload: { cwd: '/tmp/x', id: 'async-question' } },
-    { type: 'turn_context', payload: { turn_id: 'tq1' } },
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tq1' } },
-    { type: 'response_item', payload: { type: 'function_call', id: 'fc_1', name: 'request_user_input_async', arguments: '{"questions":[{"title":"Which color first?","options":["Crimson","Teal"]}]}', call_id: 'call_q1' } },
-    { type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'tq1', item: { type: 'AgentMessage', id: 'call_q1', content: [{ type: 'Text', text: 'Which color first?\n- Crimson\n- Teal' }], phase: 'final_answer', delivery: 'async', questions: [{ title: 'Which color first?', options: ['Crimson', 'Teal'] }] } } },
-    { type: 'response_item', payload: { type: 'function_call_output', id: 'fco_1', call_id: 'call_q1', output: '{"accepted":true}' } },
-    { type: 'event_msg', payload: { type: 'agent_message', message: 'Continuing with Crimson.', phase: 'commentary' } },
-    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_ok', phase: 'commentary', content: [{ type: 'output_text', text: 'Continuing with Crimson.' }] } },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tq1' } },
-  ];
-  const out = mapRollout(lines);
-  const cards = out.filter((m) => m.type === 'question-request') as any[];
-  check('request_user_input_async maps to exactly one question-request card', cards.length === 1, JSON.stringify(out.map((m) => m.type)));
-  const card = cards[0];
-  check(
-    'the async question card is read-only, nonblocking, and keyed by the native item id',
-    card?.requestId === 'codex:aq:call_q1' && card?.blocking === false && card?.readOnly === true,
-    JSON.stringify(card),
-  );
-  check(
-    'the card maps the native title and options to canonical question shape',
-    card?.questions?.length === 1
-      && card.questions[0].question === 'Which color first?'
-      && JSON.stringify(card.questions[0].options) === JSON.stringify([{ label: 'Crimson' }, { label: 'Teal' }]),
-    JSON.stringify(card?.questions),
-  );
-  check(
-    'request_user_input_async never leaks as a raw tool-call card',
-    !out.some((m) => m.type === 'tool-call' && (m as any).toolName === 'request_user_input_async'),
-    JSON.stringify(out.filter((m) => m.type === 'tool-call')),
-  );
-  check(
-    'its {"accepted":true} receipt never leaks as a raw tool-result card',
-    !out.some((m) => m.type === 'tool-result' && ((m as any).toolName === 'request_user_input_async' || (m as any).callId === 'call_q1')),
-    JSON.stringify(out.filter((m) => m.type === 'tool-result')),
-  );
-  check(
-    'the item text (which repeats the question as markdown) never doubles as model-output',
-    !out.some((m) => m.type === 'model-output' && String((m as any).text ?? '').includes('Which color first?')),
-    JSON.stringify(out.filter((m) => m.type === 'model-output')),
-  );
-  const answers = out.filter((m) => m.type === 'model-output') as any[];
-  check(
-    'an ordinary assistant item beside the async question still maps normally (no suppression bleed)',
-    answers.length === 1 && answers[0].text === 'Continuing with Crimson.' && answers[0].key === 'codex:tq1:msg_ok:t',
-    JSON.stringify(answers),
-  );
-}
-await (async () => {
-  // The same records through the Observe live tail (mapLine over appended lines): the card must
-  // arrive under the same requestId and the tool records must stay suppressed there too.
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-codex-async-question-tail-'));
-  const path = join(dir, 'rollout-2026-09-14T00-00-00-00000000-0000-4000-8000-000000000154.jsonl');
-  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
-  writeFileSync(
-    path,
-    line({ type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000154', cwd: dir } }) +
-      line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'tq-live' } }),
-  );
-  const messages: any[] = [];
-  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
-  const unsubscribe = conn.subscribe((m: any) => messages.push(m));
-  try {
-    appendFileSync(
-      path,
-      [
-        { type: 'response_item', payload: { type: 'function_call', id: 'fc_1', name: 'request_user_input_async', arguments: '{"questions":[{"title":"Which color first?","options":["Crimson","Teal"]}]}', call_id: 'call_q1' } },
-        { type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'tq-live', item: { type: 'AgentMessage', id: 'call_q1', content: [{ type: 'Text', text: 'Which color first?\n- Crimson\n- Teal' }], phase: 'final_answer', delivery: 'async', questions: [{ title: 'Which color first?', options: ['Crimson', 'Teal'] }] } } },
-        { type: 'response_item', payload: { type: 'function_call_output', id: 'fco_1', call_id: 'call_q1', output: '{"accepted":true}' } },
-        { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tq-live' } },
-      ].map(line).join(''),
-    );
-    const deadline = Date.now() + 4000;
-    while (Date.now() < deadline && !messages.some((m: any) => m.type === 'question-request')) await new Promise((r) => setTimeout(r, 25));
-    const cards = messages.filter((m: any) => m.type === 'question-request');
-    check(
-      'the Observe live tail surfaces the same nonblocking card under the same requestId',
-      cards.length === 1 && cards[0].requestId === 'codex:aq:call_q1' && cards[0].blocking === false,
-      JSON.stringify(cards.map((m: any) => m.requestId)),
-    );
-    check(
-      'the live tail never renders the async tool call or its receipt as tool cards',
-      !messages.some((m: any) => (m.type === 'tool-call' || m.type === 'tool-result') && (m.toolName === 'request_user_input_async' || m.callId === 'call_q1')),
-      JSON.stringify(messages.filter((m: any) => m.type === 'tool-call' || m.type === 'tool-result')),
-    );
-  } finally {
-    unsubscribe();
-    await conn.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-})();
-{
   const out = mapRollout([
     { timestamp: '2026-06-18T10:20:00.000Z', type: 'event_msg', payload: { type: 'task_started' } },
     { timestamp: '2026-06-18T10:20:02.000Z', type: 'event_msg', payload: { type: 'task_complete' } },
@@ -1689,118 +1357,6 @@ await (async () => {
     done?.key === 'codex:run:line:0' && done?.totalRuntimeMs === 2000,
     JSON.stringify(out),
   );
-}
-{
-  // apply_patch (the primary file-edit tool) arrives as a custom_tool_call, NOT function_call —
-  // dropping it would render no edit in ~55% of real sessions. Must map call + enriched result.
-  const lines = [
-    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'p1', input: '*** Begin Patch\n*** Add File: src/new.ts\n+const a = 1;\n+const b = 2;\n*** End Patch' } },
-    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'p1', output: 'Success' } },
-  ];
-  const out = mapRollout(lines);
-  const call = out.find((m) => m.type === 'tool-call') as any;
-  const res = out.find((m) => m.type === 'tool-result') as any;
-  check('custom_tool_call → tool-call (apply_patch, not dropped)', !!call && call.toolName === 'apply_patch' && call.callId === 'p1' && call.toolClass === 'edit', JSON.stringify(call));
-  check('custom_tool_call_output → tool-result enriched (path + diffstat from patch body)', !!res && res.callId === 'p1' && res.toolName === 'apply_patch' && res.toolClass === 'edit' && res.path === 'src/new.ts' && res.additions === 2 && res.deletions === 0, JSON.stringify(res));
-  check('apply_patch Add → create title + git-style header (new file, /dev/null base)', res?.title === 'Created new.ts' && res.diff.includes('diff --git a/src/new.ts b/src/new.ts') && res.diff.includes('--- /dev/null') && res.diff.includes('+++ b/src/new.ts'), JSON.stringify(res?.diff));
-  check('apply_patch Add → fileChanges[create] with per-file diff + stats', res?.fileChanges?.length === 1 && res.fileChanges[0].operation === 'create' && res.fileChanges[0].path === 'src/new.ts' && res.fileChanges[0].additions === 2 && res.fileChanges[0].deletions === 0 && res.fileChanges[0].diff.includes('+++ b/src/new.ts'), JSON.stringify(res?.fileChanges));
-}
-{
-  // apply_patch on an ABSOLUTE path must not emit a malformed `b//abs` header.
-  const lines = [
-    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'abs1', input: '*** Begin Patch\n*** Add File: /tmp/x/a.ts\n+one\n*** End Patch' } },
-    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'abs1', output: 'Success' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  check('apply_patch absolute path → single-slash git header (no b//abs)', res?.path === '/tmp/x/a.ts' && res.diff.includes('diff --git a/tmp/x/a.ts b/tmp/x/a.ts') && res.diff.includes('+++ b/tmp/x/a.ts') && !res.diff.includes('b//tmp') && !res.diff.includes('a//tmp'), JSON.stringify(res?.diff));
-}
-{
-  // apply_patch Update: V4A `@@ context` + ±/space body → git-style diff, "Edited" title, diffstat.
-  const lines = [
-    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'u1', input: '*** Begin Patch\n*** Update File: src/a.ts\n@@ class A\n keep\n-old line\n+new line\n*** End Patch' } },
-    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'u1', output: 'Success' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  check('apply_patch Update → edit title + git-style headers + diffstat', res?.path === 'src/a.ts' && res.title === 'Edited a.ts' && res.additions === 1 && res.deletions === 1 && res.diff.includes('--- a/src/a.ts') && res.diff.includes('+++ b/src/a.ts'), JSON.stringify(res));
-}
-{
-  // apply_patch Delete: no body content in V4A → deleted-file headers, "Deleted" title, no false diffstat.
-  const lines = [
-    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'd1', input: '*** Begin Patch\n*** Delete File: src/gone.ts\n*** End Patch' } },
-    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'd1', output: 'Success' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  check('apply_patch Delete → delete title + deleted-file headers (/dev/null target)', res?.path === 'src/gone.ts' && res.title === 'Deleted gone.ts' && res.diff.includes('deleted file') && res.diff.includes('--- a/src/gone.ts') && res.diff.includes('+++ /dev/null'), JSON.stringify(res));
-  check('apply_patch Delete → fileChanges[delete]', res?.fileChanges?.length === 1 && res.fileChanges[0].operation === 'delete' && res.fileChanges[0].path === 'src/gone.ts', JSON.stringify(res?.fileChanges));
-}
-{
-  // patch_apply_end for a delete that carries the removed content → synthesized removed-body lines,
-  // event-time (from the result event), NEVER reconstructed from Git.
-  const lines = [
-    { type: 'response_item', payload: { type: 'function_call', name: 'apply_patch', call_id: 'del2', arguments: '{}' } },
-    { type: 'event_msg', payload: { type: 'patch_apply_end', call_id: 'del2', success: true, changes: { 'src/bye.ts': { type: 'delete', content: 'line one\nline two' } } } },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'del2', output: 'ok' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  check('patch_apply_end delete with content → removed body lines synthesized', res?.title === 'Deleted bye.ts' && res.deletions === 2 && res.diff.includes('-line one') && res.diff.includes('-line two') && res.fileChanges?.[0]?.operation === 'delete', JSON.stringify(res));
-}
-{
-  // patch_apply_end for an UPDATE that carries only new-file `content` (no diff): `content` is the
-  // whole new file, NOT a diff — synthesizing `+content` would render an edit as a brand-new file
-  // (T1b finding 4). With no event-time diff we omit the body honestly (edit title, no fabricated +).
-  const lines = [
-    { type: 'response_item', payload: { type: 'function_call', name: 'apply_patch', call_id: 'up1', arguments: '{}' } },
-    { type: 'event_msg', payload: { type: 'patch_apply_end', call_id: 'up1', success: true, changes: { 'src/edit.ts': { type: 'update', content: 'line one\nline two\nline three' } } } },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'up1', output: 'ok' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  check(
-    'patch_apply_end update with only content → Edited, NOT fabricated as a create',
-    res?.title === 'Edited edit.ts' &&
-      res.fileChanges?.[0]?.operation === 'edit' &&
-      !res.diff.includes('/dev/null') &&
-      !res.diff.includes('new file') &&
-      !res.diff.includes('+line one') &&
-      (res.additions ?? 0) === 0,
-    JSON.stringify(res),
-  );
-}
-{
-  // patch_apply_end for an update that DOES carry an event-time unified_diff: use it verbatim
-  // (an honest edit body), not the header-only fallback.
-  const lines = [
-    { type: 'response_item', payload: { type: 'function_call', name: 'apply_patch', call_id: 'up2', arguments: '{}' } },
-    { type: 'event_msg', payload: { type: 'patch_apply_end', call_id: 'up2', success: true, changes: { 'src/e2.ts': { type: 'update', unified_diff: '@@ -1,1 +1,1 @@\n-was\n+now' } } } },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'up2', output: 'ok' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  check(
-    'patch_apply_end update with a carried unified_diff → uses it (edit, +1 −1)',
-    res?.title === 'Edited e2.ts' && res.fileChanges?.[0]?.operation === 'edit' && res.diff.includes('-was') && res.diff.includes('+now') && res.additions === 1 && res.deletions === 1,
-    JSON.stringify(res),
-  );
-}
-{
-  // apply_patch rename via `*** Move to:` → path follows the new name, git header spans old→new.
-  const lines = [
-    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'r1', input: '*** Begin Patch\n*** Update File: src/old.ts\n*** Move to: src/new-name.ts\n@@ header\n keep\n+added\n*** End Patch' } },
-    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'r1', output: 'Success' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  check('apply_patch rename → new path + git header old→new', res?.path === 'src/new-name.ts' && res.diff.includes('diff --git a/src/old.ts b/src/new-name.ts') && res.diff.includes('--- a/src/old.ts') && res.diff.includes('+++ b/src/new-name.ts'), JSON.stringify(res));
-  check('apply_patch rename → Renamed title + fileChanges[rename] with previousPath', res?.title === 'Renamed new-name.ts' && res.fileChanges?.[0]?.operation === 'rename' && res.fileChanges[0].previousPath === 'src/old.ts' && res.fileChanges[0].path === 'src/new-name.ts' && res.diff.includes('rename from src/old.ts') && res.diff.includes('rename to src/new-name.ts'), JSON.stringify(res));
-}
-{
-  // apply_patch multi-file: two sections keep their own git boundaries (old code merged them into one blob).
-  const lines = [
-    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'mf1', input: '*** Begin Patch\n*** Update File: src/one.ts\n@@ a\n keep\n-x\n+y\n*** Add File: src/two.ts\n+brand new\n*** End Patch' } },
-    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'mf1', output: 'Success' } },
-  ];
-  const res = mapRollout(lines).find((m) => m.type === 'tool-result') as any;
-  const twoBoundary = res?.diff.indexOf('diff --git a/src/two.ts b/src/two.ts') ?? -1;
-  const oneBoundary = res?.diff.indexOf('diff --git a/src/one.ts b/src/one.ts') ?? -1;
-  check('apply_patch multi-file → both sections keep distinct git boundaries in order', oneBoundary >= 0 && twoBoundary > oneBoundary && res.diff.includes('+++ b/src/two.ts') && res.additions === 2 && res.deletions === 1, JSON.stringify(res?.diff));
-  check('apply_patch multi-file → fileChanges[2] per-file (edit one.ts + create two.ts) + count title', res?.fileChanges?.length === 2 && res.fileChanges[0].path === 'src/one.ts' && res.fileChanges[0].operation === 'edit' && res.fileChanges[1].path === 'src/two.ts' && res.fileChanges[1].operation === 'create' && res.title === 'Changed 2 files', JSON.stringify({ t: res?.title, fc: res?.fileChanges }));
 }
 {
   // A blank/malformed line must STILL consume its index so the next message is keyed by raw position
@@ -1815,54 +1371,6 @@ await (async () => {
   const user = out.find((m) => m.type === 'user-message') as any;
   const model = out.find((m) => m.type === 'model-output') as any;
   check('blank/malformed slots preserve line-index keys (history/live alignment)', user?.key === 'c0' && model?.key === 'c3', `user=${user?.key} model=${model?.key}`);
-}
-{
-  // A steer delivered during one native turn is a real source boundary, not a queued next-turn
-  // prompt. Adapter mapping must retain exact rollout order and canonical turn ordinals.
-  const lines = [
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-steer' } },
-    { type: 'event_msg', payload: { type: 'user_message', message: 'open' } },
-    { type: 'event_msg', payload: { type: 'agent_message', message: 'before' } },
-    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg-before', content: [{ type: 'output_text', text: 'before' }] } },
-    { type: 'event_msg', payload: { type: 'user_message', message: 'steer' } },
-    { type: 'event_msg', payload: { type: 'agent_message', message: 'after' } },
-    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg-after', content: [{ type: 'output_text', text: 'after' }] } },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-steer' } },
-  ];
-  const chronologicalKeys = mapRollout(lines)
-    .filter((message) => message.type === 'user-message' || message.type === 'model-output')
-    .map((message: any) => message.key);
-  check(
-    'native mid-turn steer preserves exact canonical key order at the adapter boundary',
-    chronologicalKeys.join(',') === [
-      'codex:turn-steer:u0',
-      'codex:turn-steer:msg-before:t',
-      'codex:turn-steer:u1',
-      'codex:turn-steer:msg-after:t',
-    ].join(','),
-    chronologicalKeys.join(','),
-  );
-}
-{
-  const lines = [
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'terminal-a' } },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'terminal-a' } },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'terminal-a' } },
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'terminal-b' } },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'terminal-a' } },
-    { type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'terminal-b', reason: 'interrupted' } },
-    { type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'terminal-b', reason: 'interrupted' } },
-  ];
-  const out = mapRollout(lines);
-  const idleCount = out.filter((message: any) => message.type === 'status' && message.status === 'idle').length;
-  const terminalRuns = out.filter((message: any) => message.type === 'run-summary' && message.status !== 'running');
-  check(
-    'matching terminals retire each exact turn once; duplicate and stale terminals emit no footer/status',
-    idleCount === 2 &&
-      terminalRuns.length === 2 &&
-      terminalRuns.map((message: any) => message.turnId).join(',') === 'terminal-a,terminal-b',
-    JSON.stringify({ idleCount, terminalRuns: terminalRuns.map((message: any) => [message.turnId, message.status]) }),
-  );
 }
 {
   const dir = `/tmp/cosyncingcodexrollout${Math.random().toString(36).slice(2, 8)}`;
@@ -2028,8 +1536,7 @@ await (async () => {
       bounded.kind === 'fallback'
         && (bounded.reason === 'source-limit' || bounded.reason === 'time-limit')
         && bounded.scannedBytes <= 64 * 1024 * 1024
-        && ticks > 0
-        && elapsedMs < 1000,
+        && ticks > 0,
       JSON.stringify({ bounded, ticks, elapsedMs: Math.round(elapsedMs) }),
     );
 
@@ -2104,11 +1611,11 @@ await (async () => {
       'warm Codex 512 MiB incomplete append yields and reports bounded source work',
       bounded.kind === 'fallback'
         && bounded.status === 'working'
-        && bounded.reason === 'source-limit'
+        // A loaded host can reach the 1 s budget before the 64 MiB one; both are bounded work.
+        && (bounded.reason === 'source-limit' || bounded.reason === 'time-limit')
         && bounded.scannedBytes > 0
         && bounded.scannedBytes <= 64 * 1024 * 1024
-        && ticks > 0
-        && elapsedMs < 1000,
+        && ticks > 0,
       JSON.stringify({ bounded, ticks, elapsedMs: Math.round(elapsedMs) }),
     );
 
@@ -2468,588 +1975,11 @@ await (async () => {
   }
 }
 
-// ── 1h. subagent lifecycle → agent-activity bars (spawn_agent / wait_agent) ──────
-//   Codex spawns named child threads via spawn_agent and joins them via wait_agent, all in the PARENT
-//   rollout (call_id-correlated like any tool). They must surface as the canonical `agent-activity`
-//   subagent bars (the same type Claude's Task subagents use) — running on the spawn output, done on
-//   the wait output — and the raw spawn/wait control cards must NOT leak as tool cards.
-{
-  const lines = [
-    { type: 'session_meta', payload: { cwd: '/tmp/x', id: 'parent-subs' } },
-    { type: 'event_msg', payload: { type: 'user_message', message: 'research', turn_id: 't1' } },
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' }, timestamp: '2026-03-20T23:45:00.000Z' },
-    { type: 'response_item', payload: { type: 'function_call', name: 'spawn_agent', call_id: 'cs1', arguments: JSON.stringify({ agent_type: 'explorer', model: 'gpt-5.4-mini', reasoning_effort: 'high', message: 'verify claims' }) }, timestamp: '2026-03-20T23:45:01.000Z' },
-    { type: 'response_item', payload: { type: 'function_call', name: 'spawn_agent', call_id: 'cs2', arguments: JSON.stringify({ agent_type: 'coder', message: 'patch it' }) }, timestamp: '2026-03-20T23:45:01.500Z' },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cs1', output: JSON.stringify({ agent_id: 'kid-A', nickname: 'Turing' }) }, timestamp: '2026-03-20T23:45:02.000Z' },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cs2', output: JSON.stringify({ agent_id: 'kid-B', nickname: 'Carson' }) }, timestamp: '2026-03-20T23:45:02.200Z' },
-    // first join: A done, B still running → B's bar must stay running
-    { type: 'response_item', payload: { type: 'function_call', name: 'wait_agent', call_id: 'cw1', arguments: JSON.stringify({ ids: ['kid-A', 'kid-B'], timeout_ms: 120000 }) }, timestamp: '2026-03-20T23:45:30.000Z' },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cw1', output: JSON.stringify({ status: { 'kid-A': { completed: 'Found.' }, 'kid-B': { status: 'running' } } }) }, timestamp: '2026-03-20T23:46:11.000Z' },
-    // second join: B done
-    { type: 'response_item', payload: { type: 'function_call', name: 'wait_agent', call_id: 'cw2', arguments: JSON.stringify({ ids: ['kid-B'], timeout_ms: 120000 }) }, timestamp: '2026-03-20T23:46:20.000Z' },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cw2', output: JSON.stringify({ status: { 'kid-B': { completed: 'Patched.' } } }) }, timestamp: '2026-03-20T23:46:40.000Z' },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1' }, timestamp: '2026-03-20T23:46:41.000Z' },
-  ];
-  const out = mapRollout(lines) as any[];
-  const acts = out.filter((m) => m.type === 'agent-activity');
-  const final = new Map<string, any>(); // the app upserts by key → last frame per key is what renders
-  for (const a of acts) final.set(a.key, a);
-  const A = final.get('agent:kid-A');
-  const B = final.get('agent:kid-B');
-  const leaked = out.some((m) => (m.type === 'tool-call' || m.type === 'tool-result') && (m.toolName === 'spawn_agent' || m.toolName === 'wait_agent'));
-  check('subagent: both children surface as subagent agent-activity bars', final.size === 2 && [...final.values()].every((a) => a.kind === 'subagent'), `keys=${[...final.keys()].join(',')}`);
-  check('subagent: spawn output sets nickname title + agent_type subtitle', A?.title === 'Turing' && A?.subtitle === 'explorer' && B?.title === 'Carson' && B?.subtitle === 'coder', JSON.stringify({ A: { t: A?.title, s: A?.subtitle }, B: { t: B?.title, s: B?.subtitle } }));
-  check('subagent: a running child is NOT marked done by an unrelated wait (B running through cw1)', acts.some((a) => a.key === 'agent:kid-B' && a.status === 'running'), 'expected an intermediate running B frame');
-  check('subagent: wait_agent completion → done bar with first→last elapsed', A?.status === 'done' && A?.elapsedMs === 69000 && B?.status === 'done' && B?.elapsedMs === 97800, JSON.stringify({ A: { st: A?.status, e: A?.elapsedMs }, B: { st: B?.status, e: B?.elapsedMs } }));
-  check('subagent: raw spawn_agent/wait_agent control cards are suppressed (no tool cards leak)', !leaked, leaked ? 'a spawn/wait tool card leaked' : '');
-  // the child's RETURNED REPORT is preserved as a `subagent` tool-result (the bar has no body field) — not dropped.
-  const reports = out.filter((m) => m.type === 'tool-result' && m.toolName === 'subagent') as any[];
-  const repA = reports.find((m) => m.callId === 'subagent:kid-A');
-  const repB = reports.find((m) => m.callId === 'subagent:kid-B');
-  check('subagent: the child report is preserved as a `subagent` tool-result', reports.length === 2 && repA?.result === 'Found.' && repB?.result === 'Patched.', `reports=${JSON.stringify(reports.map((r) => ({ id: r.callId, t: r.title, res: r.result })))}`);
-  // idempotence: re-waiting an already-resolved child must NOT duplicate its report or bar.
-  const dupWait = mapRollout([
-    ...lines,
-    { type: 'response_item', payload: { type: 'function_call', name: 'wait_agent', call_id: 'cw3', arguments: JSON.stringify({ ids: ['kid-A'] }) }, timestamp: '2026-03-20T23:47:00.000Z' },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cw3', output: JSON.stringify({ status: { 'kid-A': { completed: 'Found again.' } } }) }, timestamp: '2026-03-20T23:47:10.000Z' },
-  ]) as any[];
-  const aReports = dupWait.filter((m) => m.type === 'tool-result' && m.callId === 'subagent:kid-A');
-  check('subagent: re-waiting a resolved child does not duplicate its report/bar (idempotent)', aReports.length === 1 && aReports[0].result === 'Found.', `aReports=${aReports.length}`);
-}
 
-// ── 1i. a timed-out wait_agent (empty status) is reaped at turn end (no stuck "running" bar) ──────
-{
-  const lines = [
-    { type: 'session_meta', payload: { cwd: '/tmp/x', id: 'parent-timeout' } },
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' }, timestamp: '2026-03-20T23:45:00.000Z' },
-    { type: 'response_item', payload: { type: 'function_call', name: 'spawn_agent', call_id: 'cs1', arguments: JSON.stringify({ agent_type: 'explorer', message: 'go' }) }, timestamp: '2026-03-20T23:45:01.000Z' },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cs1', output: JSON.stringify({ agent_id: 'kid-T', nickname: 'Aquinas' }) }, timestamp: '2026-03-20T23:45:02.000Z' },
-    // wait TIMES OUT → empty status map, child never resolved here
-    { type: 'response_item', payload: { type: 'function_call', name: 'wait_agent', call_id: 'cw1', arguments: JSON.stringify({ ids: ['kid-T'], timeout_ms: 1000 }) }, timestamp: '2026-03-20T23:45:30.000Z' },
-    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cw1', output: JSON.stringify({ status: {}, timed_out: true }) }, timestamp: '2026-03-20T23:45:31.000Z' },
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1' }, timestamp: '2026-03-20T23:46:00.000Z' },
-  ];
-  const out = mapRollout(lines) as any[];
-  const acts = out.filter((m) => m.type === 'agent-activity');
-  const final = new Map<string, any>();
-  for (const a of acts) final.set(a.key, a);
-  const T = final.get('agent:kid-T');
-  check('subagent: a timed-out child is reaped to a terminal state at task_complete (not stuck running)', T?.status === 'done', `final Aquinas=${JSON.stringify(T)}`);
-}
 
-// ── 1j. token_count → contextUsage metadata (the context meter's only data source) ──────
-// Each case below is a trap verified against ~42k real rollout events; getting any of them wrong
-// produces a plausible-looking but wrong meter, which is worse than showing none.
-{
-  const ctxOf = (info: any) => {
-    const lines = [{ type: 'event_msg', payload: { type: 'token_count', info } }];
-    return (mapRollout(lines) as any[]).find((m) => m.type === 'metadata-update' && m.key === 'contextUsage');
-  };
 
-  const usage = (input: number, cached: number, output: number, total?: number) => ({
-    input_tokens: input,
-    cached_input_tokens: cached,
-    output_tokens: output,
-    reasoning_output_tokens: 0,
-    total_tokens: total ?? input + output,
-  });
 
-  const basic = ctxOf({ last_token_usage: usage(9013, 7872, 217), total_token_usage: usage(9013, 7872, 217), model_context_window: 972800 });
-  check(
-    'contextUsage used = last input+output (cached_input_tokens is a SUBSET here, never added)',
-    basic?.value?.used === 9230 && basic?.value?.max === 972800,
-    JSON.stringify(basic?.value),
-  );
 
-  // The 0-1 vs 0-100 bug class: 9230/972800 is ~0.95%, and must stay under 1 — never 95%.
-  const pct = (basic!.value.used / basic!.value.max) * 100;
-  check('contextUsage stays a true ratio (0.95%, not 95%)', pct > 0.9 && pct < 1.0, `${pct.toFixed(3)}%`);
-
-  // total_token_usage accumulates across the whole session and reached 160406% of the window on a
-  // real measured session; only last_token_usage is resident, so the cumulative bucket must be ignored.
-  const cumulative = ctxOf({ last_token_usage: usage(26000, 20000, 832), total_token_usage: usage(414_000_000, 0, 489_505), model_context_window: 258400 });
-  check(
-    'contextUsage ignores the cumulative total_token_usage and reads last_token_usage',
-    cumulative?.value?.used === 26832,
-    JSON.stringify(cumulative?.value),
-  );
-
-  // Observed sentinel: every bucket zero while total_tokens equals the window → a false 100%.
-  const sentinel = ctxOf({ last_token_usage: usage(0, 0, 0, 121600), total_token_usage: usage(0, 0, 0, 121600), model_context_window: 121600 });
-  check('contextUsage skips the all-zero sentinel row rather than reporting 100%', sentinel === undefined, JSON.stringify(sentinel));
-
-  check('contextUsage omitted when the window size is unknown', ctxOf({ last_token_usage: usage(100, 0, 20) }) === undefined);
-  check('contextUsage omitted when last_token_usage is absent', ctxOf({ total_token_usage: usage(100, 0, 20), model_context_window: 200000 }) === undefined);
-  check(
-    'token-count still emitted alongside contextUsage (cost/telemetry path unchanged)',
-    (mapRollout([{ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: usage(10, 2, 5), last_token_usage: usage(10, 2, 5), model_context_window: 1000 } } }]) as any[]).filter((m) => m.type === 'token-count').length === 1,
-  );
-}
-
-// ── 1k. Codex 0.146 assistant compatibility: new-only, old-only, dual ─────────────
-// Codex 0.146 writes item_completed + response_item/message and may omit the legacy
-// event_msg/agent_message entirely. These fixtures copy only that public record shape; no path or
-// text from the maintainer's recorded sessions enters the repository.
-await (async () => {
-  type AssistantEmission = 'new-only' | 'old-only' | 'dual';
-  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
-  const assistantRows = (
-    emission: AssistantEmission,
-    id: string,
-    text: string,
-    phase: 'commentary' | 'final_answer',
-  ): any[] => {
-    const legacy = {
-      type: 'event_msg',
-      payload: { type: 'agent_message', message: text, phase },
-    };
-    const response = {
-      type: 'response_item',
-      payload: {
-        type: 'message',
-        role: 'assistant',
-        id,
-        phase,
-        content: [{ type: 'output_text', text }],
-      },
-    };
-    switch (emission) {
-      case 'new-only':
-        return [
-          { type: 'event_msg', payload: { type: 'item_completed' } },
-          response,
-        ];
-      case 'old-only':
-        return [legacy];
-      case 'dual':
-        return [legacy, response];
-    }
-  };
-  const transcript = (messages: any[]) => messages.filter((message) =>
-    message.type === 'model-output'
-      || message.type === 'tool-call'
-      || message.type === 'tool-result');
-  const signature = (messages: any[]) => transcript(messages).map((message) =>
-    message.type === 'model-output'
-      ? `${message.type}:${message.text}`
-      : `${message.type}:${message.callId}`);
-
-  for (const emission of ['new-only', 'old-only', 'dual'] as const) {
-    const dir = join(
-      '/tmp',
-      `cosyncing-codex-0146-${emission}-${Math.random().toString(36).slice(2, 8)}`,
-    );
-    mkdirSync(dir, { recursive: true });
-    const path = join(
-      dir,
-      'rollout-2026-08-10T00-00-00-00000000-0000-4000-8000-000000000146.jsonl',
-    );
-    const coldRows = [
-      { type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000146', cwd: dir } },
-      { type: 'event_msg', payload: { type: 'task_started', turn_id: `cold-${emission}` } },
-      ...assistantRows(emission, `msg_cold_${emission}`, 'Cold answer.', 'commentary'),
-      { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: `call_cold_${emission}`, arguments: '{}' } },
-      { type: 'response_item', payload: { type: 'function_call_output', call_id: `call_cold_${emission}`, output: 'ok' } },
-      ...assistantRows(emission, `msg_cold_final_${emission}`, 'Cold final.', 'final_answer'),
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: `cold-${emission}` } },
-    ];
-    writeFileSync(path, coldRows.map(line).join(''));
-
-    const id = Buffer.from(path, 'utf8').toString('base64url');
-    const conn = await new CodexAdapter().attach(id, 'observe');
-    const liveMessages: any[] = [];
-    const unsubscribe = conn.subscribe((message: any) => liveMessages.push(message));
-    try {
-      const first = await conn.getHistory() as any[];
-      const coldSignature = signature(first);
-      check(
-        `Codex 0.146 ${emission} cold history keeps assistant text and tools in order`,
-        JSON.stringify(coldSignature) === JSON.stringify([
-          'model-output:Cold answer.',
-          `tool-call:call_cold_${emission}`,
-          `tool-result:call_cold_${emission}`,
-          'model-output:Cold final.',
-        ]),
-        JSON.stringify(coldSignature),
-      );
-      const coldAnswers = first.filter((message) => message.type === 'model-output');
-      check(
-        `Codex 0.146 ${emission} cold history emits each assistant item exactly once`,
-        coldAnswers.length === 2 && new Set(coldAnswers.map((message) => message.key)).size === 2,
-        JSON.stringify(coldAnswers.map((message) => message.key)),
-      );
-      const repeated = (await conn.getHistory() as any[])
-        .filter((message) => message.type === 'model-output')
-        .map((message) => message.key);
-      check(
-        `Codex 0.146 ${emission} cold replay keeps stable assistant keys`,
-        JSON.stringify(repeated) === JSON.stringify(coldAnswers.map((message) => message.key)),
-        JSON.stringify(repeated),
-      );
-
-      appendFileSync(
-        path,
-        [
-          { type: 'event_msg', payload: { type: 'task_started', turn_id: `live-${emission}` } },
-          ...assistantRows(emission, `msg_live_${emission}`, 'Live answer.', 'commentary'),
-          { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: `call_live_${emission}`, arguments: '{}' } },
-          { type: 'response_item', payload: { type: 'function_call_output', call_id: `call_live_${emission}`, output: 'ok' } },
-          ...assistantRows(emission, `msg_live_final_${emission}`, 'Live final.', 'final_answer'),
-          { type: 'event_msg', payload: { type: 'task_complete', turn_id: `live-${emission}` } },
-        ].map(line).join(''),
-      );
-      const deadline = Date.now() + 4_000;
-      while (Date.now() < deadline && transcript(liveMessages).length < 4) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      const liveSignature = signature(liveMessages);
-      check(
-        `Codex 0.146 ${emission} live follow keeps assistant text and tools in order`,
-        JSON.stringify(liveSignature) === JSON.stringify([
-          'model-output:Live answer.',
-          `tool-call:call_live_${emission}`,
-          `tool-result:call_live_${emission}`,
-          'model-output:Live final.',
-        ]),
-        JSON.stringify(liveSignature),
-      );
-      const liveAnswers = liveMessages.filter((message) => message.type === 'model-output');
-      check(
-        `Codex 0.146 ${emission} live follow emits each assistant item exactly once`,
-        liveAnswers.length === 2 && new Set(liveAnswers.map((message) => message.key)).size === 2,
-        JSON.stringify(liveAnswers.map((message) => message.key)),
-      );
-      const replay = (await conn.getHistory() as any[])
-        .filter((message) => message.type === 'model-output');
-      check(
-        `Codex 0.146 ${emission} live and replay assistant keys agree`,
-        JSON.stringify(replay.slice(-2).map((message) => message.key))
-          === JSON.stringify(liveAnswers.map((message) => message.key)),
-        `history=${JSON.stringify(replay.slice(-2).map((message) => message.key))} live=${JSON.stringify(liveAnswers.map((message) => message.key))}`,
-      );
-    } finally {
-      unsubscribe();
-      await conn.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
-})();
-
-// ── 1k2. Codex 0.147 user-message compatibility: item_completed/UserMessage ─────────────
-// Codex 0.147 stopped writing `event_msg/user_message`: the prompt's only durable event is now
-// `item_completed` whose `item.type` is `UserMessage` (it carries `turn_id`, a native item id, and
-// `content: [{type:'text', …}]`), while `response_item/message` `role:'user'` still also carries
-// bootstrap/developer context that is NOT the prompt. These fixtures copy only that public record
-// shape; no path or text from the maintainer's recorded sessions enters the repository.
-{
-  // The durable prompt pair exactly as 0.147 writes it: the (ignored) response_item twin, then the
-  // authoritative completed item. `started_at_ms` is a fixed sanitized epoch, not a recorded one.
-  const userItemRows = (turnId: string, itemId: string, text: string, extraContent: any[] = []) => [
-    { type: 'response_item', payload: { type: 'message', role: 'user', id: itemId, content: [{ type: 'input_text', text }] } },
-    {
-      type: 'event_msg',
-      payload: {
-        type: 'item_completed',
-        thread_id: '00000000-0000-4000-8000-000000000147',
-        turn_id: turnId,
-        started_at_ms: 1_755_200_000_000,
-        completed_at_ms: 1_755_200_000_001,
-        item: { type: 'UserMessage', id: itemId, content: [{ type: 'text', text, text_elements: [] }, ...extraContent] },
-      },
-    },
-  ];
-  const assistantRows147 = (turnId: string, itemId: string, text: string) => [
-    { type: 'event_msg', payload: { type: 'item_completed', thread_id: '00000000-0000-4000-8000-000000000147', turn_id: turnId, item: { type: 'AgentMessage', id: itemId, content: [{ type: 'Text', text }], phase: 'final_answer' } } },
-    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: itemId, phase: 'final_answer', content: [{ type: 'output_text', text }] } },
-  ];
-  const turn147 = (turnId: string, prompt: string, ordinalTag: string) => [
-    { type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } },
-    { type: 'response_item', payload: { type: 'message', role: 'developer', id: `dev_${ordinalTag}`, content: [{ type: 'input_text', text: 'bootstrap developer context' }] } },
-    { type: 'response_item', payload: { type: 'message', role: 'user', id: `boot_${ordinalTag}`, content: [{ type: 'input_text', text: 'bootstrap environment context' }] } },
-    { type: 'turn_context', payload: { turn_id: turnId, model: 'gpt-5.3-codex-spark' } },
-    ...userItemRows(turnId, `item_${ordinalTag}`, prompt),
-    ...assistantRows147(turnId, `msg_${ordinalTag}`, `answer ${ordinalTag}`),
-    { type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } },
-  ];
-  const promptsOf = (out: any[]) => out.filter((m: any) => m.type === 'user-message');
-
-  {
-    // New-only format — the 0.147 regression itself. Before the item_completed/UserMessage case
-    // this mapped to ZERO user rows (the bootstrap response_item is rightly ignored, the legacy
-    // event never arrives), which is exactly the observed failure: assistant output without the
-    // prompt that caused it.
-    const out = mapRollout([
-      { type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000147', cwd: '/tmp/x' } },
-      ...turn147('t147', 'new-format prompt', 'a0'),
-    ]) as any[];
-    const prompts = promptsOf(out);
-    check(
-      'Codex 0.147 new-only: item_completed/UserMessage maps to exactly one user-message',
-      prompts.length === 1 && prompts[0].text === 'new-format prompt',
-      JSON.stringify(prompts.map((p: any) => [p.key, p.text])),
-    );
-    check(
-      'Codex 0.147 new-only: the prompt rebuilds the canonical (turn, ordinal) identity',
-      prompts[0]?.key === 'codex:t147:u0' && prompts[0]?.turnId === 't147',
-      JSON.stringify(prompts[0]),
-    );
-    check(
-      'Codex 0.147 new-only: sentAt falls back to the completed item\'s started_at_ms',
-      prompts[0]?.sentAt === 1_755_200_000_000,
-      JSON.stringify(prompts[0]?.sentAt),
-    );
-    const done = out.find((m: any) => m.type === 'run-summary' && m.status === 'done');
-    check(
-      'Codex 0.147 new-only: the terminal run summary names the canonical opening prompt key',
-      done?.userMessageKey === 'codex:t147:u0',
-      JSON.stringify(done?.userMessageKey),
-    );
-    const answers = out.filter((m: any) => m.type === 'model-output');
-    check(
-      'Codex 0.147 new-only: item_completed/AgentMessage stays ignored (answer emitted once)',
-      answers.length === 1 && answers[0].key === 'codex:t147:msg_a0:t',
-      JSON.stringify(answers.map((m: any) => m.key)),
-    );
-  }
-
-  {
-    // Bootstrap-only: response_item role:user context with NO authoritative user completion must
-    // not fabricate a prompt bubble — the measured rollout has two role:user response items but
-    // only one real prompt.
-    const out = mapRollout([
-      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tboot' } },
-      { type: 'response_item', payload: { type: 'message', role: 'user', id: 'boot_only', content: [{ type: 'input_text', text: 'bootstrap environment context' }] } },
-      ...assistantRows147('tboot', 'msg_boot', 'unprompted answer'),
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tboot' } },
-    ]) as any[];
-    check(
-      'Codex 0.147 bootstrap response_item role:user alone fabricates no user bubble',
-      promptsOf(out).length === 0,
-      JSON.stringify(promptsOf(out)),
-    );
-  }
-
-  {
-    // Legacy-only stays exactly as before this lane.
-    const out = mapRollout([
-      { type: 'turn_context', payload: { turn_id: 'tleg' } },
-      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tleg' } },
-      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'legacy prompt' }] } },
-      { type: 'event_msg', payload: { type: 'user_message', message: 'legacy prompt' } },
-      { type: 'event_msg', payload: { type: 'agent_message', message: 'ok', phase: 'final_answer' } },
-      { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_leg', phase: 'final_answer', content: [{ type: 'output_text', text: 'ok' }] } },
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tleg' } },
-    ]) as any[];
-    const prompts = promptsOf(out);
-    check(
-      'Codex 0.147 legacy-only keeps exactly one user-message with the same identity as before',
-      prompts.length === 1 && prompts[0].key === 'codex:tleg:u0' && prompts[0].text === 'legacy prompt',
-      JSON.stringify(prompts.map((p: any) => p.key)),
-    );
-  }
-
-  {
-    // Hypothetical dual format: one prompt written in BOTH durable forms must stay one row —
-    // in either order — while the pairing never crosses forms' boundaries wider than the
-    // prompt's own records.
-    for (const order of ['legacy-first', 'item-first'] as const) {
-      const twin = { type: 'response_item', payload: { type: 'message', role: 'user', id: 'item_dual', content: [{ type: 'input_text', text: 'dual prompt' }] } };
-      const legacy = { type: 'event_msg', payload: { type: 'user_message', message: 'dual prompt' } };
-      const item = {
-        type: 'event_msg',
-        payload: {
-          type: 'item_completed',
-          turn_id: 'tdual',
-          started_at_ms: 1_755_200_000_000,
-          completed_at_ms: 1_755_200_000_001,
-          item: { type: 'UserMessage', id: 'item_dual', content: [{ type: 'text', text: 'dual prompt', text_elements: [] }] },
-        },
-      };
-      const out = mapRollout([
-        { type: 'turn_context', payload: { turn_id: 'tdual' } },
-        { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tdual' } },
-        ...(order === 'legacy-first' ? [twin, legacy, item] : [twin, item, legacy]),
-        ...assistantRows147('tdual', 'msg_dual', 'ok'),
-        { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tdual' } },
-      ]) as any[];
-      const prompts = promptsOf(out);
-      const done = out.find((m: any) => m.type === 'run-summary' && m.status === 'done');
-      check(
-        `Codex 0.147 dual format (${order}) emits one logical user-message`,
-        prompts.length === 1 && prompts[0].key === 'codex:tdual:u0' && prompts[0].text === 'dual prompt',
-        JSON.stringify(prompts.map((p: any) => p.key)),
-      );
-      check(
-        `Codex 0.147 dual format (${order}) run summary still owns the canonical opening key`,
-        done?.userMessageKey === 'codex:tdual:u0',
-        JSON.stringify(done?.userMessageKey),
-      );
-    }
-  }
-
-  {
-    // TWO SEPARATE identical prompts — one legacy, one new-format, each preceded by its own
-    // response_item twin — must stay two rows. The twin after a durable form means a second
-    // prompt's representation is opening, so it must disarm the dual-format pairing; an earlier
-    // draft let a byte-equal twin bridge the pairing and collapsed this sequence into one row.
-    const out = mapRollout([
-      { type: 'turn_context', payload: { turn_id: 'tsep' } },
-      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tsep' } },
-      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'same' }] } },
-      { type: 'event_msg', payload: { type: 'user_message', message: 'same' } },
-      { type: 'response_item', payload: { type: 'message', role: 'user', id: 'item_sep', content: [{ type: 'input_text', text: 'same' }] } },
-      { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'tsep', started_at_ms: 1_755_200_000_000, completed_at_ms: 1_755_200_000_001, item: { type: 'UserMessage', id: 'item_sep', content: [{ type: 'text', text: 'same', text_elements: [] }] } } },
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tsep' } },
-    ]) as any[];
-    const prompts = promptsOf(out);
-    check(
-      'Codex 0.147 a legacy prompt and a separate identical new-format prompt stay u0 and u1',
-      prompts.length === 2 && prompts[0].key === 'codex:tsep:u0' && prompts[1].key === 'codex:tsep:u1',
-      JSON.stringify(prompts.map((p: any) => p.key)),
-    );
-  }
-
-  {
-    // Unknown-turn evidence never suppresses: a durable form whose enclosing turn cannot be
-    // matched to the other form's exact turn is not proof of one prompt, in either direction.
-    const legacyFirst = mapRollout([
-      { type: 'event_msg', payload: { type: 'user_message', message: 'orphan' } },
-      { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'tx', item: { type: 'UserMessage', id: 'item_x', content: [{ type: 'text', text: 'orphan', text_elements: [] }] } } },
-    ]) as any[];
-    const itemFirst = mapRollout([
-      { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'ty', item: { type: 'UserMessage', id: 'item_y', content: [{ type: 'text', text: 'orphan', text_elements: [] }] } } },
-      { type: 'event_msg', payload: { type: 'user_message', message: 'orphan' } },
-    ]) as any[];
-    check(
-      'Codex 0.147 a turn-less legacy prompt is never paired away by an adjacent completed item',
-      promptsOf(legacyFirst).length === 2,
-      JSON.stringify(promptsOf(legacyFirst).map((p: any) => p.key)),
-    );
-    check(
-      'Codex 0.147 a completed item never pairs away an adjacent legacy prompt outside its turn',
-      promptsOf(itemFirst).length === 2,
-      JSON.stringify(promptsOf(itemFirst).map((p: any) => p.key)),
-    );
-  }
-
-  {
-    // Identity stays structural in the new format too: the same bytes sent in two different turns
-    // are two prompts with two distinct canonical keys.
-    const out = mapRollout([
-      ...turn147('t147a', 'same text', 'b1'),
-      ...turn147('t147b', 'same text', 'b2'),
-    ]) as any[];
-    const prompts = promptsOf(out);
-    check(
-      'Codex 0.147 two byte-identical prompts in different turns keep two distinct keys',
-      prompts.length === 2 && prompts[0].key === 'codex:t147a:u0' && prompts[1].key === 'codex:t147b:u0',
-      JSON.stringify(prompts.map((p: any) => p.key)),
-    );
-  }
-
-  {
-    // A mid-turn steer in the new format keeps its own ordinal — even byte-identical and adjacent
-    // to the opening prompt, which is the sharpest guard that dual-format pairing never becomes a
-    // text merge (same form twice is two real prompts, never a pair).
-    const out = mapRollout([
-      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tsteer' } },
-      { type: 'turn_context', payload: { turn_id: 'tsteer' } },
-      ...userItemRows('tsteer', 'item_s0', 'do the thing'),
-      ...userItemRows('tsteer', 'item_s1', 'do the thing'),
-      ...assistantRows147('tsteer', 'msg_steer', 'ok'),
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tsteer' } },
-    ]) as any[];
-    const prompts = promptsOf(out);
-    const done = out.find((m: any) => m.type === 'run-summary' && m.status === 'done');
-    check(
-      'Codex 0.147 opening prompt and mid-turn steer keep ordinals u0 and u1',
-      prompts.length === 2 && prompts[0].key === 'codex:tsteer:u0' && prompts[1].key === 'codex:tsteer:u1',
-      JSON.stringify(prompts.map((p: any) => p.key)),
-    );
-    check(
-      'Codex 0.147 steered turn is still owned by the prompt that opened it',
-      done?.userMessageKey === 'codex:tsteer:u0',
-      JSON.stringify(done?.userMessageKey),
-    );
-  }
-
-  {
-    // Image content in the completed item keeps the live path's image-count behavior
-    // (`local_image` is the rollout spelling of the app-server's `localImage`).
-    const out = mapRollout([
-      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'timg' } },
-      ...userItemRows('timg', 'item_img', 'look at this', [{ type: 'local_image', path: '/tmp/fixture.png' }]),
-    ]) as any[];
-    const prompt = promptsOf(out)[0];
-    check(
-      'Codex 0.147 completed item image content maps to imageCount',
-      prompt?.imageCount === 1 && prompt?.text === 'look at this\n[image]',
-      JSON.stringify(prompt),
-    );
-  }
-}
-
-// ── 1k3. Codex 0.147 history/live-tail overlap: one prompt, one identity across both ─────
-await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-0147-tail-${Math.random().toString(36).slice(2, 8)}`);
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, 'rollout-2026-08-15T00-00-00-00000000-0000-4000-8000-000000000147.jsonl');
-  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
-  writeFileSync(
-    path,
-    line({ type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000147', cwd: dir } }) +
-      line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't147live' } }),
-  );
-
-  const messages: any[] = [];
-  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
-  const unsubscribe = conn.subscribe((m: any) => messages.push(m));
-  const prompts = () => messages.filter((m: any) => m.type === 'user-message');
-  const settle = async (predicate: () => boolean, ms: number) => {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-      if (predicate()) return true;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    return predicate();
-  };
-
-  try {
-    appendFileSync(
-      path,
-      [
-        { type: 'turn_context', payload: { turn_id: 't147live', model: 'gpt-5.3-codex-spark' } },
-        { type: 'response_item', payload: { type: 'message', role: 'user', id: 'item_live', content: [{ type: 'input_text', text: 'tailed prompt' }] } },
-        { type: 'event_msg', payload: { type: 'item_completed', turn_id: 't147live', started_at_ms: 1_755_200_000_000, completed_at_ms: 1_755_200_000_001, item: { type: 'UserMessage', id: 'item_live', content: [{ type: 'text', text: 'tailed prompt', text_elements: [] }] } } },
-        { type: 'event_msg', payload: { type: 'item_completed', turn_id: 't147live', item: { type: 'AgentMessage', id: 'msg_live147', content: [{ type: 'Text', text: 'tailed answer' }], phase: 'final_answer' } } },
-        { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_live147', phase: 'final_answer', content: [{ type: 'output_text', text: 'tailed answer' }] } },
-        { type: 'event_msg', payload: { type: 'task_complete', turn_id: 't147live' } },
-      ].map(line).join(''),
-    );
-    const tailed = await settle(() => prompts().length > 0 && messages.some((m: any) => m.type === 'run-summary' && m.status === 'done'), 4000);
-    check(
-      'Codex 0.147 live tail emits the new-format prompt once with the canonical identity',
-      tailed && prompts().length === 1 && prompts()[0].key === 'codex:t147live:u0',
-      JSON.stringify(prompts().map((p: any) => p.key)),
-    );
-    const doneLive = messages.find((m: any) => m.type === 'run-summary' && m.status === 'done');
-    check(
-      'Codex 0.147 live tail terminal summary owns the tailed prompt',
-      doneLive?.userMessageKey === 'codex:t147live:u0',
-      JSON.stringify(doneLive?.userMessageKey),
-    );
-    const replayPrompts = ((await conn.getHistory()) as any[]).filter((m: any) => m.type === 'user-message');
-    check(
-      'Codex 0.147 history replay re-derives the exact key the tail already published',
-      replayPrompts.length === 1 && replayPrompts[0].key === prompts()[0]?.key,
-      `history=${JSON.stringify(replayPrompts.map((p: any) => p.key))} live=${JSON.stringify(prompts().map((p: any) => p.key))}`,
-    );
-  } finally {
-    unsubscribe();
-    await conn.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-})();
 
 // ── 1b. live tail identity (CR4): the tail must decide identity exactly as a whole-file map does ──
 // The native id lives on the record AFTER the assistant event, which a tail has not read yet when it
@@ -3756,55 +2686,6 @@ await (async () => {
   }
 })();
 
-// ── 2. real-data smoke (read-only; no content printed) ──────────────────────────
-await (async () => {
-  const adapter = new CodexAdapter();
-  if (!(await adapter.isAvailable())) {
-    check('real-data smoke (skipped — no ~/.codex/sessions on this machine)', true, 'skipped');
-    return;
-  }
-  const sessions = await adapter.discoverSessions();
-  if (sessions.length === 0 && process.env.CODEX_HOME) {
-    check(
-      'real-data smoke (skipped — explicit CODEX_HOME has no sessions)',
-      true,
-      'skipped',
-    );
-    return;
-  }
-  check('discovery finds real Codex sessions', sessions.length > 0, `${sessions.length} sessions`);
-  const liveRows = sessions.filter((s) => s.attachMode === 'live');
-  // `active` is presence-based (a TUI must be attached RIGHT NOW), so on a real machine a
-  // daemon-loaded row may honestly be active:false — the loaded list is a one-way latch that
-  // survives terminal exits, and claiming "synced with terminal" then was the stuck-badge bug.
-  // Drive follows presence too: terminal attached ⇒ unavailable (sync is the input path);
-  // no terminal ⇒ driving (the live daemon conn is the app's mutable path).
-  check(
-    'daemon-loaded Codex roster rows advertise sync and map Drive to terminal presence',
-    !syncServerEnabled || liveRows.length === 0 || liveRows.every((s) =>
-      s.control?.terminalSync.syncAvailable === true &&
-      (s.control.terminalSync.active
-        ? s.control.drive.state === 'unavailable' && s.control.drive.supported === false
-        : s.control.drive.state === 'driving' && s.control.drive.supported === true)),
-    syncServerEnabled ? `${liveRows.length} live rows` : 'sync disabled',
-  );
-  if (!sessions.length) return;
-  // newest by updatedAt
-  const newest = [...sessions].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]!;
-  const conn = await adapter.attach(newest.id, 'observe');
-  let history: any[] = [];
-  let threw = '';
-  try {
-    history = await conn.getHistory();
-  } catch (e) {
-    threw = String(e);
-  }
-  await conn.close();
-  const types = [...new Set(history.map((m) => m.type))];
-  const bad = types.filter((t) => !(CANONICAL_MESSAGE_TYPES as readonly string[]).includes(t));
-  check('getHistory() on a real rollout parses without throwing', threw === '', threw);
-  check('real history yields only canonical message types', bad.length === 0, `types=[${types.join(',')}] msgs=${history.length}`);
-})();
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

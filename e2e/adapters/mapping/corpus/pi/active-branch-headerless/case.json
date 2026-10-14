@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "the session file is an append-only tree: a reload maps only the active branch (the ancestors of the last entry), so an abandoned fork never shows, and the tail continues the active branch. A file with no header row is the shape this rule works on today",
+  "userTexts": [
+    "start",
+    "chosen branch prompt"
+  ],
+  "sessionId": "5d08f333-c277-4608-8608-5d08f333c277"
+}

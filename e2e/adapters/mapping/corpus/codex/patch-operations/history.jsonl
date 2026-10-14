@@ -1,0 +1,11 @@
+{"type":"session_meta","payload":{"id":"efcaee66-b9dd-4617-8617-efcaee66b9dd","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"edit files"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"tp"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"p1","input":"*** Begin Patch\n*** Add File: src/new.ts\n+const a = 1;\n+const b = 2;\n*** End Patch"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"p1","output":"Success"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"abs1","input":"*** Begin Patch\n*** Add File: /tmp/x/a.ts\n+one\n*** End Patch"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"abs1","output":"Success"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"u1","input":"*** Begin Patch\n*** Update File: src/a.ts\n@@ class A\n keep\n-old line\n+new line\n*** End Patch"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"u1","output":"Success"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"d1","input":"*** Begin Patch\n*** Delete File: src/gone.ts\n*** End Patch"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"d1","output":"Success"}}

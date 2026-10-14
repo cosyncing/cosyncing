@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-tasks.ts and test-claude-todos.ts",
+  "description": "TodoWrite and TaskCreate/TaskUpdate fold into one upserted task-list-state panel; raw task tool rows are suppressed, a failed update stays visible, a malformed call falls through to a tool row; the ledger built from history continues across the tail",
+  "userTexts": [
+    "plan the work"
+  ],
+  "sessionId": "a44d7ba1-61d1-43a6-83a6-a44d7ba161d1"
+}

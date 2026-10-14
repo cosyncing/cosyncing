@@ -1,0 +1,10 @@
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-r","turn_id":"turn-new","started_at_ms":1700000000000,"completed_at_ms":1700000000500,"item":{"type":"Reasoning","id":"rs_new_1","summary_text":[],"raw_content":["New raw step.","New raw step two."]}}}
+{"type":"response_item","payload":{"type":"reasoning","id":"rs_new_1","summary":[],"content":[{"type":"reasoning_text","text":"New raw step."},{"type":"reasoning_text","text":"New raw step two."}],"encrypted_content":null,"internal_chat_message_metadata_passthrough":{"turn_id":"turn-new"}}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-r","turn_id":"turn-new","started_at_ms":1700000000000,"completed_at_ms":1700000000500,"item":{"type":"Reasoning","id":"rs_new_2","summary_text":[],"raw_content":[]}}}
+{"type":"response_item","payload":{"type":"reasoning","id":"rs_new_2","summary":[],"encrypted_content":"opaque-3","internal_chat_message_metadata_passthrough":{"turn_id":"turn-new"}}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-r","turn_id":"turn-new","started_at_ms":1700000000000,"completed_at_ms":1700000000500,"item":{"type":"Reasoning","id":"rs_new_3","summary_text":["New summary."],"raw_content":[]}}}
+{"type":"response_item","payload":{"type":"reasoning","id":"rs_new_3","summary":[{"type":"summary_text","text":"New summary."}],"content":null,"encrypted_content":null,"internal_chat_message_metadata_passthrough":{"turn_id":"turn-new"}}}
+{"type":"response_item","payload":{"type":"reasoning","id":"rs_new_4","summary":[{"type":"summary_text","text":"Metadata spelling."}],"encrypted_content":"opaque-4","metadata":{"turn_id":"turn-new"}}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"second answer","phase":"commentary"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_new","phase":"commentary","content":[{"type":"output_text","text":"second answer"}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-new"},"timestamp":"2026-09-01T10:01:09.000Z"}

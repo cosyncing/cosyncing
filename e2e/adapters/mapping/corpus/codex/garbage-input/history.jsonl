@@ -1,0 +1,23 @@
+{"type":"session_meta","payload":{"id":"0f99527d-bc80-44ce-84ce-0f99527dbc80","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"before the noise"}}
+
+   
+not json at all
+{"type":"event_msg","payload":{"type":"user_message","message":"cut off
+null
+42
+"a string"
+[1,2,3]
+[]
+{}
+{"type":null}
+{"type":"event_msg"}
+{"type":"event_msg","payload":null}
+{"type":"event_msg","payload":{"type":"agent_message","message":{"nested":true}}}
+{"type":"response_item","payload":{"type":"function_call","call_id":7,"arguments":{"x":1}}}
+{"type":"response_item","payload":{"type":"function_call_output"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":"not an array"}}
+<<binary-line>>
+{"type":"event_msg","payload":{"type":"task_complete"}}
+{"type":"event_msg","payload":{"type":"token_count","info":"nope"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"after the noise","phase":"final_answer"}}

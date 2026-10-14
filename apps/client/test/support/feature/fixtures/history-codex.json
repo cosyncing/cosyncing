@@ -1,0 +1,166 @@
+{
+  "agent": "codex",
+  "texts": [
+    "seeded prompt 1",
+    "seeded answer 1",
+    "seeded prompt 2",
+    "seeded answer 2"
+  ],
+  "session": {
+    "kind": "session",
+    "info": {
+      "id": "L3RtcC9jb3N5bmNpbmctZTJlLWNhcHR1cmUtY29kZXgtWmlDUkFOL2hvbWUvLmNvZGV4L3Nlc3Npb25zLzIwMjYvMTAvMTQvcm9sbG91dC0yMDI2LTEwLTE0VDA5LTQ4LTU2LTAxYTEzOWQwLTlmNDItN2E3Ny04NjJkLTFkNWY2YmNjZDEyNC5qc29ubA",
+      "tool": "codex",
+      "title": "seed-1",
+      "cwd": "/captured/workspaces/seed-1",
+      "nativeId": "01a139d0-9f42-7a77-862d-1d5f6bccd124",
+      "launchSurface": "terminal",
+      "model": "gpt-5.6-sol",
+      "currentModel": {
+        "providerID": "openai",
+        "modelID": "gpt-5.6-sol",
+        "reasoningEffort": "medium"
+      },
+      "currentMode": "ask-permission",
+      "status": "idle",
+      "attachMode": "observe",
+      "updatedAt": 1791971335999.412,
+      "terminalSyncHint": {
+        "label": "Sync with your terminal (optional)",
+        "command": "cd /captured/workspaces/seed-1 && codex resume --remote unix:///captured/user-home/.codex/app-server-control/app-server-control.sock -m gpt-5.6-sol 01a139d0-9f42-7a77-862d-1d5f6bccd124",
+        "note": "Optional — this joins the same Codex app-server daemon as cosyncing. Plain Codex sessions on the same machine can auto-connect after daemon startup; use this exact command when you need manual fallback behavior."
+      },
+      "control": {
+        "drive": {
+          "supported": true,
+          "state": "observing"
+        },
+        "terminalSync": {
+          "supported": true,
+          "syncAvailable": true,
+          "active": false,
+          "presence": "absent",
+          "action": "join",
+          "label": "Sync with your terminal (optional)",
+          "command": "cd /captured/workspaces/seed-1 && codex resume --remote unix:///captured/user-home/.codex/app-server-control/app-server-control.sock -m gpt-5.6-sol 01a139d0-9f42-7a77-862d-1d5f6bccd124",
+          "note": "Optional — this joins the same Codex app-server daemon as cosyncing. Plain Codex sessions on the same machine can auto-connect after daemon startup; use this exact command when you need manual fallback behavior.",
+          "behind": false
+        }
+      },
+      "machine": "Howard",
+      "sessionOwner": {
+        "revision": {
+          "epoch": "966eed10-480d-4664-a2e4-cb2c4a35d27e",
+          "seq": 0
+        },
+        "state": "none"
+      }
+    },
+    "authority": {
+      "canMutate": false,
+      "prompt": "none"
+    }
+  },
+  "history": {
+    "kind": "history",
+    "messages": [
+      {
+        "type": "status",
+        "status": "running"
+      },
+      {
+        "type": "run-summary",
+        "key": "codex:run:turn-seed-ccd124-1",
+        "turnId": "turn-seed-ccd124-1",
+        "status": "running",
+        "startedAt": 1791971336003,
+        "source": "codex-rollout"
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 1",
+        "key": "codex:turn-seed-ccd124-1:u0",
+        "turnId": "turn-seed-ccd124-1",
+        "sentAt": 1791971336003
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 1",
+        "final": true,
+        "key": "codex:turn-seed-ccd124-1:msg_seed_ccd124_1:t"
+      },
+      {
+        "type": "status",
+        "status": "idle"
+      },
+      {
+        "type": "run-summary",
+        "key": "codex:run:turn-seed-ccd124-1",
+        "turnId": "turn-seed-ccd124-1",
+        "userMessageKey": "codex:turn-seed-ccd124-1:u0",
+        "assistantMessageKey": "codex:turn-seed-ccd124-1:msg_seed_ccd124_1:t",
+        "status": "done",
+        "startedAt": 1791971336003,
+        "completedAt": 1791971336003,
+        "totalRuntimeMs": 0,
+        "source": "codex-rollout"
+      },
+      {
+        "type": "metadata-update",
+        "key": "runtimeTotals",
+        "value": {
+          "totalRuntimeMs": 0,
+          "turnCount": 1,
+          "updatedAt": 1791971336003,
+          "source": "codex-rollout"
+        }
+      },
+      {
+        "type": "status",
+        "status": "running"
+      },
+      {
+        "type": "run-summary",
+        "key": "codex:run:turn-seed-ccd124-2",
+        "turnId": "turn-seed-ccd124-2",
+        "status": "running",
+        "startedAt": 1791971336003,
+        "source": "codex-rollout"
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 2",
+        "key": "codex:turn-seed-ccd124-2:u0",
+        "turnId": "turn-seed-ccd124-2",
+        "sentAt": 1791971336003
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 2",
+        "final": true,
+        "key": "codex:turn-seed-ccd124-2:msg_seed_ccd124_2:t"
+      },
+      {
+        "type": "status",
+        "status": "idle"
+      },
+      {
+        "type": "run-summary",
+        "key": "codex:run:turn-seed-ccd124-2",
+        "turnId": "turn-seed-ccd124-2",
+        "userMessageKey": "codex:turn-seed-ccd124-2:u0",
+        "assistantMessageKey": "codex:turn-seed-ccd124-2:msg_seed_ccd124_2:t",
+        "status": "done",
+        "startedAt": 1791971336003,
+        "completedAt": 1791971336003,
+        "totalRuntimeMs": 0,
+        "source": "codex-rollout"
+      }
+    ],
+    "reset": true,
+    "cursor": "eyJ2IjoxLCJuIjoxMywiaCI6IkFsaGlkbWJvSGR6MHQ3SGlzV3FhZm94Qjk5MXZJZlAtczFhV3BhZ3BxUTQifQ",
+    "attachTicket": "eyJ2IjoxLCJuIjoxMywiaCI6IkFsaGlkbWJvSGR6MHQ3SGlzV3FhZm94Qjk5MXZJZlAtczFhV3BhZ3BxUTQifQ",
+    "endCursor": "eyJ2IjoxLCJrIjoib2xkZXIiLCJiIjoxMywiaCI6IkFsaGlkbWJvSGR6MHQ3SGlzV3FhZm94Qjk5MXZJZlAtczFhV3BhZ3BxUTQifQ",
+    "newerHistory": true
+  }
+}

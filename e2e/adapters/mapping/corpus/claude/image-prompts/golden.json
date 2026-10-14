@@ -1,0 +1,23 @@
+{
+  "history": [
+    {"type":"file-artifact","name":"image.png","path":"image:p6-a:0","mimeType":"image/png","url":"data:image/png;base64,AAAA","userMessageKey":"p6-a:u"},
+    {"type":"user-message","text":"what is in this screenshot","imageCount":1,"key":"p6-a:u","turnId":"p6-a"},
+    {"type":"run-summary","key":"164648d7-8c2a-4659-8659-164648d78c2a:run:p6-a","turnId":"p6-a","userMessageKey":"p6-a:u","status":"running","source":"claude-transcript"},
+    {"type":"file-artifact","name":"image.webp","path":"image:p6-b:0","mimeType":"image/webp","url":"data:image/webp;base64,BBBB","userMessageKey":"p6-b:u"},
+    {"type":"user-message","text":"","imageCount":1,"key":"p6-b:u","turnId":"p6-b"},
+    {"type":"run-summary","key":"164648d7-8c2a-4659-8659-164648d78c2a:run:p6-a","turnId":"p6-a","userMessageKey":"p6-a:u","status":"cancelled","source":"claude-transcript"},
+    {"type":"run-summary","key":"164648d7-8c2a-4659-8659-164648d78c2a:run:p6-b","turnId":"p6-b","userMessageKey":"p6-b:u","status":"running","source":"claude-transcript"},
+    {"type":"file-artifact","name":"image.png","path":"image:p6-c:0","mimeType":"image/png","url":"data:image/png;base64,CCCC"}
+  ],
+  "live": [],
+  "replay": [
+    {"type":"file-artifact","name":"image.png","path":"image:p6-a:0","mimeType":"image/png","url":"data:image/png;base64,AAAA","userMessageKey":"p6-a:u"},
+    {"type":"user-message","text":"what is in this screenshot","imageCount":1,"key":"p6-a:u","turnId":"p6-a"},
+    {"type":"run-summary","key":"164648d7-8c2a-4659-8659-164648d78c2a:run:p6-a","turnId":"p6-a","userMessageKey":"p6-a:u","status":"running","source":"claude-transcript"},
+    {"type":"file-artifact","name":"image.webp","path":"image:p6-b:0","mimeType":"image/webp","url":"data:image/webp;base64,BBBB","userMessageKey":"p6-b:u"},
+    {"type":"user-message","text":"","imageCount":1,"key":"p6-b:u","turnId":"p6-b"},
+    {"type":"run-summary","key":"164648d7-8c2a-4659-8659-164648d78c2a:run:p6-a","turnId":"p6-a","userMessageKey":"p6-a:u","status":"cancelled","source":"claude-transcript"},
+    {"type":"run-summary","key":"164648d7-8c2a-4659-8659-164648d78c2a:run:p6-b","turnId":"p6-b","userMessageKey":"p6-b:u","status":"running","source":"claude-transcript"},
+    {"type":"file-artifact","name":"image.png","path":"image:p6-c:0","mimeType":"image/png","url":"data:image/png;base64,CCCC"}
+  ]
+}

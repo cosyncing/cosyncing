@@ -1,0 +1,21 @@
+{"type":"session","version":3,"id":"723d8cea-3b3e-4903-8903-723d8cea3b3e","timestamp":"2026-06-20T00:00:00.000Z","cwd":"/work/proj"}
+{"type":"message","id":"g1","timestamp":"2026-06-20T00:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"before the noise"}],"timestamp":1781913600000}}
+
+   
+not json at all
+{"type":"message","id":"trunc","message":{"role":"user","content":[{"type":"text","text":"cut off
+null
+42
+"a string"
+[1,2,3]
+[]
+{}
+{"type":null}
+{"type":"message"}
+{"type":"message","message":null}
+{"type":"message","id":"x","message":{"role":"toolResult","content":42}}
+{"type":"message","id":"y","message":{"role":"assistant","content":"a string not an array"}}
+{"type":"message","id":"z","message":{"role":"assistant","content":[{"type":"text"},{"type":"toolCall"}]}}
+{"type":"message","id":"w","message":{"role":"toolResult","content":[{"type":"text","text":5}]}}
+<<binary-line>>
+{"type":"message","id":"g2","timestamp":"2026-06-20T00:00:09.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"after the noise"}],"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":{"total":0.01}}}}

@@ -1,0 +1,7 @@
+{"type":"response_item","payload":{"type":"function_call","id":"fc_1","name":"request_user_input_async","arguments":"{\"questions\":[{\"title\":\"Which color first?\",\"options\":[\"Crimson\",\"Teal\"]}]}","call_id":"call_q1"}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"t","turn_id":"tq1","item":{"type":"AgentMessage","id":"call_q1","content":[{"type":"Text","text":"Which color first?\n- Crimson\n- Teal"}],"phase":"final_answer","delivery":"async","questions":[{"title":"Which color first?","options":["Crimson","Teal"]}]}}}
+{"type":"response_item","payload":{"type":"function_call_output","id":"fco_1","call_id":"call_q1","output":"{\"accepted\":true}"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Continuing with Crimson.","phase":"commentary"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_ok","phase":"commentary","content":[{"type":"output_text","text":"Continuing with Crimson."}]}}
+{"type":"event_msg","payload":{"type":"thread_goal_updated","threadId":"t-goal","goal":{"threadId":"t-goal","objective":"resume the last goal","status":"paused","tokensUsed":12971511,"timeUsedSeconds":69811,"createdAt":1783006625,"updatedAt":1783117677}}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"tq1"}}

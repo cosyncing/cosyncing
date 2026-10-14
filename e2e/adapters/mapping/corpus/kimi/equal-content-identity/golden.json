@@ -1,0 +1,20 @@
+{
+  "history": [
+    {"type":"user-message","text":"same words","key":"kimi:e_1:0"},
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_2:0"},
+    {"type":"user-message","text":"same words","key":"kimi:e_3:0"}
+  ],
+  "live": [
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_4:0"},
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_5:0"},
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_5:1"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"same words","key":"kimi:e_1:0"},
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_2:0"},
+    {"type":"user-message","text":"same words","key":"kimi:e_3:0"},
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_4:0"},
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_5:0"},
+    {"type":"model-output","text":"same words","final":true,"key":"kimi:e_5:1"}
+  ]
+}

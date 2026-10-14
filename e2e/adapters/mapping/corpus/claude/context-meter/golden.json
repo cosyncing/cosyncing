@@ -1,0 +1,27 @@
+{
+  "history": [
+    {"type":"user-message","text":"meter","key":"c0","turnId":"c0"},
+    {"type":"run-summary","key":"df6fbf43-c886-47e9-87e9-df6fbf43c886:run:c0","turnId":"c0","userMessageKey":"c0","status":"running","source":"claude-transcript"},
+    {"type":"model-output","text":"before marker","final":true,"key":"claude:ctx-m1:0:t"},
+    {"type":"token-count","input":10,"output":99,"cacheRead":150000,"cacheWrite":25000},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":175010,"max":200000}},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":175010,"max":1000000}},
+    {"type":"token-count","input":250001},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":250001,"max":1000000}}
+  ],
+  "live": [
+    {"type":"metadata-update","key":"sessionInfo","value":{"model":"vendor-mystery","currentModel":{"providerID":"anthropic","modelID":"vendor-mystery"}}},
+    {"type":"token-count","input":10}
+  ],
+  "replay": [
+    {"type":"user-message","text":"meter","key":"c0","turnId":"c0"},
+    {"type":"run-summary","key":"df6fbf43-c886-47e9-87e9-df6fbf43c886:run:c0","turnId":"c0","userMessageKey":"c0","status":"running","source":"claude-transcript"},
+    {"type":"model-output","text":"before marker","final":true,"key":"claude:ctx-m1:0:t"},
+    {"type":"token-count","input":10,"output":99,"cacheRead":150000,"cacheWrite":25000},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":175010,"max":200000}},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":175010,"max":1000000}},
+    {"type":"token-count","input":250001},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":250001,"max":1000000}},
+    {"type":"token-count","input":10}
+  ]
+}

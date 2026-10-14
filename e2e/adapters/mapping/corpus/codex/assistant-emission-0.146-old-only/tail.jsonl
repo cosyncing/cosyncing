@@ -1,0 +1,6 @@
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"live"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"live answer.","phase":"commentary"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_live","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_live","output":"ok"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"live final.","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"live"}}

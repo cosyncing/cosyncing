@@ -160,11 +160,8 @@ try {
     trace: (event) => traces.push(`${event.op}:${event.detail}`),
   });
   const history = await connection.getHistory();
-  check('replay maps the initial transcript once',
-    history.filter((message) => message.type === 'user-message').length === 1
-      && history.filter((message) => message.type === 'model-output').length === 1
-      && history.filter((message) => message.type === 'run-summary').length === 1,
-    history.map((message) => message.type).join(','));
+  // Replay mapping once: conformance C03 (e2e/adapters/conformance/reasonix.test.ts).
+  void history;
 
   const live: AgentMessage[] = [];
   connection.subscribe((message) => live.push(message));
@@ -179,12 +176,10 @@ try {
     starts_turn: true,
   });
   updateSidecars(2);
+  // The append is admitted exactly once: conformance C05. The rewrite below is the later sentinel that proves no
+  // duplicate followed the first row (checked after the reset arrives).
   const appendSeen = await waitFor(() => live.some((message) => message.type === 'user-message'));
-  await sleep(150);
-  const liveUsers = live.filter((message) => message.type === 'user-message');
-  check('the append tail admits a new user row exactly once',
-    appendSeen && liveUsers.length === 1 && liveUsers[0]?.text === 'two',
-    JSON.stringify(live));
+  if (!appendSeen) throw new Error('the appended user row never arrived');
 
   const replacementPath = `${transcript}.replacement`;
   writeFileSync(replacementPath, `${JSON.stringify({ role: 'system', content: 'rewritten' })}\n`);
@@ -192,6 +187,10 @@ try {
   displayEntries = [{ index: 0, offset: 0, length: 50, role: 'system', authored_turn: 0 }];
   updateSidecars(3);
   const resetSeen = await waitFor(() => live.some((message) => message.type === 'history-reset'));
+  const usersBeforeReset = live.slice(0, live.findIndex((message) => message.type === 'history-reset'))
+    .filter((message) => message.type === 'user-message');
+  check('the append tail admitted the new row exactly once, before the rewrite reset',
+    usersBeforeReset.length === 1 && usersBeforeReset[0]?.text === 'two', JSON.stringify(live));
   check('a shrink/rewrite emits one canonical rollback reset instead of splicing history',
     resetSeen
       && live.filter((message) => message.type === 'history-reset').length === 1
@@ -222,13 +221,7 @@ try {
       && message.userMessageKey === `reasonix:${id}:message:1`),
     JSON.stringify(interruptedReplay));
 
-  let promptRejected = false;
-  try {
-    await connection.sendPrompt({ text: 'must refuse' });
-  } catch {
-    promptRejected = true;
-  }
-  check('Observe refuses mutation', promptRejected);
+  // Observe refuses mutation: conformance C04.
   await connection.close();
   check('close is clean and idempotent', (await connection.close()) === undefined && traces.length === 0, traces.join(' | '));
 

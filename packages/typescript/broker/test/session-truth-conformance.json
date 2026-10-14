@@ -11,11 +11,11 @@
   "adapters": {
     "CodexAdapter": {
       "coverage": {
-        "native-identity": ["session-truth-conformance"],
-        "terminal-authority": ["session-truth-conformance"],
-        "history-live-chronology": ["session-truth-conformance"],
-        "replacement": ["session-truth-conformance"],
-        "hub-authority": ["session-truth-conformance"],
+        "native-identity": ["narrow/broker/test/sessions/session-status-fold"],
+        "terminal-authority": ["status-truth-codex"],
+        "history-live-chronology": ["narrow/broker/test/sessions/session-status-fold"],
+        "replacement": ["narrow/broker/test/sessions/session-status-fold"],
+        "hub-authority": ["status-truth"],
         "turn-attention": ["codex-permissions"]
       }
     },
@@ -24,8 +24,8 @@
         "native-identity": ["claude-transcript-mapping"],
         "terminal-authority": [],
         "history-live-chronology": ["claude-transcript-mapping"],
-        "replacement": ["roster-revision"],
-        "hub-authority": ["session-truth-conformance"],
+        "replacement": ["session-roster"],
+        "hub-authority": ["status-truth"],
         "turn-attention": ["claude-runtime", "claude-driven-queue"]
       },
       "exclusions": {
@@ -37,11 +37,11 @@
     },
     "OpenCodeAdapter": {
       "coverage": {
-        "native-identity": ["opencode-message-identity"],
+        "native-identity": ["conformance/opencode"],
         "terminal-authority": ["opencode-completion-fence"],
-        "history-live-chronology": ["opencode-message-identity"],
+        "history-live-chronology": ["conformance/opencode"],
         "replacement": [],
-        "hub-authority": ["session-truth-conformance"],
+        "hub-authority": ["status-truth"],
         "turn-attention": ["opencode-completion-fence"]
       },
       "exclusions": {
@@ -57,7 +57,7 @@
         "terminal-authority": ["pi-bridge-reload"],
         "history-live-chronology": [],
         "replacement": ["pi-bridge-reload"],
-        "hub-authority": ["session-truth-conformance"],
+        "hub-authority": ["status-truth"],
         "turn-attention": ["pi-tool-result", "pi-bridge-reload"]
       },
       "exclusions": {
@@ -73,8 +73,8 @@
         "terminal-authority": ["omp-bridge"],
         "history-live-chronology": [],
         "replacement": ["omp-bridge"],
-        "hub-authority": ["session-truth-conformance"],
-        "turn-attention": ["omp-lifecycle", "omp-bridge"]
+        "hub-authority": ["status-truth"],
+        "turn-attention": ["conformance/omp", "omp-bridge"]
       },
       "exclusions": {
         "history-live-chronology": {
@@ -89,17 +89,17 @@
         "terminal-authority": ["reasonix-drive", "reasonix-observe"],
         "history-live-chronology": ["reasonix-identity", "reasonix-observe"],
         "replacement": ["reasonix-identity"],
-        "hub-authority": ["reasonix-cross-client-join", "reasonix-registration-gate"],
+        "hub-authority": ["conformance/reasonix"],
         "turn-attention": ["reasonix-drive"]
       }
     },
     "GrokAdapter": {
       "coverage": {
         "native-identity": ["grok-identity"],
-        "terminal-authority": ["grok-drive", "grok-observe"],
-        "history-live-chronology": ["grok-identity", "grok-observe"],
-        "replacement": ["grok-drive", "grok-observe"],
-        "hub-authority": ["grok-cross-client-join", "grok-registration-gate"],
+        "terminal-authority": ["grok-drive", "conformance/grok"],
+        "history-live-chronology": ["grok-identity", "conformance/grok"],
+        "replacement": ["grok-drive", "conformance/grok"],
+        "hub-authority": ["conformance/grok"],
         "turn-attention": ["grok-drive"]
       }
     },
@@ -125,11 +125,11 @@
     },
     "KimiAdapter": {
       "coverage": {
-        "native-identity": ["kimi-mapping"],
-        "terminal-authority": ["kimi-drive"],
-        "history-live-chronology": ["kimi-observe", "kimi-attach-priming"],
-        "replacement": ["kimi-drive", "kimi-observe"],
-        "hub-authority": ["kimi-attach-priming", "kimi-drive-authority"],
+        "native-identity": ["mapping/kimi", "kimi-host"],
+        "terminal-authority": ["kimi-drive", "conformance/kimi"],
+        "history-live-chronology": ["kimi-observe", "kimi-attach-priming", "conformance/kimi"],
+        "replacement": ["kimi-drive", "kimi-observe", "kimi-host"],
+        "hub-authority": ["kimi-attach-priming", "conformance/kimi", "kimi-host"],
         "turn-attention": ["kimi-drive"]
       }
     },
@@ -146,10 +146,10 @@
     "AgyAdapter": {
       "coverage": {
         "native-identity": ["agy-store", "agy-identity"],
-        "terminal-authority": ["agy-drive", "agy-observe"],
-        "history-live-chronology": ["agy-identity", "agy-observe"],
-        "replacement": ["agy-identity"],
-        "hub-authority": ["agy-cross-client-join", "agy-registration-gate"],
+        "terminal-authority": ["agy-drive", "agy-observe", "conformance/agy"],
+        "history-live-chronology": ["agy-identity", "agy-observe", "conformance/agy"],
+        "replacement": ["agy-identity", "conformance/agy"],
+        "hub-authority": ["conformance/agy", "agy-registration-gate"],
         "turn-attention": []
       },
       "exclusions": {

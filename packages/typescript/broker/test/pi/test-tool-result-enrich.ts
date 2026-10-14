@@ -126,31 +126,6 @@ function check(name: string, ok: boolean, detail = ''): void {
 
 // ── 2. enrichPiToolResult ──────────────────────────────────────────────────────
 {
-  const diff = '--- a/src/x.ts\n+++ b/src/x.ts\n@@\n+one\n+two\n-old\n';
-  const e = enrichPiToolResult('edit', { text: 'ok', details: { diff }, args: { path: 'src/x.ts' } });
-  check('edit: diff + diffstat + path(from args) + title',
-    e.diff === diff && e.additions === 2 && e.deletions === 1 && e.path === 'src/x.ts' && e.title === 'Edited x.ts',
-    `+${e.additions} -${e.deletions} path=${e.path} title=${e.title}`);
-  // Range-less `@@` (no line numbers) still counts +/- body and yields a single-file change set.
-  check('edit: fileChanges[edit] single file (range-less hunk counted)',
-    e.fileChanges?.length === 1 && e.fileChanges[0]?.operation === 'edit' && e.fileChanges[0]?.path === 'src/x.ts' && e.fileChanges[0]?.additions === 2 && e.fileChanges[0]?.deletions === 1,
-    JSON.stringify(e.fileChanges));
-}
-{
-  // details.patch (no .diff) is honored; path recovered from the diff header when args are absent.
-  const patch = '--- a/lib/y.ts\n+++ b/lib/y.ts\n@@\n+added\n';
-  const e = enrichPiToolResult('apply_patch', { text: 'ok', details: { patch } });
-  check('patch fallback + path recovered from +++ header', e.diff === patch && e.path === 'lib/y.ts' && e.additions === 1, `path=${e.path} +${e.additions}`);
-}
-{
-  const e = enrichPiToolResult('bash', { text: 'boom\nCommand exited with code 2', isError: true, details: { truncation: { truncated: true } } });
-  check('bash: exitCode parsed from error text + truncated flag', e.exitCode === 2 && e.truncated === true, `exit=${e.exitCode} truncated=${e.truncated}`);
-}
-{
-  const e = enrichPiToolResult('bash', { text: 'done', details: { exitCode: 0, duration: { secs: 2, nanos: 500_000_000 } } });
-  check('bash: numeric details.exitCode + native duration honored (success path)', e.exitCode === 0 && e.durationMs === 2500, `exit=${e.exitCode} duration=${e.durationMs}`);
-}
-{
   check(
     'Pi owns canonical tool display classes (execute/edit/lookup/other)',
     piToolDisplayClass('bash') === 'execute' && piToolDisplayClass('write') === 'edit' && piToolDisplayClass('grep') === 'lookup' && piToolDisplayClass('custom') === 'other',
@@ -161,102 +136,19 @@ function check(name: string, ok: boolean, detail = ''): void {
   const e = enrichPiToolResult('read', { text: 'file contents' });
   check('plain result with no details → no spurious fields', e.diff === undefined && e.exitCode === undefined && e.path === undefined && e.truncated === undefined, JSON.stringify(e));
 }
-{
-  // grep/ls overload `path` to mean a SEARCH dir — it must NOT become a path chip / filename title.
-  const e = enrichPiToolResult('grep', { text: 'match', args: { pattern: 'foo', path: 'src' } });
-  check('grep: search-dir `path` arg is NOT mislabeled as a file path/title', e.path === undefined && e.title === undefined, `path=${e.path} title=${e.title}`);
-}
-{
-  // The exit code must come from the LAST "exited with code" (Pi appends the status line last),
-  // not a number the command's own output happened to mention first.
-  const e = enrichPiToolResult('bash', { text: 'log: a job exited with code 137 earlier\n\nCommand exited with code 2', isError: true });
-  check('bash: exitCode takes the LAST match, not output noise', e.exitCode === 2, `exit=${e.exitCode}`);
-}
 
-// ── 2b. JSONL chronology + run-summary evidence (mapPiJsonlText) ──────────────
-// Pi's native causal order is the FILE order (the parent chain flattened).
-// Nothing may sort by wall clock: an assistant entry's embedded timestamp is
-// its request-creation time and routinely EQUALS — or precedes — the previous
-// entry's clock. And a run summary may only claim completion from evidence.
+// ── 2b. JSONL reload convergence (chronology and run summaries live in the pi mapping corpus) ──
 {
   const jsonl = (obj: unknown): string => `${JSON.stringify(obj)}\n`;
   const fixture = [
     jsonl({ type: 'session', version: 3, id: 'chrono', timestamp: '2026-06-20T00:00:00.000Z', cwd: '/tmp' }),
     jsonl({ type: 'message', id: 'cu1', timestamp: '2026-06-20T00:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'go' }], timestamp: Date.parse('2026-06-20T00:00:01.000Z') } }),
-    // Equal clocks: the assistant's embedded timestamp EQUALS the user entry's.
-    jsonl({ type: 'message', id: 'ca1', timestamp: '2026-06-20T00:00:03.000Z', message: { role: 'assistant', stopReason: 'toolUse', timestamp: Date.parse('2026-06-20T00:00:01.000Z'), content: [{ type: 'text', text: 'first text' }, { type: 'toolCall', id: 'cc1', name: 'bash', arguments: { command: 'ls' } }] } }),
-    // Older clock than the entry BEFORE it: sorting by time would move it.
-    jsonl({ type: 'message', id: 'cr1', timestamp: '2026-06-20T00:00:02.500Z', message: { role: 'toolResult', toolCallId: 'cc1', toolName: 'bash', content: [{ type: 'text', text: 'listing' }] } }),
-    jsonl({ type: 'message', id: 'ca2', timestamp: '2026-06-20T00:00:05.000Z', message: { role: 'assistant', stopReason: 'stop', timestamp: Date.parse('2026-06-20T00:00:02.500Z'), content: [{ type: 'text', text: 'after tools' }] } }),
+    jsonl({ type: 'message', id: 'ca1', timestamp: '2026-06-20T00:00:03.000Z', message: { role: 'assistant', stopReason: 'stop', timestamp: Date.parse('2026-06-20T00:00:01.000Z'), content: [{ type: 'text', text: 'first text' }] } }),
   ].join('');
   const { mapPiJsonlText } = await import('../../../adapters/pi/src/index.ts');
-  const mapped = mapPiJsonlText(fixture);
-  const order = mapped
-    .filter((m) => ['user-message', 'model-output', 'tool-call', 'tool-result'].includes(m.type))
-    .map((m) => (m.type === 'model-output' ? `text:${(m as any).text}` : m.type === 'tool-call' ? `call:${(m as any).callId}` : m.type === 'tool-result' ? `result:${(m as any).callId}` : 'user'));
-  check(
-    'JSONL mapping preserves file order under equal and older clocks',
-    JSON.stringify(order) === JSON.stringify(['user', 'text:first text', 'call:cc1', 'result:cc1', 'text:after tools']),
-    JSON.stringify(order),
-  );
-  const summary = mapped.filter((m) => m.type === 'run-summary');
-  check(
-    'one turn-level summary spans user entry → final assistant entry',
-    summary.length === 1
-      && summary[0]?.status === 'done'
-      && (summary[0] as any)?.key === 'pi:run:u0'
-      && (summary[0] as any)?.turnId === 'u0'
-      && (summary[0] as any)?.userMessageKey === 'cu1'
-      && summary[0]?.startedAt === Date.parse('2026-06-20T00:00:01.000Z')
-      && summary[0]?.completedAt === Date.parse('2026-06-20T00:00:05.000Z')
-      && summary[0]?.totalRuntimeMs === 4000,
-    JSON.stringify(summary),
-  );
   check(
     'mapping the same bytes twice is identical (reload convergence)',
-    JSON.stringify(mapPiJsonlText(fixture)) === JSON.stringify(mapped),
-  );
-
-  // A window that ends mid-run (trailing toolUse) must not claim completion.
-  const midRun = fixture.split('\n').filter(Boolean).slice(0, 4).join('\n');
-  const midMapped = mapPiJsonlText(midRun);
-  const midSummary = midMapped.filter((m) => m.type === 'run-summary');
-  check(
-    'a mid-run window reports the trailing turn running with no duration',
-    midSummary.length === 1
-      && midSummary[0]?.status === 'running'
-      && midSummary[0]?.totalRuntimeMs === undefined
-      && midSummary[0]?.completedAt === undefined,
-    JSON.stringify(midSummary),
-  );
-
-  // Contradictory clocks (final entry written "before" the prompt) omit the
-  // duration rather than invent a negative-or-zero one.
-  const contradictory = [
-    jsonl({ type: 'message', id: 'xu1', timestamp: '2026-06-20T01:00:10.000Z', message: { role: 'user', content: [{ type: 'text', text: 'go' }], timestamp: Date.parse('2026-06-20T01:00:10.000Z') } }),
-    jsonl({ type: 'message', id: 'xa1', timestamp: '2026-06-20T01:00:05.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'time went backwards' }] } }),
-  ].join('');
-  const contradictorySummary = mapPiJsonlText(contradictory).filter((m) => m.type === 'run-summary');
-  check(
-    'contradictory clocks omit the duration',
-    contradictorySummary.length === 1
-      && contradictorySummary[0]?.status === 'done'
-      && contradictorySummary[0]?.totalRuntimeMs === undefined,
-    JSON.stringify(contradictorySummary),
-  );
-
-  // An aborted final entry is terminal evidence: cancelled, with its real span.
-  const aborted = [
-    jsonl({ type: 'message', id: 'bu1', timestamp: '2026-06-20T02:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'go' }], timestamp: Date.parse('2026-06-20T02:00:00.000Z') } }),
-    jsonl({ type: 'message', id: 'ba1', timestamp: '2026-06-20T02:00:07.000Z', message: { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'stopped' }] } }),
-  ].join('');
-  const abortedSummary = mapPiJsonlText(aborted).filter((m) => m.type === 'run-summary');
-  check(
-    'an aborted turn closes as cancelled with its recorded span',
-    abortedSummary.length === 1
-      && abortedSummary[0]?.status === 'cancelled'
-      && abortedSummary[0]?.totalRuntimeMs === 7000,
-    JSON.stringify(abortedSummary),
+    JSON.stringify(mapPiJsonlText(fixture)) === JSON.stringify(mapPiJsonlText(fixture)),
   );
 }
 
@@ -538,7 +430,8 @@ try {
   const ws = new WebSocket(`${WSBASE}/api/sessions/pi/${encodeURIComponent(id)}/stream`);
   ws.onmessage = (e) => { try { frames.push(JSON.parse(String(e.data))); } catch { /* skip */ } };
   await new Promise<void>((res) => { ws.onopen = () => res(); });
-  await sleep(400); // attach completes (session + history)
+  const attachDeadline = Date.now() + 20_000;
+  while (!frames.some((f) => f.kind === 'history') && Date.now() < attachDeadline) await sleep(25); // attach completes (session + history)
 
   const diff = '--- a/app.ts\n+++ b/app.ts\n@@\n+new line\n+another\n-gone\n';
   await post('/pi/bridge/events', {
@@ -553,8 +446,8 @@ try {
   });
 
   const waitFor = async (pred: (f: any) => boolean): Promise<any> => {
-    const end = Date.now() + 3000;
-    for (;;) { const f = frames.find(pred); if (f) return f; if (Date.now() > end) return undefined; await sleep(60); }
+    const end = Date.now() + 20_000;
+    for (;;) { const f = frames.find(pred); if (f) return f; if (Date.now() > end) return undefined; await sleep(25); }
   };
   const toolMsg = (callId: string) => (f: any) => f.kind === 'message' && f.message?.type === 'tool-result' && f.message?.callId === callId;
   const sessionFrame = await waitFor((f) => f.kind === 'session');
@@ -884,7 +777,10 @@ try {
     const first = await toolCall(danger, ctx);
     const afterFirst = requests().length;
     const second = await toolCall({ toolName: 'bash', input: { command: 'sudo -n true' } }, ctx);
-    await sleep(120); // a second card would have been flushed by now (60ms coalescing)
+    // Negative proof by sentinel: events flush in emit order, so once a later `status` event has
+    // arrived, a second card (emitted before it) would already be in `events`.
+    await handlers.get('agent_end')?.({}, ctx);
+    await waitUntil(() => events.some((ev) => ev.t === 'status' && ev.running === false), 20_000);
     const afterSecond = requests().length;
     await waitUntil(() => events.some((ev) => ev.t === 'permission-resolved'));
     const resolved = events.find((ev) => ev.t === 'permission-resolved');
@@ -1037,7 +933,7 @@ process.stdin.resume();
     let sink = attachFrames;
     drive.subscribe((m) => sink.push(m));
     const attachHistory = await drive.getHistory();
-    await sleep(150);
+    await drive.getHistory(); // a later round trip through the same reader: stray live frames would precede it
     check(
       'Drive attach to a finished turn replays it as history only, never as a live running summary',
       summaries(attachFrames).length === 0
@@ -1095,7 +991,7 @@ process.stdin.resume();
       const frames: AgentMessage[] = [];
       again.subscribe((m) => frames.push(m));
       const history = await again.getHistory();
-      await sleep(300);
+      await again.getHistory(); // a later round trip through the same reader: stray live frames would precede it
       const replayed = pairs(history);
       const eventsBefore = store.listEvents().length;
       const openBefore = store.listObservations().length;

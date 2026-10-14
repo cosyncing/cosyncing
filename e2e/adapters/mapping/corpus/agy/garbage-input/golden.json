@@ -1,0 +1,28 @@
+{
+  "history": [
+    {"type":"user-message","text":"before the noise","key":"agy:11111111-1111-4111-8111-111111111111:0","sentAt":1787221200000},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:10:call:0","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:10:call:0","toolName":"run_command","toolClass":"execute","result":""},
+    {"type":"model-output","text":"after the noise","key":"agy:11111111-1111-4111-8111-111111111111:12:text","final":true}
+  ],
+  "live": [
+    {"type":"notice","message":"Antigravity wrote an inbox message from an unrecognized sender (\"someone\"): a settlement with a bad clock"},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"agy:11111111-1111-4111-8111-111111111111:21","sentAt":1787221221000}
+  ],
+  "replay": [
+    {"type":"user-message","text":"before the noise","key":"agy:11111111-1111-4111-8111-111111111111:0","sentAt":1787221200000},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:10:call:0","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:10:call:0","toolName":"run_command","toolClass":"execute","result":""},
+    {"type":"model-output","text":"after the noise","key":"agy:11111111-1111-4111-8111-111111111111:12:text","final":true},
+    {"type":"notice","message":"Antigravity wrote an inbox message from an unrecognized sender (\"someone\"): a settlement with a bad clock"},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender."},
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"agy:11111111-1111-4111-8111-111111111111:21","sentAt":1787221221000}
+  ]
+}

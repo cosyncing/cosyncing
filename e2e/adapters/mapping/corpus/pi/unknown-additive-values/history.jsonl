@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"eb627ed7-5708-4439-8439-eb627ed75708","timestamp":"2026-06-20T00:00:00.000Z","cwd":"/work/proj"}
+{"type":"a-row-type-from-the-future","id":"f1","payload":{"anything":1}}
+{"type":"compaction","id":"f2","summary":"compacted"}
+{"type":"label","id":"f3","label":"x"}
+{"type":"message","id":"f4","timestamp":"2026-06-20T00:00:01.000Z","message":{"role":"a-role-from-the-future","content":[{"type":"text","text":"not a prompt"}]}}
+{"type":"message","id":"f5","timestamp":"2026-06-20T00:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"real prompt"}],"timestamp":1781913602000}}
+{"type":"message","id":"f6","timestamp":"2026-06-20T00:00:03.000Z","message":{"role":"assistant","stopReason":"a-stop-reason-from-the-future","content":[{"type":"text","text":"answer"},{"type":"a-block-from-the-future","x":1},{"type":"toolCall","id":"cf1","name":"tool_from_the_future","arguments":{"x":1}}],"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":{"total":0.01}},"aNewField":true}}

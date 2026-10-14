@@ -1,0 +1,10 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/antigravity/test/test-agy-mapping.ts",
+  "description": "provenance is the (source, type) pair: a SYSTEM or MODEL row carrying USER_INPUT is never a user bubble; an unlisted pair is a named neutral context row carrying its own source and type; a wholly empty step does not throw; a RUNNING tool row replayed with no live child reads as failed/interrupted, a CANCELED one is terminal and not an error, an unknown status is unknown; the /mode prefix and metadata the harness adds are stripped from a prompt on the tail",
+  "userTexts": [
+    "plain typed text",
+    "second prompt"
+  ],
+  "liveChild": false,
+  "sessionId": "604b4cbb-0959-4912-8912-604b4cbb0959"
+}

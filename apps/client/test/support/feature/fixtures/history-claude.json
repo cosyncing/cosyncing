@@ -1,0 +1,187 @@
+{
+  "agent": "claude",
+  "texts": [
+    "seeded prompt 1",
+    "seeded answer 1",
+    "seeded prompt 2",
+    "seeded answer 2"
+  ],
+  "session": {
+    "kind": "session",
+    "info": {
+      "id": "L3RtcC9jb3N5bmNpbmctZTJlLWNhcHR1cmUtY2xhdWRlLTQwb045aC9jbGF1ZGUvcHJvamVjdHMvLXRtcC1jb3N5bmNpbmctZTJlLWNhcHR1cmUtY2xhdWRlLTQwb045aC13b3Jrc3BhY2VzLXNlZWQtMS9iNTU2OTIxYi1hMTE5LTQzYmUtOTNkMy1iZWU1NjA5MzUxMmMuanNvbmw",
+      "lineageId": "ab54d112-d918-4157-afdc-39b728386203",
+      "tool": "claude",
+      "title": "Captured conversation",
+      "cwd": "/captured/workspaces/seed-1",
+      "model": "claude-opus-4-8",
+      "currentModel": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-4-8",
+        "label": "Opus 4.8"
+      },
+      "status": "idle",
+      "attachMode": "observe",
+      "updatedAt": 1791971333660,
+      "control": {
+        "drive": {
+          "state": "observing",
+          "supported": true,
+          "reason": "Driving resumes this session via claude -p --resume on your Claude subscription (no API cost)."
+        },
+        "terminalSync": {
+          "supported": false,
+          "syncAvailable": false,
+          "active": false,
+          "label": "Resume in terminal",
+          "command": "cd /captured/workspaces/seed-1 && claude --resume b556921b-a119-43be-93d3-bee56093512c",
+          "reason": "Claude v1 supports Observe + Take over; live terminal sync is unavailable.",
+          "behind": false
+        }
+      },
+      "currentMode": "default",
+      "machine": "Howard",
+      "sessionOwner": {
+        "revision": {
+          "epoch": "f289dc23-bd58-43a8-a390-eb080d358057",
+          "seq": 0
+        },
+        "state": "none"
+      }
+    },
+    "authority": {
+      "canMutate": false,
+      "prompt": "none"
+    }
+  },
+  "history": {
+    "kind": "history",
+    "messages": [
+      {
+        "type": "user-message",
+        "text": "seeded prompt 1",
+        "key": "ab54d112-d918-4157-afdc-39b728386203",
+        "turnId": "ab54d112-d918-4157-afdc-39b728386203",
+        "sentAt": 1791971333659
+      },
+      {
+        "type": "run-summary",
+        "key": "b556921b-a119-43be-93d3-bee56093512c:run:ab54d112-d918-4157-afdc-39b728386203",
+        "turnId": "ab54d112-d918-4157-afdc-39b728386203",
+        "userMessageKey": "ab54d112-d918-4157-afdc-39b728386203",
+        "status": "running",
+        "startedAt": 1791971333659,
+        "source": "claude-transcript"
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 1",
+        "final": true,
+        "key": "claude:msg_seed_1_b556921b:0:t"
+      },
+      {
+        "type": "token-count",
+        "input": 11,
+        "output": 4,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      {
+        "type": "metadata-update",
+        "key": "contextUsage",
+        "value": {
+          "used": 11,
+          "max": 200000
+        }
+      },
+      {
+        "type": "run-summary",
+        "key": "b556921b-a119-43be-93d3-bee56093512c:run:ab54d112-d918-4157-afdc-39b728386203",
+        "turnId": "ab54d112-d918-4157-afdc-39b728386203",
+        "userMessageKey": "ab54d112-d918-4157-afdc-39b728386203",
+        "assistantMessageKey": "claude:msg_seed_1_b556921b:0:t",
+        "status": "done",
+        "startedAt": 1791971333659,
+        "completedAt": 1791971333660,
+        "totalRuntimeMs": 1,
+        "tokens": {
+          "input": 11,
+          "output": 4,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "source": "claude-transcript"
+      },
+      {
+        "type": "metadata-update",
+        "key": "runtimeTotals",
+        "value": {
+          "totalRuntimeMs": 1,
+          "turnCount": 1,
+          "updatedAt": 1791971333660,
+          "source": "claude-transcript"
+        }
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 2",
+        "key": "9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "turnId": "9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "sentAt": 1791971333660
+      },
+      {
+        "type": "run-summary",
+        "key": "b556921b-a119-43be-93d3-bee56093512c:run:9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "turnId": "9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "userMessageKey": "9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "status": "running",
+        "startedAt": 1791971333660,
+        "source": "claude-transcript"
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 2",
+        "final": true,
+        "key": "claude:msg_seed_2_b556921b:0:t"
+      },
+      {
+        "type": "token-count",
+        "input": 11,
+        "output": 4,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      {
+        "type": "metadata-update",
+        "key": "contextUsage",
+        "value": {
+          "used": 11,
+          "max": 200000
+        }
+      },
+      {
+        "type": "run-summary",
+        "key": "b556921b-a119-43be-93d3-bee56093512c:run:9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "turnId": "9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "userMessageKey": "9ed81674-29d0-40e7-ac79-0521f1ab30ec",
+        "assistantMessageKey": "claude:msg_seed_2_b556921b:0:t",
+        "status": "done",
+        "startedAt": 1791971333660,
+        "completedAt": 1791971333660,
+        "totalRuntimeMs": 0,
+        "tokens": {
+          "input": 11,
+          "output": 4,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "source": "claude-transcript"
+      }
+    ],
+    "reset": true,
+    "cursor": "eyJ2IjoxLCJuIjoxMywiaCI6IkJ6ZjhaSUNfLW1oTEQ0b3Z4Qzh6d25DaFBlMTZhRWZvOWFaTE1EeXVQdkUifQ",
+    "attachTicket": "eyJ2IjoxLCJuIjoxMywiaCI6IkJ6ZjhaSUNfLW1oTEQ0b3Z4Qzh6d25DaFBlMTZhRWZvOWFaTE1EeXVQdkUifQ",
+    "endCursor": "eyJ2IjoxLCJrIjoib2xkZXIiLCJiIjoxMywiaCI6IkJ6ZjhaSUNfLW1oTEQ0b3Z4Qzh6d25DaFBlMTZhRWZvOWFaTE1EeXVQdkUifQ",
+    "newerHistory": true
+  }
+}

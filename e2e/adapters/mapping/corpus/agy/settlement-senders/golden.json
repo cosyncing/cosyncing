@@ -1,0 +1,32 @@
+{
+  "history": [
+    {"type":"user-message","text":"start a task","key":"agy:11111111-1111-4111-8111-111111111111:0","sentAt":1787221200000},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:1:result","toolName":"manage_task","args":{},"toolClass":"other"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:1:result","toolName":"manage_task","toolClass":"other","result":"Task: 11111111-1111-4111-8111-111111111111/task-8\nStatus: RUNNING"}
+  ],
+  "live": [
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-8","toolName":"background-task","title":"Build task finished","toolClass":"execute","args":{"task":"11111111-1111-4111-8111-111111111111/task-8","spawnedBy":"agy:11111111-1111-4111-8111-111111111111:1"}},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-8","toolName":"background-task","toolClass":"execute","title":"Build task finished","result":"Task finished with result: ok"},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-9","toolName":"background-task","title":"Test task was canceled","toolClass":"execute","args":{"task":"11111111-1111-4111-8111-111111111111/task-9"}},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-9","toolName":"background-task","toolClass":"execute","title":"Test task was canceled","result":"Task was canceled by the user"},
+    {"type":"notice","message":"Antigravity system notice: All your subagents have been stopped."},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:task:33333333-3333-4333-8333-333333333333","toolName":"background-task","title":"A subagent reported","toolClass":"execute","args":{"task":"33333333-3333-4333-8333-333333333333"}},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:task:33333333-3333-4333-8333-333333333333","toolName":"background-task","toolClass":"execute","title":"A subagent reported","result":"child conversation finished"},
+    {"type":"notice","message":"Antigravity wrote an inbox message from an unrecognized sender (\"some-agent-name\"): Drifted sender — who is this"},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender: A notice with no sender — no sender"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"start a task","key":"agy:11111111-1111-4111-8111-111111111111:0","sentAt":1787221200000},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:1:result","toolName":"manage_task","args":{},"toolClass":"other"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:1:result","toolName":"manage_task","toolClass":"other","result":"Task: 11111111-1111-4111-8111-111111111111/task-8\nStatus: RUNNING"},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-8","toolName":"background-task","title":"Build task finished","toolClass":"execute","args":{"task":"11111111-1111-4111-8111-111111111111/task-8","spawnedBy":"agy:11111111-1111-4111-8111-111111111111:1"}},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-8","toolName":"background-task","toolClass":"execute","title":"Build task finished","result":"Task finished with result: ok"},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-9","toolName":"background-task","title":"Test task was canceled","toolClass":"execute","args":{"task":"11111111-1111-4111-8111-111111111111/task-9"}},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:task:11111111-1111-4111-8111-111111111111/task-9","toolName":"background-task","toolClass":"execute","title":"Test task was canceled","result":"Task was canceled by the user"},
+    {"type":"notice","message":"Antigravity system notice: All your subagents have been stopped."},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:task:33333333-3333-4333-8333-333333333333","toolName":"background-task","title":"A subagent reported","toolClass":"execute","args":{"task":"33333333-3333-4333-8333-333333333333"}},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:task:33333333-3333-4333-8333-333333333333","toolName":"background-task","toolClass":"execute","title":"A subagent reported","result":"child conversation finished"},
+    {"type":"notice","message":"Antigravity wrote an inbox message from an unrecognized sender (\"some-agent-name\"): Drifted sender — who is this"},
+    {"type":"notice","message":"Antigravity wrote an inbox message with no sender: A notice with no sender — no sender"}
+  ]
+}

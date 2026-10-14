@@ -1,0 +1,17 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "the live tail updates the mode/model chips only on a real change: a permission-mode row, a main-chain model change; never on a repeat, a sidechain row, a synthetic model, a tool result; an approved plan clears the mode, a rejected one keeps it; history draws no chip update",
+  "userTexts": [
+    "go",
+    "set the mode",
+    "subagent task",
+    "plan it",
+    "carry on"
+  ],
+  "upsertTypes": [
+    "run-summary",
+    "status",
+    "metadata-update"
+  ],
+  "sessionId": "975dc915-94f1-43ac-83ac-975dc91594f1"
+}

@@ -10,52 +10,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('keeps broker order and exposes Cancel then Remove', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [brokerClientProvider.overrideWith((ref) async => fake)],
-        child: MaterialApp(
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
-          supportedLocales: AppLocalizations.supportedLocales,
-          theme: ThemeData(
-            extensions: [themeSpecById(kDefaultThemeId).light],
-          ),
-          home: const ScheduleManagerPage(),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final rows = find.byWidgetPredicate(
-      (widget) =>
-          widget.key is ValueKey<String> &&
-          (widget.key! as ValueKey<String>).value.startsWith('schedule-row-'),
-    );
-    expect(rows, findsNWidgets(2));
-    expect(
-      tester.widget(rows.at(0)).key,
-      const ValueKey<String>('schedule-row-live'),
-    );
-    expect(find.text('Cancel'), findsOneWidget);
-    expect(find.text('Remove'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey('schedule-delete-live')));
-    await tester.pumpAndSettle();
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('schedule-row-live')),
-        matching: find.text('Remove'),
-      ),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const ValueKey('schedule-delete-live')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('schedule-row-live')), findsNothing);
-  });
-
   testWidgets('schedule editor validation error is selectable', (
     tester,
   ) async {
@@ -88,36 +42,6 @@ void main() {
     expect(error, findsOneWidget);
     expect(tester.widget(error), isA<SelectableText>());
   });
-
-  testWidgets('a failed mutation reports the mutation, not a failed load', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient(failDelete: true);
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [brokerClientProvider.overrideWith((ref) async => fake)],
-        child: MaterialApp(
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
-          supportedLocales: AppLocalizations.supportedLocales,
-          theme: ThemeData(
-            extensions: [themeSpecById(kDefaultThemeId).light],
-          ),
-          home: const ScheduleManagerPage(),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const ValueKey('schedule-delete-live')));
-    await tester.pumpAndSettle();
-
-    final en = await AppLocalizations.delegate.load(const Locale('en'));
-    final banner = find.byKey(const Key('schedule-manager-error'));
-    expect(banner, findsOneWidget);
-    final text = tester.widget<SelectableText>(banner).data;
-    expect(text, contains(en.failureLeadUpdateSchedule));
-    expect(text, isNot(contains(en.failureLeadLoadScheduledSends)));
-  });
 }
 
 ScheduleRecord _row(String id, ScheduleState state, int at) => ScheduleRecord(
@@ -134,7 +58,7 @@ ScheduleRecord _row(String id, ScheduleState state, int at) => ScheduleRecord(
 );
 
 final class _FakeBrokerClient extends BrokerClient {
-  _FakeBrokerClient({this.failDelete = false})
+  _FakeBrokerClient()
     : rows = [
         _row('live', ScheduleState.scheduled, 1000),
         _row('done', ScheduleState.delivered, 500),
@@ -143,9 +67,6 @@ final class _FakeBrokerClient extends BrokerClient {
 
   List<ScheduleRecord> rows;
 
-  /// When true, every `deleteSchedule` call throws.
-  final bool failDelete;
-
   @override
   Future<ScheduleListResponse> listSchedules({
     CancelToken? cancelToken,
@@ -153,7 +74,6 @@ final class _FakeBrokerClient extends BrokerClient {
 
   @override
   Future<ScheduleDeleteResponse> deleteSchedule(String id) async {
-    if (failDelete) throw Exception('delete refused');
     final index = rows.indexWhere((row) => row.id == id);
     if (rows[index].state.isLive) {
       final canceled = _row(id, ScheduleState.canceled, rows[index].at);

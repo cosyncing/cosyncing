@@ -1,0 +1,2 @@
+{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-08-20T10:20:00Z","content":"<USER_REQUEST>\nstart a task\n</USER_REQUEST>"}
+{"step_index":1,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-08-20T10:20:01Z","content":"Created At: 2026-08-20T11:10:15+01:00\nTask: 11111111-1111-4111-8111-111111111111/task-8\nStatus: RUNNING"}

@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"7beab9f3-0597-4e7d-8e7d-7beab9f30597","timestamp":"2026-06-20T00:00:00.000Z","cwd":"/work/proj"}
+{"type":"message","id":"gb1","timestamp":"2026-06-20T00:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"before"}],"timestamp":1781913600000}}
+{"type":"message","id":"gb2","timestamp":"2026-06-20T00:00:01.000Z","message":{"role":"assistant","content":[null,1,"x",{"type":"text","text":"after the bad blocks"}]}}

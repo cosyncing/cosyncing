@@ -1,0 +1,713 @@
+{
+  "events": [
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "busy"
+        }
+      }
+    },
+    {
+      "type": "message.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "info": {
+          "id": "msg_u2",
+          "role": "user",
+          "time": {
+            "created": 2000
+          },
+          "sessionID": "$SESSION"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_msg_u2",
+          "type": "text",
+          "text": "now the lexer",
+          "time": {
+            "start": 2000
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_u2"
+        }
+      }
+    },
+    {
+      "type": "message.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "info": {
+          "id": "msg_a2",
+          "role": "assistant",
+          "parentID": "msg_u2",
+          "time": {
+            "created": 2001
+          },
+          "tokens": {
+            "input": 10,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 1,
+              "write": 2
+            }
+          },
+          "cost": 0.01,
+          "sessionID": "$SESSION"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_l_task",
+          "type": "tool",
+          "tool": "task",
+          "callID": "call_task",
+          "state": {
+            "status": "running",
+            "input": {
+              "description": "Survey the lexer",
+              "subagent_type": "explore",
+              "prompt": "look"
+            },
+            "time": {
+              "start": 1000
+            }
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_a2"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_l_task",
+          "type": "tool",
+          "tool": "task",
+          "callID": "call_task",
+          "state": {
+            "status": "completed",
+            "input": {
+              "description": "Survey the lexer",
+              "subagent_type": "explore",
+              "prompt": "look"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "surveyed"
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_a2"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_l_bash",
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_lbash",
+          "state": {
+            "status": "running",
+            "input": {
+              "command": "ls"
+            },
+            "time": {
+              "start": 1000
+            }
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_a2"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_l_bash",
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_lbash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "a\nb",
+            "metadata": {
+              "exit": 0,
+              "output": "a\nb"
+            }
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_a2"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_a2",
+          "type": "text",
+          "text": "",
+          "time": {
+            "start": 2002
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_a2"
+        }
+      }
+    },
+    {
+      "type": "message.part.delta",
+      "properties": {
+        "sessionID": "$SESSION",
+        "messageID": "msg_a2",
+        "partID": "prt_a2",
+        "field": "text",
+        "delta": "Hello"
+      }
+    },
+    {
+      "type": "message.part.delta",
+      "properties": {
+        "sessionID": "$SESSION",
+        "messageID": "msg_a2",
+        "partID": "prt_a2",
+        "field": "text",
+        "delta": " world"
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_a2",
+          "type": "text",
+          "text": "Hello world",
+          "time": {
+            "start": 2002,
+            "end": 2003
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_a2"
+        }
+      }
+    },
+    {
+      "type": "message.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "info": {
+          "id": "msg_a2",
+          "role": "assistant",
+          "parentID": "msg_u2",
+          "time": {
+            "created": 2001,
+            "completed": 2004
+          },
+          "finish": "stop",
+          "tokens": {
+            "input": 10,
+            "output": 5,
+            "reasoning": 0,
+            "cache": {
+              "read": 1,
+              "write": 2
+            }
+          },
+          "cost": 0.01,
+          "sessionID": "$SESSION"
+        }
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "idle"
+        }
+      }
+    }
+  ],
+  "settled": [
+    {
+      "info": {
+        "id": "msg_u1",
+        "role": "user",
+        "time": {
+          "created": 1000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u1",
+          "type": "text",
+          "text": "refactor the parser",
+          "time": {
+            "start": 1000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_a1",
+        "role": "assistant",
+        "parentID": "msg_u1",
+        "time": {
+          "created": 1001,
+          "completed": 1005
+        },
+        "finish": "stop",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "read": 1,
+            "write": 2
+          }
+        },
+        "cost": 0.01
+      },
+      "parts": [
+        {
+          "id": "prt_r1",
+          "type": "reasoning",
+          "text": "Let me look first.",
+          "time": {
+            "start": 1001,
+            "end": 1002
+          }
+        },
+        {
+          "id": "prt_t_bash",
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_bash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "bun test",
+              "description": "Run tests"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "ok",
+            "title": "Run tests",
+            "metadata": {
+              "exit": 0,
+              "output": "ok"
+            }
+          }
+        },
+        {
+          "id": "prt_t_fail",
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_fail",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "false"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "",
+            "metadata": {
+              "exit": 1,
+              "output": ""
+            }
+          }
+        },
+        {
+          "id": "prt_t_read",
+          "type": "tool",
+          "tool": "read",
+          "callID": "call_read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "/work/proj/src/a.ts",
+              "offset": 9
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "const a = 1;",
+            "metadata": {
+              "preview": "const a = 1;",
+              "totalLines": 40
+            }
+          }
+        },
+        {
+          "id": "prt_t_edit",
+          "type": "tool",
+          "tool": "edit",
+          "callID": "call_edit",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "/work/proj/src/a.ts"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "edited",
+            "metadata": {
+              "filediff": {
+                "file": "src/a.ts",
+                "additions": 1,
+                "deletions": 1,
+                "patch": "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-const a = 1;\n+const a = 2;"
+              },
+              "diff": "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-const a = 1;\n+const a = 2;"
+            }
+          }
+        },
+        {
+          "id": "prt_t_edit2",
+          "type": "tool",
+          "tool": "apply_patch",
+          "callID": "call_edit2",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "/work/proj/src/b.ts"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "patched",
+            "metadata": {
+              "diff": "diff --git a/src/b.ts b/src/b.ts\n--- a/src/b.ts\n+++ b/src/b.ts\n@@ -1 +1 @@\n-x\n+y\ndiff --git a/src/c.ts b/src/c.ts\n--- a/src/c.ts\n+++ b/src/c.ts\n@@ -1 +1 @@\n-p\n+q"
+            }
+          }
+        },
+        {
+          "id": "prt_t_write",
+          "type": "tool",
+          "tool": "write",
+          "callID": "call_write",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "/work/proj/src/new.ts"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "created",
+            "metadata": {
+              "exists": false
+            }
+          }
+        },
+        {
+          "id": "prt_t_grep",
+          "type": "tool",
+          "tool": "grep",
+          "callID": "call_grep",
+          "state": {
+            "status": "completed",
+            "input": {
+              "pattern": "TODO",
+              "path": "src"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "3 matches",
+            "metadata": {
+              "matches": 3,
+              "count": 2,
+              "files": [
+                "src/a.ts",
+                {
+                  "path": "src/b.ts",
+                  "count": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "prt_t_glob",
+          "type": "tool",
+          "tool": "glob",
+          "callID": "call_glob",
+          "state": {
+            "status": "completed",
+            "input": {
+              "pattern": "**/*.ts"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "x",
+            "metadata": {
+              "count": 1
+            }
+          }
+        },
+        {
+          "id": "prt_t_web",
+          "type": "tool",
+          "tool": "webfetch",
+          "callID": "call_web",
+          "state": {
+            "status": "completed",
+            "input": {
+              "url": "https://example.invalid/doc"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "page"
+          }
+        },
+        {
+          "id": "prt_t_todo",
+          "type": "tool",
+          "tool": "todowrite",
+          "callID": "call_todo",
+          "state": {
+            "status": "completed",
+            "input": {
+              "todos": [
+                {
+                  "id": "1",
+                  "content": "Parse",
+                  "status": "completed",
+                  "priority": "high"
+                },
+                {
+                  "id": "2",
+                  "content": "Emit",
+                  "status": "in_progress",
+                  "priority": "medium"
+                },
+                {
+                  "content": "Ship",
+                  "status": "pending"
+                },
+                {
+                  "content": "  ",
+                  "status": "pending"
+                }
+              ]
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": ""
+          }
+        },
+        {
+          "id": "prt_t_q",
+          "type": "tool",
+          "tool": "question",
+          "callID": "call_q",
+          "state": {
+            "status": "completed",
+            "input": {
+              "questions": [
+                {
+                  "question": "Which?",
+                  "options": []
+                }
+              ]
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "answered"
+          }
+        },
+        {
+          "id": "prt_t_err",
+          "type": "tool",
+          "tool": "edit",
+          "callID": "call_err",
+          "state": {
+            "status": "error",
+            "input": {
+              "filePath": "/work/proj/src/a.ts"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "error": "file changed on disk"
+          }
+        },
+        {
+          "id": "prt_t_run",
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_run",
+          "state": {
+            "status": "running",
+            "input": {
+              "command": "sleep 60"
+            },
+            "time": {
+              "start": 1000
+            }
+          }
+        },
+        {
+          "id": "prt_file",
+          "type": "file",
+          "mime": "image/png",
+          "filename": "shot.png",
+          "url": "data:image/png;base64,AAAA"
+        },
+        {
+          "id": "prt_a1",
+          "type": "text",
+          "text": "Refactor done.",
+          "time": {
+            "start": 1003,
+            "end": 1004
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_u2",
+        "role": "user",
+        "time": {
+          "created": 2000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u2",
+          "type": "text",
+          "text": "now the lexer",
+          "time": {
+            "start": 2000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_a2",
+        "role": "assistant",
+        "parentID": "msg_u2",
+        "time": {
+          "created": 2001,
+          "completed": 2004
+        },
+        "finish": "stop",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "read": 1,
+            "write": 2
+          }
+        },
+        "cost": 0.01
+      },
+      "parts": [
+        {
+          "id": "prt_l_task",
+          "type": "tool",
+          "tool": "task",
+          "callID": "call_task",
+          "state": {
+            "status": "completed",
+            "input": {
+              "description": "Survey the lexer",
+              "subagent_type": "explore",
+              "prompt": "look"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "surveyed"
+          }
+        },
+        {
+          "id": "prt_l_bash",
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_lbash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "a\nb",
+            "metadata": {
+              "exit": 0,
+              "output": "a\nb"
+            }
+          }
+        },
+        {
+          "id": "prt_a2",
+          "type": "text",
+          "text": "Hello world",
+          "time": {
+            "start": 2002,
+            "end": 2003
+          }
+        }
+      ]
+    }
+  ]
+}

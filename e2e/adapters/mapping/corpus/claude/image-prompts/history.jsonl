@@ -1,0 +1,3 @@
+{"type":"user","uuid":"p6-a","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},{"type":"text","text":"what is in this screenshot"}]}}
+{"type":"user","uuid":"p6-b","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/webp","data":"BBBB"}}]}}
+{"type":"user","uuid":"p6-c","isMeta":true,"message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"CCCC"}}]}}

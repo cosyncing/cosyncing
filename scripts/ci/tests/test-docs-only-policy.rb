@@ -221,7 +221,7 @@ def workflow_contract_errors(source, heavy_jobs)
 end
 
 workflow_cases = {
-  '.github/workflows/ci.yml' => %w[current-host linux-android apple windows windows-broker],
+  '.github/workflows/ci.yml' => %w[policy suite linux-android apple windows windows-broker],
   '.github/workflows/broker-release-gate.yml' => %w[native-package broker-web-pair]
 }
 workflow_cases.each do |path, heavy_jobs|
@@ -278,7 +278,7 @@ end
 {
   'broker source is Windows-relevant' => [['packages/typescript/broker/src/main.ts'], true],
   'adapter-api is Windows-relevant' => [['packages/typescript/adapter-api/src/windows-ffi.ts'], true],
-  'the scripts tree is Windows-relevant' => [['scripts/verification/windows-broker.ts'], true],
+  'the scripts tree is Windows-relevant' => [['scripts/ci/lib/windows-lane.ts'], true],
   'a workflow change is Windows-relevant' => [['.github/workflows/ci.yml'], true],
   'a lockfile change is Windows-relevant' => [['bun.lock'], true],
   'an unrecognised top-level path is Windows-relevant' => [['Makefile'], true],

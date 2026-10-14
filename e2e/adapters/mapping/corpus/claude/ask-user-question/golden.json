@@ -1,0 +1,48 @@
+{
+  "history": [
+    {"type":"user-message","text":"ask me","key":"q0","turnId":"q0"},
+    {"type":"run-summary","key":"75b5e006-3b1a-4eaf-8eaf-75b5e0063b1a:run:q0","turnId":"q0","userMessageKey":"q0","status":"running","source":"claude-transcript"},
+    {"type":"question-request","requestId":"toolu_single","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]}]},
+    {"type":"question-resolved","requestId":"toolu_single","answers":[["Teal"]]},
+    {"type":"question-request","requestId":"toolu_multi","readOnly":true,"questions":[{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_multi","answers":[["Lint","Small, cheap"]]},
+    {"type":"question-request","requestId":"toolu_other","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]}]},
+    {"type":"question-resolved","requestId":"toolu_other","answers":[["a dark green"]]},
+    {"type":"question-request","requestId":"toolu_mixed","readOnly":true,"questions":[{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_mixed","answers":[["Lint, and the slow ones"]]},
+    {"type":"question-request","requestId":"toolu_both","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]},{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_both","answers":[["Amber"],["Types"]]},
+    {"type":"question-request","requestId":"toolu_partial","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]},{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_partial","answers":[["Amber"],[]]},
+    {"type":"question-request","requestId":"toolu_dismissed","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]}]},
+    {"type":"question-resolved","requestId":"toolu_dismissed"},
+    {"type":"tool-call","callId":"toolu_bad","toolName":"AskUserQuestion","toolClass":"other","args":{"questions":[]}},
+    {"type":"tool-result","callId":"toolu_bad","toolName":"AskUserQuestion","toolClass":"other","result":"x"}
+  ],
+  "live": [
+    {"type":"question-request","requestId":"toolu_open","readOnly":true,"questions":[{"question":"Which approach?","header":"Approach","multiple":false,"options":[{"label":"MVP first","description":"Smallest shippable slice"},{"label":"Risk first"}]}]},
+    {"type":"question-resolved","requestId":"toolu_open"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"ask me","key":"q0","turnId":"q0"},
+    {"type":"run-summary","key":"75b5e006-3b1a-4eaf-8eaf-75b5e0063b1a:run:q0","turnId":"q0","userMessageKey":"q0","status":"running","source":"claude-transcript"},
+    {"type":"question-request","requestId":"toolu_single","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]}]},
+    {"type":"question-resolved","requestId":"toolu_single","answers":[["Teal"]]},
+    {"type":"question-request","requestId":"toolu_multi","readOnly":true,"questions":[{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_multi","answers":[["Lint","Small, cheap"]]},
+    {"type":"question-request","requestId":"toolu_other","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]}]},
+    {"type":"question-resolved","requestId":"toolu_other","answers":[["a dark green"]]},
+    {"type":"question-request","requestId":"toolu_mixed","readOnly":true,"questions":[{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_mixed","answers":[["Lint, and the slow ones"]]},
+    {"type":"question-request","requestId":"toolu_both","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]},{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_both","answers":[["Amber"],["Types"]]},
+    {"type":"question-request","requestId":"toolu_partial","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]},{"question":"Which checks?","header":"Checks","multiple":true,"options":[{"label":"Lint"},{"label":"Small, cheap"},{"label":"Types"}]}]},
+    {"type":"question-resolved","requestId":"toolu_partial","answers":[["Amber"],[]]},
+    {"type":"question-request","requestId":"toolu_dismissed","readOnly":true,"questions":[{"question":"Which colour?","header":"Colour","multiple":false,"options":[{"label":"Amber"},{"label":"Teal"}]}]},
+    {"type":"question-resolved","requestId":"toolu_dismissed"},
+    {"type":"tool-call","callId":"toolu_bad","toolName":"AskUserQuestion","toolClass":"other","args":{"questions":[]}},
+    {"type":"tool-result","callId":"toolu_bad","toolName":"AskUserQuestion","toolClass":"other","result":"x"},
+    {"type":"question-request","requestId":"toolu_open","readOnly":true,"questions":[{"question":"Which approach?","header":"Approach","multiple":false,"options":[{"label":"MVP first","description":"Smallest shippable slice"},{"label":"Risk first"}]}]},
+    {"type":"question-resolved","requestId":"toolu_open"}
+  ]
+}

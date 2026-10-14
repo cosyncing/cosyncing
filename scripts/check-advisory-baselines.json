@@ -1,5 +1,0 @@
-{
-  "schemaVersion": 1,
-  "normalization": "trimmed FAIL lines, repository root replaced with <repo>, sorted as a multiset, SHA-256 per finding",
-  "suites": {}
-}

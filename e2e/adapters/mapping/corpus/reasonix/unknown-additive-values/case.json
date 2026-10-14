@@ -1,0 +1,14 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/reasonix/test/test-reasonix-mapping.ts",
+  "description": "unknown roles and shapes become named neutral context events (never user speech, never a throw): a non-textual user row, an empty assistant row, an over-long tool id and a non-text tool result fail open; a negative duration emits no run-summary",
+  "userTexts": [
+    "real prompt"
+  ],
+  "traceOps": [
+    "unmapped-record",
+    "unmapped-record",
+    "unmapped-record",
+    "unmapped-record"
+  ],
+  "sessionId": "c72bf505-ea06-4d2d-8d2d-c72bf505ea06"
+}

@@ -60,8 +60,8 @@ try {
       && kiloDataRoot({ XDG_DATA_HOME: tree.root }, '/unused') === join(tree.root, 'kilo'));
 
   createKiloDatabase(join(tree.dataRoot, 'opencode.db'), { id: 'ses_legacy_wrong', title: 'legacy' });
-  check('a kilo-named database suppresses legacy opencode-named files',
-    kiloDatabasePaths(tree.dataRoot).map((path) => path.split('/').at(-1)).join(',') === 'kilo.db');
+  // Deleted here, covered by e2e/adapters/managed-hosts-kilo.test.ts (WAL/DB precedence): a kilo-named database
+  // suppresses a legacy opencode-named one.
   const sessions = await discoverKiloStore({ env: { KILO_DATA_DIR: tree.dataRoot } });
   const assistantBaseline = JSON.stringify({
     role: 'assistant', parentID: 'msg-user', providerID: 'vllm-fixture', modelID: 'qwen-fixture',
@@ -271,13 +271,7 @@ try {
   );
   timestampCleanup.close();
 
-  writeFileSync(`${tree.databasePath}-journal`, 'synthetic hot rollback journal');
-  const journalTrace: string[] = [];
-  check('a rollback-journal sidecar is refused because only WAL mode is measured',
-    await readKiloHistory(sessions[0]!, { trace: (event) => journalTrace.push(event.detail) }) === undefined
-      && journalTrace.some((detail) => detail.includes('rollback-journal')),
-    journalTrace.join(','));
-  rmSync(`${tree.databasePath}-journal`);
+  // Deleted here, covered by managed-hosts-kilo.test.ts and conformance C21: a rollback-journal sidecar is refused.
 
   const malformedIdentityDatabase = new Database(tree.databasePath);
   const oversizedPartId = 'p'.repeat(2_000);
@@ -317,8 +311,6 @@ try {
   check('discovery honors the caller abort signal', aborted);
 
   rmSync(tree.databasePath);
-  check('legacy opencode-named databases are considered only when no kilo-named file exists',
-    kiloDatabasePaths(tree.dataRoot).map((path) => path.split('/').at(-1)).join(',') === 'opencode.db');
   const legacy = await discoverKiloStore({ env: { KILO_DATA_DIR: tree.dataRoot } });
   check('the legacy fallback remains Kilo-root scoped', legacy[0]?.id === 'ses_legacy_wrong', JSON.stringify(legacy));
 } finally {

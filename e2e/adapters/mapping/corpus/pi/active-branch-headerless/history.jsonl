@@ -1,0 +1,4 @@
+{"type":"message","id":"b1","parentId":null,"timestamp":"2026-06-20T00:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"start"}],"timestamp":1781913600000}}
+{"type":"message","id":"b2","parentId":"b1","timestamp":"2026-06-20T00:00:01.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"first answer"}],"timestamp":1781913601000}}
+{"type":"message","id":"b3","parentId":"b2","timestamp":"2026-06-20T00:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"abandoned branch prompt"}],"timestamp":1781913602000}}
+{"type":"message","id":"b4","parentId":"b2","timestamp":"2026-06-20T00:00:03.000Z","message":{"role":"user","content":[{"type":"text","text":"chosen branch prompt"}],"timestamp":1781913603000}}

@@ -1,0 +1,108 @@
+{
+  "agent": "reasonix",
+  "texts": [
+    "seeded prompt 1",
+    "seeded answer 1",
+    "seeded prompt 2",
+    "seeded answer 2"
+  ],
+  "session": {
+    "kind": "session",
+    "info": {
+      "id": "reasonix-445e10f6349f4770",
+      "nativeId": "reasonix-445e10f6349f4770",
+      "tool": "reasonix",
+      "title": "Captured conversation",
+      "cwd": "/captured/workspaces/seed-1",
+      "status": "idle",
+      "attachMode": "observe",
+      "model": "provider/model",
+      "currentModel": {
+        "providerID": "provider",
+        "modelID": "model"
+      },
+      "createdAt": 1791971345729,
+      "updatedAt": 1791971345729,
+      "control": {
+        "drive": {
+          "state": "observing",
+          "supported": true,
+          "takeoverAvailable": true
+        },
+        "terminalSync": {
+          "supported": false,
+          "syncAvailable": false,
+          "active": false,
+          "reason": "Reasonix exposes --resume [QUERY], but exact session targeting is not pinned; the broker-owned ACP child has no true terminal join channel.",
+          "behind": false
+        }
+      },
+      "machine": "Howard",
+      "sessionOwner": {
+        "revision": {
+          "epoch": "3dc98bd1-8c69-45c1-88d1-204a1093d4f7",
+          "seq": 0
+        },
+        "state": "none"
+      }
+    },
+    "authority": {
+      "canMutate": false,
+      "prompt": "none"
+    }
+  },
+  "history": {
+    "kind": "history",
+    "messages": [
+      {
+        "type": "user-message",
+        "text": "seeded prompt 1",
+        "key": "reasonix:reasonix-445e10f6349f4770:message:0",
+        "turnId": "reasonix:reasonix-445e10f6349f4770:turn:0",
+        "sentAt": 1791971345729
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 1",
+        "key": "reasonix:reasonix-445e10f6349f4770:message:1:output",
+        "final": true
+      },
+      {
+        "type": "run-summary",
+        "key": "reasonix:reasonix-445e10f6349f4770:message:1:summary",
+        "turnId": "reasonix:reasonix-445e10f6349f4770:turn:0",
+        "assistantMessageKey": "reasonix:reasonix-445e10f6349f4770:message:1:output",
+        "status": "done",
+        "agentRuntimeMs": 3,
+        "source": "reasonix"
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 2",
+        "key": "reasonix:reasonix-445e10f6349f4770:message:2",
+        "turnId": "reasonix:reasonix-445e10f6349f4770:turn:1",
+        "sentAt": 1791971345729
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 2",
+        "key": "reasonix:reasonix-445e10f6349f4770:message:3:output",
+        "final": true
+      },
+      {
+        "type": "run-summary",
+        "key": "reasonix:reasonix-445e10f6349f4770:message:3:summary",
+        "turnId": "reasonix:reasonix-445e10f6349f4770:turn:1",
+        "assistantMessageKey": "reasonix:reasonix-445e10f6349f4770:message:3:output",
+        "status": "done",
+        "agentRuntimeMs": 3,
+        "source": "reasonix"
+      }
+    ],
+    "reset": true,
+    "cursor": "eyJ2IjoxLCJuIjo2LCJoIjoiMVNfVTRWUEdxRmpiXzVEMEo2U3ExeVNfNFFfc05hQncwdmRaVk1VekU0USJ9",
+    "attachTicket": "eyJ2IjoxLCJuIjo2LCJoIjoiMVNfVTRWUEdxRmpiXzVEMEo2U3ExeVNfNFFfc05hQncwdmRaVk1VekU0USJ9",
+    "endCursor": "eyJ2IjoxLCJrIjoib2xkZXIiLCJiIjo2LCJoIjoiMVNfVTRWUEdxRmpiXzVEMEo2U3ExeVNfNFFfc05hQncwdmRaVk1VekU0USJ9",
+    "newerHistory": true
+  }
+}

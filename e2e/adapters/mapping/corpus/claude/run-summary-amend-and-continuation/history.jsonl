@@ -1,0 +1,2 @@
+{"type":"user","uuid":"cu1","timestamp":"2026-08-28T10:00:00.000Z","message":{"role":"user","content":"kick off"}}
+{"type":"assistant","uuid":"ca1","timestamp":"2026-08-28T10:00:10.000Z","message":{"id":"cm1","role":"assistant","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"weighing options","signature":"sig"}]}}

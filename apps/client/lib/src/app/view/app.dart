@@ -41,13 +41,20 @@ import 'package:cosyncing_client/src/platform/update/web_handoff_bridge.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_freeze.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 /// Root widget for the cosyncing client.
 ///
 /// Sets up theming and delegates routing to [goRouter].
 class App extends ConsumerStatefulWidget {
   /// Creates the root [App] widget.
-  const App({super.key});
+  ///
+  /// [router] defaults to the app-wide [goRouter]; tests pass a fresh one so
+  /// navigation state never carries from one test to the next.
+  const App({super.key, this.router});
+
+  /// Router override; null uses [goRouter].
+  final GoRouter? router;
 
   @override
   ConsumerState<App> createState() => _AppState();
@@ -58,6 +65,8 @@ class _AppState extends ConsumerState<App> {
   bool _announcedFirstFrame = false;
   Future<void> _attentionNavigationTail = Future<void>.value();
   late final AppLifecycleListener _nativeUpdateLifecycle;
+
+  GoRouter get _router => widget.router ?? goRouter;
 
   @override
   void initState() {
@@ -184,19 +193,19 @@ class _AppState extends ConsumerState<App> {
           // app-level Overlay so selectable global notices and foreground
           // notifications have the lookup ancestor they require.
           child: _AppRootOverlay(
-            onOpenAttention: () => goRouter.go(attentionRoute),
+            onOpenAttention: () => _router.go(attentionRoute),
             onOpenAttentionEntry: _openForegroundAttention,
             child: child,
           ),
         ),
       ),
-      routerConfig: goRouter,
+      routerConfig: _router,
     );
   }
 
   void _openForegroundAttention(AttentionInboxEntry? entry) {
     if (entry == null) {
-      goRouter.go(attentionRoute);
+      _router.go(attentionRoute);
       return;
     }
     if (entry.event.action.kind != 'open-session') {
@@ -229,13 +238,13 @@ class _AppState extends ConsumerState<App> {
         final decoded = jsonDecode(payload);
         if (decoded is! Map<String, dynamic> ||
             decoded['kind'] != 'attention-event') {
-          goRouter.go(attentionRoute);
+          _router.go(attentionRoute);
           return;
         }
         final profileId = decoded['brokerProfileId'];
         final sourceKey = decoded['brokerScopeKey'];
         if (profileId is! String || sourceKey is! String) {
-          goRouter.go(attentionRoute);
+          _router.go(attentionRoute);
           return;
         }
         final profile = await ref
@@ -243,7 +252,7 @@ class _AppState extends ConsumerState<App> {
             .getById(profileId);
         if (profile == null ||
             RosterSource.ofProfile(profile).storageKey != sourceKey) {
-          goRouter.go(attentionRoute);
+          _router.go(attentionRoute);
           return;
         }
         await ref
@@ -259,7 +268,7 @@ class _AppState extends ConsumerState<App> {
           sessionId: decoded['sessionId'] as String?,
         );
       } on Object {
-        goRouter.go(attentionRoute);
+        _router.go(attentionRoute);
       }
     });
   }
@@ -287,7 +296,7 @@ class _AppState extends ConsumerState<App> {
     _attentionNavigationTail = _attentionNavigationTail
         .then((_) => navigation())
         .catchError((Object _) {
-          goRouter.go(attentionRoute);
+          _router.go(attentionRoute);
         });
   }
 
@@ -297,16 +306,16 @@ class _AppState extends ConsumerState<App> {
     required String? sessionId,
   }) {
     if (actionKind == 'open-session' && tool != null && sessionId != null) {
-      goRouter.go(sessionDetailLocation(tool: tool, sessionId: sessionId));
+      _router.go(sessionDetailLocation(tool: tool, sessionId: sessionId));
       return;
     }
     if (actionKind == 'open-runtime-settings' ||
         actionKind == 'open-quota-settings' ||
         actionKind == 'open-broker-health') {
-      goRouter.go(settingsRoute);
+      _router.go(settingsRoute);
       return;
     }
-    goRouter.go(attentionRoute);
+    _router.go(attentionRoute);
   }
 }
 

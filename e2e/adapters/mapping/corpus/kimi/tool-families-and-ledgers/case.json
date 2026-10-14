@@ -1,0 +1,17 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/kimi/test/test-kimi-mapping.ts",
+  "description": "tool rows carry display class, semantics and paths for the measured Kimi tool set and nothing for an unknown tool; a failing result stays an error; TodoList is one task-list panel with its acknowledgment suppressed; a background spawn read at attach is settled by a task-origin notification on the tail as the deferred tool-result of its call (an uncorrelated or unparseable one is a visible notice, never a user bubble); a foreground Agent call opens a subagent bar that its result closes with the parent-wait elapsed",
+  "userTexts": [
+    "do the work"
+  ],
+  "upsertTypes": [
+    "run-summary",
+    "status",
+    "metadata-update",
+    "task-list-state",
+    "agent-activity",
+    "goal-state",
+    "tool-result"
+  ],
+  "sessionId": "9b0065ba-478e-4237-8237-9b0065ba478e"
+}

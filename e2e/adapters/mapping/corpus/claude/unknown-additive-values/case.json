@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "line types, system subtypes, content blocks, tool names and extra fields Claude may add later fail open: no throw, no user bubble made from them, real prompts and replies around them still render",
+  "userTexts": [
+    "Do the thing.",
+    "still a prompt"
+  ],
+  "sessionId": "9e0aceb6-81a8-4fa2-8fa2-9e0aceb681a8"
+}

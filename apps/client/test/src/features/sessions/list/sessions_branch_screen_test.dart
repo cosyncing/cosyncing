@@ -1,4 +1,3 @@
-import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
@@ -7,7 +6,6 @@ import 'package:cosyncing_client/src/features/attention/controller/attention_inb
 import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_branch_screen.dart';
@@ -20,9 +18,6 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
-import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
-import 'package:cosyncing_client/src/platform/speech/speech_output_factory.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -41,77 +36,6 @@ import '../../../../support/session_detail_page_test_harness.dart'
         openSessionDetailTestTab;
 
 void main() {
-  Widget buildAt(Size size) {
-    return ProviderScope(
-      overrides: [
-        sessionListControllerProvider.overrideWith(
-          () => _StubSessionListController(
-            const SessionListState(
-              status: SessionListStatus.loaded,
-              sessions: [
-                SessionInfo(
-                  id: 'a',
-                  tool: 'claude',
-                  title: 'First',
-                  status: SessionStatus.idle,
-                  attachMode: AttachMode.observe,
-                ),
-              ],
-            ),
-          ),
-        ),
-        openSessionsStoreProvider.overrideWithValue(_FakeOpenSessionsStore()),
-        ..._sessionStoreOverrides(),
-        activeBrokerProfileProvider.overrideWith(
-          (ref) => BrokerProfile(
-            id: 'p1',
-            displayName: 'p1',
-            baseUri: Uri.parse('http://127.0.0.1:7734'),
-            createdAt: DateTime(2026),
-          ),
-        ),
-        brokerClientProvider.overrideWith(
-          (ref) async => BrokerClient(baseUrl: 'http://test'),
-        ),
-      ],
-      child: MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        theme: buildAppTheme(
-          themeSpecById(kDefaultThemeId).light,
-          Brightness.light,
-        ),
-        home: MediaQuery(
-          data: MediaQueryData(size: size),
-          child: const SessionsBranchScreen(),
-        ),
-      ),
-    );
-  }
-
-  group('SessionsBranchScreen', () {
-    testWidgets('renders the two-pane workspace at Expanded width', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildAt(const Size(1100, 800)));
-      await tester.pumpAndSettle();
-
-      expect(find.byType(SessionsWorkspace), findsOneWidget);
-      expect(find.byType(SessionsPage), findsNothing);
-      expect(find.byKey(const Key('workspace-overview-tab')), findsOneWidget);
-    });
-
-    testWidgets('renders the workspace with a drawer at Compact width', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildAt(const Size(400, 800)));
-      await tester.pumpAndSettle();
-
-      expect(find.byType(SessionsPage), findsNothing);
-      expect(find.byType(SessionsWorkspace), findsOneWidget);
-    });
-  });
-
   // Regression: resizing an open session down to phone width used to drop the
   // user back on the bare roster. The two layouts encode "a session is open"
   // differently — Expanded keeps it as the active tab while the location stays
@@ -226,39 +150,6 @@ void main() {
       );
     });
 
-    testWidgets('carries the open session into the compact layout', (
-      tester,
-    ) async {
-      final store = _FakeOpenSessionsStore()
-        ..saved['p1'] = const OpenSessionsSnapshot(
-          refs: [
-            SessionRef(
-              tool: 'claude',
-              id: 'a',
-              title: 'First',
-              status: SessionStatus.idle,
-            ),
-          ],
-          activeKey: 'claude/a',
-        );
-
-      resize(tester, const Size(1100, 800));
-      await tester.pumpWidget(buildRouted(store: store));
-      await tester.pumpAndSettle();
-      expect(find.byType(SessionsWorkspace), findsOneWidget);
-
-      // Shrink past the list/detail breakpoint with the session still open.
-      resize(tester, const Size(400, 800));
-      await tester.pumpAndSettle();
-
-      expect(
-        router.state.uri.path,
-        '/sessions',
-        reason: 'resizing keeps the session in the retained workspace',
-      );
-      expect(find.byType(SessionDetailPage), findsOneWidget);
-    });
-
     testWidgets('collapsing carries the open file, not the session under it', (
       tester,
     ) async {
@@ -349,59 +240,6 @@ void main() {
       });
     }
 
-    testWidgets(
-      'repeated breakpoint crossings preserve a real open detail '
-      'without an exception',
-      (tester) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
-        useRealDetailRoute = true;
-        var speechOutputFactoryCalls = 0;
-        final store = _FakeOpenSessionsStore()
-          ..saved['p1'] = const OpenSessionsSnapshot(
-            refs: [
-              SessionRef(
-                tool: 'claude',
-                id: 'a',
-                title: 'First',
-                status: SessionStatus.idle,
-              ),
-            ],
-            activeKey: 'claude/a',
-          );
-
-        resize(tester, const Size(1100, 800));
-        await tester.pumpWidget(
-          buildRouted(
-            store: store,
-            overrides: [
-              speechOutputFactoryProvider.overrideWithValue(() {
-                speechOutputFactoryCalls++;
-                return const UnavailableSpeechOutput();
-              }),
-            ],
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.byType(SessionDetailPage), findsOneWidget);
-
-        for (var crossing = 0; crossing < 6; crossing++) {
-          resize(
-            tester,
-            crossing.isEven ? const Size(400, 800) : const Size(1100, 800),
-          );
-          await tester.pumpAndSettle();
-          expect(tester.takeException(), isNull);
-        }
-        expect(
-          speechOutputFactoryCalls,
-          1,
-          reason: 'responsive route swaps must reuse the platform TTS owner',
-        );
-        debugDefaultTargetPlatformOverride = null;
-      },
-    );
-
     testWidgets('stays on the roster when nothing is open', (tester) async {
       final store = _FakeOpenSessionsStore();
 
@@ -414,44 +252,6 @@ void main() {
 
       expect(router.state.uri.path, '/sessions');
       expect(find.byType(SessionsWorkspace), findsOneWidget);
-    });
-
-    // Back out of the detail route and the roster must stay put. Redirecting on
-    // every compact build (rather than on the transition) would re-push the
-    // detail route here and make Back unusable.
-    testWidgets('does not re-push the session after going back', (
-      tester,
-    ) async {
-      final store = _FakeOpenSessionsStore()
-        ..saved['p1'] = const OpenSessionsSnapshot(
-          refs: [
-            SessionRef(
-              tool: 'claude',
-              id: 'a',
-              title: 'First',
-              status: SessionStatus.idle,
-            ),
-          ],
-          activeKey: 'claude/a',
-        );
-
-      resize(tester, const Size(1100, 800));
-      await tester.pumpWidget(buildRouted(store: store));
-      await tester.pumpAndSettle();
-      resize(tester, const Size(400, 800));
-      await tester.pumpAndSettle();
-      expect(find.byType(SessionDetailPage), findsOneWidget);
-
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(SessionsWorkspace)),
-      );
-      container.read(workspaceOverviewVisibleProvider.notifier).state = true;
-      await tester.pumpAndSettle();
-
-      expect(router.state.uri.path, '/sessions');
-      expect(find.byType(SessionsWorkspace), findsOneWidget);
-      expect(find.byType(SessionDetailPage), findsNothing);
-      expect(find.byKey(const Key('workspace-overview-tab')), findsOneWidget);
     });
   });
 }

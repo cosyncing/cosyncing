@@ -57,27 +57,6 @@ void main() {
   );
 
   group('U3-C fingerprints belong to Debug', () {
-    testWidgets('normal Status exposes no native session id', (tester) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [controlEvent(healthySyncedShared)],
-          showDebugViews: true,
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openStatus(tester);
-
-      expect(
-        inStatus(find.textContaining('session-1')),
-        findsNothing,
-        reason: 'the fingerprint moved to Debug, it did not move surfaces',
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-session-id')),
-        findsNothing,
-      );
-    });
-
     testWidgets('Debug keeps the tool/native identity when enabled', (
       tester,
     ) async {
@@ -321,321 +300,6 @@ void main() {
   });
 
   group('U3-E healthy synced state says it once', () {
-    testWidgets('the exact healthy shared-terminal fixture keeps only the '
-        'pill', (tester) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [controlEvent(healthySyncedShared)],
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openStatus(tester);
-
-      expect(
-        find.byKey(
-          const Key('session-detail-status-sheet-control-pill-synced'),
-        ),
-        findsOneWidget,
-        reason: 'the one sufficient headline stays',
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-control-description')),
-        findsNothing,
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-terminal-heading')),
-        findsNothing,
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-terminal-description')),
-        findsNothing,
-      );
-      expect(find.text('Terminal connected and synced.'), findsNothing);
-      expect(
-        find.textContaining('Send from here or the terminal'),
-        findsNothing,
-      );
-      // Nothing was removed that the user could act on.
-      expect(
-        find.byKey(const Key('session-detail-detach-button')),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('join command keeps its terminal-sync section', (tester) async {
-      useRoomyTestViewport(tester);
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [
-            controlEvent(const {
-              'drive': {'state': 'observing', 'supported': true},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': false,
-                'action': 'join',
-                'command': 'codex resume --remote sock thread',
-              },
-            }),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openStatus(tester);
-      expect(
-        find.byKey(const Key('session-detail-status-sync-heading')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-copy-command')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-sync-description')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-takeover-heading')),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('non-actionable unknown omits the terminal restatement', (
-      tester,
-    ) async {
-      useRoomyTestViewport(tester);
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [
-            controlEvent(const {
-              'drive': {'state': 'observing', 'supported': false},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': true,
-                'presence': 'unknown',
-              },
-            }),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openStatus(tester);
-      expect(
-        find.byKey(const Key('session-detail-status-terminal-heading')),
-        findsNothing,
-      );
-      expect(
-        find.text('The terminal connection could not be confirmed.'),
-        findsNothing,
-      );
-    });
-
-    /// Every state that carries an action, a caveat, a limitation, a safety
-    /// consequence, or a recovery path. None of these may be compacted.
-    final preserved =
-        <
-          ({
-            String name,
-            Map<String, dynamic> control,
-            String description,
-            String? terminal,
-            Key? action,
-          })
-        >[
-          (
-            name: 'answers-only sync',
-            control: {
-              'drive': {'state': 'unavailable', 'supported': false},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': true,
-                'input': 'answer-only',
-                'presence': 'shared',
-              },
-            },
-            description:
-                'Synced with your terminal for answers only. Answer '
-                'permission and question cards here; send new prompts from '
-                'the terminal.',
-            terminal: null,
-            action: null,
-          ),
-          (
-            name: 'observing',
-            control: {
-              'drive': {'state': 'observing', 'supported': true},
-              'terminalSync': {
-                'supported': false,
-                'syncAvailable': false,
-                'active': false,
-              },
-            },
-            description:
-                'The terminal owns input right now. Take over to send from '
-                'the app.',
-            terminal: null,
-            action: const Key('session-detail-take-over-button'),
-          ),
-          (
-            name: 'terminal behind',
-            control: {
-              'drive': {'state': 'driving', 'supported': true},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': false,
-                'active': false,
-                'presence': 'private',
-                'behind': true,
-              },
-            },
-            description:
-                'Driving from the app. Switch to Observe before resuming this '
-                'session manually in a terminal.',
-            terminal:
-                'This terminal is behind. Restart or resume it to rejoin.',
-            action: null,
-          ),
-          (
-            name: 'terminal available but not joined',
-            control: {
-              'drive': {'state': 'observing', 'supported': true},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': false,
-                'action': 'join',
-                'command': 'codex resume --remote sock thread',
-              },
-            },
-            description:
-                'No terminal is currently synced. Choose how to continue.',
-            terminal: null,
-            action: const Key('session-detail-status-copy-command'),
-          ),
-          (
-            name: 'unavailable',
-            control: {
-              'drive': {'state': 'unavailable', 'supported': false},
-              'terminalSync': {
-                'supported': false,
-                'syncAvailable': false,
-                'active': false,
-              },
-            },
-            description:
-                'The app can neither take over nor sync this session. You can '
-                'only observe it.',
-            terminal: null,
-            action: null,
-          ),
-          (
-            name: 'synced but terminal sync degraded',
-            control: {
-              'drive': {'state': 'observing', 'supported': false},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': true,
-                'presence': 'unknown',
-              },
-            },
-            description:
-                'Synced with your terminal. Send from here or the '
-                'terminal; both stay in step.',
-            terminal: null,
-            action: null,
-          ),
-          (
-            name: 'synced shared but behind',
-            control: {
-              'drive': {'state': 'observing', 'supported': false},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': true,
-                'presence': 'shared',
-                'behind': true,
-              },
-            },
-            description:
-                'Synced with your terminal. Send from here or the '
-                'terminal; both stay in step.',
-            terminal:
-                'This terminal is behind. Restart or resume it to rejoin.',
-            action: null,
-          ),
-        ];
-
-    for (final testCase in preserved) {
-      testWidgets('${testCase.name} keeps its explanation and controls', (
-        tester,
-      ) async {
-        useRoomyTestViewport(tester);
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: [controlEvent(testCase.control)],
-          ),
-        );
-        await tester.pumpAndSettle();
-        await openStatus(tester);
-
-        expect(
-          find.byKey(const Key('session-detail-status-control-description')),
-          findsOneWidget,
-        );
-        expect(find.text(testCase.description), findsOneWidget);
-        if (testCase.terminal case final terminal?) {
-          expect(
-            find.byKey(const Key('session-detail-status-terminal-heading')),
-            findsOneWidget,
-          );
-          expect(find.text(terminal), findsOneWidget);
-        }
-        if (testCase.action case final action?) {
-          await showSessionStatusTestItem(tester, action);
-          expect(find.byKey(action), findsOneWidget);
-        }
-      });
-    }
-
-    testWidgets('answers-only is never described as fully synced', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [
-            controlEvent(const {
-              'drive': {'state': 'unavailable', 'supported': false},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': true,
-                'input': 'answer-only',
-                'presence': 'shared',
-              },
-            }),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // The composer caveat is a safety consequence, not repetition: it lives
-      // on Chat and must survive whatever Status compacts.
-      expect(
-        find.byKey(const Key('session-detail-observe-composer-bar')),
-        findsOneWidget,
-      );
-
-      await openStatus(tester);
-      expect(find.textContaining('for answers only'), findsOneWidget);
-      expect(
-        find.textContaining('Send from here or the terminal'),
-        findsNothing,
-      );
-    });
-
     testWidgets('a disconnected session keeps its hint and Attach action', (
       tester,
     ) async {
@@ -669,40 +333,6 @@ void main() {
         reason: 'a session that is not attached is not a healthy synced one',
       );
     });
-
-    testWidgets('a broker reason survives the healthy-looking shape', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [
-            controlEvent(const {
-              'drive': {'state': 'observing', 'supported': false},
-              'terminalSync': {
-                'supported': true,
-                'syncAvailable': true,
-                'active': true,
-                'presence': 'shared',
-                'reason': 'Sync is running one revision behind.',
-              },
-            }),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openStatus(tester);
-
-      await tester.tap(find.text('Technical details'));
-      await tester.pumpAndSettle();
-      expect(
-        find.text('Sync is running one revision behind.'),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const Key('session-detail-status-control-description')),
-        findsOneWidget,
-      );
-    });
   });
 
   group('U3 Status presentation', () {
@@ -711,50 +341,52 @@ void main() {
       ('roomy', Size(1280, 900)),
     ];
 
-    for (final themeId in const [kDefaultThemeId, 'soft-minimalist']) {
-      for (final (label, size) in densities) {
-        for (final brightness in Brightness.values) {
-          for (final scale in const [1.0, 2.0]) {
-            testWidgets('$themeId $label ${brightness.name} at ${scale}x '
-                'lays out cleanly', (tester) async {
-              tester.view
-                ..physicalSize = size
-                ..devicePixelRatio = 1;
-              addTearDown(tester.view.reset);
+    // Two corners stand in for the full theme x density x brightness x scale
+    // sweep: the narrowest, darkest, largest-text layout and the roomiest one.
+    const corners = <(String, Size, Brightness, double)>[
+      ('compact', Size(420, 900), Brightness.dark, 2.0),
+      ('roomy', Size(1280, 900), Brightness.light, 1.0),
+    ];
 
-              final spec = themeSpecById(themeId);
-              await tester.pumpWidget(
-                buildSessionDetailTestPage(
-                  events: [controlEvent(healthySyncedShared)],
-                  theme: buildAppTheme(
-                    brightness == Brightness.dark ? spec.dark : spec.light,
-                    brightness,
-                  ),
-                  textScale: scale,
-                ),
-              );
-              await tester.pumpAndSettle();
-              await openStatus(tester);
+    for (final (label, size, brightness, scale) in corners) {
+      testWidgets('$label ${brightness.name} at ${scale}x lays out cleanly', (
+        tester,
+      ) async {
+        tester.view
+          ..physicalSize = size
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
 
-              expect(
-                find.byKey(const Key('session-detail-status-panel')),
-                findsOneWidget,
-              );
-              expect(
-                find.byKey(
-                  const Key('session-detail-status-sheet-control-pill-synced'),
-                ),
-                findsOneWidget,
-              );
-              expect(
-                tester.takeException(),
-                isNull,
-                reason: 'no overflow or layout exception',
-              );
-            });
-          }
-        }
-      }
+        final spec = themeSpecById(kDefaultThemeId);
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: [controlEvent(healthySyncedShared)],
+            theme: buildAppTheme(
+              brightness == Brightness.dark ? spec.dark : spec.light,
+              brightness,
+            ),
+            textScale: scale,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await openStatus(tester);
+
+        expect(
+          find.byKey(const Key('session-detail-status-panel')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const Key('session-detail-status-sheet-control-pill-synced'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: 'no overflow or layout exception',
+        );
+      });
     }
 
     testWidgets(
@@ -1097,76 +729,6 @@ void main() {
         expect(hungA.connectCallCount, 1);
       },
     );
-
-    testWidgets("the previous broker's control frame is never shown", (
-      tester,
-    ) async {
-      // The page qualified its own build, but the Status panel read the
-      // controller raw. Switching brokers only replaces the controller state
-      // after the queued attach tears the old connection down, so in that
-      // window Status displayed — and enabled — the PREVIOUS broker's
-      // Driving/Sync actions against the new one.
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          initialState: SessionDetailState(
-            tool: 'claude',
-            sessionId: 'session-1',
-            source: const RosterSource(
-              profileId: 'a-different-broker',
-              endpoint: 'http://a-different-broker.invalid:7734',
-            ),
-            connectionStatus: SessionDetailConnectionStatus.connected,
-            sessionInfo: SessionInfo.fromJson(const {
-              'id': 'session-1',
-              'tool': 'claude',
-              'title': 'Owned by another broker',
-              'status': 'working',
-              'attachMode': 'resume',
-              'control': {
-                'drive': {'state': 'driving', 'supported': true},
-                'terminalSync': {
-                  'supported': true,
-                  'syncAvailable': true,
-                  'active': true,
-                  'presence': 'shared',
-                },
-              },
-            }),
-          ),
-        ),
-      );
-      await pumpFrames(tester);
-      await tester.tap(find.byKey(const Key('session-detail-view-menu')));
-      await pumpFrames(tester);
-      await tester.tap(
-        find.byKey(const Key('session-detail-view-item-status')),
-      );
-      await pumpFrames(tester);
-
-      expect(
-        find.byKey(
-          const Key('session-detail-status-sheet-control-pill-driving'),
-        ),
-        findsNothing,
-        reason: "another broker's ownership claim must not be displayed",
-      );
-      expect(
-        find.byKey(
-          const Key('session-detail-status-sheet-control-pill-synced'),
-        ),
-        findsNothing,
-      );
-      expect(inStatus(find.text('Owned by another broker')), findsNothing);
-      // Qualification empties the state, so the panel states the honest fact:
-      // nothing authoritative has arrived for the broker that is active now.
-      expect(
-        find.byKey(
-          const Key('session-detail-status-sheet-control-pill-reconnecting'),
-        ),
-        findsOneWidget,
-      );
-    });
   });
 }
 

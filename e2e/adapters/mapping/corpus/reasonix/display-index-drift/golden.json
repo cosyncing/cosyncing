@@ -1,0 +1,16 @@
+{
+  "history": [
+    {"type":"user-message","text":"first","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:0","turnId":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:turn:7"},
+    {"type":"model-output","text":"a","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:1:output","final":true},
+    {"type":"run-summary","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:1:summary","turnId":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:turn:7","assistantMessageKey":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:1:output","status":"done","agentRuntimeMs":1,"source":"reasonix"}
+  ],
+  "live": [
+    {"type":"user-message","text":"second","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:2","turnId":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:turn:8"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"first","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:0","turnId":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:turn:7"},
+    {"type":"model-output","text":"a","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:1:output","final":true},
+    {"type":"run-summary","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:1:summary","turnId":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:turn:7","assistantMessageKey":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:1:output","status":"done","agentRuntimeMs":1,"source":"reasonix"},
+    {"type":"user-message","text":"second","key":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:message:2","turnId":"reasonix:7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0:turn:8"}
+  ]
+}

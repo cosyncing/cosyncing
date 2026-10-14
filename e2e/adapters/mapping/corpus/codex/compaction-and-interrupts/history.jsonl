@@ -1,0 +1,11 @@
+{"type":"session_meta","payload":{"id":"83bfad8f-903a-4385-8385-83bfad8f903a","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"start"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Before.","phase":"commentary"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_before","phase":"commentary","content":[{"type":"output_text","text":"Before."}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}
+{"type":"event_msg","payload":{"type":"context_compacted"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"After.","phase":"commentary"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_after","phase":"commentary","content":[{"type":"output_text","text":"After."}]}}
+{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t2","reason":"interrupted","duration_ms":2595}}

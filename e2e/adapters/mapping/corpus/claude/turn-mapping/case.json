@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "one turn split over four sibling lines, tool results arriving on the tail for tool_use blocks read at attach, tokens deduped per message.id, tool enrichment from toolUseResult, compaction, local command echoes, api error, interrupts",
+  "userTexts": [
+    "/compact",
+    "Please edit the file and run ls."
+  ],
+  "oneRow": [
+    "I will edit it.",
+    "Done."
+  ],
+  "sessionId": "64a4b950-9d21-467a-867a-64a4b9509d21"
+}

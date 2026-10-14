@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "the same content is written as event_msg and response_item: user, reasoning and answer come out once each; exec/patch end events only enrich the tool-result they belong to, a patch pair arriving on the tail; run-summary upserts by turn id",
+  "userTexts": [
+    "hello"
+  ],
+  "oneRow": [
+    "hello",
+    "Done.",
+    "thinking through it"
+  ],
+  "sessionId": "da054cc3-8942-4347-8347-da054cc38942"
+}

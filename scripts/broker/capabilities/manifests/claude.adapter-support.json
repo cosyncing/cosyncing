@@ -200,7 +200,7 @@
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0"],
       "adapterRefs": ["packages/typescript/adapters/claude/src/implementation.ts (exportTranscript)", "packages/typescript/adapters/claude/src/implementation.ts (containedClaudePath)", "packages/typescript/broker/src/security/r2-export.ts", "packages/typescript/broker/src/security/r2-redactor.ts"],
-      "traceRefs": ["packages/typescript/adapters/claude/test/test-claude-export.ts", "packages/typescript/broker/test/security-r2/test-r2-export.ts"]
+      "traceRefs": ["packages/typescript/adapters/claude/test/test-claude-export.ts", "e2e/broker/transcript-export.test.ts"]
     }
   ]
 }

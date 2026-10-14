@@ -68,7 +68,7 @@ import {
 import {
   insideSupervisedProcessGroup,
   runSupervised,
-} from '../../../verification/supervised-process.ts';
+} from '../../../ci/lib/process.ts';
 
 import { installerOnboardingRegressions } from './installer-onboarding-regressions.ts';
 import { installerPairingRegressions } from './installer-pairing-regressions.ts';

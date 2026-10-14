@@ -6,6 +6,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/broker_profiles/model/url_normalizer.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/connection_state.dart';
 import 'package:cosyncing_client/src/features/connection/model/real_broker_health_probe.dart';
@@ -17,7 +18,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 ///
 /// Override this in tests to inject a fake implementation.
 final brokerHealthProbeProvider = Provider<BrokerHealthProbe>(
-  (ref) => RealBrokerHealthProbe(),
+  (ref) => RealBrokerHealthProbe(
+    transport: ref.watch(brokerHttpTransportProvider),
+  ),
 );
 
 /// Active broker profile selected from the Connection screen.
@@ -309,12 +312,14 @@ Future<BrokerClient> createBrokerClientForProfile(
         profile.incarnationId ??
         'created-${profile.createdAt.toUtc().microsecondsSinceEpoch}',
   );
+  final transport = ref.read(brokerHttpTransportProvider);
   final credentialKey = profile.credentialKey;
   if (credentialKey == null) {
     return BrokerClient(
       baseUrl: profile.baseUri.toString(),
       clientProfileId: sourceArguments.profileId,
       clientProfileIncarnation: sourceArguments.incarnation,
+      dio: brokerTransportDio(transport),
     );
   }
 
@@ -332,12 +337,14 @@ Future<BrokerClient> createBrokerClientForProfile(
       token: credential,
       clientProfileId: sourceArguments.profileId,
       clientProfileIncarnation: sourceArguments.incarnation,
+      dio: brokerTransportDio(transport),
     ),
     BrokerCredentialKind.peerToken => BrokerClient(
       baseUrl: profile.baseUri.toString(),
       peerToken: credential,
       clientProfileId: sourceArguments.profileId,
       clientProfileIncarnation: sourceArguments.incarnation,
+      dio: brokerTransportDio(transport),
     ),
   };
 }

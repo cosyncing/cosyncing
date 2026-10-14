@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/antigravity/test/test-agy-mapping.ts",
+  "description": "host settlement messages by sender: a task settlement is a self-contained tool block keyed by its sender (a cancelled title closes as cancelled), a subagent settlement a tool block for the child, a system or senderless one a stated notice carrying the host's words, an unrecognized sender is named as drift and never presented as a system notice; none is ever a user message",
+  "userTexts": [
+    "start a task"
+  ],
+  "liveChild": false,
+  "sessionId": "015493a5-aa6c-454c-854c-015493a5aa6c"
+}

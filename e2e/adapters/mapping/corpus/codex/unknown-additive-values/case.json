@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "event types, record types, response items, roles, phases, tool names, item types and content blocks Codex may add later fail open: no throw, no user bubble made from a non-prompt item, real rows around them still map",
+  "userTexts": [
+    "real prompt",
+    "prompt with a new block"
+  ],
+  "sessionId": "1d882271-7cec-4164-8164-1d8822717cec"
+}

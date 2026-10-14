@@ -173,7 +173,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'packages/typescript/adapters/opencode/test/test-opencode-private.ts',
+    file: 'e2e/adapters/opencode-private.test.ts',
     title: 'OpenCode private Drive runtime and streaming suite',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['opencode'], note: 'raw run answer/tool/token lanes' },
@@ -181,8 +181,8 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'packages/typescript/broker/test/pi/test-pi.ts',
-    title: 'Pi integration suite including file input/output',
+    file: 'e2e/adapters/conformance/pi.test.ts',
+    title: 'Pi conformance kit including file input/output',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['pi'], note: 'Pi JSONL/RPC text/thinking lanes' },
       { fn: 'F12', level: 'L2', agents: ['pi'], note: 'byte-exact inbox upload' },
@@ -213,8 +213,8 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'packages/typescript/adapters/omp/test/test-omp-lifecycle.ts',
-    title: 'omp fake-stdio RPC resume and lifecycle suite',
+    file: 'e2e/adapters/conformance/omp.test.ts',
+    title: 'omp conformance kit: fake-stdio RPC create, resume and lifecycle',
     nativeVersion: '17.4.2',
     coverage: [
       { fn: 'F01', level: 'L2', agents: ['omp'], note: 'fake native --mode rpc create and resume path' },
@@ -280,7 +280,15 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
   },
   {
     file: 'packages/typescript/adapters/reasonix/test/test-reasonix-mapping.ts',
-    title: 'Reasonix flat-transcript canonical mapping suite',
+    title: 'Reasonix live ACP update parity suite',
+    nativeVersion: '1.25.2',
+    coverage: [
+      { fn: 'F05', level: 'L0', agents: ['reasonix'], note: 'a replayed tool step matches the rows the live drive emitted; interrupted partial calls are never restated' },
+    ],
+  },
+  {
+    file: 'e2e/adapters/mapping/reasonix.test.ts',
+    title: 'Reasonix transcript mapping corpus',
     nativeVersion: '1.25.2',
     coverage: [
       { fn: 'F04', level: 'L0', agents: ['reasonix'], note: 'reasoning and answer lanes preserve stored whitespace and stable keys' },
@@ -327,29 +335,34 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'packages/typescript/broker/test/reasonix/test-reasonix-registration-gate.ts',
-    title: 'Reasonix broker registration, capability, create/load, and fail-closed gate',
-    nativeVersion: '1.25.2',
+    file: 'e2e/adapters/conformance/grok.test.ts',
+    title: 'Grok adapter conformance: fixture broker, fake ACP agent, shipped floored-version writer',
+    nativeVersion: '1.0.13',
     coverage: [
-      { fn: 'F01', level: 'L2', agents: ['reasonix'], note: 'real fixture broker publishes Reasonix and adapter attach/create re-derive durable history identity' },
-      { fn: 'F02', level: 'L2', agents: ['reasonix'], note: 'broker advertises terminal sync unsupported and omits an unpinned terminal hint' },
-      { fn: 'F03', level: 'L2', agents: ['reasonix'], note: 'Observe stays process-free while Resume command discovery starts the workspace-scoped ACP writer before its first prompt' },
-      { fn: 'F08', level: 'L2', agents: ['reasonix'], note: 'durable model survives create/load while existing-session switch remains false' },
-      { fn: 'F14', level: 'L2', agents: ['reasonix'], note: 'create/load succeeds only when ACP identity reappears in the durable store' },
-      { fn: 'F16', level: 'L2', agents: ['reasonix'], note: 'undeclared modes, missing binaries, synthetic identities, and unsupported client shapes fail closed' },
+      { fn: 'F01', level: 'L2', agents: ['grok'], note: 'the broker publishes Observe plus floored-version create/load; replay, tail and reload join the exact existing Drive connection and its history' },
+      { fn: 'F03', level: 'L2', agents: ['grok'], note: 'Observe stays process-free; Resume loads one ACP writer, two sockets keep prompt order through it and are refused after demotion' },
+      { fn: 'F04', level: 'L2', agents: ['grok'], note: 'a joined socket receives correlated user echo and model output from the existing child' },
+      { fn: 'F06', level: 'L2', agents: ['grok'], note: 'a late joiner replays an unresolved permission and approve maps to allow_once' },
+      { fn: 'F08', level: 'L2', agents: ['grok'], note: 'model, effort and mode controls are published only on the version-gated writer surface' },
+      { fn: 'F09', level: 'L2', agents: ['grok'], note: 'the ACP initialize catalog reaches the Drive connection and a joined client' },
+      { fn: 'F14', level: 'L2', agents: ['grok'], note: 'a foreign durable write or log replacement demotes every joined socket; a prefix rewrite resets history instead of splicing' },
+      { fn: 'F15', level: 'L1', agents: ['grok'], note: 'doctor distinguishes missing, measured, newer-unmeasured and below-floor binaries' },
+      { fn: 'F16', level: 'L2', agents: ['grok'], note: 'single-writer reuse, version fence, cached-token readiness, hostile stores and Observe fallback fail closed' },
     ],
   },
   {
-    file: 'packages/typescript/broker/test/broker/test-reasonix-cross-client-join.ts',
-    title: 'Reasonix broker cross-client writer, permission replay, and ownership-loss suite',
+    file: 'e2e/adapters/conformance/reasonix.test.ts',
+    title: 'Reasonix adapter conformance: fixture broker, fake ACP agent, writer and ownership loss',
     nativeVersion: '1.25.2',
     coverage: [
-      { fn: 'F01', level: 'L2', agents: ['reasonix'], note: 'Observe reload can join the exact existing Drive connection and pending history' },
-      { fn: 'F03', level: 'L2', agents: ['reasonix'], note: 'two sockets preserve prompt order through one ACP child and refuse after demotion' },
-      { fn: 'F06', level: 'L2', agents: ['reasonix'], note: 'late joiner replays an unresolved card and maps approve to native allow_once' },
-      { fn: 'F09', level: 'L2', agents: ['reasonix'], note: 'synthetic protocol-shaped catalog reaches a joined Drive and invokes an advertised command through session/prompt; native payload capture remains pending' },
-      { fn: 'F14', level: 'L2', agents: ['reasonix'], note: 'a detectable foreign durable write demotes every joined socket without losing accepted prompts' },
-      { fn: 'F16', level: 'L2', agents: ['reasonix'], note: 'single-writer reuse and nonmatching foreign-write detection reduce competing native writers; native per-write identity remains unmeasured' },
+      { fn: 'F01', level: 'L2', agents: ['reasonix'], note: 'the broker publishes Reasonix; create/load re-derive durable identity and reload joins the exact existing Drive connection' },
+      { fn: 'F02', level: 'L2', agents: ['reasonix'], note: 'terminal sync is advertised unsupported with no unpinned terminal hint' },
+      { fn: 'F03', level: 'L2', agents: ['reasonix'], note: 'Observe stays process-free; two sockets keep prompt order through one ACP child and are refused after demotion' },
+      { fn: 'F06', level: 'L2', agents: ['reasonix'], note: 'a late joiner replays an unresolved card and approve maps to native allow_once' },
+      { fn: 'F08', level: 'L2', agents: ['reasonix'], note: 'the durable model survives create/load while existing-session switch stays false' },
+      { fn: 'F09', level: 'L2', agents: ['reasonix'], note: 'a protocol-shaped catalog reaches a joined Drive and invokes an advertised command; native payload capture remains pending' },
+      { fn: 'F14', level: 'L2', agents: ['reasonix'], note: 'a foreign durable write demotes every joined socket without losing accepted prompts' },
+      { fn: 'F16', level: 'L2', agents: ['reasonix'], note: 'undeclared modes, missing binaries, synthetic identities and hostile stores fail closed; native per-write identity remains unmeasured' },
     ],
   },
   {
@@ -378,18 +391,6 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'packages/typescript/adapters/grok/test/test-grok-observe.ts',
-    title: 'Grok Observe replay, immutable snapshot, tail, and rewrite suite',
-    nativeVersion: '1.0.13',
-    coverage: [
-      { fn: 'F01', level: 'L0', agents: ['grok'], note: 'history-before-tail replay, append dedupe, partial-line withholding, and page capture share one identity' },
-      { fn: 'F04', level: 'L0', agents: ['grok'], note: 'one canonical mapper serves replay and durable tail' },
-      { fn: 'F14', level: 'L0', agents: ['grok'], note: 'prefix rewrite emits rollback history-reset instead of splicing histories' },
-      { fn: 'F15', level: 'L0', agents: ['grok'], note: 'ownerless trailing user turns are cancelled rather than indefinitely running' },
-      { fn: 'F16', level: 'L0', agents: ['grok'], note: 'snapshot identity and bounded page readers keep source revisions coherent' },
-    ],
-  },
-  {
     file: 'packages/typescript/adapters/grok/test/test-grok-drive.ts',
     title: 'Grok ACP Drive queue, permission, and demotion suite',
     nativeVersion: '1.0.13',
@@ -412,42 +413,6 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F08', level: 'L0', agents: ['grok'], note: 'initialize and relaunch cover model labels, effort, mode, and same-id load' },
       { fn: 'F14', level: 'L0', agents: ['grok'], note: 'create closes its temporary child and restart restores durable app-created eligibility' },
       { fn: 'F16', level: 'L0', agents: ['grok'], note: 'only 1.0.13 or newer with reusable cached-token authentication creates or drives; older versions remain Observe-only' },
-    ],
-  },
-  {
-    file: 'packages/typescript/adapters/grok/test/test-grok-diagnostics.ts',
-    title: 'Grok effect-free floored-version and local-store diagnosis suite',
-    nativeVersion: '1.0.13',
-    coverage: [
-      { fn: 'F15', level: 'L1', agents: ['grok'], note: 'doctor distinguishes missing, measured, newer-unmeasured, and below-floor local binary versions' },
-      { fn: 'F16', level: 'L1', agents: ['grok'], note: 'effect-free diagnosis honors explicit executable/store roots and reports unsafe store types without mutation' },
-    ],
-  },
-  {
-    file: 'packages/typescript/broker/test/grok/test-grok-registration-gate.ts',
-    title: 'Grok shipped floored-version writer registration and fallback gate',
-    nativeVersion: '1.0.13',
-    coverage: [
-      { fn: 'F01', level: 'L2', agents: ['grok'], note: 'the fixture broker publishes Observe plus floored-version create/load and restart-safe Drive eligibility' },
-      { fn: 'F03', level: 'L2', agents: ['grok'], note: 'Observe stays process-free while eligible Resume lazily loads one authenticated ACP writer' },
-      { fn: 'F08', level: 'L2', agents: ['grok'], note: 'shipped registration publishes model, effort, and mode controls only on the version-gated writer surface' },
-      { fn: 'F09', level: 'L2', agents: ['grok'], note: 'the ACP initialize catalog reaches the shipped floored-version Drive connection' },
-      { fn: 'F14', level: 'L2', agents: ['grok'], note: 'create/load/cancel eligibility is durable while terminal handoff remains a separate-process hint' },
-      { fn: 'F16', level: 'L2', agents: ['grok'], note: 'client floor, service executable capture, cached-token readiness, version fence, and Observe fallback are pinned' },
-    ],
-  },
-  {
-    file: 'packages/typescript/broker/test/broker/test-grok-cross-client-join.ts',
-    title: 'Grok shipped writer cross-client and ownership-loss suite',
-    nativeVersion: '1.0.13',
-    coverage: [
-      { fn: 'F01', level: 'L2', agents: ['grok'], note: 'reload joins the exact existing Drive connection and receives its queued history' },
-      { fn: 'F03', level: 'L2', agents: ['grok'], note: 'two sockets preserve prompt order through one ACP child and refuse after shared demotion' },
-      { fn: 'F04', level: 'L2', agents: ['grok'], note: 'a joined socket receives correlated user echo and model output from the existing child' },
-      { fn: 'F06', level: 'L2', agents: ['grok'], note: 'a late joiner replays an unresolved permission and maps approve to allow_once' },
-      { fn: 'F09', level: 'L2', agents: ['grok'], note: 'a joined Drive receives the existing child command catalog' },
-      { fn: 'F14', level: 'L2', agents: ['grok'], note: 'a detectable foreign durable write demotes every joined socket together' },
-      { fn: 'F16', level: 'L2', agents: ['grok'], note: 'single-writer reuse, shared-ledger, and foreign-write fences cover the shipped floored-version writer' },
     ],
   },
   {
@@ -480,11 +445,11 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     title: 'Cline Observe replay, immutable snapshot, rewrite, and paging suite',
     nativeVersion: '3.0.61',
     coverage: [
-      { fn: 'F01', level: 'L0', agents: ['cline'], note: 'history replay, whole-file append dedupe, page capture, and explicit Observe reattach share one identity' },
+      { fn: 'F01', level: 'L0', agents: ['cline'], note: 'history replay, page capture, and explicit Observe reattach share one identity (whole-file append dedupe is conformance C05)' },
       { fn: 'F04', level: 'L0', agents: ['cline'], note: 'one canonical mapper serves live ACP updates, replay, and rewritten-file tail' },
-      { fn: 'F14', level: 'L0', agents: ['cline'], note: 'content rewrite emits rollback history-reset and invalidates stale page identity' },
+      { fn: 'F14', level: 'L0', agents: ['cline'], note: 'a rewrite clears shared correlations and revokes the durable ownership gate (the rollback history-reset itself is conformance C06)' },
       { fn: 'F15', level: 'L0', agents: ['cline'], note: 'dead-pid session tail receives a cancelled summary and aggregate usage remains separate' },
-      { fn: 'F16', level: 'L0', agents: ['cline'], note: 'snapshot convergence and read-only prompt/permission refusals fail closed' },
+      { fn: 'F16', level: 'L0', agents: ['cline'], note: 'snapshot convergence fails closed (read-only prompt/permission refusals are conformance C04)' },
     ],
   },
   {

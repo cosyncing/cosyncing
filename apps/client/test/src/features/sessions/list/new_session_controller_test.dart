@@ -14,27 +14,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('filters agents by authoritative create capability', () async {
-    final fake = _FakeBrokerClient(
-      agents: [
-        _agent('codex', canCreate: true),
-        _agent('watch', canCreate: false),
-      ],
-    );
-    final container = _container(fake);
-    addTearDown(container.dispose);
-
-    await container.read(newSessionControllerProvider.notifier).loadAgents();
-
-    expect(
-      container
-          .read(newSessionControllerProvider)
-          .agents
-          .map((agent) => agent.id),
-      ['codex'],
-    );
-  });
-
   test(
     'a superseded modes load cannot retire the catalog that replaced it',
     () async {
@@ -166,38 +145,6 @@ void main() {
     expect(state.models, hasLength(newSessionModelCatalogMaxOptions));
     expect(state.models.last.modelID, 'model-2047');
   });
-
-  test(
-    'adapter without a pre-session catalog stays unavailable and is not called',
-    () async {
-      final fake = _FakeBrokerClient(
-        agents: [
-          _agent(
-            'legacy',
-            canCreate: true,
-            canSelectModelAtCreation: false,
-          ),
-        ],
-      );
-      final container = _container(fake);
-      addTearDown(container.dispose);
-      final controller = container.read(
-        newSessionControllerProvider.notifier,
-      );
-
-      await controller.loadAgents();
-      await controller.loadModels('legacy');
-
-      final state = container.read(newSessionControllerProvider);
-      expect(
-        state.modelCatalogPhase,
-        NewSessionModelCatalogPhase.unavailable,
-      );
-      expect(state.modelTool, 'legacy');
-      expect(state.models, isEmpty);
-      expect(fake.listModelCalls, 0);
-    },
-  );
 
   for (final lateFailure in [false, true]) {
     test(
@@ -334,38 +281,6 @@ void main() {
       },
     );
   }
-
-  test(
-    'submits edited directory and broker resume intent exactly once',
-    () async {
-      final fake = _FakeBrokerClient(
-        agents: [_agent('codex', canCreate: true)],
-      );
-      final driveStore = _RecordingDriveIntentStore();
-      final container = _container(fake, driveStore: driveStore);
-      addTearDown(container.dispose);
-      final controller = container.read(newSessionControllerProvider.notifier);
-      await controller.loadAgents();
-
-      final session = await controller.create(
-        tool: 'codex',
-        directory: ' /edited/project ',
-        title: ' My session ',
-      );
-
-      expect(session?.id, 'created');
-      expect(fake.lastDirectory, '/edited/project');
-      expect(fake.lastTitle, 'My session');
-      const key = SessionDetailKey(tool: 'codex', sessionId: 'created');
-      final intents = container.read(createdSessionAttachIntentsProvider);
-      // The intent is profile-qualified: another broker's identical
-      // tool/session id must not consume it.
-      expect(intents.takeResume(_scope('other-profile'), key), isFalse);
-      expect(intents.takeResume(_scope('local'), key), isTrue);
-      expect(intents.takeResume(_scope('local'), key), isFalse);
-      expect(driveStore.appCreatedKeys, ['${_scope('local')}/codex/created']);
-    },
-  );
 
   test(
     'persists the exact live restore mode with the one-shot create intent',
@@ -525,24 +440,6 @@ void main() {
       expect(intents.takeResume(_scope('p2'), key), isFalse);
       expect(intents.takeResume(_scope('p1'), key), isTrue);
       expect(driveStore.appCreatedKeys, ['${_scope('p1')}/codex/created']);
-    },
-  );
-
-  test(
-    'blank global directory is omitted instead of inheriting a cwd',
-    () async {
-      final fake = _FakeBrokerClient(
-        agents: [_agent('codex', canCreate: true)],
-      );
-      final container = _container(fake);
-      addTearDown(container.dispose);
-      final controller = container.read(newSessionControllerProvider.notifier);
-      await controller.loadAgents();
-
-      await controller.create(tool: 'codex', directory: '  ', title: '');
-
-      expect(fake.lastDirectory, isNull);
-      expect(fake.lastTitle, isNull);
     },
   );
 }

@@ -1,0 +1,70 @@
+{
+  "items": [
+    {
+      "id": "f_5",
+      "role": "assistant",
+      "aNewFieldFromTheFuture": {
+        "nested": true
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "answer with a new field"
+        }
+      ]
+    },
+    {
+      "id": "f_4",
+      "role": "a-role-from-the-future",
+      "content": [
+        {
+          "type": "text",
+          "text": "not model output either"
+        }
+      ]
+    },
+    {
+      "id": "f_3",
+      "role": "tool",
+      "content": [
+        {
+          "type": "text",
+          "text": "not model output"
+        }
+      ]
+    },
+    {
+      "id": "f_2",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "a-content-type-from-the-future",
+          "blob": 1
+        },
+        {
+          "type": "tool_use"
+        },
+        {
+          "type": "text",
+          "text": "kept"
+        }
+      ]
+    },
+    {
+      "id": "f_1",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "real prompt"
+        }
+      ]
+    }
+  ],
+  "has_more": false
+}

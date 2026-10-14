@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/opencode-wire/src/mapping.ts and packages/typescript/adapters/opencode/test/test-opencode-retry-detail.ts",
+  "description": "messages from the session revert pointer onward are hidden at attach (the server still returns them); un-reverting resets history and the resync returns them again",
+  "userTexts": [
+    "keep me",
+    "undone prompt"
+  ],
+  "sessionId": "f198f843-faab-4b33-8b33-f198f843faab"
+}

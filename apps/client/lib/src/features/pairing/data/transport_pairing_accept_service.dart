@@ -1,5 +1,6 @@
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/pairing/model/transport_qr_payload.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -21,6 +22,12 @@ abstract interface class TransportPairingAcceptService {
 /// Broker-backed transport pairing accept service.
 final class BrokerTransportPairingAcceptService
     implements TransportPairingAcceptService {
+  /// Creates the service; a null [transport] uses the platform default.
+  BrokerTransportPairingAcceptService({this.transport});
+
+  /// HTTP transport override for the acceptance request.
+  final BrokerHttpTransport? transport;
+
   @override
   Future<TransportPairingAcceptResponse> accept(
     TransportQrPayload payload, {
@@ -34,7 +41,10 @@ final class BrokerTransportPairingAcceptService
     if (pairingId == null || pairingId.isEmpty) {
       throw const FormatException('QR payload is missing pairingId');
     }
-    final client = BrokerClient(baseUrl: brokerUrl.toString());
+    final client = BrokerClient(
+      baseUrl: brokerUrl.toString(),
+      dio: brokerTransportDio(transport),
+    );
     try {
       return await client.acceptTransportPairing(
         pairingId,
@@ -54,5 +64,7 @@ final class BrokerTransportPairingAcceptService
 /// Provider for transport pairing accept service.
 final transportPairingAcceptServiceProvider =
     Provider<TransportPairingAcceptService>(
-      (ref) => BrokerTransportPairingAcceptService(),
+      (ref) => BrokerTransportPairingAcceptService(
+        transport: ref.watch(brokerHttpTransportProvider),
+      ),
     );

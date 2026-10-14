@@ -1,0 +1,621 @@
+/**
+ * Pi-family conformance extras: what Pi and omp do that the shared scenarios cannot say.
+ *
+ * Every extra drives the broker over HTTP and the session socket the way the app does, against the
+ * kit's fake runtime, and asserts what a client receives, what the runtime receives (its ledger) and
+ * what lands in the session file the product reads back. Pi and omp share the engine, so most extras
+ * run for both dialects; the few that differ (fork and clone exist only on Pi, omp persists the
+ * app's prompt correlation, omp rejects empty names) branch on the dialect, never on a tool name.
+ */
+import { expect } from 'bun:test';
+import { BROKER_CONTRACT_REVISION } from '../../../packages/typescript/protocol/src/index.ts';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { eventually, type SessionStream } from '../../harness/index.ts';
+import type { ConformanceContext, ConformanceExtra } from './kit.ts';
+import { type PiFake, type PiFamilyDialect, promptText, piFileOf, piRowId, piUuidOf } from './pi-family.ts';
+import { PI_COLLAB_PROMPT_PREFIX, piHeader, piModelEntry, piTitleEntry, appendLines } from './fakes/pi-agent.ts';
+
+const asFake = (context: ConformanceContext): PiFake => context.fake as PiFake;
+
+const text = (message: any): string =>
+  typeof message?.text === 'string' ? message.text : typeof message?.delta === 'string' ? message.delta : '';
+
+/** Terminal run summaries after a frame index, by key. */
+function terminals(stream: SessionStream, from: number): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const frame of stream.frames.slice(from)) {
+    if (frame.kind !== 'message' || frame.message?.type !== 'run-summary') continue;
+    out.set(frame.message.key, [...(out.get(frame.message.key) ?? []), frame.message.status]);
+  }
+  return out;
+}
+
+/** The native commands one fake process received, in order. */
+function commandsOf(fake: PiFake, pid: number, from = 0): any[] {
+  return fake.ledger.since(from).filter((entry) => entry.kind === 'recv' && entry.pid === pid).map((entry) => entry.frame);
+}
+
+async function post(context: ConformanceContext, path: string, body?: unknown) {
+  return context.client.post(path, body ?? {});
+}
+
+/** A raw JSONL row's entries, parsed. */
+function readEntries(file: string): any[] {
+  return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
+  const omp = dialect.name === 'omp';
+  const agent = dialect.name;
+  const extras: ConformanceExtra[] = [];
+
+  // ----------------------------------------------------------------- create
+  extras.push({
+    title: 'create applies the model, thinking level and name, in that order, before it reads the state back',
+    async run(context) {
+      const fake = asFake(context);
+      const id = fake.prepareCreate();
+      const cwd = fake.workspace('create-order');
+      const mark = fake.ledger.mark();
+      const created = await post(context, `/api/sessions/${agent}`, {
+        directory: cwd,
+        title: 'Named at create',
+        model: { providerID: 'fake', modelID: 'pi-reason', reasoningEffort: 'high' },
+      });
+      expect(created.status, created.text).toBe(200);
+      expect(created.body.session.id).toBe(id);
+      expect(created.body.session.currentModel).toEqual({ providerID: 'fake', modelID: 'pi-reason', reasoningEffort: 'high' });
+      const start = fake.ledger.spawns(mark).find((entry) => entry.cwd === cwd)!;
+      expect(start.argv).toContain('--mode');
+      expect(start.session).toBeNull();
+      // The runtime is told the exact model and level before anything reads the state the broker publishes.
+      const commands = commandsOf(fake, start.pid, mark);
+      expect(commands.map((command) => command.type)).toEqual([
+        'get_state', 'set_model', 'set_thinking_level', 'get_state', 'set_session_name', 'get_state',
+      ]);
+      expect(commands[1]).toMatchObject({ provider: 'fake', modelId: 'pi-reason' });
+      expect(commands[2]).toMatchObject({ level: 'high' });
+      expect(commands[4]).toMatchObject({ name: 'Named at create' });
+      // What the runtime would not have written for a session with no turn yet is on disk for the next process.
+      const entries = readEntries(piFileOf(id));
+      expect(entries.some((entry) => entry.type === 'session' && entry.cwd === cwd)).toBe(true);
+      expect(JSON.stringify(entries)).toContain('Named at create');
+      const row = await context.client.waitForSession((candidate) => candidate.id === id && candidate.title === 'Named at create');
+      expect(row.currentModel).toMatchObject({ providerID: 'fake', modelID: 'pi-reason' });
+    },
+  });
+
+  // ------------------------------------------------------------- fork and clone
+  if (omp) {
+    extras.push({
+      title: 'omp offers neither fork nor clone: both are refused before any runtime starts',
+      async run(context) {
+        const fake = asFake(context);
+        const stored = fake.seedSession({ title: 'no fork on omp' });
+        await context.client.waitForSession((row) => row.id === stored.id);
+        const mark = fake.ledger.mark();
+        const fork = await post(context, `/api/sessions/${agent}/${stored.id}/fork`, { messageId: 'any' });
+        const clone = await post(context, `/api/sessions/${agent}/${stored.id}/clone`);
+        expect([fork.status, clone.status]).toEqual([501, 501]);
+        expect(fake.ledger.spawns(mark)).toEqual([]);
+        const agents = (await context.client.get(`/api/agents?contractRevision=${BROKER_CONTRACT_REVISION}`)).body;
+        const row = (Array.isArray(agents) ? agents : agents.agents).find((candidate: any) => candidate.id === agent);
+        expect([row.canFork, row.canClone]).toEqual([false, false]);
+      },
+    });
+  } else {
+    extras.push({
+      title: 'fork and clone start a new session from a stored one, and a bare fork is the runtime\'s clone',
+      async run(context) {
+        const fake = asFake(context);
+        const source = fake.seedSession({ title: 'fork source', turns: 2 });
+        await context.client.waitForSession((row) => row.id === source.id);
+        const sourceFile = piFileOf(source.id);
+        const before = readFileSync(sourceFile, 'utf8');
+        const userEntries = readEntries(sourceFile).filter((entry) => entry.type === 'message' && entry.message?.role === 'user');
+        const mark = fake.ledger.mark();
+
+        // Fork at the second prompt: the copy holds the conversation before it.
+        const forked = await post(context, `/api/sessions/${agent}/${source.id}/fork`, { messageId: userEntries[1].id });
+        expect(forked.status, forked.text).toBe(200);
+        const forkRow = forked.body.session;
+        expect(forkRow.id).not.toBe(source.id);
+        expect(forkRow.control?.drive?.supported).toBe(true);
+        const forkCommand = fake.ledger.commands('fork', mark)[0]!;
+        expect(forkCommand.frame).toMatchObject({ type: 'fork', entryId: userEntries[1].id });
+        // The runtime that forked was the one holding the source session.
+        expect(fake.ledger.spawns(mark).some((entry) => entry.pid === forkCommand.pid && entry.session === sourceFile)).toBe(true);
+        const forkHistory = await context.client.attach(agent, forkRow.id);
+        const forkMessages = (await forkHistory.waitForKind('history')).messages as any[];
+        expect(forkMessages.filter((message) => message.type === 'user-message').map(text)).toEqual([source.texts[0]!]);
+        forkHistory.close();
+
+        // A bare fork has no fork RPC of its own: it is the runtime's clone, at the current leaf.
+        const bareMark = fake.ledger.mark();
+        const bare = await post(context, `/api/sessions/${agent}/${source.id}/fork`);
+        expect(bare.status, bare.text).toBe(200);
+        expect(fake.ledger.commands('fork', bareMark)).toEqual([]);
+        expect(fake.ledger.commands('clone', bareMark).length).toBe(1);
+
+        const clone = await post(context, `/api/sessions/${agent}/${source.id}/clone`);
+        expect(clone.status, clone.text).toBe(200);
+        const cloneHistory = await context.client.attach(agent, clone.body.session.id);
+        const cloneMessages = (await cloneHistory.waitForKind('history')).messages as any[];
+        expect(cloneMessages.filter((message) => message.type === 'user-message').map(text)).toEqual([source.texts[0]!, source.texts[2]!]);
+        cloneHistory.close();
+        // Every copy is its own session in the roster; the source is untouched.
+        const ids = [forkRow.id, bare.body.session.id, clone.body.session.id];
+        expect(new Set([source.id, ...ids]).size).toBe(4);
+        for (const copy of ids) await context.client.waitForSession((row) => row.id === copy);
+        expect(readFileSync(sourceFile, 'utf8')).toBe(before);
+      },
+    });
+
+    extras.push({
+      title: 'a fork a runtime extension cancels is refused without a copy, and a failed one leaks no native text',
+      async run(context) {
+        const fake = asFake(context);
+        const source = fake.seedSession({ title: 'fork cancelled', turns: 2 });
+        await context.client.waitForSession((row) => row.id === source.id);
+        const userEntries = readEntries(piFileOf(source.id)).filter((entry) => entry.type === 'message' && entry.message?.role === 'user');
+        const rowsBefore = (await context.client.sessions({ refresh: true })).filter((row) => row.tool === agent).length;
+        fake.patchConfig({ cancelFork: true });
+        try {
+          const cancelled = await post(context, `/api/sessions/${agent}/${source.id}/fork`, { messageId: userEntries[1].id });
+          expect(cancelled.status, cancelled.text).toBe(502);
+          expect(cancelled.body.error).toBe('native session fork failed');
+          const clone = await post(context, `/api/sessions/${agent}/${source.id}/clone`);
+          expect(clone.status).toBe(502);
+        } finally {
+          fake.patchConfig({ cancelFork: false });
+        }
+        // A fork point that is not an entry of the session is refused by the runtime, in words with no path or id in them.
+        const bad = await post(context, `/api/sessions/${agent}/${source.id}/fork`, { messageId: 'not-an-entry' });
+        expect(bad.status).toBe(502);
+        expect(bad.text).not.toContain(piFileOf(source.id));
+        const rowsAfter = (await context.client.sessions({ refresh: true })).filter((row) => row.tool === agent).length;
+        expect(rowsAfter).toBe(rowsBefore);
+      },
+    });
+
+    extras.push({
+      title: 'a subagent session cannot be forked: it belongs to its parent run',
+      async run(context) {
+        const fake = asFake(context);
+        const parent = fake.seedSession({ title: 'fork parent' });
+        const child = fake.seedSession({ title: 'fork child', childOf: parent });
+        await context.client.waitForSession((row) => row.id === child.id);
+        const mark = fake.ledger.mark();
+        const refused = await post(context, `/api/sessions/${agent}/${child.id}/fork`);
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('SESSION_AGENT_OWNED');
+        expect(fake.ledger.spawns(mark)).toEqual([]);
+      },
+    });
+  }
+
+  // ------------------------------------------------------------------ rename
+  extras.push({
+    title: omp
+      ? 'rename trims, persists a title_change, fails without native text, and cannot clear an omp title'
+      : 'rename trims, persists a session_info, fails without native text, and can clear a Pi title',
+    async run(context) {
+      const fake = asFake(context);
+      const stored = fake.seedSession({ title: 'before rename' });
+      await context.client.waitForSession((row) => row.id === stored.id);
+      const mark = fake.ledger.mark();
+      const renamed = await context.client.request('PATCH', `/api/sessions/${agent}/${stored.id}/rename`, { title: '  New name  ' });
+      expect(renamed.status, renamed.text).toBe(200);
+      expect(renamed.body.title).toBe('New name');
+      expect(fake.ledger.commands('set_session_name', mark)[0]!.frame).toMatchObject({ name: 'New name' });
+      // The name is a durable entry in the dialect's own shape.
+      const entry = readEntries(piFileOf(stored.id)).filter((row) => row.type === (omp ? 'title_change' : 'session_info')).at(-1);
+      expect(omp ? entry?.title : entry?.name).toBe('New name');
+      expect(readFileSync(piFileOf(stored.id), 'utf8')).not.toContain(omp ? '"session_info"' : '"title_change"');
+      await context.client.waitForSession((row) => row.id === stored.id && row.title === 'New name');
+
+      // A native failure reaches the client as a bare failure: no runtime text, path or credential.
+      const failed = await context.client.request('PATCH', `/api/sessions/${agent}/${stored.id}/rename`, { title: 'fail-secret' });
+      expect(failed.status).toBe(502);
+      for (const leak of ['FAKE_RUNTIME_SECRET', 'sk-fixture-secret', '/root/.pi']) expect(failed.text).not.toContain(leak);
+
+      // Clearing: Pi drops the name, omp's runtime rejects an empty one and the title stays.
+      const cleared = await context.client.request('PATCH', `/api/sessions/${agent}/${stored.id}/rename`, { title: null });
+      if (omp) {
+        expect(cleared.status).toBe(502);
+        expect((await context.client.waitForSession((row) => row.id === stored.id)).title).toBe('New name');
+      } else {
+        expect(cleared.status, cleared.text).toBe(200);
+        await context.client.waitForSession((row) => row.id === stored.id && row.title !== 'New name');
+      }
+    },
+  });
+
+  // ------------------------------------------------------------- runs and retries
+  extras.push({
+    title: 'a retried turn keeps one running summary key and closes once; a retry that gives up ends in one error',
+    async run(context) {
+      const session = await context.drivableSession('retry');
+      const stream = await context.openDrive(session);
+      const from = stream.frames.length;
+      expect((await context.prompt(stream, '[[retry]] flaky provider')).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: flaky provider');
+      const banner = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'status'
+        && String(frame.message.detail ?? '').startsWith('Retrying 1/3'), { after: from });
+      expect(String(banner.message.detail)).toContain('429 rate limited');
+      await eventually(() => [...terminals(stream, from)].some(([, statuses]) => statuses.includes('done')), { what: 'the retried turn to close' });
+      const retried = [...terminals(stream, from)];
+      expect(retried.length).toBe(1);
+      expect(retried[0]![1].filter((status) => status !== 'running')).toEqual(['done']);
+
+      const mark = stream.frames.length;
+      expect((await context.prompt(stream, '[[retryfail]] hopeless provider')).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'error' && String(message.message).startsWith('API retry gave up'));
+      await eventually(() => [...terminals(stream, mark)].some(([, statuses]) => statuses.includes('error')), { what: 'the failed turn to close' });
+      const failed = [...terminals(stream, mark)];
+      expect(failed.length).toBe(1);
+      expect(failed[0]![1].filter((status) => status !== 'running')).toEqual(['error']);
+      // The banner message is one line: the runtime's multi-line detail does not leak a second line.
+      const gaveUp = stream.messages().find((message) => message.type === 'error' && String(message.message).startsWith('API retry gave up'));
+      expect(String(gaveUp.message)).not.toContain('retry-after');
+      // The session is usable straight away.
+      expect((await context.prompt(stream, 'after the failure')).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: after the failure');
+      stream.close();
+    },
+  });
+
+  extras.push({
+    title: 'compaction is asked of the runtime and every client re-reads the rewritten history',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('compact');
+      const owner = await context.openDrive(session);
+      const tab = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+      await tab.waitForKind('session');
+      expect((await context.prompt(owner, 'before compaction')).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+      const mark = fake.ledger.mark();
+      const fromOwner = owner.frames.length;
+      const fromTab = tab.frames.length;
+      const reply = await owner.sendAndAwait({ kind: 'command', name: 'compact', args: 'keep the plan' });
+      expect(reply.kind).toBe('ack');
+      await eventually(() => fake.ledger.commands('compact', mark).length === 1, { what: 'the runtime to receive compact' });
+      expect(fake.ledger.commands('compact', mark)[0]!.frame).toMatchObject({ type: 'compact', customInstructions: 'keep the plan' });
+      // The compaction rewrote the file, so every client reloads its history rather than patching it.
+      for (const [stream, after] of [[owner, fromOwner], [tab, fromTab]] as const) {
+        await stream.waitForFrame((frame) => frame.kind === 'history', { after, what: 'a history reload after compaction' });
+        await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'status' && frame.message.status === 'idle', { after });
+      }
+      expect((await context.prompt(owner, 'after compaction')).kind).toBe('ack');
+      await tab.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: after compaction');
+      owner.close();
+      tab.close();
+    },
+  });
+
+  // ------------------------------------------------------- extension dialogs
+  extras.push({
+    title: 'an extension select is a question card answered with the user\'s own choice, a text dialog takes free text, and a dismissal cancels',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('dialogs');
+      const owner = await context.openDrive(session);
+      const mark = fake.ledger.mark();
+
+      const select = context.prompt(owner, '[[question]] pick a path');
+      const card = await owner.waitForMessage((message) => message.type === 'question-request' && String(message.requestId).startsWith('question-'));
+      expect(card.questions[0].options.map((option: any) => option.label)).toEqual(['Left', 'Right']);
+      expect(owner.messages().some((message) => message.type === 'permission-request')).toBe(false);
+      // A late tab holds the open card exactly once.
+      const late = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+      await late.waitForMessage((message) => message.type === 'question-request' && message.requestId === card.requestId);
+      expect((await late.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Right']] })).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'question-resolved' && message.requestId === card.requestId);
+      expect((await select).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('answered Right'));
+      expect(fake.ledger.commands('extension_ui_response', mark).map((entry) => entry.frame)).toEqual([
+        { type: 'extension_ui_response', id: card.requestId, value: 'Right' },
+      ]);
+
+      // A free-text dialog arrives as a question with no options; the typed text is the value.
+      const typedMark = fake.ledger.mark();
+      const typed = context.prompt(owner, '[[input]] name it');
+      const input = await owner.waitForMessage((message) => message.type === 'question-request' && String(message.requestId).endsWith('-input'));
+      expect(input.questions[0].options).toEqual([]);
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: input.requestId, answers: [['Moby']] })).kind).toBe('ack');
+      expect((await typed).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('typed Moby'));
+      expect(fake.ledger.commands('extension_ui_response', typedMark)[0]!.frame).toMatchObject({ id: input.requestId, value: 'Moby' });
+
+      // Dismissing a question cancels the dialog; denying a confirm cancels it too and the runtime says so.
+      const rejectedMark = fake.ledger.mark();
+      const rejected = context.prompt(owner, '[[question]] pick again');
+      const second = await owner.waitForMessage((message) => message.type === 'question-request' && message.requestId !== card.requestId && message.requestId !== input.requestId);
+      expect((await owner.sendAndAwait({ kind: 'reject-question', requestId: second.requestId })).kind).toBe('ack');
+      expect((await rejected).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('question unanswered'));
+      expect(fake.ledger.commands('extension_ui_response', rejectedMark)[0]!.frame).toMatchObject({ id: second.requestId, cancelled: true });
+
+      const deniedMark = fake.ledger.mark();
+      const denied = context.prompt(owner, '[[permission]] risky');
+      const confirm = await owner.waitForMessage((message) => message.type === 'permission-request' && message.requestId.startsWith('permission-')
+        && !owner.messages().some((other) => other.type === 'permission-resolved' && other.requestId === message.requestId));
+      expect((await owner.sendAndAwait({ kind: 'approve', requestId: confirm.requestId, decision: 'reject' })).kind).toBe('ack');
+      expect((await denied).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('permission deny'));
+      expect(fake.ledger.commands('extension_ui_response', deniedMark)[0]!.frame).toMatchObject({ id: confirm.requestId, cancelled: true });
+      owner.close();
+      late.close();
+    },
+  });
+
+  extras.push({
+    title: 'a notification raises no card, and a blocking dialog the product does not know is cancelled rather than left hanging',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('quiet dialogs');
+      const stream = await context.openDrive(session);
+      const mark = fake.ledger.mark();
+      const heldBefore = stream.messages().length;
+      expect((await context.prompt(stream, '[[notify]] [[unknowndialog]] quiet')).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: quiet');
+      const live = stream.messages().slice(heldBefore);
+      expect(live.some((message) => message.type === 'permission-request' || message.type === 'question-request')).toBe(false);
+      // The unknown dialog was answered with a cancel at once: the turn did not wait on a user.
+      const cancelled = fake.ledger.commands('extension_ui_response', mark).map((entry) => entry.frame);
+      expect(cancelled.length).toBe(1);
+      expect(cancelled[0]).toMatchObject({ cancelled: true });
+      expect(String(cancelled[0]!.id).startsWith('dialog-')).toBe(true);
+      const skipped = stream.messages().find((message) => message.type === 'event' && message.name === 'dialog-skipped');
+      expect(skipped?.payload?.method).toBe('custom-widget');
+      stream.close();
+    },
+  });
+
+  // -------------------------------------------------------- tools and keys
+  extras.push({
+    title: 'a tool call and its result reach the client, and every row streamed live carries the key its session-file copy has',
+    async run(context) {
+      const session = await context.drivableSession('keys');
+      const owner = await context.openDrive(session);
+      const from = owner.frames.length;
+      expect((await context.prompt(owner, '[[tool]] list files', { clientMessageId: 'keys-client' })).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: list files');
+      await eventually(() => [...terminals(owner, from)].some(([, statuses]) => statuses.includes('done')), { what: 'the turn to close' });
+      const live = owner.frames.slice(from).filter((frame) => frame.kind === 'message').map((frame) => frame.message);
+      const call = live.find((message) => message.type === 'tool-call');
+      const result = live.find((message) => message.type === 'tool-result');
+      expect(call).toMatchObject({ toolName: 'bash', args: { command: 'echo fixture' } });
+      expect(result).toMatchObject({ callId: call.callId, toolName: 'bash', isError: false, exitCode: 0, result: 'fixture\n' });
+
+      // A fresh reader of the file holds the same rows under the same keys.
+      const fresh = await context.client.attach(agent, session.id);
+      const history = (await fresh.waitForKind('history')).messages as any[];
+      for (const row of live.filter((message) => message.type === 'model-output' || message.type === 'thinking')) {
+        expect(history.some((entry) => entry.type === row.type && entry.key === row.key && text(entry).includes('answer: list files')), `${row.type} ${row.key}`).toBe(true);
+      }
+      expect(history.some((entry) => entry.type === 'tool-call' && entry.callId === call.callId)).toBe(true);
+      expect(history.some((entry) => entry.type === 'tool-result' && entry.callId === result.callId && entry.exitCode === 0)).toBe(true);
+      const own = history.filter((entry) => entry.type === 'user-message' && text(entry) === '[[tool]] list files');
+      expect(own.length).toBe(1);
+      const sent = live.find((message) => message.type === 'user-message' && message.clientKey === 'keys-client');
+      if (omp) {
+        // omp persists the sender's key and clientKey on the entry itself.
+        expect(own[0].key).toBe(sent.key);
+        expect(own[0].clientKey).toBe('keys-client');
+      }
+      // Every turn closed under one key, matching the summary a reload computes for it.
+      const summaries = history.filter((entry) => entry.type === 'run-summary' && entry.userMessageKey === own[0].key);
+      expect(summaries.length).toBe(1);
+      expect(summaries[0].status).toBe('done');
+      fresh.close();
+      owner.close();
+    },
+  });
+
+  extras.push({
+    title: 'the runtime\'s native context usage and session stats ride every finished turn, in the shape Pi documents',
+    async run(context) {
+      const session = await context.drivableSession('stats');
+      const owner = await context.openDrive(session);
+      expect((await context.prompt(owner, 'measure me')).kind).toBe('ack');
+      const usage = await owner.waitForMessage((message) => message.type === 'metadata-update' && message.key === 'contextUsage');
+      expect(usage.value).toMatchObject({ max: 200_000 });
+      expect(usage.value.used).toBeGreaterThan(1000);
+      const stats = await owner.waitForMessage((message) => message.type === 'metadata-update' && message.key === 'sessionStats');
+      // Cost sits at the root and the window inside contextUsage: not the other way round.
+      expect(stats.value.cost).toBe(0.0042);
+      expect(stats.value.tokens).toMatchObject({ input: expect.any(Number), total: expect.any(Number) });
+      expect(stats.value.contextUsage).toMatchObject({ tokens: usage.value.used, contextWindow: 200_000 });
+      // A client that joins afterwards is told the same without waiting for another turn.
+      const late = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+      const replayed = await late.waitForMessage((message) => message.type === 'metadata-update' && message.key === 'contextUsage');
+      expect(replayed.value.max).toBe(200_000);
+      late.close();
+      owner.close();
+    },
+  });
+
+  // -------------------------------------------------------- prompts and files
+  extras.push({
+    title: 'a prompt on another model and thinking level switches the runtime first; a switch it refuses delivers nothing',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('switch');
+      const stream = await context.openDrive(session);
+      const mark = fake.ledger.mark();
+      expect((await context.prompt(stream, 'think hard', { model: { providerID: 'fake', modelID: 'pi-reason', reasoningEffort: 'high' } })).kind).toBe('ack');
+      // (The broker may check the model against the runtime's catalog first.)
+      const types = fake.ledger.since(mark).filter((entry) => entry.kind === 'recv').map((entry) => entry.frame!.type)
+        .filter((type) => type !== 'get_available_models');
+      expect(types.slice(0, 4)).toEqual(['get_state', 'set_model', 'set_thinking_level', 'prompt']);
+      expect(fake.ledger.commands('set_model', mark)[0]!.frame).toMatchObject({ provider: 'fake', modelId: 'pi-reason' });
+      expect(fake.ledger.commands('set_thinking_level', mark)[0]!.frame).toMatchObject({ level: 'high' });
+      await stream.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: think hard');
+
+      // A model the runtime does not have: the prompt is refused, nothing reaches the runtime, no row is left queued.
+      const refusedMark = fake.ledger.mark();
+      const refused = await context.prompt(stream, 'on a missing model', { model: { providerID: 'fake', modelID: 'does-not-exist' } });
+      expect(refused.kind).toBe('nack');
+      expect(fake.ledger.requests('session/prompt', refusedMark)).toEqual([]);
+      expect((await context.prompt(stream, 'still works')).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: still works');
+      // The refused prompt's optimistic row was withdrawn, and the next turn is linked to its own prompt.
+      const stuck = stream.messages().filter((message) => message.type === 'user-message' && text(message) === 'on a missing model' && message.queued !== true);
+      expect(stuck).toEqual([]);
+      stream.close();
+    },
+  });
+
+  extras.push({
+    title: 'a prompt that arrives while a run is open is sent as a steer, once, and answered in order',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('steer');
+      const stream = await context.openDrive(session);
+      const tab = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+      await tab.waitForKind('session');
+      const mark = fake.ledger.mark();
+      const first = context.prompt(stream, '[[hold:steer-1]] first');
+      await eventually(() => fake.ledger.commands('prompt', mark).length === 1, { what: 'the first prompt to reach the runtime' });
+      const second = context.prompt(tab, 'steered second');
+      await eventually(() => fake.ledger.commands('prompt', mark).length === 2, { what: 'the steer to reach the runtime' });
+      const [one, two] = fake.ledger.commands('prompt', mark).map((entry) => entry.frame!);
+      expect(one!.streamingBehavior).toBeUndefined();
+      expect(two!.streamingBehavior).toBe('steer');
+      // The steer is a row both clients hold while it waits.
+      await stream.waitForMessage((message) => message.type === 'user-message' && text(message) === 'steered second');
+      fake.release('steer-1');
+      expect((await first).kind).toBe('ack');
+      expect((await second).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: steered second');
+      // Two prompts, two turns, each closed once under its own key.
+      await eventually(() => [...terminals(stream, 0)].filter(([, statuses]) => statuses.includes('done')).length >= 2, { what: 'both turns to close' });
+      stream.close();
+      tab.close();
+    },
+  });
+
+  extras.push({
+    title: 'a file sent in Drive lands in the workspace inbox and the runtime is told its path in the turn',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('send file');
+      const stream = await context.openDrive(session);
+      const mark = fake.ledger.mark();
+      const reply = await stream.sendAndAwait({
+        kind: 'file', name: 'notes.txt', mimeType: 'text/plain', data: Buffer.from('file-contents-ok').toString('base64'),
+      });
+      expect(reply.kind, JSON.stringify(reply)).toBe('ack');
+      const stored = join(session.cwd, '.cosyncing', 'inbox', 'notes.txt');
+      expect(existsSync(stored)).toBe(true);
+      expect(readFileSync(stored, 'utf8')).toBe('file-contents-ok');
+      await eventually(() => fake.ledger.promptTexts(mark).length === 1, { what: 'the runtime to receive the file turn' });
+      const delivered = fake.ledger.promptTexts(mark)[0]!;
+      expect(delivered).toContain('Attached file(s)');
+      expect(delivered).toContain(stored);
+      expect(delivered).toContain('notes.txt (text/plain)');
+      stream.close();
+    },
+  });
+
+  // ---------------------------------------------------- terminal handoff
+  extras.push({
+    title: 'the terminal handoff command names the exact session file and the executable that was verified',
+    async run(context) {
+      const fake = asFake(context);
+      const stored = fake.seedSession({ title: 'handoff' });
+      const row = await context.client.waitForSession((candidate) => candidate.id === stored.id);
+      const command = row.control.terminalSync.command as string;
+      // The broker's own address rides along, because a terminal started by hand cannot guess it.
+      expect(command).toBe(`COSYNCING_BROKER='${context.broker.url}' '${fake.executable}' --session '${piFileOf(stored.id)}'`);
+      expect(row.control.terminalSync.syncAvailable).toBe(true);
+      expect(row.control.terminalSync.active).toBe(false);
+      void piUuidOf;
+    },
+  });
+
+  // ------------------------------------------------ correlation on the wire
+  extras.push({
+    title: omp
+      ? 'omp is sent a correlated prompt: the app\'s key, client key and clock travel inside the native command'
+      : 'Pi is sent the prompt as plain text; the app\'s keys never enter the native command',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('correlation');
+      const stream = await context.openDrive(session);
+      const mark = fake.ledger.mark();
+      expect((await context.prompt(stream, 'carry my key', { clientMessageId: 'wire-client' })).kind).toBe('ack');
+      const command = fake.ledger.commands('prompt', mark)[0]!.frame!;
+      if (omp) {
+        expect(String(command.message).startsWith(PI_COLLAB_PROMPT_PREFIX)).toBe(true);
+        const payload = JSON.parse(Buffer.from(String(command.message).slice(PI_COLLAB_PROMPT_PREFIX.length), 'base64url').toString('utf8'));
+        expect(payload).toMatchObject({ text: 'carry my key', clientKey: 'wire-client' });
+        expect(String(payload.messageKey).startsWith('u:remote:')).toBe(true);
+        expect(typeof payload.sentAt).toBe('number');
+        // The broker accepted the prompt only once the runtime's own message carried that correlation back.
+        const echoed = await stream.waitForMessage((message) => message.type === 'user-message' && message.key === payload.messageKey && message.queued === false);
+        expect(echoed.clientKey).toBe('wire-client');
+      } else {
+        expect(command.message).toBe('carry my key');
+        expect(promptText(String(command.message))).toBe('carry my key');
+      }
+      stream.close();
+    },
+  });
+
+  // --------------------------------------------------------- roster details
+  extras.push({
+    title: omp
+      ? 'omp titles follow the leading slot and later title_change entries, last write wins, and model ids split at the first slash'
+      : 'Pi titles follow session_info entries, last write wins, and the model comes from the entry\'s own fields',
+    async run(context) {
+      const fake = asFake(context);
+      const cwd = fake.workspace('title-rules');
+      const uuid = crypto.randomUUID();
+      const at = Date.now() - 60_000;
+      const file = join(fake.sessionsRoot, `--title-rules-${uuid.slice(0, 6)}--`, `${new Date(at).toISOString().replace(/[:.]/g, '-')}_${uuid}.jsonl`);
+      const model = omp ? { provider: 'openrouter', id: 'anthropic/claude-x' } : { provider: 'fake', id: 'pi-reason' };
+      // The first title a file carries: omp's leading slot, Pi's first session_info.
+      appendLines(file, omp ? piHeader('omp', uuid, cwd, at, 'Leading slot title') : [...piHeader('pi', uuid, cwd, at), piTitleEntry('pi', null, 'First title', at)]);
+      appendLines(file, [piModelEntry(dialect.name, null, model, at)]);
+      const id = piRowId(file);
+      const first = await context.client.waitForSession((row) => row.id === id);
+      expect(first.title).toBe(omp ? 'Leading slot title' : 'First title');
+      expect(first.currentModel).toMatchObject({ providerID: model.provider, modelID: model.id });
+      appendLines(file, [piTitleEntry(dialect.name, null, 'Second title', Date.now())]);
+      await context.client.waitForSession((row) => row.id === id && row.title === 'Second title');
+      appendLines(file, [piTitleEntry(dialect.name, null, 'Third title', Date.now() + 1)]);
+      const last = await context.client.waitForSession((row) => row.id === id && row.title === 'Third title');
+      expect(last.title).toBe('Third title');
+    },
+  });
+
+  extras.push({
+    title: 'a subagent of a subagent is published once, under its direct parent, observe-only',
+    async run(context) {
+      const fake = asFake(context);
+      const root = fake.seedSession({ title: 'tree root' });
+      const child = fake.seedSession({ title: 'tree child', childOf: root });
+      const grandchild = fake.seedSession({ title: 'tree grandchild', childOf: child });
+      const rows = await context.client.waitForSession((row) => row.id === grandchild.id);
+      const all = (await context.client.sessions({ refresh: true })).filter((row) => [root.id, child.id, grandchild.id].includes(row.id));
+      expect(all.map((row) => row.id).sort()).toEqual([root.id, child.id, grandchild.id].sort());
+      expect(rows.origin).toBe('subagent');
+      expect(rows.parentThreadId).toBe(child.storeKey);
+      expect(rows.control?.drive?.supported).toBe(false);
+      expect(all.find((row) => row.id === child.id).parentThreadId).toBe(root.storeKey);
+      expect(all.find((row) => row.id === root.id).origin).toBeUndefined();
+      // Driving a subagent is refused, whatever the roster says.
+      const refused = await context.client.attach(agent, grandchild.id, { mode: 'resume', reason: 'takeover' });
+      const outcome = await refused.waitForFrame((frame) => frame.kind === 'error' || frame.kind === 'attach-conflict' || frame.kind === 'session');
+      if (outcome.kind === 'session') expect(outcome.authority?.canMutate).toBe(false);
+      refused.close();
+    },
+  });
+
+  void writeFileSync;
+  return extras;
+}

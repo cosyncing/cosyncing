@@ -1,0 +1,248 @@
+{
+  "events": [
+    {
+      "type": "message.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "info": {
+          "id": "msg_u9",
+          "role": "a-role-from-the-future",
+          "time": {
+            "created": 9000
+          }
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_x",
+          "type": "text",
+          "text": "orphan part",
+          "time": {
+            "start": 4000,
+            "end": 4001
+          },
+          "messageID": "msg_unknown",
+          "sessionID": "$SESSION"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": null
+      }
+    },
+    {
+      "type": "message.part.delta",
+      "properties": {
+        "sessionID": "$SESSION",
+        "messageID": "msg_unknown"
+      }
+    },
+    {
+      "type": "message.part.delta",
+      "properties": {
+        "sessionID": "$SESSION",
+        "partID": "prt_x",
+        "delta": null
+      }
+    },
+    {
+      "type": "message.updated",
+      "properties": null
+    },
+    {
+      "properties": {
+        "sessionID": "$SESSION"
+      }
+    },
+    {
+      "type": "message.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "info": {
+          "id": "msg_u2",
+          "role": "user",
+          "time": {
+            "created": 5000
+          },
+          "sessionID": "$SESSION"
+        }
+      }
+    },
+    {
+      "type": "message.part.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "part": {
+          "id": "prt_msg_u2",
+          "type": "text",
+          "text": "prompt after unknown events",
+          "time": {
+            "start": 5000
+          },
+          "sessionID": "$SESSION",
+          "messageID": "msg_u2"
+        }
+      }
+    }
+  ],
+  "settled": [
+    {
+      "info": {
+        "id": "msg_u1",
+        "role": "user",
+        "time": {
+          "created": 1000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u1",
+          "type": "text",
+          "text": "real prompt",
+          "time": {
+            "start": 1000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_a1",
+        "role": "assistant",
+        "parentID": "msg_u1",
+        "time": {
+          "created": 1001,
+          "completed": 1003
+        },
+        "finish": "stop",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "read": 1,
+            "write": 2
+          }
+        },
+        "cost": 0.01,
+        "aNewFieldFromTheFuture": {
+          "nested": true
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_t1",
+          "type": "text",
+          "text": "answer",
+          "time": {
+            "start": 1001,
+            "end": 1002
+          }
+        },
+        {
+          "id": "prt_future",
+          "type": "a-part-type-from-the-future",
+          "blob": 1
+        },
+        {
+          "id": "prt_tf",
+          "type": "tool",
+          "tool": "tool_from_the_future",
+          "callID": "call_f",
+          "state": {
+            "status": "completed",
+            "input": {
+              "x": 1
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "ok"
+          }
+        },
+        {
+          "id": "prt_ts",
+          "type": "tool",
+          "tool": "edit",
+          "callID": "call_s",
+          "state": {
+            "status": "a-status-from-the-future",
+            "input": {
+              "filePath": "/w/a.ts"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            }
+          }
+        },
+        {
+          "id": "prt_null",
+          "type": "tool",
+          "tool": null,
+          "state": null
+        },
+        {
+          "id": "prt_noid",
+          "type": "text",
+          "text": "part without time"
+        },
+        {
+          "type": "text",
+          "text": "part with no id"
+        },
+        null,
+        7,
+        "garbage"
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_unknown",
+        "role": "assistant",
+        "time": {
+          "created": 4000,
+          "completed": 4001
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_x",
+          "type": "text",
+          "text": "orphan part",
+          "time": {
+            "start": 4000,
+            "end": 4001
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_u2",
+        "role": "user",
+        "time": {
+          "created": 5000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u2",
+          "type": "text",
+          "text": "prompt after unknown events",
+          "time": {
+            "start": 5000
+          }
+        }
+      ]
+    }
+  ]
+}

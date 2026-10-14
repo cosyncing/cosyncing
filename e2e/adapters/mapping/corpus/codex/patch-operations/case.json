@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "apply_patch (custom_tool_call) and patch_apply_end: create, update, delete, rename and multi-file patches map to git-style headers, titles and per-file fileChanges; an update with only new-file content is never fabricated as a create, absolute paths get a single-slash header",
+  "userTexts": [
+    "edit files"
+  ],
+  "sessionId": "efcaee66-b9dd-4617-8617-efcaee66b9dd"
+}

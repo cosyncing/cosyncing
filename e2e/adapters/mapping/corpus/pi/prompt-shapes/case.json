@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "prompt text is preserved verbatim (whitespace), an image-only prompt is a row with its image count and an empty prompt is no row, assistant whitespace and thinking blocks map without empty blocks; a cosyncing-remote custom prompt takes its correlated key and client key (also image-only), duplicate correlations fall back to entry keys, a native skill envelope shows as /skill:<name> not its expansion, display-only and foreign custom messages never become prompts",
+  "userTexts": [
+    "  indented\n\n  prompt with trailing space  \n",
+    "",
+    "remote prompt",
+    "first duplicate",
+    "second duplicate",
+    "/skill:review src"
+  ],
+  "sessionId": "6510b102-5e63-4b73-8b73-6510b1025e63"
+}

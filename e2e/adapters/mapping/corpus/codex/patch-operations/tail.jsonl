@@ -1,0 +1,14 @@
+{"type":"response_item","payload":{"type":"function_call","name":"apply_patch","call_id":"del2","arguments":"{}"}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"del2","success":true,"changes":{"src/bye.ts":{"type":"delete","content":"line one\nline two"}}}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"del2","output":"ok"}}
+{"type":"response_item","payload":{"type":"function_call","name":"apply_patch","call_id":"up1","arguments":"{}"}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"up1","success":true,"changes":{"src/edit.ts":{"type":"update","content":"line one\nline two\nline three"}}}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"up1","output":"ok"}}
+{"type":"response_item","payload":{"type":"function_call","name":"apply_patch","call_id":"up2","arguments":"{}"}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"up2","success":true,"changes":{"src/e2.ts":{"type":"update","unified_diff":"@@ -1,1 +1,1 @@\n-was\n+now"}}}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"up2","output":"ok"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"r1","input":"*** Begin Patch\n*** Update File: src/old.ts\n*** Move to: src/new-name.ts\n@@ header\n keep\n+added\n*** End Patch"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"r1","output":"Success"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"mf1","input":"*** Begin Patch\n*** Update File: src/one.ts\n@@ a\n keep\n-x\n+y\n*** Add File: src/two.ts\n+brand new\n*** End Patch"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"mf1","output":"Success"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"tp"}}

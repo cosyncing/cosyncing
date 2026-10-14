@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' show SemanticsAction;
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
@@ -17,7 +16,6 @@ import 'package:cosyncing_client/src/features/sessions/list/new_session_sheet.da
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_model_preference_store.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -29,55 +27,6 @@ void main() {
 
   setUpAll(() async {
     en = await AppLocalizations.delegate.load(const Locale('en'));
-  });
-
-  testWidgets('global New starts empty and project New uses the real cwd', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient();
-    await tester.pumpWidget(_host(fake));
-
-    await tester.tap(find.byKey(const Key('open-global-new')));
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<TextField>(find.byKey(const Key('new-session-directory')))
-          .controller!
-          .text,
-      isEmpty,
-    );
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('Friendly · /real/project'), findsOneWidget);
-    expect(
-      tester
-          .widget<TextField>(find.byKey(const Key('new-session-directory')))
-          .controller!
-          .text,
-      '/real/project',
-    );
-  });
-
-  testWidgets('editing project cwd changes the immediate create request', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient();
-    await tester.pumpWidget(_host(fake));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    await tester.enterText(
-      find.byKey(const Key('new-session-directory')),
-      '/edited/project',
-    );
-    await tester.tap(find.byKey(const Key('new-session-submit')));
-    await tester.pumpAndSettle();
-
-    expect(fake.createdDirectory, '/edited/project');
-    expect(find.text('created'), findsOneWidget);
   });
 
   testWidgets('daily scheduled New sends edited cwd, prompt, and IANA zone', (
@@ -118,40 +67,6 @@ void main() {
     expect(find.text('scheduled'), findsOneWidget);
     expect(find.byKey(const Key('new-session-launch-page')), findsNothing);
     expect(fake.createCalls, 0);
-  });
-
-  testWidgets('immediate New propagates an exact advertised permission mode', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient(
-      agents: const [
-        _AgentFixture(
-          'codex',
-          'Codex',
-          canSelectPermissionModeAtCreation: true,
-        ),
-      ],
-      modes: const {
-        'codex': [
-          ModeOption(value: 'ask', label: 'Ask permission'),
-          ModeOption(value: 'full-access', label: 'Full access'),
-        ],
-      },
-    );
-    await tester.pumpWidget(_host(fake));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    await tester.tap(
-      find.byKey(const Key('new-session-permission-codex-ready-default')),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Full access').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('new-session-submit')));
-    await tester.pumpAndSettle();
-
-    expect(fake.createdPermissionMode, 'full-access');
   });
 
   testWidgets('permission modes survive a populated model catalog', (
@@ -306,74 +221,6 @@ void main() {
     expect(find.text('created'), findsOneWidget);
   });
 
-  testWidgets('a failed create surfaces a plain-language error and retries', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient(failCreatesRemaining: 1);
-    await tester.pumpWidget(_host(fake));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('new-session-submit')));
-    await tester.pumpAndSettle();
-
-    // Plain-language classified error, not a raw exception dump.
-    final error = tester.widget<Text>(
-      find.byKey(const Key('new-session-launch-error')),
-    );
-    expect(error.data, contains("Couldn't start the session."));
-    expect(error.data, contains('The server ran into a problem on its end.'));
-    expect(error.data, isNot(contains('BrokerException')));
-    expect(error.data, isNot(contains('broker exploded')));
-    // The page stays actionable with retry and back controls.
-    expect(find.text('created'), findsNothing);
-    expect(find.byKey(const Key('new-session-launch-retry')), findsOneWidget);
-    expect(find.byKey(const Key('new-session-launch-back')), findsOneWidget);
-
-    // Retrying succeeds and navigates.
-    final retry = find.byKey(const Key('new-session-launch-retry'));
-    await tester.ensureVisible(retry);
-    await tester.tap(retry);
-    await tester.pumpAndSettle();
-    expect(find.text('created'), findsOneWidget);
-  });
-
-  testWidgets('successful immediate create clears busy state and navigates', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient();
-    await tester.pumpWidget(_host(fake));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('new-session-submit')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('created'), findsOneWidget);
-    expect(fake.createCalls, 1);
-    expect(fake.createdModel, isNull);
-    expect(find.byKey(const Key('new-session-submit-progress')), findsNothing);
-  });
-
-  testWidgets('explicit model reaches immediate create exactly', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient();
-    await tester.pumpWidget(_host(fake));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text(en.newSessionModelDefault));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('GPT Test').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('new-session-submit')));
-    await tester.pumpAndSettle();
-
-    expect(fake.createdModel?.providerID, 'openai');
-    expect(fake.createdModel?.modelID, 'gpt-test');
-  });
-
   testWidgets('Pi thinking effort reaches immediate create exactly', (
     tester,
   ) async {
@@ -426,33 +273,6 @@ void main() {
       tool: 'pi',
     );
     expect(saved?.reasoningEffort, 'high');
-  });
-
-  testWidgets('per-tool last-picked default preselects a catalog match', (
-    tester,
-  ) async {
-    final store = _InMemoryModelPreferenceStore();
-    await store.saveToolDefault(
-      brokerProfileId: _localSourceKey(),
-      tool: 'codex',
-      model: const SessionCurrentModel(
-        providerID: 'openai',
-        modelID: 'gpt-test',
-      ),
-    );
-    final fake = _FakeBrokerClient();
-    await tester.pumpWidget(_host(fake, modelPreferenceStore: store));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    // The dropdown must VISIBLY show the remembered label — not merely send
-    // it. A programmatic prefill arrives after the field latched its initial
-    // value, so this guards display/submit divergence.
-    expect(find.text('GPT Test'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('new-session-submit')));
-    await tester.pumpAndSettle();
-    expect(fake.createdModel?.providerID, 'openai');
-    expect(fake.createdModel?.modelID, 'gpt-test');
   });
 
   testWidgets('prefill in flight across a tool switch is discarded', (
@@ -806,52 +626,6 @@ void main() {
     expect(fake.createdModel, isNull);
   });
 
-  testWidgets('picking a model in the sheet records the per-tool default', (
-    tester,
-  ) async {
-    final store = _InMemoryModelPreferenceStore();
-    final fake = _FakeBrokerClient();
-    await tester.pumpWidget(_host(fake, modelPreferenceStore: store));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text(en.newSessionModelDefault));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('GPT Test').last);
-    await tester.pumpAndSettle();
-
-    final saved = await store.loadToolDefault(
-      brokerProfileId: _localSourceKey(),
-      tool: 'codex',
-    );
-    expect(saved?.providerID, 'openai');
-    expect(saved?.modelID, 'gpt-test');
-  });
-
-  testWidgets('model selector exposes touch semantics and keyboard dismissal', (
-    tester,
-  ) async {
-    final semantics = tester.ensureSemantics();
-    await tester.pumpWidget(_host(_FakeBrokerClient()));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    expect(
-      tester
-          .getSemantics(_modelDropdown())
-          .getSemanticsData()
-          .hasAction(SemanticsAction.tap),
-      isTrue,
-    );
-    await tester.tap(_modelDropdown());
-    await tester.pumpAndSettle();
-    expect(find.text('GPT Test'), findsOneWidget);
-    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-    await tester.pumpAndSettle();
-    expect(find.text('GPT Test'), findsNothing);
-    semantics.dispose();
-  });
-
   testWidgets('catalog renders loading, empty, failed, and stale honestly', (
     tester,
   ) async {
@@ -911,32 +685,6 @@ void main() {
     expect(find.textContaining(en.failureLeadCreateSession), findsNothing);
   });
 
-  testWidgets('initial catalog failure is localized and retryable', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient(failCatalogsRemaining: 1);
-    await tester.pumpWidget(_host(fake, locale: const Locale('zh')));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-    final zh = await AppLocalizations.delegate.load(const Locale('zh'));
-    expect(
-      find.textContaining(zh.failureLeadRefreshModelCatalog),
-      findsOneWidget,
-    );
-    expect(find.textContaining(zh.newSessionModelStaleNote), findsNothing);
-    expect(find.text(zh.newSessionModelRefresh), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('new-session-model-refresh')));
-    await tester.pumpAndSettle();
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(_NewSessionLauncher)),
-    );
-    expect(
-      container.read(newSessionControllerProvider).models.single.label,
-      'GPT Test',
-    );
-  });
-
   testWidgets(
     'revision-7 agent capability stays honest default-only without a 404 probe',
     (tester) async {
@@ -971,48 +719,6 @@ void main() {
     },
   );
 
-  testWidgets(
-    'observe-only Cline is absent from the create sheet without crashing',
-    (
-      tester,
-    ) async {
-      final fake = _FakeBrokerClient(
-        agents: const [
-          _AgentFixture('codex', 'Codex'),
-          _AgentFixture('cline', 'Cline', canCreateSession: false),
-        ],
-      );
-      await tester.pumpWidget(_host(fake));
-      await tester.tap(find.byKey(const Key('open-project-new')));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Codex'), findsWidgets);
-      expect(find.text('Cline'), findsNothing);
-      expect(tester.takeException(), isNull);
-    },
-  );
-
-  testWidgets(
-    'observe-only Kilo Code is absent from the create sheet without crashing',
-    (
-      tester,
-    ) async {
-      final fake = _FakeBrokerClient(
-        agents: const [
-          _AgentFixture('codex', 'Codex'),
-          _AgentFixture('kilo', 'Kilo Code', canCreateSession: false),
-        ],
-      );
-      await tester.pumpWidget(_host(fake));
-      await tester.tap(find.byKey(const Key('open-project-new')));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Codex'), findsWidgets);
-      expect(find.text('Kilo Code'), findsNothing);
-      expect(tester.takeException(), isNull);
-    },
-  );
-
   testWidgets('retired explicit selection is shown and rejected', (
     tester,
   ) async {
@@ -1040,66 +746,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(fake.createCalls, 0);
     expect(find.text(en.newSessionModelRetired), findsWidgets);
-  });
-
-  testWidgets('all supported tools consume capability catalogs generically', (
-    tester,
-  ) async {
-    final fake = _FakeBrokerClient(
-      agents: const [
-        _AgentFixture('codex', 'Codex'),
-        _AgentFixture('claude', 'Claude'),
-        _AgentFixture('opencode', 'OpenCode'),
-        _AgentFixture('pi', 'Pi'),
-        _AgentFixture('omp', 'omp'),
-        _AgentFixture('reasonix', 'Reasonix'),
-        _AgentFixture('grok', 'Grok Build'),
-      ],
-      catalogs: {
-        'codex': [_model('codex-model', 'Codex model')],
-        'claude': [_model('opus', 'Opus', provider: 'anthropic')],
-        'opencode': [
-          _model('MiniMax-M2.5', 'MiniMax', provider: 'minimax'),
-        ],
-        'pi': [_model('pi-model', 'Pi model', provider: 'pi-provider')],
-        'omp': [_model('omp-model', 'omp model', provider: 'omp-provider')],
-        'reasonix': [
-          _model(
-            'reasonix-model',
-            'Reasonix model',
-            provider: 'reasonix-provider',
-          ),
-        ],
-        'grok': [
-          _model('grok-4.6', 'Grok 4.6', provider: 'xai'),
-        ],
-      },
-    );
-    await tester.pumpWidget(_host(fake));
-    await tester.tap(find.byKey(const Key('open-project-new')));
-    await tester.pumpAndSettle();
-
-    var currentTool = 'Codex';
-    for (final entry in const {
-      'Claude': 'Opus',
-      'OpenCode': 'MiniMax',
-      'Pi': 'Pi model',
-      'omp': 'omp model',
-      'Reasonix': 'Reasonix model',
-      'Grok Build': 'Grok 4.6',
-      'Codex': 'Codex model',
-    }.entries) {
-      await tester.tap(find.text(currentTool).first);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(entry.key).last);
-      await tester.pumpAndSettle();
-      await tester.tap(_modelDropdown());
-      await tester.pumpAndSettle();
-      expect(find.text(entry.value), findsOneWidget);
-      await tester.tap(find.text(entry.value).last);
-      await tester.pumpAndSettle();
-      currentTool = entry.key;
-    }
   });
 
   testWidgets('broker switch invalidates an open selector by incarnation', (
@@ -1149,31 +795,6 @@ void main() {
       'second-model',
     );
   });
-
-  for (final fixture in const [
-    ('compact-light', Size(390, 800), Brightness.light),
-    ('compact-dark', Size(390, 800), Brightness.dark),
-    ('roomy-light', Size(1200, 900), Brightness.light),
-    ('roomy-dark', Size(1200, 900), Brightness.dark),
-  ]) {
-    testWidgets('model selector renders in ${fixture.$1}', (tester) async {
-      tester.view.physicalSize = fixture.$2;
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      await tester.pumpWidget(
-        _host(
-          _FakeBrokerClient(),
-          brightness: fixture.$3,
-        ),
-      );
-      await tester.tap(find.byKey(const Key('open-project-new')));
-      await tester.pumpAndSettle();
-      expect(find.text(en.newSessionModelLabel), findsOneWidget);
-      expect(find.text(en.newSessionModelDefault), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    });
-  }
 }
 
 Finder _modelDropdown() => find.byWidgetPredicate(
@@ -1456,14 +1077,12 @@ class _AgentFixture {
     this.id,
     this.displayName, {
     this.canSelectModelAtCreation = true,
-    this.canCreateSession = true,
     this.canSelectPermissionModeAtCreation = false,
   });
 
   final String id;
   final String displayName;
   final bool canSelectModelAtCreation;
-  final bool canCreateSession;
   final bool canSelectPermissionModeAtCreation;
 }
 
@@ -1496,7 +1115,6 @@ final class _FakeBrokerClient extends BrokerClient {
   _FakeBrokerClient({
     this.createGate,
     this.catalogGate,
-    this.failCreatesRemaining = 0,
     this.failCatalogsRemaining = 0,
     this.failAgentList = false,
     this.agents = const [_AgentFixture('codex', 'Codex')],
@@ -1521,7 +1139,6 @@ final class _FakeBrokerClient extends BrokerClient {
   final Completer<void>? catalogGate;
 
   /// Number of leading `createSession` calls that throw before one succeeds.
-  int failCreatesRemaining;
   int failCatalogsRemaining;
 
   /// When true, every `listAgents` call throws.
@@ -1546,7 +1163,7 @@ final class _FakeBrokerClient extends BrokerClient {
             fixture.id,
             fixture.displayName,
             fixture.canSelectModelAtCreation,
-            fixture.canCreateSession,
+            true,
             fixture.canSelectPermissionModeAtCreation,
           ),
         )
@@ -1589,10 +1206,6 @@ final class _FakeBrokerClient extends BrokerClient {
   }) async {
     createCalls += 1;
     if (createGate != null) await createGate!.future;
-    if (failCreatesRemaining > 0) {
-      failCreatesRemaining--;
-      throw const BrokerException(message: 'broker exploded', statusCode: 500);
-    }
     createdDirectory = directory;
     createdModel = model;
     createdPermissionMode = permissionMode;

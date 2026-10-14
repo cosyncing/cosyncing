@@ -1,0 +1,10 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "attach while a command runs, then its result arrives on the tail: the result must carry the call name, display class and command semantic that a resync (and Claude Observe) give it",
+  "knownBugMatch": "agree on tool-result@c1",
+  "knownBug": "Codex Observe: the tailed tool-result for a function_call read at attach is toolName \"tool\", class \"other\" with no command semantic (only exitCode survives); the connection resync rebuilds it as exec_command / execute / failed",
+  "userTexts": [
+    "run it"
+  ],
+  "sessionId": "d7b84f53-bbbb-4c03-8c03-d7b84f53bbbb"
+}

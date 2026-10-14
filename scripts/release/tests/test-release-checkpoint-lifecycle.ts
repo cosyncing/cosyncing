@@ -37,8 +37,9 @@ try {
     checkReport,
     `${JSON.stringify({
       status: 'pass',
-      coverage: { mode: 'changed', complete: false },
-      source: { stable: true, before: {}, after: {} },
+      commit: '0'.repeat(40),
+      dirty: false,
+      selection: { complete: false },
     })}\n`,
   );
 

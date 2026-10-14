@@ -1,0 +1,7 @@
+{"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"cs4","arguments":"{\"agent_type\":\"explorer\",\"message\":\"late child\"}"},"timestamp":"2026-03-20T23:46:55.000Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cs4","output":"{\"agent_id\":\"kid-D\",\"nickname\":\"Dirac\"}"},"timestamp":"2026-03-20T23:46:56.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"cw4","arguments":"{\"ids\":[\"kid-D\"],\"timeout_ms\":120000}"},"timestamp":"2026-03-20T23:46:57.000Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cw4","output":"{\"status\":{\"kid-D\":{\"completed\":\"Late.\"}}}"},"timestamp":"2026-03-20T23:47:10.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"cs5","arguments":"{\"agent_type\":\"explorer\",\"message\":\"never joined\"}"},"timestamp":"2026-03-20T23:47:11.000Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cs5","output":"{\"agent_id\":\"kid-T\",\"nickname\":\"Aquinas\"}"},"timestamp":"2026-03-20T23:47:12.000Z"}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"},"timestamp":"2026-03-20T23:47:20.000Z"}

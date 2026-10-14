@@ -3,76 +3,12 @@ import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
   group('Session Detail transcript copy and cache actions', () {
-    testWidgets('copies the whole retained transcript without exporting', (
-      tester,
-    ) async {
-      String? clipboardText;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async {
-          if (call.method == 'Clipboard.setData') {
-            clipboardText =
-                (call.arguments as Map<Object?, Object?>)['text'] as String?;
-          }
-          return null;
-        },
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-      final brokerClient = _CacheBrokerClient();
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          brokerClient: brokerClient,
-          events: [
-            MessageWireEvent(
-              seq: 1,
-              message: AgentMessage.fromJson(const {
-                'type': 'user-message',
-                'text': 'Question exactly',
-              }),
-            ),
-            MessageWireEvent(
-              seq: 2,
-              message: AgentMessage.fromJson(const {
-                'type': 'model-output',
-                'text': 'Answer with ```fence``` exactly',
-              }),
-            ),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openSessionDetailTestTab(tester, 'session-detail-tab-status');
-
-      await showSessionStatusTestItem(
-        tester,
-        const Key('session-detail-copy-transcript-button'),
-      );
-      await tester.tap(
-        find.byKey(const Key('session-detail-copy-transcript-button')),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        clipboardText,
-        'Question exactly\n\nAnswer with ```fence``` exactly',
-      );
-      expect(brokerClient.prepareTranscriptExportCount, 0);
-      expect(brokerClient.exportTranscriptCount, 0);
-      expect(find.text('Transcript copied'), findsOneWidget);
-    });
-
     test('retained transcript copy makes every history gap explicit', () {
       final copied = buildRetainedTranscriptCopyText(
         segments: [

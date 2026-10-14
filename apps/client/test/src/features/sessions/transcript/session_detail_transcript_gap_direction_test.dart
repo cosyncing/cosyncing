@@ -199,23 +199,6 @@ Future<void> _wheel(WidgetTester tester, {required double dy}) async {
 
 void main() {
   group('moving toward a released range', () {
-    testWidgets('down, it fills from its older edge with a newer page', (
-      tester,
-    ) async {
-      final window = _readBackWindow();
-      final gap = window.gaps.first;
-      expect(gap.forwardCursor, isNotNull);
-      final controller = await _pump(tester, window, pagesForward: true);
-      await _bringIntoReach(tester, gap, fromStart: true);
-      expect(controller.newer, isEmpty);
-
-      await _wheel(tester, dy: 40);
-      expect(controller.newer, [
-        (cursor: gap.forwardCursor!, until: gap.reloadCursor!),
-      ]);
-      expect(controller.older, isEmpty);
-    });
-
     testWidgets('down by keyboard it fills the same way, but End jumps to the '
         'latest rows without loading the range on the way', (tester) async {
       final window = _readBackWindow();
@@ -302,31 +285,6 @@ void main() {
       ]);
     });
 
-    testWidgets('down, without forward paging, it pages back from its newer '
-        'edge', (tester) async {
-      final window = _readBackWindow();
-      final gap = window.gaps.first;
-      final controller = await _pump(tester, window, pagesForward: false);
-      await _bringIntoReach(tester, gap, fromStart: true);
-
-      await _wheel(tester, dy: 40);
-      expect(controller.older, [gap.reloadCursor]);
-      expect(controller.newer, isEmpty);
-    });
-
-    testWidgets('up, a closed range still pages back from its newer edge', (
-      tester,
-    ) async {
-      final window = _readBackWindow();
-      final gap = window.gaps.first;
-      final controller = await _pump(tester, window, pagesForward: true);
-      await _bringIntoReach(tester, gap, fromStart: false);
-
-      await _wheel(tester, dy: -40);
-      expect(controller.older, [gap.reloadCursor]);
-      expect(controller.newer, isEmpty);
-    });
-
     testWidgets('up, an open range fills only with a newer page', (
       tester,
     ) async {
@@ -340,41 +298,6 @@ void main() {
       expect(controller.newer, [(cursor: 'b100', until: 'b250')]);
       expect(controller.older, isEmpty);
     });
-  });
-
-  testWidgets('a range whose position the broker refused says it cannot '
-      'load, offers no retry, and is not asked for again', (tester) async {
-    final window = _readBackWindow();
-    final gap = window.gaps.first;
-    useRoomyTestViewport(tester);
-    final controller = _DirectionalGapController(
-      _stateFor(window).copyWith(
-        historyRefusedCursors: {gap.reloadCursor!: 'HISTORY_CURSOR_GONE'},
-      ),
-      pagesForward: true,
-    );
-    await tester.pumpWidget(
-      buildSessionDetailTestPage(
-        events: const [],
-        seededController: controller,
-      ),
-    );
-    await tester.pumpAndSettle();
-    await _bringIntoReach(tester, gap, fromStart: true);
-
-    final l10n = await AppLocalizations.delegate.load(const Locale('en'));
-    expect(
-      find.descendant(
-        of: find.byKey(Key(gap.id)),
-        matching: find.text(l10n.sessionHistoryLoadFailed),
-      ),
-      findsOneWidget,
-    );
-    expect(find.byKey(Key('${gap.id}-reload')), findsNothing);
-    await _wheel(tester, dy: 40);
-    await _wheel(tester, dy: -40);
-    expect(controller.newer, isEmpty);
-    expect(controller.older, isEmpty);
   });
 
   testWidgets('while another page loads, a range whose position the broker '

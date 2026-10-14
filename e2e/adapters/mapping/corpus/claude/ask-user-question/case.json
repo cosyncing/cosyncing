@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts and test-claude-questions.ts",
+  "description": "AskUserQuestion is one read-only question card, never a generic tool row; its answer closes the card in the card order (single, multi-select with a quoted comma label, typed Other, partial, dismissed); a malformed question falls back to a plain tool row",
+  "userTexts": [
+    "ask me"
+  ],
+  "sessionId": "75b5e006-3b1a-4eaf-8eaf-75b5e0063b1a"
+}

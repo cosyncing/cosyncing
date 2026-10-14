@@ -1,0 +1,8 @@
+{"type":"user","uuid":"u0","timestamp":"2026-07-06T23:26:00.000Z","message":{"role":"user","content":"go"}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-06T23:26:36.000Z","content":"QUEUED-MSG mention this too"}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-07-06T23:26:56.000Z"}
+{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>x</task-id>\n</task-notification>"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-06T23:27:00.000Z","content":"QUEUED-DELIVERED run the tests"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-06T23:28:00.000Z","content":"same words"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-06T23:28:01.000Z","content":"same words"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-06T23:29:00.000Z"}

@@ -1,0 +1,40 @@
+{
+  "history": [
+    {"type":"user-message","text":"plan and ask","key":"c1"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tq1","turnId":"tq1","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"token-count","input":9013,"output":217,"cacheRead":7872},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":9230,"max":972800}},
+    {"type":"token-count","input":900000,"output":20000,"cacheRead":7872},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":5050,"max":972800}},
+    {"type":"token-count","input":1,"output":0,"cacheRead":0},
+    {"type":"token-count","input":100,"output":20,"cacheRead":0},
+    {"type":"task-list-state","key":"codex:plan","title":"Plan","status":"running","source":"tool-call","sourceTool":"update_plan","semantic":{"kind":"plan","planKey":"codex:plan","revision":"cRpe54zT4g-yEJc_G4399mll-0XjIkUj","state":"active","actions":{"approve":false,"edit":false,"exit":false}},"items":[{"id":"0","title":"Read the code","status":"done"},{"id":"1","title":"Write the fix","status":"in-progress"},{"id":"2","title":"Run the tests","status":"open"}]},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"question-request","requestId":"codex:aq:call_q1","blocking":false,"readOnly":true,"questions":[{"question":"Which color first?","options":[{"label":"Crimson"},{"label":"Teal"}]}]},
+    {"type":"model-output","text":"Continuing with Crimson.","final":true,"key":"codex:tq1:msg_ok:t"},
+    {"type":"goal-state","key":"t-goal","title":"resume the last goal","status":"paused","startedAt":1783006625000,"elapsedMs":69811000,"detail":"12971511 tokens"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tq1","turnId":"tq1","assistantMessageKey":"codex:tq1:msg_ok:t","status":"done","source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"plan and ask","key":"c1"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tq1","turnId":"tq1","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"token-count","input":9013,"output":217,"cacheRead":7872},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":9230,"max":972800}},
+    {"type":"token-count","input":900000,"output":20000,"cacheRead":7872},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":5050,"max":972800}},
+    {"type":"token-count","input":1,"output":0,"cacheRead":0},
+    {"type":"token-count","input":100,"output":20,"cacheRead":0},
+    {"type":"task-list-state","key":"codex:plan","title":"Plan","status":"running","source":"tool-call","sourceTool":"update_plan","semantic":{"kind":"plan","planKey":"codex:plan","revision":"cRpe54zT4g-yEJc_G4399mll-0XjIkUj","state":"active","actions":{"approve":false,"edit":false,"exit":false}},"items":[{"id":"0","title":"Read the code","status":"done"},{"id":"1","title":"Write the fix","status":"in-progress"},{"id":"2","title":"Run the tests","status":"open"}]},
+    {"type":"question-request","requestId":"codex:aq:call_q1","blocking":false,"readOnly":true,"questions":[{"question":"Which color first?","options":[{"label":"Crimson"},{"label":"Teal"}]}]},
+    {"type":"model-output","text":"Continuing with Crimson.","final":true,"key":"codex:tq1:msg_ok:t"},
+    {"type":"goal-state","key":"t-goal","title":"resume the last goal","status":"paused","startedAt":1783006625000,"elapsedMs":69811000,"detail":"12971511 tokens"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tq1","turnId":"tq1","userMessageKey":"c1","assistantMessageKey":"codex:tq1:msg_ok:t","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

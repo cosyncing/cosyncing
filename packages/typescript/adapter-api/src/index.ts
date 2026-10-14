@@ -776,8 +776,24 @@ export function effectiveDiscoveryBudgetMs(declared: number | undefined): number
 }
 
 
+export interface AgentRegistryOptions {
+  /**
+   * Test hook: caps every DECLARED discovery budget at this many milliseconds,
+   * so an e2e suite can watch a wedged external host be abandoned without
+   * waiting the production 15 s. Undeclared (local) legs stay unbudgeted. The
+   * broker passes it only from source runs, never from a packaged build.
+   */
+  discoveryBudgetCapMs?: number;
+}
+
 export class AgentRegistry {
   private readonly backends = new Map<string, AgentBackend>();
+  private readonly discoveryBudgetCapMs: number | undefined;
+
+  constructor(options: AgentRegistryOptions = {}) {
+    const cap = options.discoveryBudgetCapMs;
+    this.discoveryBudgetCapMs = cap !== undefined && Number.isFinite(cap) && cap > 0 ? cap : undefined;
+  }
   /**
    * One complete production discovery sweep across every concurrent roster
    * window. A per-leg lock still interleaves 7-day and all-time sweeps, making
@@ -1061,7 +1077,10 @@ export class AgentRegistry {
     sweepExpiry?: AbortSignal,
     sweepBudgetMs?: number,
   ): Promise<SessionInfo[]> {
-    const legBudgetMs = effectiveDiscoveryBudgetMs(backend.discoveryBudgetMs);
+    const declaredBudgetMs = effectiveDiscoveryBudgetMs(backend.discoveryBudgetMs);
+    const legBudgetMs = declaredBudgetMs === undefined || this.discoveryBudgetCapMs === undefined
+      ? declaredBudgetMs
+      : Math.min(declaredBudgetMs, this.discoveryBudgetCapMs);
     if (legBudgetMs === undefined && sweepExpiry === undefined) {
       const unbudgetedStartedAt = Date.now();
       const unbudgetedLeg = enterLeg();

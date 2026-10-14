@@ -1,0 +1,4 @@
+also not json
+{"type":"message"
+[[[[
+{"type":"message","id":"g3","timestamp":"2026-06-20T00:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"prompt after garbage on the tail"}],"timestamp":1781913660000}}

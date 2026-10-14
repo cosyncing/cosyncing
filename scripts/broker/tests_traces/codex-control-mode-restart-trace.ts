@@ -8,7 +8,7 @@
  * pre-start so the common path never restarts (FU-3).
  *
  * Replacements (run these instead):
- *   - packages/typescript/broker/test/codex/broker-control-mode.ts        — the decoupled Codex enabler contract (+ FU-3 pre-start)
+ *   - e2e/broker/codex-sync-preference.test.ts        — the decoupled Codex enabler contract (+ FU-3 pre-start)
  *   - scripts/broker/tests_traces/sync-refactor-dom-probe.ts   — real-Chromium DOM: no #controlMode, one #control (D29)
  *   - scripts/broker/tests/app/test-web-ui-static.ts / test-web-ui-components.ts — one-button surface
  *
@@ -18,7 +18,7 @@ export {};
 
 console.log(
   'SKIP codex-control-mode-restart-trace — SUPERSEDED by the Sync Refactor (control-mode picker + ' +
-    '/api/broker/control-mode deleted). See broker-control-mode.ts (enabler contract) + ' +
+    '/api/broker/control-mode deleted). See e2e/broker/codex-sync-preference.test.ts (enabler contract) + ' +
     'sync-refactor-dom-probe.ts (D29 real-DOM probe).',
 );
 process.exit(0);

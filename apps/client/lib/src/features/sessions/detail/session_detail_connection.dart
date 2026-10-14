@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// App-facing connection states for the session detail shell.
@@ -227,6 +228,7 @@ final sessionDetailConnectionFactoryProvider =
             tool: tool,
             sessionId: sessionId,
             adapterFactory: ref.read(sessionSocketAdapterFactoryProvider),
+            transport: ref.read(brokerHttpTransportProvider),
           );
         };
       },
@@ -250,11 +252,13 @@ class BrokerSessionDetailConnection
     required String tool,
     required String sessionId,
     WebSocketAdapter Function(String url)? adapterFactory,
+    BrokerHttpTransport? transport,
   }) : _inner = SessionConnection(
          resolver: resolver,
          tool: tool,
          sessionId: sessionId,
          adapterFactory: adapterFactory ?? FlutterWebSocketAdapter.new,
+         dio: brokerTransportDio(transport),
        );
 
   final SessionConnection _inner;

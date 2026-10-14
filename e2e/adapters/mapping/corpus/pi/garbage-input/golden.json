@@ -1,0 +1,28 @@
+{
+  "history": [
+    {"type":"user-message","text":"before the noise","key":"g1","turnId":"g1","sentAt":1781913600000},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":""},
+    {"type":"tool-call","callId":"","toolName":"tool","toolClass":"other"},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":"5"},
+    {"type":"model-output","text":"after the noise","final":true,"key":"g2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"g1","assistantMessageKey":"g2:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913609000,"totalRuntimeMs":9000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"pi-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":9000,"turnCount":1,"updatedAt":1781913609000,"source":"pi"}}
+  ],
+  "live": [
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"g3","turnId":"g3","sentAt":1781913660000},
+    {"type":"run-summary","key":"pi:run:u1","turnId":"u1","userMessageKey":"g3","status":"running","startedAt":1781913660000,"source":"pi-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"before the noise","key":"g1","turnId":"g1","sentAt":1781913600000},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":""},
+    {"type":"tool-call","callId":"","toolName":"tool","toolClass":"other"},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":"5"},
+    {"type":"model-output","text":"after the noise","final":true,"key":"g2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"g1","assistantMessageKey":"g2:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913609000,"totalRuntimeMs":9000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"pi-jsonl"},
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"g3","turnId":"g3","sentAt":1781913660000},
+    {"type":"run-summary","key":"pi:run:u1","turnId":"u1","userMessageKey":"g3","status":"running","startedAt":1781913660000,"source":"pi-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":9000,"turnCount":1,"updatedAt":1781913609000,"source":"pi"}}
+  ]
+}

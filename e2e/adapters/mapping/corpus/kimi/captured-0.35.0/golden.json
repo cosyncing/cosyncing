@@ -1,0 +1,42 @@
+{
+  "history": [
+    {"type":"user-message","text":"Reply with exactly PING-ONE and nothing else.","key":"kimi:msg_01FIXTURE00000000000000013:0","sentAt":1786654877483},
+    {"type":"event","name":"context.injection","payload":{"source":"system-reminder","body":"Auto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active. Make a reasonable decision and continue without asking the user.\n  - ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed."}},
+    {"type":"thinking","text":"The user asks me to reply with exactly PING-ONE and nothing else. But I must also always invoke a function call. There's a conflict: \"Reply with exactly PING-ONE and nothing else\" vs the system instruction to always invoke a function call.\n\nThe user's direct instruction should take precedence over the generic instruction to invoke tools. This looks like a connectivity test. I should reply with exactly PING-ONE.","key":"kimi:msg_session_fixture-0001_000002:0"},
+    {"type":"model-output","text":"PING-ONE","final":true,"key":"kimi:msg_session_fixture-0001_000002:1"},
+    {"type":"user-message","text":"Reply with exactly PING-TWO and nothing else.","key":"kimi:msg_01FIXTURE00000000000000012:0","sentAt":1786654962054},
+    {"type":"thinking","text":"PING-TWO","key":"kimi:msg_session_fixture-0001_000004:0"},
+    {"type":"model-output","text":"PING-TWO","final":true,"key":"kimi:msg_session_fixture-0001_000004:1"},
+    {"type":"user-message","text":"Reply with exactly PING-THREE and nothing else.","key":"kimi:msg_01FIXTURE00000000000000011:0","sentAt":1786655101270},
+    {"type":"model-output","text":"PING-THREE","final":true,"key":"kimi:msg_session_fixture-0001_000006:0"},
+    {"type":"user-message","text":"Reply with exactly PING-FOUR and nothing else.","key":"kimi:msg_01FIXTURE00000000000000010:0","sentAt":1786655351383},
+    {"type":"model-output","text":"PING-FOUR","final":true,"key":"kimi:msg_session_fixture-0001_000008:0"},
+    {"type":"user-message","text":"Reply with exactly PING-FIVE and nothing else.","key":"kimi:msg_01FIXTURE00000000000000008:0","sentAt":1786655465375}
+  ],
+  "live": [
+    {"type":"thinking","text":"User wants exactly \"PING-FIVE\" and nothing else. Just reply.","key":"kimi:msg_session_fixture-0001_000010:0"},
+    {"type":"model-output","text":"PING-FIVE","final":true,"key":"kimi:msg_session_fixture-0001_000010:1"},
+    {"type":"user-message","text":"Reply with exactly PING-SIX and nothing else.","key":"kimi:msg_01FIXTURE00000000000000006:0","sentAt":1786655533122},
+    {"type":"thinking","text":"The user skipped PING-FIVE and asked for PING-SIX. The instruction is clear: reply with exactly PING-SIX and nothing else.","key":"kimi:msg_session_fixture-0001_000012:0"},
+    {"type":"model-output","text":"PING-SIX","final":true,"key":"kimi:msg_session_fixture-0001_000012:1"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"Reply with exactly PING-ONE and nothing else.","key":"kimi:msg_01FIXTURE00000000000000013:0","sentAt":1786654877483},
+    {"type":"event","name":"context.injection","payload":{"source":"system-reminder","body":"Auto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active. Make a reasonable decision and continue without asking the user.\n  - ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed."}},
+    {"type":"thinking","text":"The user asks me to reply with exactly PING-ONE and nothing else. But I must also always invoke a function call. There's a conflict: \"Reply with exactly PING-ONE and nothing else\" vs the system instruction to always invoke a function call.\n\nThe user's direct instruction should take precedence over the generic instruction to invoke tools. This looks like a connectivity test. I should reply with exactly PING-ONE.","key":"kimi:msg_session_fixture-0001_000002:0"},
+    {"type":"model-output","text":"PING-ONE","final":true,"key":"kimi:msg_session_fixture-0001_000002:1"},
+    {"type":"user-message","text":"Reply with exactly PING-TWO and nothing else.","key":"kimi:msg_01FIXTURE00000000000000012:0","sentAt":1786654962054},
+    {"type":"thinking","text":"PING-TWO","key":"kimi:msg_session_fixture-0001_000004:0"},
+    {"type":"model-output","text":"PING-TWO","final":true,"key":"kimi:msg_session_fixture-0001_000004:1"},
+    {"type":"user-message","text":"Reply with exactly PING-THREE and nothing else.","key":"kimi:msg_01FIXTURE00000000000000011:0","sentAt":1786655101270},
+    {"type":"model-output","text":"PING-THREE","final":true,"key":"kimi:msg_session_fixture-0001_000006:0"},
+    {"type":"user-message","text":"Reply with exactly PING-FOUR and nothing else.","key":"kimi:msg_01FIXTURE00000000000000010:0","sentAt":1786655351383},
+    {"type":"model-output","text":"PING-FOUR","final":true,"key":"kimi:msg_session_fixture-0001_000008:0"},
+    {"type":"user-message","text":"Reply with exactly PING-FIVE and nothing else.","key":"kimi:msg_01FIXTURE00000000000000008:0","sentAt":1786655465375},
+    {"type":"thinking","text":"User wants exactly \"PING-FIVE\" and nothing else. Just reply.","key":"kimi:msg_session_fixture-0001_000010:0"},
+    {"type":"model-output","text":"PING-FIVE","final":true,"key":"kimi:msg_session_fixture-0001_000010:1"},
+    {"type":"user-message","text":"Reply with exactly PING-SIX and nothing else.","key":"kimi:msg_01FIXTURE00000000000000006:0","sentAt":1786655533122},
+    {"type":"thinking","text":"The user skipped PING-FIVE and asked for PING-SIX. The instruction is clear: reply with exactly PING-SIX and nothing else.","key":"kimi:msg_session_fixture-0001_000012:0"},
+    {"type":"model-output","text":"PING-SIX","final":true,"key":"kimi:msg_session_fixture-0001_000012:1"}
+  ]
+}

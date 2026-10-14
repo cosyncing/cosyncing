@@ -39,7 +39,7 @@ import { reserveLoopbackFixturePort } from '../../../../packages/typescript/brok
 import {
   insideSupervisedProcessGroup,
   runSupervised,
-} from '../../../verification/supervised-process.ts';
+} from '../../../ci/lib/process.ts';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
 /** Where the application lives inside the package; mirrors PACKAGED_APPLICATION in build-npm-package.ts. */

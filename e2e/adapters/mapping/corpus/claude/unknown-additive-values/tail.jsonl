@@ -1,0 +1,4 @@
+{"type":"a-line-type-from-the-future","uuid":"fx3"}
+{"type":"user","uuid":"r-fut","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fut","content":[{"type":"a-result-block-from-the-future","blob":1}]}]},"toolUseResult":{"shape":"unknown"}}
+{"type":"user","uuid":"bu2","message":{"role":"user","content":[{"type":"a-user-block-from-the-future","blob":1},{"type":"text","text":"still a prompt"}]}}
+{"type":"assistant","uuid":"ba2","isApiErrorMessage":false,"message":{"id":"bm2","role":"assistant","content":[{"type":"a-block-type-from-the-future"}]}}

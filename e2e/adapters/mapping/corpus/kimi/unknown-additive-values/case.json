@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/kimi/test/test-kimi-mapping.ts",
+  "description": "content types and roles Kimi may add later (its server API is experimental) cost one neutral row and never a throw: an unknown role is not model output, an unknown content part leaks no native payload, wrongly-typed parts are skipped",
+  "userTexts": [
+    "real prompt",
+    "prompt with a new block"
+  ],
+  "sessionId": "c275c9fe-0941-434c-834c-c275c9fe0941"
+}

@@ -1,0 +1,35 @@
+{
+  "provenance": "captured agy 1.1.17 2026-08-25 (sanitized: shapes measured on the real store, every value invented)",
+  "description": "the sixteen measured (source, type) pairs of a real agy 1.1.17 transcript: the first 19 steps at attach, the last 6 (a RUNNING planner row with its pending tool call, system notices, an error) on the tail, then the background-task settlement, a system notice and a senderless notice the host wrote beside the transcript; only USER_EXPLICIT/USER_INPUT is a human bubble, stripped of the wrapper blocks and /mode prefix the harness adds inside it; a settlement is a self-contained tool block, system and senderless ones are notices",
+  "userTexts": [
+    "review the demo project and report"
+  ],
+  "liveChild": false,
+  "refs": {
+    "history": [
+      {
+        "fixture": "packages/typescript/adapters/antigravity/test/fixtures/agy-1.1.17.json",
+        "path": "transcript[0:19]"
+      }
+    ],
+    "tail": [
+      {
+        "fixture": "packages/typescript/adapters/antigravity/test/fixtures/agy-1.1.17.json",
+        "path": "transcript[19:25]"
+      },
+      {
+        "fixture": "packages/typescript/adapters/antigravity/test/fixtures/agy-1.1.17.json",
+        "path": "settlement"
+      },
+      {
+        "fixture": "packages/typescript/adapters/antigravity/test/fixtures/agy-1.1.17.json",
+        "path": "round2b.systemSettlement"
+      },
+      {
+        "fixture": "packages/typescript/adapters/antigravity/test/fixtures/agy-1.1.17.json",
+        "path": "round2b.senderlessSettlement"
+      }
+    ]
+  },
+  "sessionId": "31fa56f2-46b0-474a-874a-31fa56f246b0"
+}

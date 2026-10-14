@@ -1,0 +1,172 @@
+{
+  "events": [
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "retry",
+          "attempt": 1,
+          "message": "\u0000\u0007\n\n  😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\nignored second line"
+        }
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "retry",
+          "attempt": 2,
+          "message": "\n\u0000\n  provider unavailable  \nnext"
+        }
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "retry",
+          "attempt": 3,
+          "message": "\u0000\n\u0007"
+        }
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "retry",
+          "attempt": 4
+        }
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "busy"
+        }
+      }
+    },
+    {
+      "type": "message.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "info": {
+          "id": "msg_a2",
+          "role": "assistant",
+          "parentID": "msg_u1",
+          "time": {
+            "created": 2001,
+            "completed": 2002
+          },
+          "error": {
+            "name": "MessageAbortedError",
+            "data": {
+              "message": "aborted"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "message.updated",
+      "properties": {
+        "sessionID": "$SESSION",
+        "info": {
+          "id": "msg_a3",
+          "role": "assistant",
+          "parentID": "msg_u1",
+          "time": {
+            "created": 2003,
+            "completed": 2004
+          },
+          "error": {
+            "name": "APIError",
+            "data": {
+              "message": "Output length limit\nsecond line"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "session.error",
+      "properties": {
+        "sessionID": "$SESSION",
+        "error": {
+          "name": "ProviderAuthError",
+          "data": {
+            "message": "bad key"
+          }
+        }
+      }
+    },
+    {
+      "type": "session.error",
+      "properties": {
+        "sessionID": "$SESSION",
+        "error": {
+          "name": "MessageAbortedError"
+        }
+      }
+    },
+    {
+      "type": "session.compacted",
+      "properties": {
+        "sessionID": "$SESSION"
+      }
+    },
+    {
+      "type": "message.removed",
+      "properties": {
+        "sessionID": "$SESSION",
+        "messageID": "msg_a1"
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "$SESSION",
+        "status": {
+          "type": "a-status-from-the-future"
+        }
+      }
+    },
+    {
+      "type": "an.event.from.the.future",
+      "properties": {
+        "sessionID": "$SESSION",
+        "anything": [
+          1,
+          2
+        ]
+      }
+    }
+  ],
+  "settled": [
+    {
+      "info": {
+        "id": "msg_u1",
+        "role": "user",
+        "time": {
+          "created": 1000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u1",
+          "type": "text",
+          "text": "go",
+          "time": {
+            "start": 1000
+          }
+        }
+      ]
+    }
+  ]
+}

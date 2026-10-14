@@ -1,0 +1,11 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "tool results (call and result both arriving on the tail) carry the call arguments and enrichment: edit diff, diffstat and path from args, apply_patch path recovered from the +++ header, bash exit code from the LAST \"exited with code\" line or numeric details with native duration, truncation flag, a plain read invents no fields, a grep search directory is not a file path",
+  "userTexts": [
+    "enrich"
+  ],
+  "oneRow": [
+    "enriched"
+  ],
+  "sessionId": "04095c25-88a5-4735-8735-04095c2588a5"
+}

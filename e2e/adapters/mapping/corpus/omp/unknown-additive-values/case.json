@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "row types, roles, stop reasons, content blocks, tool names and detail shapes a newer agent may write fail open: no throw, nothing but a user entry becomes a user bubble, an unknown stopReason is not terminal evidence, and the real rows around them still map",
+  "userTexts": [
+    "real prompt",
+    "prompt after unknown rows"
+  ],
+  "sessionId": "b827fd8a-4565-42bd-82bd-b827fd8a4565"
+}

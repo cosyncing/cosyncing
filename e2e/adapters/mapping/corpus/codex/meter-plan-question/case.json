@@ -1,0 +1,11 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "contextUsage reads last_token_usage (cached tokens are a subset, never added), skips an all-zero sentinel and omits when the window or last usage is absent; update_plan is one task-list panel with no raw tool cards; request_user_input_async is one read-only nonblocking question card keyed by the native item id on the tail, its receipt and repeated markdown never render; goal state maps",
+  "userTexts": [
+    "plan and ask"
+  ],
+  "oneRow": [
+    "Continuing with Crimson."
+  ],
+  "sessionId": "7ee6d201-0f59-41bf-81bf-7ee6d2010f59"
+}

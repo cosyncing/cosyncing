@@ -1,0 +1,12 @@
+{"type":"session_meta","payload":{"id":"191375dd-58cc-41df-81df-191375dd58cc","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"first prompt"},"timestamp":"2026-09-01T10:00:00.000Z"}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-old"},"timestamp":"2026-09-01T10:00:01.000Z"}
+{"type":"event_msg","payload":{"type":"agent_reasoning","text":"Old part one."}}
+{"type":"event_msg","payload":{"type":"agent_reasoning","text":"Old part two."}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Old part one."},{"type":"summary_text","text":"Old part two."}],"content":null,"encrypted_content":"opaque-1"}}
+{"type":"event_msg","payload":{"type":"agent_reasoning","text":"Old identified part."}}
+{"type":"response_item","payload":{"type":"reasoning","id":"rs_old_2","summary":[{"type":"summary_text","text":"Old identified part."}],"encrypted_content":"opaque-2"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"first answer","phase":"commentary"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_old","phase":"commentary","content":[{"type":"output_text","text":"first answer"}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-old"},"timestamp":"2026-09-01T10:00:05.000Z"}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-new"},"timestamp":"2026-09-01T10:01:00.000Z"}

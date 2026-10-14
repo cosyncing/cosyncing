@@ -1,0 +1,9 @@
+{"type":"session_meta","payload":{"id":"26686059-2297-44ff-84ff-266860592297","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"cold"}}
+{"type":"event_msg","payload":{"type":"item_completed"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_cold","phase":"commentary","content":[{"type":"output_text","text":"cold answer."}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_cold","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_cold","output":"ok"}}
+{"type":"event_msg","payload":{"type":"item_completed"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_cold_final","phase":"final_answer","content":[{"type":"output_text","text":"cold final."}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"cold"}}

@@ -1,0 +1,42 @@
+{
+  "history": [
+    {"type":"user-message","text":"plain typed text","key":"agy:11111111-1111-4111-8111-111111111111:0","sentAt":1787221200000},
+    {"type":"event","name":"context.injection","payload":{"source":"agy SYSTEM/USER_INPUT (unmapped)","body":"not typed by a human"}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy MODEL/USER_INPUT (unmapped)","body":"a model row claiming USER_INPUT"}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy MODEL/FUTURE_STEP_TYPE_ADDED_BY_AN_AUTO_UPDATE (unmapped)","body":"A step type this build has never seen."}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy SYSTEM/ANOTHER_FUTURE_SYSTEM_STEP (unmapped)","body":"unknown system row"}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy / (unmapped)","body":""}},
+    {"type":"model-output","text":"Summarising now","key":"agy:11111111-1111-4111-8111-111111111111:6:text","final":true},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:6:call:0","toolName":"run_command","args":{"CommandLine":"sleep 90","Cwd":"/work/proj"},"toolClass":"execute"}
+  ],
+  "live": [
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:6:call:0","toolName":"run_command","toolClass":"execute","semantic":{"kind":"command","command":"sleep 90","cwd":"/work/proj","state":"interrupted","stdout":{"text":"partial output","totalBytes":14}},"result":"partial output","isError":true},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:8:result","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:8:result","toolName":"run_command","toolClass":"execute","result":"stopped part-way"},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:9:result","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:9:result","toolName":"run_command","toolClass":"execute","result":"\nThe command exited with code 3.\nOutput:\nboom","exitCode":3,"isError":true,"durationMs":5000},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:10:result","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:10:result","toolName":"run_command","toolClass":"execute","result":"no preamble at all"},
+    {"type":"user-message","text":"second prompt","key":"agy:11111111-1111-4111-8111-111111111111:11","sentAt":1787221211000},
+    {"type":"event","name":"context.injection","payload":{"source":"agy user-row metadata (ADDITIONAL_METADATA)","body":"The current local time is: 2026-08-20T11:30:00+01:00."}}
+  ],
+  "replay": [
+    {"type":"user-message","text":"plain typed text","key":"agy:11111111-1111-4111-8111-111111111111:0","sentAt":1787221200000},
+    {"type":"event","name":"context.injection","payload":{"source":"agy SYSTEM/USER_INPUT (unmapped)","body":"not typed by a human"}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy MODEL/USER_INPUT (unmapped)","body":"a model row claiming USER_INPUT"}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy MODEL/FUTURE_STEP_TYPE_ADDED_BY_AN_AUTO_UPDATE (unmapped)","body":"A step type this build has never seen."}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy SYSTEM/ANOTHER_FUTURE_SYSTEM_STEP (unmapped)","body":"unknown system row"}},
+    {"type":"event","name":"context.injection","payload":{"source":"agy / (unmapped)","body":""}},
+    {"type":"model-output","text":"Summarising now","key":"agy:11111111-1111-4111-8111-111111111111:6:text","final":true},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:6:call:0","toolName":"run_command","args":{"CommandLine":"sleep 90","Cwd":"/work/proj"},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:6:call:0","toolName":"run_command","toolClass":"execute","semantic":{"kind":"command","command":"sleep 90","cwd":"/work/proj","state":"interrupted","stdout":{"text":"partial output","totalBytes":14}},"result":"partial output","isError":true},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:8:result","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:8:result","toolName":"run_command","toolClass":"execute","result":"stopped part-way"},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:9:result","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:9:result","toolName":"run_command","toolClass":"execute","result":"\nThe command exited with code 3.\nOutput:\nboom","exitCode":3,"isError":true,"durationMs":5000},
+    {"type":"tool-call","callId":"agy:11111111-1111-4111-8111-111111111111:10:result","toolName":"run_command","args":{},"toolClass":"execute"},
+    {"type":"tool-result","callId":"agy:11111111-1111-4111-8111-111111111111:10:result","toolName":"run_command","toolClass":"execute","result":"no preamble at all"},
+    {"type":"user-message","text":"second prompt","key":"agy:11111111-1111-4111-8111-111111111111:11","sentAt":1787221211000},
+    {"type":"event","name":"context.injection","payload":{"source":"agy user-row metadata (ADDITIONAL_METADATA)","body":"The current local time is: 2026-08-20T11:30:00+01:00."}}
+  ]
+}

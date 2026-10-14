@@ -1,0 +1,48 @@
+{
+  "history": [
+    {"type":"user-message","text":"kick off","key":"cu1","turnId":"cu1","sentAt":1787911200000},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cu1","turnId":"cu1","userMessageKey":"cu1","status":"running","startedAt":1787911200000,"source":"claude-transcript"},
+    {"type":"thinking","text":"weighing options","key":"claude:cm1:0:r"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cu1","turnId":"cu1","userMessageKey":"cu1","assistantMessageKey":"claude:cm1:0:r","status":"done","startedAt":1787911200000,"completedAt":1787911210000,"totalRuntimeMs":10000,"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":10000,"turnCount":1,"updatedAt":1787911210000,"source":"claude-transcript"}}
+  ],
+  "live": [
+    {"type":"model-output","text":"final text","final":true,"key":"claude:cm1:1:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cu1","turnId":"cu1","userMessageKey":"cu1","assistantMessageKey":"claude:cm1:1:t","status":"done","startedAt":1787911200000,"completedAt":1787911212000,"totalRuntimeMs":12000,"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":12000,"turnCount":1,"updatedAt":1787911212000,"source":"claude-transcript"}},
+    {"type":"notice","message":"Agent finished","semantic":{"kind":"continuation","reason":"task-notification","turnId":"cn1"}},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cn1","turnId":"cn1","status":"running","origin":"background","startedAt":1787911500000,"source":"claude-transcript"},
+    {"type":"model-output","text":"continuing","final":true,"key":"claude:cm2:0:t"},
+    {"type":"tool-call","callId":"cont-tool","toolName":"Bash","toolClass":"execute","args":{"command":"true"},"semantic":{"kind":"command","command":"true","state":"running"}},
+    {"type":"model-output","text":"wrapped up","final":true,"key":"claude:cm3:0:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cn1","turnId":"cn1","assistantMessageKey":"claude:cm3:0:t","status":"done","origin":"background","startedAt":1787911500000,"completedAt":1787911560000,"totalRuntimeMs":60000,"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":72000,"turnCount":2,"updatedAt":1787911560000,"source":"claude-transcript"}},
+    {"type":"notice","message":"Background task completed.","semantic":{"kind":"continuation","reason":"task-notification","turnId":"cn2"}},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cn2","turnId":"cn2","status":"running","origin":"background","startedAt":1787911620000,"source":"claude-transcript"},
+    {"type":"notice","message":"Background task completed.","semantic":{"kind":"continuation","reason":"task-notification","turnId":"cn3"}}
+  ],
+  "replay": [
+    {"type":"user-message","text":"kick off","key":"cu1","turnId":"cu1","sentAt":1787911200000},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cu1","turnId":"cu1","userMessageKey":"cu1","status":"running","startedAt":1787911200000,"source":"claude-transcript"},
+    {"type":"thinking","text":"weighing options","key":"claude:cm1:0:r"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cu1","turnId":"cu1","userMessageKey":"cu1","assistantMessageKey":"claude:cm1:0:r","status":"done","startedAt":1787911200000,"completedAt":1787911210000,"totalRuntimeMs":10000,"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":10000,"turnCount":1,"updatedAt":1787911210000,"source":"claude-transcript"}},
+    {"type":"model-output","text":"final text","final":true,"key":"claude:cm1:1:t"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cu1","turnId":"cu1","userMessageKey":"cu1","assistantMessageKey":"claude:cm1:1:t","status":"done","startedAt":1787911200000,"completedAt":1787911212000,"totalRuntimeMs":12000,"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":12000,"turnCount":1,"updatedAt":1787911212000,"source":"claude-transcript"}},
+    {"type":"notice","message":"Agent finished","semantic":{"kind":"continuation","reason":"task-notification","turnId":"cn1"}},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cn1","turnId":"cn1","status":"running","origin":"background","startedAt":1787911500000,"source":"claude-transcript"},
+    {"type":"model-output","text":"continuing","final":true,"key":"claude:cm2:0:t"},
+    {"type":"tool-call","callId":"cont-tool","toolName":"Bash","toolClass":"execute","args":{"command":"true"},"semantic":{"kind":"command","command":"true","state":"running"}},
+    {"type":"model-output","text":"wrapped up","final":true,"key":"claude:cm3:0:t"},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cn1","turnId":"cn1","assistantMessageKey":"claude:cm3:0:t","status":"done","origin":"background","startedAt":1787911500000,"completedAt":1787911560000,"totalRuntimeMs":60000,"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":72000,"turnCount":2,"updatedAt":1787911560000,"source":"claude-transcript"}},
+    {"type":"notice","message":"Background task completed.","semantic":{"kind":"continuation","reason":"task-notification","turnId":"cn2"}},
+    {"type":"run-summary","key":"7110e4ae-d972-4579-8579-7110e4aed972:run:cn2","turnId":"cn2","status":"running","origin":"background","startedAt":1787911620000,"source":"claude-transcript"},
+    {"type":"notice","message":"Background task completed.","semantic":{"kind":"continuation","reason":"task-notification","turnId":"cn3"}}
+  ]
+}

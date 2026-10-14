@@ -1,0 +1,12 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "reasoning in its three spellings (agent_reasoning events, item_completed Reasoning, response_item reasoning): one thinking row per reasoning item with text, keyed like the live path, encrypted-only items render nothing",
+  "userTexts": [
+    "first prompt"
+  ],
+  "oneRow": [
+    "Old part one.\nOld part two.",
+    "New summary."
+  ],
+  "sessionId": "191375dd-58cc-41df-81df-191375dd58cc"
+}

@@ -489,39 +489,10 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
     delete data[key];
     return data;
   };
-  const unreachableClient = () => new KimiReadOnlyHttp({
-    baseUrl: instance.baseUrl,
-    fetchImpl: async () => {
-      throw new Error('connection refused');
-    },
-  });
 
-  const none = await resolveVerifiedInstance({ live: [], stale: 0, invalid: 0, truncated: false }, gateClient());
-  check('no live instance refuses with `none`', !none.ok && none.reason === 'none');
-
-  // The 33-record shape end to end: one live server visible, truncation set.
-  // The gate must refuse rather than accept the visible server — the record it
-  // never enumerated may describe ANOTHER live one.
-  const incomplete = await resolveVerifiedInstance(
-    { live: [instance], stale: 0, invalid: 0, truncated: true },
-    gateClient(),
-  );
-  check('a truncated scan refuses with `incomplete`, even with one visible live server',
-    !incomplete.ok && incomplete.reason === 'incomplete',
-    JSON.stringify(incomplete));
-
-  const ambiguous = await resolveVerifiedInstance(
-    { live: [instance, { ...instance, serverId: 'server-two', port: 2 }], stale: 0, invalid: 0, truncated: false },
-    gateClient(),
-  );
-  check('several live instances refuse with `ambiguous`',
-    !ambiguous.ok && ambiguous.reason === 'ambiguous');
-
+  // The refusal REASONS (none, incomplete, ambiguous, unreachable, auth-bypassed, unbindable, startup-mismatch,
+  // version-mismatch) and the restart adoption are asserted at the product surface by e2e/adapters/kimi-host.test.ts.
   const one: KimiInstanceScan = { live: [instance], stale: 0, invalid: 0, truncated: false };
-  const unreachable = await resolveVerifiedInstance(one, unreachableClient);
-  check('an unanswerable /meta refuses with `unreachable`',
-    !unreachable.ok && unreachable.reason === 'unreachable');
-
   // THE REGRESSION: the captured pair, unmodified, through the real gate.
   const matched = await resolveVerifiedInstance(one, gateClient());
   check('the CAPTURED registry record and the CAPTURED meta resolve — the shape a real host serves',
@@ -546,56 +517,6 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
     check(`a malformed ${field} refuses`, !malformed.ok && malformed.reason === 'metadata-invalid');
   }
 
-  // A server that answers ANY caller has not proved it is this user's server:
-  // the authenticated probe that "verified" it authenticated nothing.
-  const bypassed = await resolveVerifiedInstance(one,
-    gateClient((data) => ({ ...data, dangerous_bypass_auth: true })));
-  check('a server with its token gate disabled refuses with `auth-bypassed`',
-    !bypassed.ok && bypassed.reason === 'auth-bypassed');
-
-  // No `started_at` in the registry record leaves NOTHING tying it to the
-  // process answering, and the version alone would not: a replacement server
-  // almost certainly reports the same version.
-  const { startedAt: _unbound, ...unboundInstance } = instance;
-  const unbindable = await resolveVerifiedInstance(
-    { live: [unboundInstance], stale: 0, invalid: 0, truncated: false },
-    gateClient(),
-  );
-  check('a registry record with no start time refuses with `unbindable`',
-    !unbindable.ok && unbindable.reason === 'unbindable');
-
-  const late = await resolveVerifiedInstance(
-    { live: [{ ...instance, startedAt: registryStartedAt - KIMI_STARTUP_BINDING_WINDOW_MS - 1 }], stale: 0, invalid: 0, truncated: false },
-    gateClient(),
-  );
-  check('an API start beyond the window after the record refuses with `startup-mismatch`',
-    !late.ok && late.reason === 'startup-mismatch');
-
-  // The PREVIOUS server still holding the port while a newer `kimi web` writes
-  // a record and fails to bind: it reports a start from before that record.
-  const early = await resolveVerifiedInstance(
-    { live: [{ ...instance, startedAt: metaStartedAtMs + 1 }], stale: 0, invalid: 0, truncated: false },
-    gateClient(),
-  );
-  check('an API start BEFORE the record refuses — a predecessor still holding the port',
-    !early.ok && early.reason === 'startup-mismatch');
-
-  const versionDrift = await resolveVerifiedInstance(one,
-    gateClient((data) => ({ ...data, server_version: '9.9.9' })));
-  check('a server reporting a version its record does not refuses with `version-mismatch`',
-    !versionDrift.ok && versionDrift.reason === 'version-mismatch');
-
-  // A record without `host_version` is not an older shape to accommodate: every
-  // supported version writes it, so its absence is a record the gate cannot
-  // check, and skipping the comparison it enables would fail open.
-  const { hostVersion: _versionless, ...versionlessInstance } = instance;
-  const versionless = await resolveVerifiedInstance(
-    { live: [versionlessInstance], stale: 0, invalid: 0, truncated: false },
-    gateClient(),
-  );
-  check('a record without host_version refuses with `unbindable`',
-    !versionless.ok && versionless.reason === 'unbindable');
-
   // The FAIL-OPEN EDGES, both reached by malformed input rather than by an
   // attacker: a present-but-empty `host_version` must not decode into a record
   // that merely looks unversioned, and a missing `dangerous_bypass_auth` must
@@ -604,23 +525,11 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
     decodeKimiInstanceRecord({ ...FIXTURE.instanceRecord, host_version: '' }) === undefined);
   check('a present-but-malformed started_at invalidates the whole record',
     decodeKimiInstanceRecord({ ...FIXTURE.instanceRecord, started_at: Number.NaN }) === undefined);
-  const bypassAbsent = await resolveVerifiedInstance(one, gateClient(without('dangerous_bypass_auth')));
-  check('a /meta without dangerous_bypass_auth refuses — a security field is never defaulted',
-    !bypassAbsent.ok && bypassAbsent.reason === 'metadata-invalid');
   const bypassNonBoolean = await resolveVerifiedInstance(one,
     gateClient((data) => ({ ...data, dangerous_bypass_auth: 'false' })));
   check('a non-boolean dangerous_bypass_auth refuses rather than being coerced',
     !bypassNonBoolean.ok && bypassNonBoolean.reason === 'metadata-invalid');
 
-  // NO CROSS-CALL PIN, asserted rather than assumed. A resolution carries no
-  // memory of the previous one, so an ordinary `kimi web` restart — a new API
-  // generation over a fresh registry record — resolves immediately instead of
-  // spending a refusal on whichever operation happened to run first.
-  const restarted = await resolveVerifiedInstance(one,
-    gateClient((data) => ({ ...data, server_id: `${String(data.server_id)}-next` })));
-  check('a new API generation resolves on its own merits — no operation is spent on a stale pin',
-    restarted.ok && restarted.identity.apiServerId === `${String(capturedMeta.server_id)}-next`,
-    restarted.ok ? 'ok' : restarted.reason);
 }
 
 // ── 4. The response-body ceiling ────────────────────────────────────────────

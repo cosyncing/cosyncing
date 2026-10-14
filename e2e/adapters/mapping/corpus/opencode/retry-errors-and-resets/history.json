@@ -1,0 +1,56 @@
+{
+  "rows": [
+    {
+      "info": {
+        "id": "msg_u1",
+        "role": "user",
+        "time": {
+          "created": 1000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u1",
+          "type": "text",
+          "text": "go",
+          "time": {
+            "start": 1000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_a1",
+        "role": "assistant",
+        "parentID": "msg_u1",
+        "time": {
+          "created": 1001,
+          "completed": 1003
+        },
+        "finish": "stop",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "read": 1,
+            "write": 2
+          }
+        },
+        "cost": 0.01
+      },
+      "parts": [
+        {
+          "id": "prt_a1",
+          "type": "text",
+          "text": "partial",
+          "time": {
+            "start": 1001,
+            "end": 1002
+          }
+        }
+      ]
+    }
+  ]
+}

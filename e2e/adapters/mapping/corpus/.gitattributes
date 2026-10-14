@@ -1,0 +1,2 @@
+# Garbage-input cases hold whitespace-only lines on purpose (the mapper must skip them).
+*/garbage-input/*.jsonl -whitespace

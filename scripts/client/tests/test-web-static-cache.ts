@@ -936,42 +936,13 @@ async function caseReleaseBuildShapeIsShared(): Promise<void> {
     );
     check(
       workflow.includes('bun run check'),
-      `${workflowPath} consumes the canonical verification graph`,
+      `${workflowPath} runs the suites through bun run check`,
     );
     check(
       !workflow.includes('flutter build web --release'),
       `${workflowPath} has no release-shaped raw Flutter web build`,
     );
   }
-  const verificationGraph = JSON.parse(
-    await readFile(
-      join(
-        REPOSITORY_ROOT,
-        'scripts/verification/verification-graph.json',
-      ),
-      'utf8',
-    ),
-  ) as {
-    gates: Array<{ id: string; command: string[]; dependencies: string[] }>;
-  };
-  const clientGate = verificationGraph.gates.find(
-    (gate) => gate.id === 'client',
-  );
-  const browserGate = verificationGraph.gates.find(
-    (gate) => gate.id === 'web-browser',
-  );
-  const cacheGate = verificationGraph.gates.find(
-    (gate) => gate.id === 'web-cache',
-  );
-  check(
-    clientGate?.command.join(' ') === 'bun run client:check',
-    'the graph has one canonical client build owner',
-  );
-  check(
-    browserGate?.dependencies.includes('client') === true
-      && cacheGate?.dependencies.includes('client') === true,
-    'browser and cache gates consume the exact canonical client output',
-  );
 }
 
 /**

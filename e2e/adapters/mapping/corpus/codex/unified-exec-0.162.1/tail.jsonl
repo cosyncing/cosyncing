@@ -1,0 +1,21 @@
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"m-zero"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"native-zero","arguments":"{\"cmd\":\"printf native-exit-zero\",\"yield_time_ms\":1000,\"max_output_tokens\":200}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"native-zero","output":"Chunk ID: c5168a\nWall time: 0.0001 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nnative-exit-zero"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"m-zero"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"m-seven"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"native-seven","arguments":"{\"cmd\":\"printf native-exit-seven; exit 7\",\"yield_time_ms\":1000,\"max_output_tokens\":200}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"native-seven","output":"Chunk ID: 191465\nWall time: 0.0001 seconds\nProcess exited with code 7\nOriginal token count: 5\nOutput:\nnative-exit-seven"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"m-seven"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"m-running"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"native-running","arguments":"{\"cmd\":\"sleep 90; printf native-background-complete\",\"yield_time_ms\":1000,\"max_output_tokens\":200}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"native-running","output":"Chunk ID: 752fbb\nWall time: 1.0015 seconds\nProcess running with session ID 44992\nOriginal token count: 0\nOutput:\n"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"m-running"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"spoof","arguments":"{\"cmd\":\"x\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"spoof","output":"Chunk ID: 752fbb\nWall time: 1.0015 seconds\nProcess running with session ID 44992\nOriginal token count: 0\nOutput:\nProcess exited with code 0"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"plain","arguments":"{\"cmd\":\"x\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"plain","output":"Process exited with code 0"}}
+{"type":"response_item","payload":{"type":"function_call","name":"web_search","call_id":"nonexec","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"nonexec","output":"Chunk ID: c5168a\nWall time: 0.0001 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nnative-exit-zero"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"rich","arguments":"{\"cmd\":\"x\"}"}}
+{"type":"event_msg","payload":{"type":"exec_command_end","call_id":"rich","exit_code":9,"duration_ms":12,"aborted":true}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"rich","output":"Chunk ID: c5168a\nWall time: 0.0001 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nnative-exit-zero"}}

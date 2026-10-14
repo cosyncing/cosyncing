@@ -1,0 +1,38 @@
+{
+  "history": [
+    {"type":"user-message","text":"enrich","key":"t0","turnId":"t0"},
+    {"type":"run-summary","key":"b555d714-62ca-4286-8286-b555d71462ca:run:t0","turnId":"t0","userMessageKey":"t0","status":"running","source":"claude-transcript"},
+    {"type":"tool-call","callId":"w1","toolName":"Write","toolClass":"edit","args":{"file_path":"/tmp/x/new.ts","content":"l1\nl2\nl3"}},
+    {"type":"tool-call","callId":"e1","toolName":"Edit","toolClass":"edit","args":{"file_path":"/tmp/x/a.ts"}},
+    {"type":"tool-call","callId":"b1","toolName":"Bash","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}},
+    {"type":"tool-call","callId":"g1","toolName":"Grep","toolClass":"lookup","args":{"pattern":"foo","path":"/tmp/x/src"},"semantic":{"kind":"search","query":"foo","scope":"/tmp/x/src"}},
+    {"type":"tool-call","callId":"i1","toolName":"Read","toolClass":"lookup","args":{"file_path":"/tmp/x/shot.png"},"semantic":{"kind":"file-read","path":"/tmp/x/shot.png"}},
+    {"type":"tool-call","callId":"s1","toolName":"SendUserFile","toolClass":"other","args":{"attachments":[{"path":"r.png"}],"caption":"Here is the report"}}
+  ],
+  "live": [
+    {"type":"tool-result","callId":"w1","toolName":"Write","toolClass":"edit","isError":false,"result":"File created","title":"Created new.ts","path":"/tmp/x/new.ts","diff":"--- /dev/null\n+++ b/tmp/x/new.ts\n+l1\n+l2\n+l3","fileChanges":[{"path":"/tmp/x/new.ts","operation":"create","diff":"--- /dev/null\n+++ b/tmp/x/new.ts\n+l1\n+l2\n+l3","additions":3,"deletions":0}],"additions":3,"deletions":0},
+    {"type":"tool-result","callId":"e1","toolName":"Edit","toolClass":"edit","isError":false,"result":"ok","title":"Edited a.ts","path":"/tmp/x/a.ts","diff":"@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n@@ -40,1 +41,1 @@\n-gone\n+here","fileChanges":[{"path":"/tmp/x/a.ts","operation":"edit","diff":"@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n@@ -40,1 +41,1 @@\n-gone\n+here","additions":3,"deletions":2}],"additions":3,"deletions":2},
+    {"type":"tool-result","callId":"b1","toolName":"Bash","toolClass":"execute","semantic":{"kind":"command","command":"ls","state":"completed","stdout":{"text":"x","totalBytes":1}},"isError":false,"result":"x"},
+    {"type":"tool-result","callId":"g1","toolName":"Grep","toolClass":"lookup","semantic":{"kind":"search","query":"foo","scope":"/tmp/x/src","fileCount":3},"isError":false,"result":"matches"},
+    {"type":"tool-result","callId":"i1","toolName":"Read","toolClass":"lookup","semantic":{"kind":"file-read","path":"/tmp/x/shot.png","unavailable":"binary"},"isError":false,"result":"image","title":"Read shot.png","path":"/tmp/x/shot.png"},
+    {"type":"tool-result","callId":"s1","toolName":"SendUserFile","toolClass":"other","isError":false,"result":"sent","title":"Here is the report"},
+    {"type":"file-artifact","name":"r.png","path":"r.png","mimeType":"application/octet-stream","proactive":true}
+  ],
+  "replay": [
+    {"type":"user-message","text":"enrich","key":"t0","turnId":"t0"},
+    {"type":"run-summary","key":"b555d714-62ca-4286-8286-b555d71462ca:run:t0","turnId":"t0","userMessageKey":"t0","status":"running","source":"claude-transcript"},
+    {"type":"tool-call","callId":"w1","toolName":"Write","toolClass":"edit","args":{"file_path":"/tmp/x/new.ts","content":"l1\nl2\nl3"}},
+    {"type":"tool-call","callId":"e1","toolName":"Edit","toolClass":"edit","args":{"file_path":"/tmp/x/a.ts"}},
+    {"type":"tool-call","callId":"b1","toolName":"Bash","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}},
+    {"type":"tool-call","callId":"g1","toolName":"Grep","toolClass":"lookup","args":{"pattern":"foo","path":"/tmp/x/src"},"semantic":{"kind":"search","query":"foo","scope":"/tmp/x/src"}},
+    {"type":"tool-call","callId":"i1","toolName":"Read","toolClass":"lookup","args":{"file_path":"/tmp/x/shot.png"},"semantic":{"kind":"file-read","path":"/tmp/x/shot.png"}},
+    {"type":"tool-call","callId":"s1","toolName":"SendUserFile","toolClass":"other","args":{"attachments":[{"path":"r.png"}],"caption":"Here is the report"}},
+    {"type":"tool-result","callId":"w1","toolName":"Write","toolClass":"edit","isError":false,"result":"File created","title":"Created new.ts","path":"/tmp/x/new.ts","diff":"--- /dev/null\n+++ b/tmp/x/new.ts\n+l1\n+l2\n+l3","fileChanges":[{"path":"/tmp/x/new.ts","operation":"create","diff":"--- /dev/null\n+++ b/tmp/x/new.ts\n+l1\n+l2\n+l3","additions":3,"deletions":0}],"additions":3,"deletions":0},
+    {"type":"tool-result","callId":"e1","toolName":"Edit","toolClass":"edit","isError":false,"result":"ok","title":"Edited a.ts","path":"/tmp/x/a.ts","diff":"@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n@@ -40,1 +41,1 @@\n-gone\n+here","fileChanges":[{"path":"/tmp/x/a.ts","operation":"edit","diff":"@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n@@ -40,1 +41,1 @@\n-gone\n+here","additions":3,"deletions":2}],"additions":3,"deletions":2},
+    {"type":"tool-result","callId":"b1","toolName":"Bash","toolClass":"execute","semantic":{"kind":"command","command":"ls","state":"completed","stdout":{"text":"x","totalBytes":1}},"isError":false,"result":"x"},
+    {"type":"tool-result","callId":"g1","toolName":"Grep","toolClass":"lookup","semantic":{"kind":"search","query":"foo","scope":"/tmp/x/src","fileCount":3},"isError":false,"result":"matches"},
+    {"type":"tool-result","callId":"i1","toolName":"Read","toolClass":"lookup","semantic":{"kind":"file-read","path":"/tmp/x/shot.png","unavailable":"binary"},"isError":false,"result":"image","title":"Read shot.png","path":"/tmp/x/shot.png"},
+    {"type":"tool-result","callId":"s1","toolName":"SendUserFile","toolClass":"other","isError":false,"result":"sent","title":"Here is the report"},
+    {"type":"file-artifact","name":"r.png","path":"r.png","mimeType":"application/octet-stream","proactive":true}
+  ]
+}

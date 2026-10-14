@@ -112,7 +112,7 @@
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
       "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('thread/compact/start'))"],
-      "traceRefs": ["packages/typescript/broker/test/codex/broker-control-mode.ts"]
+      "traceRefs": ["e2e/broker/codex-sync-preference.test.ts"]
     },
     {
       "schemaVersion": 1,

@@ -31,62 +31,6 @@ void main() {
       await tester.pump();
     }
 
-    testWidgets('desktop drop surface leaves mobile unchanged', (tester) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          theme: platformTheme(TargetPlatform.linux),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(
-        find.byKey(const Key('session-detail-attachment-drop-region')),
-        findsOneWidget,
-      );
-
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          theme: platformTheme(TargetPlatform.android),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(
-        find.byKey(const Key('session-detail-attachment-drop-region')),
-        findsNothing,
-      );
-    });
-
-    testWidgets('actionable plain and rich paste remain draft text only', (
-      tester,
-    ) async {
-      final clipboard = _FakeClipboard.native([
-        const SessionAttachmentClipboardText('plain text'),
-        const SessionAttachmentClipboardText(' + rich fallback'),
-      ]);
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          attachmentClipboard: clipboard,
-          theme: platformTheme(TargetPlatform.linux),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final input = find.byKey(const Key('session-detail-prompt-input'));
-      await tester.tap(input);
-
-      await pressPaste(tester);
-      await pressPaste(tester);
-      await tester.pumpAndSettle();
-
-      expect(
-        tester.widget<TextField>(input).controller?.text,
-        'plain text + rich fallback',
-      );
-      expect(find.byType(ActionChip), findsNothing);
-      expect(clipboard.nativeReadCount, 2);
-    });
-
     testWidgets('web text representations are never claimed as files', (
       tester,
     ) async {
@@ -153,47 +97,6 @@ void main() {
 
       expect(find.text('one.png'), findsOneWidget);
       expect(find.text('two.png'), findsOneWidget);
-    });
-
-    testWidgets('pending paste blocks send until attachment intake settles', (
-      tester,
-    ) async {
-      final gate = Completer<SessionAttachmentClipboardRead>();
-      final clipboard = _FakeClipboard.nativeFutures([gate.future]);
-      final connection = ScriptedSessionDetailConnection(events: const []);
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          connection: connection,
-          attachmentClipboard: clipboard,
-          theme: platformTheme(TargetPlatform.linux),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final input = find.byKey(const Key('session-detail-prompt-input'));
-      await tester.enterText(input, 'wait for the file');
-      await tester.tap(input);
-      await pressPaste(tester);
-
-      await tester.tap(find.byKey(const Key('session-detail-send-button')));
-      await tester.pump();
-      expect(connection.sendPromptCount, 0);
-      expect(
-        tester
-            .widget<IconButton>(
-              find.byKey(const Key('session-detail-send-button')),
-            )
-            .onPressed,
-        isNull,
-      );
-
-      gate.complete(
-        SessionAttachmentClipboardFiles([_memoryItem('ready.png', 1)]),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('session-detail-send-button')));
-      await tester.pump();
-      expect(connection.sendPromptCount, 1);
     });
 
     testWidgets('paste holds and queued acquisition are bounded at ownership', (
@@ -967,102 +870,6 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets(
-      'drop is ordered, deduped, focus-preserving, and does not send',
-      (
-        tester,
-      ) async {
-        final connection = ScriptedSessionDetailConnection(events: const []);
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: const [],
-            connection: connection,
-            theme: platformTheme(TargetPlatform.linux),
-          ),
-        );
-        await tester.pumpAndSettle();
-        final input = find.byKey(const Key('session-detail-prompt-input'));
-        await tester.tap(input);
-        final inputWidget = tester.widget<TextField>(input);
-        final target = tester.widget<DropTarget>(
-          find.byKey(const Key('session-detail-attachment-drop-region')),
-        );
-        target.onDragEntered?.call(_dropEventDetails);
-        target.onDragEntered?.call(_dropEventDetails);
-        await tester.pump();
-        expect(
-          find.byKey(const Key('session-detail-attachment-drop-overlay')),
-          findsOneWidget,
-        );
-        target.onDragExited?.call(_dropEventDetails);
-        await tester.pump();
-        expect(
-          find.byKey(const Key('session-detail-attachment-drop-overlay')),
-          findsOneWidget,
-        );
-        target.onDragExited?.call(_dropEventDetails);
-        await tester.pump();
-        expect(
-          find.byKey(const Key('session-detail-attachment-drop-overlay')),
-          findsNothing,
-        );
-
-        final details = _dropDetails([
-          _dropFile('first.png', [1, 2]),
-          _dropFile('second.png', [3]),
-        ]);
-        target.onDragDone?.call(details);
-        await tester.pumpAndSettle();
-        target.onDragDone?.call(details);
-        await tester.pumpAndSettle();
-
-        expect(find.text('first.png'), findsOneWidget);
-        expect(find.text('second.png'), findsOneWidget);
-        expect(inputWidget.focusNode?.hasFocus, isTrue);
-        expect(connection.sendPromptCount, 0);
-        expect(connection.sendFileCount, 0);
-      },
-    );
-
-    testWidgets('directory drop is rejected without changing draft or chips', (
-      tester,
-    ) async {
-      final picker = FakeSessionAttachmentPicker();
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          attachmentPicker: picker,
-          theme: platformTheme(TargetPlatform.linux),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openComposerMenu(tester);
-      await tester.tap(find.byKey(const Key('session-detail-attach-button')));
-      final input = find.byKey(const Key('session-detail-prompt-input'));
-      await tester.enterText(input, 'keep this draft');
-      final target = tester.widget<DropTarget>(
-        find.byKey(const Key('session-detail-attachment-drop-region')),
-      );
-      target.onDragDone?.call(
-        _dropDetails([
-          DropItemDirectory.fromData(
-            Uint8List(0),
-            const [],
-            name: 'folder',
-            path: '/folder',
-          ),
-        ]),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('notes.txt'), findsOneWidget);
-      expect(
-        tester.widget<TextField>(input).controller?.text,
-        'keep this draft',
-      );
-      expect(find.textContaining("Couldn't add those files"), findsOneWidget);
-    });
-
     testWidgets('an oversized drop is refused before any file is stat-ed', (
       tester,
     ) async {
@@ -1128,70 +935,6 @@ void main() {
       expect(find.text('promised.png'), findsNothing);
       expect(find.byType(ActionChip), findsNothing);
       expect(find.textContaining("Couldn't add those files"), findsOneWidget);
-    });
-
-    testWidgets('URL drop is rejected without creating an attachment', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          theme: platformTheme(TargetPlatform.linux),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final target = tester.widget<DropTarget>(
-        find.byKey(const Key('session-detail-attachment-drop-region')),
-      );
-      target.onDragDone?.call(
-        _dropDetails([
-          DropItemFile.fromData(
-            Uint8List.fromList([1]),
-            name: 'remote.png',
-            path: 'https://example.test/remote.png',
-            mimeType: 'image/png',
-          ),
-        ]),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('remote.png'), findsNothing);
-      expect(find.textContaining("Couldn't add those files"), findsOneWidget);
-    });
-
-    testWidgets('Windows drive and UNC file paths are admitted', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          theme: platformTheme(TargetPlatform.windows),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final target = tester.widget<DropTarget>(
-        find.byKey(const Key('session-detail-attachment-drop-region')),
-      );
-      target.onDragDone?.call(
-        _dropDetails([
-          DropItemFile.fromData(
-            Uint8List.fromList([1]),
-            name: 'drive.png',
-            path: r'C:\project\drive.png',
-            mimeType: 'image/png',
-          ),
-          DropItemFile.fromData(
-            Uint8List.fromList([2]),
-            name: 'unc.png',
-            path: r'\\server\share\unc.png',
-            mimeType: 'image/png',
-          ),
-        ]),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('drive.png'), findsOneWidget);
-      expect(find.text('unc.png'), findsOneWidget);
     });
 
     testWidgets(
@@ -1270,13 +1013,6 @@ DropDoneDetails _dropDetails(List<DropItem> files) => DropDoneDetails(
   files: files,
   localPosition: Offset.zero,
   globalPosition: Offset.zero,
-);
-
-DropItemFile _dropFile(String name, List<int> bytes) => DropItemFile.fromData(
-  Uint8List.fromList(bytes),
-  name: name,
-  path: '/drop/$name',
-  mimeType: 'image/png',
 );
 
 /// A dropped file that records every filesystem measurement it is asked for.

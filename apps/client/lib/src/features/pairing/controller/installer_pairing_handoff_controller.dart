@@ -1,3 +1,5 @@
+import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/real_broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/pairing_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/data/installer_pairing_handoff.dart';
@@ -55,7 +57,13 @@ final installerPairingStoragePreflightProvider =
 
 /// Safe readiness probe run before the one-use acceptance request.
 final installerPairingBrokerPreflightProvider =
-    Provider<Future<void> Function(String)>((ref) => _verifyBrokerReady);
+    Provider<Future<void> Function(String)>((ref) {
+      final probe = RealBrokerHealthProbe(
+        timeout: const Duration(seconds: 5),
+        transport: ref.watch(brokerHttpTransportProvider),
+      );
+      return (brokerUrl) => _verifyBrokerReady(probe, brokerUrl);
+    });
 
 /// Delay between bounded secure-storage readiness attempts.
 final installerPairingRetryDelayProvider =
@@ -79,10 +87,11 @@ const List<Duration> _brokerRetryDelays = <Duration>[
   Duration(seconds: 16),
 ];
 
-Future<void> _verifyBrokerReady(String brokerUrl) async {
-  final health = await RealBrokerHealthProbe(
-    timeout: const Duration(seconds: 5),
-  ).probe(Uri.parse(brokerUrl));
+Future<void> _verifyBrokerReady(
+  BrokerHealthProbe probe,
+  String brokerUrl,
+) async {
+  final health = await probe.probe(Uri.parse(brokerUrl));
   if (!health.isSuccess) {
     throw StateError('Broker health check was not ready.');
   }

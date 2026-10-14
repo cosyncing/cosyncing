@@ -1,0 +1,11 @@
+{"type":"session_meta","payload":{"id":"1d882271-7cec-4164-8164-1d8822717cec","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"real prompt"}}
+{"type":"event_msg","payload":{"type":"a_new_event_from_the_future","payload":{"anything":1}}}
+{"type":"a_new_record_type_from_the_future","payload":{"type":"x"}}
+{"type":"response_item","payload":{"type":"a_response_item_from_the_future","role":"user","content":[{"type":"input_text","text":"not a prompt"}]}}
+{"type":"response_item","payload":{"type":"message","role":"a-role-from-the-future","content":[{"type":"output_text","text":"ambiguous role"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"tool_from_the_future","call_id":"cf1","arguments":"{\"x\":1}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cf1","output":"ok"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"tf","a_new_field":true}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Answer with a new phase.","phase":"a-phase-from-the-future"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_f","phase":"a-phase-from-the-future","content":[{"type":"output_text","text":"Answer with a new phase."}]}}

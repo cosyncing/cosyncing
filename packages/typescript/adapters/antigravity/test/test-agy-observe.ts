@@ -17,7 +17,7 @@
  *   bun run packages/typescript/adapters/antigravity/test/test-agy-observe.ts   (exit 0 = all pass)
  */
 export {};
-import { appendFileSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentMessage } from '@cosyncing/adapter-api';
 import {
@@ -53,9 +53,46 @@ function infoFor(id: string) {
   };
 }
 
-/** Let the debounced fs.watch drain fire. The tail debounce is 80 ms. */
-function settle(ms = 260): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** A watch event with nothing behind it: run the tail's own drain now, and wait out one already running. */
+async function drainNow(connection: unknown): Promise<void> {
+  const tail = connection as { draining: boolean; drainTail(): Promise<void> };
+  const deadline = Date.now() + 10_000;
+  while (tail.draining) {
+    if (Date.now() > deadline) throw new Error('the transcript tail never finished draining');
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  await tail.drainTail();
+}
+
+/**
+ * Run `write` against the transcript and return once the tail has ACTED on it: the OS has delivered the change
+ * event (an independent watcher, started before the write, sees it), and the connection's own debounce has fired
+ * and its drain has finished. The old barrier slept for the debounce plus a guess at the drain, which a loaded
+ * machine made wrong; this one waits on the two conditions themselves, bounded and loud.
+ */
+async function afterWrite(connection: unknown, path: string, write: () => void, timeoutMs = 10_000): Promise<void> {
+  const tail = connection as { pendingDrain?: unknown; draining: boolean };
+  const deadline = Date.now() + timeoutMs;
+  let delivered = false;
+  const watcher = watch(path, () => { delivered = true; });
+  try {
+    write();
+    while (!delivered) {
+      if (Date.now() > deadline) throw new Error(`the change event for ${path} never arrived`);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    // The watchers of one file are served from the same event; let the connection's own callback run, then wait
+    // out its debounce and drain.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    let idle = 0;
+    while (idle < 3) {
+      if (Date.now() > deadline) throw new Error('the transcript tail never went idle');
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      idle = tail.pendingDrain === undefined && !tail.draining ? idle + 1 : 0;
+    }
+  } finally {
+    watcher.close();
+  }
 }
 
 /** Poll until a predicate holds. Test synchronization, not production polling. */
@@ -153,8 +190,7 @@ function duplicates(messages: AgentMessage[]): string[] {
     connection.subscribe((message) => live.push(message));
     const history = await connection.getHistory();
 
-    appendFileSync(tree.transcriptPath, jsonl(FIXTURE.appendedSteps));
-    await settle();
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, jsonl(FIXTURE.appendedSteps)));
 
     check('appended steps arrive on the tail', live.length > 0, `${live.length} live messages`);
     check('the appended RUN_COMMAND result arrived with its exit code',
@@ -169,15 +205,14 @@ function duplicates(messages: AgentMessage[]): string[] {
 
     // A drain fired again with nothing new must emit nothing.
     const before = live.length;
-    appendFileSync(tree.transcriptPath, '');
-    await settle();
+    await drainNow(connection);
     check('a watch event with no new bytes emits nothing', live.length === before, `${before} → ${live.length}`);
 
     // Re-writing the SAME content (same size) must not re-emit either: the step
     // fence catches what a byte offset alone would miss.
     const countBefore = live.length;
     await connection.getHistory();
-    await settle();
+    await drainNow(connection);
     check('a fresh getHistory does not cause the tail to re-emit already-seen steps',
       live.length === countBefore, `${countBefore} → ${live.length}`);
     await connection.close();
@@ -200,13 +235,11 @@ function duplicates(messages: AgentMessage[]): string[] {
     // Write half a line, then complete it — the classic double-admit shape.
     const step = JSON.stringify(FIXTURE.transcript[3]);
     const half = step.slice(0, 40);
-    appendFileSync(tree.transcriptPath, half);
-    await settle();
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, half));
     check('a partial trailing line emits nothing until its newline lands',
       !live.some((m) => m.type === 'model-output'), live.map((m) => m.type).join(','));
 
-    appendFileSync(tree.transcriptPath, step.slice(40) + '\n');
-    await settle();
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, step.slice(40) + '\n'));
     check('the completed line is then admitted exactly once',
       live.filter((m) => m.type === 'thinking').length === 1, `${live.filter((m) => m.type === 'thinking').length}`);
     check('replay + tail still has no duplicates', duplicates([...history, ...live]).length === 0);
@@ -229,8 +262,7 @@ function duplicates(messages: AgentMessage[]): string[] {
     await connection.getHistory();
 
     // Replace the file with a SHORTER, different transcript.
-    writeFileSync(tree.transcriptPath, jsonl(FIXTURE.transcript.slice(0, 3)));
-    await settle();
+    await afterWrite(connection, tree.transcriptPath, () => writeFileSync(tree.transcriptPath, jsonl(FIXTURE.transcript.slice(0, 3))));
 
     check('a shrunk transcript emits a history-reset rather than splicing',
       live.some((m) => m.type === 'history-reset'), live.map((m) => m.type).join(','));
@@ -385,14 +417,13 @@ function duplicates(messages: AgentMessage[]): string[] {
     const unsubscribe = connection.subscribe((message) => live.push(message));
     await connection.getHistory();
     unsubscribe();
-    appendFileSync(tree.transcriptPath, jsonl(FIXTURE.appendedSteps));
-    await settle();
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, jsonl(FIXTURE.appendedSteps)));
     check('an unsubscribed handler stops receiving', live.length === 0, `${live.length}`);
 
     await connection.close();
     const after = live.length;
-    appendFileSync(tree.transcriptPath, jsonl([FIXTURE.transcript[0]!]));
-    await settle();
+    // The tail is stopped, so its own debounce never runs: only the OS delivering the event can be waited for.
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, jsonl([FIXTURE.transcript[0]!])));
     check('close stops the tail', live.length === after, `${after} → ${live.length}`);
   } finally {
     tree.cleanup();
@@ -412,7 +443,6 @@ function duplicates(messages: AgentMessage[]): string[] {
     const history = await connection.getHistory();
     check('a missing transcript replays a notice and does not throw',
       history.length === 1 && history[0]!.type === 'notice', JSON.stringify(history));
-    await settle(120);
     check('subscribing to a missing transcript emits nothing and does not crash', live.length === 0);
     await connection.close();
   } finally {
@@ -554,15 +584,14 @@ function duplicates(messages: AgentMessage[]): string[] {
 
     // ONE write: the whole over-cap line, newline included, lands at once.
     const huge = '日'.repeat(800_000); // 3 bytes each → ~2.4 MB, over the 1 MiB line cap
-    appendFileSync(tree.transcriptPath, jsonl([{
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, jsonl([{
       step_index: 700,
       source: 'MODEL',
       type: 'PLANNER_RESPONSE',
       status: 'DONE',
       created_at: '2026-08-15T10:10:23Z',
       content: huge,
-    }]));
-    await settle(400);
+    }])));
     check(
       'an over-cap line arriving COMPLETE is dropped, with a trace',
       traces.some((trace) => trace.op === 'transcript-line-oversized'),
@@ -579,14 +608,11 @@ function duplicates(messages: AgentMessage[]): string[] {
     const piece = '月'.repeat(200_000);
     const opening = `{"step_index":701,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE",`
       + `"created_at":"2026-08-15T10:10:23Z","content":"`;
-    appendFileSync(tree.transcriptPath, opening);
-    await settle(150);
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, opening));
     for (let i = 0; i < 4; i += 1) {
-      appendFileSync(tree.transcriptPath, piece);
-      await settle(150);
+      await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, piece));
     }
-    appendFileSync(tree.transcriptPath, '"}\n');
-    await settle(400);
+    await afterWrite(connection, tree.transcriptPath, () => appendFileSync(tree.transcriptPath, '"}\n'));
     check(
       'an over-cap line arriving SPLIT across writes is dropped too',
       traces.filter((trace) => trace.op === 'transcript-line-oversized').length > before,

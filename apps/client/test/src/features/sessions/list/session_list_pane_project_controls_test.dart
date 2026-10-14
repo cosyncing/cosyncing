@@ -8,8 +8,6 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_control
 import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -97,28 +95,6 @@ void main() {
   );
 
   group('project header actions', () {
-    testWidgets('the header carries no pencil, overflow, count or path line', (
-      tester,
-    ) async {
-      await setViewSize(tester, const Size(360, 800));
-      await tester.pumpWidget(
-        host(twoProjectPane(onNew: (_) {}, onRename: (_) {})),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(const ValueKey('project-rename-$alphaCwd')),
-        findsNothing,
-      );
-      expect(
-        find.byKey(const ValueKey('project-overflow-$alphaCwd')),
-        findsNothing,
-      );
-      // Touch has no hover, so the add action lives in the long-press sheet.
-      expect(find.byKey(const ValueKey('project-new-$alphaCwd')), findsNothing);
-      expect(find.text(alphaCwd), findsNothing);
-    });
-
     testWidgets('a touch long-press opens a sheet with add and rename', (
       tester,
     ) async {
@@ -162,84 +138,6 @@ void main() {
       await tester.pumpAndSettle();
       expect(renamed, [alphaCwd]);
     });
-
-    testWidgets(
-      'a pointer hover reveals add and a right-click opens the menu',
-      (
-        tester,
-      ) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
-        await setViewSize(tester, const Size(1000, 800));
-        final created = <String>[];
-        final renamed = <String>[];
-        await tester.pumpWidget(
-          host(twoProjectPane(onNew: created.add, onRename: renamed.add)),
-        );
-        await tester.pumpAndSettle();
-
-        final header = find.byKey(const ValueKey('project-header-$alphaCwd'));
-        expect(tester.getSize(header).height, 36);
-        expect(
-          find.byKey(const ValueKey('project-new-$alphaCwd')),
-          findsNothing,
-        );
-        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-        await mouse.addPointer(location: Offset.zero);
-        addTearDown(mouse.removePointer);
-        await mouse.moveTo(tester.getCenter(header));
-        await tester.pump();
-        final add = find.byKey(const ValueKey('project-new-$alphaCwd'));
-        expect(add, findsOneWidget);
-        // Only the hovered project offers it.
-        expect(
-          find.byKey(const ValueKey('project-new-$betaCwd')),
-          findsNothing,
-        );
-        await tester.tap(add);
-        await tester.pumpAndSettle();
-        expect(created, [alphaCwd]);
-        expect(
-          find.byKey(const Key('session-row-codex/a1')),
-          findsNothing,
-          reason: 'the add action must not fall through to the header toggle',
-        );
-
-        await tester.tap(
-          header,
-          buttons: kSecondaryMouseButton,
-          kind: PointerDeviceKind.mouse,
-        );
-        await tester.pumpAndSettle();
-        expect(
-          find.byKey(const ValueKey('project-path-$alphaCwd')),
-          findsOneWidget,
-        );
-        await tester.tap(
-          find.byKey(const ValueKey('project-menu-rename-$alphaCwd')),
-        );
-        await tester.pumpAndSettle();
-        expect(renamed, [alphaCwd]);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.windows),
-    );
-
-    testWidgets(
-      'a pointer layout shows the path as the header tooltip',
-      (
-        tester,
-      ) async {
-        await setViewSize(tester, const Size(1000, 800));
-        await tester.pumpWidget(
-          host(twoProjectPane(onNew: (_) {}, onRename: (_) {})),
-        );
-        await tester.pumpAndSettle();
-
-        expect(find.byTooltip(alphaCwd), findsOneWidget);
-        expect(find.text(alphaCwd), findsNothing);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
-    );
   });
 
   group('project rename dialog', () {

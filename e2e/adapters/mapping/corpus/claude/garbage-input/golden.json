@@ -1,0 +1,27 @@
+{
+  "history": [
+    {"type":"user-message","text":"before the noise","key":"g1","turnId":"g1"},
+    {"type":"run-summary","key":"a14c0c56-ec8c-4dc0-8dc0-a14c0c56ec8c:run:g1","turnId":"g1","userMessageKey":"g1","status":"running","source":"claude-transcript"},
+    {"type":"tool-call","callId":"","toolName":"tool","toolClass":"other"},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","result":""},
+    {"type":"tool-result","callId":"5","toolName":"tool","toolClass":"other","result":""},
+    {"type":"model-output","text":"after the noise","final":true,"key":"claude:gm:0:t"}
+  ],
+  "live": [
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"g3","turnId":"g3"},
+    {"type":"run-summary","key":"a14c0c56-ec8c-4dc0-8dc0-a14c0c56ec8c:run:g1","turnId":"g1","userMessageKey":"g1","assistantMessageKey":"claude:gm:0:t","status":"cancelled","source":"claude-transcript"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"a14c0c56-ec8c-4dc0-8dc0-a14c0c56ec8c:run:g3","turnId":"g3","userMessageKey":"g3","status":"running","source":"claude-transcript"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"before the noise","key":"g1","turnId":"g1"},
+    {"type":"run-summary","key":"a14c0c56-ec8c-4dc0-8dc0-a14c0c56ec8c:run:g1","turnId":"g1","userMessageKey":"g1","status":"running","source":"claude-transcript"},
+    {"type":"tool-call","callId":"","toolName":"tool","toolClass":"other"},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","result":""},
+    {"type":"tool-result","callId":"5","toolName":"tool","toolClass":"other","result":""},
+    {"type":"model-output","text":"after the noise","final":true,"key":"claude:gm:0:t"},
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"g3","turnId":"g3"},
+    {"type":"run-summary","key":"a14c0c56-ec8c-4dc0-8dc0-a14c0c56ec8c:run:g1","turnId":"g1","userMessageKey":"g1","assistantMessageKey":"claude:gm:0:t","status":"cancelled","source":"claude-transcript"},
+    {"type":"run-summary","key":"a14c0c56-ec8c-4dc0-8dc0-a14c0c56ec8c:run:g3","turnId":"g3","userMessageKey":"g3","status":"running","source":"claude-transcript"}
+  ]
+}

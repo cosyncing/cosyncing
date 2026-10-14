@@ -1,0 +1,2 @@
+{"type":"assistant","uuid":"a-toolu_open","isSidechain":false,"message":{"id":"m-toolu_open","role":"assistant","content":[{"type":"tool_use","id":"toolu_open","name":"AskUserQuestion","input":{"questions":[{"question":"Which approach?","header":"Approach","multiSelect":false,"options":[{"label":"MVP first","description":"Smallest shippable slice"},{"label":"Risk first"}]}]}}]}}
+{"type":"user","uuid":"u-open","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_open","content":"MVP first"}]}}

@@ -24,9 +24,6 @@ GATE = File.expand_path(
 VALIDATOR = File.expand_path(File.join(__dir__, '..', 'check-flutter-goldens.rb'))
 REGISTRY_PATH = 'scripts/ci/flutter-golden-registry.json'
 VALIDATOR_PATH = 'scripts/ci/check-flutter-goldens.rb'
-VERIFICATION_GRAPH = File.expand_path(
-  File.join(__dir__, '..', '..', 'verification', 'verification-graph.json')
-)
 PRODUCT_FIXTURE_PATH = 'docs/assets/agents/pills/codex.png'
 PRODUCT_FIXTURE = File.expand_path(File.join(__dir__, '..', '..', '..', PRODUCT_FIXTURE_PATH))
 PRODUCT_ALLOWLIST = File.expand_path(
@@ -362,18 +359,6 @@ record(
     gate_source.include?('golden_policy.failures.each') &&
     gate_source.include?('registered_goldens = golden_policy.accepted_paths'),
   'the public-tree gate no longer has the complete golden-policy binding'
-)
-
-graph = JSON.parse(File.read(VERIFICATION_GRAPH, encoding: 'UTF-8'))
-public_tree_inputs = graph.fetch('gates').find { |gate| gate['id'] == 'public-tree' }.fetch('sourceOwners')
-policy_inputs = graph.fetch('gates').find { |gate| gate['id'] == 'public-tree-policy' }.fetch('sourceOwners')
-required_golden_inputs = [REGISTRY_PATH, VALIDATOR_PATH]
-record(
-  'verification declares the registry and validator as public-tree inputs',
-  required_golden_inputs.all? { |path| public_tree_inputs.include?(path) } &&
-    required_golden_inputs.all? { |path| policy_inputs.include?(path) },
-  "public-tree inputs: #{public_tree_inputs.join(', ')}\n" \
-    "public-tree-policy inputs: #{policy_inputs.join(', ')}"
 )
 
 golden_path = 'apps/client/test/src/features/attention/view/goldens/fixture.png'

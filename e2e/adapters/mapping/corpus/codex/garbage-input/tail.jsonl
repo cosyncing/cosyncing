@@ -1,0 +1,4 @@
+also not json
+{"type":"event_msg"
+[[[[
+{"type":"event_msg","payload":{"type":"user_message","message":"prompt after garbage on the tail"}}

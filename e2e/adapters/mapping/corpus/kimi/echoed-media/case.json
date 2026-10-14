@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/kimi/test/test-kimi-mapping.ts",
+  "description": "an echoed data: image is a real image artifact owned by the user row it was sent with (an image-only prompt still gets an empty-text user row to own it); an unresolvable media ref, a video and a non-url source keep a neutral event",
+  "userTexts": [
+    "what is in this screenshot",
+    ""
+  ],
+  "sessionId": "348f8e11-9ab5-451c-851c-348f8e119ab5"
+}

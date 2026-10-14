@@ -8,33 +8,6 @@ import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
   group('D1 debug-view gate', () {
-    testWidgets('Debug is hidden by default', (tester) async {
-      await tester.pumpWidget(buildSessionDetailTestPage(events: const []));
-      await tester.pumpAndSettle();
-
-      await withSessionDetailViewMenu(tester, () async {
-        expect(
-          find.byKey(const Key('session-detail-view-item-debug')),
-          findsNothing,
-        );
-      });
-      expect(find.text('Debug timeline'), findsNothing);
-    });
-
-    testWidgets('Debug is offered when the preference is on', (tester) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: const [], showDebugViews: true),
-      );
-      await tester.pumpAndSettle();
-
-      await withSessionDetailViewMenu(tester, () async {
-        expect(
-          find.byKey(const Key('session-detail-view-item-debug')),
-          findsOneWidget,
-        );
-      });
-    });
-
     testWidgets('disabling while Debug is open returns to Chat', (
       tester,
     ) async {

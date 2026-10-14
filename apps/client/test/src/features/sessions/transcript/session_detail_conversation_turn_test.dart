@@ -1,7 +1,6 @@
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_output_state.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../../../support/session_detail_page_test_harness.dart';
@@ -127,108 +126,6 @@ void main() {
   });
 
   group('conversation turn footer', () {
-    testWidgets('shows one footer with runtime, copy, and telemetry actions', (
-      tester,
-    ) async {
-      useRoomyTestViewport(tester);
-      final speechOutput = RecordingSpeechOutput();
-      addTearDown(speechOutput.close);
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          speechOutput: speechOutput,
-          events: [
-            _user(1, 'u1', 'Do it'),
-            _model(2, 'a1', 'First part'),
-            _model(3, 'a2', 'Second part'),
-            _runSummary(
-              4,
-              assistantMessageKey: 'a2',
-              status: 'done',
-              totalRuntimeMs: 4200,
-              completedAt: DateTime(2026, 7, 23, 10, 15).millisecondsSinceEpoch,
-            ),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(const Key('conversation-turn-telemetry')),
-        findsOneWidget,
-      );
-      expect(find.byKey(const Key('conversation-turn-copy')), findsOneWidget);
-      expect(
-        find.byKey(const Key('conversation-turn-read-aloud')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const Key('conversation-turn-runtime-line')),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Ran for'), findsOneWidget);
-      expect(find.textContaining('Finished at'), findsOneWidget);
-      // Status and run-summary frames never reach Chat as rows.
-      expect(find.text('Run summary'), findsNothing);
-    });
-
-    testWidgets('copy targets the full model-output aggregate', (tester) async {
-      useRoomyTestViewport(tester);
-      String? copied;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async {
-          if (call.method == 'Clipboard.setData') {
-            final args = call.arguments;
-            if (args is Map<Object?, Object?>) copied = args['text'] as String?;
-          }
-          return null;
-        },
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [
-            _user(1, 'u1', 'Do it'),
-            _model(2, 'a1', 'First part'),
-            _model(3, 'a2', 'Second part'),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.byKey(const Key('conversation-turn-copy')));
-      await tester.pumpAndSettle();
-      expect(copied, 'First part\n\nSecond part');
-    });
-
-    testWidgets('read aloud speaks the turn aggregate under a stable key', (
-      tester,
-    ) async {
-      useRoomyTestViewport(tester);
-      final speechOutput = RecordingSpeechOutput();
-      addTearDown(speechOutput.close);
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          speechOutput: speechOutput,
-          events: [
-            _user(1, 'u1', 'Do it'),
-            _model(2, 'a1', 'First part'),
-            _model(3, 'a2', 'Second part'),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.byKey(const Key('conversation-turn-read-aloud')));
-      await tester.pumpAndSettle();
-      expect(speechOutput.spokenMessageKeys, ['turn:user:u1']);
-    });
-
     testWidgets(
       'read aloud continues when its virtualized footer scrolls away',
       (

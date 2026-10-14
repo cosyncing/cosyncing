@@ -119,10 +119,35 @@ let statusPayload: { code: number; msg: string; data: unknown } = FIXTURE.rest.s
  */
 let modelsPayload: { code: number; msg: string; data: unknown } | undefined;
 
+/**
+ * What the fixture can observe the adapter doing, and how much of it is still in flight. {@link settle} waits for
+ * this to stop moving; a fixed sleep waited for a clock, and was right only on a machine with nothing else to do.
+ * `parkedNow` counts requests a test parked on purpose, which a barrier must not wait out.
+ */
+let requestsServed = 0;
+let servingNow = 0;
+let parkedNow = 0;
+let fetching = 0;
+const realFetch = globalThis.fetch;
+globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  fetching += 1;
+  return realFetch(input, init).finally(() => { fetching -= 1; });
+}) as typeof fetch;
+
 const server = Bun.serve({
   hostname: '127.0.0.1',
   port: 0,
   async fetch(request) {
+    servingNow += 1;
+    requestsServed += 1;
+    try {
+      return await serve(request);
+    } finally {
+      servingNow -= 1;
+    }
+  },
+});
+async function serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method !== 'GET') return new Response('method not allowed', { status: 405 });
     if (url.pathname === '/api/v1/healthz') return Response.json(FIXTURE.rest.healthz);
@@ -150,7 +175,12 @@ const server = Bun.serve({
       if (holdNextMessages) {
         const hold = holdNextMessages;
         holdNextMessages = undefined;
-        await hold;
+        parkedNow += 1;
+        try {
+          await hold;
+        } finally {
+          parkedNow -= 1;
+        }
       }
       if (failNextMessages) {
         failNextMessages = false;
@@ -201,8 +231,7 @@ const server = Bun.serve({
       });
     }
     return Response.json(FIXTURE.rest.messagesUnknownSession);
-  },
-});
+}
 
 const listenPort = server.port ?? 0;
 const baseUrl = `http://127.0.0.1:${listenPort}`;
@@ -226,6 +255,31 @@ const scan: KimiInstanceScan = {
 };
 
 const sockets: FakeSocket[] = [];
+
+/** Requests served, sockets built and frames sent: everything the fixture sees the adapter do. */
+const activity = (): number =>
+  requestsServed + sockets.length + sockets.reduce((frames, socket) => frames + socket.sent.length, 0);
+
+/**
+ * Wait until the adapter has gone quiet: no unparked request in flight, on either side of the wire, and nothing it
+ * does to the fixture has changed for several consecutive turns of the event loop. Bounded, and it THROWS on
+ * expiry, so work that never ends says so instead of riding the suite timeout.
+ */
+async function settle(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = activity();
+  let quiet = 0;
+  while (quiet < 5) {
+    if (Date.now() > deadline) throw new Error(`the adapter never went quiet within ${timeoutMs}ms`);
+    await Bun.sleep(1);
+    const now = activity();
+    if (servingNow - parkedNow <= 0 && fetching - parkedNow <= 0 && now === last) quiet += 1;
+    else {
+      quiet = 0;
+      last = now;
+    }
+  }
+}
 class FakeSocket implements KimiSocketLike {
   readonly sent: Array<Record<string, unknown>> = [];
   closed = false;
@@ -303,7 +357,7 @@ try {
     type: 'resync_required',
     payload: { session_id: 'some-other-session', reason: 'buffer_overflow', current_seq: 5_000, epoch: 'ep_x' },
   });
-  await Bun.sleep(50);
+  await settle();
   check('a foreign-journal resync is ignored entirely',
     connection.observedCursor?.seq === 7 && connection.observedCursor.epoch === 'ep_a'
       && messageCalls === beforeForeignResync
@@ -320,7 +374,7 @@ try {
     type: 'resync_required',
     payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 1_207, epoch: 'ep_b' },
   });
-  await Bun.sleep(50);
+  await settle();
   check('resync_required triggers a catch-up REST read', messageCalls > beforeResync);
   check('resync adopts the server\'s current watermark, not zero',
     connection.observedCursor?.seq === 1_207 && connection.observedCursor.epoch === 'ep_b',
@@ -336,7 +390,7 @@ try {
 
   const beforePoll = messageCalls;
   intervalHandler?.();
-  await Bun.sleep(50);
+  await settle();
   check('the poll refresh re-reads REST while observing', messageCalls > beforePoll);
 
   // A foreign (terminal-driven) turn: WS stays silent, the pull refresh finds it.
@@ -348,7 +402,7 @@ try {
   });
   FIXTURE.rest.messagesAll = grown as never;
   intervalHandler?.();
-  await Bun.sleep(50);
+  await settle();
   check('a foreign turn surfaces through the poll refresh with no WS frame',
     live.some((m) => m.type === 'model-output' && m.text?.includes('driven in the terminal')),
     live.map((m) => m.type).join(','));
@@ -356,18 +410,18 @@ try {
   const beforeError = live.length;
   failNextMessages = true;
   intervalHandler?.();
-  await Bun.sleep(50);
+  await settle();
   check('a failed refresh emits nothing and does not throw', live.length === beforeError);
 
   socket.fire('close', {});
-  await Bun.sleep(50);
+  await settle();
   check('a lost socket falls back to a REST refresh', messageCalls > beforeError + 1);
 
   // The poll tick owns the reopen. Before the fix, one dropped socket demoted
   // observe to poll-only for the rest of the connection.
   const socketsBeforeReopen = sockets.length;
   intervalHandler?.();
-  await Bun.sleep(50);
+  await settle();
   check('a poll tick reopens the socket after a drop',
     sockets.length === socketsBeforeReopen + 1, `sockets=${sockets.length}`);
   const reopened = sockets[sockets.length - 1]!;
@@ -378,7 +432,7 @@ try {
       && JSON.stringify(reopened.sent[1]?.payload).includes('"epoch":"ep_b"'),
     JSON.stringify(reopened.sent[1]?.payload));
   check('a poll tick does not open a second socket while one is live',
-    (intervalHandler?.(), await Bun.sleep(50), sockets.length) === socketsBeforeReopen + 1,
+    (intervalHandler?.(), await settle(), sockets.length) === socketsBeforeReopen + 1,
     `sockets=${sockets.length}`);
 
   // Newer servers fan out event types this round has never seen (0.36.1 adds
@@ -398,7 +452,7 @@ try {
   reopened.deliver({ type: 'event.some.future.thing', payload: { anything: true } });
   reopened.fire('message', { data: 'not json {{{' });
   reopened.fire('message', { data: JSON.stringify(['an', 'array']) });
-  await Bun.sleep(50);
+  await settle();
   check('unknown inbound event types surface no message', live.length === liveBeforeUnknown,
     live.slice(liveBeforeUnknown).map((m) => m.type).join(','));
   check('unknown inbound event types provoke no outbound frame', reopened.sent.length === sentBeforeUnknown,
@@ -422,7 +476,7 @@ try {
   });
   FIXTURE.rest.messagesAll = afterNoise as never;
   intervalHandler?.();
-  await Bun.sleep(50);
+  await settle();
   check('a real row after unknown-event noise delivers exactly once',
     live.filter((m) => m.type === 'model-output' && m.text?.includes('after unknown-event noise')).length === 1,
     live.map((m) => m.type).join(','));
@@ -459,7 +513,7 @@ try {
       '文'.repeat(Math.ceil(KIMI_WS_FRAME_MAX_BYTES / 2)),
     );
     reopened.fire('message', { data: multibyte });
-    await Bun.sleep(50);
+    await settle();
 
     check('the multibyte frame is UNDER the cap by UTF-16 length and OVER it by bytes',
       multibyte.length < KIMI_WS_FRAME_MAX_BYTES
@@ -527,7 +581,7 @@ try {
         options: [{ id: 'opt_0_0', label: 'Yes' }, { id: 'opt_0_1', label: 'No' }],
       }],
     }));
-    await Bun.sleep(30);
+    await settle();
     const permission = cardRows.find((m) => m.type === 'permission-request');
     const question = cardRows.find((m) => m.type === 'question-request');
     check('an observe connection surfaces the approval card, non-actionable',
@@ -551,7 +605,7 @@ try {
       turnId: 4, reason: 'failed',
       error: { message: 'the model provider refused\nstack frame one\nstack frame two' },
     }));
-    await Bun.sleep(30);
+    await settle();
     const errors = cardRows.filter((m): m is Extract<AgentMessage, { type: 'error' }> => m.type === 'error');
     check('only a FAILED turn emits an error, bounded to its first line',
       errors.length === 1 && errors[0]?.message === 'the model provider refused',
@@ -567,7 +621,7 @@ try {
         turnId: 5, reason: 'failed', error: { message: 'a subagent gave up' },
       },
     });
-    await Bun.sleep(30);
+    await settle();
     check('a SUBAGENT turn failure is not reported as this session\'s outcome',
       cardRows.filter((m) => m.type === 'error').length === 1,
       cardRows.filter((m) => m.type === 'error').map((m) => (m as { message: string }).message).join(' | '));
@@ -647,7 +701,7 @@ try {
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 100, { busy: true }));
     turnSocket!.deliver(turnEnvelope('prompt.completed', 101, { promptId: 'p1' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 150, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     check('a completed turn emits exactly one run-summary',
       summaries().length === 1, JSON.stringify(summaries()));
     const doneSummary = summaries()[0];
@@ -674,7 +728,7 @@ try {
     nowMs = t2 + 5_000;
     turnSocket!.deliver(turnEnvelope('prompt.aborted', 201, { promptId: 'p2' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 250, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     const abortedSummary = summaries()[1];
     check('an aborted turn is reported cancelled, keyed by the echo walked during the deferral',
       summaries().length === 2
@@ -702,7 +756,7 @@ try {
       type: 'turn.ended', seq: 302, epoch: 'ep_turn', session_id: 's-turn', timestamp: 't',
       payload: { type: 'turn.ended', agentId: 'agent-9', sessionId: 's-turn', turnId: 42, reason: 'completed' },
     });
-    await Bun.sleep(80);
+    await settle();
     check('a subagent\'s busy edge, completion, and turn end are all ignored by the main turn',
       summaries().length === summariesBeforeSub
         && turnRows.filter((m) => m.type === 'status').length === statusesBeforeSub
@@ -718,7 +772,7 @@ try {
       turnId: 7, reason: 'failed', error: { message: 'the provider refused' },
     }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 450, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     const failedSummary = summaries()[2];
     check('a failed turn emits an error summary even without an echo key',
       summaries().length === 3
@@ -731,7 +785,7 @@ try {
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 500, { busy: true }));
     turnSocket!.deliver(turnEnvelope('prompt.completed', 501, { promptId: 'p3' }));
     turnSocket!.deliver(turnEnvelope('turn.ended', 502, { turnId: 8, reason: 'completed' }));
-    await Bun.sleep(80);
+    await settle();
     check('two terminal frames for one turn emit one summary',
       summaries().length === 4 && summaries()[3]?.status === 'done',
       `summaries=${summaries().length} ${JSON.stringify(summaries()[3])}`);
@@ -761,7 +815,7 @@ try {
     nowMs = t3 + 50_000;
     turnSocket!.deliver(turnEnvelope('prompt.completed', 604, { promptId: 'pB' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 605, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     check('two turns closing inside one deferral each get a footer on their OWN opener and start time',
       summaries().length === 6
         && summaries()[4]?.turnId === 'pA'
@@ -802,7 +856,7 @@ try {
     nowMs = t4 + 50_000;
     turnSocket!.deliver(turnEnvelope('prompt.completed', 704, { promptId: 'pD' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 705, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     check('a close that captured its opener is never re-keyed onto the next turn\'s echo',
       summaries().length === 8
         && summaries()[6]?.turnId === 'pC'
@@ -838,7 +892,7 @@ try {
     // E closes with its echo not yet walked — a keyless snapshot.
     turnSocket!.deliver(turnEnvelope('prompt.completed', 801, { promptId: 'pE' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 802, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     check('a keyless close is keyed by the FIRST qualifying row — the queued prompt predating the close does not steal it',
       summaries().length === 9
         && summaries()[8]?.turnId === 'pE'
@@ -857,7 +911,7 @@ try {
     nowMs = t5 + 50_000;
     turnSocket!.deliver(turnEnvelope('prompt.completed', 804, { promptId: 'pF' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 805, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     check('a busy edge keeps the opener keyed during the idle gap, so the next turn\'s footer lands keyed',
       summaries().length === 10
         && summaries()[9]?.turnId === 'pF'
@@ -885,7 +939,7 @@ try {
     nowMs = t6 + 20_000;
     turnSocket!.deliver(turnEnvelope('prompt.completed', 901, { promptId: 'pG' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 902, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     check('G closes once, keyed by its own echo',
       summaries().length === 11
         && summaries()[10]?.turnId === 'pG'
@@ -896,7 +950,7 @@ try {
     nowMs = t6 + 35_000;
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 903, { busy: true }));
     turnSocket!.deliver(turnEnvelope('prompt.completed', 904, { promptId: 'pG' }));
-    await Bun.sleep(80);
+    await settle();
     check('a replayed terminal frame with an already-accounted ref is dropped, not snapshotted onto the open turn',
       summaries().length === 11
         && summaries().filter((s) => s.turnId === 'pG').length === 1,
@@ -904,7 +958,7 @@ try {
     nowMs = t6 + 50_000;
     turnSocket!.deliver(turnEnvelope('prompt.completed', 905, { promptId: 'pH' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 906, { busy: false, pending_interaction: 'none' }));
-    await Bun.sleep(80);
+    await settle();
     check('the open turn\'s own close still lands after the replay, keyed to its own opener',
       summaries().length === 12
         && summaries()[11]?.turnId === 'pH'
@@ -921,7 +975,7 @@ try {
     turnSocket!.deliver(turnEnvelope('turn.ended', 1002, { turnId: 90, reason: 'completed' }));
     turnSocket!.deliver(turnEnvelope('event.session.work_changed', 1003, { busy: false, pending_interaction: 'none' }));
     turnSocket!.deliver(turnEnvelope('prompt.completed', 1004, { promptId: 'p-observed', reason: 'completed' }));
-    await Bun.sleep(80);
+    await settle();
     check('an observe connection announces no running run-summary, even for a start naming its prompt',
       summaries().length === 13
         && summaries()[12]?.turnId === '90' && summaries()[12]?.status === 'done'
@@ -1027,7 +1081,7 @@ try {
     type: 'resync_required',
     payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 50_000, epoch: 'ep_deep' },
   });
-  await Bun.sleep(200);
+  await settle();
   check('an unbridgeable gap emits exactly one in-band gap notice',
     deepNotices.filter((text) => text === KIMI_RESYNC_GAP_NOTICE).length === 1,
     deepNotices.join(' | '));
@@ -1045,7 +1099,7 @@ try {
     type: 'resync_required',
     payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 50_000, epoch: 'ep_deep' },
   });
-  await Bun.sleep(200);
+  await settle();
   check('a repeated identical resync does not duplicate the gap notice',
     deepNotices.filter((text) => text === KIMI_RESYNC_GAP_NOTICE).length === 1,
     `notices=${deepNotices.length}`);
@@ -1056,7 +1110,7 @@ try {
     type: 'resync_required',
     payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 61_000, epoch: 'ep_deep' },
   });
-  await Bun.sleep(200);
+  await settle();
   check('a later unbridged gap surfaces as its own notice',
     deepNotices.filter((text) => text === KIMI_RESYNC_GAP_NOTICE).length === 2,
     `notices=${deepNotices.length}`);
@@ -1081,18 +1135,18 @@ try {
     holdNextMessages = new Promise((resolve) => { releasePoll = resolve; });
     const callsBefore = messageCalls;
     intervalHandler?.(); // the poll refresh takes the walk slot, blocked on its first page
-    await Bun.sleep(30);
+    await settle();
     blockedConn.refresh(); // a coalesced poll while held must stay a no-op
     blockedSocket.deliver({
       type: 'resync_required',
       payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 70_000, epoch: 'ep_wait' },
     });
-    await Bun.sleep(60);
+    await settle();
     check('recovery waits for the in-flight refresh instead of skipping its walk',
       blockedSocket.sent.filter((frame) => frame.type === 'subscribe').length === subscribesBefore,
       `subscribes=${blockedSocket.sent.filter((frame) => frame.type === 'subscribe').length}`);
     releasePoll();
-    await Bun.sleep(200);
+    await settle();
     const blockedResubs = blockedSocket.sent.filter((frame) => frame.type === 'subscribe');
     check('after the blocked refresh the deep walk runs and only THEN resubscribes',
       blockedResubs.length === subscribesBefore + 1
@@ -1124,11 +1178,11 @@ try {
       type: 'resync_required',
       payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 90_000, epoch: 'ep_close' },
     });
-    await Bun.sleep(30); // recovery is now blocked inside its first page
+    await settle(); // recovery is now blocked inside its first page
     const callsAtHold = messageCalls;
     await closingConn.close();
     releaseWalk();
-    await Bun.sleep(200);
+    await settle();
     check('a close during recovery stops the walk at the page it was holding',
       messageCalls === callsAtHold,
       `pages after close=${messageCalls - callsAtHold} ceiling=${KIMI_RESYNC_MAX_PAGES}`);
@@ -1150,12 +1204,12 @@ try {
     let releaseHistory: () => void = () => {};
     holdNextMessages = new Promise((resolve) => { releaseHistory = resolve; });
     const pending = heldConn.getHistory();
-    await Bun.sleep(30); // the backfill is now blocked inside its FIRST page
+    await settle(); // the backfill is now blocked inside its FIRST page
     const callsAtHold = messageCalls;
     await heldConn.close();
     releaseHistory();
     const held = await pending;
-    await Bun.sleep(100);
+    await settle();
     historyMode = 'fixture';
     check('a close during the history backfill spends no further page reads',
       messageCalls === callsAtHold,
@@ -1182,7 +1236,7 @@ try {
       type: 'resync_required',
       payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 80_000, epoch: 'ep_fail' },
     });
-    await Bun.sleep(100);
+    await settle();
     check('a failed recovery read emits the gap notice',
       errNotices.filter((text) => text === KIMI_RESYNC_GAP_NOTICE).length === 1,
       errNotices.join(' | '));
@@ -1211,7 +1265,7 @@ try {
     badSocket.fire('open', {});
     const subscribesBefore = badSocket.sent.filter((frame) => frame.type === 'subscribe').length;
     badSocket.deliver({ type: 'resync_required', payload: malformed });
-    await Bun.sleep(150);
+    await settle();
     const badResubs = badSocket.sent.filter((frame) => frame.type === 'subscribe');
     const newest = badResubs[badResubs.length - 1];
     const newestCursors = (newest?.payload as { cursors?: Record<string, unknown> } | undefined)?.cursors ?? {};
@@ -1263,10 +1317,10 @@ try {
         payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: seq, epoch: 'ep_coalesce' },
       });
     }
-    await Bun.sleep(30); // the first recovery holds the slot, blocked on page one
+    await settle(); // the first recovery holds the slot, blocked on page one
     const callsAtHold = messageCalls;
     releaseWalk();
-    await Bun.sleep(600);
+    await settle();
     historyMode = 'fixture';
     endlessFreshPerRead = false;
     const coalesceResubs = coalesceSocket.sent.filter((frame) => frame.type === 'subscribe');
@@ -1307,12 +1361,12 @@ try {
   unsubscribeGuard();
   const callsBeforeQuietTick = messageCalls;
   guardTick?.();
-  await Bun.sleep(50);
+  await settle();
   check('a tick with zero handlers issues no HTTP request',
     messageCalls === callsBeforeQuietTick, `calls=${messageCalls - callsBeforeQuietTick}`);
   guardConn.subscribe(() => {});
   guardTick?.();
-  await Bun.sleep(50);
+  await settle();
   check('after re-subscribing the next tick refreshes again',
     messageCalls > callsBeforeQuietTick, `calls=${messageCalls - callsBeforeQuietTick}`);
   await guardConn.close();
@@ -1602,7 +1656,7 @@ try {
       JSON.stringify(attachedInfo?.value));
 
     statusTick?.();
-    await Bun.sleep(60);
+    await settle();
     check('a tick repeats no overlay the attach already delivered',
       overlayRows('contextUsage').length === 0 && overlayRows('sessionInfo').length === 0,
       `context=${overlayRows('contextUsage').length} info=${overlayRows('sessionInfo').length}`);
@@ -1613,7 +1667,7 @@ try {
       data: { ...base, context_tokens: 12_345, permission: 'auto' },
     };
     statusTick?.();
-    await Bun.sleep(60);
+    await settle();
     check('a changed context reading is emitted, exactly once',
       overlayRows('contextUsage').length === 1
         && JSON.stringify(overlayRows('contextUsage')[0]?.value)
@@ -1625,7 +1679,7 @@ try {
       JSON.stringify(overlayRows('sessionInfo').map((row) => row.value)));
 
     statusTick?.();
-    await Bun.sleep(60);
+    await settle();
     check('a tick with an unchanged reading emits nothing new',
       overlayRows('contextUsage').length === 1 && overlayRows('sessionInfo').length === 1,
       `context=${overlayRows('contextUsage').length} info=${overlayRows('sessionInfo').length}`);
@@ -1690,7 +1744,7 @@ try {
     const base = FIXTURE.rest.status!.data as Record<string, unknown>;
     statusPayload = { ...FIXTURE.rest.status!, data: { ...base, model: 'kimi-code/kimi-for-coding' } };
     labelTick?.();
-    await Bun.sleep(60);
+    await settle();
     check('a status change to another catalog model emits the updated label',
       labelInfo().length === 1
         && (labelInfo()[0]?.value as { currentModel?: { label?: string; modelID?: string } })
@@ -1703,9 +1757,9 @@ try {
     const beforeUnknown = modelReads;
     statusPayload = { ...FIXTURE.rest.status!, data: { ...base, model: 'kimi-code/k9-unreleased' } };
     labelTick?.();
-    await Bun.sleep(60);
+    await settle();
     labelTick?.();
-    await Bun.sleep(60);
+    await settle();
     const unknownInfo = labelInfo().at(-1)?.value as { model?: string; currentModel?: unknown };
     check('an alias the catalog does not know keeps the bare model and CLEARS the label explicitly, at one extra read',
       unknownInfo?.model === 'kimi-code/k9-unreleased' && unknownInfo.currentModel === undefined
@@ -1735,7 +1789,7 @@ try {
     const readContext = async (used: number) => {
       statusPayload = { ...FIXTURE.rest.status!, data: { ...base, context_tokens: used } };
       returnTick?.();
-      await Bun.sleep(60);
+      await settle();
     };
     const contextReadings = () => returnRows.filter(
       (message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
@@ -1843,7 +1897,7 @@ try {
       const liveCounts = { inputOther: 7, output: 3, inputCacheRead: 2, inputCacheCreation: 1 };
       appendFileSync(wireOf('main'), usageRow(base + 180_000, liveCounts));
       telemetryTick?.();
-      await Bun.sleep(60);
+      await settle();
       check('a usage row appended after attach emits exactly one token-count row',
         tokenRows().length === 1
           && JSON.stringify(tokenRows()[0]) === JSON.stringify({
@@ -1860,7 +1914,7 @@ try {
       // The same row appended again is the same reading, not a second one.
       appendFileSync(wireOf('main'), usageRow(base + 180_000, liveCounts));
       telemetryTick?.();
-      await Bun.sleep(60);
+      await settle();
       check('a repeated usage row is deduped rather than counted twice',
         tokenRows().length === 1
           && (latest('sessionUsage') as { records?: number } | undefined)?.records === 6,
@@ -1874,7 +1928,7 @@ try {
       await conn.close();
       appendFileSync(wireOf('main'), usageRow(base + 240_000, liveCounts));
       heldTick?.();
-      await Bun.sleep(60);
+      await settle();
       check('close stops telemetry: no further journal read, no further row',
         wireOpens === opensAtClose && rows.length === rowsAtClose,
         `opens=${wireOpens - opensAtClose} rows=${rows.length - rowsAtClose}`);
@@ -1900,7 +1954,7 @@ try {
       silent.subscribe((message) => silentRows.push(message));
       await silent.getHistory();
       silentTick?.();
-      await Bun.sleep(60);
+      await settle();
       check('a session with no journal emits no usage and no timing at all',
         silentRows.every((message) => message.type !== 'token-count'
           && !(message.type === 'metadata-update'
@@ -1961,7 +2015,7 @@ try {
       // exactly these.
       for (let tick = 0; tick < 4; tick += 1) {
         drainTick?.();
-        await Bun.sleep(30);
+        await settle();
       }
 
       const drainTokens = () => drainRows.filter(
@@ -1987,7 +2041,7 @@ try {
       // all time: what lands afterwards is genuinely live.
       appendFileSync(drainWire, drainRow(base + historyRows));
       drainTick?.();
-      await Bun.sleep(30);
+      await settle();
       check('a usage row appended after the drain emits exactly one token-count row',
         drainTokens().length === 1
           && JSON.stringify(drainTokens()[0]) === JSON.stringify({
@@ -2087,9 +2141,9 @@ try {
     await conn.refresh(); // the first generation is genuinely reading
     const aAtLoss = aReads.length;
     genSocket!.fire('close', {});
-    await Bun.sleep(30);
+    await settle();
     genTick?.();
-    await Bun.sleep(60);
+    await settle();
     check('a replacement socket carries a re-resolved generation, never the lost one\'s proof',
       reverifyCalls > 0 && opens.length === 2
         && opens[1]?.url === 'ws://127.0.0.1:2/api/v1/ws' && opens[1]?.token === 'tok-B',
@@ -2164,17 +2218,17 @@ try {
     await conn.refresh();
     const aAtLoss = aReads.length;
     darkSocket!.fire('close', {});
-    await Bun.sleep(30);
+    await settle();
     for (let tick = 0; tick < 2; tick += 1) {
       darkTick?.();
-      await Bun.sleep(60);
+      await settle();
     }
     check('a generation nothing can re-resolve reopens no socket and spends no read',
       opens.length === 1 && aReads.length === aAtLoss && reverifyCalls > 1,
       `opens=${opens.length} a=${aReads.length} (${aAtLoss} when the socket dropped) reverify=${reverifyCalls}`);
     resolvable = true;
     darkTick?.();
-    await Bun.sleep(60);
+    await settle();
     check('a later successful re-resolution restores the socket and the reads together',
       opens.length === 2 && opens[1]?.token === 'tok-B' && bReads.length > 0,
       `opens=${JSON.stringify(opens)} b=${bReads.length}`);
@@ -2245,9 +2299,9 @@ try {
     const socketsAtGuard = sockets.length;
     const reverifyAtGuard = reverifyCalls;
     retired.fire('close', {});
-    await Bun.sleep(30);
+    await settle();
     zombieTick?.();
-    await Bun.sleep(30);
+    await settle();
     check('a late close from the retired socket does not clear the replacement\'s state',
       sockets.length === socketsAtGuard && reverifyCalls === reverifyAtGuard,
       `sockets=${sockets.length - socketsAtGuard} reverify=${reverifyCalls - reverifyAtGuard}`);
@@ -2325,7 +2379,7 @@ try {
 
     const before = reads.length;
     fixedSocket!.fire('close', {});
-    await Bun.sleep(30);
+    await settle();
     check('with no reverifier a lost socket still refreshes immediately through its fixed transport',
       reads.length > before, `reads=${reads.length - before}`);
     await conn.close();
@@ -2362,16 +2416,16 @@ try {
     first.deliver({ type: 'ack', id: 'subscribe', payload: { cursors: { 's-epoch': { seq: 5, epoch: 'ep1' } } } });
     const held = conn.observedCursor?.seq === 5 && conn.observedCursor.epoch === 'ep1';
     first.deliver(frame);
-    await Bun.sleep(30);
+    await settle();
     check(`a new incarnation with no readable position clears the cursor (${label})`,
       held && conn.observedCursor === undefined,
       `held=${held} after=${JSON.stringify(conn.observedCursor)}`);
     // The next socket generation is what would have carried the invented
     // position onto the wire.
     first.fire('close', {});
-    await Bun.sleep(30);
+    await settle();
     epochTick?.();
-    await Bun.sleep(30);
+    await settle();
     const next = epochSocket!;
     next.fire('open', {});
     const subscribe = next.sent.find((sent) => sent.type === 'subscribe');
@@ -2404,7 +2458,7 @@ try {
     okSocket!.fire('open', {});
     okSocket!.deliver({ type: 'ack', id: 'subscribe', payload: { cursors: { 's-epoch-ok': { seq: 5, epoch: 'ep1' } } } });
     okSocket!.deliver({ type: 'event.x', session_id: 's-epoch-ok', seq: 900, epoch: 'ep2' });
-    await Bun.sleep(30);
+    await settle();
     check('a valid-seq epoch change still adopts the frame\'s own watermark',
       conn.observedCursor?.seq === 900 && conn.observedCursor.epoch === 'ep2',
       JSON.stringify(conn.observedCursor));
@@ -2453,7 +2507,7 @@ try {
       type: 'resync_required',
       payload: { session_id: FIXTURE.sessionId, reason: 'buffer_overflow', current_seq: 110_000, epoch: 'ep_storm' },
     });
-    await Bun.sleep(1_200);
+    await settle(30_000);
     onMessagesRequest = undefined;
     historyMode = 'fixture';
     endlessFreshPerRead = false;
@@ -2559,7 +2613,7 @@ try {
       conn.subscribe((message) => rows.push(message));
       const repairSocket = sockets[sockets.length - 1]!;
       repairSocket.fire('open', {});
-      await Bun.sleep(50);
+      await settle();
       // The envelope shape the socket path actually reads: the type is at the
       // top level AND inside the payload, and only this session's `session_id`
       // may move the cursor.
@@ -2575,14 +2629,14 @@ try {
       // same identity, and history remembered it on the way out.
       repairSocket.deliver(repairEnvelope(
         'turn.ended', { turnId: 6, reason: 'failed', error: { message: QUOTA_MESSAGE } }));
-      await Bun.sleep(50);
+      await settle();
       check('a live turn.ended for a turn history already recovered adds no second row',
         errorRows().length === 0, `${errorRows().length} live error rows`);
 
       // ── A stale `working` heals on a stream restore ────────────────────────
       sessionRowPayload = { id: FIXTURE.sessionId, busy: true, pending_interaction: 'none' };
       repairSocket.deliver(busyEdge(true));
-      await Bun.sleep(50);
+      await settle();
       check('a busy edge still puts the connection in working',
         conn.info.status === 'working', conn.info.status);
 
@@ -2598,11 +2652,11 @@ try {
       sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
       const readsBeforeRestore = sessionRowReads;
       repairSocket.close();
-      await Bun.sleep(50);
+      await settle();
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       sockets[sockets.length - 1]!.fire('open', {});
-      await Bun.sleep(50);
+      await settle();
       check('a stream restore repairs a stale working from the session row',
         conn.info.status === 'idle' && sessionRowReads > readsBeforeRestore,
         `status=${conn.info.status} reads=${sessionRowReads - readsBeforeRestore}`);
@@ -2614,37 +2668,37 @@ try {
       const readsWhileIdle = sessionRowReads;
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS * 4;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       check('an idle connection reads no session row however long it sits',
         sessionRowReads === readsWhileIdle, `${sessionRowReads - readsWhileIdle} reads`);
 
       // ── The watchdog: a healthy socket that simply lost the edge ───────────
       const liveSocket = sockets[sockets.length - 1]!;
       liveSocket.deliver(busyEdge(true));
-      await Bun.sleep(50);
+      await settle();
       sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
       const readsBeforeWatchdog = sessionRowReads;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       check('the watchdog does not fire inside its own window',
         conn.info.status === 'working' && sessionRowReads === readsBeforeWatchdog,
         `status=${conn.info.status} reads=${sessionRowReads - readsBeforeWatchdog}`);
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       check('a working badge with no evidence behind it heals on the poll tick',
         conn.info.status === 'idle' && sessionRowReads > readsBeforeWatchdog,
         `status=${conn.info.status} reads=${sessionRowReads - readsBeforeWatchdog}`);
 
       // ── Never fabricate: a drifted row leaves the held state alone ─────────
       liveSocket.deliver(busyEdge(true));
-      await Bun.sleep(50);
+      await settle();
       // `busy` is a REQUIRED boolean upstream, so a string is drift — a payload
       // this reader cannot read, not a session that happens to be idle.
       sessionRowPayload = { id: FIXTURE.sessionId, busy: 'false', pending_interaction: 'none' };
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       const readsAfterDrift = sessionRowReads;
       check('a repair that reads a drifted row keeps the state it holds',
         conn.info.status === 'working', conn.info.status);
@@ -2654,15 +2708,15 @@ try {
       // its window already expired and read again on EVERY 10-second poll for
       // as long as the drift lasts.
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS - 1;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       check('an unclassifiable repair still spends its window instead of retrying every poll',
         sessionRowReads === readsAfterDrift, `${sessionRowReads - readsAfterDrift} extra reads`);
       clock += 2;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       check('once the window is up the drifted connection tries exactly once more',
         sessionRowReads === readsAfterDrift + 1 && conn.info.status === 'working',
         `reads=${sessionRowReads - readsAfterDrift} status=${conn.info.status}`);
@@ -2671,7 +2725,7 @@ try {
       sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'approval' };
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       check('a repair adopts needs-input rather than flattening a blocked turn to idle',
         conn.info.status === 'needs-input', conn.info.status);
 
@@ -2689,7 +2743,7 @@ try {
       sessionRowPayload = { id: FIXTURE.sessionId, busy: true, pending_interaction: 'none' };
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       const duringTurn = await conn.getHistory();
       check('history appends no failure while the connection claims a live turn',
         conn.info.status === 'working' && duringTurn.every((message) => message.type !== 'error'),
@@ -2698,7 +2752,7 @@ try {
       sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
       repairTick?.();
-      await Bun.sleep(50);
+      await settle();
       const afterTurn = await conn.getHistory();
       check('the same journal yields the failure once the session settles',
         conn.info.status === 'idle' && afterTurn.at(-1)?.type === 'error',

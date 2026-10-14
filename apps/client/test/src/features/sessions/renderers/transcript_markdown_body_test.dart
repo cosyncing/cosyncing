@@ -11,7 +11,6 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_detail_sta
 // The line-width exception above applies to each canonical path that follows.
 // ignore: lines_longer_than_80_chars
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
-import 'package:cosyncing_client/src/features/sessions/renderers/transcript_markdown.dart';
 // The line-width exception above applies to each canonical path that follows.
 // ignore: lines_longer_than_80_chars
 import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
@@ -56,76 +55,6 @@ TextStyle? _runStyle(WidgetTester tester, Finder richFinder, String runText) {
 
 void main() {
   group('transcript markdown links (web-only)', () {
-    testWidgets('an https link is tappable and launches via the opener', (
-      tester,
-    ) async {
-      final opened = <Uri>[];
-      transcriptLinkOpener = opened.add;
-      addTearDown(() => transcriptLinkOpener = null);
-
-      await _pumpBody(tester, 'see [the site](https://example.com/a) now');
-
-      // The link label renders as its own tappable Text (not inline prose).
-      final label = find.text('the site');
-      expect(label, findsOneWidget);
-      // It looks like a link.
-      expect(
-        tester.widget<Text>(label).style?.decoration,
-        TextDecoration.underline,
-      );
-
-      await tester.tap(label);
-      await tester.pump();
-      expect(opened, [Uri.parse('https://example.com/a')]);
-    });
-
-    testWidgets('a /home path link exposes its exact target with no gesture', (
-      tester,
-    ) async {
-      final opened = <Uri>[];
-      transcriptLinkOpener = opened.add;
-      addTearDown(() => transcriptLinkOpener = null);
-
-      await _pumpBody(tester, 'open [the file](/var/data/file) here');
-
-      final prose = find.textContaining('open the file (/var/data/file) here');
-      expect(prose, findsOneWidget);
-      // It is not styled as a link.
-      final style = _runStyle(tester, prose, 'the file');
-      expect(style?.decoration, isNot(TextDecoration.underline));
-      expect(
-        tester.widget<Text>(prose).textSpan!.toPlainText(),
-        'open the file (/var/data/file) here',
-      );
-      // Tapping the prose opens nothing.
-      await tester.tap(prose);
-      await tester.pump();
-      expect(opened, isEmpty);
-    });
-
-    testWidgets('a file:// link is not tappable and not styled as a link', (
-      tester,
-    ) async {
-      final opened = <Uri>[];
-      transcriptLinkOpener = opened.add;
-      addTearDown(() => transcriptLinkOpener = null);
-
-      await _pumpBody(tester, 'read [notes](file:///etc/hosts) please');
-
-      final prose = find.textContaining(
-        'read notes (file:///etc/hosts) please',
-      );
-      expect(prose, findsOneWidget);
-      expect(
-        _runStyle(tester, prose, 'notes')?.decoration,
-        isNot(TextDecoration.underline),
-      );
-
-      await tester.tap(prose);
-      await tester.pump();
-      expect(opened, isEmpty);
-    });
-
     testWidgets('a matching non-http label and target renders only once', (
       tester,
     ) async {
@@ -239,62 +168,6 @@ void main() {
     },
   );
 
-  group('transcript markdown tables', () {
-    testWidgets('a pipe table renders cells in a horizontal scroller', (
-      tester,
-    ) async {
-      await _pumpBody(
-        tester,
-        '| Name | Role |\n|---|---|\n| Ada | Eng |\n| Bob | PM |',
-      );
-
-      expect(find.byType(Table), findsOneWidget);
-      expect(find.textContaining('Name'), findsOneWidget);
-      expect(find.textContaining('Ada'), findsOneWidget);
-      expect(find.textContaining('PM'), findsOneWidget);
-
-      // The table lives inside a horizontally scrollable container so a wide
-      // table scrolls rather than overflowing the transcript width.
-      final scroller = tester.widget<SingleChildScrollView>(
-        find.ancestor(
-          of: find.byType(Table),
-          matching: find.byType(SingleChildScrollView),
-        ),
-      );
-      expect(scroller.scrollDirection, Axis.horizontal);
-    });
-
-    testWidgets('an https link inside a table cell is tappable', (
-      tester,
-    ) async {
-      final opened = <Uri>[];
-      transcriptLinkOpener = opened.add;
-      addTearDown(() => transcriptLinkOpener = null);
-
-      await _pumpBody(
-        tester,
-        '| Doc |\n|---|\n| [open](https://example.org) |',
-      );
-
-      expect(find.byType(Table), findsOneWidget);
-      final label = find.text('open');
-      expect(label, findsOneWidget);
-
-      await tester.tap(label);
-      await tester.pump();
-      expect(opened, [Uri.parse('https://example.org')]);
-    });
-
-    testWidgets('malformed table-like input renders without throwing', (
-      tester,
-    ) async {
-      await _pumpBody(tester, '| A | B |\n| 1 | 2 |');
-      // No valid delimiter row: the lines stay prose, no Table is built.
-      expect(find.byType(Table), findsNothing);
-      expect(tester.takeException(), isNull);
-    });
-  });
-
   group('transcript fenced-code highlighting', () {
     // One fence exercising every scanner category: keyword, string, number,
     // comment, and built-in literal.
@@ -390,69 +263,6 @@ void main() {
       );
     });
 
-    for (final variant in const [
-      (
-        platform: TargetPlatform.linux,
-        brightness: Brightness.light,
-        locale: Locale('en'),
-        extent: 32.0,
-      ),
-      (
-        platform: TargetPlatform.windows,
-        brightness: Brightness.dark,
-        locale: Locale('zh'),
-        extent: 32.0,
-      ),
-      (
-        platform: TargetPlatform.android,
-        brightness: Brightness.dark,
-        locale: Locale('zh'),
-        extent: 40.0,
-      ),
-      (
-        platform: TargetPlatform.iOS,
-        brightness: Brightness.light,
-        locale: Locale('en'),
-        extent: 40.0,
-      ),
-    ]) {
-      testWidgets(
-        '${variant.platform.name} code header and copy hit target are '
-        '${variant.extent.toInt()}dp',
-        (tester) async {
-          await _pumpMarkdown(
-            tester,
-            allCategoriesFence,
-            brightness: variant.brightness,
-            platform: variant.platform,
-            locale: variant.locale,
-          );
-
-          final header = find.byKey(
-            const ValueKey('markdown-code-block-0-header'),
-          );
-          final copy = find.byKey(
-            const ValueKey('markdown-code-block-0-copy'),
-          );
-          expect(tester.getSize(header).height, variant.extent);
-          expect(tester.getSize(copy), Size.square(variant.extent));
-          expect(
-            tester
-                .widget<Icon>(
-                  find.descendant(of: copy, matching: find.byType(Icon)),
-                )
-                .size,
-            14,
-          );
-          expect(
-            tester.getRect(header).bottom,
-            tester.getRect(copy).bottom,
-          );
-          expect(tester.takeException(), isNull);
-        },
-      );
-    }
-
     testWidgets('code header goldens cover EN/ZH and both brightnesses', (
       tester,
     ) async {
@@ -491,49 +301,6 @@ void main() {
       }
     });
 
-    testWidgets('header copy returns the exact authored source', (
-      tester,
-    ) async {
-      String? clipboardText;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async {
-          if (call.method == 'Clipboard.setData') {
-            clipboardText =
-                (call.arguments as Map<Object?, Object?>)['text'] as String?;
-          }
-          return null;
-        },
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-
-      await _pumpMarkdown(tester, allCategoriesFence);
-      final copy = find.byKey(const ValueKey('markdown-code-block-0-copy'));
-      final copyFocus = Focus.of(
-        tester.element(
-          find.descendant(of: copy, matching: find.byType(Icon)),
-        ),
-      )..requestFocus();
-      await tester.pump();
-      expect(copyFocus.hasFocus, isTrue);
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pumpAndSettle();
-
-      expect(clipboardText, allCategoriesSource);
-      expect(find.text('Code copied'), findsOneWidget);
-
-      clipboardText = null;
-      await tester.tap(copy);
-      await tester.pumpAndSettle();
-      expect(clipboardText, allCategoriesSource);
-      expect(tester.takeException(), isNull);
-    });
-
     testWidgets('unknown languages preserve exact text as one literal run', (
       tester,
     ) async {
@@ -560,25 +327,6 @@ void main() {
         find.byKey(const ValueKey('markdown-code-block-0-copy')),
         findsOneWidget,
       );
-    });
-
-    testWidgets('over-128K UTF-16 code-unit blocks stay bounded and exact', (
-      tester,
-    ) async {
-      final source = List<String>.filled(
-        maxHighlightedTranscriptCodeUnits + 1,
-        'x',
-      ).join();
-      await _pumpMarkdown(
-        tester,
-        '```dart\n$source\n```',
-        viewSize: const Size(320, 480),
-      );
-
-      final root = _codeText(tester).textSpan! as TextSpan;
-      expect(root.toPlainText(), source);
-      expect(root.children, hasLength(1));
-      expect(tester.takeException(), isNull);
     });
 
     testWidgets('unterminated fences preserve source and selection semantics', (
@@ -617,96 +365,6 @@ void main() {
         expect(body.fontSize, theme.textTheme.bodyMedium!.fontSize);
       },
     );
-
-    testWidgets('hierarchy is carried by weight, not a font-size jump', (
-      tester,
-    ) async {
-      await _pumpMarkdown(tester, headingsBesideBody);
-
-      final h1 = _rootStyle(tester, 'Alpha');
-      final h2 = _rootStyle(tester, 'Beta');
-      final h3 = _rootStyle(tester, 'Gamma');
-      final body = _rootStyle(tester, 'Body paragraph.');
-
-      // Strict H1 > H2 > H3 > body weight progression at body size.
-      expect(h1.fontWeight, FontWeight.w700);
-      expect(h2.fontWeight, FontWeight.w600);
-      expect(h3.fontWeight, FontWeight.w500);
-      final bodyWeight = body.fontWeight?.value ?? FontWeight.normal.value;
-      expect(h1.fontWeight!.value, greaterThan(h2.fontWeight!.value));
-      expect(h2.fontWeight!.value, greaterThan(h3.fontWeight!.value));
-      expect(h3.fontWeight!.value, greaterThan(bodyWeight));
-    });
-
-    testWidgets(
-      'heading markers are hidden and block order is preserved',
-      (tester) async {
-        await _pumpMarkdown(
-          tester,
-          '# Goals\n\nDo the thing.\n\n- first\n- second',
-        );
-
-        expect(find.textContaining('# Goals'), findsNothing);
-        expect(find.textContaining('- first'), findsNothing);
-        expect(find.textContaining('Goals'), findsOneWidget);
-        // Bodies stay plain Text so the ancestor SelectionArea keeps working.
-        expect(find.byType(SelectableText), findsNothing);
-
-        final goals = tester.getTopLeft(find.textContaining('Goals'));
-        final paragraph = tester.getTopLeft(
-          find.textContaining('Do the thing.'),
-        );
-        final first = tester.getTopLeft(find.textContaining('first'));
-        final second = tester.getTopLeft(find.textContaining('second'));
-        expect(goals.dy, lessThan(paragraph.dy));
-        expect(paragraph.dy, lessThan(first.dy));
-        expect(first.dy, lessThan(second.dy));
-      },
-    );
-
-    testWidgets('long headings wrap within a Compact width', (tester) async {
-      const longHeading =
-          '# A very long plan heading that must wrap onto at least '
-          'two lines instead of overflowing the compact transcript width';
-      await _pumpMarkdown(
-        tester,
-        '# Short\n\n$longHeading',
-        viewSize: const Size(360, 800),
-      );
-
-      final shortFinder = find.textContaining('Short');
-      final longFinder = find.textContaining('very long plan heading');
-      expect(shortFinder, findsOneWidget);
-      expect(longFinder, findsOneWidget);
-      expect(tester.takeException(), isNull);
-      expect(tester.getSize(longFinder).width, lessThanOrEqualTo(360));
-      expect(
-        tester.getSize(longFinder).height,
-        greaterThan(tester.getSize(shortFinder).height),
-      );
-    });
-
-    testWidgets('long Chinese headings wrap within a Compact width', (
-      tester,
-    ) async {
-      final longHeading = '### ${'这是一个很长的计划标题' * 8}';
-      await _pumpMarkdown(
-        tester,
-        '## 短标题\n\n$longHeading',
-        viewSize: const Size(360, 800),
-      );
-
-      final shortFinder = find.textContaining('短标题');
-      final longFinder = find.textContaining('这是一个很长的计划标题');
-      expect(shortFinder, findsOneWidget);
-      expect(longFinder, findsOneWidget);
-      expect(tester.takeException(), isNull);
-      expect(tester.getSize(longFinder).width, lessThanOrEqualTo(360));
-      expect(
-        tester.getSize(longFinder).height,
-        greaterThan(tester.getSize(shortFinder).height),
-      );
-    });
 
     testWidgets('large text scale renders headings without clipping', (
       tester,

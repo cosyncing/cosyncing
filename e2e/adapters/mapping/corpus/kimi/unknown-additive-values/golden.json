@@ -1,0 +1,28 @@
+{
+  "history": [
+    {"type":"user-message","text":"real prompt","key":"kimi:f_1:0"},
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_2:0","nativeKind":"a-content-type-from-the-future"}},
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_2:1","nativeKind":"tool_use"}},
+    {"type":"model-output","text":"kept","final":true,"key":"kimi:f_2:2"},
+    {"type":"event","name":"kimi.unmapped-role","payload":{"key":"kimi:f_3:0","nativeRole":"tool"}},
+    {"type":"event","name":"kimi.unmapped-role","payload":{"key":"kimi:f_4:0","nativeRole":"a-role-from-the-future"}},
+    {"type":"model-output","text":"answer with a new field","final":true,"key":"kimi:f_5:0"}
+  ],
+  "live": [
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_6:2","nativeKind":"tool_result"}},
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_7:0","nativeKind":"a-user-block-from-the-future"}},
+    {"type":"user-message","text":"prompt with a new block","key":"kimi:f_7:1"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"real prompt","key":"kimi:f_1:0"},
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_2:0","nativeKind":"a-content-type-from-the-future"}},
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_2:1","nativeKind":"tool_use"}},
+    {"type":"model-output","text":"kept","final":true,"key":"kimi:f_2:2"},
+    {"type":"event","name":"kimi.unmapped-role","payload":{"key":"kimi:f_3:0","nativeRole":"tool"}},
+    {"type":"event","name":"kimi.unmapped-role","payload":{"key":"kimi:f_4:0","nativeRole":"a-role-from-the-future"}},
+    {"type":"model-output","text":"answer with a new field","final":true,"key":"kimi:f_5:0"},
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_6:2","nativeKind":"tool_result"}},
+    {"type":"event","name":"kimi.unmapped-content","payload":{"key":"kimi:f_7:0","nativeKind":"a-user-block-from-the-future"}},
+    {"type":"user-message","text":"prompt with a new block","key":"kimi:f_7:1"}
+  ]
+}

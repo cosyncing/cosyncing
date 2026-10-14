@@ -1,0 +1,5 @@
+{"type":"response_item","payload":{"type":"function_call","name":"tool_from_the_future","call_id":"cf2","arguments":"{\"x\":2}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cf2","output":{"not":"a string"}}}
+{"type":"event_msg","payload":{"type":"item_completed","turn_id":"tf","item":{"type":"ItemFromTheFuture","id":"x","content":[{"type":"Blob"}]}}}
+{"type":"event_msg","payload":{"type":"item_completed","turn_id":"tf","item":{"type":"UserMessage","id":"uf","content":[{"type":"a-content-from-the-future"},{"type":"text","text":"prompt with a new block","text_elements":[]}]}}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"tf"}}

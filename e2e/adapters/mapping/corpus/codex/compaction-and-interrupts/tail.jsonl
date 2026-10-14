@@ -1,0 +1,14 @@
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"denied-turn"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"deny-1","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"deny-1","output":"exec_command failed for bun run test: CreateProcess { message: \"Rejected(\\\"Automatic approval review denied. The workspace approval policy forbids granting escalated host execution.\\\")\" }"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"deny-2","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"deny-2","output":"exec_command failed for bun run test: CreateProcess { message: \"Rejected(\\\"Automatic approval review denied. The workspace approval policy forbids granting escalated host execution.\\\")\" }"}}
+{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"denied-turn","reason":"interrupted"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"terminal-a"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"terminal-a"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"terminal-a"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"terminal-b"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"terminal-a"}}
+{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"terminal-b","reason":"interrupted"}}
+{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"terminal-b","reason":"interrupted"}}
+{"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}

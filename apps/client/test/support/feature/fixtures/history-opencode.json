@@ -1,0 +1,144 @@
+{
+  "agent": "opencode",
+  "texts": [
+    "seeded prompt 1",
+    "seeded answer 1",
+    "seeded prompt 2",
+    "seeded answer 2"
+  ],
+  "session": {
+    "kind": "session",
+    "info": {
+      "id": "ses_seed0016dbc3806ef",
+      "tool": "opencode",
+      "nativeId": "ses_seed0016dbc3806ef",
+      "title": "Captured conversation",
+      "slug": "captured-conversation",
+      "cwd": "/captured/workspaces/seed-1",
+      "status": "idle",
+      "attachMode": "live",
+      "model": "model-a",
+      "currentModel": {
+        "providerID": "test-provider",
+        "modelID": "model-a"
+      },
+      "createdAt": 1791971341831,
+      "updatedAt": 1791971341835,
+      "terminalSyncHint": {
+        "label": "Sync with your terminal (optional)",
+        "command": "opencode attach 'http://127.0.0.1:43327' -s 'ses_seed0016dbc3806ef' --dir '/captured/workspaces/seed-1'",
+        "note": "Optional — you can already view and drive this session here without any terminal. Run this only if you also want your live OpenCode TUI to mirror it. On the host machine, quit the current bare `opencode` first (it runs its own private server), then paste this to join the shared one so terminal and app stay in sync."
+      },
+      "control": {
+        "drive": {
+          "supported": true,
+          "state": "driving"
+        },
+        "terminalSync": {
+          "supported": true,
+          "syncAvailable": true,
+          "active": false,
+          "action": "join",
+          "label": "Sync with your terminal (optional)",
+          "command": "opencode attach 'http://127.0.0.1:43327' -s 'ses_seed0016dbc3806ef' --dir '/captured/workspaces/seed-1'",
+          "note": "Optional — you can already view and drive this session here without any terminal. Run this only if you also want your live OpenCode TUI to mirror it. On the host machine, quit the current bare `opencode` first (it runs its own private server), then paste this to join the shared one so terminal and app stay in sync.",
+          "behind": false
+        }
+      },
+      "machine": "Howard",
+      "sessionOwner": {
+        "revision": {
+          "epoch": "5faf399b-f046-4ff9-bb0f-b47affc1134d",
+          "seq": 1
+        },
+        "state": "drive"
+      }
+    },
+    "authority": {
+      "canMutate": true,
+      "prompt": "full"
+    }
+  },
+  "history": {
+    "kind": "history",
+    "messages": [
+      {
+        "type": "user-message",
+        "text": "seeded prompt 1",
+        "key": "msg_seed_ses_seed0016dbc3806ef_1_u",
+        "turnId": "msg_seed_ses_seed0016dbc3806ef_1_u",
+        "sentAt": 1791971341832
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 1",
+        "key": "prt_seed_ses_seed0016dbc3806ef_1",
+        "final": true
+      },
+      {
+        "type": "run-summary",
+        "key": "opencode:run:msg_seed_ses_seed0016dbc3806ef_1_a",
+        "turnId": "msg_seed_ses_seed0016dbc3806ef_1_a",
+        "userMessageKey": "msg_seed_ses_seed0016dbc3806ef_1_u",
+        "assistantMessageKey": "prt_seed_ses_seed0016dbc3806ef_1",
+        "status": "done",
+        "startedAt": 1791971341833,
+        "completedAt": 1791971341834,
+        "totalRuntimeMs": 1,
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": 0.01
+        },
+        "source": "opencode"
+      },
+      {
+        "type": "token-count",
+        "input": 10,
+        "output": 5,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0.01
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 2",
+        "key": "msg_seed_ses_seed0016dbc3806ef_2_u",
+        "turnId": "msg_seed_ses_seed0016dbc3806ef_2_u",
+        "sentAt": 1791971341833
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 2",
+        "key": "prt_seed_ses_seed0016dbc3806ef_2",
+        "final": true
+      },
+      {
+        "type": "run-summary",
+        "key": "opencode:run:msg_seed_ses_seed0016dbc3806ef_2_a",
+        "turnId": "msg_seed_ses_seed0016dbc3806ef_2_a",
+        "userMessageKey": "msg_seed_ses_seed0016dbc3806ef_2_u",
+        "assistantMessageKey": "prt_seed_ses_seed0016dbc3806ef_2",
+        "status": "done",
+        "startedAt": 1791971341834,
+        "completedAt": 1791971341835,
+        "totalRuntimeMs": 1,
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": 0.01
+        },
+        "source": "opencode"
+      }
+    ],
+    "reset": true,
+    "cursor": "eyJ2IjoxLCJuIjo3LCJoIjoiY0xTU1RZRWlCa2swYkpoNWlib2RFczF3R01YVS04d0Vuc0ZDQ01tQWgxWSJ9",
+    "attachTicket": "eyJ2IjoxLCJuIjo3LCJoIjoiY0xTU1RZRWlCa2swYkpoNWlib2RFczF3R01YVS04d0Vuc0ZDQ01tQWgxWSJ9",
+    "endCursor": "eyJ2IjoxLCJrIjoib2xkZXIiLCJiIjo3LCJoIjoiY0xTU1RZRWlCa2swYkpoNWlib2RFczF3R01YVS04d0Vuc0ZDQ01tQWgxWSJ9",
+    "newerHistory": true
+  }
+}

@@ -1,0 +1,193 @@
+{
+  "items": [
+    {
+      "id": "m_r1d",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_edit",
+          "output": "edited"
+        }
+      ]
+    },
+    {
+      "id": "m_r1c",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_write",
+          "output": "written"
+        }
+      ]
+    },
+    {
+      "id": "m_r1b",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_read",
+          "output": "const a = 1;"
+        }
+      ]
+    },
+    {
+      "id": "m_r1",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_bash",
+          "output": "ok"
+        }
+      ]
+    },
+    {
+      "id": "m_a1",
+      "role": "assistant",
+      "created_at": "2026-08-19T10:00:00.000Z",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "plan it"
+        },
+        {
+          "type": "text",
+          "text": "on it"
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_bash",
+          "tool_name": "Bash",
+          "input": {
+            "command": "bun test",
+            "cwd": "/repo",
+            "timeout": 120000
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_read",
+          "tool_name": "Read",
+          "input": {
+            "path": "/repo/a.ts",
+            "line_offset": 9,
+            "n_lines": 40
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_write",
+          "tool_name": "Write",
+          "input": {
+            "path": "/repo/new.ts",
+            "content": "a\nb"
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_edit",
+          "tool_name": "Edit",
+          "input": {
+            "path": "/repo/a.ts",
+            "old_string": "a",
+            "new_string": "b"
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_grep",
+          "tool_name": "Grep",
+          "input": {
+            "pattern": "TODO",
+            "path": "/repo/src",
+            "output_mode": "content"
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_glob",
+          "tool_name": "Glob",
+          "input": {
+            "pattern": "**/*.ts",
+            "path": "/repo"
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_media",
+          "tool_name": "ReadMediaFile",
+          "input": {
+            "path": "/repo/shot.png"
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_future",
+          "tool_name": "ToolFromTheFuture",
+          "input": {
+            "x": 1
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_todo",
+          "tool_name": "TodoList",
+          "input": {
+            "todos": [
+              {
+                "title": "Wire the mapper",
+                "status": "done"
+              },
+              {
+                "title": "Write the tests",
+                "status": "in_progress"
+              },
+              {
+                "title": "Run the checks",
+                "status": "pending"
+              }
+            ]
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_bg",
+          "tool_name": "Bash",
+          "input": {
+            "command": "npm test",
+            "run_in_background": true
+          }
+        },
+        {
+          "type": "tool_use",
+          "tool_call_id": "c_agent",
+          "tool_name": "Agent",
+          "input": {
+            "prompt": "Find every caller.\n\nReport back.",
+            "description": "Find callers",
+            "subagent_type": "explore"
+          }
+        }
+      ]
+    },
+    {
+      "id": "m_u",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "do the work"
+        }
+      ]
+    }
+  ],
+  "has_more": false
+}

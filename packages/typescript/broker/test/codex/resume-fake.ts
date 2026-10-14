@@ -82,8 +82,10 @@ async function test(name: string, fn: () => Promise<[boolean, string]>): Promise
     console.log(`SKIP  ${name}`);
     return;
   }
+  const t0 = Date.now();
   try {
     const [ok, detail] = await fn();
+    console.log(`TIME ${Date.now()-t0} ${name}`);
     results.push({ name, kind: ok ? 'pass' : 'fail', detail });
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
   } catch (err) {
@@ -110,7 +112,24 @@ function fakeCodexDir(scriptBody: string): { dir: string; rollout: string; fake:
   writeFileSync(rollout, JSON.stringify({ type: 'session_meta', payload: { id: 'fake-thread', cwd: dir } }) + String.fromCharCode(10));
   const marker = join(dir, 'markers.jsonl');
   const fake = join(binDir, 'codex');
-  writeFileSync(fake, scriptBody.replace(/__DIR__/g, dir).replace(/__ROLLOUT__/g, rollout).replace(/__MARKER__/g, marker));
+  // A fake must answer the native calls it does not model: left unanswered, `thread/read`,
+  // `thread/turns/list`, `thread/goal/get` and `thread/settings/update` each cost the adapter its full
+  // 5 s RPC timeout (a history read, a run-state repair, a settings push), which once made single
+  // tests here take 5 to 20 s.
+  const fallbacks: Record<string, string> = {
+    'thread/read': "{ error: { code: -32601, message: 'not modelled by this fake' } }",
+    'thread/turns/list': "{ error: { code: -32601, message: 'not modelled by this fake' } }",
+    'thread/goal/get': "{ error: { code: -32601, message: 'not modelled by this fake' } }",
+    'thread/settings/update': '{ result: {} }',
+  };
+  const unmodelled = Object.keys(fallbacks).filter((m) => !scriptBody.includes(`'${m}'`));
+  const body = unmodelled.length === 0
+    ? scriptBody
+    : scriptBody.replace(
+      'const msg = JSON.parse(raw);',
+      `const msg = JSON.parse(raw);\n    const unmodelled = { ${unmodelled.map((m) => `${JSON.stringify(m)}: ${fallbacks[m]}`).join(', ')} }[msg.method];\n    if (unmodelled && msg.id !== undefined) { send({ id: msg.id, ...unmodelled }); continue; }`,
+    );
+  writeFileSync(fake, body.replace(/__DIR__/g, dir).replace(/__ROLLOUT__/g, rollout).replace(/__MARKER__/g, marker));
   chmodSync(fake, 0o755);
   return { dir, rollout, fake, marker };
 }
@@ -943,7 +962,7 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `, async (rollout, _dir, marker) => {
-    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const conn = await new CodexAdapter({ goalPauseTurnWaitMs: 100 }).attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
     const messages: any[] = [];
     conn.subscribe((m: any) => messages.push(m));
     try {
@@ -957,7 +976,9 @@ for await (const chunk of Bun.stdin.stream()) {
       const clear = await conn.runCommand?.('goal', 'clear');
       await conn.sendPrompt({ text: 'finish the goal' });
       await waitFor(() => messages.some((m) => m.type === 'goal-state' && m.status === 'done'), 5000);
-      await waitFor(() => messages.some((m) => m.type === 'status' && m.status === 'idle'), 5000);
+      // The turn's end is its run summary. A status frame is not guaranteed: when the turn completes in
+      // the same chunk as its start reply the session never visibly left Idle, and no Idle is emitted.
+      await waitFor(() => messages.some((m) => m.type === 'run-summary' && m.status === 'done' && m.turnId === 'turn1'), 5000);
       // /goal pause during a RUNNING turn must also interrupt it (pause alone only gates future
       // auto-turns — verified 2026-07-12, adapters/03-codex.md goal semantics).
       const preHold = messages.length;
@@ -3975,6 +3996,8 @@ setInterval(() => {}, 1000);
     const adapter = new CodexAdapter({
       reportAttachDiagnostic: (event) => diagnostics.push(event),
       scanCodexTuiPresence: async () => fakeTuiScan(),
+      // The daemon never answers `initialize`, so a short probe deadline only shortens the wait.
+      daemonProbeTimeoutMs: 150,
     });
     const id = Buffer.from(rollout, 'utf8').toString('base64url');
     const conflicts: string[] = [];
@@ -4016,14 +4039,18 @@ setInterval(() => {}, 1000);
     const ignoredMethods = new Set<string>();
     return withLoadedDaemon(dir, [], async () => {
       const diagnostics: CodexAttachDiagnostic[] = [];
-      const adapter = new CodexAdapter({
+      const adapterOptions: ConstructorParameters<typeof CodexAdapter>[0] = {
         reportAttachDiagnostic: (event) => diagnostics.push(event),
         scanCodexTuiPresence: async () => fakeTuiScan(),
-      });
+      };
+      const adapter = new CodexAdapter(adapterOptions);
       const id = Buffer.from(rollout, 'utf8').toString('base64url');
+      // The first probe talks to a healthy daemon at the default deadline, so the absence is cached.
       const observe = await adapter.attach(id);
       await observe.close();
       ignoredMethods.add('initialize');
+      // From here the daemon never answers, so a short probe deadline only shortens the wait.
+      adapterOptions!.daemonProbeTimeoutMs = 150;
 
       let conflict = '';
       try {

@@ -1,0 +1,14 @@
+{"type":"ai-title","aiTitle":"Test session","sessionId":"s1"}
+{"type":"custom-title","customTitle":"Custom","sessionId":"s1"}
+{"type":"mode","mode":"build","sessionId":"s1"}
+{"type":"permission-mode","permissionMode":"default","sessionId":"s1"}
+{"type":"file-history-snapshot","messageId":"m0","isSnapshotUpdate":false}
+{"type":"attachment","uuid":"att1","cwd":"/tmp/x","attachment":{"type":"deferred_tools_delta","addedNames":["X"]}}
+{"type":"user","uuid":"um1","isMeta":true,"cwd":"/tmp/x","message":{"role":"user","content":"<local-command-caveat>Caveat: ..."}}
+{"type":"user","uuid":"um2","cwd":"/tmp/x","message":{"role":"user","content":"<system-reminder>hi</system-reminder>"}}
+{"type":"user","uuid":"um3","cwd":"/tmp/x","message":{"role":"user","content":"<command-name>/compact</command-name>"}}
+{"type":"user","uuid":"u1","cwd":"/tmp/x","timestamp":"2026-07-01T10:00:00.000Z","message":{"role":"user","content":"Please edit the file and run ls."}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-07-01T10:00:01.000Z","message":{"id":"m1","role":"assistant","content":[{"type":"thinking","thinking":"Let me think","signature":"sig"}],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2},"model":"claude-opus-4-8"}}
+{"type":"assistant","uuid":"a2","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"I will edit it."}],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}
+{"type":"assistant","uuid":"a3","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_edit","name":"Edit","input":{"file_path":"/tmp/x/a.ts"}}],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}
+{"type":"assistant","uuid":"a4","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"ls"}}],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}

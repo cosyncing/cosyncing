@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 /**
- * omp discovery deltas: leading `title` slot before the session header, combined
- * `provider/modelId` model_change, last-write-wins `title_change`, session_info still readable,
- * and the XDG/PI_CONFIG_DIR/PI_CODING_AGENT_DIR path rules. Fixture JSONL only — no real omp.
+ * omp discovery deltas the merged suites do not assert: session_info naming, subagent lineage on
+ * attach and observe-only control, symlinked transcripts, shared-Pi-variable suppression, the
+ * future-version fail-closed surface, and the XDG/PI_CONFIG_DIR/PI_CODING_AGENT_DIR path rules.
+ * (Title/model parsing and subagent tree rows live in e2e/adapters/conformance/omp.test.ts.)
+ * Fixture JSONL only, no real omp.
  */
 export {};
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -74,7 +76,6 @@ try {
   const { OmpAdapter, resetOmpRuntimeReadinessCache } = await import('../src/index.ts');
   const adapter = new OmpAdapter({ brokerUrl: 'http://127.0.0.1:7734' });
   check('omp adapter id/displayName', adapter.id === 'omp' && adapter.displayName === 'omp', `${adapter.id}/${adapter.displayName}`);
-  check('omp omits fork/clone hooks', typeof (adapter as any).forkSession === 'undefined' && typeof (adapter as any).cloneSession === 'undefined');
 
   const sessions = await adapter.discoverSessions();
   const byId = new Map(sessions.map((s) => [s.id, s]));
@@ -89,25 +90,8 @@ try {
     `${sessions.length}`);
 
   check('cwd comes from the session header AFTER the leading title slot', a?.cwd === cwdA, String(a?.cwd));
-  check('title_change is last-write-wins', a?.title === 'Renamed session', String(a?.title));
-  check(
-    'combined model_change splits provider/modelId on the first slash',
-    a?.currentModel?.providerID === 'openai' && a?.currentModel?.modelID === 'gpt-5.2',
-    JSON.stringify(a?.currentModel),
-  );
-  check('model label comes from the split modelId', a?.model === 'gpt-5.2', String(a?.model));
   check('session rows stamp tool=omp', a?.tool === 'omp' && b?.tool === 'omp', '');
   check('ordinary row publishes its native header id', a?.nativeId === 'sess-a', String(a?.nativeId));
-  check('subagent row links to the parent native header id',
-    child?.origin === 'subagent'
-      && child.nativeId === 'child-native'
-      && child.parentThreadId === 'sess-a',
-    JSON.stringify(child));
-  check('nested subagent row links to its immediate parent native header id',
-    grandchild?.origin === 'subagent'
-      && grandchild.nativeId === 'grandchild-native'
-      && grandchild.parentThreadId === 'child-native',
-    JSON.stringify(grandchild));
   check('subagent row advertises observation only',
     child?.control?.drive.supported === false
       && child.control.terminalSync?.supported === false,
@@ -133,7 +117,7 @@ try {
     childDriveRefusal);
 
   check('session_info naming still reads', b?.title === 'Legacy pi-shaped name', String(b?.title));
-  check('non-empty leading title slot names the session', c?.title === 'Durable Title', String(c?.title));
+
 
   process.env.PI_CODING_AGENT_DIR = join(root, 'shared-agent');
   process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;

@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "Codex 0.147 stopped writing event_msg/user_message: the prompt is item_completed/UserMessage, rebuilt to the canonical (turn, ordinal) identity with sentAt from started_at_ms, on history and on the tail; bootstrap developer/user response_items are context, never prompts; a turn that has only bootstrap context fabricates no bubble",
+  "userTexts": [
+    "new-format prompt",
+    "tailed prompt"
+  ],
+  "oneRow": [
+    "answer a0",
+    "answer a1"
+  ],
+  "sessionId": "22a50171-bb93-466c-866c-22a50171bb93"
+}

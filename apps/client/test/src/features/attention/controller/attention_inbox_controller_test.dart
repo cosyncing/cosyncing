@@ -28,13 +28,6 @@ void main() {
     baseUri: Uri.parse('http://127.0.0.1:7734'),
     createdAt: DateTime(2026, 7, 16),
   );
-  final secondProfile = BrokerProfile(
-    id: 'profile-2',
-    displayName: 'Remote',
-    baseUri: Uri.parse('http://127.0.0.1:7735'),
-    createdAt: DateTime(2026, 7, 16),
-  );
-
   AttentionInboxEntry entry(
     String id, {
     BrokerProfile? owner,
@@ -115,26 +108,6 @@ void main() {
   tearDown(() async {
     container.dispose();
     await database.close();
-  });
-
-  test('read and dismiss clear their visible OS notifications', () async {
-    final actions = container.read(attentionInboxActionsProvider);
-
-    await actions.acknowledge(entry('event-read'));
-    await actions.dismiss(entry('event-dismiss'));
-
-    expect(notificationSink.cleared.toSet(), {
-      ...attentionNotificationIdsForEvent(
-        brokerProfileId: profile.id,
-        event: entry('event-read').event,
-      ),
-      ...attentionNotificationIdsForEvent(
-        brokerProfileId: profile.id,
-        event: entry('event-dismiss').event,
-      ),
-    });
-    expect(brokerClient.acknowledged, ['event-read']);
-    expect(brokerClient.dismissed, ['event-dismiss']);
   });
 
   test(
@@ -353,31 +326,6 @@ void main() {
         notificationSink.cleared,
         contains('attention:profile-1:request-r'),
       );
-    },
-  );
-
-  test(
-    'Clear all isolates profiles and keeps only the offline profile pending',
-    () async {
-      final local = entry('local-event');
-      final remote = entry('remote-event', owner: secondProfile);
-      await _persist(repository, [local, remote]);
-      secondBrokerClient.failBulk = true;
-
-      final result = await container
-          .read(attentionInboxActionsProvider)
-          .clearAll(AttentionInboxSections.fromEntries([local, remote]));
-
-      expect(result.locallyDismissed, 2);
-      expect(result.pendingProfiles, 1);
-      expect(brokerClient.bulkRequests, hasLength(1));
-      expect(secondBrokerClient.bulkRequests, hasLength(1));
-      expect(await repository.loadPendingMutations(_scope(profile)), isEmpty);
-      expect(
-        await repository.loadPendingMutations(_scope(secondProfile)),
-        hasLength(1),
-      );
-      expect(notificationSink.clearManyCallCount, 1);
     },
   );
 

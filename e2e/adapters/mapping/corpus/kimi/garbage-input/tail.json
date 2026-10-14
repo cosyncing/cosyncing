@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "id": "g_7",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "after the noise"
+        }
+      ]
+    },
+    null,
+    {
+      "id": "g_6",
+      "role": "user",
+      "content": [
+        {
+          "type": "text"
+        }
+      ]
+    }
+  ]
+}

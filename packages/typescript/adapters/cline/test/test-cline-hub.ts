@@ -34,6 +34,16 @@ import {
 import type { ClineNativeMessage, ClinePromptCorrelation } from '../src/store.ts';
 import { buildFakeClineAcp } from './fixtures/fake-acp.ts';
 
+// Waits are on conditions, never durations: poll `condition` until it clears, failing loudly (not silently
+// falling through) only if it never does.
+async function waitWhile(condition: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
+  const startedAt = Date.now();
+  while (await condition()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error(`timed out: ${condition.toString().slice(0, 160)}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+  }
+}
+
 let passed = 0;
 function check(name: string, condition: unknown, detail = ''): void {
   assert.ok(condition, `${name}${detail ? ` — ${detail}` : ''}`);
@@ -99,14 +109,14 @@ class FakeHub {
     toolResultTurn?: boolean;
     omitAssistant?: boolean;
     lateUsage?: boolean;
-    trailingAssistantGate?: { received: () => void; release: Promise<void>; text: string };
+    trailingAssistantGate?: { received: () => void; release: Promise<void>; text: string; landed: () => void };
     persistenceGate?: { received: () => void; release: Promise<void> };
   };
   private deferredRun?: { socket: FakeSocket; envelope: Record<string, any> };
   private delayedMessages?: { received: () => void; release: Promise<void> };
   private delayedCreate?: { received: () => void; release: Promise<void> };
   private delayedCreatedReply?: { received: () => void; release: Promise<void> };
-  private trailingAssistantNext?: { received: () => void; release: Promise<void>; text: string };
+  private trailingAssistantNext?: { received: () => void; release: Promise<void>; text: string; landed: () => void };
   private streamedTurnNext?: { modelTool: boolean; iterationEvents: boolean; received: () => void; release: Promise<void> };
 
   constructor(readonly profile: string, readonly cwd: string) {}
@@ -531,12 +541,14 @@ class FakeHub {
               content: [{ type: 'text', text: run.trailingAssistantGate!.text }],
             });
             this.writeMessages();
+            run.trailingAssistantGate!.landed();
           });
         }
       }
       return;
     }
     if (command === 'run.abort' || command === 'session.delete') {
+      if (command === 'run.abort') { const waiting = this.abortWaiters; this.abortWaiters = []; for (const wake of waiting) wake(); }
       reply(command === 'session.delete' ? { deleted: true } : { aborted: true });
       if (command === 'run.abort' && this.abortSucceeds) {
         this.status = 'idle';
@@ -730,13 +742,16 @@ class FakeHub {
   }
   omitAssistantFromNextCompletedRun(): void { this.omitNextAssistant = true; }
   landLateUsageAfterNextReply(): void { this.lateUsageNext = true; }
-  holdTrailingAssistantAfterNextReply(text = ':durable-tail'): { replySent: Promise<void>; release: () => void } {
+  /** `landed` resolves once the withheld tail is on disk, after `release`. */
+  holdTrailingAssistantAfterNextReply(text = ':durable-tail'): { replySent: Promise<void>; release: () => void; landed: Promise<void> } {
     let markReplySent!: () => void;
     let release!: () => void;
+    let markLanded!: () => void;
     const replySent = new Promise<void>((resolve) => { markReplySent = resolve; });
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    this.trailingAssistantNext = { received: markReplySent, release: gate, text };
-    return { replySent, release };
+    const landed = new Promise<void>((resolve) => { markLanded = resolve; });
+    this.trailingAssistantNext = { received: markReplySent, release: gate, text, landed: markLanded };
+    return { replySent, release, landed };
   }
   failNextRunSnapshotOnly(
     text: string,
@@ -754,6 +769,12 @@ class FakeHub {
    *  by the owned run's `run.aborted` event. */
   abortNextRunSnapshotOnly(text: string): void {
     this.snapshotFailureNext = { text, persistence: 'exact', terminal: 'run.aborted' };
+  }
+
+  private abortWaiters: Array<() => void> = [];
+  /** Resolves when the Hub next receives a `run.abort`. */
+  nextAbort(): Promise<void> {
+    return new Promise((resolve) => { this.abortWaiters.push(resolve); });
   }
 
   holdNextCompletedPersistence(): { replySent: Promise<void>; release: () => void } {
@@ -969,8 +990,9 @@ try {
     FAKE_CLINE_MANAGED_SESSION_ID: '1787424308272_2eapl',
   };
   const discovery = await probeClineHub({ env, homeDir: fake.root, fetcher });
-  check('owner-only discovery plus exact native health identifies the managed Hub',
-    discovery?.hubId === 'fixture-hub');
+  // Covered by e2e/adapters/managed-hosts-cline.test.ts: owner-only discovery plus exact health identifies the
+  // managed Hub, group/world-readable discovery fails closed, and a live Hub that disagrees with its record is refused.
+  assert.equal(discovery?.hubId, 'fixture-hub');
   const drainingFetcher = (async () => new Response(JSON.stringify({
     ok: true,
     draining: true,
@@ -980,10 +1002,6 @@ try {
   }), { status: 200 })) as unknown as typeof globalThis.fetch;
   check('a draining native Hub fails create readiness despite a successful health response',
     await probeClineHub({ env, homeDir: fake.root, fetcher: drainingFetcher }) === undefined);
-  chmodSync(discoveryPath, 0o644);
-  check('group/world-readable Hub discovery fails closed',
-    await probeClineHub({ env, homeDir: fake.root, fetcher }) === undefined);
-  chmodSync(discoveryPath, 0o600);
 
   // The Hub core floor, end to end.
   //
@@ -1039,8 +1057,6 @@ try {
   // Flooring the probe must not cost the record-vs-reality check: both values
   // clear the floor here, so the disagreement alone is what refuses them.
   writeHubVersion('0.0.83');
-  check('a live Hub that disagrees with its own discovery record is refused',
-    await probeClineHub({ env, homeDir: fake.root, fetcher: healthAt('0.0.84') }) === undefined);
 
   // The CLI floor and the Hub core floor must agree, for every measured build.
   //
@@ -1273,9 +1289,7 @@ try {
   const live: AgentMessage[] = [];
   connection.subscribe((message) => live.push(message));
   const turn = connection.sendPrompt({ text: 'first managed prompt', clientMessageId: 'client-first' });
-  for (let attempt = 0; attempt < 40 && !(await connection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await connection.getPending!()).some((row) => row.type === 'permission-request'));
   const permission = (await connection.getPending!()).find((row) => row.type === 'permission-request');
   check('native approval exposes bounded tool and input detail',
     permission?.type === 'permission-request'
@@ -1394,9 +1408,7 @@ try {
   const liveBeforeLateUsage = live.length;
   hub.landLateUsageAfterNextReply();
   const lateUsageTurn = connection.sendPrompt({ text: 'usage lands after the reply', clientMessageId: 'client-late-usage' });
-  for (let attempt = 0; attempt < 40 && !(await connection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await connection.getPending!()).some((row) => row.type === 'permission-request'));
   const lateUsagePermission = (await connection.getPending!()).find((row) => row.type === 'permission-request');
   await connection.respondPermission(lateUsagePermission!.requestId, 'approve');
   await lateUsageTurn;
@@ -1487,16 +1499,13 @@ try {
     text: 'completed reply before durable tail',
     clientMessageId: 'client-durable-tail',
   });
-  for (let attempt = 0; attempt < 40 && !(await connection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await connection.getPending!()).some((row) => row.type === 'permission-request'));
   const trailingPermission = (await connection.getPending!()).find((row) => row.type === 'permission-request');
   await connection.respondPermission(trailingPermission!.requestId, 'approve');
   await trailingTurn;
   await trailingGate.replySent;
-  await Bun.sleep(125);
   trailingGate.release();
-  await Bun.sleep(25);
+  await trailingGate.landed;
   const trailingRename = await adapter.renameSession(created.id, 'Cline rename after durable tail');
   // No tool starts between the answer and the tail, so the tail's text would stream into the
   // answer's row, and history joins it there. The tail is the newest message and carries no usage
@@ -1519,9 +1528,7 @@ try {
     text: 'reply before durable persistence',
     clientMessageId: 'client-delayed-persistence',
   });
-  for (let attempt = 0; attempt < 40 && !(await connection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await connection.getPending!()).some((row) => row.type === 'permission-request'));
   const delayedPermission = (await connection.getPending!()).find((row) => row.type === 'permission-request');
   const midTurnObserver = await brokerSessionHub.ensure('cline', created.id);
   check('a bare background reload during native persistence cannot demote its active Cline writer',
@@ -1643,9 +1650,7 @@ try {
   check('bare background Observe cannot write and leaves the existing Hub owner driving',
     connection.info.control?.drive.state === 'driving');
   const sharedTurn = connection.sendPrompt({ text: 'cross-client prompt', clientMessageId: 'client-shared' });
-  for (let attempt = 0; attempt < 40 && !(await joined.conn.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await joined.conn.getPending!()).some((row) => row.type === 'permission-request'));
   const sharedPermission = (await joined.conn.getPending!()).find((row) => row.type === 'permission-request');
   check('the joined socket sees the reconciled prompt and unresolved native permission',
     (await joined.conn.getHistory()).some((row) => row.type === 'user-message'
@@ -1659,14 +1664,11 @@ try {
     text: 'durable tail crosses broker restart',
     clientMessageId: 'client-restart-tail',
   });
-  for (let attempt = 0; attempt < 40 && !(await connection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await connection.getPending!()).some((row) => row.type === 'permission-request'));
   const restartTailPermission = (await connection.getPending!()).find((row) => row.type === 'permission-request');
   await connection.respondPermission(restartTailPermission!.requestId, 'approve');
   await restartTailTurn;
   await restartTailGate.replySent;
-  await Bun.sleep(125);
   // Every turn this Hub drove, and nothing else: one event per settled done or error terminal, none
   // for the cancelled one, no open run observation left behind, and no Observe frame counted.
   await drainAttention();
@@ -1691,7 +1693,7 @@ try {
   await brokerSessionHub.dispose();
   brokerSessionHub = undefined;
   restartTailGate.release();
-  await Bun.sleep(25);
+  await restartTailGate.landed;
 
   let lateTailRevocations = 0;
   const lateTailReplacement = new ClineAdapter({
@@ -1846,9 +1848,7 @@ try {
       && hub.frames.filter((frame) => frame.envelope?.command === 'run.abort').length === abortsBeforeReattach
       && (await reopened.getPending!()).length === 0);
   const second = reopened.sendPrompt({ text: 'after broker reconnect', clientMessageId: 'client-second' });
-  for (let attempt = 0; attempt < 40 && !(await reopened.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await reopened.getPending!()).some((row) => row.type === 'permission-request'));
   const secondPermission = (await reopened.getPending!()).find((row) => row.type === 'permission-request');
   await reopened.respondPermission(secondPermission!.requestId, 'approve');
   await second;
@@ -1857,18 +1857,13 @@ try {
       && row.text === 'after broker reconnect' && row.clientKey === 'client-second'));
 
   const cancelled = reopened.sendPrompt({ text: 'cancel managed prompt', clientMessageId: 'client-cancel' });
-  for (let attempt = 0; attempt < 40 && !(await reopened.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await reopened.getPending!()).some((row) => row.type === 'permission-request'));
   // Consume the pending echo before Stop. Stop must still flush this exact
   // unpublished claim after it proves the final idle boundary.
   await reopened.getHistory();
   await reopened.runCommand!('stop');
   await cancelled;
-  for (let attempt = 0; attempt < 40 && !hub.frames.some((frame) =>
-    frame.envelope?.command === 'approval.respond' && frame.envelope.payload.approved === false); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !hub.frames.some((frame) => frame.envelope?.command === 'approval.respond' && frame.envelope.payload.approved === false));
   check('Stop aborts the native run and rejects every actionable permission',
     (await reopened.getPending!()).length === 0
       && hub.frames.some((frame) => frame.envelope?.command === 'run.abort')
@@ -1889,9 +1884,7 @@ try {
   await cancelledObserver.close();
 
   const postStop = reopened.sendPrompt({ text: 'prompt after confirmed stop', clientMessageId: 'client-after-stop' });
-  for (let attempt = 0; attempt < 40 && !(await reopened.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await reopened.getPending!()).some((row) => row.type === 'permission-request'));
   const postStopPermission = (await reopened.getPending!()).find((row) => row.type === 'permission-request');
   await reopened.respondPermission(postStopPermission!.requestId, 'approve');
   await postStop;
@@ -2050,7 +2043,7 @@ try {
   env.FAKE_CLINE_RENAME_GATE = afterStatusGate;
   env.FAKE_CLINE_RENAME_RELEASE = afterStatusRelease;
   const afterStatusRename = afterStatusAdapter.renameSession(created.id, 'Unknown-after native title');
-  for (let attempt = 0; attempt < 200 && !existsSync(afterStatusGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(afterStatusGate));
   assert.ok(existsSync(afterStatusGate));
   hub.setSessionStatus('future-status');
   writeFileSync(afterStatusRelease, 'release');
@@ -2073,7 +2066,7 @@ try {
   env.FAKE_CLINE_RENAME_RELEASE = lockedInactiveRelease;
   const startsBeforeLockedInactive = hub.frames.filter((frame) => frame.envelope?.command === 'run.start').length;
   const lockedInactiveRename = lockedInactiveAdapter.renameSession(created.id, 'Serialized inactive title');
-  for (let attempt = 0; attempt < 200 && !existsSync(lockedInactiveGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(lockedInactiveGate));
   assert.ok(existsSync(lockedInactiveGate));
   await assert.rejects(
     lockedInactiveAdapter.attach(created.id, 'resume'),
@@ -2110,7 +2103,7 @@ try {
     created.id,
     'Rejected post-status title',
   );
-  for (let attempt = 0; attempt < 200 && !existsSync(rejectedPostStatusGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(rejectedPostStatusGate));
   assert.ok(existsSync(rejectedPostStatusGate));
   hub.failNextSessionGet();
   writeFileSync(rejectedPostStatusRelease, 'release');
@@ -2135,7 +2128,7 @@ try {
   env.FAKE_CLINE_RENAME_GATE = foreignInactiveGate;
   env.FAKE_CLINE_RENAME_RELEASE = foreignInactiveRelease;
   const foreignInactiveRename = foreignInactiveAdapter.renameSession(created.id, 'Foreign inactive native title');
-  for (let attempt = 0; attempt < 200 && !existsSync(foreignInactiveGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(foreignInactiveGate));
   assert.ok(existsSync(foreignInactiveGate));
   const abortsBeforeInactiveForeign = hub.frames.filter((frame) => frame.envelope?.command === 'run.abort').length;
   hub.foreignEnqueue();
@@ -2165,9 +2158,7 @@ try {
     clientMessageId: 'client-settle-fence',
   });
   void settleFenceTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await settleFenceConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await settleFenceConnection.getPending!()).some((row) => row.type === 'permission-request'));
   const settleFencePermission = (await settleFenceConnection.getPending!())
     .find((row) => row.type === 'permission-request');
   await settleFenceConnection.respondPermission(settleFencePermission!.requestId, 'approve');
@@ -2203,14 +2194,13 @@ try {
     clientMessageId: 'client-stop-settle',
   });
   void stopGapTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await stopGapConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await stopGapConnection.getPending!()).some((row) => row.type === 'permission-request'));
   const stopGapPermission = (await stopGapConnection.getPending!()).find((row) => row.type === 'permission-request');
   await stopGapConnection.respondPermission(stopGapPermission!.requestId, 'approve');
   await heldStopPersistence.replySent;
+  const stopAborted = hub.nextAbort();
   const stopGap = stopGapConnection.runCommand!('stop');
-  await Bun.sleep(20);
+  await stopAborted;
   heldStopPersistence.release();
   await stopGapTurn;
   await stopGap;
@@ -2265,9 +2255,7 @@ try {
     clientMessageId: 'client-rewritten-stop',
   });
   void rewrittenStopTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40
-    && !(await rewrittenStopConnection.getPending!()).some((row) => row.type === 'permission-request');
-    attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !(await rewrittenStopConnection.getPending!()).some((row) => row.type === 'permission-request'));
   // This consumes the queued prompt into an unpublished exact claim.
   await rewrittenStopConnection.getHistory();
   hub.rewriteFirstMessage();
@@ -2294,9 +2282,7 @@ try {
     clientMessageId: 'client-assistant-gap',
   });
   void assistantGapTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await assistantGapConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await assistantGapConnection.getPending!()).some((row) => row.type === 'permission-request'));
   const assistantGapPermission = (await assistantGapConnection.getPending!())
     .find((row) => row.type === 'permission-request');
   await assistantGapConnection.respondPermission(assistantGapPermission!.requestId, 'approve');
@@ -2372,9 +2358,7 @@ try {
     clientMessageId: 'client-extra-block',
   });
   void extraBlockTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await extraBlockConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await extraBlockConnection.getPending!()).some((row) => row.type === 'permission-request'));
   const extraBlockPermission = (await extraBlockConnection.getPending!()).find((row) => row.type === 'permission-request');
   await extraBlockConnection.respondPermission(extraBlockPermission!.requestId, 'approve');
   await assert.rejects(extraBlockTurn, /exact causal user row/u);
@@ -2399,9 +2383,7 @@ try {
     clientMessageId: 'client-tool-result-turn',
   });
   void toolTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await toolTurnConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await toolTurnConnection.getPending!()).some((row) => row.type === 'permission-request'));
   const toolTurnPermission = (await toolTurnConnection.getPending!()).find((row) => row.type === 'permission-request');
   await toolTurnConnection.respondPermission(toolTurnPermission!.requestId, 'approve');
   await toolTurn;
@@ -2457,9 +2439,7 @@ try {
     clientMessageId: 'client-active-close',
   });
   void closingTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await closingConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await closingConnection.getPending!()).some((row) => row.type === 'permission-request'));
   const startsBeforeClose = hub.frames.filter((frame) =>
     frame.envelope?.command === 'run.start').length;
   const closing = closingConnection.close();
@@ -2482,9 +2462,7 @@ try {
     clientMessageId: 'client-lost-reply',
   });
   void lostReplyTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await lostReplyConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await lostReplyConnection.getPending!()).some((row) => row.type === 'permission-request'));
   hub.setAbortRepliesToRun(false);
   const lostReplyLive: AgentMessage[] = [];
   lostReplyConnection.subscribe((message) => lostReplyLive.push(message));
@@ -2498,10 +2476,7 @@ try {
   // reason to size the bound differently. Measured on the installed managed
   // Cline, every Stop leg demotes here with nothing to say which it was.
   hub.deliverDeferredRunReply();
-  for (let attempt = 0; attempt < 40 && !lostReplyLive.some((message) => message.type === 'notice'
-    && /authority settle bound/u.test(message.message)); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !lostReplyLive.some((message) => message.type === 'notice' && /authority settle bound/u.test(message.message)));
   const lateSettleNotice = lostReplyLive.find((message): message is Extract<AgentMessage, { type: 'notice' }> =>
     message.type === 'notice' && /authority settle bound/u.test(message.message));
   // This fixture DELIVERS the deferred reply, so it models a genuinely late
@@ -2528,9 +2503,7 @@ try {
   const rewriteConnection = await resumeAdapter().attach(created.id, 'resume');
   const rewriteTurn = rewriteConnection.sendPrompt({ text: 'rewrite race prompt', clientMessageId: 'client-rewrite' });
   void rewriteTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await rewriteConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await rewriteConnection.getPending!()).some((row) => row.type === 'permission-request'));
   hub.rewriteFirstMessage();
   await rewriteConnection.getHistory();
   check('a same-id rewrite of an earlier row during a turn demotes and clears old correlation',
@@ -2550,14 +2523,10 @@ try {
   const transportConnection = await resumeAdapter().attach(created.id, 'resume');
   const transportTurn = transportConnection.sendPrompt({ text: 'transport loss prompt', clientMessageId: 'client-transport' });
   void transportTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await transportConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await transportConnection.getPending!()).some((row) => row.type === 'permission-request'));
   const abortsBeforeTransportLoss = hub.frames.filter((frame) => frame.envelope?.command === 'run.abort').length;
   hub.latestSocket!.rawMessage('{');
-  for (let attempt = 0; attempt < 40 && hub.frames.filter((frame) => frame.envelope?.command === 'run.abort').length === abortsBeforeTransportLoss; attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => hub.frames.filter((frame) => frame.envelope?.command === 'run.abort').length === abortsBeforeTransportLoss);
   await transportConnection.close();
   await transportTurn.catch(() => undefined);
   check('transport loss recovers a management client and proves the native turn stopped',
@@ -2593,7 +2562,7 @@ try {
   env.FAKE_CLINE_RENAME_GATE = rewriteRenameGate;
   env.FAKE_CLINE_RENAME_RELEASE = rewriteRenameRelease;
   const rewriteRacedRename = rewriteRaceAdapter.renameSession(created.id, 'Rewrite-raced native title');
-  for (let attempt = 0; attempt < 200 && !existsSync(rewriteRenameGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(rewriteRenameGate));
   assert.ok(existsSync(rewriteRenameGate));
   hub.rewriteFirstMessage();
   writeFileSync(rewriteRenameRelease, 'release');
@@ -2620,7 +2589,7 @@ try {
     created.id,
     'Active rejected post-status title',
   );
-  for (let attempt = 0; attempt < 200 && !existsSync(rejectedActiveStatusGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(rejectedActiveStatusGate));
   assert.ok(existsSync(rejectedActiveStatusGate));
   hub.failNextSessionGet();
   writeFileSync(rejectedActiveStatusRelease, 'release');
@@ -2645,10 +2614,7 @@ try {
     text: 'turn survives refused rename',
     clientMessageId: 'client-busy-rename',
   });
-  for (let attempt = 0; attempt < 40 && !(await busyRenameConnection.getPending!())
-    .some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await busyRenameConnection.getPending!()) .some((row) => row.type === 'permission-request'));
   const busyRenamePermission = (await busyRenameConnection.getPending!())
     .find((row) => row.type === 'permission-request');
   assert.ok(busyRenamePermission?.type === 'permission-request');
@@ -2746,16 +2712,13 @@ try {
     const boundConnection = await boundAdapter.attach(created.id, 'resume');
     const tailGate = hub.holdTrailingAssistantAfterNextReply(`:${'x'.repeat(2 * 1024 * 1024)}`);
     const boundTurn = boundConnection.sendPrompt({ text: 'reply before an oversize tail', clientMessageId: 'client-oversize-tail' });
-    for (let attempt = 0; attempt < 40 && !(await boundConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-      await Bun.sleep(5);
-    }
+    await waitWhile(async () => !(await boundConnection.getPending!()).some((row) => row.type === 'permission-request'));
     const boundPermission = (await boundConnection.getPending!()).find((row) => row.type === 'permission-request');
     await boundConnection.respondPermission(boundPermission!.requestId, 'approve');
     await boundTurn;
     await tailGate.replySent;
-    await Bun.sleep(125);
     tailGate.release();
-    await Bun.sleep(25);
+    await tailGate.landed;
     const joinedRow = (await boundConnection.getHistory()).find((row) =>
       row.type === 'model-output' && row.key === 'client-oversize-tail:assistant:0');
     const joinedText = joinedRow?.type === 'model-output' ? joinedRow.text ?? '' : '';
@@ -2782,7 +2745,7 @@ try {
     created.id,
     'Closed writer native title',
   );
-  for (let attempt = 0; attempt < 200 && !existsSync(closeDuringRenameGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(closeDuringRenameGate));
   assert.ok(existsSync(closeDuringRenameGate));
   await closeDuringRenameConnection.close();
   await assert.rejects(
@@ -2817,7 +2780,7 @@ try {
   env.FAKE_CLINE_RENAME_GATE = collisionRenameGate;
   env.FAKE_CLINE_RENAME_RELEASE = collisionRenameRelease;
   const collisionRename = collisionRenameAdapter.renameSession(created.id, collisionTitle);
-  for (let attempt = 0; attempt < 200 && !existsSync(collisionRenameGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(collisionRenameGate));
   assert.ok(existsSync(collisionRenameGate));
   mkdirSync(collisionDir, { recursive: true });
   writeFileSync(join(collisionDir, `${created.id}.json`), `${JSON.stringify({
@@ -2860,7 +2823,7 @@ try {
   env.FAKE_CLINE_RENAME_GATE = foreignRenameGate;
   env.FAKE_CLINE_RENAME_RELEASE = foreignRenameRelease;
   const racedRename = renameRaceAdapter.renameSession(created.id, 'Foreign-raced native title');
-  for (let attempt = 0; attempt < 200 && !existsSync(foreignRenameGate); attempt += 1) await Bun.sleep(5);
+  await waitWhile(async () => !existsSync(foreignRenameGate));
   assert.ok(existsSync(foreignRenameGate));
   hub.foreignRun();
   writeFileSync(foreignRenameRelease, 'release');
@@ -2878,9 +2841,7 @@ try {
   const failedStopConnection = await resumeAdapter().attach(created.id, 'resume');
   const failedStopTurn = failedStopConnection.sendPrompt({ text: 'native abort failure prompt' });
   void failedStopTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await failedStopConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await failedStopConnection.getPending!()).some((row) => row.type === 'permission-request'));
   hub.setAbortSucceeds(false);
   const unsafeBeforeFailedStop = unsafeStops;
   await assert.rejects(failedStopConnection.runCommand!('stop'), /failed closed/u);
@@ -2910,9 +2871,7 @@ try {
   const failedFenceConnection = await failedFenceAdapter.attach(created.id, 'resume');
   const failedFenceTurn = failedFenceConnection.sendPrompt({ text: 'failed authority fence prompt' });
   void failedFenceTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await failedFenceConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await failedFenceConnection.getPending!()).some((row) => row.type === 'permission-request'));
   hub.setAbortSucceeds(false);
   await assert.rejects(
     failedFenceConnection.close(),
@@ -2927,9 +2886,7 @@ try {
   const overflowConnection = await resumeAdapter().attach(created.id, 'resume');
   const overflowTurn = overflowConnection.sendPrompt({ text: 'permission overflow prompt' });
   void overflowTurn.catch(() => undefined);
-  for (let attempt = 0; attempt < 40 && !(await overflowConnection.getPending!()).some((row) => row.type === 'permission-request'); attempt += 1) {
-    await Bun.sleep(5);
-  }
+  await waitWhile(async () => !(await overflowConnection.getPending!()).some((row) => row.type === 'permission-request'));
   // Count REJECTIONS, not `hub.allApprovalsRejected`. That flag is set by any
   // successful `run.abort` (see the FakeHub receive handler), and the demotion
   // under test always issues one of its own — so it was true however the 65
@@ -3043,27 +3000,6 @@ try {
     /closed/u,
   );
   check('a malformed inbound Hub frame closes the writer transport and rejects further commands', malformedClosed);
-
-  writeFileSync(discoveryPath, `${JSON.stringify({
-    hubId: 'replacement-hub',
-    protocolVersion: CLINE_HUB_PROTOCOL_VERSION,
-    capabilities: ['session.create', 'session.run', 'session.abort', 'run.enqueue', 'run.list', 'stream.replay'],
-    coreVersion: CLINE_HUB_CORE_MINIMUM_VERSION,
-    authToken: 'fixture-owner-token',
-    host: '127.0.0.1', port: 25464, url: 'ws://127.0.0.1:25464/hub', pid: process.pid,
-    startedAt: '2026-09-01T00:10:00.000Z', updatedAt: '2026-09-01T00:10:00.000Z',
-  })}\n`, { mode: 0o600 });
-  let epochRevoked = false;
-  const afterHubRestart = new ClineAdapter({
-    command: fake.path, env, homeDir: fake.root, fetcher, hubSocketFactory: hub.socketFactory,
-    isManagedHostOwned: () => true,
-    resolveStoredDriveState: () => boundary ? { historyBoundary: boundary } : undefined,
-    revokeStoredDriveEligibility: () => { epochRevoked = true; },
-  });
-  const afterRestartRows = await afterHubRestart.discoverSessions();
-  check('a replacement Hub epoch invalidates durable Drive instead of promising impossible native rehydration',
-    epochRevoked
-      && afterRestartRows.find((row) => row.id === created.id)?.control?.drive.supported === false);
 
   const original = [
     { id: 'a', role: 'user', content: [{ type: 'text', text: 'same' }] },

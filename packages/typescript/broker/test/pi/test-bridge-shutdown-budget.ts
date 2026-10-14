@@ -53,6 +53,8 @@ interface Run {
   elapsedMs: number;
   byeAttempted: boolean;
   byeReason: string | undefined;
+  /** Whether the handler's own timer aborted any request it sent (it spent its budget waiting). */
+  aborted: boolean;
 }
 
 /** Drive one shutdown against a broker that stalls `stall`. */
@@ -62,9 +64,11 @@ async function runShutdown(stall: 'events' | 'bye', emitFirst: boolean): Promise
   let byeAttempted = false;
   let byeReason: string | undefined;
   let polled = false;
+  let aborted = false;
   try {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
+      init?.signal?.addEventListener('abort', () => { aborted = true; }, { once: true });
       if (url.endsWith('/pi/bridge/hello')) return Response.json({ id: 'bridge-shutdown-1' });
       if (url.endsWith('/pi/bridge/events')) {
         if (stall === 'events') return await hangUntilAborted(init?.signal);
@@ -135,8 +139,8 @@ async function runShutdown(stall: 'events' | 'bye', emitFirst: boolean): Promise
       }),
     ]);
     if (watchdog) clearTimeout(watchdog);
-    if (!returned) return { elapsedMs: Number.POSITIVE_INFINITY, byeAttempted, byeReason };
-    return { elapsedMs: Date.now() - startedAt, byeAttempted, byeReason };
+    if (!returned) return { elapsedMs: Number.POSITIVE_INFINITY, byeAttempted, byeReason, aborted };
+    return { elapsedMs: Date.now() - startedAt, byeAttempted, byeReason, aborted };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -166,12 +170,14 @@ async function runShutdown(stall: 'events' | 'bye', emitFirst: boolean): Promise
 }
 
 {
-  // The ordinary case must stay fast: the budget is a ceiling, not a wait.
+  // The ordinary case must stay fast: the budget is a ceiling, not a wait. Proved without a
+  // wall-clock threshold: no request was cut off by the handler's own timer (the stalled cases
+  // above are), and the handler returned inside the host budget.
   const run = await runShutdown('none' as 'events', true);
   check(
     'a healthy broker still shuts down promptly rather than spending the budget',
-    run.elapsedMs < 500 && run.byeAttempted,
-    `${run.elapsedMs}ms byeAttempted=${run.byeAttempted}`,
+    run.elapsedMs < BUDGET_MS && run.byeAttempted && run.byeReason === 'quit' && !run.aborted,
+    `${run.elapsedMs}ms byeAttempted=${run.byeAttempted} aborted=${run.aborted}`,
   );
 }
 

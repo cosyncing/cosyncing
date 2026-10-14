@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/opencode-wire/src/mapping.ts and packages/typescript/adapters/opencode/test/test-opencode-retry-detail.ts",
+  "description": "part types, tool names and statuses OpenCode may add later, wrongly-typed or null parts and malformed events fail open: no throw, nothing becomes a user bubble except a real user row, the real rows around them still map",
+  "userTexts": [
+    "real prompt",
+    "prompt after unknown events"
+  ],
+  "sessionId": "c117194b-a2e5-43f2-83f2-c117194ba2e5"
+}

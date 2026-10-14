@@ -1,0 +1,7 @@
+{"role":"user","content":"real prompt"}
+{"role":"a-role-from-the-future","content":"not speech","extra":1}
+{"role":"system"}
+{"role":"user","raw_content":42}
+{"role":"user","content":{"nested":true}}
+{"role":"assistant","content":"   "}
+{"role":"assistant","content":"answer","aNewFieldFromTheFuture":{"x":1}}

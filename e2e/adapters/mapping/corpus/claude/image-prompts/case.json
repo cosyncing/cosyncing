@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "a pasted image is linked to the user row it was sent with (userMessageKey); image-only prompts still get an empty-text row; a meta line owns nothing",
+  "userTexts": [
+    "what is in this screenshot",
+    ""
+  ],
+  "sessionId": "164648d7-8c2a-4659-8659-164648d78c2a"
+}

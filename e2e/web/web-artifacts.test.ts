@@ -1,0 +1,292 @@
+/**
+ * A file the agent sends shows up on exactly the session that sent it, and the
+ * user can keep and download it.
+ *
+ * Real brokers serve the built Flutter client; the Pi bridge is the agent.
+ * Chromium shows what the user sees: the owner's session carries a delivered
+ * file, a peer session in the same folder never does, the file survives a
+ * broker outage and restart, a failing Files route never takes the Chat action
+ * away, an over-limit response never reaches the download path, a transient
+ * failure can be retried into exact bytes, and a different broker never shows
+ * another broker's file even for the same native session id.
+ */
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import type { Browser, Download, Locator, Page } from 'playwright-core';
+import { type Broker, eventually } from '../harness/index.ts';
+import { collectBrowserErrors, launchBrowser, newScenarioContext, waitForFlutter } from '../harness/browser.ts';
+import { startWebBroker } from '../harness/web-scenario.ts';
+
+const REPORT_BYTES = Buffer.from('exact browser download bytes\n', 'utf8');
+
+interface Fixture {
+  a: Broker;
+  b: Broker;
+  ownerId: string;
+  peerId: string;
+  /** Re-register both sessions on A (after a restart). */
+  rehelloA(): Promise<void>;
+  sameOwnerIdOnB: string;
+  dispose(): Promise<void>;
+}
+
+/** Two brokers; on A an owner session that was sent a file and a peer session in the same folder. */
+async function startFixture(): Promise<Fixture> {
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-e2e-web-artifacts-'));
+  const workspace = join(root, 'workspace');
+  mkdirSync(workspace, { recursive: true });
+  const reportPath = join(workspace, 'report.txt');
+  writeFileSync(reportPath, REPORT_BYTES);
+  const files = { owner: join(root, 'owner.jsonl'), peer: join(root, 'peer.jsonl') };
+  for (const [name, file] of Object.entries(files)) {
+    writeFileSync(file, `${JSON.stringify({ type: 'session', id: name, cwd: workspace })}\n`);
+  }
+  const [a, b] = await Promise.all([
+    startWebBroker({ name: 'web-art-a', env: { COSYNCING_FS_REMOTE_ENABLED: '1' } }),
+    startWebBroker({ name: 'web-art-b', env: { COSYNCING_FS_REMOTE_ENABLED: '1' } }),
+  ]);
+  const hello = async (broker: Broker, file: string, title: string, row: string): Promise<string> => {
+    const response = await broker.client().post('/pi/bridge/hello', {
+      sessionFile: file,
+      cwd: workspace,
+      title,
+      history: [{ t: 'user', key: `${title}-row`, text: row }],
+    });
+    expect(response.status).toBe(200);
+    return String(response.body.id);
+  };
+  const ownerId = await hello(a, files.owner, 'Artifact owner', 'owner session row');
+  const peerId = await hello(a, files.peer, 'Artifact peer', 'peer session row');
+  const sameOwnerIdOnB = await hello(b, files.owner, 'Artifact owner', 'owner session row');
+  expect(sameOwnerIdOnB).toBe(ownerId);
+  const sent = await a.client().post('/pi/bridge/send-file', { id: ownerId, path: reportPath });
+  expect(sent.status).toBe(200);
+  return {
+    a, b, ownerId, peerId, sameOwnerIdOnB,
+    async rehelloA() {
+      await hello(a, files.owner, 'Artifact owner', 'owner session row');
+      await hello(a, files.peer, 'Artifact peer', 'peer session row');
+    },
+    async dispose() {
+      await Promise.all([a.stop(), b.stop()]);
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+const transcriptDownload = (page: Page): Locator =>
+  // Wide layouts keep Chat beside Files, so both have a Download action: scope
+  // to the delivered-file card in the transcript.
+  page.getByRole('group', { name: /^report\.txt\s+Sent to you\b/ }).getByRole('button', { name: 'Download', exact: true });
+
+const sessionTab = (page: Page, title: string): Locator => page.locator(`[role="group"][aria-label="${title}"]`);
+
+async function openView(page: Page, view: 'Chat' | 'Files'): Promise<void> {
+  await page.getByRole('button', { name: 'Views and display options', exact: true }).click();
+  await page.getByRole('menuitem', { name: view, exact: true }).click();
+}
+
+/**
+ * Open a session from the roster, as the user does, and come back to a fresh
+ * load of Sessions with its tab mounted from the durable working set. Flutter
+ * can replace a semantics node while the roster repaints, so each attempt
+ * re-resolves everything.
+ */
+async function openFromRoster(page: Page, origin: string, title: string): Promise<void> {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await eventually(async () => {
+    await page.goto(`${origin}/cosy/#/sessions`, { waitUntil: 'domcontentloaded' });
+    await waitForFlutter(page);
+    if (await sessionTab(page, title).count() > 0) return true;
+    try {
+      const row = page.getByRole('button', { name: title, exact: false });
+      if (!(await row.first().isVisible().catch(() => false))) {
+        await page.getByRole('textbox', { name: 'Search sessions' }).first().fill(title, { timeout: 5_000 });
+        await row.first().waitFor({ state: 'visible', timeout: 5_000 });
+      }
+      await row.first().click({ force: true, timeout: 5_000 });
+      await sessionTab(page, title).first().waitFor({ state: 'attached', timeout: 5_000 });
+    } catch {
+      // The roster repainted under us: load again and retry.
+    }
+    return false;
+  }, { timeoutMs: 90_000, intervalMs: 50, what: `session ${title} in the working set` });
+}
+
+/** Click the working-set tab for a session (the topmost, when a layout shows two). */
+async function selectTab(page: Page, title: string): Promise<void> {
+  const tabs = sessionTab(page, title);
+  const count = await tabs.count();
+  expect(count).toBeGreaterThan(0);
+  let best = tabs.first();
+  let bestY = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < count; i++) {
+    const box = await tabs.nth(i).boundingBox();
+    if (box && box.y < bestY) { best = tabs.nth(i); bestY = box.y; }
+  }
+  await best.click();
+}
+
+describe('delivered files in the web client', () => {
+  let browser: Browser;
+  beforeAll(async () => { browser = await launchBrowser(); });
+  afterAll(async () => { await browser?.close(); });
+
+  async function scenario(run: (f: Fixture, page: Page, errors: string[], downloads: Download[]) => Promise<void>): Promise<void> {
+    const fixture = await startFixture();
+    const context = await newScenarioContext(browser, { viewport: { width: 1440, height: 1000 } });
+    try {
+      const page = await context.newPage();
+      const errors = collectBrowserErrors(page);
+      const downloads: Download[] = [];
+      page.on('download', (download) => downloads.push(download));
+      await run(fixture, page, errors, downloads);
+    } finally {
+      await context.close().catch(() => undefined);
+      await fixture.dispose();
+    }
+  }
+
+  test.concurrent('the owner session shows its file; a peer session in the same folder never does', async () => {
+    await scenario(async (f, page) => {
+      await openFromRoster(page, f.a.url, 'Artifact owner');
+      await transcriptDownload(page).waitFor();
+      await openFromRoster(page, f.a.url, 'Artifact peer');
+      // The peer's own transcript has loaded; only then can "no file" mean anything.
+      await page.getByText('peer session row').first().waitFor();
+      expect(await page.getByRole('button', { name: 'Download', exact: true }).count()).toBe(0);
+    });
+  });
+
+  test.concurrent('with the broker down the file is still on the owner tab; after a restart and reload there is exactly one', async () => {
+    await scenario(async (f, page) => {
+      await openFromRoster(page, f.a.url, 'Artifact owner');
+      await transcriptDownload(page).waitFor();
+      await openFromRoster(page, f.a.url, 'Artifact peer');
+      await page.getByText('peer session row').first().waitFor();
+
+      await f.a.stop({ keepState: true });
+      await selectTab(page, 'Artifact owner');
+      // No broker can replay it: this is the client's own cache.
+      await transcriptDownload(page).waitFor();
+
+      await f.a.start();
+      await f.rehelloA();
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForFlutter(page);
+      await transcriptDownload(page).waitFor();
+      await openView(page, 'Files');
+      await page.getByRole('group', { name: /^File artifacts \(1\)\s+report\.txt/ }).waitFor();
+      expect(await page.getByRole('group', { name: /^report\.txt\s+Sent to you\b/ }).count()).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  test.concurrent('a failing Files route leaves the Chat download action enabled', async () => {
+    await scenario(async (f, page) => {
+      await openFromRoster(page, f.a.url, 'Artifact owner');
+      await transcriptDownload(page).waitFor();
+      let failures = 0;
+      await page.route('**/api/sessions/pi/*/fs*', async (route) => {
+        failures++;
+        await route.fulfill({ status: 503, body: 'fixture workspace failure' });
+      });
+      await openView(page, 'Files');
+      await eventually(() => failures > 0, { what: 'the Files view to hit its failing route' });
+      await page.getByRole('group', { name: /^File artifacts \(1\)\s+report\.txt/ })
+        .getByRole('button', { name: 'Download', exact: true }).waitFor();
+      await transcriptDownload(page).waitFor();
+      await openView(page, 'Chat');
+      await page.unrouteAll({ behavior: 'wait' });
+      await transcriptDownload(page).waitFor();
+      expect(await transcriptDownload(page).isEnabled()).toBe(true);
+    });
+  });
+
+  test.concurrent('an over-limit response never reaches the download path; a transient failure retries into the exact bytes', async () => {
+    await scenario(async (f, page, errors, downloads) => {
+      await openFromRoster(page, f.a.url, 'Artifact owner');
+      await transcriptDownload(page).waitFor();
+
+      // One handler for the whole scenario, steered by a mode: no unrouting while a
+      // handler may still be answering. Oversize keeps the signed response and its
+      // headers and only advertises more than the client accepts.
+      let mode: 'pass' | 'oversize' | 'transient' = 'oversize';
+      let oversizedServed!: () => void;
+      const served = new Promise<void>((resolve) => { oversizedServed = resolve; });
+      let failedOnce = false;
+      await page.route('**/api/sessions/pi/*/artifact/*', async (route) => {
+        if (mode === 'oversize') {
+          const response = await route.fetch();
+          await route.fulfill({ response, headers: { ...response.headers(), 'content-length': String(64 * 1024 * 1024 + 1) } });
+          oversizedServed();
+        } else if (mode === 'transient' && !failedOnce) {
+          failedOnce = true;
+          await route.fulfill({ status: 503, body: 'transient fixture failure' });
+        } else {
+          await route.continue();
+        }
+      });
+      await transcriptDownload(page).click();
+      await Promise.race([
+        served,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the over-limit route was not served')), 30_000).unref()),
+      ]);
+
+      // First real fetch fails transiently; the action stays and nothing technical leaks.
+      mode = 'transient';
+      // The action is absent while the previous attempt is still being handled. Click
+      // when it is there, then give that click time to take effect before trying again:
+      // a second click on a request in flight is not a retry.
+      await eventually(async () => {
+        if (failedOnce) return true;
+        if (await transcriptDownload(page).count() > 0) {
+          await transcriptDownload(page).click({ timeout: 5_000 }).catch(() => undefined);
+          await eventually(() => failedOnce, { timeoutMs: 8_000, what: 'the click to request the file' }).catch(() => undefined);
+        }
+        return failedOnce;
+      }, { timeoutMs: 60_000, what: 'the transient failure' });
+      await transcriptDownload(page).waitFor();
+      const visible = await page.locator('body').innerText();
+      expect(visible).not.toContain('transient fixture failure');
+      expect(visible).not.toContain('sig=');
+
+      await eventually(async () => {
+        if (downloads.length > 0) return true;
+        if (await transcriptDownload(page).count() > 0) {
+          await transcriptDownload(page).click({ timeout: 5_000 }).catch(() => undefined);
+          await eventually(() => downloads.length > 0, { timeoutMs: 8_000, what: 'the click to start a download' }).catch(() => undefined);
+        }
+        return downloads.length > 0;
+      }, { timeoutMs: 60_000, what: 'the download to start' });
+      const saved = downloads[0]!;
+      expect(readFileSync((await saved.path())!)).toEqual(REPORT_BYTES);
+      expect(saved.suggestedFilename()).toBe('report.txt');
+      mode = 'pass';
+      // Every download this page started: only the good one. Events arrive in
+      // order, so an earlier over-limit download would already be listed.
+      expect(downloads).toHaveLength(1);
+
+      // Survives a reload.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForFlutter(page);
+      await transcriptDownload(page).waitFor();
+      const material = errors.filter((message) => !/favicon|Failed to load resource.*503/i.test(message)
+        && !/Failed to load resource.* 502 .*\/api\/tokdash\/report\?/.test(message));
+      expect(material).toEqual([]);
+    });
+  });
+
+  test.concurrent('another broker with the same native session id never shows this broker\'s file', async () => {
+    await scenario(async (f, page) => {
+      await openFromRoster(page, f.a.url, 'Artifact owner');
+      await transcriptDownload(page).waitFor();
+      // Flutter web is same-origin to its broker; switching brokers is opening the other /cosy/ mount.
+      await openFromRoster(page, f.b.url, 'Artifact owner');
+      await page.getByText('owner session row').first().waitFor();
+      expect(await page.locator('[role]').filter({ hasText: 'report.txt' }).count()).toBe(0);
+      expect(await page.getByRole('button', { name: 'Download', exact: true }).count()).toBe(0);
+    });
+  });
+});
