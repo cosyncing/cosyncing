@@ -25,7 +25,7 @@ if (!win32.isAbsolute(candidateRoot) || candidateRoot.startsWith('\\\\')) {
 }
 
 const startedAt = Date.now();
-const proc = Bun.spawn([laneBun, 'run', 'verification:windows-broker'], {
+const proc = Bun.spawn([laneBun, 'run', 'check', 'windows'], {
   cwd: candidateRoot,
   stdin: 'ignore',
   stdout: 'pipe',

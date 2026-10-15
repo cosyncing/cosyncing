@@ -1,0 +1,11 @@
+{
+  "history": [],
+  "live": [
+    {"type":"history-reset"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"first duplicate","key":"pc3","turnId":"pc3","sentAt":1781913840000},
+    {"type":"user-message","text":"second duplicate","key":"pc4","turnId":"pc4","sentAt":1781913841000},
+    {"type":"run-summary","key":"pi:run:pc4","turnId":"pc4","userMessageKey":"pc4","status":"running","startedAt":1781913841000,"source":"pi-jsonl"}
+  ]
+}

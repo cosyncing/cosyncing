@@ -1,0 +1,4 @@
+{"type":"permission-mode","permissionMode":"default","sessionId":"facts"}
+{"type":"user","uuid":"f1","isSidechain":false,"message":{"role":"user","content":"go"}}
+{"type":"assistant","uuid":"f2","isSidechain":false,"message":{"id":"msg_F1","model":"claude-haiku-4-5-20251001","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"first"}]}}
+{"parentUuid":"p9-0","isSidechain":false,"cwd":"/work","sessionId":"p9","version":"2.1.294","timestamp":"2026-10-07T19:06:41.000Z","uuid":"p9-1","type":"user","promptSource":"typed","permissionMode":"acceptEdits","message":{"role":"user","content":"set the mode"}}

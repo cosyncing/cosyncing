@@ -1,0 +1,115 @@
+{
+  "rows": [
+    {
+      "info": {
+        "id": "msg_u1",
+        "role": "user",
+        "time": {
+          "created": 1000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u1",
+          "type": "text",
+          "text": "real prompt",
+          "time": {
+            "start": 1000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_a1",
+        "role": "assistant",
+        "parentID": "msg_u1",
+        "time": {
+          "created": 1001,
+          "completed": 1003
+        },
+        "finish": "stop",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "read": 1,
+            "write": 2
+          }
+        },
+        "cost": 0.01,
+        "aNewFieldFromTheFuture": {
+          "nested": true
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_t1",
+          "type": "text",
+          "text": "answer",
+          "time": {
+            "start": 1001,
+            "end": 1002
+          }
+        },
+        {
+          "id": "prt_future",
+          "type": "a-part-type-from-the-future",
+          "blob": 1
+        },
+        {
+          "id": "prt_tf",
+          "type": "tool",
+          "tool": "tool_from_the_future",
+          "callID": "call_f",
+          "state": {
+            "status": "completed",
+            "input": {
+              "x": 1
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            },
+            "output": "ok"
+          }
+        },
+        {
+          "id": "prt_ts",
+          "type": "tool",
+          "tool": "edit",
+          "callID": "call_s",
+          "state": {
+            "status": "a-status-from-the-future",
+            "input": {
+              "filePath": "/w/a.ts"
+            },
+            "time": {
+              "start": 1000,
+              "end": 1500
+            }
+          }
+        },
+        {
+          "id": "prt_null",
+          "type": "tool",
+          "tool": null,
+          "state": null
+        },
+        {
+          "id": "prt_noid",
+          "type": "text",
+          "text": "part without time"
+        },
+        {
+          "type": "text",
+          "text": "part with no id"
+        },
+        null,
+        7,
+        "garbage"
+      ]
+    }
+  ]
+}

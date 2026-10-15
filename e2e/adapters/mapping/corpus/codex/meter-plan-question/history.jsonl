@@ -1,0 +1,10 @@
+{"type":"session_meta","payload":{"id":"7ee6d201-0f59-41bf-81bf-7ee6d2010f59","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"plan and ask"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"tq1"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":9013,"cached_input_tokens":7872,"output_tokens":217,"reasoning_output_tokens":0,"total_tokens":9230},"total_token_usage":{"input_tokens":9013,"cached_input_tokens":7872,"output_tokens":217,"reasoning_output_tokens":0,"total_tokens":9230},"model_context_window":972800}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5000,"cached_input_tokens":100,"output_tokens":50,"reasoning_output_tokens":0,"total_tokens":5050},"total_token_usage":{"input_tokens":900000,"cached_input_tokens":7872,"output_tokens":20000,"reasoning_output_tokens":0,"total_tokens":920000},"model_context_window":972800}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":0},"total_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1},"model_context_window":972800}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":120}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":120},"model_context_window":200000}}}
+{"type":"response_item","payload":{"type":"function_call","name":"update_plan","call_id":"plan1","arguments":"{\"plan\":[{\"step\":\"Read the code\",\"status\":\"completed\"},{\"step\":\"Write the fix\",\"status\":\"in_progress\"},{\"step\":\"Run the tests\",\"status\":\"pending\"}]}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"plan1","output":"ok"}}

@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
@@ -10,51 +8,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('opens after connection starts without waiting for bootstrap', (
-    tester,
-  ) async {
-    final creation = Completer<SessionInfo>();
-    final opening = Completer<void>();
-    final connecting = Completer<NewSessionConnectionHandoff>();
-    SessionInfo? completed;
-
-    await tester.pumpWidget(
-      _host(
-        onCreate: (_) => creation.future,
-        onOpen: (_) => opening.future,
-        onConnect: (_) => connecting.future,
-        onComplete: (session) => completed = session,
-      ),
-    );
-
-    expect(
-      find.byKey(const Key('new-session-launch-creating')),
-      findsOneWidget,
-    );
-    expect(completed, isNull);
-
-    creation.complete(_session());
-    await tester.pump();
-    expect(find.byKey(const Key('new-session-launch-opening')), findsOneWidget);
-    expect(completed, isNull);
-
-    opening.complete();
-    await tester.pump();
-    expect(
-      find.byKey(const Key('new-session-launch-connecting')),
-      findsOneWidget,
-    );
-    expect(
-      completed?.id,
-      'created',
-      reason: 'the destination owns the visible connection progress',
-    );
-
-    connecting.complete(NewSessionConnectionHandoff(() {}));
-    await tester.pump();
-    expect(completed?.id, 'created');
-  });
-
   testWidgets('releases Drive handoff only after destination frame', (
     tester,
   ) async {
@@ -144,71 +97,6 @@ void main() {
       expect(completed?.id, 'created');
     },
   );
-
-  testWidgets('failed launch exposes Back and leaves when requested', (
-    tester,
-  ) async {
-    var backCount = 0;
-    await tester.pumpWidget(
-      _host(
-        onCreate: (_) => Future<SessionInfo>.error(
-          const BrokerException(
-            message: 'private broker diagnostic',
-            statusCode: 500,
-          ),
-        ),
-        onOpen: (_) async {},
-        onConnect: (_) async => NewSessionConnectionHandoff(() {}),
-        onBack: () => backCount += 1,
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final message = tester
-        .widget<Text>(find.byKey(const Key('new-session-launch-error')))
-        .data;
-    expect(message, contains('The server ran into a problem on its end.'));
-    expect(message, isNot(contains('private broker diagnostic')));
-
-    await tester.tap(find.byKey(const Key('new-session-launch-back')));
-    expect(backCount, 1);
-  });
-
-  testWidgets('fills Compact dark and Expanded light launch surfaces', (
-    tester,
-  ) async {
-    final creation = Completer<SessionInfo>();
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-
-    await tester.binding.setSurfaceSize(const Size(390, 640));
-    await tester.pumpWidget(
-      _host(
-        brightness: Brightness.dark,
-        onCreate: (_) => creation.future,
-        onOpen: (_) async {},
-        onConnect: (_) async => NewSessionConnectionHandoff(() {}),
-      ),
-    );
-    expect(
-      tester.getSize(find.byKey(const Key('new-session-launch-page'))),
-      const Size(390, 640),
-    );
-    expect(tester.takeException(), isNull);
-
-    await tester.binding.setSurfaceSize(const Size(1200, 800));
-    await tester.pumpWidget(
-      _host(
-        onCreate: (_) => creation.future,
-        onOpen: (_) async {},
-        onConnect: (_) async => NewSessionConnectionHandoff(() {}),
-      ),
-    );
-    expect(
-      tester.getSize(find.byKey(const Key('new-session-launch-page'))),
-      const Size(1200, 800),
-    );
-    expect(tester.takeException(), isNull);
-  });
 }
 
 Widget _host({

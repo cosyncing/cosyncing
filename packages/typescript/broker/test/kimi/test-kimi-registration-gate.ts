@@ -203,10 +203,9 @@ try {
   const withoutIds = idsOf(legacy);
   const withIds = idsOf(current);
 
-  check('a client that declares nothing is served no kimi row',
-    !withoutIds.includes('kimi'), withoutIds.join(','));
-  check('a client one revision too old is served no kimi row',
-    !idsOf(older).includes('kimi'), idsOf(older).join(','));
+  // The row served (or withheld) per client revision, and its capabilities, are conformance scenario C01
+  // (e2e/adapters/conformance/kimi.test.ts); what stays here are the spellings C01 does not enumerate and the
+  // cross-agent view.
   // Fail closed on nonsense rather than 400: refusing the request would cost
   // the caller every agent, which is the failure this filtering prevents. The
   // grammar has to be exactly as narrow as the policy claims — `0xF` and `1e2`
@@ -214,11 +213,6 @@ try {
   const leaked = noncanonical.filter(([, rows]) => idsOf(rows).includes('kimi')).map(([raw]) => raw);
   check('every non-canonical revision spelling is read as the oldest client, not rejected',
     leaked.length === 0, leaked.map((raw) => JSON.stringify(raw)).join(','));
-  check('a client at the tolerant revision IS served the kimi row',
-    withIds.includes('kimi'), withIds.join(','));
-  // The floor is a MINIMUM, not an equality: a newer client is served too.
-  check('a client past the floor is still served the kimi row',
-    idsOf(later).includes('kimi'), idsOf(later).join(','));
   // The filter withholds ONLY what it must. An agent every client can decode is
   // never collateral, in either view.
   check('the established agents are served to both, filtered and unfiltered',
@@ -247,23 +241,6 @@ try {
   // than the adapter's in-process capabilities object.
   const kimiRow = served.find((row) => String(row.id) === 'kimi');
   const capabilities = kimiRow?.capabilities as Record<string, unknown> | undefined;
-  check('the served kimi row advertises observe FIRST, with live attach and model switching',
-    capabilities?.integrationKind === 'http-websocket'
-      // Observe leads: it is the mode EVERY Kimi session supports. Drive is
-      // reachable only for a session cosyncing created in this broker process.
-      && JSON.stringify(capabilities?.attachModes) === '["observe","live"]'
-      && capabilities?.supportsObserve === true
-      // The adapter never owns the Kimi process, so there is nothing to resume
-      // into.
-      && capabilities?.supportsResume === false
-      && capabilities?.supportsLiveAttach === true
-      && capabilities?.supportsModelSwitch === true
-      && capabilities?.permissionGranularity === 'per-session',
-    JSON.stringify(capabilities));
-  check('the served kimi row advertises native file input and still no artifact signal',
-    capabilities?.supportsNativeFileInput === true
-      && capabilities?.supportsNativeArtifact === false,
-    JSON.stringify(capabilities));
   // `canSelectModelAtCreation` is derived from HOOK PRESENCE
   // (`runtime.ts:5136-5139`) and proves the create surface is genuinely wired.
   // `canCreateSession` is FALSE on this machine anyway, and that pairing is the
@@ -288,12 +265,7 @@ try {
   // is by default, so `kimi web` in a user-facing failure races the managed
   // startup and invites a second server on the same home — the ambiguity the
   // whole ownership proof exists to prevent.
-  check('the create route refuses a hostless machine as temporary and retryable',
-    createOnHostlessMachine.status === 503
-      && createOnHostlessMachine.body.code === 'SESSION_CREATE_TEMPORARILY_UNAVAILABLE'
-      && createOnHostlessMachine.body.detailCode === 'kimi-server-unavailable'
-      && createOnHostlessMachine.body.retryable === true,
-    `${createOnHostlessMachine.status} ${JSON.stringify(createOnHostlessMachine.body)}`);
+  // (The 503 / SESSION_CREATE_TEMPORARILY_UNAVAILABLE / retryable refusal itself is conformance scenario C17.)
   check('...and never instructs the user to start a competing host',
     !String(createOnHostlessMachine.body.error).includes('kimi web')
       && String(createOnHostlessMachine.body.error).includes('cosyncing doctor'),

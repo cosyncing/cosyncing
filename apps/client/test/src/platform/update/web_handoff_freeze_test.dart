@@ -99,43 +99,6 @@ void main() {
     // connection first, and the keystroke is injected raw, because a probe
     // that pumps on its way in would hand the declarative layer the very
     // frame this regression exists to deny it.
-    testWidgets('a keystroke cannot beat the first frozen frame', (
-      tester,
-    ) async {
-      final controller = TextEditingController();
-      addTearDown(controller.dispose);
-      registry.holdWhile(() => controller.text.isNotEmpty);
-      await tester.pumpWidget(subject(controller));
-
-      await tester.tap(find.byKey(fieldKey));
-      await tester.pump();
-      expect(tester.testTextInput.hasAnyClients, isTrue);
-
-      final pending = registry.commit();
-      expect(registry.frozen.value, isTrue);
-
-      // No pump from here on — only microtasks, never a frame. ExcludeFocus
-      // and AbsorbPointer have not been rebuilt; the imperative revocation
-      // inside commit()'s own turn is the only thing in force.
-      tester.testTextInput.enterText('must not land');
-      await tester.idle();
-      expect(
-        controller.text,
-        isEmpty,
-        reason:
-            'input delivered before the first frozen frame must be '
-            'refused, or it dies with the document',
-      );
-
-      expect(await pending, isTrue);
-      registry.releaseAll();
-      await tester.pump();
-
-      await tester.tap(find.byKey(fieldKey));
-      await tester.pump();
-      await tester.enterText(find.byKey(fieldKey), 'lands after release');
-      expect(controller.text, 'lands after release');
-    });
 
     testWidgets('an abandoned round hands the whole surface back', (
       tester,

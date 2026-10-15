@@ -1,0 +1,143 @@
+{
+  "agent": "pi",
+  "texts": [
+    "seeded prompt 1",
+    "seeded answer 1",
+    "seeded prompt 2",
+    "seeded answer 2"
+  ],
+  "session": {
+    "kind": "session",
+    "info": {
+      "id": "L3RtcC9jb3N5bmNpbmctZTJlLWNhcHR1cmUtcGktbGsxZHRxL3BpLXNlc3Npb25zLy0tdG1wLWNvc3luY2luZy1lMmUtY2FwdHVyZS1waS1sazFkdHEtd29ya3NwYWNlcy1zZWVkLTEtLS8yMDI2LTEwLTE0VDA5LTQ3LTAzLTU2MlpfNTM1MDI2YWYtODY1OS00OTUwLWI1NjAtNTcxNTIwZDhlZDExLmpzb25s",
+      "nativeId": "535026af-8659-4950-b560-571520d8ed11",
+      "tool": "pi",
+      "title": "Captured conversation",
+      "cwd": "/captured/workspaces/seed-1",
+      "status": "idle",
+      "attachMode": "observe",
+      "model": "pi-fake",
+      "currentModel": {
+        "providerID": "fake",
+        "modelID": "pi-fake"
+      },
+      "control": {
+        "drive": {
+          "supported": true,
+          "state": "observing"
+        },
+        "terminalSync": {
+          "supported": true,
+          "syncAvailable": true,
+          "active": false,
+          "label": "Resume in Pi terminal",
+          "command": "COSYNCING_BROKER='http://127.0.0.1:37007' '/captured/bin/pi' --session '/captured/pi-sessions/--tmp-cosyncing-e2e-capture-pi-lk1dtq-workspaces-seed-1--/2026-10-14T09-47-03-562Z_535026af-8659-4950-b560-571520d8ed11.jsonl'",
+          "note": "Resume this session in the Pi CLI; once the installed bridge connects, the app will show it as synced.",
+          "behind": false
+        }
+      },
+      "machine": "Howard",
+      "sessionOwner": {
+        "revision": {
+          "epoch": "8ee97b6f-f656-44c7-81e4-547c9dbb5405",
+          "seq": 0
+        },
+        "state": "none"
+      }
+    },
+    "authority": {
+      "canMutate": false,
+      "prompt": "none"
+    }
+  },
+  "history": {
+    "kind": "history",
+    "messages": [
+      {
+        "type": "user-message",
+        "text": "seeded prompt 1",
+        "key": "70fdc979",
+        "turnId": "70fdc979",
+        "sentAt": 1791971224562
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 1",
+        "final": true,
+        "key": "a1791971225062:t:0"
+      },
+      {
+        "type": "token-count",
+        "input": 3,
+        "output": 2,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0
+      },
+      {
+        "type": "run-summary",
+        "key": "pi:run:u0",
+        "turnId": "u0",
+        "userMessageKey": "70fdc979",
+        "assistantMessageKey": "a1791971225062:t:0",
+        "status": "done",
+        "startedAt": 1791971224562,
+        "completedAt": 1791971225062,
+        "totalRuntimeMs": 500,
+        "tokens": {
+          "input": 3,
+          "output": 2,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": 0
+        },
+        "source": "pi-jsonl"
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 2",
+        "key": "d15ed452",
+        "turnId": "d15ed452",
+        "sentAt": 1791971226562
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 2",
+        "final": true,
+        "key": "a1791971227062:t:0"
+      },
+      {
+        "type": "token-count",
+        "input": 3,
+        "output": 2,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0
+      },
+      {
+        "type": "run-summary",
+        "key": "pi:run:u1",
+        "turnId": "u1",
+        "userMessageKey": "d15ed452",
+        "assistantMessageKey": "a1791971227062:t:0",
+        "status": "done",
+        "startedAt": 1791971226562,
+        "completedAt": 1791971227062,
+        "totalRuntimeMs": 500,
+        "tokens": {
+          "input": 3,
+          "output": 2,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": 0
+        },
+        "source": "pi-jsonl"
+      }
+    ],
+    "reset": true,
+    "cursor": "eyJ2IjoxLCJuIjo4LCJoIjoiUV9TdmROV0pxRTVINUIyWlotTnVxdVRsOGFBRklUb2ljNnNhN2JyN1hjWSJ9",
+    "attachTicket": "eyJ2IjoxLCJuIjo4LCJoIjoiUV9TdmROV0pxRTVINUIyWlotTnVxdVRsOGFBRklUb2ljNnNhN2JyN1hjWSJ9",
+    "endCursor": "eyJ2IjoxLCJrIjoib2xkZXIiLCJiIjo4LCJoIjoiUV9TdmROV0pxRTVINUIyWlotTnVxdVRsOGFBRklUb2ljNnNhN2JyN1hjWSJ9",
+    "newerHistory": true
+  }
+}

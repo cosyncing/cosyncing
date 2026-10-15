@@ -1,0 +1,28 @@
+{
+  "history": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:turn-steer","turnId":"turn-steer","status":"running","source":"codex-rollout"},
+    {"type":"user-message","text":"open","key":"codex:turn-steer:u0","turnId":"turn-steer"},
+    {"type":"model-output","text":"before","final":true,"key":"codex:turn-steer:msg-before:t"},
+    {"type":"user-message","text":"steer","key":"codex:turn-steer:u1","turnId":"turn-steer"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"model-output","text":"after","final":true,"key":"codex:turn-steer:msg-after:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:turn-steer","turnId":"turn-steer","assistantMessageKey":"codex:turn-steer:msg-after:t","status":"done","source":"codex-rollout"},
+    {"type":"model-output","text":"Never paired.","final":true,"key":"c9"}
+  ],
+  "replay": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:turn-steer","turnId":"turn-steer","status":"running","source":"codex-rollout"},
+    {"type":"user-message","text":"open","key":"codex:turn-steer:u0","turnId":"turn-steer"},
+    {"type":"model-output","text":"before","final":true,"key":"codex:turn-steer:msg-before:t"},
+    {"type":"user-message","text":"steer","key":"codex:turn-steer:u1","turnId":"turn-steer"},
+    {"type":"model-output","text":"after","final":true,"key":"codex:turn-steer:msg-after:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:turn-steer","turnId":"turn-steer","userMessageKey":"codex:turn-steer:u0","assistantMessageKey":"codex:turn-steer:msg-after:t","status":"done","source":"codex-rollout"},
+    {"type":"model-output","text":"Never paired.","final":true,"key":"c9"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

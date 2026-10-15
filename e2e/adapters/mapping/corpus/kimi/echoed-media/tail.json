@@ -1,0 +1,61 @@
+{
+  "items": [
+    {
+      "id": "p_5",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "seen"
+        }
+      ]
+    },
+    {
+      "id": "p_4",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "video",
+          "source": {
+            "kind": "url",
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+          }
+        },
+        {
+          "type": "image",
+          "source": {
+            "kind": "blobref",
+            "ref": "blob_1"
+          }
+        },
+        {
+          "type": "image"
+        }
+      ]
+    },
+    {
+      "id": "p_3",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "image",
+          "source": {
+            "kind": "url",
+            "url": "[media missing]"
+          }
+        }
+      ]
+    }
+  ],
+  "has_more": false
+}

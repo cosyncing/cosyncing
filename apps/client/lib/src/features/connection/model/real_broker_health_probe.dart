@@ -1,5 +1,6 @@
 import 'package:broker_client/broker_client.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 
 import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/health_probe_result.dart';
@@ -14,20 +15,23 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
   /// Creates a [RealBrokerHealthProbe].
   ///
   /// [clientFactory] is optional for testing and defaults to constructing
-  /// a real client with the provided broker URL.
+  /// a real client with the provided broker URL on [transport] (the platform
+  /// HTTP transport when null).
   RealBrokerHealthProbe({
     BrokerClient Function(String baseUrl)? clientFactory,
+    BrokerHttpTransport? transport,
     this.timeout,
-  }) : _clientFactory = clientFactory ?? _defaultClientFactory;
+  }) : _clientFactory =
+           clientFactory ??
+           ((baseUrl) => BrokerClient(
+             baseUrl: baseUrl,
+             dio: brokerTransportDio(transport),
+           ));
 
   final BrokerClient Function(String baseUrl) _clientFactory;
 
   /// Optional upper bound for the transport request.
   final Duration? timeout;
-
-  static BrokerClient _defaultClientFactory(String baseUrl) {
-    return BrokerClient(baseUrl: baseUrl);
-  }
 
   @override
   Future<HealthProbeResult> probe(Uri baseUrl) async {

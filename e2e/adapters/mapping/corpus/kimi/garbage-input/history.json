@@ -1,0 +1,44 @@
+{
+  "items": [
+    {
+      "id": "g_5",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "before the noise"
+        }
+      ]
+    },
+    {
+      "id": "g_4",
+      "role": "assistant",
+      "content": null
+    },
+    {
+      "id": "g_3",
+      "role": "user",
+      "content": "not an array"
+    },
+    {
+      "id": "g_2",
+      "role": "user"
+    },
+    {
+      "id": "g_1"
+    },
+    {
+      "id": 5
+    },
+    {},
+    [],
+    7,
+    "a string",
+    null
+  ]
+}

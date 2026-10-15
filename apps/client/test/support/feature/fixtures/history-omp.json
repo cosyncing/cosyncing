@@ -1,0 +1,143 @@
+{
+  "agent": "omp",
+  "texts": [
+    "seeded prompt 1",
+    "seeded answer 1",
+    "seeded prompt 2",
+    "seeded answer 2"
+  ],
+  "session": {
+    "kind": "session",
+    "info": {
+      "id": "L3RtcC9jb3N5bmNpbmctZTJlLWNhcHR1cmUtb21wLTFCQjJETC9vbXAtc2Vzc2lvbnMvLS10bXAtY29zeW5jaW5nLWUyZS1jYXB0dXJlLW9tcC0xQkIyREwtd29ya3NwYWNlcy1zZWVkLTEtLS8yMDI2LTEwLTE0VDA5LTQ2LTU5LTk3N1pfZGZiNzU5OGItZTdjMi00YjBlLWIzZDItZDFjYTZiNzc1MGQ4Lmpzb25s",
+      "nativeId": "dfb7598b-e7c2-4b0e-b3d2-d1ca6b7750d8",
+      "tool": "omp",
+      "title": "Captured conversation",
+      "cwd": "/captured/workspaces/seed-1",
+      "status": "idle",
+      "attachMode": "observe",
+      "model": "pi-fake",
+      "currentModel": {
+        "providerID": "fake",
+        "modelID": "pi-fake"
+      },
+      "control": {
+        "drive": {
+          "supported": true,
+          "state": "observing"
+        },
+        "terminalSync": {
+          "supported": true,
+          "syncAvailable": true,
+          "active": false,
+          "label": "Resume in omp terminal",
+          "command": "COSYNCING_BROKER='http://127.0.0.1:34965' '/captured/bin/omp' --session '/captured/omp-sessions/--tmp-cosyncing-e2e-capture-omp-1BB2DL-workspaces-seed-1--/2026-10-14T09-46-59-977Z_dfb7598b-e7c2-4b0e-b3d2-d1ca6b7750d8.jsonl'",
+          "note": "Resume this session in the omp CLI; once the installed bridge connects, the app will show it as synced.",
+          "behind": false
+        }
+      },
+      "machine": "Howard",
+      "sessionOwner": {
+        "revision": {
+          "epoch": "3cabf2b1-2261-4e1f-a7c5-33e1012cc417",
+          "seq": 0
+        },
+        "state": "none"
+      }
+    },
+    "authority": {
+      "canMutate": false,
+      "prompt": "none"
+    }
+  },
+  "history": {
+    "kind": "history",
+    "messages": [
+      {
+        "type": "user-message",
+        "text": "seeded prompt 1",
+        "key": "6e978266",
+        "turnId": "6e978266",
+        "sentAt": 1791971220977
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 1",
+        "final": true,
+        "key": "a1791971221477:t:0"
+      },
+      {
+        "type": "token-count",
+        "input": 3,
+        "output": 2,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0
+      },
+      {
+        "type": "run-summary",
+        "key": "omp:run:u0",
+        "turnId": "u0",
+        "userMessageKey": "6e978266",
+        "assistantMessageKey": "a1791971221477:t:0",
+        "status": "done",
+        "startedAt": 1791971220977,
+        "completedAt": 1791971221477,
+        "totalRuntimeMs": 500,
+        "tokens": {
+          "input": 3,
+          "output": 2,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": 0
+        },
+        "source": "omp-jsonl"
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 2",
+        "key": "cd143be1",
+        "turnId": "cd143be1",
+        "sentAt": 1791971222977
+      },
+      {
+        "type": "model-output",
+        "text": "seeded answer 2",
+        "final": true,
+        "key": "a1791971223477:t:0"
+      },
+      {
+        "type": "token-count",
+        "input": 3,
+        "output": 2,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0
+      },
+      {
+        "type": "run-summary",
+        "key": "omp:run:u1",
+        "turnId": "u1",
+        "userMessageKey": "cd143be1",
+        "assistantMessageKey": "a1791971223477:t:0",
+        "status": "done",
+        "startedAt": 1791971222977,
+        "completedAt": 1791971223477,
+        "totalRuntimeMs": 500,
+        "tokens": {
+          "input": 3,
+          "output": 2,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": 0
+        },
+        "source": "omp-jsonl"
+      }
+    ],
+    "reset": true,
+    "cursor": "eyJ2IjoxLCJuIjo4LCJoIjoiNklsZkgxWlJneFB1UkMxcUh1OXBwdmJVRFNrUGJNMG5UR2VpbTBlZ0VUbyJ9",
+    "attachTicket": "eyJ2IjoxLCJuIjo4LCJoIjoiNklsZkgxWlJneFB1UkMxcUh1OXBwdmJVRFNrUGJNMG5UR2VpbTBlZ0VUbyJ9",
+    "endCursor": "eyJ2IjoxLCJrIjoib2xkZXIiLCJiIjo4LCJoIjoiNklsZkgxWlJneFB1UkMxcUh1OXBwdmJVRFNrUGJNMG5UR2VpbTBlZ0VUbyJ9",
+    "newerHistory": true
+  }
+}

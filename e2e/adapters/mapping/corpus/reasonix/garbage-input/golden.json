@@ -1,0 +1,22 @@
+{
+  "history": [
+    {"type":"user-message","text":"before","key":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:0","turnId":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:turn:0"},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix unknown record (unmapped)","body":"keys: (no keys)"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix unknown record (unmapped)","body":"keys: role"}},
+    {"type":"model-output","text":"x","key":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:3:output","final":true},
+    {"type":"tool-call","callId":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:3:call:3","toolName":"Reasonix tool","title":"Reasonix tool"},
+    {"type":"tool-call","callId":"ok","toolName":"n","title":"n","args":[]}
+  ],
+  "live": [
+    {"type":"user-message","text":"after","key":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:4","turnId":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:turn:4"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"before","key":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:0","turnId":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:turn:0"},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix unknown record (unmapped)","body":"keys: (no keys)"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix unknown record (unmapped)","body":"keys: role"}},
+    {"type":"model-output","text":"x","key":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:3:output","final":true},
+    {"type":"tool-call","callId":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:3:call:3","toolName":"Reasonix tool","title":"Reasonix tool"},
+    {"type":"tool-call","callId":"ok","toolName":"n","title":"n","args":[]},
+    {"type":"user-message","text":"after","key":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:message:4","turnId":"reasonix:f2d01501-f298-4048-8048-f2d01501f298:turn:4"}
+  ]
+}

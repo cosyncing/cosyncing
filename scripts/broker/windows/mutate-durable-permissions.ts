@@ -9,7 +9,7 @@ interface Mutation { name: string; file: string; changes: Array<[string, string]
 const plain = (file: string, name: string, from: string, to: string): Mutation => ({ name, file: broker + file, changes: [[from, to]], windows: true });
 const mutations: Mutation[] = [
   { name: 'M1-peers-save-plain-write', file: broker + 'transport/transport-pairing.ts',
-    suite: process.platform === 'win32' ? undefined : 'packages/typescript/broker/test/broker/test-pairing.ts',
+    suite: process.platform === 'win32' ? undefined : 'e2e/broker/pairing.test.ts',
     changes: [
       ["import { existsSync, readFileSync } from 'node:fs';", "import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';"],
       ["import { join } from 'node:path';", "import { join, dirname } from 'node:path';"],
@@ -114,7 +114,7 @@ for (const mutation of selected) {
   }
   try {
     writeFileSync(mutation.file, edited);
-    const child = Bun.spawn([process.execPath, 'run', mutation.suite ?? helper], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore', windowsHide: true });
+    const child = Bun.spawn([process.execPath, mutation.suite?.endsWith('.test.ts') ? 'test' : 'run', mutation.suite ?? helper], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore', windowsHide: true });
     const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     // A compilation failure does not count as a killed mutation.
     assert.ok(!/SyntaxError|ParseError|Cannot find module|Export named/.test(stderr), `${mutation.name}: invalid mutant: ${stderr}`);

@@ -1,0 +1,10 @@
+{
+  "provenance": "captured kimi 0.38.0 2026-08-25 (sanitized capture, values synthetic; envelope, part types and id correlation are the evidence)",
+  "description": "the 0.38.0 transcript page as a real kimi web server answered it: oldest rows at attach, the newest 4 rows arriving after (mapped through the same connection state); every native row gets one unique identity, machine-written rows (injection, task, compaction_summary) are never user bubbles, tool results correlate to their calls",
+  "source": {
+    "fixture": "packages/typescript/adapters/kimi/test/fixtures/kimi-0.38.0.json",
+    "path": "rest.messagesAll.data",
+    "tailNewest": 4
+  },
+  "sessionId": "0762e51e-66c8-41aa-81aa-0762e51e66c8"
+}

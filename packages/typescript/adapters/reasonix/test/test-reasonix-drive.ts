@@ -31,6 +31,23 @@ class TestDriveConnection extends ReasonixDriveConnection {
     options: ReasonixDriveOpenOptions = {},
   ) {
     super(session, info, transport, options);
+    // Count the debounced watcher drains, so a test can wait for "a drain that began after my write has finished"
+    // instead of sleeping for a few debounce periods.
+    const self = this as unknown as { drain(): Promise<void> };
+    const drain = self.drain.bind(this);
+    self.drain = async () => {
+      this.drainsStarted += 1;
+      try { await drain(); } finally { this.drainsFinished += 1; }
+    };
+  }
+
+  private drainsStarted = 0;
+  private drainsFinished = 0;
+
+  /** Resolves once a watcher drain that began after this call has finished (the subscriber must have started the watcher). */
+  async settleWatcher(timeoutMs = 10_000): Promise<void> {
+    const target = this.drainsStarted + 1;
+    if (!await waitFor(() => this.drainsFinished >= target, timeoutMs)) throw new Error('the watcher never drained after the write');
   }
 
   pushDurableUser(
@@ -660,7 +677,7 @@ try {
     update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'unkeyed first answer' } },
   });
   pendingIdentity.clearPendingCreateForTest();
-  await sleep(150);
+  // (a late chunk after materialization follows synchronously: nothing to wait for)
   pendingIdentity.pushUpdate({
     sessionId: id,
     update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'late unkeyed first answer' } },
@@ -695,7 +712,7 @@ try {
   await waitFor(() => postureTransport.prompts.length === 1);
   writeFileSync(join(dir, `${id}.acp.json`),
     `${JSON.stringify({ sessionId: id, status: { state: 'working' } })}\n`);
-  await sleep(250);
+  await postureIdentity.settleWatcher();
   check('a first post-create turn is not demoted by its own working posture',
     !postureSeen.some((message) => message.type === 'notice'
       && /another active writer/u.test(String((message as { message?: string }).message ?? ''))),
@@ -715,13 +732,8 @@ try {
   const sending = connection.sendPrompt({ text: 'same text', clientMessageId: 'client-1' });
   const promptStarted = await waitFor(() => transport.prompts.length === 1);
   const pending = connection.getPending();
-  check('prompt admission mints a queued row before the child completes',
-    promptStarted
-      && pending.length === 1
-      && pending[0]?.type === 'user-message'
-      && pending[0].queued === true
-      && transport.prompts.length === 1,
-    JSON.stringify(pending));
+  // Prompt admission mints a queued row before the child completes: conformance C09 (reasonix). The later checks need the queue state.
+  if (!promptStarted || pending.length !== 1) throw new Error('prompt admission did not queue the prompt');
   connection.pushUpdate({
     sessionId: id,
     update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before tool' } },
@@ -769,7 +781,7 @@ try {
       && replayedEchoes[0].queued === false
       && replayedEchoes[0].clientKey === 'client-1',
     JSON.stringify(replayedEchoes));
-  await sleep(180);
+  await connection.settleWatcher();
   check('the watcher cannot resurrect a prompt already reconciled by replay',
     connection.getPending().length === 0);
   const secondReplay = await connection.getHistory();
@@ -822,7 +834,7 @@ try {
     log_size: deliveredOffset + Buffer.byteLength(`${replacement}\n`),
     revision: 3,
   })}\n`);
-  await sleep(180);
+  await connection.settleWatcher();
   const rewrittenReplay = await connection.getHistory();
   const replacementRow = rewrittenReplay.find(
     (message): message is Extract<AgentMessage, { type: 'user-message' }> => message.type === 'user-message'
@@ -1039,7 +1051,7 @@ try {
     JSON.stringify(runSummaries(appendedLive)));
   // A same-content sidecar write wakes the watcher; neither it nor a replay is a live turn.
   writeFileSync(eventIndexPath, readFileSync(eventIndexPath));
-  await sleep(250);
+  await appended.settleWatcher();
   await appended.getHistory();
   check('no second running follows the paired terminal on a later drain or replay',
     runSummaries(appendedLive, 'running').length === 1
@@ -1082,7 +1094,7 @@ try {
       && JSON.stringify(runNotifications(publishedLive)) === JSON.stringify([`done:${finalKey}`]),
     JSON.stringify(runSummaries(publishedLive)));
   writeFileSync(eventIndexPath, readFileSync(eventIndexPath));
-  await sleep(250);
+  await published.settleWatcher();
   await published.getHistory();
   check('the re-sent pairing is not repeated by a later drain or replay',
     runSummaries(publishedLive, 'running').length === 1
@@ -1118,7 +1130,8 @@ try {
   stopped.subscribe((message) => stoppedLive.push(message));
   await stopped.getHistory();
   await stopped.sendPrompt({ text: 'tool turn stopped by the user' });
-  await sleep(200);
+  writeFileSync(eventIndexPath, readFileSync(eventIndexPath)); // wake the watcher once, then wait for that drain
+  await stopped.settleWatcher();
   check('a cancelled tool turn raises no running, so its durable step footer cannot notify',
     stopped.driving
       && hasFrame(stoppedLive, stepKey, 'done')
@@ -1489,7 +1502,7 @@ try {
     options: [{ optionId: 'allow_once', name: 'Allow', kind: 'allow_once' }],
   });
   const foreignSending = foreign.sendPrompt({ text: 'ours' });
-  await sleep(10);
+  await waitFor(() => foreign.getPending().some((message) => message.type === 'user-message'));
   const foreignRecord = { role: 'user', content: 'terminal write', raw_content: 'terminal write', createdAt: 3 };
   const foreignLine = JSON.stringify(foreignRecord);
   const foreignOffset = deliveredOffset + Buffer.byteLength(`${delivered}\n`);
@@ -1520,7 +1533,8 @@ try {
     foreignSeen.length === postDemoteCount);
   let demotedRejected = false;
   try { await foreign.sendPrompt({ text: 'after demotion' }); } catch { demotedRejected = true; }
-  check('demotion refuses subsequent writes', demotedRejected);
+  // Demotion refuses subsequent writes: conformance C14 (reasonix).
+  if (!demotedRejected) throw new Error('a demoted connection accepted a write');
   await foreignSending.catch(() => {});
   await foreign.close();
 
@@ -2038,7 +2052,7 @@ try {
   await capped.getHistory();
   const capSends = Array.from({ length: 129 }, (_unused, index) =>
     capped.sendPrompt({ text: `bounded-${index}` }).then(() => undefined, (error: unknown) => error));
-  await sleep(10);
+  await waitFor(() => capped.getPending().filter((message) => message.type === 'user-message').length === 128);
   const capLast = await capSends[128];
   check('concurrent admissions cannot race past the 128-prompt retained bound',
     capped.getPending().filter((message) => message.type === 'user-message').length === 128

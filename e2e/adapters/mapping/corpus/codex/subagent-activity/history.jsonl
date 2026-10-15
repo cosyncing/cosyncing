@@ -1,0 +1,13 @@
+{"type":"session_meta","payload":{"cwd":"/work/proj","id":"3972814c-0f8c-46fe-86fe-3972814c0f8c"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"research","turn_id":"t1"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"},"timestamp":"2026-03-20T23:45:00.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"cs1","arguments":"{\"agent_type\":\"explorer\",\"model\":\"gpt-5.4-mini\",\"reasoning_effort\":\"high\",\"message\":\"verify claims\"}"},"timestamp":"2026-03-20T23:45:01.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"cs2","arguments":"{\"agent_type\":\"coder\",\"message\":\"patch it\"}"},"timestamp":"2026-03-20T23:45:01.500Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cs1","output":"{\"agent_id\":\"kid-A\",\"nickname\":\"Turing\"}"},"timestamp":"2026-03-20T23:45:02.000Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cs2","output":"{\"agent_id\":\"kid-B\",\"nickname\":\"Carson\"}"},"timestamp":"2026-03-20T23:45:02.200Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"cw1","arguments":"{\"ids\":[\"kid-A\",\"kid-B\"],\"timeout_ms\":120000}"},"timestamp":"2026-03-20T23:45:30.000Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cw1","output":"{\"status\":{\"kid-A\":{\"completed\":\"Found.\"},\"kid-B\":{\"status\":\"running\"}}}"},"timestamp":"2026-03-20T23:46:11.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"cw2","arguments":"{\"ids\":[\"kid-B\"],\"timeout_ms\":120000}"},"timestamp":"2026-03-20T23:46:20.000Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cw2","output":"{\"status\":{\"kid-B\":{\"completed\":\"Patched.\"}}}"},"timestamp":"2026-03-20T23:46:40.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"cw3","arguments":"{\"ids\":[\"kid-A\"],\"timeout_ms\":120000}"},"timestamp":"2026-03-20T23:46:50.000Z"}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cw3","output":"{\"status\":{\"kid-A\":{\"completed\":\"Found.\"}}}"},"timestamp":"2026-03-20T23:46:51.000Z"}

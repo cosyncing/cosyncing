@@ -1,0 +1,11 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "a message typed while a turn runs exists only as a queue-operation sidecar: keyed queued bubble, delivery takes over the key (here across the attach boundary), dropped stays dimmed, identical texts stay two bubbles FIFO, harness and contentless enqueues stay quiet",
+  "userTexts": [
+    "go",
+    "QUEUED-MSG mention this too",
+    "QUEUED-DELIVERED run the tests",
+    "same words"
+  ],
+  "sessionId": "b286faa0-53db-41ea-81ea-b286faa053db"
+}

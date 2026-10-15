@@ -1,5 +1,6 @@
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_auth_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -10,7 +11,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 ///
 /// Override this in tests to inject a fake implementation.
 final brokerAuthProbeProvider = Provider<BrokerAuthProbe>(
-  (ref) => RealBrokerAuthProbe(),
+  (ref) => RealBrokerAuthProbe(
+    transport: ref.watch(brokerHttpTransportProvider),
+  ),
 );
 
 /// Evaluates whether the app may talk to the active broker.

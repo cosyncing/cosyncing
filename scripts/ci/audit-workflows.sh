@@ -324,15 +324,24 @@ test "$(rg -c 'GH_REPO: \$\{\{ github\.repository \}\}' "$client_workflow")" = 1
   exit 1
 }
 
-for workflow in ci.yml nightly.yml broker-release.yml client-release.yml; do
+# A release gates on the complete check, exactly once.
+for workflow in broker-release.yml client-release.yml; do
   test "$(rg -c 'bun run check$' "$workflow_dir/$workflow")" = 1 || {
-    echo "ERROR: $workflow must consume exactly one canonical repository check." >&2
+    echo "ERROR: $workflow must consume exactly one complete repository check." >&2
+    exit 1
+  }
+done
+# CI runs every suite the manifest defines, each as its own job: a suite no job runs is a suite
+# nothing tests.
+for suite in $(bun run scripts/ci/run.ts --suites); do
+  rg -q "^      - run: bun run check $suite\$|^          - suite: $suite\$" "$workflow_dir/ci.yml" || {
+    echo "ERROR: ci.yml has no job that runs the $suite suite." >&2
     exit 1
   }
 done
 
 if rg -n \
-  'acceptance:broker-deterministic|rg[0-9]+:check|test:broker-release|bun run (client:check|contract:check|test:contract-revision-history|test:web-static-cache|test:web-startup-shell)' \
+  'acceptance:broker-deterministic|rg[0-9]+:check|test:broker-release|bun run (client:check|contract:check|test:contract-revision-history|test:web-static-cache)' \
   "$workflow_dir"; then
   echo 'ERROR: workflow bypasses or duplicates the canonical verification graph.' >&2
   exit 1
@@ -355,14 +364,14 @@ if rg -n '^    name: required$' "$workflow_dir"; then
   exit 1
 fi
 
-for workflow in ci.yml nightly.yml; do
+for workflow in ci.yml broker-release.yml client-release.yml; do
   hosted="$workflow_dir/$workflow"
   rg -q 'sudo apt-get install -y ripgrep' "$hosted" || {
-    echo "ERROR: $hosted must install ripgrep before bun run check." >&2
+    echo "ERROR: $hosted must install ripgrep for the policy suite." >&2
     exit 1
   }
   rg -q 'npx --yes playwright@1\.61\.1 install --with-deps chromium-headless-shell' "$hosted" || {
-    echo "ERROR: $hosted must install the pinned Playwright browser before bun run check." >&2
+    echo "ERROR: $hosted must install the pinned Playwright browser for the web suite." >&2
     exit 1
   }
 done

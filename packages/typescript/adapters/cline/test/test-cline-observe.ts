@@ -17,7 +17,14 @@ function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
-const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+// Waits are on observable effects, never on durations: the watcher's own debounce decides when.
+const until = async (what: string, ready: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> => {
+  const startedAt = Date.now();
+  while (!await ready()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+};
 
 const tree = buildClineFixtureTree();
 try {
@@ -50,33 +57,8 @@ try {
       && page.messages.length === 1,
     JSON.stringify({ accepted: accepted.length, page }));
 
-  const live: AgentMessage[] = [];
-  const unsubscribe = connection.subscribe((message) => live.push(message));
-  const appended = [...fixtureParentMessages(), {
-    id: 'msg-user-tail', role: 'user', content: [{ type: 'text', text: 'tail prompt' }],
-  }];
-  tree.writeParent(appended);
-  await wait(250);
-  check('whole-file append emits the new mapped row exactly once',
-    live.filter((message) => message.type === 'user-message' && message.text === 'tail prompt').length === 1,
-    JSON.stringify(live));
-
-  const rewritten = fixtureParentMessages();
-  const first = rewritten[0]?.content[0];
-  if (first) first.text = 'rewritten prompt';
-  tree.writeParent(rewritten);
-  await wait(250);
-  check('content rewrite emits rollback reset and invalidates further paging',
-    live.some((message) => message.type === 'history-reset' && message.semantic?.kind === 'rollback')
-      && await connection.getHistorySourceIdentity() === undefined,
-    JSON.stringify(live.filter((message) => message.type === 'history-reset')));
-
-  let sendRejected = false;
-  let permissionRejected = false;
-  try { await connection.sendPrompt({ text: 'no' }); } catch { sendRejected = true; }
-  try { await connection.respondPermission('no', 'approve'); } catch { permissionRejected = true; }
-  check('Observe refuses prompt and permission mutations', sendRejected && permissionRejected);
-  unsubscribe();
+  // Deleted here, covered by e2e/adapters/conformance/cline.test.ts: a whole-file append tails once (C05), a
+  // content rewrite resets history (C06), Observe refuses mutations (C04).
   await connection.close();
 } finally {
   tree.cleanup();
@@ -111,7 +93,7 @@ try {
       totalCost: 0.03,
     },
   });
-  await wait(250);
+  await until('the metadata refresh', () => connection.info.status === 'idle' && connection.info.currentMode === 'plan' && live.some((message) => message.type === 'metadata-update'));
   const refreshed = await connection.getHistory();
   check('metadata rewrites refresh live status, connection info, and aggregate usage',
     connection.info.status === 'idle'
@@ -269,7 +251,7 @@ try {
     id: 'different-native-user', role: 'user', content: [{ type: 'text', text: 'fixture prompt' }],
   }];
   correlationTree.writeParent(duplicateText);
-  await wait(250);
+  await until('the duplicate-text history', async () => (await connection.getHistory()).filter((message) => message.type === 'user-message' && message.text === 'fixture prompt').length === 2);
   const duplicateHistory = await connection.getHistory();
   const duplicateUsers = duplicateHistory.filter(
     (message): message is Extract<AgentMessage, { type: 'user-message' }> =>
@@ -288,7 +270,7 @@ try {
     content: [{ type: 'text', text: 'same id, replacement content' }],
   };
   correlationTree.writeParent(replacement);
-  await wait(250);
+  await until('the correlation reset', () => registry.size === 0 && invalidations >= 1);
   check('a rewrite clears shared correlations and revokes the durable ownership gate',
     registry.size === 0 && invalidations >= 1,
     JSON.stringify({ registrySize: registry.size, invalidations }));

@@ -1,0 +1,22 @@
+{
+  "history": [
+    {"type":"user-message","text":"before the noise","key":"c1"},
+    {"type":"model-output","text":"[object Object]","final":true,"key":"c15"},
+    {"type":"tool-call","callId":"7","toolName":"tool","toolClass":"other","args":{"x":1}},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":"\"\""},
+    {"type":"model-output","text":"after the noise","final":true,"key":"c22"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"c26"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"before the noise","key":"c1"},
+    {"type":"model-output","text":"[object Object]","final":true,"key":"c15"},
+    {"type":"tool-call","callId":"7","toolName":"tool","toolClass":"other","args":{"x":1}},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":"\"\""},
+    {"type":"model-output","text":"after the noise","final":true,"key":"c22"},
+    {"type":"user-message","text":"prompt after garbage on the tail","key":"c26"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

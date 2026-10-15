@@ -301,7 +301,7 @@
  *   stdin and can never read as a foreign write.
  *
  * Q15 — EVERY NEW TEST FILE WIRED BEFORE THE LANE CLOSES.
- *   Five suites — `test-agy-store.ts`, `test-agy-mapping.ts`,
+ *   Five suites — `test-agy-store.ts`, the mapping corpus (`e2e/adapters/mapping/agy.test.ts`),
  *   `test-agy-observe.ts`, `test-agy-drive.ts`, `test-agy-identity.ts`. Gate
  *   wiring (package scripts, verification graph, completeness anchor) is a later
  *   integration pass and is NOT done here; an unwired suite is an orphan the gate
@@ -964,7 +964,7 @@ export class AgyAdapter implements AgentBackend {
         // the roster's: an observe connection never drives, whatever the
         // adapter's registry says — claiming `driving` here handed a bare
         // observer mutation authority and cost it the join offer
-        // (agy-cross-client-join A7/A8). The drive constructor overwrites it
+        // (agy conformance C13). The drive constructor overwrites it
         // with its own live state on resume.
         control: agyControlState(false, sessionId),
         terminalSyncHint: {

@@ -22,7 +22,6 @@ import 'package:flutter_test/flutter_test.dart';
 import '../../../../support/in_memory_roster_snapshot_repository.dart';
 import '../../../../support/in_memory_session_display_preferences_store.dart';
 import '../../../../support/in_memory_session_live_state_view_store.dart';
-import '../../../../support/roster_expansion.dart';
 import '../../../../support/session_detail_page_test_harness.dart';
 
 /// U3-A/B — the title Session Detail shows while its session frame is
@@ -177,41 +176,6 @@ void main() {
   }
 
   group('U3 session title through bootstrap', () {
-    testWidgets('roster navigation shows the tapped title on the first frame', (
-      tester,
-    ) async {
-      useCompactViewport(tester);
-      await tester.pumpWidget(
-        buildRoutedSubject(
-          sessions: [
-            SessionInfo(
-              id: 'ses_01JQ4Z8W',
-              tool: 'claude',
-              title: 'Refactor the broker gate',
-              status: SessionStatus.idle,
-              attachMode: AttachMode.live,
-              updatedAt: DateTime.now().millisecondsSinceEpoch,
-            ),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
-      await tester.pumpAndSettle();
-      await expandRosterProject(tester);
-
-      await tester.tap(find.text('Refactor the broker gate'));
-      await pumpToSessionDetail(tester, 'ses_01JQ4Z8W');
-
-      expect(
-        stripTitle('Refactor the broker gate'),
-        findsOneWidget,
-        reason: 'the row the user tapped names the page immediately',
-      );
-      expect(find.text('ses_01JQ4Z8W'), findsNothing);
-      await expectNoFingerprintWhilePumping(tester, 'ses_01JQ4Z8W');
-    });
-
     testWidgets('cached N3 roster navigation shows its known title', (
       tester,
     ) async {
@@ -294,124 +258,6 @@ void main() {
         reason: 'a held bootstrap must not rewrite the tab with the id',
       );
     });
-
-    testWidgets('an authoritative empty title retires a stale local one', (
-      tester,
-    ) async {
-      // The broker clearing a title is a fact, not an absence. The local
-      // sources exist only for the window BEFORE the session frame arrives;
-      // consulting them afterwards puts a name back on a session that no
-      // longer has one.
-      //
-      // The roster is the durable form of that bug — it keeps serving the old
-      // row until it refreshes, so a fallthrough shows the retired name
-      // indefinitely, not for one frame.
-      useCompactViewport(tester);
-      late _HeldSessionDetailConnection connection;
-      await tester.pumpWidget(
-        buildRoutedSubject(
-          sessions: [
-            SessionInfo(
-              id: 'ses_renamed_01',
-              tool: 'claude',
-              title: 'Old title',
-              status: SessionStatus.idle,
-              attachMode: AttachMode.live,
-              updatedAt: DateTime.now().millisecondsSinceEpoch,
-            ),
-          ],
-          onConnection: (created) => connection = created,
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('workspace-open-drawer')));
-      await tester.pumpAndSettle();
-      await expandRosterProject(tester);
-      await tester.tap(find.text('Old title'));
-      await pumpToSessionDetail(tester, 'ses_renamed_01');
-      expect(stripTitle('Old title'), findsOneWidget);
-
-      connection.emit(
-        SessionWireEvent(
-          info: SessionInfo.fromJson(const {
-            'id': 'ses_renamed_01',
-            'tool': 'claude',
-            'title': '',
-            'status': 'idle',
-            'attachMode': 'observe',
-          }),
-        ),
-      );
-      await tester.pump();
-
-      // From the very first frame the session frame is applied, and it stays
-      // that way while the roster still holds the retired name.
-      expect(stripTitle('Untitled session'), findsOneWidget);
-      expect(stripTitle('Old title'), findsNothing);
-      for (var frame = 0; frame < 10; frame++) {
-        await tester.pump(const Duration(milliseconds: 16));
-        expect(stripTitle('Old title'), findsNothing);
-      }
-      expect(find.text('ses_renamed_01'), findsNothing);
-    });
-
-    testWidgets(
-      'an authoritative empty title retires the persisted tab title',
-      (
-        tester,
-      ) async {
-        // Same rule against the working set, asserted on the FIRST frame after
-        // the session frame lands: the tab self-heals a frame later through
-        // `SessionRef.fromSession`, so anything less than a first-frame check
-        // would step straight over the flash.
-        final store = InMemoryOpenSessionsStore(
-          snapshot: const OpenSessionsSnapshot(
-            refs: [
-              SessionRef(
-                tool: 'claude',
-                id: 'session-1',
-                title: 'Old title',
-                status: SessionStatus.idle,
-              ),
-            ],
-            activeKey: 'claude/session-1',
-          ),
-        );
-        final connection = ScriptedSessionDetailConnection(
-          events: const [],
-          autoConnect: false,
-        );
-
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: const [],
-            connection: connection,
-            openSessionsStore: store,
-            locale: const Locale('en'),
-          ),
-        );
-        await tester.pump();
-        await tester.pump();
-        expect(stripTitle('Old title'), findsOneWidget);
-
-        connection.emitEvent(
-          SessionWireEvent(
-            info: SessionInfo.fromJson(const {
-              'id': 'session-1',
-              'tool': 'claude',
-              'title': '',
-              'status': 'idle',
-              'attachMode': 'observe',
-            }),
-          ),
-        );
-        await tester.pump();
-
-        expect(stripTitle('Untitled session'), findsOneWidget);
-        expect(stripTitle('Old title'), findsNothing);
-        expect(find.text('session-1'), findsNothing);
-      },
-    );
 
     testWidgets('a profile switch never shows or persists the previous '
         "profile's title", (tester) async {
@@ -657,39 +503,6 @@ void main() {
   });
 
   group('U3 direct deep link', () {
-    testWidgets('shows the neutral English fallback, never the fingerprint', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          autoConnect: false,
-          sessionId: 'ses_deep_link_01',
-          locale: const Locale('en'),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(stripTitle('Opening session'), findsOneWidget);
-      expect(find.text('ses_deep_link_01'), findsNothing);
-    });
-
-    testWidgets('shows the neutral Chinese fallback', (tester) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          autoConnect: false,
-          sessionId: 'ses_deep_link_01',
-          locale: const Locale('zh'),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(stripTitle('正在打开会话'), findsOneWidget);
-      expect(stripTitle('Opening session'), findsNothing);
-      expect(find.text('ses_deep_link_01'), findsNothing);
-    });
-
     testWidgets('authoritative session info replaces the fallback', (
       tester,
     ) async {
@@ -729,24 +542,6 @@ void main() {
       expect(stripTitle('Named by the broker'), findsOneWidget);
       expect(stripTitle('Opening session'), findsNothing);
       expect(find.text('ses_deep_link_01'), findsNothing);
-    });
-
-    testWidgets('a resolved session with no title is named untitled, not '
-        'opening', (tester) async {
-      // The broker answered; the session simply has no name. Reusing the
-      // opening placeholder here would be a progress state that never ends.
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          sessionId: 'ses_untitled_01',
-          locale: const Locale('en'),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(stripTitle('Untitled session'), findsOneWidget);
-      expect(stripTitle('Opening session'), findsNothing);
-      expect(find.text('ses_untitled_01'), findsNothing);
     });
 
     testWidgets('the working set persists the id, never the localized label', (

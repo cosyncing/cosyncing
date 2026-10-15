@@ -1,0 +1,109 @@
+{
+  "$comment": "The client's decoded-size estimate of one transcript row, after a JSON round trip. The broker bounds history frames with it (history-delta.ts estimatedClientDecodedBytes) and the Flutter client bounds its transcript window with it (estimatedAgentMessageDecodedBytes); both sides must agree on every case.",
+  "cases": [
+    {
+      "message": {
+        "type": "model-output",
+        "key": "k",
+        "text": "abc"
+      },
+      "estimatedBytes": 334
+    },
+    {
+      "message": {
+        "type": "user-message",
+        "key": "u1",
+        "text": "héllo 👋",
+        "sentAt": 1700000000000
+      },
+      "estimatedBytes": 422
+    },
+    {
+      "message": {
+        "type": "tool-call",
+        "callId": "c1",
+        "toolName": "bash",
+        "title": "Run",
+        "args": {
+          "command": "ls -la",
+          "timeout": 30,
+          "env": null,
+          "flags": [
+            true,
+            false
+          ]
+        }
+      },
+      "estimatedBytes": 930
+    },
+    {
+      "message": {
+        "type": "tool-result",
+        "callId": "c1",
+        "toolName": "edit",
+        "title": "Edited a.ts",
+        "path": "a.ts",
+        "isError": false,
+        "additions": 3,
+        "deletions": 1,
+        "fileChanges": [
+          {
+            "path": "a.ts",
+            "operation": "edit",
+            "additions": 3,
+            "deletions": 1
+          }
+        ],
+        "diffRef": {
+          "fetchUrl": "/api/sessions/claude/s/artifact/k?expires=1&sig=z",
+          "contentHash": "abababababababababababababababababababababababababababababababab",
+          "byteSize": 1234,
+          "lineCount": 40
+        }
+      },
+      "estimatedBytes": 2004
+    },
+    {
+      "message": {
+        "type": "task-list-state",
+        "key": "plan",
+        "title": "Plan",
+        "status": "running",
+        "items": [
+          {
+            "id": "1",
+            "title": "step one",
+            "status": "completed"
+          },
+          {
+            "id": "2",
+            "title": "step two",
+            "status": "in-progress"
+          }
+        ]
+      },
+      "estimatedBytes": 1242
+    },
+    {
+      "message": {
+        "type": "metadata-update",
+        "key": "runtimeTotals",
+        "value": {
+          "tokens": [],
+          "cost": {},
+          "ratio": 0.5
+        }
+      },
+      "estimatedBytes": 686
+    },
+    {
+      "message": {
+        "type": "model-output",
+        "key": "long",
+        "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "final": true
+      },
+      "estimatedBytes": 2408
+    }
+  ]
+}

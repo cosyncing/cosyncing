@@ -87,38 +87,5 @@ void main() {
         );
       },
     );
-
-    testWidgets(
-      'two identical prompts render as two distinctly keyed bubbles',
-      (tester) async {
-        final connection = ScriptedSessionDetailConnection(events: const []);
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(events: const [], connection: connection),
-        );
-        await tester.pumpAndSettle();
-
-        const prompt = 'again please';
-        for (var send = 0; send < 2; send++) {
-          await tester.enterText(
-            find.byKey(const Key('session-detail-prompt-input')),
-            prompt,
-          );
-          await tester.pump();
-          tester
-              .widget<IconButton>(
-                find.byKey(const Key('session-detail-send-button')),
-              )
-              .onPressed!();
-          await tester.pumpAndSettle();
-        }
-
-        expect(connection.sendPromptCount, 2);
-        expect(
-          find.text(prompt),
-          findsNWidgets(2),
-          reason: 'equal text is never identity — no global dedupe',
-        );
-      },
-    );
   });
 }

@@ -1,0 +1,17 @@
+{
+  "history": [
+    {"type":"user-message","text":"earlier","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:0","turnId":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:turn:0"},
+    {"type":"model-output","text":"ok","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:1:output","final":true},
+    {"type":"run-summary","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:1:summary","turnId":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:turn:1","assistantMessageKey":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:1:output","status":"done","agentRuntimeMs":5,"source":"reasonix"},
+    {"type":"user-message","text":"run the migration","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:2","turnId":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:turn:2"},
+    {"type":"tool-result","callId":"t1","toolName":"run_command","result":"partial","isError":true}
+  ],
+  "live": [],
+  "replay": [
+    {"type":"user-message","text":"earlier","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:0","turnId":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:turn:0"},
+    {"type":"model-output","text":"ok","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:1:output","final":true},
+    {"type":"run-summary","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:1:summary","turnId":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:turn:1","assistantMessageKey":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:1:output","status":"done","agentRuntimeMs":5,"source":"reasonix"},
+    {"type":"user-message","text":"run the migration","key":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:message:2","turnId":"reasonix:e29f09b6-995f-4bc0-8bc0-e29f09b6995f:turn:2"},
+    {"type":"tool-result","callId":"t1","toolName":"run_command","result":"partial","isError":true}
+  ]
+}

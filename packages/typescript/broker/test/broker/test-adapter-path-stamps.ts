@@ -239,7 +239,7 @@ const DECLARED: Record<string, Record<Family, Answer>> = {
   agy: {
     // `view_file`'s result decodes `AbsolutePath` off the call's JSON-encoded
     // args and lands it on the file-read semantic and the result's own field —
-    // both asserted with unquoted values in test-agy-mapping.ts.
+    // both asserted with unquoted values in the agy mapping corpus (e2e/adapters/mapping/).
     read: { status: 'supported', fields: ['semantic.path', 'result.path'] },
     // CODE_ACTION names the file it acted on; the transcript records prose
     // ("Created file file://…"), not a unified diff, so the row states
@@ -318,8 +318,7 @@ PROBES.codex = {
   ),
 };
 
-// OpenCode: one completed tool part, the shape
-// test-opencode-file-changes.ts records.
+// OpenCode: one completed tool part, the shape the OpenCode serve reports for a tool call.
 const openCodePart = (tool: string, callID: string, state: Record<string, unknown>) => ({
   id: `prt_${callID}`,
   type: 'tool',
@@ -351,7 +350,7 @@ PROBES.opencode = {
   ),
 };
 
-// Pi: extension JSONL, the shape test-pi-observe.ts records.
+// Pi: extension JSONL, the shape the Pi conformance fake (e2e/adapters/kits/fakes/pi-agent.ts) writes.
 const piJsonl = (id: string, name: string, args: unknown, details?: unknown) => [
   {
     type: 'message',
@@ -486,7 +485,7 @@ PROBES.cline = {
   edit: () => clinePair('cline-edit', 'edit_file'),
 };
 
-// Kimi: REST message rows, the shape test-kimi-mapping.ts records.
+// Kimi: REST message rows, the shape the kimi mapping corpus (e2e/adapters/mapping/) records.
 function kimiPair(callId: string, toolName: string, input: unknown, output: unknown): RowPair {
   const state = createKimiMappingState();
   const rows = [

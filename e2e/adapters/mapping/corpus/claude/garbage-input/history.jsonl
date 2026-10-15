@@ -1,0 +1,21 @@
+{"type":"user","uuid":"g1","message":{"role":"user","content":"before the noise"}}
+
+   
+not json at all
+{"type":"user","uuid":"trunc","message":{"role":"user","content":"cut off
+null
+42
+"a string"
+[1,2,3]
+[]
+{}
+{"type":null}
+{"type":"user"}
+{"type":"user","message":null}
+{"type":"user","uuid":"x","message":{"role":"user","content":42}}
+{"type":"assistant","message":{"content":"a string not an array"}}
+{"type":"assistant","uuid":"y","message":{"id":7,"content":[null,1,"x",{"type":"text"},{"type":"tool_use"}]}}
+{"type":"user","uuid":"z","message":{"role":"user","content":[{"type":"tool_result"},{"type":"tool_result","tool_use_id":5}]}}
+<<binary-line>>
+{"type":"user","uuid":"deep","message":{"role":"user","content":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}
+{"type":"assistant","uuid":"g2","message":{"id":"gm","role":"assistant","content":[{"type":"text","text":"after the noise"}]}}

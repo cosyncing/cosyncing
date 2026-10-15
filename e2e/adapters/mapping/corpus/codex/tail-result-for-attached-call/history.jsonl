@@ -1,0 +1,4 @@
+{"type":"session_meta","payload":{"id":"d7b84f53-bbbb-4c03-8c03-d7b84f53bbbb","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"run it"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"tr1"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{\"command\":\"ls\"}"}}

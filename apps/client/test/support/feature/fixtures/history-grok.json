@@ -1,0 +1,123 @@
+{
+  "agent": "grok",
+  "texts": [
+    "seeded prompt 1",
+    "seeded answer 1",
+    "seeded prompt 2",
+    "seeded answer 2"
+  ],
+  "session": {
+    "kind": "session",
+    "info": {
+      "id": "01a139d0-a72c-7312-a135-8e453be47900",
+      "nativeId": "01a139d0-a72c-7312-a135-8e453be47900",
+      "tool": "grok",
+      "title": "Captured conversation",
+      "cwd": "/captured/workspaces/seed-1",
+      "status": "idle",
+      "attachMode": "observe",
+      "model": "grok-4.6",
+      "currentModel": {
+        "providerID": "xai",
+        "modelID": "grok-4.6",
+        "reasoningEffort": "high"
+      },
+      "currentAgent": "build",
+      "createdAt": 1791971338043,
+      "updatedAt": 1791971338043,
+      "terminalSyncHint": {
+        "label": "Resume in Grok",
+        "command": "grok --cwd '/captured/workspaces/seed-1' --resume '01a139d0-a72c-7312-a135-8e453be47900'",
+        "note": "This hands control to a separate terminal process; it does not join the broker-owned ACP child."
+      },
+      "control": {
+        "drive": {
+          "state": "observing",
+          "supported": false,
+          "reason": "Grok Drive is restricted to sessions created by this broker installation."
+        },
+        "terminalSync": {
+          "supported": false,
+          "syncAvailable": false,
+          "active": false,
+          "reason": "Grok exposes terminal resume but no measured channel that joins a running TUI to the broker-owned ACP child.",
+          "behind": false
+        }
+      },
+      "machine": "Howard",
+      "sessionOwner": {
+        "revision": {
+          "epoch": "f2ef6897-05c0-4d13-b01a-30e4d959810f",
+          "seq": 0
+        },
+        "state": "none"
+      }
+    },
+    "authority": {
+      "canMutate": false,
+      "prompt": "none"
+    }
+  },
+  "history": {
+    "kind": "history",
+    "messages": [
+      {
+        "type": "user-message",
+        "text": "seeded prompt 1",
+        "key": "grok:01a139d0-a72c-7312-a135-8e453be47900:event:seed-1",
+        "turnId": "grok:01a139d0-a72c-7312-a135-8e453be47900:turn:seed-prompt-1",
+        "sentAt": 1791971338043
+      },
+      {
+        "type": "model-output",
+        "key": "grok:01a139d0-a72c-7312-a135-8e453be47900:turn:seed-prompt-1:answer:seed-1-answer",
+        "text": "seeded answer 1",
+        "final": true
+      },
+      {
+        "type": "run-summary",
+        "key": "grok:01a139d0-a72c-7312-a135-8e453be47900:event:seed-1-done:summary",
+        "turnId": "grok:01a139d0-a72c-7312-a135-8e453be47900:turn:seed-prompt-1",
+        "userMessageKey": "grok:01a139d0-a72c-7312-a135-8e453be47900:event:seed-1",
+        "status": "done",
+        "completedAt": 1791971338043,
+        "tokens": {
+          "input": 11,
+          "output": 4
+        },
+        "source": "grok"
+      },
+      {
+        "type": "user-message",
+        "text": "seeded prompt 2",
+        "key": "grok:01a139d0-a72c-7312-a135-8e453be47900:event:seed-2",
+        "turnId": "grok:01a139d0-a72c-7312-a135-8e453be47900:turn:seed-prompt-2",
+        "sentAt": 1791971338043
+      },
+      {
+        "type": "model-output",
+        "key": "grok:01a139d0-a72c-7312-a135-8e453be47900:turn:seed-prompt-2:answer:seed-2-answer",
+        "text": "seeded answer 2",
+        "final": true
+      },
+      {
+        "type": "run-summary",
+        "key": "grok:01a139d0-a72c-7312-a135-8e453be47900:event:seed-2-done:summary",
+        "turnId": "grok:01a139d0-a72c-7312-a135-8e453be47900:turn:seed-prompt-2",
+        "userMessageKey": "grok:01a139d0-a72c-7312-a135-8e453be47900:event:seed-2",
+        "status": "done",
+        "completedAt": 1791971338043,
+        "tokens": {
+          "input": 11,
+          "output": 4
+        },
+        "source": "grok"
+      }
+    ],
+    "reset": true,
+    "cursor": "eyJ2IjoxLCJuIjo2LCJoIjoiME1hYnpTUkJ0Smx0elUxaDdRR29CaENHMzRJRV8wdmRKRGJMMXZtU0FwZyJ9",
+    "attachTicket": "eyJ2IjoxLCJuIjo2LCJoIjoiME1hYnpTUkJ0Smx0elUxaDdRR29CaENHMzRJRV8wdmRKRGJMMXZtU0FwZyJ9",
+    "endCursor": "eyJ2IjoxLCJrIjoib2xkZXIiLCJiIjo2LCJoIjoiME1hYnpTUkJ0Smx0elUxaDdRR29CaENHMzRJRV8wdmRKRGJMMXZtU0FwZyJ9",
+    "newerHistory": true
+  }
+}

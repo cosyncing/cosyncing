@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"04095c25-88a5-4735-8735-04095c2588a5","timestamp":"2026-06-20T00:00:00.000Z","cwd":"/work/proj"}
+{"type":"message","id":"tu1","timestamp":"2026-06-20T00:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"enrich"}],"timestamp":1781913600000}}

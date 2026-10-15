@@ -1,0 +1,136 @@
+{
+  "items": [
+    {
+      "id": "m_r8",
+      "role": "tool",
+      "created_at": "2026-08-19T10:12:30.000Z",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_agent",
+          "output": "agent_id: agent-0\n\nFound 3 callers."
+        }
+      ]
+    },
+    {
+      "id": "m_note3",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "task",
+          "taskId": "bash-raw0000",
+          "status": "failed"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "not a notification envelope at all"
+        }
+      ]
+    },
+    {
+      "id": "m_note2",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "task",
+          "taskId": "bash-unknown0",
+          "status": "failed"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "<notification id=\"task:bash-unknown0:failed\" category=\"task\" type=\"task.failed\" source_kind=\"background_task\" source_id=\"bash-unknown0\">\nTitle: Background bash failed\nSeverity: warning\nit failed.\n</notification>"
+        }
+      ]
+    },
+    {
+      "id": "m_note",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "task",
+          "taskId": "bash-abc12345",
+          "status": "completed",
+          "notificationId": "task:bash-abc12345:completed"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "<notification id=\"task:bash-abc12345:completed\" category=\"task\" type=\"task.completed\" source_kind=\"background_task\" source_id=\"bash-abc12345\">\nTitle: Background bash completed\nSeverity: info\nnpm test completed.\n<output-file path=\"/tmp/tasks/bash-abc12345.log\" bytes=\"512\">\nRead the output file to retrieve the result: /tmp/tasks/bash-abc12345.log\n</output-file>\n</notification>"
+        }
+      ]
+    },
+    {
+      "id": "m_r7",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_bg",
+          "output": "task_id: bash-abc12345\npid: 4242\ndescription: npm test\nstatus: running\nautomatic_notification: true"
+        }
+      ]
+    },
+    {
+      "id": "m_r6",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_todo",
+          "output": "Todo list updated"
+        }
+      ]
+    },
+    {
+      "id": "m_r5",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_future",
+          "output": "something",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "id": "m_r4",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_media",
+          "output": "image data"
+        }
+      ]
+    },
+    {
+      "id": "m_r3",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_glob",
+          "output": "a.ts"
+        }
+      ]
+    },
+    {
+      "id": "m_r2",
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "c_grep",
+          "output": "src/a.ts:3: TODO"
+        }
+      ]
+    }
+  ],
+  "has_more": false
+}

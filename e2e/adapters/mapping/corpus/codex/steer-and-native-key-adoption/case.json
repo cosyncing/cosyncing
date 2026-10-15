@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "a mid-turn steer is a real boundary (canonical turn ordinals u0/u1 in rollout order); a tailed answer adopts the paired native identity, and one whose pair never arrives still emits on the line-index fallback",
+  "userTexts": [
+    "open",
+    "steer"
+  ],
+  "sessionId": "24ab1ad7-d907-4253-8253-24ab1ad7d907"
+}

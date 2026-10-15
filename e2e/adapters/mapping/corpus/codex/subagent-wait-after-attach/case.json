@@ -1,0 +1,10 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "a child spawned before the attach and joined on the tail keeps its nickname and role on the report row, like a cold read",
+  "knownBugMatch": "agree on tool-result@subagent:kid-A",
+  "knownBug": "Codex Observe: the child report the tail builds for a spawn read at attach is titled by the raw agent id (kid-A) instead of \"Turing · explorer\"; the connection resync titles it correctly",
+  "userTexts": [
+    "research"
+  ],
+  "sessionId": "ffaaecef-c200-4daa-8daa-ffaaecefc200"
+}

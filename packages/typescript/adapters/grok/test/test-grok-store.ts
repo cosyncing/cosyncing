@@ -83,9 +83,7 @@ try {
   const wrongGroup = join(tree.root, 'sessions', encodeURIComponent('/wrong/cwd'), '019f9d70-e38e-7591-9a24-74a06ad89477');
   mkdirSync(wrongGroup, { recursive: true });
   writeFileSync(join(wrongGroup, 'summary.json'), `${JSON.stringify({ info: { id: '019f9d70-e38e-7591-9a24-74a06ad89477', cwd: tree.cwd } })}\n`);
-  const refused = await discoverGrokStore({ root: tree.root, trace: (event) => traces.push(`${event.op}:${event.detail}`) });
-  check('a summary whose cwd disagrees with its URL directory fails closed',
-    refused.length === 1 && traces.some((trace) => trace.startsWith('schema-refused:')), traces.join(' | '));
+  // The cwd-disagreement refusal is asserted by conformance C21 (e2e/adapters/conformance/grok.test.ts); the group stays planted.
 
   const malformedId = '019f9d70-e38e-7591-1a24-74a06ad89479';
   const malformedIdDir = join(tree.root, 'sessions', encodeURIComponent(tree.cwd), malformedId);
@@ -105,22 +103,9 @@ try {
   check('only canonical lowercase UUIDv7 session directories are discoverable',
     (await discoverGrokStore({ root: tree.root })).length === 1);
 
-  const duplicateGroup = join(tree.root, 'sessions', encodeURIComponent('/duplicate/cwd'), tree.id);
-  mkdirSync(duplicateGroup, { recursive: true });
-  writeFileSync(join(duplicateGroup, 'summary.json'), `${JSON.stringify({ info: { id: tree.id, cwd: '/duplicate/cwd' } })}\n`);
-  const duplicateTraces: string[] = [];
-  check('a UUID duplicated across cwd groups is globally ambiguous and entirely refused',
-    (await discoverGrokStore({
-      root: tree.root,
-      trace: (event) => duplicateTraces.push(event.detail),
-    })).every((session) => session.id !== tree.id)
-      && duplicateTraces.some((detail) => detail.includes('more than one cwd group')),
-    duplicateTraces.join(' | '));
-  rmSync(duplicateGroup, { recursive: true, force: true });
-
   const symlinkDir = join(tree.root, 'sessions', encodeURIComponent(tree.cwd), '019f9d70-e38e-7591-9a24-74a06ad89478');
   symlinkSync(tree.sessionDir, symlinkDir, 'dir');
-  check('symlinked session directories are never traversed', (await discoverGrokStore({ root: tree.root })).length === 1);
+  // Symlinked session directories: conformance C21 'a symlinked session directory'. The link stays planted.
 
   const moved = `${tree.updatesPath}.moved`;
   renameSync(tree.updatesPath, moved);
@@ -210,8 +195,6 @@ try {
     JSON.stringify(linked.map((session) => ({ id: session.id, origin: session.origin, parent: session.parentThreadId }))));
 
   rmSync(parentMetaPath, { force: true });
-  check('a subagent summary with missing parent metadata is withheld, never promoted to a root row',
-    (await discoverGrokStore({ root: lineageTree.root })).every((session) => session.id !== childId));
 
   writeParentMeta(lineageTree.sessionDir, lineageTree.id, { child_cwd: '/mismatched/child/cwd' });
   check('a child cwd mismatch fails lineage closed',

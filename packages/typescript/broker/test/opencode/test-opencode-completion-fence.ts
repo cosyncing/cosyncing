@@ -3,7 +3,8 @@
  * C2R: OpenCode assistant completion telemetry is not a live terminal fence.
  *
  * Drives the real adapter against one fake server-wide OpenCode HTTP/SSE bus. The fixture covers
- * app prompts and terminal-originated prompts, active attach/history reconciliation, native
+ * app prompts (the terminal-typed turn is e2e: opencode conformance extra 'completion telemetry is not a
+ * terminal fence'), active attach/history reconciliation, native
  * error/abort fences, stale-fence ownership, bounded assistant state, duplicate events, and two
  * interleaved sessions without a model or live OpenCode process.
  */
@@ -30,7 +31,6 @@ mkdirSync(WORKTREE, { recursive: true });
 
 const sessionIds = [
   'ses_app',
-  'ses_tui',
   'ses_compaction_continue',
   'ses_active_history',
   'ses_busy_trailing_user',
@@ -76,7 +76,7 @@ function sendEvent(event: unknown): void {
   }
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
@@ -133,6 +133,17 @@ function summaries(messages: AgentMessage[]): Array<Extract<AgentMessage, { type
 
 function terminals(messages: AgentMessage[]): Array<Extract<AgentMessage, { type: 'run-summary' }>> {
   return summaries(messages).filter((message) => message.status !== 'running');
+}
+
+/**
+ * Negative-proof sentinel. Events reach a connection in bus order, so once a later event for the same
+ * session has produced its own frame, anything the earlier events were going to emit is already in `live`.
+ */
+let sentinelCount = 0;
+async function settle(live: AgentMessage[], sessionID: string): Promise<void> {
+  const partID = `prt_sentinel_${++sentinelCount}`;
+  sendEvent({ type: 'message.part.delta', properties: { sessionID, messageID: 'msg_sentinel', partID, field: 'text', delta: 'sentinel' } });
+  await waitFor(() => live.some((message) => (message as any).key === partID), 20_000);
 }
 
 let server: ReturnType<typeof Bun.serve> | undefined;
@@ -330,7 +341,7 @@ try {
     }));
     sendEvent({ type: 'session.idle', properties: { sessionID: id } });
     sendEvent({ type: 'session.idle', properties: { sessionID: id } });
-    await Bun.sleep(100);
+    await settle(live, 'ses_app');
     await drainAttention();
     assert.equal(terminals(live).length, 1, 'duplicate completion and idle events stay idempotent');
     assert.equal(
@@ -339,36 +350,6 @@ try {
       1,
       'duplicate completion and idle produce exactly one Attention event',
     );
-    await closeConnection(conn);
-  }
-
-  // A prompt originating in an attached TUI has the same global-event transition as an app prompt.
-  {
-    const id = 'ses_tui';
-    const promptCountBefore = promptBodies.get(id)?.length ?? 0;
-    const { conn, live } = await attach(adapter, id);
-    const userId = 'msg_tui_user';
-    const assistantId = 'msg_tui_assistant';
-    const startedAt = 1_800_200_000_000;
-    const completedAt = startedAt + 5000;
-    sendEvent({ type: 'session.status', properties: { sessionID: id, status: { type: 'busy' } } });
-    sendMessageUpdated(id, userInfo(userId, startedAt - 100));
-    sendMessageUpdated(id, assistantInfo({ id: assistantId, userId, created: startedAt }));
-    sendAssistantPart(id, assistantId, 'prt_tui_assistant');
-    sendMessageUpdated(id, assistantInfo({
-      id: assistantId,
-      userId,
-      created: startedAt,
-      completed: completedAt,
-      finish: 'stop',
-    }));
-    await waitFor(() => summaries(live).some((summary) => summary.status === 'running'));
-    assert.equal(terminals(live).length, 0, 'attached-TUI completion stays running before idle');
-    setBusy(id, false);
-    sendEvent({ type: 'session.status', properties: { sessionID: id, status: { type: 'idle' } } });
-    await waitFor(() => terminals(live).length === 1);
-    assert.equal(terminals(live)[0]?.status, 'done');
-    assert.equal(promptBodies.get(id)?.length ?? 0, promptCountBefore, 'TUI fixture did not use app send');
     await closeConnection(conn);
   }
 
@@ -573,7 +554,7 @@ try {
     }));
     await waitFor(() => summaries(live).some((summary) => summary.turnId === 'msg_stale_a1'));
     sendMessageUpdated(id, userInfo('msg_stale_u2', 1_800_500_002_000));
-    await Bun.sleep(100);
+    await settle(live, 'ses_stale');
     assert.equal(
       terminals(live).length,
       0,
@@ -593,7 +574,7 @@ try {
       'a later assistant boundary never finalizes another assistant before idle',
     );
     sendEvent({ type: 'session.compacted', properties: { sessionID: id } });
-    await Bun.sleep(100);
+    await settle(live, 'ses_stale');
     assert.equal(
       terminals(live).length,
       0,
@@ -700,7 +681,7 @@ try {
       tokens: { input: 13, output: 8 },
     }));
     sendEvent({ type: 'session.idle', properties: { sessionID: id } });
-    await Bun.sleep(100);
+    await settle(live, 'ses_idle_first');
     assert.equal(terminals(live).length, 2, 'repeated enriched telemetry and idle are idempotent');
     await closeConnection(conn);
   }
@@ -743,7 +724,7 @@ try {
     );
     setBusy(id, false);
     sendEvent({ type: 'session.idle', properties: { sessionID: id } });
-    await Bun.sleep(100);
+    await settle(live, 'ses_error');
     assert.equal(terminals(live).length, 1, 'idle after error is idempotent');
     await closeConnection(conn);
   }
@@ -986,7 +967,7 @@ try {
     );
     setBusy(id, false);
     sendEvent({ type: 'session.idle', properties: { sessionID: id } });
-    await Bun.sleep(100);
+    await settle(live, 'ses_cancel');
     assert.equal(terminals(live).length, 2);
     await closeConnection(conn);
   }
@@ -1010,7 +991,7 @@ try {
     assert.equal(terminals(live).length, 0);
     sendEvent({ type: 'session.idle', properties: { sessionID: id } });
     await waitFor(() => terminals(live).length >= 128);
-    await Bun.sleep(100);
+    await settle(live, 'ses_bounded');
     assert.equal(
       terminals(live).length,
       128,
@@ -1059,13 +1040,14 @@ try {
         error: { name: 'ProviderAuthError', data: { message: 'belongs elsewhere' } },
       },
     });
-    await Bun.sleep(100);
+    await settle(a.live, 'ses_cross_a');
+    await settle(b.live, 'ses_cross_b');
     assert.equal(terminals(a.live).length, 0, 'unrelated global error does not finalize session A');
     assert.equal(terminals(b.live).length, 0, 'unrelated global error does not finalize session B');
     setBusy('ses_cross_a', false);
     sendEvent({ type: 'session.idle', properties: { sessionID: 'ses_cross_a' } });
     await waitFor(() => terminals(a.live).length === 1);
-    await Bun.sleep(100);
+    await settle(b.live, 'ses_cross_b');
     assert.equal(terminals(a.live)[0]?.turnId, 'msg_cross_a_a');
     assert.equal(terminals(b.live).length, 0, 'session A idle does not finalize session B');
     setBusy('ses_cross_b', false);

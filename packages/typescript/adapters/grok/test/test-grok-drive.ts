@@ -19,7 +19,6 @@ import type {
 } from '@cosyncing/adapter-api';
 import { TerminalSummaryRegistry } from '@cosyncing/adapter-api';
 import {
-  GROK_PERMISSION_MODES,
   GrokDriveConnection,
   parseGrokModelCatalog,
   type GrokAcpTransport,
@@ -173,8 +172,9 @@ try {
       driveInfo(lazySession.id, lazySession.cwd),
       lazyTransport,
     );
-    check('a never-prompted native session may start before Grok lazily creates updates.jsonl',
-      lazyConnection.driving && (await lazyConnection.getHistory()).length >= 0);
+    // A never-prompted session starts Drive before Grok creates updates.jsonl: grok extra 'the lazily created updates log is an append'.
+    if (!lazyConnection.driving) throw new Error('lazy Drive did not start');
+    await lazyConnection.getHistory();
     writeFileSync(lazyTree.updatesPath, '');
     await lazyConnection.getHistory();
     check('the first empty updates.jsonl creation is an append-lineage transition, not foreign rewrite',
@@ -193,8 +193,8 @@ try {
     };
     await lazyConnection.sendPrompt({ text: 'lazy durable prompt', clientMessageId: 'lazy-client' });
     await lazyConnection.getHistory();
-    check('the first durable lazy-log row claims its queued correlation without demotion',
-      lazyConnection.driving && lazyConnection.getPending().every((row) => row.type !== 'user-message'));
+    // The first durable lazy-log row claims its queued correlation without demotion: grok extra above (second prompt still acks).
+    if (!lazyConnection.driving) throw new Error('the lazy-log row demoted Drive');
     unlinkSync(lazyTree.updatesPath);
     writeFileSync(lazyTree.updatesPath, `${JSON.stringify({
       timestamp: '2026-08-23T10:00:01.000Z',
@@ -243,9 +243,7 @@ try {
       && message.text === 'queued prompt' && message.queued === true && message.clientKey === 'client-1')
       && live.some((message) => message.type === 'user-message' && message.queued === true),
     JSON.stringify(connection.getPending()));
-  check('the adapter serializes the exact text onto one ACP stdin',
-    transport.prompts.length === 1 && transport.prompts[0]?.prompt[0]?.text === 'queued prompt',
-    JSON.stringify(transport.prompts));
+  // The exact prompt text reaches the agent once: conformance C10 (grok).
 
   const durable = {
     timestamp: '2026-08-23T10:01:00.000Z',
@@ -266,7 +264,9 @@ try {
       && beforeDurableAppend[0]?.queued === true,
     JSON.stringify(beforeDurableAppend));
   tree.append(durable);
-  await new Promise((resolve) => setTimeout(resolve, 160));
+  // The tail watcher publishes the durable row asynchronously: wait for the delivered transition, not a delay.
+  for (let attempt = 0; attempt < 500 && !live.some((message) => message.type === 'user-message'
+    && message.clientKey === 'client-1' && message.queued === false); attempt += 1) await Bun.sleep(10);
   releasePrompt?.();
   await send;
   const replay = await connection.getHistory();
@@ -411,13 +411,8 @@ try {
       && connection.driving,
     JSON.stringify({ eventlessUsers, eventlessAnswers, driving: connection.driving }));
 
-  const models = await connection.listModels();
-  const modes = await connection.listModes();
-  const commands = await connection.listCommands();
-  check('Drive exposes only the measured model, permission-mode, and command catalogs',
-    models[0]?.label === 'Grok 4.6'
-      && modes.map((mode) => mode.value).join(',') === GROK_PERMISSION_MODES.map((mode) => mode.value).join(',')
-      && commands[0]?.name === 'compact');
+  // Drive's model, mode and command catalogs: conformance C18 (catalog) and C19 (grok). The command catalog must be loaded for runCommand.
+  await connection.listCommands();
 
   transport.onPrompt = async (params) => {
     tree.append({
@@ -518,11 +513,9 @@ try {
       && transport.closes.includes(true)
       && live.some((message) => message.type === 'notice' && message.message.includes('read-only')),
     JSON.stringify({ closes: transport.closes, cancels: transport.cancels, live }));
-  const promptCountBeforeRefused = transport.prompts.length;
   let refused = false;
   try { await connection.sendPrompt({ text: 'after demotion' }); } catch { refused = true; }
-  check('demotion makes later mutations fail before touching native state',
-    refused && transport.prompts.length === promptCountBeforeRefused);
+  if (!refused) throw new Error('a demoted connection accepted a write'); // refused before native state: conformance C14 (grok)
   stop();
   await connection.close();
 

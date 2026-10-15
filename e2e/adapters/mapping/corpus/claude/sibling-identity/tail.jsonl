@@ -1,0 +1,3 @@
+{"type":"assistant","uuid":"g2","message":{"id":"msg_G","role":"assistant","content":[{"type":"text","text":"second block"}]}}
+{"type":"assistant","uuid":"t1","message":{"id":"msg_T","role":"assistant","content":[{"type":"thinking","thinking":"tail thought","signature":"sig"}]}}
+{"type":"assistant","uuid":"t2","message":{"id":"msg_T","role":"assistant","content":[{"type":"text","text":"tail answer"}]}}

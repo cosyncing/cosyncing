@@ -1,0 +1,6 @@
+{"type":"user","uuid":"r-w","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","content":"File created"}]},"toolUseResult":{"type":"create","filePath":"/tmp/x/new.ts","content":"l1\nl2\nl3","structuredPatch":[]}}
+{"type":"user","uuid":"r-e","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e1","content":"ok"}]},"toolUseResult":{"filePath":"/tmp/x/a.ts","structuredPatch":[{"oldStart":10,"oldLines":3,"newStart":10,"newLines":4,"lines":[" ctx","-old","+new","+added"]},{"oldStart":40,"oldLines":1,"newStart":41,"newLines":1,"lines":["-gone","+here"]}]}}
+{"type":"user","uuid":"r-b","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b1","content":"x"}]},"toolUseResult":{"stdout":"x","stderr":"","interrupted":false,"isImage":false}}
+{"type":"user","uuid":"r-g","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"g1","content":"matches"}]},"toolUseResult":{"numFiles":3}}
+{"type":"user","uuid":"r-i","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"i1","content":"image"}]},"toolUseResult":{"type":"image"}}
+{"type":"user","uuid":"r-s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"s1","content":"sent"}]},"toolUseResult":{"attachments":[{"path":"r.png"}],"caption":"Here is the report\nsecond line"}}

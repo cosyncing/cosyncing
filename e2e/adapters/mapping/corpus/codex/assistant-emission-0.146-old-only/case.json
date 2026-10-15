@@ -1,0 +1,12 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "Codex 0.146 assistant emission old-only: assistant text and tool rows keep order and each assistant item is exactly one row, cold at attach and followed on the tail, with identical keys on resync",
+  "userTexts": [],
+  "oneRow": [
+    "cold answer.",
+    "cold final.",
+    "live answer.",
+    "live final."
+  ],
+  "sessionId": "8087bccc-dc58-4cdf-8cdf-8087bcccdc58"
+}

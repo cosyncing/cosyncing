@@ -241,6 +241,11 @@ export class CodexAdapter implements AgentBackend {
     }) => SessionInfo['currentModel'] | undefined;
     resumeStartupTimeoutMs?: number;
     resumeProcessStopTimeoutMs?: number;
+    /** Test seams, never set by the broker runtime: how long the loaded-thread probe waits on a daemon
+     *  that does not answer (default 1.5 s), and how long `/goal pause` waits for a turn to appear
+     *  when the session is idle (default 3 s). */
+    daemonProbeTimeoutMs?: number;
+    goalPauseTurnWaitMs?: number;
   } = {}) {}
 
   private reportAttachDiagnostic(diagnostic: CodexAttachDiagnostic): void {
@@ -1007,6 +1012,7 @@ export class CodexAdapter implements AgentBackend {
         this.liveThreadCache = undefined;
         this.liveActivityCache = undefined;
       },
+      this.options.goalPauseTurnWaitMs,
     );
     await conn.start();
     return this.trackOwner(conn);
@@ -1112,7 +1118,7 @@ export class CodexAdapter implements AgentBackend {
   }
 
   private async refreshLiveLoadedThreadIds(): Promise<Set<string>> {
-    const ids = await (this.options.queryLoadedThreadIds ?? queryCodexLoadedThreadIds)();
+    const ids = await (this.options.queryLoadedThreadIds ?? (() => queryCodexLoadedThreadIds(this.options.daemonProbeTimeoutMs)))();
     this.liveThreadCache = { at: Date.now(), ids };
     return ids;
   }
@@ -1138,7 +1144,7 @@ export class CodexAdapter implements AgentBackend {
     // Existing tests inject only the older loaded-id seam. Do not reach the operator's real daemon
     // from those fixtures; absence from this map means unknown, not Idle.
     if (this.options.queryLoadedThreadIds && !this.options.queryLoadedThreadActivities) return new Map();
-    const rows = await (this.options.queryLoadedThreadActivities ?? queryCodexLoadedThreadActivitiesStrict)();
+    const rows = await (this.options.queryLoadedThreadActivities ?? (() => queryCodexLoadedThreadActivitiesStrict(this.options.daemonProbeTimeoutMs)))();
     const activities = new Map(rows.map((row) => [row.id, row.status] as const));
     this.liveActivityCache = { at: Date.now(), activities };
     return activities;
@@ -1993,6 +1999,7 @@ function unavailableCodexSyncHint(hint: SessionInfo['terminalSyncHint'], reason?
 async function withCodexDaemonRpc<T>(
   sock: string,
   fn: (rpc: <R = any>(method: string, params: unknown, timeoutMs?: number) => Promise<R>) => Promise<T>,
+  defaultTimeoutMs = 1500,
 ): Promise<T> {
   const pending = new Map<string, PendingRpc>();
   let reqId = 0;
@@ -2000,7 +2007,7 @@ async function withCodexDaemonRpc<T>(
   const write = (obj: unknown) => {
     transport?.write(obj);
   };
-  const rpc = <T = any>(method: string, params: unknown, timeoutMs = 1500): Promise<T> => {
+  const rpc = <T = any>(method: string, params: unknown, timeoutMs = defaultTimeoutMs): Promise<T> => {
     const id = ++reqId;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -2051,10 +2058,10 @@ async function loadedCodexThreadIds(rpc: <R = any>(method: string, params: unkno
   return ids;
 }
 
-export async function queryCodexLoadedThreadIds(): Promise<Set<string>> {
+export async function queryCodexLoadedThreadIds(rpcTimeoutMs?: number): Promise<Set<string>> {
   const sock = codexAppServerSock();
   if (!sock) return new Set();
-  return withCodexDaemonRpc(sock, loadedCodexThreadIds);
+  return withCodexDaemonRpc(sock, loadedCodexThreadIds, rpcTimeoutMs);
 }
 
 /** Safety-critical form used before automatic daemon restart: socket absence is unknown, never idle. */
@@ -2090,7 +2097,7 @@ export function codexThreadActivityFromNative(id: string, response: any): CodexL
  * `thread/read` is point-in-time native state, so no rollout recency/staleness heuristic is involved.
  * Individual read failures remain visible unknown blockers instead of collapsing the whole list.
  */
-export async function queryCodexLoadedThreadActivitiesStrict(): Promise<CodexLoadedThreadActivity[]> {
+export async function queryCodexLoadedThreadActivitiesStrict(rpcTimeoutMs?: number): Promise<CodexLoadedThreadActivity[]> {
   const sock = codexAppServerSock();
   if (!sock) throw new Error('Codex managed daemon socket is unavailable.');
   return withCodexDaemonRpc(sock, async (rpc) => {
@@ -2110,7 +2117,7 @@ export async function queryCodexLoadedThreadActivitiesStrict(): Promise<CodexLoa
         };
       }
     }));
-  });
+  }, rpcTimeoutMs);
 }
 
 export interface CodexDaemonVersion {
@@ -3081,6 +3088,19 @@ async function codexObserveCaptureTestHold(): Promise<void> {
   }
 }
 
+/** Test-only, with the capture gate above: a live tail that deferred appended bytes because a
+ *  capture was in flight writes `<hold file>.deferred`, so the test releases the hold only once its
+ *  append has provably landed inside the capture window. */
+function codexObserveNoteDeferredTail(): void {
+  const holdPath = process.env.COSYNCING_TEST_CODEX_CAPTURE_HOLD_FILE?.trim();
+  if (!holdPath) return;
+  try {
+    writeFileSync(`${holdPath}.deferred`, '1');
+  } catch {
+    /* a test marker never affects the tail */
+  }
+}
+
 /**
  * A read-only observe connection: replays the rollout as history and live-follows appended lines.
  * Keys every message by its rollout line index so the history snapshot and any live-tailed line
@@ -3457,6 +3477,7 @@ class CodexObserveConnection implements SessionConnection {
       )
     ) {
       this.deferredDrainPending = true;
+      codexObserveNoteDeferredTail();
       return;
     }
     let bytes: Buffer;
@@ -3965,6 +3986,7 @@ class CodexResumeConnection implements SessionConnection {
     private readonly startupTimeoutMs = CODEX_RESUME_START_TIMEOUT_MS,
     private readonly processStopTimeoutMs = CODEX_RESUME_PROCESS_STOP_TIMEOUT_MS,
     private readonly onDaemonLost?: () => void,
+    private readonly goalPauseTurnWaitMs = 3000,
   ) {}
 
   private diagnostic(diagnostic: Omit<CodexAttachDiagnostic, 'threadId'>): void {
@@ -5902,7 +5924,7 @@ class CodexResumeConnection implements SessionConnection {
           // Codex `paused` only gates FUTURE auto-turns — the in-flight goal turn (and any subagents
           // it spawned) runs to completion (verified 2026-07-12, see adapters/03-codex.md). A user
           // pausing means "stop working", so the gate is closed first, then the running turn braked.
-          const activeTurnId = await this.waitForActiveTurnId(3000, true);
+          const activeTurnId = await this.waitForActiveTurnId(this.goalPauseTurnWaitMs, true);
           if (activeTurnId) {
             await this.rpc('turn/interrupt', { threadId: this.threadId, turnId: activeTurnId }, 10000).catch(() => {});
             return { notice: 'Goal paused; interrupted the running turn.' };

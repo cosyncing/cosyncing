@@ -163,10 +163,7 @@ try {
     !sessions.some((session) => session.id.endsWith('.events'))
       && sessions.length === 4,
     sessions.map((session) => session.id).join(','));
-  check('unknown metadata schema fails closed with a named trace',
-    !sessions.some((session) => session.id === 'future-schema')
-      && traces.some((trace) => trace.startsWith('schema-refused:')),
-    traces.join(' | '));
+  // Unknown metadata schema: conformance C21 'an unknown metadata schema'.
   check('unknown event and display index schemas fail closed during discovery',
     !sessions.some((session) => session.id === 'future-event-schema')
       && !sessions.some((session) => session.id === 'future-display-schema')
@@ -232,18 +229,7 @@ try {
     budgeted.length === 1 && budgeted[0]?.id === 'a-project-newer',
     budgeted.map((session) => session.id).join(','));
 
-  const duplicateRoot = join(root, 'duplicate-id-case');
-  sessionFixture(join(duplicateRoot, 'sessions'), 'duplicate-native-id');
-  sessionFixture(join(duplicateRoot, 'projects', 'legacy-copy', 'sessions'), 'duplicate-native-id');
-  const duplicateTraces: string[] = [];
-  const duplicateSessions = await discoverReasonixStore({
-    root: duplicateRoot,
-    trace: (event) => duplicateTraces.push(event.detail),
-  });
-  check('duplicate native ids across store layouts fail closed instead of attaching an arbitrary copy',
-    duplicateSessions.every((session) => session.id !== 'duplicate-native-id')
-      && duplicateTraces.some((detail) => detail.includes('duplicate native session id')),
-    duplicateTraces.join(' | '));
+  // Duplicate native ids across layouts: conformance C21 'one id in both the global and a project layout'.
 
   const boundedWorkRoot = join(root, 'bounded-work-case');
   const boundedWorkSessions = join(boundedWorkRoot, 'sessions');

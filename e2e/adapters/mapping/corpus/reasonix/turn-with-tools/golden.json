@@ -1,0 +1,38 @@
+{
+  "history": [
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix system context","body":"You are Reasonix. Follow the project rules."}},
+    {"type":"user-message","text":"fix the build","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:1","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:1","sentAt":1760000000000},
+    {"type":"thinking","text":"look at the tree first","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:thinking"},
+    {"type":"model-output","text":"  I will check.\n\n","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:output","final":true},
+    {"type":"run-summary","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:summary","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:2","assistantMessageKey":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:output","status":"done","agentRuntimeMs":1500,"source":"reasonix"},
+    {"type":"tool-call","callId":"call_a","toolName":"run_command","title":"run_command","args":{"command":"ls"}},
+    {"type":"tool-call","callId":"call_b","toolName":"read_file","title":"read_file"},
+    {"type":"tool-result","callId":"call_a","toolName":"run_command","result":"a.ts\nb.ts","isError":false},
+    {"type":"tool-result","callId":"call_b","toolName":"read_file","result":"denied","isError":true}
+  ],
+  "live": [
+    {"type":"model-output","text":"Done.\n  indented","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:5:output","final":true},
+    {"type":"run-summary","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:5:summary","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:5","assistantMessageKey":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:5:output","status":"done","agentRuntimeMs":800,"source":"reasonix"},
+    {"type":"user-message","text":"second prompt","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:6","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:6","sentAt":1760000100000},
+    {"type":"thinking","text":"thinking only so far","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:7:thinking"},
+    {"type":"run-summary","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:7:summary","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:7","status":"done","agentRuntimeMs":40,"source":"reasonix"},
+    {"type":"tool-result","callId":"reasonix-tool:6903bdff-c41e-452e-852e-6903bdffc41e:8","toolName":"Reasonix tool","result":"orphan result","isError":true}
+  ],
+  "replay": [
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix system context","body":"You are Reasonix. Follow the project rules."}},
+    {"type":"user-message","text":"fix the build","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:1","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:1","sentAt":1760000000000},
+    {"type":"thinking","text":"look at the tree first","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:thinking"},
+    {"type":"model-output","text":"  I will check.\n\n","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:output","final":true},
+    {"type":"run-summary","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:summary","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:2","assistantMessageKey":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:2:output","status":"done","agentRuntimeMs":1500,"source":"reasonix"},
+    {"type":"tool-call","callId":"call_a","toolName":"run_command","title":"run_command","args":{"command":"ls"}},
+    {"type":"tool-call","callId":"call_b","toolName":"read_file","title":"read_file"},
+    {"type":"tool-result","callId":"call_a","toolName":"run_command","result":"a.ts\nb.ts","isError":false},
+    {"type":"tool-result","callId":"call_b","toolName":"read_file","result":"denied","isError":true},
+    {"type":"model-output","text":"Done.\n  indented","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:5:output","final":true},
+    {"type":"run-summary","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:5:summary","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:5","assistantMessageKey":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:5:output","status":"done","agentRuntimeMs":800,"source":"reasonix"},
+    {"type":"user-message","text":"second prompt","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:6","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:6","sentAt":1760000100000},
+    {"type":"thinking","text":"thinking only so far","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:7:thinking"},
+    {"type":"run-summary","key":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:message:7:summary","turnId":"reasonix:6903bdff-c41e-452e-852e-6903bdffc41e:turn:7","status":"done","agentRuntimeMs":40,"source":"reasonix"},
+    {"type":"tool-result","callId":"reasonix-tool:6903bdff-c41e-452e-852e-6903bdffc41e:8","toolName":"Reasonix tool","result":"orphan result","isError":true}
+  ]
+}

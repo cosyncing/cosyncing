@@ -3,7 +3,7 @@
  * tail tomorrow.
  *
  * Three properties this module exists to guarantee, all asserted by
- * `test/test-agy-mapping.ts`:
+ * the agy mapping corpus (`e2e/adapters/mapping/agy.test.ts`):
  *
  *  1. **The fold is TOTAL and the default is a category, not a fallback.** The
  *     `(source, type)` inventory below is complete over a real corpus, and an

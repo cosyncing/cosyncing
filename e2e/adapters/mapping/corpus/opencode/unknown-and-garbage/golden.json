@@ -1,0 +1,39 @@
+{
+  "history": [
+    {"type":"user-message","text":"real prompt","key":"msg_u1","turnId":"msg_u1","sentAt":1000000},
+    {"type":"model-output","text":"answer","key":"prt_t1","final":true},
+    {"type":"tool-call","callId":"call_f","toolName":"tool_from_the_future","toolClass":"other","historySlot":true,"title":"tool_from_the_future","args":{"x":1}},
+    {"type":"tool-result","callId":"call_f","toolName":"tool_from_the_future","toolClass":"other","historySlot":true,"pending":false,"isError":false,"result":"ok","title":"tool_from_the_future"},
+    {"type":"tool-call","callId":"call_s","toolName":"edit","toolClass":"edit","historySlot":true,"title":"Edited a.ts","args":{"filePath":"/w/a.ts"}},
+    {"type":"tool-result","callId":"call_s","toolName":"edit","historySlot":true,"pending":true},
+    {"type":"tool-call","callId":"prt_null","toolName":"tool","toolClass":"other","historySlot":true,"title":"tool","args":{}},
+    {"type":"tool-result","callId":"prt_null","toolName":"tool","historySlot":true,"pending":true},
+    {"type":"model-output","text":"part without time","key":"prt_noid","final":false},
+    {"type":"model-output","text":"part with no id","final":false},
+    {"type":"run-summary","key":"opencode:run:msg_a1","turnId":"msg_a1","userMessageKey":"msg_u1","assistantMessageKey":"prt_t1","status":"done","startedAt":1001000,"completedAt":1003000,"totalRuntimeMs":2000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"opencode"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":2000,"turnCount":1,"updatedAt":1003000,"source":"opencode"}}
+  ],
+  "live": [
+    {"type":"model-output","text":"orphan part","key":"prt_x","final":true},
+    {"type":"user-message","text":"prompt after unknown events","key":"msg_u2","turnId":"msg_u2","sentAt":5000000}
+  ],
+  "replay": [
+    {"type":"user-message","text":"real prompt","key":"msg_u1","turnId":"msg_u1","sentAt":1000000},
+    {"type":"model-output","text":"answer","key":"prt_t1","final":true},
+    {"type":"tool-call","callId":"call_f","toolName":"tool_from_the_future","toolClass":"other","historySlot":true,"title":"tool_from_the_future","args":{"x":1}},
+    {"type":"tool-result","callId":"call_f","toolName":"tool_from_the_future","toolClass":"other","historySlot":true,"pending":false,"isError":false,"result":"ok","title":"tool_from_the_future"},
+    {"type":"tool-call","callId":"call_s","toolName":"edit","toolClass":"edit","historySlot":true,"title":"Edited a.ts","args":{"filePath":"/w/a.ts"}},
+    {"type":"tool-result","callId":"call_s","toolName":"edit","historySlot":true,"pending":true},
+    {"type":"tool-call","callId":"prt_null","toolName":"tool","toolClass":"other","historySlot":true,"title":"tool","args":{}},
+    {"type":"tool-result","callId":"prt_null","toolName":"tool","historySlot":true,"pending":true},
+    {"type":"model-output","text":"part without time","key":"prt_noid","final":false},
+    {"type":"model-output","text":"part with no id","final":false},
+    {"type":"run-summary","key":"opencode:run:msg_a1","turnId":"msg_a1","userMessageKey":"msg_u1","assistantMessageKey":"prt_t1","status":"done","startedAt":1001000,"completedAt":1003000,"totalRuntimeMs":2000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"opencode"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"model-output","text":"orphan part","key":"prt_x","final":true},
+    {"type":"run-summary","key":"opencode:run:msg_unknown","turnId":"msg_unknown","userMessageKey":"msg_u1","assistantMessageKey":"prt_x","status":"done","startedAt":4000000,"completedAt":4001000,"totalRuntimeMs":1000,"source":"opencode"},
+    {"type":"user-message","text":"prompt after unknown events","key":"msg_u2","turnId":"msg_u2","sentAt":5000000},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":3000,"turnCount":2,"updatedAt":4001000,"source":"opencode"}}
+  ]
+}

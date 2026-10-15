@@ -133,6 +133,8 @@ export interface SharedDraftStoreOptions {
   directory?: string;
   now?: () => number;
   onPersistenceError?: (error: unknown) => void;
+  /** Cap on retained non-empty drafts; {@link MAX_SHARED_DRAFT_SESSIONS} unless a test lowers it. */
+  maxSessions?: number;
 }
 
 const storeKey = (tool: string, sessionId: string): string => `${tool}\0${sessionId}`;
@@ -150,6 +152,7 @@ export class SharedDraftStore {
   private readonly directory: string;
   private readonly now: () => number;
   private readonly onPersistenceError?: (error: unknown) => void;
+  private readonly maxSessions: number;
   private readonly records = new Map<string, SharedDraftRecord>();
   /** key → shard path. Populated on load and on the first accepted write. */
   private readonly shards = new Map<string, string>();
@@ -166,6 +169,7 @@ export class SharedDraftStore {
     this.directory = options.directory ?? join(setupStateHome(), 'drafts');
     this.now = options.now ?? Date.now;
     this.onPersistenceError = options.onPersistenceError;
+    this.maxSessions = options.maxSessions ?? MAX_SHARED_DRAFT_SESSIONS;
     this.load();
   }
 
@@ -296,7 +300,7 @@ export class SharedDraftStore {
       entries.sort((a, b) => a[1].updatedAt - b[1].updatedAt);
       for (const [key] of entries.slice(0, entries.length - cap)) evict(key);
     };
-    evictOldestBeyond(nonEmpty, MAX_SHARED_DRAFT_SESSIONS);
+    evictOldestBeyond(nonEmpty, this.maxSessions);
     evictOldestBeyond(tombstones, MAX_SHARED_DRAFT_CLEAR_TOMBSTONES);
   }
 

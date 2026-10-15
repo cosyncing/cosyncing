@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "two remote prompts claiming the same correlation key arriving on the tail: the connection emits a history-reset instead of keying one of them wrongly, and the resync keys both by their entry ids",
+  "userTexts": [
+    "first duplicate",
+    "second duplicate"
+  ],
+  "sessionId": "720f9ace-3f43-4d4c-8d4c-720f9ace3f43"
+}

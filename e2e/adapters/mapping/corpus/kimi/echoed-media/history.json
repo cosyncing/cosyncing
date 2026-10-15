@@ -1,0 +1,45 @@
+{
+  "items": [
+    {
+      "id": "p_2",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "image",
+          "source": {
+            "kind": "url",
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+          }
+        }
+      ]
+    },
+    {
+      "id": "p_1",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "image",
+          "source": {
+            "kind": "url",
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+          }
+        },
+        {
+          "type": "text",
+          "text": "what is in this screenshot"
+        }
+      ]
+    }
+  ],
+  "has_more": false
+}

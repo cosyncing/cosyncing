@@ -323,8 +323,7 @@
       "evidencePresent": ["D", "L0", "L1"],
       "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeAdapter.exportTranscript)", "packages/typescript/broker/src/security/r2-export.ts", "packages/typescript/broker/src/security/r2-redactor.ts"],
       "traceRefs": [
-        "packages/typescript/broker/test/security-r2/test-r2-export.ts",
-        "packages/typescript/broker/test/security-r2/test-r2-redactor.ts",
+        "e2e/broker/transcript-export.test.ts",
         "scripts/broker/tests/app/test-web-ui-components.ts"
       ]
     },

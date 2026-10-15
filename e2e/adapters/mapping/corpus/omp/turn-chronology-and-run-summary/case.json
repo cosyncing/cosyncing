@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "file order is causal order (equal or older clocks never reorder); one run summary per user turn from evidence only: a turn closes on a terminal stopReason or a later prompt, the tail continues a turn opened at attach and closes it with the same summary a reload computes, contradictory clocks omit the duration, an abort is cancelled with its span, a superseded retry error neither closes nor fails the turn, a trailing toolUse stays running",
+  "userTexts": [
+    "go",
+    "time goes backwards",
+    "stop me",
+    "flaky provider",
+    "unanswered",
+    "still running"
+  ],
+  "sessionId": "ff644405-b840-4724-8724-ff644405b840"
+}

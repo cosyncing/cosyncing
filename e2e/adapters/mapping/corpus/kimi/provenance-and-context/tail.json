@@ -1,0 +1,158 @@
+{
+  "items": [
+    {
+      "id": "msg_u2",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "prompt after the context rows"
+        }
+      ]
+    },
+    {
+      "id": "msg_future_origin",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "a-kind-from-the-future"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "written by a kind of origin from the future"
+        }
+      ]
+    },
+    {
+      "id": "msg_compact",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "compaction_summary"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Earlier conversation was folded into this note."
+        }
+      ]
+    },
+    {
+      "id": "msg_skill_quoted",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "User activated the skill \"commit\". Follow the loaded skill instructions.\n\n<skill-loaded name=\"commit\" trigger=\"user-slash\" source=\"project\" dir=\"/repo/.agents/skills/commit\" args=\"please review\">\n# Commit\nStage, write the message, commit.\n</skill-loaded>"
+        }
+      ]
+    },
+    {
+      "id": "msg_skill_env",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "skill_activation",
+          "activationId": "act_5",
+          "skillName": "commit",
+          "skillArgs": "please review",
+          "trigger": "user-slash"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "The skill text, with no envelope around it."
+        }
+      ]
+    },
+    {
+      "id": "msg_skill_nameless",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "skill_activation",
+          "activationId": "act_4",
+          "trigger": "user-slash"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "User activated the skill \"commit\". Follow the loaded skill instructions.\n\n<skill-loaded name=\"commit\" trigger=\"user-slash\" source=\"project\" dir=\"/repo/.agents/skills/commit\" args=\"please review\">\n# Commit\nStage, write the message, commit.\n</skill-loaded>"
+        }
+      ]
+    },
+    {
+      "id": "msg_plugin",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "plugin_command",
+          "activationId": "act_3",
+          "pluginId": "demo",
+          "commandName": "wrap",
+          "commandArgs": "src/",
+          "trigger": "user-slash"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Expanded command body.\nDo the thing."
+        }
+      ]
+    },
+    {
+      "id": "msg_skill_bare",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "skill_activation",
+          "activationId": "act_2",
+          "skillName": "goal",
+          "trigger": "user-slash"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "<skill-loaded name=\"goal\" trigger=\"user-slash\">\nWrite a goal.\n</skill-loaded>"
+        }
+      ]
+    },
+    {
+      "id": "msg_skill",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "skill_activation",
+          "activationId": "act_1",
+          "skillName": "commit",
+          "skillArgs": "please review",
+          "trigger": "user-slash"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "User activated the skill \"commit\". Follow the loaded skill instructions.\n\n<skill-loaded name=\"commit\" trigger=\"user-slash\" source=\"project\" dir=\"/repo/.agents/skills/commit\" args=\"please review\">\n# Commit\nStage, write the message, commit.\n</skill-loaded>"
+        }
+      ]
+    }
+  ],
+  "has_more": false
+}

@@ -1,0 +1,4 @@
+{"type":"message","id":"f7","timestamp":"2026-06-20T00:00:04.000Z","message":{"role":"toolResult","toolCallId":"cf1","toolName":"tool_from_the_future","content":[{"type":"text","text":"ok"}],"details":{"a":{"new":"shape"}}}}
+{"type":"message","id":"f8","message":{"role":"toolResult","content":7}}
+{"type":"message","id":"f9","message":null}
+{"type":"message","id":"f10","timestamp":"2026-06-20T00:00:05.000Z","message":{"role":"user","content":[{"type":"text","text":"prompt after unknown rows"}],"timestamp":1781913605000}}

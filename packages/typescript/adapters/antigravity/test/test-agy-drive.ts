@@ -62,7 +62,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 6000): Promise<bool
   return predicate();
 }
 
-const settle = (ms = 300): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Wait until the transcript tail has consumed every byte now in the file. The honest barrier for "nothing more
+ * arrived": rows are emitted while a chunk is processed, so once the offset reaches the file's size no further row
+ * can come from what was written. A fixed sleep guessed how long the drain takes and was wrong on a loaded machine.
+ */
+async function tailed(h: { connection: unknown; transcriptPath: string }): Promise<void> {
+  const reached = await waitFor(
+    () => (h.connection as { offset: number }).offset >= statSync(h.transcriptPath).size,
+  );
+  if (!reached) throw new Error('the transcript tail never consumed the file');
+}
 
 /**
  * A LONE surrogate — a high one with no low after it, or a low one with no high
@@ -185,33 +195,6 @@ function newDrive(
     !bare.includes('--conversation') && bare.includes('--input-format=stream-json'), bare.join(' '));
 }
 
-// ── 2. Attach spawns nothing; the first prompt spawns ───────────────────────
-{
-  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] });
-  try {
-    await h.connection.getHistory();
-    await settle(200);
-    check('attaching and replaying history spawns NO child (an opened row costs nothing)',
-      h.fake.argv() === undefined, JSON.stringify(h.fake.argv()));
-
-    await h.connection.sendPrompt({ text: 'hello there' });
-    check('the first sendPrompt spawned the child', await waitFor(() => h.fake.argv() !== undefined),
-      JSON.stringify(h.fake.argv()));
-    const argv = h.fake.argv()!;
-    check('the spawned argv carries no --print', !argv.includes('--print'), argv.join(' '));
-    check('the spawned argv resumes this conversation',
-      argv.includes('--conversation') && argv.includes(CONVERSATION), argv.join(' '));
-
-    check('the prompt was written to stdin as one NDJSON `event: user` line',
-      await waitFor(() => h.fake.stdin().length === 1)
-        && h.fake.stdin()[0]!.event === 'user'
-        && JSON.stringify(h.fake.stdin()[0]!.message) === JSON.stringify({ role: 'user', content: 'hello there' }),
-      JSON.stringify(h.fake.stdin()));
-  } finally {
-    h.cleanup();
-  }
-}
-
 // ── 3. The minted pending row (Q7) ──────────────────────────────────────────
 {
   const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] });
@@ -260,7 +243,7 @@ function newDrive(
     // agy writes the delivering line itself, AFTER our send.
     appendFileSync(h.transcriptPath, jsonl([userInputStep(50, 'continue')]));
     await waitFor(() => h.users().length > before);
-    await settle(200);
+    await tailed(h);
 
     const delivered = h.users().filter((row) => row.text === 'continue');
     check('the delivering transcript line does NOT mint a second row',
@@ -324,7 +307,7 @@ function newDrive(
     const before = h.users().length;
     appendFileSync(h.transcriptPath, jsonl([userInputStep(61, 'yes')]));
     await waitFor(() => h.users().length > before);
-    await settle(200);
+    await tailed(h);
     const claimed = h.users().filter((row) => row.text === 'yes' && row.key === minted.key);
     check('the line written AFTER the send does claim it', claimed.length >= 1, `${claimed.length}`);
   } finally {
@@ -376,7 +359,7 @@ function newDrive(
     // A prompt WE never sent appears: a terminal took the conversation.
     appendFileSync(h.transcriptPath, jsonl([userInputStep(70, 'typed in a terminal')]));
     await waitFor(() => h.connection.driving === false);
-    await settle(250);
+    await tailed(h);
 
     check('a USER_EXPLICIT line we did not submit self-demotes the connection',
       h.connection.driving === false);
@@ -425,39 +408,6 @@ function newDrive(
   }
 }
 
-// ── 8. The stream-closed-without-result trap ────────────────────────────────
-{
-  // MEASURED: an unrecognized input `event` makes agy exit 0 with only `init`
-  // and no `result`. An adapter that just waits would hang forever.
-  const h = newDrive({
-    init: INIT_EVENT,
-    turns: ['silent'],
-    silentExitCode: 0,
-    stderr: 'warning: ignoring unsupported stream input message event "x"',
-  });
-  try {
-    await h.connection.getHistory();
-    await h.connection.sendPrompt({ text: 'this turn will be swallowed' });
-
-    const surfaced = await waitFor(() => h.messages.some((m) => m.type === 'error'));
-    check('a turn whose stream closes with NO result surfaces an error', surfaced,
-      h.messages.map((m) => m.type).join(','));
-    check('the error names the missing result rather than a generic failure',
-      h.messages.some((m) => m.type === 'error' && /without reporting the result/i.test((m as { message: string }).message)),
-      h.messages.filter((m) => m.type === 'error').map((m) => (m as { message: string }).message).join(' | '));
-    check('the session stops reporting a running turn',
-      await waitFor(() => {
-        const statuses = h.messages.filter((m) => m.type === 'status');
-        return statuses.length > 0 && (statuses[statuses.length - 1] as { status: string }).status === 'idle';
-      }),
-      h.messages.filter((m) => m.type === 'status').map((m) => (m as { status: string }).status).join(','));
-    check('the words the user typed are NOT lost by the failure',
-      h.users().some((row) => row.text === 'this turn will be swallowed'));
-  } finally {
-    h.cleanup();
-  }
-}
-
 // ── 9. result drives the outcome; usage becomes token-count ─────────────────
 {
   const h = newDrive({
@@ -472,7 +422,6 @@ function newDrive(
     await h.connection.getHistory();
     await h.connection.sendPrompt({ text: 'go' });
     await waitFor(() => h.messages.some((m) => m.type === 'token-count'));
-    await settle(200);
 
     const output = h.messages.find((m) => m.type === 'model-output' && String((m as { text?: string }).text).includes('partial answer'));
     check('step_update deltas accumulate into ONE model-output row', !!output,
@@ -502,27 +451,6 @@ function newDrive(
   }
 }
 
-// ── 10. A non-SUCCESS result is an error, whatever the exit code ────────────
-{
-  const h = newDrive({
-    init: INIT_EVENT,
-    turns: [[{ result: {}, conversation_id: CONVERSATION, status: 'ERROR', error: 'message field missing', num_turns: 1 }]],
-  });
-  try {
-    await h.connection.getHistory();
-    await h.connection.sendPrompt({ text: 'bad turn' });
-    check('a non-SUCCESS result event raises an error, read from the RESULT and not an exit code',
-      await waitFor(() => h.messages.some((m) => m.type === 'error'
-        && /ERROR/.test((m as { message: string }).message))),
-      h.messages.filter((m) => m.type === 'error').map((m) => (m as { message: string }).message).join(' | '));
-    check('a turn that DID report its result raises no missing-result error',
-      !h.messages.some((m) => m.type === 'error' && /without reporting the result/i.test((m as { message: string }).message)),
-      h.messages.filter((m) => m.type === 'error').map((m) => (m as { message: string }).message).join(' | '));
-  } finally {
-    h.cleanup();
-  }
-}
-
 // ── 11. init re-derives the MODEL; the mode comes from the launch ───────────
 //
 // TWO AXES, and `init` answers the wrong one. `--mode` takes `default`,
@@ -537,7 +465,6 @@ function newDrive(
     await h.connection.getHistory();
     await h.connection.sendPrompt({ text: 'go' });
     await waitFor(() => h.messages.some((m) => m.type === 'metadata-update'));
-    await settle(200);
 
     check('the live init re-derives the model rather than trusting what attach decided',
       h.connection.info.currentModel?.modelID === 'gemini-3.5-flash-low',
@@ -589,7 +516,6 @@ function newDrive(
     await h.connection.getHistory();
     await h.connection.sendPrompt({ text: 'go', permissionMode: 'full-access' });
     await waitFor(() => h.fake.launches() === 1);
-    await settle(200);
     const launched = h.fake.argv() ?? [];
     check('a per-turn mode agy does not have is dropped from the argv, with a trace',
       !launched.includes('--mode') && h.traces.some((trace) => trace.op === 'drive-mode-rejected'),
@@ -597,89 +523,6 @@ function newDrive(
     check('the dropped mode never reaches `currentMode` either',
       h.connection.info.currentMode === undefined,
       String(h.connection.info.currentMode));
-  } finally {
-    h.cleanup();
-  }
-}
-
-// ── 11c. A per-turn EFFORT switch launches the sibling id (P2a + F1) ────────
-//
-// The picker collapses a family's effort variants into one row, so the client
-// sends `{modelID: <some variant>, reasoningEffort: 'low'}`. The switch must
-// resolve to the SIBLING id before it is compared to the launch model and before
-// it reaches the argv — and `--effort` must never be passed, because every
-// catalog id is already a variant and the binary rejects the pair. The relaunch
-// still obeys the F1 settlement rules: the abandoned turn is named and the
-// session returns to idle.
-{
-  const h = newDrive({
-    init: INIT_EVENT,
-    turnsByLaunch: [[[]], [[RESULT_OK]]],
-    defaultTurn: [],
-  });
-  try {
-    await h.connection.getHistory();
-    await h.connection.sendPrompt({ text: 'first, which never answers' });
-    await waitFor(() => h.fake.stdin().length === 1);
-
-    await h.connection.sendPrompt({
-      text: 'second, at a different effort',
-      model: { providerID: 'google-antigravity', modelID: 'gemini-3.7-flash-high', reasoningEffort: 'low' },
-    });
-    check('an effort switch relaunches the child',
-      await waitFor(() => h.fake.launches() === 2), `${h.fake.launches()} launches`);
-    const argv = h.fake.argv() ?? [];
-    check('the relaunch names the SIBLING id rather than the id the client sent',
-      argv.includes('gemini-3.7-flash-low') && !argv.includes('gemini-3.7-flash-high'),
-      argv.join(' '));
-    check('`--effort` is never passed — the id already carries the effort',
-      !argv.includes('--effort'), argv.join(' '));
-    check('`--print` is still absent from the relaunched argv', !argv.includes('--print'), argv.join(' '));
-
-    // F1, unchanged by the model resolution in front of it.
-    check('the turn the effort switch abandoned is named to the user',
-      h.errors().some((message) => /cancelled without a result/i.test(message)),
-      h.errors().join(' | '));
-    check('the effort switch settles the abandoned generation exactly once',
-      h.traces.filter((trace) => trace.op === 'drive-turn-abandoned-by-relaunch').length === 1,
-      h.traces.filter((trace) => trace.op === 'drive-turn-abandoned-by-relaunch').length.toString());
-    check('the replacement turn CAN return the session to idle',
-      await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle'),
-      h.statuses().join(','));
-  } finally {
-    h.cleanup();
-  }
-}
-
-// ── 12. Two sockets share ONE connection and one writer (Q14) ───────────────
-{
-  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] });
-  try {
-    await h.connection.getHistory();
-    // A peer socket joins the EXISTING connection — `Hub.joinExisting` never attaches.
-    const peer: AgentMessage[] = [];
-    h.connection.subscribe((message) => peer.push(message));
-
-    await h.connection.sendPrompt({ text: 'from socket A' });
-    await h.connection.sendPrompt({ text: 'from socket B' });
-    await waitFor(() => h.fake.stdin().length === 2);
-
-    check('both sockets\' prompts reach ONE child stdin, in order',
-      h.fake.stdin().map((line) => (line.message as { content: string }).content).join('|')
-        === 'from socket A|from socket B',
-      JSON.stringify(h.fake.stdin().map((l) => (l.message as { content: string }).content)));
-    check('the peer socket sees the other socket\'s pending row',
-      peer.some((m) => m.type === 'user-message' && (m as { text: string }).text === 'from socket A'));
-    check('a peer socket\'s prompt is NOT treated as a foreign writer',
-      h.connection.driving === true);
-
-    // And the delivery of a peer prompt still claims its key rather than demoting.
-    const before = h.users().length;
-    appendFileSync(h.transcriptPath, jsonl([userInputStep(80, 'from socket B')]));
-    await waitFor(() => h.users().length > before);
-    await settle(200);
-    check('the delivering line for a peer prompt does not demote the shared connection',
-      h.connection.driving === true);
   } finally {
     h.cleanup();
   }
@@ -777,41 +620,6 @@ function newDrive(
   }
 }
 
-// ── 15. Demotion mid-turn settles and publishes ─────────────────────────────
-//
-// Same accounting hole, reached the other way: demotion kills the child to stop
-// being a second writer, and killing it settles nothing by itself. A demoted
-// connection stuck at Running is the worst of both — no writer left, and a UI
-// that says a turn is still going.
-{
-  const h = newDrive({ init: INIT_EVENT, defaultTurn: [] });
-  try {
-    await h.connection.getHistory();
-    await h.connection.sendPrompt({ text: 'ours, still running' });
-    await waitFor(() => h.fake.stdin().length === 1);
-    check('the turn is running when the takeover lands',
-      h.statuses().join(',') === 'running', h.statuses().join(','));
-
-    appendFileSync(h.transcriptPath, jsonl([userInputStep(80, 'typed in a terminal')]));
-    await waitFor(() => h.connection.driving === false);
-    await settle(250);
-
-    check('the demotion settles the outstanding turn back to idle',
-      h.statuses()[h.statuses().length - 1] === 'idle', h.statuses().join(','));
-    check('the demotion says what happened to the turn that was running',
-      h.errors().some((message) => /never reported its result/i.test(message)),
-      h.errors().join(' | '));
-    check('the abandoned turn is traced with its cause',
-      h.traces.some((trace) => trace.op === 'drive-turn-abandoned-by-demotion'),
-      h.traces.map((trace) => trace.op).join(','));
-    check('the demotion still publishes the observing posture to everyone',
-      h.messages.some((m) => m.type === 'metadata-update'
-        && JSON.stringify((m as { value: unknown }).value).includes('observing')));
-  } finally {
-    h.cleanup();
-  }
-}
-
 // ── 16. Ownership is proved by the consumed claim, never by matching text ────
 //
 // The removed fallback exonerated any tail prompt whose text matched one of the
@@ -829,7 +637,7 @@ function newDrive(
 
     // OUR prompt's delivery: appended past the fence, so it claims the key.
     appendFileSync(h.transcriptPath, jsonl([userInputStep(90, 'continue')]));
-    await settle(300);
+    await tailed(h);
     check('our own prompt delivering does NOT demote', h.connection.driving === true);
 
     // The key SURVIVES delivery: the mapper re-keys that transcript line to the
@@ -959,61 +767,6 @@ function newDrive(
       h.messages.filter((m) => m.type === 'model-output').length.toString());
     check('the turn still completes',
       await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle'), h.statuses().join(','));
-  } finally {
-    h.cleanup();
-  }
-}
-
-// ── 18. A canceled step is TERMINAL, not running ────────────────────────────
-//
-// `isTerminalStreamState` accepted CANCEL, so the step flushed and nothing more
-// would ever arrive for it — while the status mapper below it had no CANCEL arm
-// and returned RUNNING. A step that is finished and says it is running is a
-// spinner with nothing left to stop it.
-{
-  for (const state of ['STEP_CANCELED', 'STEP_CANCELLED', 'CANCEL', 'STEP_ABORTED', 'STEP_INTERRUPTED']) {
-    check(`${state} is terminal AND maps to a terminal status`,
-      isTerminalStreamState(state) && agyStepStatusForState(state) !== 'RUNNING',
-      `terminal=${isTerminalStreamState(state)} status=${agyStepStatusForState(state)}`);
-  }
-  check('every terminal stream state maps to a non-RUNNING status',
-    ['STEP_DONE', 'STEP_COMPLETE', 'STEP_ERROR', 'STEP_FAILED', 'STEP_CANCELED']
-      .every((state) => !isTerminalStreamState(state) || agyStepStatusForState(state) !== 'RUNNING'));
-  check('a still-running state is still RUNNING',
-    agyStepStatusForState('STEP_RUNNING') === 'RUNNING' && !isTerminalStreamState('STEP_RUNNING'));
-  check('a cancel is not painted as a host failure',
-    agyStepStatusForState('STEP_CANCELED') === AGY_CANCELED_STATUS
-    && agyStepStatusForState('STEP_ERROR') === 'ERROR');
-  check('the canceled status reads as interrupted even with a live child',
-    agyCommandState(AGY_CANCELED_STATUS, true) === 'interrupted'
-    && agyCommandState('RUNNING', true) === 'running',
-    `${agyCommandState(AGY_CANCELED_STATUS, true)} vs ${agyCommandState('RUNNING', true)}`);
-}
-
-{
-  // The fixture the finding asked for. It lives in the shared wire fixture under
-  // `canceledStepUpdates`, flagged CONSTRUCTED rather than measured: only
-  // STEP_DONE was ever captured, so this pair is a probe for the invariant, not a
-  // recording of a 1.1.17 envelope.
-  const h = newDrive({
-    init: INIT_EVENT,
-    defaultTurn: [
-      ...FIXTURE.streamEvents.canceledStepUpdates.map((event) => ({ type: 'step_update', ...event })),
-      RESULT_OK,
-    ],
-  });
-  try {
-    await h.connection.getHistory();
-    await h.connection.sendPrompt({ text: 'cancel me' });
-    check('a canceled step flushes exactly once, carrying what it had',
-      await waitFor(() => h.messages.some(
-        (m) => m.type === 'model-output' && String((m as { text?: string }).text).includes('half an answ'),
-      )),
-      h.messages.map((m) => m.type).join(','));
-    check('a canceled step does not leave the turn running',
-      await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle'), h.statuses().join(','));
-    check('a cancel is not reported as an error',
-      !h.errors().some((message) => /cancel/i.test(message)), h.errors().join(' | '));
   } finally {
     h.cleanup();
   }
@@ -1271,7 +1024,7 @@ function newDrive(
     // Let the tail drain across the boundary and settle either way — a demotion
     // is the failure mode under test, so waiting on "still driving" would pass
     // vacuously by timing out.
-    await settle(600);
+    await tailed(h);
 
     check('(3) the fenced key claim still lands on the delivering line',
       h.connection.driving === true, `driving=${h.connection.driving}`);

@@ -1,0 +1,1 @@
+{"type":"message","id":"oa1","timestamp":"2026-06-20T00:00:04.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"omp answer"}],"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":{"total":0.01}}}}

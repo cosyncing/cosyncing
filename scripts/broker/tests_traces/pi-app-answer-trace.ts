@@ -19,7 +19,7 @@
  *     Pi emits only in RPC mode — never to a TUI extension), so a synced Pi session keeps interactive questions
  *     terminal-only; the wire is forward-ready and the extension now handles a stray `answer`/`reject-question`
  *     gracefully (clears the card, posts an honest notice) instead of dropping it. The Pi RESUME path answers
- *     questions for real (covered by packages/typescript/adapters/pi/test/test-pi-observe.ts + the resume adapter's RPC handling).
+ *     questions for real (covered by e2e/adapters/conformance/pi.test.ts + the resume adapter's RPC handling).
  *
  *   bun run scripts/broker/tests_traces/pi-app-answer-trace.ts
  */

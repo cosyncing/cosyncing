@@ -1,0 +1,12 @@
+{
+  "history": [
+    {"type":"user-message","text":"before the noise","key":"kimi:g_5:0"}
+  ],
+  "live": [
+    {"type":"user-message","text":"after the noise","key":"kimi:g_7:0"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"before the noise","key":"kimi:g_5:0"},
+    {"type":"user-message","text":"after the noise","key":"kimi:g_7:0"}
+  ]
+}

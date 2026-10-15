@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "spawn_agent and wait_agent in the parent rollout surface as agent-activity subagent bars (running on spawn output, done on wait output, a still-running child stays running through an unrelated wait, re-waiting a resolved child does not duplicate its report, a child never joined is reaped at task_complete); raw control cards never leak",
+  "userTexts": [
+    "research"
+  ],
+  "sessionId": "3972814c-0f8c-46fe-86fe-3972814c0f8c"
+}

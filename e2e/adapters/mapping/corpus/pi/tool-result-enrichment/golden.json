@@ -1,0 +1,52 @@
+{
+  "history": [
+    {"type":"user-message","text":"enrich","key":"tu1","turnId":"tu1","sentAt":1781913600000},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"tu1","status":"running","startedAt":1781913600000,"source":"pi-jsonl"}
+  ],
+  "live": [
+    {"type":"tool-call","callId":"e1","toolName":"edit","toolClass":"edit","args":{"path":"src/x.ts"}},
+    {"type":"tool-call","callId":"p1","toolName":"apply_patch","toolClass":"edit","args":{}},
+    {"type":"tool-call","callId":"b1","toolName":"bash","toolClass":"execute","args":{"command":"false"},"semantic":{"kind":"command","command":"false","state":"running"}},
+    {"type":"tool-call","callId":"b2","toolName":"bash","toolClass":"execute","args":{"command":"true"},"semantic":{"kind":"command","command":"true","state":"running"}},
+    {"type":"tool-call","callId":"b3","toolName":"bash","toolClass":"execute","args":{"command":"noisy"},"semantic":{"kind":"command","command":"noisy","state":"running"}},
+    {"type":"tool-call","callId":"r1","toolName":"read","toolClass":"lookup","args":{"path":"README.md"},"semantic":{"kind":"file-read","path":"README.md"}},
+    {"type":"tool-call","callId":"g1","toolName":"grep","toolClass":"lookup","args":{"pattern":"foo","path":"src"},"semantic":{"kind":"search","query":"foo","scope":"src"}},
+    {"type":"tool-call","callId":"w1","toolName":"write","toolClass":"edit","args":{"path":"new.ts","content":"x"}},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"tool-result","callId":"e1","toolName":"edit","toolClass":"edit","isError":false,"result":"ok","diff":"--- a/src/x.ts\n+++ b/src/x.ts\n@@\n+one\n+two\n-old\n","additions":2,"deletions":1,"path":"src/x.ts","fileChanges":[{"path":"src/x.ts","operation":"edit","additions":2,"deletions":1,"diff":"--- a/src/x.ts\n+++ b/src/x.ts\n@@\n+one\n+two\n-old\n"}],"title":"Edited x.ts"},
+    {"type":"tool-result","callId":"p1","toolName":"apply_patch","toolClass":"edit","isError":false,"result":"ok","diff":"--- a/lib/y.ts\n+++ b/lib/y.ts\n@@\n+added\n","additions":1,"deletions":0,"path":"lib/y.ts","fileChanges":[{"path":"lib/y.ts","operation":"edit","additions":1,"deletions":0,"diff":"--- a/lib/y.ts\n+++ b/lib/y.ts\n@@\n+added\n"}],"title":"Edited y.ts"},
+    {"type":"tool-result","callId":"b1","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"false","state":"failed"},"isError":true,"result":"boom\nCommand exited with code 2","truncated":true,"exitCode":2},
+    {"type":"tool-result","callId":"b2","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"true","state":"completed"},"isError":false,"result":"done","exitCode":0,"durationMs":2500},
+    {"type":"tool-result","callId":"b3","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"noisy","state":"failed"},"isError":true,"result":"log: a job exited with code 137 earlier\n\nCommand exited with code 2","exitCode":2},
+    {"type":"tool-result","callId":"r1","toolName":"read","toolClass":"lookup","semantic":{"kind":"file-read","path":"README.md","preview":"file contents"},"isError":false,"result":"file contents","path":"README.md","title":"README.md"},
+    {"type":"tool-result","callId":"g1","toolName":"grep","toolClass":"lookup","semantic":{"kind":"search","query":"foo","scope":"src"},"isError":false,"result":"match"},
+    {"type":"tool-result","callId":"w1","toolName":"write","toolClass":"edit","isError":false,"result":"wrote","path":"new.ts","title":"Edited new.ts"},
+    {"type":"model-output","text":"enriched","final":true,"key":"ta2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"tu1","assistantMessageKey":"ta2:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913603000,"totalRuntimeMs":3000,"tokens":{"input":20,"output":10,"cacheRead":2,"cacheWrite":4,"cost":0.02},"source":"pi-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"enrich","key":"tu1","turnId":"tu1","sentAt":1781913600000},
+    {"type":"tool-call","callId":"e1","toolName":"edit","toolClass":"edit","args":{"path":"src/x.ts"}},
+    {"type":"tool-call","callId":"p1","toolName":"apply_patch","toolClass":"edit","args":{}},
+    {"type":"tool-call","callId":"b1","toolName":"bash","toolClass":"execute","args":{"command":"false"},"semantic":{"kind":"command","command":"false","state":"running"}},
+    {"type":"tool-call","callId":"b2","toolName":"bash","toolClass":"execute","args":{"command":"true"},"semantic":{"kind":"command","command":"true","state":"running"}},
+    {"type":"tool-call","callId":"b3","toolName":"bash","toolClass":"execute","args":{"command":"noisy"},"semantic":{"kind":"command","command":"noisy","state":"running"}},
+    {"type":"tool-call","callId":"r1","toolName":"read","toolClass":"lookup","args":{"path":"README.md"},"semantic":{"kind":"file-read","path":"README.md"}},
+    {"type":"tool-call","callId":"g1","toolName":"grep","toolClass":"lookup","args":{"pattern":"foo","path":"src"},"semantic":{"kind":"search","query":"foo","scope":"src"}},
+    {"type":"tool-call","callId":"w1","toolName":"write","toolClass":"edit","args":{"path":"new.ts","content":"x"}},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"tool-result","callId":"e1","toolName":"edit","toolClass":"edit","isError":false,"result":"ok","diff":"--- a/src/x.ts\n+++ b/src/x.ts\n@@\n+one\n+two\n-old\n","additions":2,"deletions":1,"path":"src/x.ts","fileChanges":[{"path":"src/x.ts","operation":"edit","additions":2,"deletions":1,"diff":"--- a/src/x.ts\n+++ b/src/x.ts\n@@\n+one\n+two\n-old\n"}],"title":"Edited x.ts"},
+    {"type":"tool-result","callId":"p1","toolName":"apply_patch","toolClass":"edit","isError":false,"result":"ok","diff":"--- a/lib/y.ts\n+++ b/lib/y.ts\n@@\n+added\n","additions":1,"deletions":0,"path":"lib/y.ts","fileChanges":[{"path":"lib/y.ts","operation":"edit","additions":1,"deletions":0,"diff":"--- a/lib/y.ts\n+++ b/lib/y.ts\n@@\n+added\n"}],"title":"Edited y.ts"},
+    {"type":"tool-result","callId":"b1","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"false","state":"failed"},"isError":true,"result":"boom\nCommand exited with code 2","truncated":true,"exitCode":2},
+    {"type":"tool-result","callId":"b2","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"true","state":"completed"},"isError":false,"result":"done","exitCode":0,"durationMs":2500},
+    {"type":"tool-result","callId":"b3","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"noisy","state":"failed"},"isError":true,"result":"log: a job exited with code 137 earlier\n\nCommand exited with code 2","exitCode":2},
+    {"type":"tool-result","callId":"r1","toolName":"read","toolClass":"lookup","semantic":{"kind":"file-read","path":"README.md","preview":"file contents"},"isError":false,"result":"file contents","path":"README.md","title":"README.md"},
+    {"type":"tool-result","callId":"g1","toolName":"grep","toolClass":"lookup","semantic":{"kind":"search","query":"foo","scope":"src"},"isError":false,"result":"match"},
+    {"type":"tool-result","callId":"w1","toolName":"write","toolClass":"edit","isError":false,"result":"wrote","path":"new.ts","title":"Edited new.ts"},
+    {"type":"model-output","text":"enriched","final":true,"key":"ta2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"tu1","assistantMessageKey":"ta2:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913603000,"totalRuntimeMs":3000,"tokens":{"input":20,"output":10,"cacheRead":2,"cacheWrite":4,"cost":0.02},"source":"pi-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":3000,"turnCount":1,"updatedAt":1781913603000,"source":"pi"}}
+  ]
+}

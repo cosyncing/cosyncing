@@ -9,7 +9,6 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { sourceFingerprint } from '../verification/verification-graph.ts';
 
 const ROOT = resolve(import.meta.dir, '../..');
 const OUTPUT = resolve(
@@ -21,6 +20,33 @@ const CHECK_REPORT = resolve(
     ?? join(ROOT, 'output', 'check', 'report.json'),
 );
 const MAX_BUFFER_BYTES = 64 << 20;
+
+interface SourceState {
+  commit: string;
+  dirty: boolean;
+  /** `git status` plus the full working-tree diff: equal text means unchanged source. */
+  changes: string;
+}
+
+function git(args: string[]): string {
+  const result = Bun.spawnSync(['git', ...args], {
+    cwd: ROOT,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    maxBuffer: MAX_BUFFER_BYTES,
+  });
+  if (!result.success) fail(`git ${args.join(' ')}: ${result.stderr.toString().trim()}`);
+  return result.stdout.toString();
+}
+
+function sourceState(): SourceState {
+  const status = git(['status', '--porcelain=v1', '--untracked-files=normal']);
+  return {
+    commit: git(['rev-parse', 'HEAD']).trim(),
+    dirty: status.length > 0,
+    changes: `${status}\0${git(['diff', '--no-ext-diff', '--binary', 'HEAD', '--'])}`,
+  };
+}
 
 interface StepResult {
   id: string;
@@ -55,25 +81,21 @@ if (!existsSync(CHECK_REPORT)) {
 
 const check = JSON.parse(readFileSync(CHECK_REPORT, 'utf8')) as {
   status?: unknown;
-  coverage?: { mode?: unknown; complete?: unknown };
-  source?: {
-    before?: { sha256?: unknown };
-    after?: { sha256?: unknown };
-    stable?: unknown;
-  };
+  commit?: unknown;
+  dirty?: unknown;
+  selection?: { complete?: unknown };
 };
-const sourceBefore = sourceFingerprint(ROOT);
+const sourceBefore = sourceState();
+// A complete run (every suite this host can run, unsharded, unfiltered) that
+// passed, for exactly this commit. A dirty tree can be rehearsed but is never
+// publication eligible.
 if (
     check.status !== 'pass'
-  || check.coverage?.mode !== 'complete'
-  || check.coverage?.complete !== true
-  || check.source?.stable !== true
-  || check.source.before?.sha256 !== sourceBefore.sha256
-  || check.source.after?.sha256 !== sourceBefore.sha256
+  || check.selection?.complete !== true
+  || check.commit !== sourceBefore.commit
+  || check.dirty !== sourceBefore.dirty
 ) {
-  fail(
-    'the repository check is absent, partial, failed, source-unstable, or belongs to a different source fingerprint',
-  );
+  fail('the repository check is absent, partial, failed, or belongs to a different commit');
 }
 if (!existsSync(join(ROOT, 'apps', 'client', 'build', 'web', 'index.html'))) {
   fail('the canonical web build from bun run check is missing');
@@ -157,19 +179,19 @@ function run(id: string, command: string[]): void {
 function writeReport(
   status: 'pass' | 'fail',
   failure: string | null,
-  sourceAfter = sourceFingerprint(ROOT),
+  sourceAfter = sourceState(),
 ): void {
-  const reportSourceStable = sourceBefore.sha256 === sourceAfter.sha256;
+  const reportSourceStable = sourceBefore.commit === sourceAfter.commit
+    && sourceBefore.changes === sourceAfter.changes;
   const artifacts = status === 'pass' ? ['cosyncing-app.js'] : [];
   const report = {
     schemaVersion: 1,
     kind: 'release-checkpoint',
-    verificationInventory: 'scripts/verification/verification-graph.json',
     status,
     failure,
     source: {
-      before: sourceBefore,
-      after: sourceAfter,
+      commit: sourceBefore.commit,
+      dirty: sourceBefore.dirty,
       stable: reportSourceStable,
     },
     checkReport: 'output/check/report.json',
@@ -196,7 +218,7 @@ function writeReport(
       '# Release checkpoint',
       '',
       `- Status: **${status.toUpperCase()}**`,
-      `- Source fingerprint: \`${sourceBefore.sha256}\``,
+      `- Source commit: \`${sourceBefore.commit}\`${sourceBefore.dirty ? ' (dirty)' : ''}`,
       `- Source stable: ${report.source.stable}`,
       `- Publication eligible: ${report.publicationEligible}`,
       `- Version: \`${version}\``,
@@ -213,7 +235,7 @@ function writeReport(
       '',
       ...artifacts.map((artifact) => `- \`${artifact}\``),
       '',
-      'A dirty source fingerprint is reviewable but not publication eligible.',
+      'A dirty source tree is reviewable but not publication eligible.',
       '',
     ].filter(Boolean).join('\n'),
   );
@@ -253,8 +275,8 @@ run('verify-candidate-pair', [
     : []),
 ]);
 
-const sourceAfter = sourceFingerprint(ROOT);
-if (sourceAfter.sha256 !== sourceBefore.sha256) {
+const sourceAfter = sourceState();
+if (sourceAfter.commit !== sourceBefore.commit || sourceAfter.changes !== sourceBefore.changes) {
   rmSync(BROKER, { force: true });
   writeReport('fail', 'source changed during the release checkpoint', sourceAfter);
   publishOutput();

@@ -1,0 +1,10 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "a user entry with no text and no image (empty or non-text content) answered by the agent: the turn summary must not anchor to a user row that was never rendered",
+  "knownBugMatch": "anchors to a user row",
+  "knownBug": "Pi engine: an empty-content user entry opens a turn (summaryAnchor/userKey) but emits no user-message, so the run-summary carries a userMessageKey no row has",
+  "userTexts": [
+    "real prompt"
+  ],
+  "sessionId": "eae40de3-19b4-4caf-8caf-eae40de319b4"
+}

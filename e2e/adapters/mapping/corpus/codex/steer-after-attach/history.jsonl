@@ -1,0 +1,5 @@
+{"type":"session_meta","payload":{"id":"b6f32b19-0adc-443d-843d-b6f32b190adc","cwd":"/work/proj"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-steer"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"open"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"before"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg-before","content":[{"type":"output_text","text":"before"}]}}

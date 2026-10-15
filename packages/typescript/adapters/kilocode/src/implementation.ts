@@ -56,6 +56,7 @@ import {
   KILO_MINIMUM_SUPPORTED_VERSION,
 } from './version.ts';
 
+export const KILO_MANAGED_PORT = 4097;
 const KILO_HTTP_TIMEOUT_MS = 5_000;
 const KILO_HTTP_MUTATION_TIMEOUT_MS = 30_000;
 const KILO_HTTP_MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -221,8 +222,12 @@ async function readBoundedJson(response: Response): Promise<unknown | undefined>
   try { return JSON.parse(text); } catch { return undefined; }
 }
 
-async function boundedKiloFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-  const response = await globalThis.fetch(input, init);
+async function boundedKiloFetch(
+  base: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<Response> {
+  const response = await base(input, init);
   const method = String(init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
   const url = new URL(String(input instanceof Request ? input.url : input));
   const returnsJson = method === 'GET'
@@ -283,6 +288,10 @@ export interface KiloAdapterOptions {
   /** @deprecated The floor-gated writer is shipped; retained for fixture compatibility. */
   testOnlyEnableUnverifiedDrive?: boolean;
   baseUrl?: string;
+  /** Transport under the authenticated, bounded fetch (default: the global fetch). Fixture hook for in-process servers. */
+  fetch?: typeof globalThis.fetch;
+  /** The loopback port the broker may launch and own `kilo serve` on (default 4097). Fixture hook, see runtime.ts. */
+  managedPort?: number;
   serverUsername?: string;
   serverPassword?: string;
   isManagedHostOwned?: (identityKey: string) => boolean | Promise<boolean>;
@@ -552,9 +561,11 @@ export class KiloAdapter implements AgentBackend {
   private readonly resolveStoredCurrentModel?: KiloAdapterOptions['resolveStoredCurrentModel'];
   private readonly recordNativeCurrentModel?: KiloAdapterOptions['recordNativeCurrentModel'];
   private readonly baseUrl: string;
+  private readonly managedPort: number;
   private readonly serverUsername: string;
   private readonly serverPassword?: string;
   private readonly fetcher: typeof globalThis.fetch;
+  private readonly baseFetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
   private readonly isManagedHostOwned?: KiloAdapterOptions['isManagedHostOwned'];
   private readonly resolveStoredDriveState?: KiloAdapterOptions['resolveStoredDriveState'];
   private readonly revokeStoredDriveEligibility?: KiloAdapterOptions['revokeStoredDriveEligibility'];
@@ -581,10 +592,12 @@ export class KiloAdapter implements AgentBackend {
     this.env = options.env ?? process.env;
     this.capabilities = KILO_CAPABILITIES;
     this.command = options.command ?? (this.env.COSYNCING_KILO_BIN?.trim() || 'kilo');
-    this.baseUrl = (options.baseUrl ?? this.env.KILO_URL?.trim() ?? 'http://127.0.0.1:4097').replace(/\/$/u, '');
+    this.managedPort = options.managedPort ?? KILO_MANAGED_PORT;
+    this.baseUrl = (options.baseUrl ?? this.env.KILO_URL?.trim() ?? `http://127.0.0.1:${this.managedPort}`).replace(/\/$/u, '');
     this.serverUsername = options.serverUsername?.trim() || this.env.KILO_SERVER_USERNAME?.trim() || 'kilo';
     this.serverPassword = (options.serverPassword ?? this.env.KILO_SERVER_PASSWORD)?.trim()
       || randomBytes(32).toString('base64url');
+    this.baseFetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.fetcher = this.authenticatedFetch();
     this.isManagedHostOwned = options.isManagedHostOwned;
     this.resolveStoredDriveState = options.resolveStoredDriveState;
@@ -613,7 +626,7 @@ export class KiloAdapter implements AgentBackend {
 
   managedHostIdentity(inputs: ManagedHostIdentityInputs): string | null {
     try {
-      const base = (inputs.env.KILO_URL?.trim() || 'http://127.0.0.1:4097').replace(/\/$/u, '');
+      const base = (inputs.env.KILO_URL?.trim() || `http://127.0.0.1:${this.managedPort}`).replace(/\/$/u, '');
       return `${new URL(base).origin}|${kiloDataRoot(inputs.env as NodeJS.ProcessEnv, inputs.homeDir)}`;
     } catch {
       return null;
@@ -641,7 +654,7 @@ export class KiloAdapter implements AgentBackend {
     const loopback = url.protocol === 'http:' && !url.username && !url.password
       && (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1');
     const port = Number(url.port || 80);
-    const invocation = loopback && port === 4097 ? await kiloVerifiedInvocation(this.command, this.env) : undefined;
+    const invocation = loopback && port === this.managedPort ? await kiloVerifiedInvocation(this.command, this.env) : undefined;
     const launchable = invocation?.kind === 'native';
     return {
       identityKey: `${url.origin}|${kiloDataRoot(this.env, this.homeDir)}`,
@@ -651,7 +664,7 @@ export class KiloAdapter implements AgentBackend {
       launch: launchable
         ? {
             command: invocation.executable,
-            args: ['serve', '--hostname', '127.0.0.1', '--port', '4097'],
+            args: ['serve', '--hostname', '127.0.0.1', '--port', String(this.managedPort)],
             env: {
               KILO_SERVER_USERNAME: this.serverUsername,
               KILO_SERVER_PASSWORD: this.serverPassword!,
@@ -683,7 +696,7 @@ export class KiloAdapter implements AgentBackend {
       if (loopback && this.serverPassword && target.origin === url.origin) {
         headers.set('authorization', `Basic ${Buffer.from(`${this.serverUsername}:${this.serverPassword}`).toString('base64')}`);
       }
-      return boundedKiloFetch(input, { ...init, headers, redirect: 'error' });
+      return boundedKiloFetch(this.baseFetch, input, { ...init, headers, redirect: 'error' });
     }) as typeof globalThis.fetch;
   }
 

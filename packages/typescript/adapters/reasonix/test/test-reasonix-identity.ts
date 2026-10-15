@@ -282,10 +282,7 @@ try {
         && (await createAdapter.discoverSessions()).every((row) => row.id !== created.id),
       JSON.stringify(created));
     const createdDrive = await createAdapter.attach(created.id, 'resume');
-    check('the first Resume adopts the session/new child without a second spawn',
-      createdDrive === createAdapter.driveConnection(created.id)
-        && createFake.spawnCount() === 1
-        && (await createdDrive.getHistory()).length === 0);
+    // The first Resume adopts the session/new child without a second spawn: conformance C07 (createChildAdopted).
     const createdLive: AgentMessage[] = [];
     createdDrive.subscribe((message) => createdLive.push(message));
     const createdTurn = createdDrive.sendPrompt({ text: 'materialize this session', clientMessageId: 'created-client' });
@@ -444,7 +441,7 @@ try {
         && !inboxPending.some((message) => message.type === 'user-message')
         && inboxOnlyAdapter.isDriving(inboxOnlyInfo.id),
       JSON.stringify({ materializedBeforeWatch, queuedInbox, inboxLive, inboxPending }));
-    await sleep(150);
+    await waitFor(() => runSummaries(inboxLive, 'done').some((frame) => frame.key === `reasonix:${inboxOnlyId}:message:2:summary`));
     check('a created first turn whose ACP return never arrives publishes its snapshot footer with no running',
       runSummaries(inboxLive, 'done').some((frame) => frame.key === `reasonix:${inboxOnlyId}:message:2:summary`)
         && runSummaries(inboxLive, 'running').length === 0

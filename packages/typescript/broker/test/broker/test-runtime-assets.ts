@@ -63,7 +63,7 @@ import {
   settledProcessOutput,
   startHealthyFixtureBroker,
 } from '../helpers/isolated-broker-fixture.ts';
-import { verificationEnvironment } from '../../../../../scripts/verification/verification-graph.ts';
+import { testEnvironment as verificationEnvironment } from '../../../../../scripts/ci/lib/process.ts';
 
 function readFrozenTextFixture(path: string): string {
   const asset = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;

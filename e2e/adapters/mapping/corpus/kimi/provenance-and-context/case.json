@@ -1,0 +1,16 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/kimi/test/test-kimi-mapping.ts",
+  "description": "who wrote a user row decides what it is: a whole system-reminder is injected context only when Kimi says origin.kind is injection (a person pasting one, a cron prompt, no or malformed origin stay user messages), a row that merely quotes a reminder stays whole, oversized context is clipped and says so, a skill or plugin activation splits into the /name action and its body as context (a nameless one stays whole), compaction summaries are context, and an unknown origin kind (cron_job, from the future) currently stays a user row",
+  "userTexts": [
+    "real prompt",
+    "<system-reminder>\nAuto permission mode is active.\n</system-reminder>",
+    "Heads up. <system-reminder>be careful</system-reminder> Act on this.",
+    "/commit please review",
+    "/goal",
+    "/demo:wrap src/",
+    "User activated the skill \"commit\". Follow the loaded skill instructions.\n\n<skill-loaded name=\"commit\" trigger=\"user-slash\" source=\"project\" dir=\"/repo/.agents/skills/commit\" args=\"please review\">\n# Commit\nStage, write the message, commit.\n</skill-loaded>",
+    "written by a kind of origin from the future",
+    "prompt after the context rows"
+  ],
+  "sessionId": "7051f18d-05bd-45ec-85ec-7051f18d05bd"
+}

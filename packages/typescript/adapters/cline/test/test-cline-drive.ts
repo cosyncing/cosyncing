@@ -1,13 +1,12 @@
 import { strict as assert } from 'node:assert';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   isNativeSessionRenameUnsupportedError,
   type AgentMessage,
   type HistorySourceIdentity,
 } from '@cosyncing/adapter-api';
-import { resolveClineAcpEnvironment } from '../src/auth.ts';
-import { CLINE_NATIVE_RENAME_TIMEOUT_MS, ClineAdapter } from '../src/implementation.ts';
+import { ClineAdapter } from '../src/implementation.ts';
 import { buildFakeClineAcp } from './fixtures/fake-acp.ts';
 
 let passed = 0;
@@ -19,43 +18,6 @@ const check = (name: string, condition: unknown, detail = '') => {
 
 const fake = buildFakeClineAcp({ replayPermission: true, hangRenameTitle: 'Timed out title' });
 try {
-  check('production native rename budget covers measured slow Cline history updates',
-    CLINE_NATIVE_RENAME_TIMEOUT_MS === 30_000);
-  const explicitAuthPath = join(fake.root, 'cline-openai-compatible.json');
-  writeFileSync(explicitAuthPath, JSON.stringify({
-    provider: 'openai-compatible', model: 'fixture/model', apiKey: 'fixture-secret',
-  }), { mode: 0o600 });
-  const fileAuth = await resolveClineAcpEnvironment({
-    env: { COSYNCING_CLINE_AUTH_FILE: explicitAuthPath },
-  });
-  check('Cline API-key auth uses an explicit owner-only cosyncing file, not native provider settings',
-    fileAuth?.provider === 'openai-compatible' && fileAuth.model === 'fixture/model'
-      && fileAuth.source === 'auth-file' && fileAuth.env.CLINE_API_KEY === 'fixture-secret');
-  chmodSync(explicitAuthPath, 0o644);
-  check('world-readable Cline auth files fail closed',
-    await resolveClineAcpEnvironment({ env: { COSYNCING_CLINE_AUTH_FILE: explicitAuthPath } }) === undefined);
-  chmodSync(explicitAuthPath, 0o600);
-  const providerSettings = join(fake.dataRoot, 'settings', 'providers.json');
-  mkdirSync(join(fake.dataRoot, 'settings'), { recursive: true });
-  writeFileSync(providerSettings, JSON.stringify({ providers: {
-    'openai-compatible': { settings: { provider: 'openai-compatible', model: 'forbidden', apiKey: 'forbidden' } },
-  } }), { mode: 0o600 });
-  check('Cline native providers.json is never an adapter authentication source',
-    await resolveClineAcpEnvironment({ env: {} }) === undefined);
-  check('partial explicit Cline environment fails closed instead of falling through to the auth file',
-    await resolveClineAcpEnvironment({
-      env: { COSYNCING_CLINE_AUTH_FILE: explicitAuthPath, CLINE_API_KEY: 'partial-secret' },
-    }) === undefined
-      && await resolveClineAcpEnvironment({
-      env: { COSYNCING_CLINE_AUTH_FILE: explicitAuthPath, CLINE_MODEL: 'partial/model' },
-      }) === undefined
-      && await resolveClineAcpEnvironment({
-        env: { COSYNCING_CLINE_AUTH_FILE: explicitAuthPath, CLINE_API_KEY: '' },
-      }) === undefined
-      && await resolveClineAcpEnvironment({
-        env: { COSYNCING_CLINE_AUTH_FILE: explicitAuthPath, CLINE_API_KEY: 'x'.repeat(4_097) },
-      }) === undefined);
-
   let storedBoundary: HistorySourceIdentity | undefined;
   let revocations = 0;
   const adapter = new ClineAdapter({

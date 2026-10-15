@@ -1663,14 +1663,18 @@ Future<void> _traverse(MatrixClient session) async {
 }
 
 /// The ordinary-use scenarios. Each returns its metrics.
+/// With [only], runs just the named scenarios (a stress file runs them one
+/// to a test, without paying for the rest).
 Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
   required bool revision28,
+  Set<String>? only,
 }) async {
+  bool want(String name) => only == null || only.contains(name);
   MatrixClient client() => MatrixClient(SimBroker(revision28: revision28));
   final results = <String, MatrixMetrics>{};
 
   // S1: a long turn streams while the reader is at the start of history.
-  {
+  if (want('longStreamWhileReadingFarBack')) {
     final session = client();
     final agent = SimAgent(session)..history(100);
     await session.attach();
@@ -1683,7 +1687,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
 
   // S2: the socket drops every 60 units of a long turn, and each time the
   // agent persists 50 units the client never receives live.
-  {
+  if (want('repeatedReconnectCycles')) {
     final session = client();
     final agent = SimAgent(session)..history(100);
     await session.attach();
@@ -1703,7 +1707,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
   }
 
   // S3: a long session read to its start and back to the latest row twice.
-  {
+  if (want('readReleaseReloadBothDirections')) {
     final session = client();
     SimAgent(session).history(1000);
     await session.attach();
@@ -1718,7 +1722,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
 
   // S4: an approval every fifth unit while the reader moves back and forth
   // through a streaming turn.
-  {
+  if (want('approvalsWhileMovingBothWays')) {
     final session = client();
     final agent = SimAgent(session, approvalEvery: 5)..history(100);
     await session.attach();
@@ -1740,7 +1744,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
   // S5: an approval on every tool call of a long turn, read from the start.
   // More never-saved rows arrive than the budget can hold beside the rows
   // being read, so some give way — each release announced where it was.
-  {
+  if (want('approvalOnEveryCallWhileReadingFarBack')) {
     final session = client();
     final agent = SimAgent(session, approvalEvery: 1)..history(100);
     await session.attach();
@@ -1757,7 +1761,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
   // S6: the socket drops and the hub resyncs while each unit's call is still
   // running, so the frames end at the running-turn hold and replay the held
   // call and the running reading after them.
-  {
+  if (want('framesWhileACallRuns')) {
     final session = client();
     final agent = SimAgent(session)..history(100);
     await session.attach();
@@ -1787,7 +1791,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
   // turn's first call (as Claude writes it), or queued during the turn before
   // and saved where the agent takes it. The reader moves and the socket drops
   // meanwhile.
-  {
+  if (want('promptsSavedLateOrQueued')) {
     final session = client();
     final agent = SimAgent(session, approvalEvery: 7)..history(100);
     await session.attach();
@@ -1816,7 +1820,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
   // S8: approvals and questions that wait fifteen units for an answer, across
   // refreshes, pages, a reconnect after rows the client never received live,
   // and the cards the broker restates after each attach.
-  {
+  if (want('cardsWaitingAcrossFrames')) {
     final session = client();
     final agent = SimAgent(
       session,
@@ -1850,6 +1854,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
     ('codexReasoningKeyedAsHistory', SimShape.codex),
     ('reasonixCallsHistoryNeverHolds', SimShape.reasonix),
   ]) {
+    if (!want(name)) continue;
     final session = client();
     final agent = SimAgent(session, approvalEvery: 6, shape: shape)
       ..history(60);
@@ -1876,7 +1881,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
 
   // S12: the user rewinds the session to before the rows the window holds
   // at its end, then the agent carries on: the window's own cursor is gone.
-  {
+  if (want('rewoundWhileRead')) {
     final session = client();
     final agent = SimAgent(session)..history(150);
     await session.attach();
@@ -1897,7 +1902,7 @@ Future<Map<String, MatrixMetrics>> runOrdinaryUseMatrix({
 
   // S13: every third refresh fails to read, and the hub resyncs the socket
   // every 40 units, while the reader moves both ways.
-  {
+  if (want('refusedRefreshesAndResyncs')) {
     final session = client();
     session.broker.nackEvery = 3;
     final agent = SimAgent(session, approvalEvery: 10)..history(100);

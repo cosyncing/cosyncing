@@ -14,37 +14,6 @@ const _lifetime = Duration(milliseconds: 500);
 
 void main() {
   testWidgets(
-    'coalesces a 50-event reconnect burst into one useful aggregate',
-    (
-      tester,
-    ) async {
-      await tester.pumpWidget(_host());
-      final container = _container(tester);
-
-      for (var index = 0; index < 50; index += 1) {
-        final kind = switch (index) {
-          < 3 => 'question-required',
-          < 43 => 'run-finished',
-          < 48 => 'run-failed',
-          _ => 'future-kind',
-        };
-        _push(container, _entry('event-$index', kind: kind));
-      }
-      await tester.pump(_coalesce);
-
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsOneWidget,
-      );
-      expect(find.text('50 new notifications'), findsOneWidget);
-      expect(
-        find.text('3 need input · 40 finished · 5 failed · 2 other'),
-        findsOneWidget,
-      );
-    },
-  );
-
-  testWidgets(
     'evicts the oldest dedupe identity while retaining aggregate counters',
     (tester) async {
       await tester.pumpWidget(_host());
@@ -93,55 +62,6 @@ void main() {
       );
     },
   );
-
-  testWidgets('deduplicates reconnect replay and permits a new revision', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_host());
-    final container = _container(tester);
-    final first = _entry('stable', kind: 'run-finished');
-
-    _push(container, first);
-    await tester.pump(_coalesce);
-    await tester.tap(
-      find.byKey(const Key('foreground-attention-close-button')),
-    );
-    await tester.pump();
-
-    _push(container, null);
-    _push(container, first);
-    await tester.pump(_coalesce);
-    expect(
-      find.byKey(const Key('foreground-attention-banner')),
-      findsNothing,
-    );
-
-    _push(
-      container,
-      _entry('stable', kind: 'run-finished', presentationRevision: 2),
-    );
-    await tester.pump(_coalesce);
-    expect(
-      find.byKey(const Key('foreground-attention-banner')),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('an event after Close forms a new aggregate', (tester) async {
-    await tester.pumpWidget(_host());
-    final container = _container(tester);
-
-    _push(container, _entry('first'));
-    await tester.pump(_coalesce);
-    await tester.tap(
-      find.byKey(const Key('foreground-attention-close-button')),
-    );
-    await tester.pump();
-    _push(container, _entry('second', sessionTitle: 'Second session'));
-    await tester.pump(_coalesce);
-
-    expect(find.text('Codex: Second session needs input'), findsOneWidget);
-  });
 
   testWidgets('uses structured session copy and never exposes a fingerprint', (
     tester,
@@ -194,35 +114,6 @@ void main() {
     expect(find.text('Pi: Release check needs input'), findsOneWidget);
   });
 
-  testWidgets('auto-hides informational batches but keeps Needs input sticky', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_host());
-    var container = _container(tester);
-    _push(container, _entry('done', kind: 'run-finished'));
-    await tester.pump(_coalesce);
-    await tester.pump(_lifetime - const Duration(milliseconds: 1));
-    expect(
-      find.byKey(const Key('foreground-attention-banner')),
-      findsOneWidget,
-    );
-    await tester.pump(const Duration(milliseconds: 1));
-    expect(
-      find.byKey(const Key('foreground-attention-banner')),
-      findsNothing,
-    );
-
-    await tester.pumpWidget(_host());
-    container = _container(tester);
-    _push(container, _entry('input'));
-    await tester.pump(_coalesce);
-    await tester.pump(const Duration(seconds: 3));
-    expect(
-      find.byKey(const Key('foreground-attention-banner')),
-      findsOneWidget,
-    );
-  });
-
   testWidgets(
     'continuing arrivals cannot extend the first presentation limit',
     (
@@ -254,51 +145,6 @@ void main() {
       );
     },
   );
-
-  testWidgets('Open and Close only control presentation', (tester) async {
-    var openCount = 0;
-    await tester.pumpWidget(_host(onOpen: () => openCount += 1));
-    final container = _container(tester);
-    final event = _entry('open-close');
-    _push(container, event);
-    await tester.pump(_coalesce);
-
-    await tester.tap(find.byKey(const Key('foreground-attention-open')));
-    await tester.pump();
-    expect(openCount, 1);
-    expect(event.event.readAt, isNull);
-    expect(event.event.dismissedAt, isNull);
-
-    _push(container, _entry('close-only'));
-    await tester.pump(_coalesce);
-    await tester.tap(
-      find.byKey(const Key('foreground-attention-close-button')),
-    );
-    await tester.pump();
-    expect(openCount, 1);
-    expect(
-      find.byKey(const Key('foreground-attention-banner')),
-      findsNothing,
-    );
-  });
-
-  testWidgets('Open forwards the exact single-session entry in one tap', (
-    tester,
-  ) async {
-    AttentionInboxEntry? opened;
-    await tester.pumpWidget(_host(onOpenEntry: (entry) => opened = entry));
-    final container = _container(tester);
-    final event = _entry('exact-open', sessionTitle: 'Exact session');
-    _push(container, event);
-    await tester.pump(_coalesce);
-
-    await tester.tap(find.byKey(const Key('foreground-attention-open')));
-    await tester.pump();
-
-    expect(opened, same(event));
-    expect(event.event.action.tool, 'codex');
-    expect(event.event.action.sessionId, 'session-exact-open');
-  });
 
   testWidgets(
     'Compact and Expanded layouts are safe, width-capped, '

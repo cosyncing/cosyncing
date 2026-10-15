@@ -38,7 +38,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     purpose: 'Prove a session can be found, attached, replayed, detached, and reattached without duplicate or missing history.',
     steps: ['Create or select a throwaway session.', 'Attach through broker WebSocket.', 'Capture session, commands, options, and history frames.', 'Detach and reattach.'],
     assertions: ['History arrives before live frames.', 'Message keys dedupe history versus live tail.', 'Received artifacts replay on reattach when the broker still owns the connection.'],
-    existingCoverage: ['packages/typescript/broker/test/opencode/test-opencode.ts', 'packages/typescript/broker/test/pi/test-pi.ts', 'packages/typescript/broker/test/codex/resume.ts', 'packages/typescript/adapters/claude/test/test-claude-jsonl.ts', 'scripts/broker/tests_traces/claude-runtime-trace.ts (Claude turn-runtime + timestamps doc-15: per-turn run-summary + sentAt + runtimeTotals replay on Observe attach)', 'packages/typescript/broker/test/claude/test-claude-runtime.ts (run-summary/sentAt/runtimeTotals mapper + tracker + real-data smoke)', 'scripts/broker/tests_traces/claude-workflow-activity-trace.ts (Claude UltraCode/workflow + subagent display: canonical agent-activity kind workflow/subagent replays on attach, no Claude-specific type leaks)', 'packages/typescript/adapters/claude/test/test-claude-activity.ts (subagent/workflow → agent-activity mapping)'],
+    existingCoverage: ['packages/typescript/broker/test/opencode/test-opencode.ts', 'e2e/adapters/conformance/pi.test.ts', 'packages/typescript/broker/test/codex/resume.ts', 'packages/typescript/adapters/claude/test/test-claude-jsonl.ts', 'scripts/broker/tests_traces/claude-runtime-trace.ts (Claude turn-runtime + timestamps doc-15: per-turn run-summary + sentAt + runtimeTotals replay on Observe attach)', 'packages/typescript/broker/test/claude/test-claude-runtime.ts (run-summary/sentAt/runtimeTotals mapper + tracker + real-data smoke)', 'scripts/broker/tests_traces/claude-workflow-activity-trace.ts (Claude UltraCode/workflow + subagent display: canonical agent-activity kind workflow/subagent replays on attach, no Claude-specific type leaks)', 'packages/typescript/adapters/claude/test/test-claude-activity.ts (subagent/workflow → agent-activity mapping)'],
   },
   {
     id: 'ST-02',
@@ -328,7 +328,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     purpose: 'Opening a session in Observe must be read-only; Drive must be an explicit app-owned continuation unless true sync is active.',
     steps: ['Discover an observe-first session.', 'Attach read-only Observe.', 'Attempt a mutation and verify it is rejected.', 'Attach with explicit Drive/resume.', 'Send a prompt and verify app-owned output/history.', 'Check terminal sync is not falsely active.'],
     assertions: ['Observe does not accept prompts, approvals, questions, uploads, commands, or interrupts.', 'Drive uses a distinct owner from observe and updates roster ownership.', 'Non-true-sync Drive is labelled as continuation/controller, not same terminal runtime.'],
-    existingCoverage: ['scripts/broker/tests_traces/opencode-private-observe-drive-trace.ts', 'scripts/broker/tests_traces/opencode-real-run-drive-trace.ts', 'packages/typescript/adapters/pi/test/test-pi-observe.ts', 'packages/typescript/broker/test/codex/rollout.ts', 'scripts/broker/tests_traces/codex-surface-contract-trace.ts', 'packages/typescript/adapters/claude/test/test-claude-resume.ts'],
+    existingCoverage: ['scripts/broker/tests_traces/opencode-private-observe-drive-trace.ts', 'scripts/broker/tests_traces/opencode-real-run-drive-trace.ts', 'e2e/adapters/conformance/pi.test.ts', 'packages/typescript/broker/test/codex/rollout.ts', 'scripts/broker/tests_traces/codex-surface-contract-trace.ts', 'packages/typescript/adapters/claude/test/test-claude-resume.ts'],
   },
   {
     id: 'ST-28',
@@ -339,7 +339,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     purpose: 'Sync Refactor (D13/D15/D17/FU-3): the global control-mode picker + /api/broker/control-mode are DELETED. Codex sync is enabled per-agent via POST /api/agents/codex/sync, persisted to setup-state.json, and applied pre-start so a fresh broker needs no restart; a one-time restart happens only when toggling against a running broker.',
     steps: ['Start a broker with Codex sync OFF.', 'GET /api/agents/codex/sync reports enabled:false.', 'POST {enabled:true} persists to setup-state.json and (against a running broker) schedules a one-time restart.', 'A fresh broker started with persisted codex=true comes up sync-ON with NO restart (FU-3).', 'The deleted /api/broker/control-mode endpoint is never called and #controlMode is absent from the DOM.'],
     assertions: ['GET enabler reports enabled:false at boot.', 'POST enabler persists agents.codex and returns restartRequired against a running observe-broker (dry-run).', 'Pre-start: persisted codex=true → health.codexSyncServer:true + supportsLiveAttach:true, no restart.', 'No #controlMode/#drive/#sync in the real DOM; exactly one #control button.'],
-    existingCoverage: ['packages/typescript/broker/test/codex/broker-control-mode.ts', 'scripts/broker/tests_traces/sync-refactor-dom-probe.ts'],
+    existingCoverage: ['e2e/broker/codex-sync-preference.test.ts', 'scripts/broker/tests_traces/sync-refactor-dom-probe.ts'],
   },
   {
     id: 'ST-29',
@@ -397,7 +397,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     purpose: 'Prove older history, local-commit checkpoints, and mutation retry remain safe across reconnect and broker restart.',
     steps: ['Attach to a history longer than the broker cap.', 'Load backward pages to end-of-history.', 'Ack only after the local transcript/projection transaction commits.', 'Reconnect/restart and replay identical and conflicting clientMessageId mutations.', 'Exercise rewritten, gone, and malformed cursors.'],
     assertions: ['Pages are chronological with exact boundaries and no old task/goal/activity/reset projection resurrection.', 'Ack advances only the identity/session-scoped durable checkpoint; nack does not.', 'Identical terminal outcomes replay across restart without a second dispatch.', 'Conflicting clientMessageId reuse and crash-unknown outcomes fail with stable typed codes.'],
-    existingCoverage: ['packages/typescript/broker/test/broker/test-history-cap.ts', 'packages/typescript/broker/test/broker/test-protocol-journal.ts', 'packages/typescript/broker/test/broker/test-protocol-hardening.ts'],
+    existingCoverage: ['e2e/broker/history-paging.test.ts', 'e2e/broker/mutation-idempotency.test.ts', 'e2e/broker/request-validation.test.ts'],
   },
   {
     id: 'ST-34',
@@ -408,7 +408,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     purpose: 'Prove schedule edits, lifecycle actions, cron, retry, and quota recovery stay authenticated, revision-safe, and durable across restart.',
     steps: ['Create legacy and arbitrary-cron schedules.', 'Edit with current and stale revisions.', 'Exercise pause, resume, run-now, and quota recovery.', 'Restart during a typed retry.', 'Apply the missed-fire boundary to an overdue retry.'],
     assertions: ['Full prompt-bearing schedule routes require authentication.', 'Stale edits and invalid state transitions fail with stable codes.', 'Retry counters and terminal outcomes survive restart without duplicate attention.', 'Generic error text cannot activate quota retry or recovery.', 'Existing-session schedules remain one-shot and missed occurrences never retry.'],
-    existingCoverage: ['packages/typescript/broker/test/broker/test-schedule-store.ts', 'packages/typescript/broker/test/broker/test-broker-auth.ts'],
+    existingCoverage: ['e2e/broker/scheduled-sends.test.ts', 'e2e/broker/auth.test.ts'],
     gaps: ['No current adapter emits native synchronous quota-class evidence at prompt handoff; recover-quota therefore remains unavailable in real adapter delivery until that evidence exists.'],
   },
 ];

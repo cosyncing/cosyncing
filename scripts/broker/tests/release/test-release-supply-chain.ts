@@ -45,7 +45,7 @@ import { SETUP_STATE_SCHEMA_VERSION } from '../../../../packages/typescript/brok
 import {
   insideSupervisedProcessGroup,
   runSupervised,
-} from '../../../verification/supervised-process.ts';
+} from '../../../ci/lib/process.ts';
 import {
   assembleRelease,
   androidClientAssetName,

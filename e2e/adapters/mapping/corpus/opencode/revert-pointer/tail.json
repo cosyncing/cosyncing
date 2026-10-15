@@ -1,0 +1,120 @@
+{
+  "events": [
+    {
+      "type": "session.updated",
+      "properties": {
+        "info": {
+          "id": "$SESSION",
+          "revert": null
+        }
+      }
+    }
+  ],
+  "settled": [
+    {
+      "info": {
+        "id": "msg_u1",
+        "role": "user",
+        "time": {
+          "created": 1000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u1",
+          "type": "text",
+          "text": "keep me",
+          "time": {
+            "start": 1000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_a1",
+        "role": "assistant",
+        "parentID": "msg_u1",
+        "time": {
+          "created": 1001,
+          "completed": 1003
+        },
+        "finish": "stop",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "read": 1,
+            "write": 2
+          }
+        },
+        "cost": 0.01
+      },
+      "parts": [
+        {
+          "id": "prt_a1",
+          "type": "text",
+          "text": "kept answer",
+          "time": {
+            "start": 1001,
+            "end": 1002
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_u2",
+        "role": "user",
+        "time": {
+          "created": 2000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_msg_u2",
+          "type": "text",
+          "text": "undone prompt",
+          "time": {
+            "start": 2000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_a2",
+        "role": "assistant",
+        "parentID": "msg_u2",
+        "time": {
+          "created": 2001,
+          "completed": 2003
+        },
+        "finish": "stop",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "read": 1,
+            "write": 2
+          }
+        },
+        "cost": 0.01
+      },
+      "parts": [
+        {
+          "id": "prt_a2",
+          "type": "text",
+          "text": "undone answer",
+          "time": {
+            "start": 2001,
+            "end": 2002
+          }
+        }
+      ]
+    }
+  ],
+  "settledRevert": null
+}

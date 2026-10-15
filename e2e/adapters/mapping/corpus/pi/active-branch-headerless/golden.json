@@ -1,0 +1,23 @@
+{
+  "history": [
+    {"type":"user-message","text":"start","key":"b1","turnId":"b1","sentAt":1781913600000},
+    {"type":"model-output","text":"first answer","final":true,"key":"a1781913601000:t:0"},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"b1","assistantMessageKey":"a1781913601000:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913601000,"totalRuntimeMs":1000,"source":"pi-jsonl"},
+    {"type":"user-message","text":"chosen branch prompt","key":"b4","turnId":"b4","sentAt":1781913603000},
+    {"type":"run-summary","key":"pi:run:u1","turnId":"u1","userMessageKey":"b4","status":"running","startedAt":1781913603000,"source":"pi-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":1000,"turnCount":1,"updatedAt":1781913601000,"source":"pi"}}
+  ],
+  "live": [
+    {"type":"model-output","text":"chosen answer","final":true,"key":"a1781913604000:t:0"},
+    {"type":"run-summary","key":"pi:run:u1","turnId":"u1","userMessageKey":"b4","assistantMessageKey":"a1781913604000:t:0","status":"done","startedAt":1781913603000,"completedAt":1781913604000,"totalRuntimeMs":1000,"source":"pi-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"start","key":"b1","turnId":"b1","sentAt":1781913600000},
+    {"type":"model-output","text":"first answer","final":true,"key":"a1781913601000:t:0"},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"b1","assistantMessageKey":"a1781913601000:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913601000,"totalRuntimeMs":1000,"source":"pi-jsonl"},
+    {"type":"user-message","text":"chosen branch prompt","key":"b4","turnId":"b4","sentAt":1781913603000},
+    {"type":"model-output","text":"chosen answer","final":true,"key":"a1781913604000:t:0"},
+    {"type":"run-summary","key":"pi:run:u1","turnId":"u1","userMessageKey":"b4","assistantMessageKey":"a1781913604000:t:0","status":"done","startedAt":1781913603000,"completedAt":1781913604000,"totalRuntimeMs":1000,"source":"pi-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":2000,"turnCount":2,"updatedAt":1781913604000,"source":"pi"}}
+  ]
+}

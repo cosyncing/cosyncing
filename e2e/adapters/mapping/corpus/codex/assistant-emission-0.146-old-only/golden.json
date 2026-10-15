@@ -1,0 +1,42 @@
+{
+  "history": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:cold","turnId":"cold","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"cold answer.","final":true,"key":"c2"},
+    {"type":"tool-call","callId":"call_cold","toolName":"exec_command","toolClass":"execute","args":{}},
+    {"type":"tool-result","callId":"call_cold","toolName":"exec_command","toolClass":"execute","isError":false,"result":"ok"},
+    {"type":"model-output","text":"cold final.","final":true,"key":"c5"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:cold","turnId":"cold","assistantMessageKey":"c5","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:live","turnId":"live","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"live answer.","final":true,"key":"c8"},
+    {"type":"tool-call","callId":"call_live","toolName":"exec_command","toolClass":"execute","args":{}},
+    {"type":"tool-result","callId":"call_live","toolName":"exec_command","toolClass":"execute","isError":false,"result":"ok"},
+    {"type":"model-output","text":"live final.","final":true,"key":"c11"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:live","turnId":"live","assistantMessageKey":"c11","status":"done","source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:cold","turnId":"cold","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"cold answer.","final":true,"key":"c2"},
+    {"type":"tool-call","callId":"call_cold","toolName":"exec_command","toolClass":"execute","args":{}},
+    {"type":"tool-result","callId":"call_cold","toolName":"exec_command","toolClass":"execute","isError":false,"result":"ok"},
+    {"type":"model-output","text":"cold final.","final":true,"key":"c5"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:cold","turnId":"cold","assistantMessageKey":"c5","status":"done","source":"codex-rollout"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:live","turnId":"live","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"live answer.","final":true,"key":"c8"},
+    {"type":"tool-call","callId":"call_live","toolName":"exec_command","toolClass":"execute","args":{}},
+    {"type":"tool-result","callId":"call_live","toolName":"exec_command","toolClass":"execute","isError":false,"result":"ok"},
+    {"type":"model-output","text":"live final.","final":true,"key":"c11"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:live","turnId":"live","assistantMessageKey":"c11","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

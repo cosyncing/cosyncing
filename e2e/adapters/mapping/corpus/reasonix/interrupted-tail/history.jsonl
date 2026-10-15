@@ -1,0 +1,4 @@
+{"role":"user","content":"earlier"}
+{"role":"assistant","content":"ok","workDurationMs":5}
+{"role":"user","content":"run the migration"}
+{"role":"tool","tool_call_id":"t1","name":"run_command","content":"partial","tool_execution":{"state":"cancelled"}}

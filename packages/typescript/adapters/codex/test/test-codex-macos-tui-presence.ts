@@ -381,30 +381,23 @@ const presence = async (options: FixtureOptions) => {
 // The production runner waits for confirmed child close/stdio drain after its deadline. This real child
 // would remain observable if the runner resolved immediately after sending SIGKILL.
 {
-  const childRoot = mkdtempSync(join(tmpdir(), 'cosyncing-codex-mac-child-'));
-  try {
-    const executable = join(childRoot, 'hang');
-    // A RAW WRITE, not console.log. The child's whole job is to print a number
-    // the parent parses, and `console.log(number)` goes through Bun's inspector,
-    // which ANSI-wraps numeric output whenever colour is forced on — an inherited
-    // FORCE_COLOR=3 (a remote-control attach, a CI runner that sets it) turned
-    // the parse into NaN and failed this check on a perfectly healthy tree. A
-    // plain string bypasses inspection styling entirely.
-    writeFileSync(executable, '#!/usr/bin/env bun\nprocess.stdout.write(`${process.pid}\\n`);\nawait Bun.sleep(60_000);\n');
-    chmodSync(executable, 0o755);
-    const started = Date.now();
-    const result = await runBoundedMacCommand(executable, [], { timeoutMs: 100, maxOutputBytes: 4_096 });
-    // ...and the parse is defensive on its own account: this reads the stdout of
-    // a child process, and a colourised byte in it is a parse failure, never a
-    // fact about the runner under test.
-    const pid = Number(result.stdout.replace(/\u001b\[[0-9;]*m/g, '').trim());
-    let alive = true;
-    try { process.kill(pid, 0); } catch { alive = false; }
-    check('macOS runner: deadline waits for real child exit and output drain',
-      result.timedOut && Number.isSafeInteger(pid) && !alive && Date.now() - started < 1_000);
-  } finally {
-    rmSync(childRoot, { recursive: true, force: true });
-  }
+  // /bin/sh prints its pid before anything else runs, so the child is known
+  // even on a loaded host; a Bun child could still be starting when a short
+  // deadline killed it, leaving nothing to parse. The deadline only has to
+  // outlast that first write: what matters is that the call returns long
+  // before the child's 60 s sleep and that the child is gone by then.
+  const executable = '/bin/sh';
+  const started = Date.now();
+  const result = await runBoundedMacCommand(executable, ['-c', 'echo $$; exec sleep 60'], {
+    timeoutMs: 1_000,
+    maxOutputBytes: 4_096,
+  });
+  const pid = Number(result.stdout.trim());
+  let alive = true;
+  try { process.kill(pid, 0); } catch { alive = false; }
+  check('macOS runner: deadline waits for real child exit and output drain',
+    result.timedOut && Number.isSafeInteger(pid) && !alive && Date.now() - started < 30_000,
+    JSON.stringify({ stdout: result.stdout, alive, elapsedMs: Date.now() - started }));
 }
 
 // Linux keeps its existing /proc + socket-probe behavior.

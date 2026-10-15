@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/opencode-wire/src/mapping.ts and packages/typescript/adapters/opencode/test/test-opencode-retry-detail.ts",
+  "description": "a retrying provider keeps the turn running with the failure detail first-line, control-character-stripped and clipped to 240 characters (a detail-less retry names its attempt); an aborted turn is an interruption notice, a failed one a one-line error, a session error likewise; compaction and a removed message reset history; unknown statuses and events are ignored",
+  "userTexts": [
+    "go"
+  ],
+  "identitiesMayVanish": true,
+  "sessionId": "4dbf9742-2b9c-4623-8623-4dbf97422b9c"
+}

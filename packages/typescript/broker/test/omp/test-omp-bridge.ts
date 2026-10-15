@@ -1,37 +1,16 @@
 /**
- * Broker-side regression for the omp (oh-my-pi) bridge family (C7–C9 of the omp adapter
- * investigation): the `/omp/bridge/*` routes must behave exactly like `/pi/bridge/*` while
- * stamping every session, frame, and roster row with omp identity.
- *
- * Pure broker-side: it simulates the in-session extension over the `/omp/bridge/*` HTTP wire and
- * a phone over the attach WebSocket. No real `omp` is needed — the bridge endpoints are
- * in-memory, and a WS attach to an already-adopted (pinned) bridge reuses it WITHOUT spawning
- * `omp --mode rpc`. It starts its OWN broker on a free port with a short grace window, so it
- * never touches a running broker or real sessions.
+ * Broker-side residue for the omp (oh-my-pi) bridge family. The hello/identity/event/commands/
+ * reload/quit/grace/attestation/collision gates are asserted by
+ * e2e/adapters/pi-family-bridge.test.ts; what stays here is not:
+ *   1. DISCOVERY identity through a symlinked omp agent dir: one canonical id for the discovered
+ *      row and a bridge hello for the realpath.
+ *   2. A newer omp than verified rejects every bridge route and the native rename advertisement
+ *      (the e2e gate asserts hello/events/bye only).
+ *   3. TURN ATTENTION through omp's OWN shipped bridge asset (running before terminal under the
+ *      `omp:run:u:remote:` key, one outcome per turn in a real AttentionPolicy, no live running
+ *      from a reload re-hello's backfill).
  *
  *   bun run test:omp-bridge
- * Exit 0 = all pass.
- *
- * What it proves:
- *   1. DISCOVERY identity — a disk-discovered omp session (through a symlinked agent dir) and a
- *      bridge hello for the realpath produce ONE canonical id, on a roster row with tool 'omp'.
- *   2. HELLO identity — the session frame and roster row carry the omp terminal-sync label and
- *      the unavailable Drive control, not pi's strings.
- *   3. EVENT namespacing (C9) — a real extension-shaped `{t:'run'}` event carrying its rewritten
- *      `omp:run:<turnId>` key reaches the phone unchanged with source `omp-bridge`; a text delta
- *      fans out.
- *   4. COMMANDS round-trip — a phone prompt lands in the extension's long-polled queue.
- *   5. RELOAD keeps the phone attached and authoritatively catches up history — bye(reason:'reload')
- *      then a same-id re-hello can recover a native-persisted prompt whose event POST was lost;
- *      a POST-reload event still reaches the phone, and NO `ended` frame was sent.
- *   6. QUIT ends cleanly — `{kind:'ended', reason:'quit'}`, later events 404, status goes false.
- *   7. GRACE EXPIRY — bye(reason:'reload') with NO re-hello → after the grace window the phone
- *      gets an `ended` frame and the bridge is gone.
- *   8. TURN ATTENTION — the omp-stamped extension asset, driven by broker-queued app prompts,
- *      delivers each collab-prompt turn to the bridge connection's subscribers as one `running`
- *      run-summary before one terminal under its `omp:run:u:remote:…` key (one outcome each in a
- *      real AttentionPolicy), and a reload re-hello's backfill of those finished turns puts no
- *      `running` on the live stream.
  */
 export {};
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -39,7 +18,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   BROKER_CONTRACT_REVISION,
-  CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY,
 } from '@cosyncing/protocol';
 import {
   captureProcessOutput,
@@ -52,10 +30,7 @@ import {
 const portLease = await reserveLoopbackFixturePort();
 const PORT = Number(process.env.COSYNCING_TEST_PORT ?? portLease.port);
 const BROKER = `http://127.0.0.1:${PORT}`;
-const WSBASE = BROKER.replace(/^http/, 'ws');
-const GRACE_MS = 700; // small so the grace-expiry test is fast; the reload re-hello is immediate
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const rand = () => Math.random().toString(36).slice(2, 8);
 const ROOT = join('/tmp', `cosyncing-omp-bridge-${PORT}`);
 const DISCOVERY_CWD = join(ROOT, 'work');
 const DISCOVERY_AGENT = join(ROOT, 'agent');
@@ -104,7 +79,6 @@ const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'
     overrides: {
     PORT: String(PORT),
     HOST: '127.0.0.1',
-    COSYNCING_BRIDGE_GRACE_MS: String(GRACE_MS),
     COSYNCING_OMP_BIN: OMP_BIN,
     // Pin omp through its dialect-specific override. Pi stays on its own agent directory and an
     // empty sessions root, proving the broker does not need shared Pi-family variables here.
@@ -126,7 +100,6 @@ const waitHealth = () => waitForBrokerHealth(broker, `${BROKER}/api/health`);
 // ── bridge wire helpers (stand in for the in-session extension) ──────────────
 const post = (path: string, body: unknown) =>
   fetch(`${BROKER}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-const enc = (s: string): string => Buffer.from(s, 'utf8').toString('base64url');
 async function hello(sessionFile: string, cwd: string, nativeId?: string, history?: unknown[]): Promise<string> {
   const r = await post('/omp/bridge/hello', {
     sessionFile,
@@ -138,12 +111,7 @@ async function hello(sessionFile: string, cwd: string, nativeId?: string, histor
   });
   return String((await r.json()).id);
 }
-const events = (id: string, evs: unknown[]) => post('/omp/bridge/events', { id, events: evs });
 const bye = (id: string, reason: string) => post('/omp/bridge/bye', { id, reason });
-const commands = async (id: string): Promise<unknown[]> =>
-  ((await (await fetch(`${BROKER}/omp/bridge/commands?id=${encodeURIComponent(id)}`)).json()).commands ?? []);
-const isBridged = async (id: string): Promise<boolean> =>
-  (await (await fetch(`${BROKER}/omp/bridge/status?id=${encodeURIComponent(id)}`)).json()).bridged;
 
 // The roster is visibility-filtered by the caller's declared contract revision: omp rows carry
 // OmpAdapter.minimumClientRevision is the explicit first-client OMP identity revision, so both a
@@ -153,28 +121,6 @@ const rosterSessions = async (revision?: number): Promise<any[]> =>
     ? `${BROKER}/api/sessions`
     : `${BROKER}/api/sessions?contractRevision=${revision}`)).json()).sessions ?? []);
 const currentRoster = () => rosterSessions(BROKER_CONTRACT_REVISION);
-
-// ── phone (attach WebSocket) ─────────────────────────────────────────────────
-interface Phone { frames: any[]; waitFrame: (p: (f: any) => boolean, ms: number) => Promise<any>; send: (o: unknown) => void; close: () => void; }
-function attach(id: string): Promise<Phone> {
-  return new Promise((resolve) => {
-    const ws = new WebSocket(`${WSBASE}/api/sessions/omp/${encodeURIComponent(id)}/stream`);
-    const frames: any[] = [];
-    ws.onmessage = (e) => { try { frames.push(JSON.parse(String(e.data))); } catch {} };
-    const phone: Phone = {
-      frames,
-      waitFrame: async (pred, ms) => {
-        const end = Date.now() + ms;
-        for (;;) { const f = frames.find(pred); if (f) return f; if (Date.now() > end) return undefined; await sleep(60); }
-      },
-      send: (o) => ws.send(JSON.stringify(o)),
-      close: () => { try { ws.close(); } catch {} },
-    };
-    ws.onopen = () => resolve(phone);
-  });
-}
-const isModelDelta = (text: string) => (f: any) =>
-  f.kind === 'message' && f.message?.type === 'model-output' && new RegExp(text).test(f.message.delta ?? f.message.text ?? '');
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 async function test(name: string, fn: () => Promise<[boolean, string]>) {
@@ -195,217 +141,18 @@ try {
 }
 
 try {
-  await test('bridge hello requires exact in-process native version attestation', async () => {
-    const sessionFile = join(DISCOVERY_SESSION_DIR, `2026-08-25T00-30-00-000Z_${rand()}.jsonl`);
-    const bodies = [
-      { sessionFile, cwd: DISCOVERY_CWD },
-      { sessionFile, cwd: DISCOVERY_CWD, nativeVersion: '17.4.3' },
-    ];
-    const responses = await Promise.all(bodies.map((body) => post('/omp/bridge/hello', body)));
-    const decoded = await Promise.all(responses.map(async (response) => ({
-      status: response.status,
-      body: await response.json().catch(() => ({})) as any,
-    })));
-    const roster = await currentRoster();
-    const ok = decoded.every((entry) => entry.status === 409
-      && entry.body.code === 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED')
-      && !roster.some((session: any) => session.id === enc(sessionFile));
-    return [ok, JSON.stringify(decoded)];
-  });
-
-  // 1 — disk discovery through a symlinked omp root and a bridge hello for the realpath must
-  // produce ONE canonical id, on a row stamped tool 'omp' (the shared bridgeId, C9). The same
-  // row is INVISIBLE to a revisionless client: the C7 visibility floor hides omp from clients
-  // that predate omp roster identity.
-  await test('bridge hello id matches symlinked disk-discovery id, hidden below the visibility floor', async () => {
-    const revisionlessRoster = await rosterSessions();
-    const priorClientRoster = await rosterSessions(CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY - 1);
-    const hidden = !revisionlessRoster.some((s: any) => s?.tool === 'omp')
-      && !priorClientRoster.some((s: any) => s?.tool === 'omp');
+  // Disk discovery through a symlinked omp agent dir and a bridge hello for the realpath must
+  // produce ONE canonical id, on a row stamped tool 'omp'. (Everything else about the hello,
+  // events, commands, reload, quit and grace is asserted by e2e/adapters/pi-family-bridge.test.ts.)
+  await test('bridge hello id matches symlinked disk-discovery id', async () => {
     const discovered = (await currentRoster()).find((s: any) => s?.tool === 'omp' && s?.cwd === DISCOVERY_CWD);
     const id = await hello(realpathSync(DISCOVERY_SESSION_FILE), DISCOVERY_CWD);
     await bye(id, 'quit');
     const decoded = Buffer.from(id, 'base64url').toString('utf8');
-    const ok = hidden && discovered?.id === id && decoded === realpathSync(DISCOVERY_SESSION_FILE);
-    return [ok, `hidden=${hidden} discovered=${discovered?.id === id} decodedRealpath=${decoded === realpathSync(DISCOVERY_SESSION_FILE)}`];
+    const ok = discovered?.id === id && decoded === realpathSync(DISCOVERY_SESSION_FILE);
+    return [ok, `discovered=${discovered?.id === id} decodedRealpath=${decoded === realpathSync(DISCOVERY_SESSION_FILE)}`];
   });
 
-  // 2 — hello publishes omp identity: the roster row and the attach session frame carry the omp
-  // terminal-sync label and Drive-unavailable control, never pi's strings. The session file sits
-  // in the discovery tree so the roster row is the discovered one, as on a real host.
-  await test('hello publishes omp roster and session-frame identity', async () => {
-    const sf = join(DISCOVERY_SESSION_DIR, `2026-08-25T01-00-00-000Z_${rand()}.jsonl`);
-    writeFileSync(
-      sf,
-      JSON.stringify({ type: 'session', version: 3, id: 'identity', timestamp: new Date().toISOString(), cwd: DISCOVERY_CWD }) + '\n',
-    );
-    const id = await hello(sf, DISCOVERY_CWD, 'identity');
-    const p = await attach(id);
-    await sleep(400); // attach completes (session + history sent)
-    const info = p.frames.find((f) => f.kind === 'session')?.info;
-    let row: any;
-    for (let waited = 0; waited < 3000 && !row; waited += 200) {
-      row = (await currentRoster()).find((s: any) => s?.id === id);
-      if (!row) await sleep(200);
-    }
-    await bye(id, 'quit');
-    p.close();
-    const ok = info?.tool === 'omp'
-      && info?.nativeId === 'identity'
-      && info?.control?.terminalSync?.label === 'Synced with omp terminal'
-      && info?.control?.terminalSync?.active === true
-      && info?.control?.drive?.supported === false
-      && info?.control?.drive?.state === 'unavailable'
-      && row?.tool === 'omp'
-      && row?.nativeId === 'identity'
-      && row?.control?.terminalSync?.label === 'Synced with omp terminal';
-    return [ok, `frameTool=${info?.tool} native=${info?.nativeId} label=${info?.control?.terminalSync?.label} rowTool=${row?.tool} rowNative=${row?.nativeId} rowLabel=${row?.control?.terminalSync?.label}`];
-  });
-
-  // 3 — C9: bridge events are namespaced by the omp dialect, not pi's. The installed asset emits
-  // an explicit key (the asset suite pins the rewrite), so this broker fixture must preserve that
-  // real event shape instead of relying on bridgeRunSummary's keyless fallback.
-  await test('events reach the phone with omp key namespace and source', async () => {
-    const sf = `/tmp/omp-bridge-ev-${rand()}.jsonl`;
-    const id = await hello(sf, '/tmp', undefined, [
-      { t: 'context-usage', value: { tokens: 2048, contextWindow: 32768 } },
-    ]);
-    const p = await attach(id);
-    await sleep(400);
-    // A history that ends in session state delivers it right after the frame rather than inside
-    // it (it is the session's current value, outside the history cursor); either way the attach
-    // carries it before any live event.
-    const isContext = (m: any) => m?.type === 'metadata-update' && m?.key === 'contextUsage';
-    const attachFrames = p.frames.length;
-    const replayContext = p.frames.find((f) => f.kind === 'history')?.messages?.find(isContext)
-      ?? p.frames.find((f) => f.kind === 'message' && isContext(f.message))?.message;
-    await events(id, [
-      { t: 'delta', kind: 'text', key: 't1:t', delta: 'OMPPRE' },
-      { t: 'run', key: 'omp:run:turn-7', turnId: 'turn-7', status: 'done' },
-      { t: 'context-usage', value: { tokens: 4096, contextWindow: 32768 } },
-    ]);
-    const gotDelta = await p.waitFrame(isModelDelta('OMPPRE'), 3000);
-    const gotRun = await p.waitFrame(
-      (f) => f.kind === 'message' && f.message?.type === 'run-summary' && f.message?.key === 'omp:run:turn-7',
-      3000,
-    );
-    const liveContext = await p.waitFrame(
-      (f) => f.kind === 'message' && f.message?.type === 'metadata-update' && f.message?.key === 'contextUsage'
-        && p.frames.indexOf(f) >= attachFrames,
-      3000,
-    );
-    const noPiNamespace = !p.frames.some((f) => String(f.message?.key ?? '').startsWith('pi:run:'));
-    await bye(id, 'quit');
-    p.close();
-    const ok = !!gotDelta
-      && !!gotRun
-      && gotRun.message.source === 'omp-bridge'
-      && replayContext?.value?.used === 2048
-      && replayContext?.value?.max === 32768
-      && liveContext?.message?.value?.used === 4096
-      && liveContext?.message?.value?.max === 32768
-      && noPiNamespace;
-    return [ok, `delta=${!!gotDelta} run=${!!gotRun} source=${gotRun?.message?.source} replayContext=${JSON.stringify(replayContext?.value)} liveContext=${JSON.stringify(liveContext?.message?.value)} noPiNs=${noPiNamespace}`];
-  });
-
-  // 4 — the extension's long-poll queue: a phone prompt arrives as a bridge command.
-  await test('phone prompt lands in the omp bridge commands queue', async () => {
-    const sf = `/tmp/omp-bridge-cmd-${rand()}.jsonl`;
-    const id = await hello(sf, '/tmp');
-    const p = await attach(id);
-    await sleep(400);
-    p.send({ kind: 'prompt', text: 'from app over omp bridge', clientMessageId: 'ca.omp.bridge-command' });
-    const queued = await commands(id);
-    await bye(id, 'quit');
-    p.close();
-    const prompt: any = queued.find((c: any) => c?.kind === 'prompt' && /over omp bridge/.test(String(c.text ?? '')));
-    const durable = prompt?.messageKey?.startsWith('u:remote:') && prompt?.clientKey === 'ca.omp.bridge-command';
-    return [!!prompt && durable, `queued=${queued.length} prompt=${!!prompt} durable=${durable}`];
-  });
-
-  // 5 — a reload must NOT orphan the attached phone (same policy as pi).
-  await test('reload keeps the phone attached (no orphan)', async () => {
-    const sf = `/tmp/omp-bridge-${rand()}.jsonl`;
-    const prior = { t: 'user', key: 'u:remote:prior', clientKey: 'ca.omp.prior', text: 'prior durable prompt', sentAt: 1000 };
-    const recovered = { t: 'user', key: 'u:remote:recovered', clientKey: 'ca.omp.recovered', text: 'persisted before event post', sentAt: 2000 };
-    const id = await hello(sf, '/tmp', undefined, [prior]);
-    const p = await attach(id);
-    await sleep(400);
-    const initialHistory = p.frames.find((f) => f.kind === 'history');
-    const initialPrior = initialHistory?.messages?.find((m: any) => m.key === prior.key && m.clientKey === prior.clientKey);
-    await events(id, [{ t: 'delta', kind: 'text', key: 't1:t', delta: 'PRE' }]);
-    const gotPre = await p.waitFrame(isModelDelta('PRE'), 3000);
-    // reload: old runtime byes, new runtime re-hellos the SAME session file (→ same id), immediately.
-    await bye(id, 'reload');
-    const id2 = await hello(sf, '/tmp', undefined, [prior, recovered]);
-    const caughtUp = await p.waitFrame(
-      (f) => f.kind === 'history'
-        && f.reset === true
-        && f.messages?.filter((m: any) => m.key === recovered.key && m.clientKey === recovered.clientKey).length === 1,
-      3000,
-    );
-    await events(id, [{ t: 'delta', kind: 'text', key: 't1:t', delta: 'POST' }]);
-    const gotPost = await p.waitFrame(isModelDelta('POST'), 3000);
-    const noEnded = !p.frames.some((f) => f.kind === 'ended');
-    p.close();
-    const ok = id2 === id && !!initialPrior && !!caughtUp && !!gotPre && !!gotPost && noEnded;
-    return [ok, `sameId=${id2 === id} prior=${!!initialPrior} caughtUp=${!!caughtUp} pre=${!!gotPre} post=${!!gotPost} noEndedFrame=${noEnded}`];
-  });
-
-  // 6 — quit: clean `ended` frame, then the bridge is gone.
-  await test('quit sends a clean `ended` frame and removes the bridge', async () => {
-    const sf = `/tmp/omp-bridge-q-${rand()}.jsonl`;
-    const id = await hello(sf, '/tmp');
-    const p = await attach(id);
-    await sleep(400);
-    await events(id, [{ t: 'status', running: true }]);
-    await bye(id, 'quit');
-    const ended = await p.waitFrame((f) => f.kind === 'ended', 3000);
-    const ghost = await events(id, [{ t: 'delta', kind: 'text', key: 't9:t', delta: 'GHOST' }]); // should 404
-    const bridged = await isBridged(id);
-    p.close();
-    const ok = !!ended && ended.reason === 'quit' && ghost.status === 404 && bridged === false;
-    return [ok, `ended=${!!ended} reason=${ended?.reason} ghost=${ghost.status} stillBridged=${bridged}`];
-  });
-
-  // 7 — a reload whose re-hello never comes: grace expires → clean teardown, no leak.
-  // A native model can carry an id and NO provider — the shipped bridge extension
-  // sends `String(model.provider ?? '')` for exactly that case. `currentModel`
-  // cannot express it (`validSessionCurrentModel` rejects an empty providerID), so
-  // the hello must drop the model claim and still ATTACH. It used to build
-  // `providerID: ''`, fail its decode, and reject the whole hello — and because
-  // `adopt` had no close guard, the bridge connection stayed registered and every
-  // re-hello repeated it.
-  await test('a bridge hello whose model has no provider still attaches, without the model claim', async () => {
-  const response = await post('/omp/bridge/hello', {
-    sessionFile: DISCOVERY_SESSION_FILE,
-    cwd: DISCOVERY_CWD,
-    title: 'omp-no-provider',
-    nativeVersion: '17.4.2',
-    model: { modelID: 'qwen3:4b' }, // id, no providerID — the reported shape
-  });
-  const body: any = await response.json().catch(() => ({}));
-  const id = String(body?.id ?? '');
-  const rows = await rosterSessions(BROKER_CONTRACT_REVISION);
-  const row = rows.find((r: any) => r.id === id);
-  const ok = response.status === 200 && id.length > 0
-    && row !== undefined && row.currentModel === undefined;
-  return [ok, `status=${response.status} id=${id ? 'set' : 'missing'} currentModel=${JSON.stringify(row?.currentModel)}`];
-});
-
-  await test('reload with no re-hello tears down after the grace window', async () => {
-    const sf = `/tmp/omp-bridge-g-${rand()}.jsonl`;
-    const id = await hello(sf, '/tmp');
-    const p = await attach(id);
-    await sleep(400);
-    await bye(id, 'reload'); // deferred GRACE_MS; no re-hello follows
-    const bridgedDuringGrace = await isBridged(id); // still live inside the window
-    const ended = await p.waitFrame((f) => f.kind === 'ended', GRACE_MS + 2000);
-    const bridgedAfter = await isBridged(id);
-    p.close();
-    const ok = bridgedDuringGrace === true && !!ended && bridgedAfter === false;
-    return [ok, `bridgedDuringGrace=${bridgedDuringGrace} endedAfterGrace=${!!ended} stillBridged=${bridgedAfter}`];
-  });
 } finally {
   // Awaiting the exit is the point: signalling and returning left the broker
   // and its children alive past this process, for the lane to reap.
@@ -413,82 +160,6 @@ try {
   await broker.exited;
   await settledProcessOutput(brokerOutput);
   rmSync(ROOT, { recursive: true, force: true });
-}
-
-// A collision must block the broker-owned live route as well as adapter discovery/RPC. Otherwise
-// Pi discovers this shared JSONL while an omp hello adopts the same artifact under a second tool id.
-{
-  const collisionLease = await reserveLoopbackFixturePort();
-  const collisionPort = collisionLease.port;
-  const collisionRoot = join('/tmp', `cosyncing-omp-bridge-collision-${collisionPort}`);
-  const sharedAgent = join(collisionRoot, 'shared-agent');
-  const sharedSessions = join(collisionRoot, 'shared-sessions');
-  const sharedSessionFile = join(sharedSessions, '2026-08-25_shared.jsonl');
-  const collisionOmpBin = join(collisionRoot, 'omp');
-  const collisionBunBin = join(collisionRoot, 'runtime', 'bun');
-  rmSync(collisionRoot, { recursive: true, force: true });
-  mkdirSync(sharedAgent, { recursive: true });
-  mkdirSync(sharedSessions, { recursive: true });
-  writeSupportedOmpBinary(collisionOmpBin, collisionBunBin);
-  writeFileSync(sharedSessionFile, [
-    JSON.stringify({
-      type: 'session',
-      version: 3,
-      id: 'shared-session',
-      timestamp: '2026-08-25T00:00:00.000Z',
-      cwd: collisionRoot,
-    }),
-    JSON.stringify({
-      type: 'session_info',
-      id: 'shared-title',
-      parentId: null,
-      timestamp: '2026-08-25T00:00:01.000Z',
-      name: 'Shared Pi artifact',
-    }),
-  ].join('\n') + '\n');
-  await collisionLease.release();
-  const collisionOrigin = `http://127.0.0.1:${collisionPort}`;
-  const collisionBroker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
-    env: isolatedBrokerFixtureEnvironment(collisionRoot, {
-      overrides: {
-        PORT: String(collisionPort),
-        HOST: '127.0.0.1',
-        COSYNCING_OMP_BIN: collisionOmpBin,
-        PI_CODING_AGENT_DIR: sharedAgent,
-        PI_CODING_AGENT_SESSION_DIR: sharedSessions,
-        COSYNCING_OMP_AGENT_DIR: '',
-        COSYNCING_OMP_SESSIONS_ROOT: '',
-      },
-    }),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const collisionOutput = captureProcessOutput(collisionBroker);
-  try {
-    await waitForBrokerHealth(collisionBroker, `${collisionOrigin}/api/health`);
-    await test('shared Pi-family paths reject omp bridge hello before duplicate adoption', async () => {
-      const response = await fetch(`${collisionOrigin}/omp/bridge/hello`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionFile: sharedSessionFile, cwd: collisionRoot, title: 'omp duplicate', nativeVersion: '17.4.2' }),
-      });
-      const body = await response.json().catch(() => ({})) as any;
-      const roster = await (await fetch(
-        `${collisionOrigin}/api/sessions?contractRevision=${BROKER_CONTRACT_REVISION}`,
-      )).json() as any;
-      const sharedRows = (roster.sessions ?? []).filter((session: any) => session.title === 'Shared Pi artifact');
-      const ok = response.status === 409
-        && body.code === 'omp-pi-path-collision'
-        && sharedRows.some((session: any) => session.tool === 'pi')
-        && !sharedRows.some((session: any) => session.tool === 'omp');
-      return [ok, `status=${response.status} code=${body.code} rows=${JSON.stringify(sharedRows.map((s: any) => s.tool))}`];
-    });
-  } finally {
-    collisionBroker.kill();
-    await collisionBroker.exited;
-    await settledProcessOutput(collisionOutput);
-    rmSync(collisionRoot, { recursive: true, force: true });
-  }
 }
 
 // A future readable OMP store remains roster-visible, but no bridge leg may register or mutate it
@@ -750,8 +421,9 @@ process.exit(73);
       await fire('session_shutdown', { reason: 'reload' });
       fire = await loadExtension();
       await fire('session_start');
+      // The backfill is ingested synchronously inside the hello route, so a history-reset frame
+      // proves any live `running` it could have emitted already exists; no settle delay is needed.
       const reset = await waitUntil(() => frames.some((f) => f.phase === 'reload' && f.message.type === 'history-reset'));
-      await sleep(200);
       const backfill = statusesByKey((helloBodies[1]?.history ?? []).filter((ev: any) => ev.t === 'run-summary'));
       const eventsBefore = store.listEvents().length;
       const openBefore = store.listObservations().length;

@@ -16,7 +16,14 @@ function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
-const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+// Waits are on observable effects, never on durations: the watcher's own debounce decides when.
+const until = async (what: string, ready: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> => {
+  const startedAt = Date.now();
+  while (!await ready()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+};
 
 const tree = buildKiloFixtureTree();
 try {
@@ -83,34 +90,8 @@ try {
         && await connection.getHistorySourceIdentity() === undefined);
   } finally { replacement.cleanup(); }
 
-  const live: AgentMessage[] = [];
-  const unsubscribe = connection.subscribe((message) => live.push(message));
-  const walWriter = appendKiloTurn(tree.databasePath);
-  const journalMode = String((walWriter.query('pragma journal_mode').get() as { journal_mode?: string } | null)?.journal_mode ?? '');
-  await wait(500);
-  check('a WAL-mode SQLite commit emits the appended mapped row once',
-    journalMode === 'wal'
-      && live.filter((message) => message.type === 'user-message' && message.text === 'tail prompt').length === 1,
-    JSON.stringify(live));
-  walWriter.close();
-
-  const database = new Database(tree.databasePath);
-  database.query('update part set data = ? where id = ?').run(
-    JSON.stringify({ type: 'text', text: 'rewritten answer' }), 'prt-answer',
-  );
-  database.close();
-  await wait(500);
-  check('a change inside the retained prefix emits rollback reset and invalidates paging',
-    live.some((message) => message.type === 'history-reset' && message.semantic?.kind === 'rollback')
-      && await connection.getHistorySourceIdentity() === undefined,
-    JSON.stringify(live));
-
-  let promptRejected = false;
-  let permissionRejected = false;
-  try { await connection.sendPrompt({ text: 'no' }); } catch { promptRejected = true; }
-  try { await connection.respondPermission('no', 'approve'); } catch { permissionRejected = true; }
-  check('Observe rejects prompt and permission mutations', promptRejected && permissionRejected);
-  unsubscribe();
+  // Deleted here, covered by e2e/adapters/conformance/kilocode.test.ts: a WAL commit tails once (C05), a
+  // rewrite inside the retained prefix resets history (C06), Observe refuses mutations (C04).
   await connection.close();
 } finally {
   tree.cleanup();
@@ -132,7 +113,7 @@ try {
     const firstWatcher = internals.watcher;
     firstWatcher?.emit('change', 'change', 'kilo.db-wal');
     firstWatcher?.emit('error', new Error('fixture watcher failure'));
-    await wait(600);
+    await until('the replacement watcher', () => !!internals.watcher && internals.watcher !== firstWatcher);
     check('a watcher error during a pending debounce cancels it and rearms a replacement watcher',
       !!internals.watcher && internals.watcher !== firstWatcher);
     unsubscribe();
@@ -185,7 +166,7 @@ try {
       'prt-answer-observed', 'msg-assistant-observed', KILO_FIXTURE_SESSION_ID, startedAt + 200, startedAt + 200,
       JSON.stringify({ type: 'text', text: 'observed answer' }),
     );
-    await wait(500);
+    await until('the observed answer', () => tail.some((message) => message.type === 'model-output' && message.text === 'observed answer'));
     check('an unfinished observed Kilo turn tails its rows with no run-summary at all',
       tail.some((message) => message.type === 'model-output' && message.text === 'observed answer')
         && runs().length === 0,
@@ -193,7 +174,7 @@ try {
 
     writer.query('update message set time_updated = ?, data = ? where id = ?')
       .run(startedAt + 900, assistant(true), 'msg-assistant-observed');
-    await wait(500);
+    await until('the observed terminal', () => runs().some((message) => message.key === 'kilo:run:msg-assistant-observed'));
     writer.close();
     const observedRuns = runs().filter((message) => message.key === 'kilo:run:msg-assistant-observed');
     check('its completion arrives as exactly one terminal, and the observe tail never says running',
@@ -263,18 +244,19 @@ try {
       'msg-assistant-turn', KILO_FIXTURE_SESSION_ID, at + 100, at + 100, assistant(false),
     );
     part('prt-answer-turn', 'msg-assistant-turn', 200, JSON.stringify({ type: 'text', text: 'Hello wor', time: { start: at + 200 } }));
-    await wait(500);
+    await until('the first answer text', () => tail.some((message) => message.type === 'model-output' && message.text === 'Hello wor'));
     // Another client attaching mid-turn reads the history through the same connection.
     await connection.getHistory();
     part('prt-answer-turn', 'msg-assistant-turn', 200,
       JSON.stringify({ type: 'text', text: 'Hello world', time: { start: at + 200, end: at + 300 } }));
     part('prt-tool-turn', 'msg-assistant-turn', 400, tool('running'));
-    await wait(500);
+    await until('the grown answer and the running tool', () => tail.some((message) => message.type === 'model-output' && message.text === 'Hello world')
+      && tail.some((message) => message.type === 'tool-call' && message.callId === 'call-turn'));
     const midTurnIdentity = await connection.getHistorySourceIdentity();
     part('prt-tool-turn', 'msg-assistant-turn', 400, tool('completed'));
     writer.query('update message set time_updated = ?, data = ? where id = ?')
       .run(at + 900, assistant(true), 'msg-assistant-turn');
-    await wait(500);
+    await until('the turn terminal', () => tail.some((message) => message.type === 'run-summary' && message.key === 'kilo:run:msg-assistant-turn' && message.status === 'done'));
     const ended = await connection.getHistory();
     const capture = await connection.captureHistorySnapshot({ acceptsLocations: true, accept: () => true });
     const describeTail = () => JSON.stringify(tail.map((message) =>
@@ -307,7 +289,7 @@ try {
       describeTail());
 
     part('prt-user-turn', 'msg-user-turn', 0, JSON.stringify({ type: 'text', text: 'rewritten prompt' }));
-    await wait(500);
+    await until('the rollback reset', () => tail.some((message) => message.type === 'history-reset'));
     writer.close();
     check('a rewrite of a row Kilo had finished writing still resets and ends paging',
       tail.some((message) => message.type === 'history-reset' && message.semantic?.kind === 'rollback')

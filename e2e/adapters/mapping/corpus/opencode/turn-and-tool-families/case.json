@@ -1,0 +1,12 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/opencode-wire/src/mapping.ts and packages/typescript/adapters/opencode/test/test-opencode-retry-detail.ts",
+  "description": "a settled turn with every tool family (bash exit codes, read, edit with filediff, multi-file apply_patch, write create, grep/glob, webfetch, todowrite ledger, suppressed question tool, errored and still-running tools, a file part) read at attach, then a live turn: a task subagent bar, a tool that runs then completes, and a streamed answer under its part id whose snapshot is not emitted on top of its deltas",
+  "userTexts": [
+    "refactor the parser",
+    "now the lexer"
+  ],
+  "oneRow": [
+    "Refactor done."
+  ],
+  "sessionId": "7262dafe-669a-44f8-84f8-7262dafe669a"
+}

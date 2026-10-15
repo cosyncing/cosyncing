@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"49534680-cc5d-47af-87af-49534680cc5d","timestamp":"2026-06-20T00:00:00.000Z","cwd":"/work/proj","title":"native title"}
+{"type":"model_change","id":"m0","timestamp":"2026-06-20T00:00:00.000Z","model":"anthropic/claude-sonnet-5-5"}
+{"type":"title_change","id":"m1","timestamp":"2026-06-20T00:00:00.000Z","title":"renamed"}
+{"type":"message","id":"ou1","timestamp":"2026-06-20T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"omp prompt"}],"timestamp":1781913601000}}

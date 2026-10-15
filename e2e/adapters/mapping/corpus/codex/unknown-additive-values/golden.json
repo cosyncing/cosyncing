@@ -1,0 +1,32 @@
+{
+  "history": [
+    {"type":"user-message","text":"real prompt","key":"c1"},
+    {"type":"tool-call","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","args":{"x":1}},
+    {"type":"tool-result","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","isError":false,"result":"ok"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tf","turnId":"tf","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"Answer with a new phase.","final":true,"key":"codex:tf:msg_f:t"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"tool-call","callId":"cf2","toolName":"tool_from_the_future","toolClass":"other","args":{"x":2}},
+    {"type":"tool-result","callId":"cf2","toolName":"tool_from_the_future","toolClass":"other","isError":false,"result":"{\"not\":\"a string\"}"},
+    {"type":"user-message","text":"prompt with a new block","key":"codex:tf:u0","turnId":"tf"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tf","turnId":"tf","userMessageKey":"codex:tf:u0","status":"done","source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"real prompt","key":"c1"},
+    {"type":"tool-call","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","args":{"x":1}},
+    {"type":"tool-result","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","isError":false,"result":"ok"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tf","turnId":"tf","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"Answer with a new phase.","final":true,"key":"codex:tf:msg_f:t"},
+    {"type":"tool-call","callId":"cf2","toolName":"tool_from_the_future","toolClass":"other","args":{"x":2}},
+    {"type":"tool-result","callId":"cf2","toolName":"tool_from_the_future","toolClass":"other","isError":false,"result":"{\"not\":\"a string\"}"},
+    {"type":"user-message","text":"prompt with a new block","key":"codex:tf:u0","turnId":"tf"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tf","turnId":"tf","userMessageKey":"c1","assistantMessageKey":"codex:tf:msg_f:t","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

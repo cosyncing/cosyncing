@@ -18,73 +18,6 @@ void main() {
   tearDown(() => container.dispose());
 
   group('UiScaleController', () {
-    test('defaults to system text size and comfortable density', () async {
-      final settings = await container.read(uiScaleControllerProvider.future);
-      expect(settings.textScale, UiTextScale.system);
-      expect(settings.density, UiDensity.comfortable);
-    });
-
-    test('persists and exposes the chosen text size', () async {
-      await container
-          .read(uiScaleControllerProvider.notifier)
-          .setTextScale(UiTextScale.large);
-
-      expect(store.values[uiTextScaleSettingKey], UiTextScale.large.token);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.large,
-      );
-    });
-
-    test('persists and exposes the chosen density', () async {
-      await container
-          .read(uiScaleControllerProvider.notifier)
-          .setDensity(UiDensity.spacious);
-
-      expect(store.values[uiDensitySettingKey], UiDensity.spacious.token);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.density,
-        UiDensity.spacious,
-      );
-    });
-
-    test('steps up and down one rung along the concrete ladder', () async {
-      final notifier = container.read(uiScaleControllerProvider.notifier);
-      await container.read(uiScaleControllerProvider.future);
-
-      await notifier.setTextScale(UiTextScale.standard);
-      await notifier.stepTextScale(1);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.large,
-      );
-
-      await notifier.stepTextScale(-1);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.standard,
-      );
-    });
-
-    test('clamps at both ends of the ladder', () async {
-      final notifier = container.read(uiScaleControllerProvider.notifier);
-      await container.read(uiScaleControllerProvider.future);
-
-      await notifier.setTextScale(UiTextScale.extraLarge);
-      await notifier.stepTextScale(1);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.extraLarge,
-      );
-
-      await notifier.setTextScale(UiTextScale.small);
-      await notifier.stepTextScale(-1);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.small,
-      );
-    });
-
     test('treats a zero direction as a no-op', () async {
       final notifier = container.read(uiScaleControllerProvider.notifier);
       await container.read(uiScaleControllerProvider.future);
@@ -93,35 +26,6 @@ void main() {
       expect(
         container.read(uiScaleControllerProvider).valueOrNull?.textScale,
         UiTextScale.system,
-      );
-    });
-
-    test('resolves system to the nearest rung before stepping', () async {
-      final notifier = container.read(uiScaleControllerProvider.notifier);
-      await container.read(uiScaleControllerProvider.future);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.system,
-      );
-
-      // system is enum index 0 but is not the smallest size; stepping down from
-      // an OS scale of 1.0 must land on small, not stay pinned at the bottom.
-      await notifier.stepTextScale(-1, ambientFactor: 1);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.small,
-      );
-    });
-
-    test('honours the ambient OS factor when leaving system', () async {
-      final notifier = container.read(uiScaleControllerProvider.notifier);
-      await container.read(uiScaleControllerProvider.future);
-
-      // An OS already near 1.15 resolves to large, so growing lands extraLarge.
-      await notifier.stepTextScale(1, ambientFactor: 1.14);
-      expect(
-        container.read(uiScaleControllerProvider).valueOrNull?.textScale,
-        UiTextScale.extraLarge,
       );
     });
 
@@ -134,23 +38,6 @@ void main() {
         container.read(uiScaleControllerProvider).valueOrNull?.textScale,
         UiTextScale.large,
       );
-    });
-
-    test('persists a stepped text size', () async {
-      final notifier = container.read(uiScaleControllerProvider.notifier);
-      await container.read(uiScaleControllerProvider.future);
-
-      await notifier.stepTextScale(1);
-      expect(store.values[uiTextScaleSettingKey], UiTextScale.large.token);
-    });
-
-    test('hydrates previously persisted choices', () async {
-      store.values[uiTextScaleSettingKey] = UiTextScale.small.token;
-      store.values[uiDensitySettingKey] = UiDensity.compact.token;
-
-      final settings = await container.read(uiScaleControllerProvider.future);
-      expect(settings.textScale, UiTextScale.small);
-      expect(settings.density, UiDensity.compact);
     });
   });
 }

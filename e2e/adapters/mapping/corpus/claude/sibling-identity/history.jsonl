@@ -1,0 +1,18 @@
+{"type":"user","uuid":"p1","message":{"role":"user","content":"go"}}
+{"type":"assistant","uuid":"g1","message":{"id":"msg_G","role":"assistant","content":[{"type":"thinking","thinking":"first block","signature":"sig"}]}}
+{"type":"assistant","uuid":"s1","message":{"id":"msg_A","role":"assistant","content":[{"type":"thinking","thinking":"reasoning","signature":"sig"}]}}
+{"type":"assistant","uuid":"s2","message":{"id":"msg_A","role":"assistant","content":[{"type":"text","text":"answer"}]}}
+{"type":"assistant","uuid":"b1","message":{"id":"msg_B","role":"assistant","content":[{"type":"text","text":"one"}]}}
+{"type":"assistant","uuid":"b2","message":{"id":"msg_B","role":"assistant","content":[{"type":"text","text":"two"}]}}
+{"type":"assistant","uuid":"d1","message":{"id":"msg_D","role":"assistant","content":[{"type":"thinking","thinking":"a","signature":"sig"}]}}
+{"type":"assistant","uuid":"d2","message":{"id":"msg_D","role":"assistant","content":[{"type":"thinking","thinking":"b","signature":"sig"}]}}
+{"type":"assistant","uuid":"c1","message":{"id":"msg_C","role":"assistant","content":[{"type":"text","text":"same words"}]}}
+{"type":"assistant","uuid":"c2","message":{"id":"msg_C","role":"assistant","content":[{"type":"text","text":"same words"}]}}
+{"type":"assistant","uuid":"h1","message":{"id":"msg_H","role":"assistant","content":[{"type":"text","text":"same words"}]}}
+{"type":"assistant","uuid":"e1","message":{"id":"msg_E","role":"assistant","content":[{"type":"thinking","thinking":"why","signature":"sig"}]}}
+{"type":"assistant","uuid":"e2","message":{"id":"msg_E","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/tmp/x"}}]}}
+{"type":"assistant","uuid":"e3","message":{"id":"msg_E","role":"assistant","content":[{"type":"text","text":"after the tool"}]}}
+{"type":"assistant","uuid":"f1","message":{"id":"msg_F","role":"assistant","content":[{"type":"text","text":"first"},{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/tmp/x"}}]}}
+{"type":"assistant","uuid":"f2","message":{"id":"msg_F","role":"assistant","content":[{"type":"text","text":"third"}]}}
+{"type":"assistant","uuid":"n1","message":{"role":"assistant","content":[{"type":"text","text":"legacy single"}]}}
+{"type":"assistant","uuid":"n2","message":{"role":"assistant","content":[{"type":"text","text":"legacy first"},{"type":"tool_use","id":"toolu_3","name":"Read","input":{"file_path":"/tmp/x"}}]}}

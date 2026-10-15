@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/omp/src/dialect.ts",
+  "description": "omp rows map through the shared engine with the omp event-key namespace and jsonl source on run summaries; model_change and title entries are not conversation rows",
+  "userTexts": [
+    "omp prompt"
+  ],
+  "sessionId": "49534680-cc5d-47af-87af-49534680cc5d"
+}

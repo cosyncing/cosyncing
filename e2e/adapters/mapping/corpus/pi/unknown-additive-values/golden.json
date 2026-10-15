@@ -1,0 +1,28 @@
+{
+  "history": [
+    {"type":"user-message","text":"real prompt","key":"f5","turnId":"f5","sentAt":1781913602000},
+    {"type":"model-output","text":"answer","final":true,"key":"f6:t:0"},
+    {"type":"tool-call","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","args":{"x":1}},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"f5","assistantMessageKey":"f6:t:0","status":"running","startedAt":1781913602000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"pi-jsonl"}
+  ],
+  "live": [
+    {"type":"tool-result","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","isError":false,"result":"ok"},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":""},
+    {"type":"user-message","text":"prompt after unknown rows","key":"f10","turnId":"f10","sentAt":1781913605000},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"f5","assistantMessageKey":"f6:t:0","status":"done","startedAt":1781913602000,"completedAt":1781913603000,"totalRuntimeMs":1000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"pi-jsonl"},
+    {"type":"run-summary","key":"pi:run:u1","turnId":"u1","userMessageKey":"f10","status":"running","startedAt":1781913605000,"source":"pi-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"real prompt","key":"f5","turnId":"f5","sentAt":1781913602000},
+    {"type":"model-output","text":"answer","final":true,"key":"f6:t:0"},
+    {"type":"tool-call","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","args":{"x":1}},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"tool-result","callId":"cf1","toolName":"tool_from_the_future","toolClass":"other","isError":false,"result":"ok"},
+    {"type":"tool-result","callId":"","toolName":"tool","toolClass":"other","isError":false,"result":""},
+    {"type":"user-message","text":"prompt after unknown rows","key":"f10","turnId":"f10","sentAt":1781913605000},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"f5","assistantMessageKey":"f6:t:0","status":"done","startedAt":1781913602000,"completedAt":1781913603000,"totalRuntimeMs":1000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"pi-jsonl"},
+    {"type":"run-summary","key":"pi:run:u1","turnId":"u1","userMessageKey":"f10","status":"running","startedAt":1781913605000,"source":"pi-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":1000,"turnCount":1,"updatedAt":1781913603000,"source":"pi"}}
+  ]
+}

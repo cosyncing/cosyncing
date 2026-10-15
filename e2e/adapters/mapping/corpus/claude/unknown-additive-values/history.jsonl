@@ -1,0 +1,10 @@
+{"type":"ai-title","title":"auto"}
+{"type":"last-prompt","lastPrompt":"Do the thing.","leafUuid":"x"}
+{"type":"bridge-session","bridgeSessionId":"cse_abc","lastSequenceNum":0}
+{"type":"attachment","attachment":{"type":"task_reminder","content":[],"itemCount":0}}
+{"type":"queue-operation","operation":"dequeue","timestamp":"2026-06-19T00:00:00.000Z"}
+{"type":"system","subtype":"away_summary","content":"Goal: …","uuid":"sy1","isMeta":false}
+{"type":"a-line-type-from-the-future","uuid":"fx1","payload":{"anything":[1,2,3]}}
+{"type":"system","subtype":"a-subtype-from-the-future","content":"new thing","uuid":"fx2"}
+{"type":"user","uuid":"bu1","newFieldFromTheFuture":{"nested":true},"message":{"role":"user","content":"Do the thing."}}
+{"type":"assistant","uuid":"ba1","newFieldFromTheFuture":1,"message":{"id":"bm1","role":"assistant","content":[{"type":"text","text":"On it."},{"type":"a-block-type-from-the-future","whatever":1},{"type":"tool_use","id":"toolu_fut","name":"ToolFromTheFuture","input":{"x":1}}]}}

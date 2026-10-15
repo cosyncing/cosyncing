@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"ff644405-b840-4724-8724-ff644405b840","timestamp":"2026-06-20T00:00:00.000Z","cwd":"/work/proj"}
+{"type":"message","id":"cu1","timestamp":"2026-06-20T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"go"}],"timestamp":1781913601000}}
+{"type":"message","id":"ca1","timestamp":"2026-06-20T00:00:03.000Z","message":{"role":"assistant","stopReason":"toolUse","timestamp":1781913601000,"content":[{"type":"text","text":"first text"},{"type":"toolCall","id":"cc1","name":"bash","arguments":{"command":"ls"}}],"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":{"total":0.01}}}}
+{"type":"message","id":"cr1","timestamp":"2026-06-20T00:00:02.000Z","message":{"role":"toolResult","toolCallId":"cc1","toolName":"bash","content":[{"type":"text","text":"listing"}]}}

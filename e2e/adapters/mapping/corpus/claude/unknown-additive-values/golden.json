@@ -1,0 +1,26 @@
+{
+  "history": [
+    {"type":"user-message","text":"Do the thing.","key":"bu1","turnId":"bu1"},
+    {"type":"run-summary","key":"9e0aceb6-81a8-4fa2-8fa2-9e0aceb681a8:run:bu1","turnId":"bu1","userMessageKey":"bu1","status":"running","source":"claude-transcript"},
+    {"type":"model-output","text":"On it.","final":true,"key":"claude:bm1:0:t"},
+    {"type":"tool-call","callId":"toolu_fut","toolName":"ToolFromTheFuture","toolClass":"other","args":{"x":1}}
+  ],
+  "live": [
+    {"type":"event","name":"transcript.unknown-type","payload":{"lineType":"a-line-type-from-the-future"}},
+    {"type":"tool-result","callId":"toolu_fut","toolName":"ToolFromTheFuture","toolClass":"other","isError":false,"result":""},
+    {"type":"user-message","text":"still a prompt","key":"bu2:u","turnId":"bu2"},
+    {"type":"run-summary","key":"9e0aceb6-81a8-4fa2-8fa2-9e0aceb681a8:run:bu1","turnId":"bu1","userMessageKey":"bu1","assistantMessageKey":"claude:bm1:0:t","status":"cancelled","source":"claude-transcript"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"9e0aceb6-81a8-4fa2-8fa2-9e0aceb681a8:run:bu2","turnId":"bu2","userMessageKey":"bu2:u","status":"running","source":"claude-transcript"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"Do the thing.","key":"bu1","turnId":"bu1"},
+    {"type":"run-summary","key":"9e0aceb6-81a8-4fa2-8fa2-9e0aceb681a8:run:bu1","turnId":"bu1","userMessageKey":"bu1","status":"running","source":"claude-transcript"},
+    {"type":"model-output","text":"On it.","final":true,"key":"claude:bm1:0:t"},
+    {"type":"tool-call","callId":"toolu_fut","toolName":"ToolFromTheFuture","toolClass":"other","args":{"x":1}},
+    {"type":"tool-result","callId":"toolu_fut","toolName":"ToolFromTheFuture","toolClass":"other","isError":false,"result":""},
+    {"type":"user-message","text":"still a prompt","key":"bu2:u","turnId":"bu2"},
+    {"type":"run-summary","key":"9e0aceb6-81a8-4fa2-8fa2-9e0aceb681a8:run:bu1","turnId":"bu1","userMessageKey":"bu1","assistantMessageKey":"claude:bm1:0:t","status":"cancelled","source":"claude-transcript"},
+    {"type":"run-summary","key":"9e0aceb6-81a8-4fa2-8fa2-9e0aceb681a8:run:bu2","turnId":"bu2","userMessageKey":"bu2:u","status":"running","source":"claude-transcript"}
+  ]
+}

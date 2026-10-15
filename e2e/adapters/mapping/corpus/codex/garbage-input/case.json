@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
+  "description": "blank, non-JSON, truncated, primitive, array, null, wrongly-typed and binary lines in history and on the tail are skipped without a throw and keep their line-index slots; no garbage becomes a user bubble",
+  "userTexts": [
+    "before the noise",
+    "prompt after garbage on the tail"
+  ],
+  "sessionId": "0f99527d-bc80-44ce-84ce-0f99527dbc80"
+}

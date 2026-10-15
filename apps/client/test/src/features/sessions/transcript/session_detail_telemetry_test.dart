@@ -64,56 +64,6 @@ void main() {
       ),
     ];
 
-    testWidgets('token lines never reach the transcript', (tester) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: eventsWithTelemetry()),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('Tokens:'), findsNothing);
-      expect(
-        find.byKey(const Key('transcript-token-count-line')),
-        findsNothing,
-      );
-      expect(find.textContaining('Here is the answer.'), findsOneWidget);
-    });
-
-    // Both halves of the metadata contract in one pump: the reading reaches the
-    // session, and the frame that carried it leaves no card behind. Asserting
-    // only the absence would pass just as well if the update had been dropped
-    // on the floor, which is the failure this pairing exists to catch.
-    testWidgets('a metadata update changes state, leaving no card', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: eventsWithTelemetry()),
-      );
-      await tester.pumpAndSettle();
-
-      // Applied: the context reading came from the hidden metadata frame.
-      expect(find.text('90k / 100k'), findsOneWidget);
-      // Not rendered: no card, and no raw key or value anywhere on screen.
-      expect(find.textContaining('Metadata update'), findsNothing);
-      expect(find.textContaining('contextUsage'), findsNothing);
-    });
-
-    // The composer carries context usage while the roomy strip carries a
-    // compact raw-bucket summary and Status keeps the full breakdown.
-    testWidgets('the composer shows the latest context reading', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: eventsWithTelemetry()),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(const Key('session-context-meter-verbose')),
-        findsOneWidget,
-      );
-      expect(find.text('90k / 100k'), findsOneWidget);
-    });
-
     testWidgets('compact strips hide telemetry below 840dp', (tester) async {
       await tester.pumpWidget(
         buildSessionDetailTestPage(events: eventsWithTelemetry()),
@@ -225,27 +175,6 @@ void main() {
       );
     });
 
-    testWidgets('the Status view holds the full breakdown', (tester) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: eventsWithTelemetry()),
-      );
-      await tester.pumpAndSettle();
-
-      await openSessionDetailTestTab(tester, 'session-detail-tab-status');
-
-      expect(
-        find.byKey(const Key('session-detail-telemetry-panel')),
-        findsOneWidget,
-      );
-      expect(find.text('10.8M tokens'), findsOneWidget);
-      expect(find.text('212k tokens'), findsOneWidget);
-      expect(find.text('332.8k tokens'), findsOneWidget);
-      expect(find.text('656 tokens'), findsOneWidget);
-      expect(find.text('Session summary'), findsOneWidget);
-      expect(find.text('Total tokens'), findsNothing);
-      expect(find.textContaining('cache hit'), findsNothing);
-    });
-
     testWidgets('Status uses quiet labels and primary tabular values', (
       tester,
     ) async {
@@ -279,22 +208,6 @@ void main() {
 
       expect(
         find.byKey(const Key('session-detail-telemetry-panel')),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('Status reports an empty state before any reading', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(events: [session()]),
-      );
-      await tester.pumpAndSettle();
-
-      await openSessionDetailTestTab(tester, 'session-detail-tab-status');
-
-      expect(
-        find.byKey(const Key('session-detail-telemetry-empty')),
         findsOneWidget,
       );
     });

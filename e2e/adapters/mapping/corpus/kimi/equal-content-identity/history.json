@@ -1,0 +1,45 @@
+{
+  "items": [
+    {
+      "id": "e_3",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "same words"
+        }
+      ]
+    },
+    {
+      "id": "e_2",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "same words"
+        }
+      ]
+    },
+    {
+      "id": "e_1",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "same words"
+        }
+      ]
+    }
+  ],
+  "has_more": false
+}

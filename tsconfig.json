@@ -12,6 +12,8 @@
     "scripts/adapters/dsh-*.ts",
     "scripts/adapters/tests/test-dsh-*.ts",
     "scripts/mod/**/*.ts",
-    "scripts/claude-mod/**/*.ts"
+    "scripts/claude-mod/**/*.ts",
+    "scripts/ci/**/*.ts",
+    "e2e/**/*.ts"
   ]
 }

@@ -10,7 +10,7 @@
 import { assertSupportedBrokerHost } from './assert-supported-host.ts';
 import { canSendBackgroundMessage } from '../sessions/background-compatibility.ts';
 import os from 'node:os';
-import { closeSync, createReadStream, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { appendFileSync, closeSync, createReadStream, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -248,6 +248,7 @@ import {
   type LocalRosterResponse,
 } from '@cosyncing/protocol';
 import { BUILD_INFO, buildFingerprint } from './build-info.ts';
+import { createBrokerClock } from './test-clock.ts';
 import { currentApplicationIdentity } from './application-identity.ts';
 import { serveWebHandoff, WEB_HANDOFF_PATH } from '../artifacts/web-handoff.ts';
 import { driveAttachRefusalCode } from '../sessions/client-message-policy.ts';
@@ -498,6 +499,14 @@ const HTTP_WORKSPACE_BROWSING_ENABLED =
   || (!BUILD_INFO.packaged && /^(1|true|yes|on)$/i.test(
     process.env.COSYNCING_FS_REMOTE_ENABLED?.trim() || '',
   ));
+// Test hook (source runs only): a short confirmation lifetime makes nonce expiry observable without a 60 s wait.
+const R2_NONCE_TTL_TEST_MS = BUILD_INFO.packaged ? 0 : Math.max(0, envNumber('COSYNCING_TEST_R2_NONCE_TTL_MS', 0));
+// Test hook (source runs only): replaces the attach-time picker retry ladder (3/8/15/30 s), comma-separated ms.
+const SESSION_OPTIONS_TEST_DELAYS_MS: number[] | undefined = (() => {
+  const raw = BUILD_INFO.packaged ? '' : process.env.COSYNCING_TEST_SESSION_OPTIONS_RETRY_MS?.trim() ?? '';
+  const delays = raw ? raw.split(',').map(Number) : [];
+  return delays.length > 0 && delays.every((delay) => Number.isFinite(delay) && delay >= 0) ? delays : undefined;
+})();
 const HTTP_R2_ENABLED_ACTIONS = new Set([
   ...(EFFECTIVE_CONFIGURATION.config.features?.httpTranscriptExport === true
     ? ['transcriptExport']
@@ -846,7 +855,10 @@ process.env.COSYNCING_BROKER_BUILD_VERSION = BUILD_INFO.version;
 }
 
 const sessionMetadata = new SessionMetadataStore();
-const registry = new AgentRegistry();
+// Test hook (source runs only): a short external-host discovery budget makes abandonment observable in about a second.
+const registry = new AgentRegistry(
+  BUILD_INFO.packaged ? {} : { discoveryBudgetCapMs: envNumber('COSYNCING_TEST_DISCOVERY_BUDGET_MS', 0) || undefined },
+);
 // This gate is shared by adapter readiness and the broker-owned bridge route. Without the broker
 // check, a blocked disk/RPC adapter could still adopt an omp bridge for a file Pi also discovers.
 const ompPathCollision = inspectOmpPathCollision(process.env);
@@ -956,7 +968,13 @@ registry.register(new ClineAdapter({
     console.warn(`${LOG_PREFIX} stopped the managed Cline Hub after an unconfirmed native authority transition: ${reason}`);
   },
 }));
+// Test hook (source/dev only, never a packaged build): own the managed `kilo serve` on another loopback
+// port than 4097, so a fixture never meets a real Kilo.
+const KILO_MANAGED_PORT_TEST = BUILD_INFO.packaged ? NaN : Number(process.env.COSYNCING_TEST_KILO_SERVE_PORT);
+const kiloManagedPort = Number.isSafeInteger(KILO_MANAGED_PORT_TEST) && KILO_MANAGED_PORT_TEST > 1023 && KILO_MANAGED_PORT_TEST < 65536
+  ? KILO_MANAGED_PORT_TEST : 4097;
 registry.register(new KiloAdapter({
+  managedPort: kiloManagedPort,
   resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
   resolveStoredDriveState: (info) => sessionMetadata.wasAppCreatedSession(info)
     ? {
@@ -976,10 +994,10 @@ registry.register(new KiloAdapter({
   },
   isManagedHostOwned: async (identityKey) => {
     const record = managedHostOwners.read('kilo');
-    if (record === null || record.evidence.port !== 4097) return false;
+    if (record === null || record.evidence.port !== kiloManagedPort) return false;
     const listener = managedHostEffects.listenerAsync
-      ? await managedHostEffects.listenerAsync(4097)
-      : managedHostEffects.listener(4097);
+      ? await managedHostEffects.listenerAsync(kiloManagedPort)
+      : managedHostEffects.listener(kiloManagedPort);
     return listener.state === 'identified'
       && listener.pid === record.pid
       && classifyManagedHost(
@@ -1020,6 +1038,8 @@ registry.register(new CodexAdapter({
       /* a durable ownership-evidence write failure cannot disable Codex discovery */
     }
   },
+  // Test hook (source runs only): a long Resume-owner stop wait lets a suite hold a terminal handoff open.
+  ...(BUILD_INFO.packaged ? {} : { resumeProcessStopTimeoutMs: envNumber('COSYNCING_TEST_CODEX_RESUME_STOP_MS', 0) || undefined }),
 })); // Codex — observe (rollout-JSONL tail); resume is a later increment
 registry.register(new ClaudeAdapter({
   // The mod registry, read per row. The adapter never opens the socket and never caches the
@@ -1084,7 +1104,12 @@ registry.register(new ClaudeAdapter({
 // managed service that could never set it. The route now filters per client
 // against each adapter's declared minimum revision, which settles the same
 // question without asking an operator to know a variable name.
-registry.register(new KimiAdapter());
+// Source-only test hook: shortens the Kimi poll tick (10 s), which confirms a foreign write after two quiet polls.
+// A packaged build never reads it.
+const kimiTestPollMs = BUILD_INFO.packaged ? 0 : Number(process.env.COSYNCING_TEST_KIMI_POLL_MS);
+registry.register(new KimiAdapter(Number.isFinite(kimiTestPollMs) && kimiTestPollMs >= 50
+  ? { observe: { pollIntervalMs: kimiTestPollMs } }
+  : {}));
 // DeepSeek Harness — live-only Drive against an EXTERNAL `dsh web` host: a
 // process that exists with or without this broker and is never configured by
 // it. Whether this broker may START one depends on how it was launched: the
@@ -1171,13 +1196,21 @@ function cleanupTransientArtifactsSync(): void {
 }
 process.on('exit', cleanupTransientArtifactsSync);
 
+// Test hook (source runs only): the e2e suites move attention, push and protocol-journal time
+// through a file.
+const attentionClock = createBrokerClock({
+  packaged: BUILD_INFO.packaged,
+  file: process.env.COSYNCING_TEST_CLOCK_FILE,
+});
 attentionService = new AttentionService({
   store: {
+    now: attentionClock.now,
     onPersistenceResult: (ok) => { brokerHealth.recordStoreWrite('attention-store', ok); },
     onStartupResult: (ok, detailCode) => { brokerHealth.recordStoreStartup('attention-store', ok, detailCode); },
     onWarning: (message) => console.warn(`${LOG_PREFIX} ${message}`),
     onChange: () => { void attentionScheduler?.tick().catch(() => {}); },
   },
+  policy: { now: attentionClock.now },
 });
 const codexConfigFreshness = createCodexConfigFreshnessProbe();
 const runtimeUpdates = new RuntimeUpdateCoordinator([
@@ -1202,7 +1235,7 @@ const runtimeUpdates = new RuntimeUpdateCoordinator([
   restartAllowed: () => !shuttingDown,
 });
 const runtimeUpdateStatusTtlMs = Math.max(0, envNumber('COSYNCING_RUNTIME_UPDATE_STATUS_TTL_MS', 60_000));
-const authFailureAttention = new AuthFailureAttentionTracker();
+const authFailureAttention = new AuthFailureAttentionTracker({ now: attentionClock.now });
 const BROKER_DESCRIPTOR = Object.freeze({
   version: BUILD_INFO.version,
   contract: Object.freeze({ ...BROKER_CONTRACT }),
@@ -1212,8 +1245,20 @@ const transportPairings = new TransportPairingRegistry({
   broker: BROKER_DESCRIPTOR,
   ttlMs: TRANSPORT_PAIRING_TTL_MS,
 });
-const wsAuthTickets = new WsAuthTicketRegistry();
+// Test hook (source runs only): a short ticket lifetime makes expiry observable without waiting 30 s.
+const wsAuthTickets = new WsAuthTicketRegistry(
+  BUILD_INFO.packaged ? {} : { ttlMs: envNumber('COSYNCING_TEST_WS_TICKET_TTL_MS', 0) || undefined },
+);
+// Test hooks (source runs only): journal retention follows the movable test clock, and a small
+// entry cap makes bounded eviction observable without ten thousand mutations.
+const protocolJournalTestMaxEntries = BUILD_INFO.packaged
+  ? 0
+  : envNumber('COSYNCING_TEST_PROTOCOL_JOURNAL_MAX_ENTRIES', 0);
 const protocolJournal = new ProtocolJournal({
+  now: attentionClock.now,
+  ...(protocolJournalTestMaxEntries > 0
+    ? { maxIdempotencyEntries: protocolJournalTestMaxEntries, maxTicketEntries: protocolJournalTestMaxEntries }
+    : {}),
   onWarning: (message) => console.warn(`${LOG_PREFIX} ${message}`),
 });
 const rosterRevision = new RosterRevisionStore(
@@ -1260,10 +1305,16 @@ function observeRosterViews(info: SessionInfo): void {
 // Durable shared composer drafts (DR1): survives zero-client owner eviction and
 // broker restart; ManagedConn keeps only the low-latency fan-out cache.
 const draftStore = new SharedDraftStore({
+  // Test hooks (source runs only): retention runs on the movable test clock, and a suite can lower
+  // the non-empty draft cap to observe LRU eviction without hundreds of sessions.
+  now: attentionClock.now,
+  maxSessions: BUILD_INFO.packaged ? undefined : envNumber('COSYNCING_TEST_DRAFT_MAX_SESSIONS', 0) || undefined,
   onPersistenceError: (error) =>
     console.error(`${LOG_PREFIX} shared draft store persistence failed: ${error instanceof Error ? error.message : String(error)}`),
 });
-const hub = new Hub(registry, 15000, artifactStore, {
+// Test hook (source runs only): a short zero-client eviction grace makes eviction and restore observable in a suite.
+const HUB_EVICT_GRACE_MS = BUILD_INFO.packaged ? 15000 : envNumber('COSYNCING_TEST_HUB_EVICT_GRACE_MS', 0) || 15000;
+const hub = new Hub(registry, HUB_EVICT_GRACE_MS, artifactStore, {
   onMessage: (info, message) => {
     void attentionService.handleMessage(attentionSessionView(info, (tool, id) => sessionMetadata.titleOf(tool, id)), message).catch((error) =>
       console.error(`${LOG_PREFIX} attention message reconciliation failed for ${info.tool}:${info.id}: ${String(error)}`));
@@ -1316,6 +1367,7 @@ const rosterPublication = createRosterPublicationBoundary({
     console.error(`${LOG_PREFIX} session-info refresh failed for ${info.tool}:${info.id}`, err),
 });
 wakePush = new WakePushRegistry(setupStateHome(), {
+  now: attentionClock.now,
   isPeerGenerationActive: (peerId, authGeneration) =>
     transportPairings.isPeerGenerationActive(peerId, authGeneration),
 });
@@ -1329,11 +1381,15 @@ const webPushDelivery: WebPushDeliveryDependencies & { vapid: WebPushVapidKeySto
 // HTTP listener. Constructor persistence failures escape module startup, so partial migration can
 // only be retried idempotently and can never advertise a ready contract-17 broker.
 const scheduleStore = new ScheduleStore({
+  // Test hook (source runs only): scheduled sends keep time on the movable test clock.
+  now: attentionClock.now,
   onPersistenceError: (error) =>
     console.error(`${LOG_PREFIX} schedule store persistence failed: ${error instanceof Error ? error.message : String(error)}`),
 });
 completeAuthorizationProvenanceMigration(setupStateHome());
 wakeCoalescer = new DeviceWakeCoalescer({
+  // Test hook (source runs only): a short window makes the trailing wake observable in seconds.
+  windowMs: BUILD_INFO.packaged ? undefined : envNumber('COSYNCING_TEST_WAKE_COALESCE_WINDOW_MS', 0) || undefined,
   // A trailing coalesced wake may outlive peer revocation. Resolve it again at the final provider
   // boundary so a removed registration or stale authentication generation cannot dispatch.
   dispatch: (registration) => dispatchWakePush(wakePush.getForDispatch(registration.deviceId)),
@@ -1343,6 +1399,7 @@ wakeCoalescer = new DeviceWakeCoalescer({
 brokerHealthAttention = new BrokerHealthAttentionReconciler({
   attentionService,
   machine: MACHINE,
+  now: attentionClock.now,
   requestDirectWake: () => {
     // A web push shows an event, so a bare wake has nothing to show; the event itself is delivered.
     for (const registration of wakePush.listForDispatch()) {
@@ -1351,6 +1408,7 @@ brokerHealthAttention = new BrokerHealthAttentionReconciler({
   },
 });
 attentionScheduler = new AttentionReminderScheduler(attentionService.store, {
+  now: attentionClock.now,
   listDeviceIds: () => wakePush.listForDispatch().map((registration) => registration.deviceId),
   deviceAlertsStartAt: (deviceId) => {
     const registration = wakePush.listForDispatch().find((item) => item.deviceId === deviceId);
@@ -1365,17 +1423,22 @@ attentionScheduler = new AttentionReminderScheduler(attentionService.store, {
     console.warn(`${LOG_PREFIX} attention wake reservation failed: ${error instanceof Error ? error.message : String(error)}`),
 });
 attentionScheduler.start();
+// A moved test clock runs the pass a timer due at the new time would have run.
+attentionClock.onMove(() => { void attentionScheduler.tick().catch(() => {}); });
 
 // ── Scheduled sends (part-3 #50) ─────────────────────────────────────────────
 // Store + timer loop; delivery/notification wiring lives in deliverScheduledSend /
 // recordScheduleOutcomeAttention below (hoisted function declarations).
 const scheduleRunner = new ScheduledSendRunner(scheduleStore, {
+  now: attentionClock.now,
   deliver: (schedule) => deliverScheduledSend(schedule),
   onOutcome: (schedule, outcome, error) => recordScheduleOutcomeAttention(schedule, outcome, error),
   onError: (error) =>
     console.warn(`${LOG_PREFIX} scheduled-send runner error: ${error instanceof Error ? error.message : String(error)}`),
 });
 scheduleRunner.start();
+// A moved test clock fires whatever came due, as the runner's own timer would have.
+attentionClock.onMove(() => { void scheduleRunner.tick().catch(() => {}); });
 const scheduledConnectionReleaseTimers = new Set<ReturnType<typeof setInterval>>();
 
 /** Runs one scheduled send end-to-end. D6: identical to a composer prompt — attach the way the app
@@ -1698,14 +1761,16 @@ const sweepUploads = (): void => {
     );
   }
 };
-const uploadGcTimer = setInterval(sweepUploads, 60 * 60 * 1000);
+// Test hook (source runs only): one period for both sweeps, so retention is observable in milliseconds.
+const UPLOAD_SWEEP_TEST_MS = BUILD_INFO.packaged ? 0 : Math.max(0, envNumber('COSYNCING_TEST_UPLOAD_SWEEP_MS', 0));
+const uploadGcTimer = setInterval(sweepUploads, UPLOAD_SWEEP_TEST_MS || 60 * 60 * 1000);
 uploadGcTimer.unref?.();
 // One sweep at start, off the startup path for real: a microtask would run at
 // the next await of module evaluation, still ahead of `Bun.serve` below, and
 // this sweep is synchronous fs work. The constructor's own `sweepExpired`
 // already runs at start and broker start does enough IO as it is. Unref'd, so
 // it never holds the process open on its own.
-const startupSweepTimer = setTimeout(sweepUploads, 5_000);
+const startupSweepTimer = setTimeout(sweepUploads, UPLOAD_SWEEP_TEST_MS || 5_000);
 startupSweepTimer.unref?.();
 // Claude live-sync via HOOKS (Tier-1; replaces the archived claude/channel). An in-session PreToolUse hook
 // relays permission/question prompts here and blocks for the phone's answer. Same adopt/evict lifecycle.
@@ -2906,6 +2971,24 @@ function sameHistorySourceRevision(
   );
 }
 
+/**
+ * Test observability for native history reads: `COSYNCING_TEST_HISTORY_READ_METRICS=1` logs each read
+ * to stderr, and (source runs only) `COSYNCING_TEST_HISTORY_READ_LOG` appends it to that file before
+ * the read starts, so a test that has received the frame the read produced can count reads exactly.
+ */
+const HISTORY_READ_LOG = BUILD_INFO.packaged ? '' : process.env.COSYNCING_TEST_HISTORY_READ_LOG?.trim() ?? '';
+function noteHistoryRead(kind: string, connection: SessionConnection): void {
+  const line = `${kind} ${connection.info.tool}:${connection.info.id}`;
+  if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') console.error(`[h1-history-read] ${line}`);
+  if (HISTORY_READ_LOG) {
+    try {
+      appendFileSync(HISTORY_READ_LOG, `${line}\n`);
+    } catch {
+      // A test ledger never fails a read.
+    }
+  }
+}
+
 async function readNativeHistory(
   connection: SessionConnection,
   artifactMode: 'inline' | 'reference' | undefined,
@@ -2915,9 +2998,7 @@ async function readNativeHistory(
   | { kind: 'history'; messages: AgentMessage[] }
   | { kind: 'unavailable' }
 > {
-  if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') {
-    console.error(`[h1-history-read] ${reason} ${connection.info.tool}:${connection.info.id}`);
-  }
+  noteHistoryRead(reason, connection);
   try {
     return {
       kind: 'history',
@@ -3041,9 +3122,7 @@ async function readHistoryPagePrefixUnrecorded(
   artifactMode: 'inline' | 'reference' | undefined,
 ): Promise<HistoryPageCacheOutcome> {
   if (typeof connection.captureHistorySnapshot === 'function') {
-    if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') {
-      console.error(`[h1-history-read] page-cache-miss ${connection.info.tool}:${connection.info.id}`);
-    }
+    noteHistoryRead('page-cache-miss', connection);
     const indexedBuilder = new IndexedHistoryPageCacheBuilder();
     const captured = await Promise.resolve(connection.captureHistorySnapshot(indexedBuilder, { artifactMode }))
       .catch(() => undefined);
@@ -3122,9 +3201,7 @@ function pruneBoundedTailFallbacks(now: number): void {
 }
 
 function boundedTailReadMetric(kind: string, connection: SessionConnection): void {
-  if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') {
-    console.error(`[h1-history-read] ${kind} ${connection.info.tool}:${connection.info.id}`);
-  }
+  noteHistoryRead(kind, connection);
 }
 
 /** Whether a pooled capture may be extended by appended bytes instead of rebuilt. */
@@ -6546,7 +6623,7 @@ server = Bun.serve<WsData>({
       const revision = deriveSessionRevision(base, action.revisionBinding);
       const format = backend.transcriptExportFormat;
       const redactionMode = 'redacted-full';
-      const { nonce, expiresAt } = issueConfirmNonce({ actionId: action.id, tool, sessionId: id, revision, format, redactionMode, tier }, action.nonceTtlMs);
+      const { nonce, expiresAt } = issueConfirmNonce({ actionId: action.id, tool, sessionId: id, revision, format, redactionMode, tier }, R2_NONCE_TTL_TEST_MS || action.nonceTtlMs);
       const retentionMinutes = Math.round(action.retentionMs / 60000);
       return json({
         ok: true,
@@ -6729,7 +6806,7 @@ server = Bun.serve<WsData>({
       if (cron && body?.at != null) return scheduleInvalid('at is broker-computed and must be omitted when cron is supplied');
       const at = cron ? undefined : Number(body?.at);
       if (!cron && (!Number.isFinite(at) || (at ?? 0) <= 0)) return scheduleInvalid('at must be an epoch-ms timestamp');
-      if (at !== undefined && at < Date.now() - 60_000) return scheduleInvalid('at is in the past');
+      if (at !== undefined && at < attentionClock.now() - 60_000) return scheduleInvalid('at is in the past');
       if (body?.repeat != null && body.repeat !== '' && body.repeat !== 'daily' && body.repeat !== 'weekdays') {
         return scheduleInvalid("repeat must be 'daily' or 'weekdays'");
       }
@@ -6831,7 +6908,7 @@ server = Bun.serve<WsData>({
       if (body?.at !== undefined) {
         const at = Number(body.at);
         if (!Number.isFinite(at) || at <= 0) return scheduleInvalid('at must be an epoch-ms timestamp');
-        if (at < Date.now() - 60_000) return scheduleInvalid('at is in the past');
+        if (at < attentionClock.now() - 60_000) return scheduleInvalid('at is in the past');
       }
       const update: ScheduleUpdate = { expectedRevision };
       for (const field of ['text', 'at', 'repeat', 'cron', 'retryPolicy', 'timeZone', 'sessionTitle', 'directory', 'title'] as const) {
@@ -8444,6 +8521,7 @@ server = Bun.serve<WsData>({
           (options) => sendRaw({ kind: 'options', ...options }),
           {
             signal: sessionOptionsAbort.signal,
+            ...(SESSION_OPTIONS_TEST_DELAYS_MS ? { delays: SESSION_OPTIONS_TEST_DELAYS_MS } : {}),
             ...(catalogBackend?.watchSessionCatalog ? {
               watchChanges: (notify: () => void) => catalogBackend!.watchSessionCatalog!(id, notify),
             } : {}),
@@ -8515,7 +8593,11 @@ const brokerUpdateTimer = setInterval(() => {
 }, BROKER_UPDATE_CHECK_INTERVAL_MS);
 brokerUpdateTimer.unref?.();
 
-const runtimeUpdatePollMs = Math.max(10_000, Number(process.env.COSYNCING_RUNTIME_UPDATE_POLL_MS ?? 60_000) || 60_000);
+// Test hook (source runs only): a sub-10 s poll lets e2e watch the automatic restart gate open.
+const runtimeUpdateTestPollMs = BUILD_INFO.packaged ? 0 : envNumber('COSYNCING_TEST_RUNTIME_UPDATE_POLL_MS', 0);
+const runtimeUpdatePollMs = runtimeUpdateTestPollMs > 0
+  ? runtimeUpdateTestPollMs
+  : Math.max(10_000, Number(process.env.COSYNCING_RUNTIME_UPDATE_POLL_MS ?? 60_000) || 60_000);
 let runtimeUpdateTimer: ReturnType<typeof setInterval> | undefined;
 const managedOpencodeStartup = ensureManagedOpencodeServe(() => !shuttingDown);
 // External agent hosts (`kimi web`, `dsh web`): processes that exist with or
@@ -8650,12 +8732,16 @@ const managedHostSupervisor = new ManagedHostSupervisor({
     console.error(`${LOG_PREFIX} managed ${agent} host supervision failed: ${String(error)}`);
   },
 });
+// Test hook (source/dev only, never a packaged build): supervise sooner than the 60 s default.
+const managedHostSupervisionTestMs = BUILD_INFO.packaged ? 0 : Number(process.env.COSYNCING_TEST_MANAGED_HOST_SUPERVISION_MS);
 const managedHostSupervision = setInterval(() => {
   // Startup has to finish first, or the supervisor races the very start it is
   // supposed to be supervising. `tick()` is synchronous and self-guarding, so
   // this cannot queue ticks behind a slow one.
   void managedHostStartup.then(() => managedHostSupervisor.tick());
-}, MANAGED_HOST_SUPERVISION_INTERVAL_MS);
+}, Number.isFinite(managedHostSupervisionTestMs) && managedHostSupervisionTestMs >= 100
+  ? managedHostSupervisionTestMs
+  : MANAGED_HOST_SUPERVISION_INTERVAL_MS);
 managedHostSupervision.unref?.();
 
 const runtimeStartup = (async () => {
@@ -8678,7 +8764,10 @@ const runtimeStartup = (async () => {
 // C5 guardrail: defer that restart while a turn is in flight (isBusy) so a config edit never interrupts
 // an active turn. The liveness signal is read generically off the backend capability (no tool-name
 // branch); registry.get('opencode') is the owner of THIS serve, so wiring it here is serve-specific plumbing.
+// Test hook (source/dev only, never a packaged build): poll the config sooner than the 20 s default.
+const OPENCODE_CONFIG_WATCH_TEST_MS = BUILD_INFO.packaged ? 0 : Number(process.env.COSYNCING_TEST_OPENCODE_CONFIG_WATCH_MS);
 startOpencodeConfigWatch({
+  ...(Number.isFinite(OPENCODE_CONFIG_WATCH_TEST_MS) && OPENCODE_CONFIG_WATCH_TEST_MS >= 50 ? { intervalMs: OPENCODE_CONFIG_WATCH_TEST_MS } : {}),
   shouldContinue: () => !shuttingDown,
   isBusy: () => {
     const b = registry.get('opencode');
@@ -8736,6 +8825,7 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
 
     for (const [name, stop] of [
       ['attention scheduler', () => attentionScheduler.stop()],
+      ['test clock', () => attentionClock.stop()],
       ['schedule runner', () => scheduleRunner.stop()],
       ['wake coalescer', () => wakeCoalescer.stop()],
     ] as const) {

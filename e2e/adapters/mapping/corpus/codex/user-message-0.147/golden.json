@@ -1,0 +1,44 @@
+{
+  "history": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t147","turnId":"t147","status":"running","source":"codex-rollout"},
+    {"type":"user-message","text":"new-format prompt","key":"codex:t147:u0","turnId":"t147","sentAt":1755200000000},
+    {"type":"model-output","text":"answer a0","final":true,"key":"codex:t147:msg_a0:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t147","turnId":"t147","userMessageKey":"codex:t147:u0","assistantMessageKey":"codex:t147:msg_a0:t","status":"done","source":"codex-rollout"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tboot","turnId":"tboot","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"unprompted answer","final":true,"key":"codex:tboot:msg_boot:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tboot","turnId":"tboot","assistantMessageKey":"codex:tboot:msg_boot:t","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t147live","turnId":"t147live","status":"running","source":"codex-rollout"},
+    {"type":"user-message","text":"tailed prompt","key":"codex:t147live:u0","turnId":"t147live","sentAt":1755200000000},
+    {"type":"model-output","text":"answer a1","final":true,"key":"codex:t147live:msg_a1:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t147live","turnId":"t147live","userMessageKey":"codex:t147live:u0","assistantMessageKey":"codex:t147live:msg_a1:t","status":"done","source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t147","turnId":"t147","status":"running","source":"codex-rollout"},
+    {"type":"user-message","text":"new-format prompt","key":"codex:t147:u0","turnId":"t147","sentAt":1755200000000},
+    {"type":"model-output","text":"answer a0","final":true,"key":"codex:t147:msg_a0:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t147","turnId":"t147","userMessageKey":"codex:t147:u0","assistantMessageKey":"codex:t147:msg_a0:t","status":"done","source":"codex-rollout"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tboot","turnId":"tboot","status":"running","source":"codex-rollout"},
+    {"type":"model-output","text":"unprompted answer","final":true,"key":"codex:tboot:msg_boot:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tboot","turnId":"tboot","assistantMessageKey":"codex:tboot:msg_boot:t","status":"done","source":"codex-rollout"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t147live","turnId":"t147live","status":"running","source":"codex-rollout"},
+    {"type":"user-message","text":"tailed prompt","key":"codex:t147live:u0","turnId":"t147live","sentAt":1755200000000},
+    {"type":"model-output","text":"answer a1","final":true,"key":"codex:t147live:msg_a1:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t147live","turnId":"t147live","userMessageKey":"codex:t147live:u0","assistantMessageKey":"codex:t147live:msg_a1:t","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

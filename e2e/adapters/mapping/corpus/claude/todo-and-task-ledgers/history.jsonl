@@ -1,0 +1,10 @@
+{"type":"user","uuid":"tp","message":{"role":"user","content":"plan the work"}}
+{"type":"assistant","uuid":"a1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_t1","name":"TodoWrite","input":{"todos":[{"content":"Investigate queue health","status":"completed","activeForm":"Investigating queue health"},{"content":"Add the guard","status":"in_progress","activeForm":"Adding the guard"},{"content":"Write tests","status":"pending","activeForm":"Writing tests"}]}}]}}
+{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_t1","content":"Todos have been modified successfully"}]}}
+{"type":"assistant","uuid":"a3","message":{"id":"m3","role":"assistant","content":[{"type":"tool_use","id":"toolu_bad","name":"TodoWrite","input":{"wrong":true}}]}}
+{"type":"assistant","uuid":"a4","message":{"id":"m4","role":"assistant","content":[{"type":"tool_use","id":"tc1","name":"TaskCreate","input":{"subject":"Profile roster loading","description":"measure discovery"}}]}}
+{"type":"user","uuid":"u5","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc1","content":"Task #1 created successfully: Profile roster loading"}]}}
+{"type":"assistant","uuid":"a6","message":{"id":"m6","role":"assistant","content":[{"type":"tool_use","id":"tc2","name":"TaskCreate","input":{"subject":"Fix session open","activeForm":"Fixing session open"}}]}}
+{"type":"user","uuid":"u7","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc2","content":[{"type":"text","text":"Task #2 created successfully: Fix session open"}]}]}}
+{"type":"assistant","uuid":"a8","message":{"id":"m8","role":"assistant","content":[{"type":"tool_use","id":"tc3","name":"TaskCreate","input":{"subject":"Throwaway task"}}]}}
+{"type":"user","uuid":"u9","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc3","content":"Task #3 created successfully: Throwaway task"}]}}

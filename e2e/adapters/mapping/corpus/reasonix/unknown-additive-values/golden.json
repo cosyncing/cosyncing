@@ -1,0 +1,26 @@
+{
+  "history": [
+    {"type":"user-message","text":"real prompt","key":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:message:0","turnId":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:turn:0"},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix a-role-from-the-future record (unmapped)","body":"keys: content, extra, role\n\nnot speech"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix system context","body":"keys: role"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix user record (unmapped)","body":"keys: raw_content, role"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix user record (unmapped)","body":"keys: content, role"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix assistant record (unmapped)","body":"keys: content, role\n\n   "}},
+    {"type":"model-output","text":"answer","key":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:message:6:output","final":true}
+  ],
+  "live": [
+    {"type":"tool-result","callId":"reasonix-tool:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:7","toolName":"n","result":"[Reasonix tool result was not textual; omitted]","isError":false},
+    {"type":"model-output","text":"after","key":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:message:8:output","final":true}
+  ],
+  "replay": [
+    {"type":"user-message","text":"real prompt","key":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:message:0","turnId":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:turn:0"},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix a-role-from-the-future record (unmapped)","body":"keys: content, extra, role\n\nnot speech"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix system context","body":"keys: role"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix user record (unmapped)","body":"keys: raw_content, role"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix user record (unmapped)","body":"keys: content, role"}},
+    {"type":"event","name":"context.injection","payload":{"source":"Reasonix assistant record (unmapped)","body":"keys: content, role\n\n   "}},
+    {"type":"model-output","text":"answer","key":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:message:6:output","final":true},
+    {"type":"tool-result","callId":"reasonix-tool:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:7","toolName":"n","result":"[Reasonix tool result was not textual; omitted]","isError":false},
+    {"type":"model-output","text":"after","key":"reasonix:c72bf505-ea06-4d2d-8d2d-c72bf505ea06:message:8:output","final":true}
+  ]
+}

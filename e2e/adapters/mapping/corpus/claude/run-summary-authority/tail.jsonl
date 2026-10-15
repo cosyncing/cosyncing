@@ -1,0 +1,7 @@
+{"type":"assistant","uuid":"a4","timestamp":"2026-06-18T17:56:44.000Z","message":{"id":"m4","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"two finished"}],"usage":{"input_tokens":5,"output_tokens":5}}}
+{"type":"user","uuid":"uf","timestamp":"2026-06-18T17:57:00.000Z","message":{"role":"user","content":"fail"}}
+{"type":"assistant","uuid":"af","timestamp":"2026-06-18T17:57:01.000Z","isApiErrorMessage":true,"message":{"id":"mf","role":"assistant","content":[{"type":"text","text":"rate limited"}]}}
+{"type":"user","uuid":"ui","timestamp":"2026-06-18T17:57:02.000Z","message":{"role":"user","content":"interrupt"}}
+{"type":"user","uuid":"ii","timestamp":"2026-06-18T17:57:03.000Z","message":{"role":"user","content":"[Request interrupted by user for tool use]"}}
+{"type":"user","uuid":"ur1","timestamp":"2026-06-18T17:57:04.000Z","message":{"role":"user","content":"open then replaced"}}
+{"type":"user","uuid":"ur2","timestamp":"2026-06-18T17:57:05.000Z","message":{"role":"user","content":"replacement"}}

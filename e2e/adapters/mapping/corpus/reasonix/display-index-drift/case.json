@@ -1,0 +1,36 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/reasonix/test/test-reasonix-mapping.ts",
+  "description": "the display index names each record native index and authored turn: keys and turn ids follow it, and a role that disagrees with the record is traced as drift while the record still maps by its own role",
+  "userTexts": [
+    "first",
+    "second"
+  ],
+  "display": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 10,
+      "role": "user",
+      "authoredTurn": 7,
+      "startsTurn": true
+    },
+    {
+      "index": 1,
+      "offset": 10,
+      "length": 10,
+      "role": "assistant",
+      "authoredTurn": 7
+    },
+    {
+      "index": 2,
+      "offset": 20,
+      "length": 10,
+      "role": "tool",
+      "authoredTurn": 8
+    }
+  ],
+  "traceOps": [
+    "display-index-mismatch"
+  ],
+  "sessionId": "7ed38b7e-bec0-43fe-83fe-7ed38b7ebec0"
+}

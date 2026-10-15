@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/reasonix/test/test-reasonix-mapping.ts",
+  "description": "a v1.25.2 turn: the system row is context, the user bubble carries raw_content and sentAt, the assistant row yields thinking, one whitespace-preserving answer, a run-summary anchored to it (workDurationMs only, no invented tokens) and its tool calls; tool rows pair by id, failed/exit!=0 results are errors, an id-less tool row gets a positional id; the tail continues positional keys",
+  "userTexts": [
+    "fix the build",
+    "second prompt"
+  ],
+  "sessionId": "6903bdff-c41e-452e-852e-6903bdffc41e"
+}

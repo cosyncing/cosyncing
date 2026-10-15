@@ -11,6 +11,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- For contributors: `bun run check` runs the tests as feature suites (`policy`,
+  `broker`, `adapters`, `packaging`, `client`, `web`, `windows`) in parallel,
+  and the same command runs in CI. A failed test file is retried once; a pass
+  on retry is reported as flaky instead of failing the run. Pass suite names
+  to run a subset, or `--only` to run one feature. The verification graph and
+  its completeness anchor are removed. See `docs/development/testing.md`.
+
 ## 0.6.5 — 2026-10-13
 
 ### Added

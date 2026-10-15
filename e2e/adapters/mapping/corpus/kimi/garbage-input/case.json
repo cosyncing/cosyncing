@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/kimi/test/test-kimi-mapping.ts",
+  "description": "null, primitive, wrongly-typed and empty native rows are skipped without a throw and never become a user bubble; the real rows around them still map",
+  "userTexts": [
+    "before the noise",
+    "after the noise"
+  ],
+  "sessionId": "976297ee-fecd-49af-89af-976297eefecd"
+}

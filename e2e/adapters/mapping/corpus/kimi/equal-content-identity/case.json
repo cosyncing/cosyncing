@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/kimi/test/test-kimi-mapping.ts",
+  "description": "rows whose rendered bytes are equal are still distinct rows with distinct keys and identities, within one message and across messages",
+  "userTexts": [
+    "same words"
+  ],
+  "sessionId": "2f3f7821-0a61-455e-855e-2f3f78210a61"
+}

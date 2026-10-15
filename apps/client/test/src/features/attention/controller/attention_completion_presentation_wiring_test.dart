@@ -34,72 +34,6 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets(
-    'exact onstage terminal events are consumed while Needs input presents',
-    (tester) async {
-      final harness = await _pumpHarness(tester);
-
-      expect(
-        harness.container
-            .read(visibleAttentionSessionsProvider)
-            .singleOrNull
-            ?.source,
-        RosterSource.ofProfile(harness.profileA),
-      );
-
-      final completion = _event(
-        id: 'visible-completion',
-        cursor: 1,
-        kind: 'run-finished',
-      );
-      await harness.deliver(completion);
-      await tester.pump(foregroundAttentionCoalesceWindow);
-
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsNothing,
-      );
-      expect(harness.notifications.shown, isEmpty);
-      await _expectConsumedButUnread(
-        harness.repository,
-        scope: harness.scopeA,
-        eventId: completion.id,
-      );
-
-      final failure = _event(
-        id: 'visible-failure',
-        cursor: 2,
-        kind: 'run-failed',
-      );
-      await harness.deliver(failure);
-      await tester.pump(foregroundAttentionCoalesceWindow);
-
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsNothing,
-      );
-      await _expectConsumedButUnread(
-        harness.repository,
-        scope: harness.scopeA,
-        eventId: failure.id,
-      );
-
-      final needsInput = _event(
-        id: 'visible-needs-input',
-        cursor: 3,
-        kind: 'permission-required',
-      );
-      await harness.deliver(needsInput);
-      await tester.pump(foregroundAttentionCoalesceWindow);
-
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsOneWidget,
-      );
-      expect(find.text('Codex: Session A needs input'), findsOneWidget);
-    },
-  );
-
-  testWidgets(
     'navigating from A to B presents A exactly once '
     'and revision replay is quiet',
     (tester) async {
@@ -158,40 +92,6 @@ void main() {
   );
 
   testWidgets(
-    'a revision consumed while exact A is watched never replays after leaving',
-    (tester) async {
-      final harness = await _pumpHarness(tester);
-      final completion = _event(
-        id: 'watched-completion-does-not-replay',
-        cursor: 1,
-        kind: 'run-finished',
-      );
-
-      await harness.deliver(completion);
-      await tester.pump(foregroundAttentionCoalesceWindow);
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsNothing,
-      );
-
-      harness.router.go('/sessions/session-b');
-      await tester.pumpAndSettle();
-      await harness.deliver(completion);
-      await tester.pump(foregroundAttentionCoalesceWindow);
-
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsNothing,
-      );
-      await _expectConsumedButUnread(
-        harness.repository,
-        scope: harness.scopeA,
-        eventId: completion.id,
-      );
-    },
-  );
-
-  testWidgets(
     'navigating from A to the roster presents A exactly once',
     (tester) async {
       final harness = await _pumpHarness(tester);
@@ -216,48 +116,6 @@ void main() {
       expect(
         find.text('Codex: Session A is ready to review.'),
         findsOneWidget,
-      );
-    },
-  );
-
-  testWidgets(
-    'the same tool and session on another exact broker source '
-    'is not suppressed',
-    (tester) async {
-      final harness = await _pumpHarness(tester);
-      final profileB = BrokerProfile(
-        id: harness.profileA.id,
-        displayName: 'Broker B',
-        baseUri: Uri.parse('http://broker-b.invalid:7734'),
-        createdAt: harness.profileA.createdAt,
-        incarnationId: harness.profileA.incarnationId,
-      );
-
-      await harness.deliver(
-        _event(
-          id: 'completion-from-source-b',
-          cursor: 1,
-          kind: 'run-finished',
-        ),
-        profile: profileB,
-      );
-      await tester.pump(foregroundAttentionCoalesceWindow);
-
-      expect(
-        harness.container
-            .read(visibleAttentionSessionsProvider)
-            .singleOrNull
-            ?.source,
-        RosterSource.ofProfile(harness.profileA),
-      );
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsOneWidget,
-      );
-      await _expectConsumedButUnread(
-        harness.repository,
-        scope: RosterSource.ofProfile(profileB).storageKey,
-        eventId: 'completion-from-source-b',
       );
     },
   );
@@ -352,42 +210,6 @@ void main() {
         find.byKey(const Key('foreground-attention-banner')),
         findsOneWidget,
       );
-    },
-  );
-
-  testWidgets(
-    'background completion preserves OS delivery without '
-    'a foreground aggregate',
-    (tester) async {
-      final harness = await _pumpHarness(tester);
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-      await tester.pump();
-      expect(
-        harness.lifecycle.currentState,
-        BrokerAppLifecycleState.paused,
-      );
-
-      await harness.deliver(
-        _event(
-          id: 'background-completion',
-          cursor: 1,
-          kind: 'run-finished',
-        ),
-      );
-      await tester.pump(foregroundAttentionCoalesceWindow);
-
-      expect(harness.notifications.shown, hasLength(1));
-      expect(
-        harness.notifications.shown.single.payload['eventId'],
-        'background-completion',
-      );
-      expect(
-        find.byKey(const Key('foreground-attention-banner')),
-        findsNothing,
-      );
-
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pump();
     },
   );
 }

@@ -1,0 +1,3 @@
+{"type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"cw1","arguments":"{\"ids\":[\"kid-A\"],\"timeout_ms\":120000}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"cw1","output":"{\"status\":{\"kid-A\":{\"completed\":\"Found.\"}}}"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}

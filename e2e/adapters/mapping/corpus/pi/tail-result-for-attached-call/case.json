@@ -1,0 +1,10 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "attach while a tool runs, then its result arrives on the tail: the result must carry the same command semantic and arguments-derived path a resync (and Claude Observe) give it",
+  "knownBugMatch": "agree on tool-result@b1",
+  "knownBug": "Pi engine Observe: the tail maps each append window on its own, so a toolResult whose toolCall was read at attach is built without the call arguments: no command semantic (and no edit path/title from args); the connection resync rebuilds it with them",
+  "userTexts": [
+    "run it"
+  ],
+  "sessionId": "6fb2f771-aa64-43a2-83a2-6fb2f771aa64"
+}

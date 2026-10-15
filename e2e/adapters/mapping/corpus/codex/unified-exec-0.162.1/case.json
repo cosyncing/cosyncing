@@ -1,0 +1,8 @@
+{
+  "provenance": "captured codex 0.162.1 2026-10-11 (function_call arguments and outputs verbatim from a scratch native server; the spoof/plain/non-exec/rich variants are synthetic derived from the same file)",
+  "description": "unified exec exit evidence: exit code, lifecycle (completed/failed/running) and wall time come from the native wrapper; stdout text, a plain wrapper line and a non-exec tool cannot invent a terminal exit; a native exec_command_end outranks the textual wrapper",
+  "userTexts": [
+    "run the commands"
+  ],
+  "sessionId": "53e99768-4312-40fb-80fb-53e997684312"
+}

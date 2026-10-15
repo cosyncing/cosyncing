@@ -16,7 +16,11 @@ let notified:()=>void; const notification=new Promise<void>(r=>notified=r);
 const adapter=new CodexAdapter({reportManagedStart:()=>notified!(),queryLoadedThreadIds:async()=>new Set(),
   scanCodexTuiPresence:async()=>({attributed:new Set(),unattributed:[],privateThreadIds:new Set(),privateUnattributed:[],unknownThreadIds:new Set(),unknownUnattributed:[],candidates:[],socketDiagAvailable:true,processScanAvailable:true})});
 await adapter.discoverSessions();
-await Promise.race([notification,new Promise((_,reject)=>setTimeout(()=>reject(new Error('start helper did not finish')),5000))]);
+// The deadline timer is cleared once the helper reports: left armed it holds the process open for its
+// whole 5 s and every run of this check pays that.
+let deadline:ReturnType<typeof setTimeout>;
+await Promise.race([notification,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(new Error('start helper did not finish')),5000);})]);
+clearTimeout(deadline!);
 const restart=await runCodexDaemonCommand('restart',3000,${JSON.stringify(bin)});
 if(restart.code!==0)throw new Error(restart.stderr);
 await stopCodexDaemonEnsureProcess();

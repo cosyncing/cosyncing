@@ -1,0 +1,2 @@
+{"type":"event_msg","payload":{"type":"user_message","message":"steer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-steer"}}

@@ -1,0 +1,4 @@
+{"role":"user","content":"before"}
+{}
+{"role":5}
+{"role":"assistant","content":"x","tool_calls":[null,4,[],{"name":5},{"id":"ok","name":"n","arguments":"[]"}]}

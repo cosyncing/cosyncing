@@ -1,0 +1,18 @@
+{
+  "history": [
+    {"type":"user-message","text":"omp prompt","key":"ou1","turnId":"ou1","sentAt":1781913601000},
+    {"type":"run-summary","key":"omp:run:u0","turnId":"u0","userMessageKey":"ou1","status":"running","startedAt":1781913601000,"source":"omp-jsonl"}
+  ],
+  "live": [
+    {"type":"model-output","text":"omp answer","final":true,"key":"oa1:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u0","turnId":"u0","userMessageKey":"ou1","assistantMessageKey":"oa1:t:0","status":"done","startedAt":1781913601000,"completedAt":1781913604000,"totalRuntimeMs":3000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"omp prompt","key":"ou1","turnId":"ou1","sentAt":1781913601000},
+    {"type":"model-output","text":"omp answer","final":true,"key":"oa1:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u0","turnId":"u0","userMessageKey":"ou1","assistantMessageKey":"oa1:t:0","status":"done","startedAt":1781913601000,"completedAt":1781913604000,"totalRuntimeMs":3000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":3000,"turnCount":1,"updatedAt":1781913604000,"source":"omp"}}
+  ]
+}

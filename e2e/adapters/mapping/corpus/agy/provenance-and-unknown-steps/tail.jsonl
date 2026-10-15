@@ -1,0 +1,5 @@
+{"step_index":7,"source":"MODEL","type":"RUN_COMMAND","status":"RUNNING","created_at":"2026-08-20T10:20:07Z","content":"Created At: 2026-08-20T11:16:00+01:00\npartial output"}
+{"step_index":8,"source":"MODEL","type":"RUN_COMMAND","status":"CANCELED","created_at":"2026-08-20T10:20:08Z","content":"Created At: 2026-08-20T11:16:00+01:00\nstopped part-way"}
+{"step_index":9,"source":"MODEL","type":"RUN_COMMAND","status":"ERROR","created_at":"2026-08-20T10:20:09Z","exit_code":3,"content":"Created At: 2026-08-20T11:16:00+01:00\nCompleted At: 2026-08-20T11:16:05+01:00\n\nThe command exited with code 3.\nOutput:\nboom"}
+{"step_index":10,"source":"MODEL","type":"RUN_COMMAND","status":"A_STATUS_FROM_THE_FUTURE","created_at":"2026-08-20T10:20:10Z","content":"no preamble at all"}
+{"step_index":11,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-08-20T10:20:11Z","content":"<USER_REQUEST>\n/plan second prompt\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-08-20T11:30:00+01:00.\n</ADDITIONAL_METADATA>"}

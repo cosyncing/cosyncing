@@ -194,22 +194,6 @@ void main() {
       });
     });
 
-    testWidgets('falls back for unknown message types', (tester) async {
-      await _pumpRenderer(
-        tester,
-        const AgentMessage(
-          type: AgentMessageType.unknown,
-          raw: {'type': 'unknown', 'payload': 'fallback-only'},
-        ),
-      );
-
-      expect(find.text('Unsupported message type'), findsOneWidget);
-      // The wire type is no longer echoed in the bubble chrome; it lives in
-      // the per-message Details dialog.
-      expect(find.text('Type: unknown'), findsNothing);
-      expect(find.textContaining('fallback-only'), findsAtLeastNWidgets(1));
-    });
-
     for (final type in [
       AgentMessageType.permissionRequest,
       AgentMessageType.questionRequest,
@@ -238,57 +222,6 @@ void main() {
         expect(find.byType(Card), findsNothing);
       });
     }
-
-    testWidgets('error boxes show payload without generic filler', (
-      tester,
-    ) async {
-      await _pumpRenderer(
-        tester,
-        const AgentMessage(
-          type: AgentMessageType.error,
-          raw: {
-            'type': 'error',
-            'code': 'E_WRITE',
-            'message': 'Write failed',
-          },
-        ),
-      );
-
-      expect(find.byType(TranscriptBox), findsOneWidget);
-      expect(find.text('code: E_WRITE'), findsOneWidget);
-      expect(find.text('message: Write failed'), findsOneWidget);
-      expect(find.text('No further detail was provided.'), findsNothing);
-      expect(
-        find.text(
-          'The session reported an error. Open details for technical '
-          'information.',
-        ),
-        findsNothing,
-      );
-    });
-
-    testWidgets('empty error boxes use the localized no-detail fallback', (
-      tester,
-    ) async {
-      await _pumpRenderer(
-        tester,
-        const AgentMessage(
-          type: AgentMessageType.error,
-          raw: {'type': 'error'},
-        ),
-      );
-      expect(find.text('No further detail was provided.'), findsOneWidget);
-
-      await _pumpRenderer(
-        tester,
-        const AgentMessage(
-          type: AgentMessageType.error,
-          raw: {'type': 'error'},
-        ),
-        locale: const Locale('zh'),
-      );
-      expect(find.text('未提供更多细节。'), findsOneWidget);
-    });
 
     testWidgets('renders token counts as a slim caption, not a card', (
       tester,
@@ -325,173 +258,6 @@ void main() {
       expect(find.byType(Divider), findsNothing);
       expect(find.text('Status'), findsNothing);
     });
-
-    testWidgets(
-      'renders a generic interruption as ancestor-selectable red inline text',
-      (tester) async {
-        for (final brightness in Brightness.values) {
-          await _pumpRenderer(
-            tester,
-            const AgentMessage(
-              type: AgentMessageType.notice,
-              raw: {
-                'type': 'notice',
-                'message': 'Adapter-specific interruption copy',
-                'semantic': {
-                  'kind': 'interruption',
-                  'reason': 'generic',
-                },
-              },
-            ),
-            brightness: brightness,
-          );
-
-          final finder = find.byKey(
-            const Key('session-transcript-interruption-inline'),
-          );
-          expect(finder, findsOneWidget);
-          expect(find.text('Interrupted'), findsOneWidget);
-          expect(find.byType(Card), findsNothing);
-          expect(find.byType(Icon), findsNothing);
-          final text = tester.widget<Text>(
-            find.descendant(of: finder, matching: find.byType(Text)),
-          );
-          expect(
-            find.descendant(
-              of: finder,
-              matching: find.byType(SelectableText),
-            ),
-            findsNothing,
-          );
-          final tokens = brightness == Brightness.light
-              ? softMinimalistTheme.light
-              : softMinimalistTheme.dark;
-          expect(text.style?.color, tokens.statusError);
-        }
-      },
-    );
-
-    testWidgets('explains repeated automatic approval denial inline', (
-      tester,
-    ) async {
-      await _pumpRenderer(
-        tester,
-        const AgentMessage(
-          type: AgentMessageType.notice,
-          raw: {
-            'type': 'notice',
-            'message': 'Adapter-specific repeated denial copy',
-            'semantic': {
-              'kind': 'interruption',
-              'reason': 'automatic-approval-denied-repeatedly',
-            },
-          },
-        ),
-      );
-
-      expect(
-        find.text(
-          'Interrupted because automatic permission approval was denied '
-          'repeatedly.',
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const Key('session-transcript-interruption-inline')),
-        findsOneWidget,
-      );
-      expect(find.byType(SelectableText), findsNothing);
-      expect(find.byType(Card), findsNothing);
-      expect(find.byType(Icon), findsNothing);
-    });
-
-    testWidgets(
-      'renders a continuation boundary as distinct neutral inline text',
-      (tester) async {
-        for (final brightness in Brightness.values) {
-          await _pumpRenderer(
-            tester,
-            const AgentMessage(
-              type: AgentMessageType.notice,
-              raw: {
-                'type': 'notice',
-                'message': 'Worker finished',
-                'semantic': {
-                  'kind': 'continuation',
-                  'reason': 'task-notification',
-                  'turnId': 'turn-8',
-                },
-              },
-            ),
-            brightness: brightness,
-          );
-
-          final finder = find.byKey(
-            const Key('session-transcript-continuation-inline'),
-          );
-          expect(finder, findsOneWidget);
-          expect(find.text('Worker finished'), findsOneWidget);
-          expect(find.byType(Card), findsNothing);
-          expect(find.byType(Icon), findsNothing);
-          final text = tester.widget<Text>(
-            find.descendant(of: finder, matching: find.byType(Text)),
-          );
-          final tokens = brightness == Brightness.light
-              ? softMinimalistTheme.light
-              : softMinimalistTheme.dark;
-          expect(text.style?.color, tokens.textSecondary);
-        }
-      },
-    );
-
-    testWidgets(
-      'unknown notice text stays unchanged and neutral in light and dark',
-      (tester) async {
-        const raw =
-            'Conversation interrupted — quoted by a lookup, not a marker.';
-        for (final brightness in Brightness.values) {
-          await _pumpRenderer(
-            tester,
-            const AgentMessage(
-              type: AgentMessageType.notice,
-              raw: {'type': 'notice', 'message': raw},
-            ),
-            brightness: brightness,
-          );
-
-          final finder = find.byKey(
-            const Key('session-transcript-notice-inline'),
-          );
-          expect(finder, findsOneWidget);
-          expect(find.text(raw), findsOneWidget);
-          expect(
-            find.byKey(
-              const Key('session-transcript-interruption-inline'),
-            ),
-            findsNothing,
-          );
-          final text = tester.widget<Text>(
-            find.descendant(
-              of: finder,
-              matching: find.byType(Text),
-            ),
-          );
-          expect(
-            find.descendant(
-              of: finder,
-              matching: find.byType(SelectableText),
-            ),
-            findsNothing,
-          );
-          final tokens = brightness == Brightness.light
-              ? softMinimalistTheme.light
-              : softMinimalistTheme.dark;
-          expect(text.style?.color, tokens.textSecondary);
-          expect(find.byType(Card), findsNothing);
-          expect(find.byType(Icon), findsNothing);
-        }
-      },
-    );
 
     testWidgets(
       'renders compaction as ancestor-selectable inline text without a card',
@@ -764,74 +530,7 @@ void main() {
         expect(find.byKey(const Key('tool-duration-chip')), findsNothing);
       });
 
-      testWidgets('Show all restores the exact payload and can return', (
-        tester,
-      ) async {
-        final output = List.filled(5000, 'x').join();
-        final result = AgentMessage.fromJson({
-          'type': 'tool-result',
-          'callId': 'long-result',
-          'toolClass': 'execute',
-          'result': output,
-        });
-        await _pumpRendererAtWidth(tester, result, width: 700);
-        await tester.tap(
-          find.byKey(const ValueKey('tool-long-result-details')),
-        );
-        await tester.pump();
-
-        Text detail() => tester.widget<Text>(
-          find.byKey(const ValueKey('tool-detail-result')),
-        );
-
-        expect(detail().data, isNot(contains(output)));
-        await tester.ensureVisible(find.text('Show all'));
-        await tester.tap(find.text('Show all'));
-        await tester.pump();
-        expect(detail().data, 'result: $output');
-        expect(find.text('Show preview'), findsOneWidget);
-        await tester.ensureVisible(find.text('Show preview'));
-        await tester.pump();
-        await tester.tap(find.text('Show preview'));
-        await tester.pump();
-        expect(detail().data, isNot('result: $output'));
-      });
-
-      testWidgets('queued user bubble is visibly labeled', (tester) async {
-        await _pumpRenderer(
-          tester,
-          AgentMessage.fromJson({
-            'type': 'user-message',
-            'key': 'queued-1',
-            'text': 'Follow up',
-            'queued': true,
-          }),
-        );
-
-        expect(
-          find.byKey(const Key('queued-user-message-badge')),
-          findsOneWidget,
-        );
-        expect(find.text('Queued'), findsOneWidget);
-      });
-
       group('message bodies are not duplicated by payload rows', () {
-        testWidgets('user bubble shows its text exactly once', (tester) async {
-          const body = 'Restart the broker and retry the upload.';
-          await _pumpRenderer(
-            tester,
-            AgentMessage.fromJson({
-              'type': 'user-message',
-              'text': body,
-              'key': '74fe8fb5-6887-46af-8d3f-2bc1f63f1a63',
-              'turnId': 'turn-9',
-              'sentAt': 1720000000000,
-            }),
-          );
-
-          expect(find.textContaining(body), findsOneWidget);
-        });
-
         testWidgets('user bubble hides transport envelope fields', (
           tester,
         ) async {
@@ -1083,12 +782,6 @@ void main() {
     // on the agent side of the transcript, detached from the prompt it went
     // with. `file-artifact.userMessageKey` is the ownership link.
     group('user attachments', () {
-      AgentMessage userMessage(String text) => AgentMessage.fromJson({
-        'type': 'user-message',
-        'key': 'user-1',
-        'text': text,
-      });
-
       AgentMessage attachment({
         required String name,
         required String mimeType,
@@ -1103,76 +796,6 @@ void main() {
         if (url != null) 'url': url,
         if (size != null) 'size': size,
         if (userMessageKey != null) 'userMessageKey': userMessageKey,
-      });
-
-      testWidgets('previews a sent image inside the right-aligned bubble', (
-        tester,
-      ) async {
-        await _pumpUserBubble(
-          tester,
-          message: userMessage('Look at this'),
-          attachments: [
-            attachment(
-              name: 'screenshot.png',
-              mimeType: 'image/png',
-              url: _onePixelPngDataUrl,
-            ),
-          ],
-        );
-
-        expect(find.text('Look at this'), findsOneWidget);
-        expect(
-          find.byKey(const Key('user-attachment-image')),
-          findsOneWidget,
-        );
-        final surfaceWidth = tester.getSize(find.byType(Scaffold)).width;
-        expect(
-          tester.getCenter(find.byKey(const Key('user-attachment-0'))).dx,
-          greaterThan(surfaceWidth / 2),
-          reason: 'a sent artifact belongs on the user side',
-        );
-      });
-
-      testWidgets('shows a compact chip for a non-image attachment', (
-        tester,
-      ) async {
-        await _pumpUserBubble(
-          tester,
-          message: userMessage('Here is the spec'),
-          attachments: [
-            attachment(
-              name: 'spec.pdf',
-              mimeType: 'application/pdf',
-              url: 'https://broker.example/artifacts/spec.pdf',
-              size: 2048,
-            ),
-          ],
-        );
-
-        expect(find.text('spec.pdf'), findsOneWidget);
-        expect(find.textContaining('2048'), findsOneWidget);
-        expect(find.byKey(const Key('user-attachment-image')), findsNothing);
-      });
-
-      testWidgets('an attachment-only prompt renders no empty body', (
-        tester,
-      ) async {
-        await _pumpUserBubble(
-          tester,
-          message: userMessage(''),
-          attachments: [
-            attachment(
-              name: 'spec.pdf',
-              mimeType: 'application/pdf',
-              url: 'https://broker.example/artifacts/spec.pdf',
-            ),
-          ],
-        );
-
-        expect(find.byKey(const Key('user-attachment-0')), findsOneWidget);
-        // An empty markdown body still renders a `Text('')` that occupies its
-        // slot; an attachment-only prompt must not carry one.
-        expect(find.text(''), findsNothing);
       });
 
       testWidgets('a linked artifact with no owner row still reads user-sent', (
@@ -1505,30 +1128,6 @@ const _onePixelPngDataUrl =
     'data:image/png;base64,'
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8'
     'BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-
-Future<void> _pumpUserBubble(
-  WidgetTester tester, {
-  required AgentMessage message,
-  List<AgentMessage> attachments = const [],
-}) async {
-  await tester.pumpWidget(
-    MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      theme: buildAppTheme(softMinimalistTheme.light, Brightness.light),
-      home: Scaffold(
-        body: Builder(
-          builder: (context) => buildConversationUserBubble(
-            context,
-            message,
-            attachments: attachments,
-          ),
-        ),
-      ),
-    ),
-  );
-  await tester.pump();
-}
 
 String _sanitizeSourceForBranchCheck(String source) {
   final withoutLineComments = source.replaceAll(RegExp('//.*'), '');

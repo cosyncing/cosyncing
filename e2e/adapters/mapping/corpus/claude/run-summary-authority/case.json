@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/claude/test-claude-runtime.ts",
+  "description": "a turn closes only on exact end_turn evidence: native start/complete and tokens deduped by message.id, a trailing tool turn stays running, the same turn closes later on the tail, an API failure is error, an interruption is cancelled, a replacing prompt fences an unterminated turn without inventing a completion time",
+  "userTexts": [
+    "first prompt",
+    "second prompt",
+    "fail",
+    "interrupt",
+    "open then replaced",
+    "replacement"
+  ],
+  "sessionId": "78a82d4c-fc6d-47b3-87b3-78a82d4cfc6d"
+}

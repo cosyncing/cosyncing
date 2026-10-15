@@ -13,38 +13,64 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  extended:
-    name: extended deterministic validation
+  # Flake hunt. Pull requests retry a failed task once and only report a pass on retry; here every
+  # task runs three times with no retry, so an intermittent failure shows up as a failure.
+  repeat:
+    name: ${{ matrix.suite }} x3
     if: github.repository == 'cosyncing/cosyncing'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [broker, adapters, packaging]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.8
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run check ${{ matrix.suite }} --repeat 3
+      - name: Keep the check report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: nightly-${{ matrix.suite }}-${{ github.run_id }}
+          path: output/check
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The client's transcript stress lane (fuzz over many seeds, the history matrix, motion and prefetch):
+  # too slow for every pull request, so it runs here only.
+  client-stress:
+    name: client stress
+    if: github.repository == 'cosyncing/cosyncing'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      COSYNCING_CLIENT_STRESS: '1'
+      COSYNCING_TRANSCRIPT_FUZZ_SEEDS: '64'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: 3.44.3
           channel: stable
           cache: true
-      - name: Install hosted verification dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-          npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
       - run: bun install --frozen-lockfile
-      - run: bun run check
-      - name: Preserve nightly verification evidence
+      - run: bun run check client --only flutter-stress
+      - name: Keep the check report
         if: ${{ always() }}
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
-          name: nightly-check-${{ github.run_id }}
-          path: |
-            output/check
-            output/artifact-session-isolation
+          name: nightly-client-stress-${{ github.run_id }}
+          path: output/check
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14

@@ -1,0 +1,13 @@
+{"type":"assistant","uuid":"a10","message":{"id":"m10","role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"TaskUpdate","input":{"taskId":"1","status":"in_progress"}}]}}
+{"type":"user","uuid":"u11","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"Updated task #1 status"}]}}
+{"type":"assistant","uuid":"a12","message":{"id":"m12","role":"assistant","content":[{"type":"tool_use","id":"tu2","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}
+{"type":"user","uuid":"u13","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu2","content":"Updated task #1 status"}]}}
+{"type":"assistant","uuid":"a14","message":{"id":"m14","role":"assistant","content":[{"type":"tool_use","id":"tu3","name":"TaskUpdate","input":{"taskId":"2","subject":"Fix session open (capped)"}}]}}
+{"type":"user","uuid":"u15","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu3","content":"Updated task #2"}]}}
+{"type":"assistant","uuid":"a16","message":{"id":"m16","role":"assistant","content":[{"type":"tool_use","id":"tu4","name":"TaskUpdate","input":{"taskId":"3","status":"deleted"}}]}}
+{"type":"user","uuid":"u17","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu4","content":"Task #3 deleted"}]}}
+{"type":"assistant","uuid":"a18","message":{"id":"m18","role":"assistant","content":[{"type":"tool_use","id":"tu5","name":"TaskUpdate","input":{"taskId":"99","status":"completed"}}]}}
+{"type":"user","uuid":"u19","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu5","content":"Task #99 not found","is_error":true}]}}
+{"type":"assistant","uuid":"a20","message":{"id":"m20","role":"assistant","content":[{"type":"tool_use","id":"tl1","name":"TaskList","input":{}}]}}
+{"type":"user","uuid":"u21","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tl1","content":"#1 [completed] Profile roster loading\n#2 [pending] Fix session open (capped)"}]}}
+{"type":"assistant","uuid":"a22","message":{"id":"m22","role":"assistant","content":[{"type":"tool_use","id":"toolu_clear","name":"TodoWrite","input":{"todos":[]}}]}}

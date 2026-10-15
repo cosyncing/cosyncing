@@ -1,0 +1,4 @@
+also not json
+{"type":"assistant"
+[[[[
+{"type":"user","uuid":"g3","message":{"role":"user","content":"prompt after garbage on the tail"}}

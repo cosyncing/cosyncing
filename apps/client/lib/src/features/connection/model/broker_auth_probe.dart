@@ -1,6 +1,7 @@
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 
 /// Probes an *authenticated* broker endpoint to classify the connection gate.
@@ -36,7 +37,8 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
   /// Creates a [RealBrokerAuthProbe].
   ///
   /// [clientFactory] is injectable for tests and defaults to building a real
-  /// client carrying the credential under the scheme its key selects.
+  /// client carrying the credential under the scheme its key selects, on
+  /// [transport] (the platform HTTP transport when null).
   RealBrokerAuthProbe({
     BrokerClient Function({
       required String baseUrl,
@@ -44,7 +46,15 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
       String? peerToken,
     })?
     clientFactory,
-  }) : _clientFactory = clientFactory ?? _defaultClientFactory;
+    BrokerHttpTransport? transport,
+  }) : _clientFactory =
+           clientFactory ??
+           (({required baseUrl, token, peerToken}) => BrokerClient(
+             baseUrl: baseUrl,
+             token: token,
+             peerToken: peerToken,
+             dio: brokerTransportDio(transport),
+           ));
 
   final BrokerClient Function({
     required String baseUrl,
@@ -52,18 +62,6 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
     String? peerToken,
   })
   _clientFactory;
-
-  static BrokerClient _defaultClientFactory({
-    required String baseUrl,
-    String? token,
-    String? peerToken,
-  }) {
-    return BrokerClient(
-      baseUrl: baseUrl,
-      token: token,
-      peerToken: peerToken,
-    );
-  }
 
   @override
   Future<BrokerGateState> probe({

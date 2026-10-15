@@ -912,7 +912,7 @@ export function isOwnerOnlyDirectory(path: string): boolean {
 export function processCommandLine(pid: number): string {
   if (!Number.isSafeInteger(pid) || pid <= 0) return '';
   if (process.platform !== 'win32') {
-    return Bun.spawnSync(['ps', '-o', 'args=', '-p', String(pid)]).stdout.toString();
+    return Bun.spawnSync(['ps', '-o', 'args=', '-p', String(pid)], { timeout: 10_000 }).stdout.toString();
   }
   const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
   if (!systemRoot) return '';
@@ -922,7 +922,8 @@ export function processCommandLine(pid: number): string {
     + `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine\n`;
   const probe = Bun.spawnSync(
     [powershell, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    { stdout: 'pipe', stderr: 'pipe' },
+    // PowerShell cold starts are slow on a runner, but a probe must never become the test.
+    { stdout: 'pipe', stderr: 'pipe', timeout: 30_000 },
   );
   return probe.stdout.toString();
 }

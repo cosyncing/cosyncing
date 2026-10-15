@@ -24,11 +24,11 @@ import {
   waitForBrokerHealth,
 } from '../helpers/isolated-broker-fixture.ts';
 import { parseQrPairingPayload } from '../../../crypto/src/index.ts';
-import { verificationEnvironment } from '../../../../../scripts/verification/verification-graph.ts';
+import { testEnvironment as verificationEnvironment } from '../../../../../scripts/ci/lib/process.ts';
 import {
   insideSupervisedProcessGroup,
   runSupervised,
-} from '../../../../../scripts/verification/supervised-process.ts';
+} from '../../../../../scripts/ci/lib/process.ts';
 import {
   BROKER_CONFIG_SCHEMA_VERSION,
   BROKER_LISTEN_HOST,

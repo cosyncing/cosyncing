@@ -37,9 +37,20 @@ try {
 
   let mode: 'loaded' | 'failure' | 'empty' = 'loaded';
   let nativeActivity: 'working' | 'idle' = 'working';
+  // Every probe the watcher makes is counted, so each phase waits on the watcher's own progress
+  // (a number of further polls in that mode) instead of a fixed sleep that a loaded box can outrun.
+  const probes = { loaded: 0, failure: 0, empty: 0 };
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 20_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!predicate()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}; probes=${JSON.stringify(probes)} changes=${changes.length}`);
+      await Bun.sleep(10);
+    }
+  };
   const { CodexAdapter } = await import('../src/index.ts');
   const adapter = new CodexAdapter({
     queryLoadedThreadIds: async () => {
+      probes[mode] += 1;
       if (mode === 'failure') throw new Error('daemon transport failed');
       return mode === 'loaded' ? new Set([threadId]) : new Set();
     },
@@ -61,7 +72,7 @@ try {
   });
   const changes: SessionInfo[] = [];
   const stop = adapter.watchSessionInfo((info) => changes.push(info));
-  await Bun.sleep(300); // initialize with authoritative loaded state
+  await waitFor(() => changes.length >= 1, 'the first-poll publication (authoritative loaded state)');
   // R0c.4: the first poll PUBLISHES the state it derived. That seed row is the loaded/Working
   // baseline this test then perturbs, so consume it and keep asserting on later publications only.
   assert.equal(changes.length, 1, 'the first poll publishes the derived loaded row');
@@ -69,13 +80,17 @@ try {
   changes.length = 0;
 
   mode = 'failure';
-  await Bun.sleep(650); // several failed probes, beyond the one-poll drop grace
-  assert.equal(changes.length, 0, 'probe errors remain unknown and never synthesize an empty loaded list');
+  // Several failed probes, beyond the one-poll drop grace.
+  await waitFor(() => probes.failure >= 3, 'several failed probes');
 
   mode = 'empty';
   nativeActivity = 'idle';
-  await Bun.sleep(350);
-  assert.equal(changes.length, 1, 'an authoritative empty loaded list still publishes the real downgrade');
+  // The authoritative empty list is the sentinel: it must publish, and only it may have published
+  // since the failed probes (they would otherwise have added their own rows before it).
+  await waitFor(() => changes.length >= 1, 'the downgrade publication');
+  const downgradedAt = probes.empty;
+  await waitFor(() => probes.empty >= downgradedAt + 2, 'two further empty polls');
+  assert.equal(changes.length, 1, 'probe errors remain unknown and never synthesize an empty loaded list; an authoritative empty loaded list still publishes the real downgrade exactly once');
   assert.equal(changes[0]?.control?.terminalSync.active, false);
   assert.equal(changes[0]?.status, 'idle', 'point-in-time native Idle retires the sticky rollout start');
   stop();

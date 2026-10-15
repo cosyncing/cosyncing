@@ -1,0 +1,34 @@
+{
+  "history": [
+    {"type":"user-message","text":"plan the work","key":"tp","turnId":"tp"},
+    {"type":"run-summary","key":"a44d7ba1-61d1-43a6-83a6-a44d7ba161d1:run:tp","turnId":"tp","userMessageKey":"tp","status":"running","source":"claude-transcript"},
+    {"type":"task-list-state","key":"claude:todos","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TodoWrite","items":[{"title":"Investigate queue health","status":"done"},{"title":"Add the guard","status":"in-progress"},{"title":"Write tests","status":"open"}]},
+    {"type":"tool-call","callId":"toolu_bad","toolName":"TodoWrite","toolClass":"other","args":{"wrong":true}},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"open"},{"id":"2","title":"Fix session open","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"open"},{"id":"2","title":"Fix session open","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]}
+  ],
+  "live": [
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"in-progress"},{"id":"2","title":"Fix session open","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"done"},{"id":"2","title":"Fix session open","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"done"},{"id":"2","title":"Fix session open (capped)","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"done"},{"id":"2","title":"Fix session open (capped)","status":"open"}]},
+    {"type":"tool-result","callId":"tu5","toolName":"TaskUpdate","toolClass":"other","isError":true,"result":"Task #99 not found"},
+    {"type":"task-list-state","key":"claude:todos","title":"Tasks","status":"cleared","source":"tool-call","sourceTool":"TodoWrite","items":[]}
+  ],
+  "replay": [
+    {"type":"user-message","text":"plan the work","key":"tp","turnId":"tp"},
+    {"type":"run-summary","key":"a44d7ba1-61d1-43a6-83a6-a44d7ba161d1:run:tp","turnId":"tp","userMessageKey":"tp","status":"running","source":"claude-transcript"},
+    {"type":"task-list-state","key":"claude:todos","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TodoWrite","items":[{"title":"Investigate queue health","status":"done"},{"title":"Add the guard","status":"in-progress"},{"title":"Write tests","status":"open"}]},
+    {"type":"tool-call","callId":"toolu_bad","toolName":"TodoWrite","toolClass":"other","args":{"wrong":true}},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"open"},{"id":"2","title":"Fix session open","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"open"},{"id":"2","title":"Fix session open","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"in-progress"},{"id":"2","title":"Fix session open","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"done"},{"id":"2","title":"Fix session open","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"done"},{"id":"2","title":"Fix session open (capped)","status":"open"},{"id":"3","title":"Throwaway task","status":"open"}]},
+    {"type":"task-list-state","key":"claude:tasks","title":"Tasks","status":"running","source":"tool-call","sourceTool":"TaskCreate","items":[{"id":"1","title":"Profile roster loading","status":"done"},{"id":"2","title":"Fix session open (capped)","status":"open"}]},
+    {"type":"tool-result","callId":"tu5","toolName":"TaskUpdate","toolClass":"other","isError":true,"result":"Task #99 not found"},
+    {"type":"task-list-state","key":"claude:todos","title":"Tasks","status":"cleared","source":"tool-call","sourceTool":"TodoWrite","items":[]}
+  ]
+}

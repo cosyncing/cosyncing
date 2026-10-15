@@ -1,0 +1,10 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/reasonix/test/test-reasonix-mapping.ts",
+  "description": "a durable user row followed only by tool rows (a cancelled tool turn) with no live owner is a cancelled run anchored to that user row; once an assistant row follows there is nothing to infer",
+  "userTexts": [
+    "earlier",
+    "run the migration"
+  ],
+  "interrupted": "cancelled",
+  "sessionId": "e29f09b6-995f-4bc0-8bc0-e29f09b6995f"
+}

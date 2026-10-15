@@ -24,10 +24,20 @@ const check = (name: string, condition: unknown, detail = '') => {
 };
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-kilo-live-'));
-const originalFetch = globalThis.fetch;
+// Waits are on conditions, never on durations. `flush` yields the event loop so every synchronously
+// handled SSE frame has been applied; `until` waits for an observable effect of asynchronous work.
+const flush = async (): Promise<void> => { for (let turn = 0; turn < 4; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve)); };
+const until = async (what: string, ready: () => boolean, timeoutMs = 20_000): Promise<void> => {
+  const startedAt = Date.now();
+  while (!ready()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+  }
+};
 const calls: Array<{ url: string; search: string; method: string; body?: any; hasSignal: boolean }> = [];
 let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
 let globalEventCalls = 0;
+let reconciliations = 0;
 let releaseCreatedHistory: (() => void) | undefined;
 let markCreatedHistoryStarted!: () => void;
 const createdHistoryStarted = new Promise<void>((resolve) => { markCreatedHistoryStarted = resolve; });
@@ -107,7 +117,7 @@ const json = (value: unknown, statusCode = 200) => new Response(JSON.stringify(v
   headers: { 'content-type': 'application/json' },
 });
 
-globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
   const url = String(input instanceof Request ? input.url : input);
   const parsed = new URL(url);
   const method = String(init.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
@@ -293,7 +303,7 @@ globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}
           },
         },
       });
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await flush();
       return json({ error: 'failed after acceptance' }, 503);
     }
     if (oversizedSuccessfulPromptBody) {
@@ -334,13 +344,20 @@ globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}
       }
       childPromptHistory.push({ info: messageEvent.properties.info, parts: [part] });
       // The native event bus can publish the echo before prompt_async resolves.
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await flush();
     }
     return json({ ok: true });
   }
   if (parsed.pathname.endsWith('/abort') && method === 'POST') return json({ ok: true });
   return json({ error: 'missing fixture route' }, 404);
 }) as typeof fetch;
+
+// An idle event, and the end of the ownership verdict it triggers (a boundary re-recorded or Drive revoked).
+async function settleIdle(sessionID: string): Promise<void> {
+  const before = reconciliations;
+  emit({ type: 'session.idle', properties: { sessionID } });
+  await until(`the idle settle of ${sessionID}`, () => reconciliations > before);
+}
 
 function emit(event: unknown): void {
   streamController?.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -359,7 +376,7 @@ try {
   const ownershipOptions = {
     isManagedHostOwned: async () => {
       ownershipChecks += 1;
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
       return true;
     },
     resolveStoredDriveState: (info: { id: string }) => boundaries.get(info.id)
@@ -367,8 +384,9 @@ try {
       : undefined,
     recordStoredDriveBoundary: (info: { id: string; historyBoundary: HistorySourceIdentity }) => {
       boundaries.set(info.id, info.historyBoundary);
+      reconciliations += 1;
     },
-    revokeStoredDriveEligibility: (info: { id: string }) => { boundaries.delete(info.id); },
+    revokeStoredDriveEligibility: (info: { id: string }) => { boundaries.delete(info.id); reconciliations += 1; },
   };
   const adapter = new KiloAdapter({
     command: fakeKilo,
@@ -377,6 +395,7 @@ try {
     baseUrl: 'http://127.0.0.1:4097',
     serverPassword: 'fixture-password',
     testOnlyEnableUnverifiedDrive: true,
+    fetch: fakeFetch,
     ...ownershipOptions,
   });
   const roster = await adapter.discoverSessions();
@@ -387,7 +406,7 @@ try {
   const wrongAuth = new KiloAdapter({
     command: fakeKilo, env: { PATH: '', KILO_DATA_DIR: root }, homeDir: root,
     baseUrl: 'http://127.0.0.1:4097', serverPassword: 'wrong-password',
-    testOnlyEnableUnverifiedDrive: true,
+    testOnlyEnableUnverifiedDrive: true, fetch: fakeFetch,
   });
   check('exact health remains unavailable with the wrong managed-server credential',
     !await wrongAuth.isManagedHostReady());
@@ -439,7 +458,7 @@ try {
     homeDir: root,
     baseUrl: 'http://127.0.0.1:4097',
     serverPassword: 'fixture-password',
-    testOnlyEnableUnverifiedDrive: true,
+    testOnlyEnableUnverifiedDrive: true, fetch: fakeFetch,
     isManagedHostOwned: () => false,
   });
   await assert.rejects(
@@ -478,7 +497,7 @@ try {
       },
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until('native child prompt', () => childObserveMessages.some((message) => message.type === 'user-message' && message.text === 'native child prompt'));
   check('API-only child Observe streams native user activity without treating it as a foreign writer',
     childObserve.info.attachMode === 'observe'
       && childObserveMessages.some((message) => message.type === 'user-message'
@@ -492,7 +511,7 @@ try {
   emit({ type: 'session.deleted', properties: {} });
   emit({ type: 'session.deleted', properties: { info: { id: 'ses_some_other_session' } } });
   emit({ type: 'session.deleted', properties: { session: { id: 'ses_some_other_session' } } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   // Against the fail-open filter this throws ERR_INVALID_STATE, because markUnavailable() already
   // aborted the stream. Catch it so the failure reports as this check rather than an unhandled
   // error somewhere later.
@@ -518,7 +537,7 @@ try {
   } catch {
     streamStillOpen = false;
   }
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until('the prompt sent after the foreign deletes', () => childObserveMessages.some((message) => message.type === 'user-message' && message.text === 'still listening'));
   check('a foreign or unidentifiable session.deleted cannot retire this session',
     streamStillOpen
       && childObserveMessages.some((message) => message.type === 'user-message'
@@ -555,17 +574,21 @@ try {
   const oversizedRoster = await adapter.discoverSessions();
   check('oversized live session bodies are refused before JSON materialization',
     oversizedRoster.some((row) => row.id === diskSession.id && row.attachMode === 'observe'));
+  // The whole-leg deadline is the discovery signal: when it fires, every hanging per-directory
+  // request is abandoned and no further directory is started. The fixture fires it itself (after
+  // the fan-out is provably in flight) instead of waiting out the 15 s budget.
   hangScopedLists = true;
   hangingScopedCalls = 0;
-  const directStartedAt = Date.now();
-  await adapter.discoverSessions();
+  const legDeadline = new AbortController();
+  const hungDiscovery = adapter.discoverSessions({ signal: legDeadline.signal });
+  await until('the fan-out to be in flight', () => hangingScopedCalls >= 4);
+  const callsWhenDeadlineFired = hangingScopedCalls;
+  legDeadline.abort(new Error('fixture whole-leg deadline'));
+  await hungDiscovery;
   hangScopedLists = false;
-  const directElapsed = Date.now() - directStartedAt;
-  check('direct Kilo discovery enforces its own whole-leg deadline',
-    directElapsed >= EXTERNAL_HOST_DISCOVERY_BUDGET_MS - 250
-      && directElapsed < EXTERNAL_HOST_DISCOVERY_BUDGET_MS + 1_500
-      && hangingScopedCalls < hangingDirectories.length,
-    JSON.stringify({ directElapsed, hangingScopedCalls }));
+  check('direct Kilo discovery stops fanning out when its whole-leg deadline fires',
+    callsWhenDeadlineFired < hangingDirectories.length && hangingScopedCalls < hangingDirectories.length,
+    JSON.stringify({ callsWhenDeadlineFired, hangingScopedCalls }));
   const models = await adapter.listModels!();
   check('Kilo model catalog excludes disconnected providers from the real all/connected shape',
     models.length === 3 && models.some((model) =>
@@ -664,7 +687,7 @@ try {
   const diskConnection = await adapter.attach(diskSession.id, 'live');
   await assert.rejects(adapter.attach(diskSession.id, 'live'), /already has a Drive owner/u);
   check('a second direct live attach cannot open a rival Kilo writer', true);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await flush();
   emit({
     type: 'message.updated',
     properties: {
@@ -674,7 +697,7 @@ try {
       },
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   const modelRefresh = await adapter.discoverSessions();
   check('native SSE model evidence outranks a stale disk model on refresh',
     modelRefresh.some((row) => row.id === diskSession.id
@@ -699,8 +722,7 @@ try {
     JSON.stringify({ type: 'text', text: 'fixture answer and its streamed continuation' }), 'prt-answer',
   );
   growingDatabase.close();
-  emit({ type: 'session.idle', properties: { sessionID: diskSession.id } });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await settleIdle(diskSession.id);
   check('an in-place growth of an assistant text part does not revoke Drive',
     diskConnection.info.attachMode !== 'observe' && boundaries.has(diskSession.id),
     JSON.stringify({
@@ -754,8 +776,7 @@ try {
   settledStepDatabase.query('update part set data = ? where id = ?').run(stepTool('completed'), 'prt-step-tool');
   settledStepDatabase.query('update message set data = ? where id = ?').run(stepMessage(true), 'msg-drive-step');
   settledStepDatabase.close();
-  emit({ type: 'session.idle', properties: { sessionID: diskSession.id } });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await settleIdle(diskSession.id);
   check('a step completing in place after a mid-turn ownership read does not revoke Drive',
     diskConnection.info.attachMode !== 'observe' && boundaries.has(diskSession.id),
     JSON.stringify({
@@ -769,8 +790,7 @@ try {
     JSON.stringify({ type: 'text', text: 'foreign replacement' }), 'prt-user',
   );
   rewrittenDatabase.close();
-  emit({ type: 'session.idle', properties: { sessionID: diskSession.id } });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settleIdle(diskSession.id);
   check('idle ownership reconciliation demotes immediately after an offline SQLite rewrite',
     diskConnection.info.attachMode === 'observe' && !boundaries.has(diskSession.id));
   await assert.rejects(
@@ -785,7 +805,7 @@ try {
   const conn = await adapter.attach('ses_child', 'live');
   const live: AgentMessage[] = [];
   conn.subscribe((message) => live.push(message));
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await until('late attach seeding', () => conn.info.status === 'needs-input');
   check('late attach seeds needs-input from point-in-time busy and pending state',
     conn.info.status === 'needs-input' && (await conn.getPending!()).some((row) => row.type === 'permission-request'));
   let busyRefused = false;
@@ -798,7 +818,7 @@ try {
 
   emit({ type: 'permission.replied', properties: { sessionID: 'ses_child', requestID: 'perm-external', response: 'always' } });
   emit({ type: 'session.error', properties: { sessionID: 'ses_child', error: { data: { message: 'nested provider refusal\nsecret' } } } });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await until('permission.replied and session.error', () => live.some((row) => row.type === 'permission-resolved' && row.requestId === 'perm-external') && live.some((row) => row.type === 'error' && row.message === 'nested provider refusal'));
   check('Kilo permission.replied maps to resolution and nested provider errors stay specific',
     live.some((row) => row.type === 'permission-resolved' && row.requestId === 'perm-external' && row.decision === 'approve-session')
       && live.some((row) => row.type === 'error' && row.message === 'nested provider refusal'));
@@ -817,21 +837,18 @@ try {
     largeHistory.filter((row) => row.type === 'model-output'
       && row.key?.startsWith('part-large-')).length === 10);
   status = 'idle';
-  emit({ type: 'session.idle', properties: { sessionID: 'ses_child' } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settleIdle('ses_child');
   oversizedSuccessfulPromptBody = true;
   await conn.sendPrompt({ text: 'successful prompt with oversized unused body', clientMessageId: 'oversized-success' });
   check('a successful mutation with an oversized unused body stays writable',
     conn.info.attachMode === 'live' && conn.info.control?.drive.supported === true);
-  emit({ type: 'session.idle', properties: { sessionID: 'ses_child' } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settleIdle('ses_child');
   await conn.sendPrompt({ text: 'now safe', clientMessageId: 'client-kilo' });
   check('a locally claimed SSE user echo cannot falsely demote Drive',
     conn.info.attachMode === 'live'
       && live.some((row) => row.type === 'user-message'
         && row.text === 'now safe' && row.clientKey === 'client-kilo' && row.sentAt === 7));
-  emit({ type: 'session.idle', properties: { sessionID: 'ses_child' } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settleIdle('ses_child');
   await conn.sendPrompt({ text: 'second safe' });
   check('a broker prompt without a client key still claims its native echo',
     conn.info.attachMode === 'live'
@@ -888,12 +905,12 @@ try {
       part: { id: 'prt_kilo_pair_reply', messageID: replyInfo.id, sessionID: 'ses_child', type: 'text', text: 'paired reply' },
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until('the running reply', () => runRowsOf(live, replyKey).length === 1);
   check('a driven Kilo reply is announced running live before it completes',
     runRowsOf(live, replyKey).map((row) => row.status).join(',') === 'running', describeRuns(live));
   const completedReply = { ...replyInfo, time: { created: 10, completed: 12 }, finish: 'stop' };
   emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: completedReply } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until('the done reply', () => runRowsOf(live, replyKey).length === 2);
   const replyRuns = runRowsOf(live, replyKey);
   check('a driven Kilo reply yields exactly one running then exactly one done under the same key',
     replyRuns.length === 2 && replyRuns[0]!.status === 'running' && replyRuns[1]!.status === 'done'
@@ -925,7 +942,7 @@ try {
   emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: { ...toolStep, time: { created: 20, completed: 21 }, finish: 'tool-calls' } } });
   emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: finalStep } });
   emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: { ...finalStep, time: { created: 22, completed: 23 }, finish: 'stop' } } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until('both steps', () => live.slice(stepsFrom).filter((row) => row.type === 'run-summary' && row.status === 'done').length === 2);
   const stepRows = live.slice(stepsFrom);
   const toolTerminal = runRowsOf(stepRows, `kilo:run:${toolStep.id}`).find((row) => row.status === 'done');
   const finalTerminal = runRowsOf(stepRows, `kilo:run:${finalStep.id}`).find((row) => row.status === 'done');
@@ -959,8 +976,7 @@ try {
   await conn.runCommand?.('stop');
   check('stop command maps to a bounded native abort request',
     calls.some((call) => call.url.endsWith('/abort') && call.method === 'POST' && call.hasSignal));
-  emit({ type: 'session.idle', properties: { sessionID: 'ses_child' } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settleIdle('ses_child');
   const accepted503CallsBefore = calls.filter((call) => call.url.endsWith('/prompt_async')
     && call.body?.parts?.[0]?.text === 'accepted-then-503').length;
   await assert.rejects(
@@ -977,7 +993,7 @@ try {
   const mutationCallsAfterDemotion = calls.length;
   await assert.rejects(conn.runCommand?.('stop') ?? Promise.resolve(), /read-only|ambiguous|may have been accepted/u);
   await assert.rejects(conn.respondPermission('perm-stale', 'reject'), /read-only|ambiguous|may have been accepted/u);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await flush();
   check('demotion stops SSE reconnect and refuses every stale mutation',
     globalEventCalls === 1 && calls.length === mutationCallsAfterDemotion);
   await conn.close();
@@ -992,6 +1008,7 @@ try {
     baseUrl: 'http://127.0.0.1:4097',
     serverPassword: 'fixture-password',
     testOnlyEnableUnverifiedDrive: true,
+    fetch: fakeFetch,
     ...ownershipOptions,
     resolveStoredCurrentModel: (info) => {
       restoredModelLookups.push(info);
@@ -1018,7 +1035,7 @@ try {
       },
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   releaseCreatedHistory?.();
   blockCreatedHistory = false;
   await staleHistory;
@@ -1032,8 +1049,7 @@ try {
   check('a later fresh history response reconciles model evidence missed during an SSE gap',
     durableModel?.providerID === 'later-native-provider' && durableModel.modelID === 'later-native-model'
       && durableModel.label === 'Later native model');
-  emit({ type: 'session.idle', properties: { sessionID: created.id } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settleIdle(created.id);
   await createdConnection.close();
 
   const secondRestartedAdapter = new KiloAdapter({
@@ -1043,6 +1059,7 @@ try {
     baseUrl: 'http://127.0.0.1:4097',
     serverPassword: 'fixture-password',
     testOnlyEnableUnverifiedDrive: true,
+    fetch: fakeFetch,
     ...ownershipOptions,
     resolveStoredCurrentModel: (info) => info.id === created.id ? durableModel : undefined,
     recordNativeCurrentModel: (info) => { durableModel = info.currentModel; },
@@ -1053,14 +1070,13 @@ try {
   check('later restart never reasserts the stale create model',
     finalPrompt?.body?.model?.providerID === 'later-native-provider'
       && finalPrompt.body.model.modelID === 'later-native-model');
-  emit({ type: 'session.idle', properties: { sessionID: created.id } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settleIdle(created.id);
   await afterNativeRestart.close();
 
   const foreignWriterConnection = await secondRestartedAdapter.attach(created.id, 'live');
   const foreignWriterMessages: AgentMessage[] = [];
   foreignWriterConnection.subscribe((message) => foreignWriterMessages.push(message));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   emit({
     type: 'message.updated',
     properties: {
@@ -1068,7 +1084,7 @@ try {
       info: { id: 'msg_foreign_writer', sessionID: created.id, role: 'user', time: { created: 8 } },
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   const callsAfterForeignWriter = calls.length;
   await assert.rejects(
     foreignWriterConnection.sendPrompt({ text: 'must not overlap foreign writer' }),
@@ -1092,7 +1108,7 @@ try {
   const rewriteConnection = await secondRestartedAdapter.attach(created.id, 'live');
   const rewriteMessages: AgentMessage[] = [];
   rewriteConnection.subscribe((message) => rewriteMessages.push(message));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   emit({
     type: 'session.updated',
     properties: {
@@ -1100,7 +1116,7 @@ try {
       info: { id: created.id, sessionID: created.id, revert: { messageID: 'msg_rewrite_boundary' } },
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   const callsAfterRewrite = calls.length;
   await assert.rejects(
     rewriteConnection.sendPrompt({ text: 'must not write after rewrite' }),
@@ -1134,8 +1150,7 @@ try {
   const authSnapshot = await readKiloHistory(authStored);
   boundaries.set(created.id, kiloHistorySourceIdentity(authStored, authSnapshot!));
   const promptAuthConnection = await secondRestartedAdapter.attach(created.id, 'live');
-  emit({ type: 'session.idle', properties: { sessionID: created.id } });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settleIdle(created.id);
   nextMutationAuthStatus = 401;
   await assert.rejects(promptAuthConnection.sendPrompt({ text: 'auth lost' }), /prompt failed \(401\)/u);
   check('a 401 prompt response demotes and revokes the Kilo writer',
@@ -1151,7 +1166,7 @@ try {
   const activeCloseConnection = await secondRestartedAdapter.attach(created.id, 'live');
   const activeCloseMessages: AgentMessage[] = [];
   activeCloseConnection.subscribe((message) => activeCloseMessages.push(message));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await flush();
   await activeCloseConnection.close();
   check('active close settles permissions externally and revokes durable Drive eligibility',
     !boundaries.has(created.id)
@@ -1183,7 +1198,6 @@ try {
     rmSync(probeRoot, { recursive: true, force: true });
   }
 } finally {
-  globalThis.fetch = originalFetch;
   try { streamController?.close(); } catch { /* already cancelled */ }
   rmSync(root, { recursive: true, force: true });
 }

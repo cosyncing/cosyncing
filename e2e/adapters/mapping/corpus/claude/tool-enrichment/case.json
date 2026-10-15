@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "tool results enriched from the same-line toolUseResult: Write create diff, Edit hunk headers, Bash with no fabricated exit code, Grep search dir never a file path, image Read path recovered from the call input, SendUserFile caption title",
+  "userTexts": [
+    "enrich"
+  ],
+  "sessionId": "b555d714-62ca-4286-8286-b555d71462ca"
+}

@@ -9,7 +9,6 @@ import { GrokAdapter } from '../src/implementation.ts';
 import { grokAuthMethod } from '../src/auth.ts';
 import {
   GROK_MEASURED_VERSIONS,
-  GROK_MINIMUM_SUPPORTED_VERSION,
   discoverGrokStore,
   grokHistorySourceIdentity,
 } from '../src/store.ts';
@@ -61,29 +60,13 @@ try {
     model: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'high' },
     permissionMode: 'default',
   });
-  check('create re-derives id, cwd, model, and title from the durable store row',
-    created.id === created.nativeId
-      && created.cwd === cwd
-      && created.title === 'Requested Grok title'
-      && created.currentModel?.modelID === 'grok-4.6'
-      && created.currentModel?.label === 'Grok 4.6'
-      && created.attachMode === 'resume',
-    JSON.stringify(created));
+  // Create re-derives id/cwd/model/title from the durable row: conformance C07 (grok).
   check('create records Drive eligibility only after the durable row appears', created.control?.drive.supported === true);
 
-  const collisionAdapter = new GrokAdapter({ command: fake.path, env: fake.env, requestTimeoutMs: 2_000, testOnlyEnableUnverifiedDrive: true });
-  let collisionRefused = false;
-  try { await collisionAdapter.createSession({ directory: cwd }); } catch { collisionRefused = true; }
-  let collisionResumeRefused = false;
-  try { await collisionAdapter.attach(created.id, 'resume'); } catch { collisionResumeRefused = true; }
-  check('session/new cannot turn a pre-existing durable UUID into broker-owned Drive eligibility',
-    collisionRefused && collisionResumeRefused);
+  // A pre-existing durable UUID never becomes broker-owned Drive: conformance C07 (second half).
 
-  const spawnsBeforeObserve = fake.spawnCount();
   const observe = await adapter.attach(created.id, 'observe');
-  check('Observe is read-only and reports the connection actually opened',
-    fake.spawnCount() === spawnsBeforeObserve && observe.info.attachMode === 'observe');
-  await observe.close();
+  await observe.close(); // Observe is read-only and spawns nothing: conformance C03/C04.
 
   const childId = '019f9d70-e38e-7591-9a24-74a06ad89482';
   const groupDir = join(store, 'sessions', encodeURIComponent(cwd));
@@ -285,8 +268,7 @@ try {
   stop();
   await drive.close();
 
-  fake.setVersion('0.2.115');
-  check('the version gate is re-read after a self-update instead of cached', !await adapter.canCreateSession());
+  // The version gate is re-read after a self-update (never cached): conformance C16 (cachedByBroker false).
 
   const evolvingStore = join(root, 'evolving-home');
   const evolvingBin = writeFakeGrokBinary(join(root, 'evolving-bin'), evolvingStore);
@@ -330,35 +312,9 @@ try {
       && restartedDrive.info.control?.drive.state === 'driving',
     JSON.stringify(restartedRow));
   await restartedDrive.close();
-  restartedAdapter.releaseDriveEligibility(created.id);
-  let resumeRefused = false;
-  try { await restartedAdapter.attach(created.id, 'resume'); } catch { resumeRefused = true; }
-  check('terminal handoff revokes both process-local and durable restart eligibility',
-    durableRevoked && resumeRefused);
+  // Terminal handoff revokes restart eligibility: conformance C20 (the handed-to-the-terminal session).
 
-  durableRevoked = false;
-  appendFileSync(storedSession.updatesPath, `${JSON.stringify({
-    method: 'session/update',
-    params: {
-      sessionId: created.id,
-      update: { sessionUpdate: 'user_message_chunk', content: { text: 'offline terminal write' } },
-    },
-  })}\n`);
-  const offlineAdapter = new GrokAdapter({
-    command: fake.path,
-    env: fake.env,
-    requestTimeoutMs: 2_000,
-    resolveStoredDriveState: (info) => info.id === created.id && !durableRevoked
-      ? { historyBoundary: restartBoundary }
-      : undefined,
-    revokeStoredDriveEligibility: () => { durableRevoked = true; },
-  });
-  const offlineRow = (await offlineAdapter.discoverSessions()).find((row) => row.id === created.id);
-  let offlineResumeRefused = false;
-  try { await offlineAdapter.attach(created.id, 'resume'); } catch { offlineResumeRefused = true; }
-  check('an offline transcript change invalidates durable restart ownership before Resume',
-    durableRevoked && offlineRow?.control?.drive.supported === false && offlineResumeRefused,
-    JSON.stringify(offlineRow));
+  // An offline transcript change revokes restart ownership: conformance C20 (the changed-offline session).
 
   const sameProcessStore = join(root, 'same-process-home');
   const sameProcessFake = writeFakeGrokBinary(join(root, 'same-process-bin'), sameProcessStore);
@@ -394,32 +350,14 @@ try {
     sameProcessRevoked && sameProcessRow?.control?.drive.supported === false && sameProcessResumeRefused,
     JSON.stringify(sameProcessRow));
 
-  const future = writeFakeGrokBinary(join(root, 'future-bin'), store, '0.2.115');
-  const futureBoundary = await grokHistorySourceIdentity(storedSession);
-  const futureAdapter = new GrokAdapter({
-    command: future.path,
-    env: future.env,
-    testOnlyEnableUnverifiedDrive: true,
-    resolveStoredDriveState: (info) => info.id === created.id
-      ? { currentModel: created.currentModel, currentMode: created.currentMode, historyBoundary: futureBoundary }
-      : undefined,
-  });
-  const futureRows = await futureAdapter.discoverSessions();
-  const futureRow = futureRows.find((row) => row.id === created.id);
-  let futureResumeRefused = false;
-  try { await futureAdapter.attach(created.id, 'resume'); } catch { futureResumeRefused = true; }
-  check('a Grok build below the measured floor remains Observe-only even with durable app-created provenance',
-    !await futureAdapter.canCreateSession()
-      && futureRows.length === 1
-      && futureRow?.control?.drive.supported === false
-      && futureResumeRefused,
-    JSON.stringify(futureRow));
+  // A build below the floor stays Observe-only even with durable provenance: conformance C16 (below the floor).
 
   // Grok updates itself and the operator does not choose when, so a gate keyed
   // to enumerated versions is one the user cannot satisfy — this box drifted
   // eleven releases unattended and Drive was refused for a build later measured
   // identical to the pinned one. Every measured build must qualify...
-  for (const measured of GROK_MEASURED_VERSIONS) {
+  // 1.0.13 (the floor) qualifies in conformance C16 (banner-polluted current); the other measured build stays here.
+  for (const measured of GROK_MEASURED_VERSIONS.filter((version) => version !== '1.0.13')) {
     const measuredFake = writeFakeGrokBinary(join(root, `measured-${measured}-bin`), store, measured);
     const measuredAdapter = new GrokAdapter({
       command: measuredFake.path,
@@ -431,21 +369,7 @@ try {
       JSON.stringify({ measured, measuredVersions: GROK_MEASURED_VERSIONS }));
   }
 
-  // ...and so must a build NEWER than anything enumerated, which is the whole
-  // point: a user who upgrades must not lose Drive until someone reruns the
-  // capture. The floor is the only version comparison that gates anything; the
-  // protocol, auth, store-shape and ownership checks each fail closed on their
-  // own if a future build genuinely breaks the contract.
-  const unmeasuredNewer = '9.9.9';
-  const newerFake = writeFakeGrokBinary(join(root, 'newer-unmeasured-bin'), store, unmeasuredNewer);
-  const newerAdapter = new GrokAdapter({
-    command: newerFake.path,
-    env: newerFake.env,
-    testOnlyEnableUnverifiedDrive: true,
-  });
-  check('a build newer than every measured version still qualifies for Create',
-    await newerAdapter.canCreateSession(),
-    JSON.stringify({ unmeasuredNewer, floor: GROK_MINIMUM_SUPPORTED_VERSION }));
+  // 1.0.13 and a build newer than any measured one qualify: conformance C16 (banner-polluted current, newer).
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
+  "description": "one logical model message spread over sibling lines keeps ONE key per block (ordinals count every block type, across multi-block lines, across the attach boundary); identical texts stay distinct; id-less lines fall back to the uuid key",
+  "userTexts": [
+    "go"
+  ],
+  "oneRow": [
+    "answer",
+    "second block",
+    "tail answer"
+  ],
+  "sessionId": "3098459b-1696-460e-860e-3098459b1696"
+}

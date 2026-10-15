@@ -1,0 +1,10 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/antigravity/test/test-agy-mapping.ts",
+  "description": "blank, non-JSON, truncated, primitive, array, null, wrongly-typed and binary lines (and settlement documents) in history and on the tail are skipped without a throw and never become a user bubble; the real rows around them still map",
+  "userTexts": [
+    "before the noise",
+    "prompt after garbage on the tail"
+  ],
+  "liveChild": false,
+  "sessionId": "4ccc53c1-b13f-420c-820c-4ccc53c1b13f"
+}

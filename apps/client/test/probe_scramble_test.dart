@@ -6,7 +6,7 @@
 // turn projections. Point COSYNCING_TEST_SCRAMBLE_FRAMES at a generated
 // frames.json to run it; it skips otherwise. The always-on synthetic coverage
 // lives in
-// test/src/features/sessions/detail/transcript_history_reconcile_test.dart.
+// test/narrow/history_protocol/reconcile_cases.dart.
 import 'dart:convert';
 import 'dart:io';
 

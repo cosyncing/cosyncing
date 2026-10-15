@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/reasonix/test/test-reasonix-mapping.ts",
+  "description": "key-less and wrongly-typed objects (the store hands the mapper only JSON objects), and tool_calls of the wrong shape, never throw and never become a user bubble; the real rows around them still map",
+  "userTexts": [
+    "before",
+    "after"
+  ],
+  "sessionId": "f2d01501-f298-4048-8048-f2d01501f298"
+}

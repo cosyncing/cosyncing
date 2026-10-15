@@ -1,0 +1,51 @@
+{
+  "history": [
+    {"type":"user-message","text":"  indented\n\n  prompt with trailing space  \n","key":"pu1","turnId":"pu1","sentAt":1781913600000},
+    {"type":"user-message","text":"","key":"pu2","turnId":"pu2","sentAt":1781913605000,"imageCount":1},
+    {"type":"thinking","text":"weighing it","key":"pa1:r:0"},
+    {"type":"model-output","text":"  answer keeps its spaces  ","final":true,"key":"pa1:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u1","turnId":"u1","userMessageKey":"pu2","assistantMessageKey":"pa1:t:0","status":"done","startedAt":1781913605000,"completedAt":1781913606000,"totalRuntimeMs":1000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"user-message","text":"remote prompt","key":"u:remote:one","turnId":"u:remote:one","sentAt":1781913720000,"clientKey":"client-1"},
+    {"type":"model-output","text":"remote answered","final":true,"key":"pa2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u:remote:one","turnId":"u:remote:one","userMessageKey":"u:remote:one","assistantMessageKey":"pa2:t:0","status":"done","startedAt":1781913720000,"completedAt":1781913725000,"totalRuntimeMs":5000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"user-message","text":"first duplicate","key":"pc3","turnId":"pc3","sentAt":1781913840000},
+    {"type":"user-message","text":"second duplicate","key":"pc4","turnId":"pc4","sentAt":1781913841000},
+    {"type":"run-summary","key":"omp:run:pc4","turnId":"pc4","userMessageKey":"pc4","status":"running","startedAt":1781913841000,"source":"omp-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":6000,"turnCount":2,"updatedAt":1781913725000,"source":"omp"}}
+  ],
+  "live": [
+    {"type":"user-message","text":"","key":"u:remote:img","turnId":"u:remote:img","sentAt":1781913780000,"imageCount":1},
+    {"type":"model-output","text":"image seen","final":true,"key":"pa3:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u:remote:img","turnId":"u:remote:img","userMessageKey":"u:remote:img","assistantMessageKey":"pa3:t:0","status":"done","startedAt":1781913780000,"completedAt":1781913785000,"totalRuntimeMs":5000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"user-message","text":"/skill:review src","key":"u7","turnId":"u7","sentAt":1781913900000},
+    {"type":"model-output","text":"after prompts","final":true,"key":"pa4:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u7","turnId":"u7","userMessageKey":"u7","assistantMessageKey":"pa4:t:0","status":"done","startedAt":1781913900000,"completedAt":1781913970000,"totalRuntimeMs":70000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"  indented\n\n  prompt with trailing space  \n","key":"pu1","turnId":"pu1","sentAt":1781913600000},
+    {"type":"user-message","text":"","key":"pu2","turnId":"pu2","sentAt":1781913605000,"imageCount":1},
+    {"type":"thinking","text":"weighing it","key":"pa1:r:0"},
+    {"type":"model-output","text":"  answer keeps its spaces  ","final":true,"key":"pa1:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u1","turnId":"u1","userMessageKey":"pu2","assistantMessageKey":"pa1:t:0","status":"done","startedAt":1781913605000,"completedAt":1781913606000,"totalRuntimeMs":1000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"user-message","text":"remote prompt","key":"u:remote:one","turnId":"u:remote:one","sentAt":1781913720000,"clientKey":"client-1"},
+    {"type":"model-output","text":"remote answered","final":true,"key":"pa2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u:remote:one","turnId":"u:remote:one","userMessageKey":"u:remote:one","assistantMessageKey":"pa2:t:0","status":"done","startedAt":1781913720000,"completedAt":1781913725000,"totalRuntimeMs":5000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"user-message","text":"first duplicate","key":"pc3","turnId":"pc3","sentAt":1781913840000},
+    {"type":"user-message","text":"second duplicate","key":"pc4","turnId":"pc4","sentAt":1781913841000},
+    {"type":"user-message","text":"","key":"u:remote:img","turnId":"u:remote:img","sentAt":1781913780000,"imageCount":1},
+    {"type":"model-output","text":"image seen","final":true,"key":"pa3:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u:remote:img","turnId":"u:remote:img","userMessageKey":"u:remote:img","assistantMessageKey":"pa3:t:0","status":"done","startedAt":1781913780000,"completedAt":1781913785000,"totalRuntimeMs":5000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"user-message","text":"/skill:review src","key":"u7","turnId":"u7","sentAt":1781913900000},
+    {"type":"model-output","text":"after prompts","final":true,"key":"pa4:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"omp:run:u7","turnId":"u7","userMessageKey":"u7","assistantMessageKey":"pa4:t:0","status":"done","startedAt":1781913900000,"completedAt":1781913970000,"totalRuntimeMs":70000,"tokens":{"input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},"source":"omp-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":81000,"turnCount":4,"updatedAt":1781913970000,"source":"omp"}}
+  ]
+}

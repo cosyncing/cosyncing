@@ -8,7 +8,7 @@
  * survives — or the input is not decodable text, or the redactor throws — the caller fails closed
  * (refuses the export and deletes all temp material). There is NO unredacted remote override.
  *
- * No model calls. Pure function; fully covered by packages/typescript/broker/test/security-r2/test-r2-redactor.ts.
+ * No model calls. Pure function; its corpus runs through the export in e2e/broker/transcript-export.test.ts.
  */
 
 export interface RedactionContext {

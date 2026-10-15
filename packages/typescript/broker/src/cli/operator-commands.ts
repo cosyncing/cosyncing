@@ -1,5 +1,6 @@
 import { parseQrPairingPayload, type QrPairingPayloadV3 } from '@cosyncing/crypto';
 import { inspectBrokerConfig, type BrokerConfig } from '../runtime/configuration.ts';
+import { BUILD_INFO } from '../runtime/build-info.ts';
 import {
   brokerTokenPath,
   inspectBrokerToken,
@@ -37,6 +38,14 @@ const REQUEST_TIMEOUT_MS = 4_000;
  */
 const PAIR_IDENTITY_DEADLINE_MS = 10_000;
 const PAIR_IDENTITY_RETRY_MS = 500;
+
+/** Test hook (source runs only): a shorter identity deadline keeps the waited-out cases fast. */
+function pairIdentityDeadlineMs(): number {
+  const override = Number(process.env.COSYNCING_TEST_PAIR_IDENTITY_DEADLINE_MS ?? '');
+  return !BUILD_INFO.packaged && Number.isSafeInteger(override) && override > 0
+    ? override
+    : PAIR_IDENTITY_DEADLINE_MS;
+}
 /** How often the acceptance watcher asks, and how long it asks for when the caller does not say. */
 const PAIRING_POLL_MS = 1_000;
 export const PAIR_STATUS_DEFAULT_TIMEOUT_SECONDS = 20;
@@ -309,7 +318,7 @@ async function verifyLocalBroker(
 ): Promise<void> {
   const now = dependencies.now ?? Date.now;
   const sleep = dependencies.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
-  const deadline = now() + PAIR_IDENTITY_DEADLINE_MS;
+  const deadline = now() + pairIdentityDeadlineMs();
   for (;;) {
     try {
       assertBrokerHealth(await request(dependencies, access, '/api/health'), access,

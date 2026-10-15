@@ -1,0 +1,35 @@
+{
+  "history": [
+    {"type":"user-message","text":"hello","key":"c1","sentAt":1781776800000},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","status":"running","startedAt":1781776802000,"source":"codex-rollout"},
+    {"type":"thinking","text":"thinking through it","key":"codex:t1:rs_t1:r"},
+    {"type":"tool-call","callId":"c1","toolName":"exec_command","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}},
+    {"type":"tool-result","callId":"c1","toolName":"exec_command","toolClass":"execute","semantic":{"kind":"command","command":"ls","state":"failed"},"isError":true,"result":"boom","exitCode":2,"durationMs":1250},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"tool-call","callId":"c2","toolName":"apply_patch","toolClass":"edit","args":{}},
+    {"type":"tool-result","callId":"c2","toolName":"apply_patch","toolClass":"edit","isError":false,"result":"ok","path":"/tmp/x/a.ts","diff":"diff --git a/tmp/x/a.ts b/tmp/x/a.ts\nnew file\n--- /dev/null\n+++ b/tmp/x/a.ts\n+l1\n+l2","fileChanges":[{"path":"/tmp/x/a.ts","operation":"create","diff":"diff --git a/tmp/x/a.ts b/tmp/x/a.ts\nnew file\n--- /dev/null\n+++ b/tmp/x/a.ts\n+l1\n+l2","additions":2,"deletions":0}],"additions":2,"deletions":0,"title":"Created a.ts"},
+    {"type":"model-output","text":"Done.","final":true,"key":"codex:t1:msg_done:t"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":2},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","assistantMessageKey":"codex:t1:msg_done:t","status":"done","completedAt":1781776810000,"source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"hello","key":"c1","sentAt":1781776800000},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","status":"running","startedAt":1781776802000,"source":"codex-rollout"},
+    {"type":"thinking","text":"thinking through it","key":"codex:t1:rs_t1:r"},
+    {"type":"tool-call","callId":"c1","toolName":"exec_command","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}},
+    {"type":"tool-result","callId":"c1","toolName":"exec_command","toolClass":"execute","semantic":{"kind":"command","command":"ls","state":"failed"},"isError":true,"result":"boom","exitCode":2,"durationMs":1250},
+    {"type":"tool-call","callId":"c2","toolName":"apply_patch","toolClass":"edit","args":{}},
+    {"type":"tool-result","callId":"c2","toolName":"apply_patch","toolClass":"edit","isError":false,"result":"ok","path":"/tmp/x/a.ts","diff":"diff --git a/tmp/x/a.ts b/tmp/x/a.ts\nnew file\n--- /dev/null\n+++ b/tmp/x/a.ts\n+l1\n+l2","fileChanges":[{"path":"/tmp/x/a.ts","operation":"create","diff":"diff --git a/tmp/x/a.ts b/tmp/x/a.ts\nnew file\n--- /dev/null\n+++ b/tmp/x/a.ts\n+l1\n+l2","additions":2,"deletions":0}],"additions":2,"deletions":0,"title":"Created a.ts"},
+    {"type":"model-output","text":"Done.","final":true,"key":"codex:t1:msg_done:t"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":2},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","assistantMessageKey":"codex:t1:msg_done:t","status":"done","startedAt":1781776802000,"completedAt":1781776810000,"totalRuntimeMs":8000,"source":"codex-rollout"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":8000,"turnCount":1,"updatedAt":1781776810000,"source":"codex-rollout"}},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

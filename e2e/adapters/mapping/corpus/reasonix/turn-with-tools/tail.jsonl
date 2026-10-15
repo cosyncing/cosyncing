@@ -1,0 +1,4 @@
+{"role":"assistant","content":"Done.\n  indented","workDurationMs":800}
+{"role":"user","content":"second prompt","createdAt":1760000100000}
+{"role":"assistant","reasoning_content":"thinking only so far","workDurationMs":40}
+{"role":"tool","content":"orphan result","tool_execution":{"exitCode":2}}

@@ -1,0 +1,8 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/claude/test-claude-runtime.ts",
+  "description": "per-block terminal lines: the close fires on the first (thinking) line and the same-id text line amends it across the attach boundary, anchored to the text row; a task notification opens a background continuation run with a boundary notice that closes on its own terminal line; a repeat notification coalesces",
+  "userTexts": [
+    "kick off"
+  ],
+  "sessionId": "7110e4ae-d972-4579-8579-7110e4aed972"
+}

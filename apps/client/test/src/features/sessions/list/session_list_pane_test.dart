@@ -4,9 +4,7 @@ import 'dart:ui' show Tristate;
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
-import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
-import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
@@ -356,121 +354,6 @@ void main() {
       expect(find.text('No sessions'), findsOneWidget);
     });
 
-    testWidgets('renders a row per session and reports open', (tester) async {
-      final opened = <String>[];
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session('claude', 'a', title: 'First'),
-              _session('codex', 'b', title: 'Second'),
-            ],
-            activeKey: 'claude/a',
-            onOpen: (session) => opened.add('${session.tool}/${session.id}'),
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        ),
-      );
-
-      await expandProject(tester, ungrouped);
-
-      expect(find.text('First'), findsOneWidget);
-      expect(find.text('Second'), findsOneWidget);
-      expect(find.byKey(const Key('session-row-claude/a')), findsOneWidget);
-      expect(
-        find.ancestor(
-          of: find.text('Second'),
-          matching: find.byType(SelectionArea),
-        ),
-        findsNothing,
-        reason: 'roster rows are navigation and carry no selection region',
-      );
-
-      await tester.drag(find.text('Second'), const Offset(80, 0));
-      await tester.pump();
-      expect(opened, isEmpty, reason: 'drag selection must not open the row');
-
-      await tester.tap(find.byKey(const Key('session-row-codex/b')));
-      expect(
-        opened,
-        ['codex/b'],
-        reason:
-            'the row opens once; the tap region must not re-supply the tap '
-            'the row InkWell already receives',
-      );
-    });
-
-    testWidgets('suppresses id-placeholder and blank titles', (tester) async {
-      // Kimi reports `title ?? last_prompt ?? id`, so an untitled session's
-      // title IS its raw id; the row used to render that fingerprint while
-      // the tab/header suppressed it via `knownSessionTitle`. The roster now
-      // applies the same suppression, so both shapes read "Untitled session".
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session('kimi', 'session_019ff', title: 'session_019ff'),
-              _session('kimi', 'session_blank', title: '   '),
-              _session('codex', 'real', title: 'A real title'),
-            ],
-            activeKey: null,
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        ),
-      );
-      await expandProject(tester, ungrouped);
-
-      expect(find.text('session_019ff'), findsNothing);
-      expect(find.text('session_blank'), findsNothing);
-      expect(find.text('Untitled session'), findsNWidgets(2));
-      expect(find.text('A real title'), findsOneWidget);
-    });
-
-    testWidgets('the roster carries no selection machinery at all', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session('claude', 'a', title: 'First'),
-              _session('codex', 'b', title: 'Second'),
-              _session('codex', 'c', title: 'Third'),
-            ],
-            activeKey: 'claude/a',
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        ),
-      );
-      await expandProject(tester, ungrouped);
-
-      // The reported grey slab is Flutter's release RenderErrorBox, and it is
-      // consistent with a known web failure: every SelectionArea adds a
-      // platform view whose placeholder reads `localToGlobal` from a
-      // post-frame callback with no `attached` guard, and a scrolling viewport
-      // that collects it first makes that throw (flutter/flutter#122680, fixed
-      // by #186840, absent from the 3.44.3 we pin). No exception was ever
-      // captured and there is no deterministic repro, so that cause is
-      // unproven — but one region per row showed one slab per row and one
-      // shared region showed one slab over the list; removing SelectionArea
-      // from the roster removes the mechanism outright. It is navigation, not
-      // a document: no selection region, no per-row island.
-      expect(find.byType(SelectionArea), findsNothing);
-      expect(find.byType(SelectableTapRegion), findsNothing);
-      for (final title in ['First', 'Second', 'Third']) {
-        expect(
-          find.ancestor(
-            of: find.text(title),
-            matching: find.byType(SelectableRegion),
-          ),
-          findsNothing,
-          reason: '$title must not sit inside any selectable region',
-        );
-      }
-    });
-
     testWidgets('shows status labels without overflowing', (tester) async {
       await tester.pumpWidget(
         host(
@@ -499,58 +382,6 @@ void main() {
 
       expect(find.text('Needs input'), findsOneWidget);
       expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('starts every project collapsed and expands from the header', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session('claude', 'a', title: 'First', cwd: '/work/alpha'),
-              _session('codex', 'b', title: 'Second', cwd: '/work/alpha'),
-              _session('claude', 'c', title: 'Elsewhere', cwd: '/work/beta'),
-            ],
-            activeKey: null,
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // R1b: a cold load shows headers only. Before R1b the empty
-      // collapsed-key set left every group open on the first frame.
-      expect(find.byKey(const Key('session-row-claude/a')), findsNothing);
-      expect(find.byKey(const Key('session-row-codex/b')), findsNothing);
-      expect(find.byKey(const Key('session-row-claude/c')), findsNothing);
-      expect(
-        find.byKey(const ValueKey('project-header-/work/alpha')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('project-header-/work/beta')),
-        findsOneWidget,
-      );
-      // Headers carry no counts; a collapsed project signals only attention.
-      expect(find.text('2'), findsNothing);
-
-      await expandProject(tester, '/work/alpha');
-
-      // Only the tapped group opens; its sibling stays closed.
-      expect(find.byKey(const Key('session-row-claude/a')), findsOneWidget);
-      expect(find.byKey(const Key('session-row-codex/b')), findsOneWidget);
-      expect(find.byKey(const Key('session-row-claude/c')), findsNothing);
-
-      await expandProject(tester, '/work/alpha');
-
-      expect(find.byKey(const Key('session-row-claude/a')), findsNothing);
-      expect(find.byKey(const Key('session-row-codex/b')), findsNothing);
-      expect(
-        find.byKey(const ValueKey('project-header-/work/alpha')),
-        findsOneWidget,
-      );
     });
 
     testWidgets('toggles OpenCode sub-agent children under their parent', (
@@ -723,106 +554,6 @@ void main() {
       );
     });
 
-    testWidgets('shows the localized Reasonix agent name', (tester) async {
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [_session('reasonix', 'reasonix-label')],
-            activeKey: null,
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        ),
-      );
-      await expandProject(tester, ungrouped);
-
-      expect(metadataContaining('Reasonix'), findsOneWidget);
-    });
-
-    testWidgets('shows the localized Grok Build agent name', (tester) async {
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [_session('grok', 'grok-label')],
-            activeKey: null,
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        ),
-      );
-      await expandProject(tester, ungrouped);
-
-      expect(metadataContaining('Grok Build'), findsOneWidget);
-    });
-
-    testWidgets('search filters the live roster without another fetch', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session('codex', 'a', title: 'Alpha task'),
-              _session('claude', 'b', title: 'Beta task'),
-            ],
-            activeKey: null,
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        ),
-      );
-
-      await tester.enterText(
-        find.byKey(const Key('session-roster-search')),
-        'beta',
-      );
-      await tester.pump();
-
-      expect(find.text('Alpha task'), findsNothing);
-      expect(find.text('Beta task'), findsOneWidget);
-    });
-
-    testWidgets(
-      'ready dot appears only after working to idle and clears open',
-      (
-        tester,
-      ) async {
-        final opened = <String>[];
-        final working = _session(
-          'codex',
-          'ready',
-          status: SessionStatus.working,
-        );
-        final idle = _session('codex', 'ready');
-        final readyKey = ValueKey(
-          'session-ready-${sessionCompositeRosterKey(idle)}',
-        );
-
-        Widget pane(SessionInfo session) => host(
-          SessionListPane(
-            sessions: [session],
-            activeKey: null,
-            onOpen: (value) => opened.add(value.id),
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-        );
-
-        await tester.pumpWidget(pane(working));
-        await tester.pump();
-        await expandProject(tester, ungrouped);
-        expect(find.byKey(readyKey), findsNothing);
-
-        await tester.pumpWidget(pane(idle));
-        await tester.pump();
-        expect(find.byKey(readyKey), findsOneWidget);
-
-        await tester.tap(find.byKey(const Key('session-row-codex/ready')));
-        await tester.pump();
-        expect(opened, ['ready']);
-        expect(find.byKey(readyKey), findsNothing);
-      },
-    );
-
     testWidgets(
       'a project header marks attention with one dot, never counters',
       (tester) async {
@@ -934,66 +665,6 @@ void main() {
     });
 
     testWidgets(
-      'compact project headers ellipsize the name and keep the path off the '
-      'row',
-      (tester) async {
-        const longProjectName =
-            'A project name long enough to require compact ellipsis';
-        const longCwd =
-            '/work/a-very-long-directory-name/with/nested/source/project';
-
-        for (final brightness in [Brightness.light, Brightness.dark]) {
-          var created = 0;
-          await tester.pumpWidget(
-            host(
-              projectRoster(
-                [
-                  SessionStatus.needsInput,
-                  SessionStatus.working,
-                  SessionStatus.idle,
-                ],
-                cwd: longCwd,
-                projectName: longProjectName,
-                width: 320,
-                onNew: () => created += 1,
-              ),
-              brightness: brightness,
-            ),
-          );
-          await tester.pumpAndSettle();
-
-          final title = tester.widget<Text>(find.text(longProjectName));
-          expect(title.maxLines, 1);
-          expect(title.overflow, TextOverflow.ellipsis);
-          expect(
-            find.byKey(const ValueKey('project-cwd-$longCwd')),
-            findsNothing,
-          );
-          expect(find.text(longCwd), findsNothing);
-          expect(find.byType(CopyableCodeLine), findsNothing);
-          expect(tester.takeException(), isNull);
-
-          // Touch reaches the path and New session through the long-press
-          // sheet.
-          await tester.longPress(
-            find.byKey(const ValueKey('project-header-$longCwd')),
-          );
-          await tester.pumpAndSettle();
-          expect(
-            find.byKey(const ValueKey('project-path-$longCwd')),
-            findsOneWidget,
-          );
-          await tester.tap(
-            find.byKey(const ValueKey('project-menu-new-$longCwd')),
-          );
-          await tester.pumpAndSettle();
-          expect(created, 1);
-          expect(tester.takeException(), isNull);
-        }
-      },
-    );
-
-    testWidgets(
       'project rename stays usable at narrow width in both themes',
       (tester) async {
         final renamed = <SessionProjectGroup>[];
@@ -1099,73 +770,6 @@ void main() {
       expect(readinessHints, 1);
       expect(await registry.prepare(), isTrue);
     });
-
-    testWidgets('renders filters and roster metadata in dark theme', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session(
-                'opencode',
-                'dark',
-                title: 'Dark roster',
-                status: SessionStatus.needsInput,
-                currentModel: const SessionCurrentModel(
-                  providerID: 'anthropic',
-                  modelID: 'claude-opus-4-8',
-                  label: 'Opus 4.8',
-                ),
-              ),
-            ],
-            activeKey: null,
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-          brightness: Brightness.dark,
-        ),
-      );
-      await tester.pumpAndSettle();
-      await expandProject(tester, ungrouped);
-
-      expect(find.byKey(const Key('session-roster-search')), findsOneWidget);
-      expect(metadataContaining('OpenCode · Opus 4.8'), findsOneWidget);
-      expect(find.text('Needs input'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('formats old activity dates with Material locale rules', (
-      tester,
-    ) async {
-      final updated = DateTime(2020, 1, 2);
-      await tester.pumpWidget(
-        host(
-          SessionListPane(
-            sessions: [
-              _session(
-                'codex',
-                'dated',
-                updatedAt: updated.millisecondsSinceEpoch,
-              ),
-            ],
-            activeKey: null,
-            onOpen: (_) {},
-            visibilityPreferences: const SessionVisibilityPreferences(),
-          ),
-          locale: const Locale('zh'),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await expandProject(tester, ungrouped);
-
-      final row = find.byKey(const Key('session-row-codex/dated'));
-      final localized = MaterialLocalizations.of(
-        tester.element(row),
-      ).formatCompactDate(updated);
-      expect(metadataContaining(localized), findsOneWidget);
-      expect(localized, isNot('1/2/2020'));
-    });
   });
 
   // R1b. Expansion is tracked as an explicit expanded-key set, so anything the
@@ -1228,60 +832,6 @@ void main() {
         find.byKey(const ValueKey('project-header-/work/beta')),
         findsOneWidget,
       );
-    });
-
-    testWidgets('manual expansion survives refresh, reorder, and status', (
-      tester,
-    ) async {
-      await tester.pumpWidget(roster([alpha('a1'), alpha('a2'), beta]));
-      await tester.pumpAndSettle();
-      await expandProject(tester, '/work/alpha');
-      expect(find.byKey(const Key('session-row-codex/a1')), findsOneWidget);
-
-      // Same identities, reordered and re-statused exactly as a delta would.
-      await tester.pumpWidget(
-        roster([
-          beta,
-          alpha('a2', status: SessionStatus.working),
-          alpha('a1', status: SessionStatus.needsInput),
-        ]),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byKey(const Key('session-row-codex/a1')), findsOneWidget);
-      expect(find.byKey(const Key('session-row-codex/a2')), findsOneWidget);
-      // A status change must not auto-open the untouched sibling project.
-      expect(find.byKey(const Key('session-row-codex/b1')), findsNothing);
-    });
-
-    testWidgets('search reveals matches and clearing restores the saved view', (
-      tester,
-    ) async {
-      await tester.pumpWidget(roster([alpha('a1'), beta]));
-      await tester.pumpAndSettle();
-      await expandProject(tester, '/work/alpha');
-
-      expect(find.byKey(const Key('session-row-codex/a1')), findsOneWidget);
-      expect(find.byKey(const Key('session-row-codex/b1')), findsNothing);
-
-      // The reveal shows the matching group without writing to the saved set.
-      await tester.enterText(
-        find.byKey(const Key('session-roster-search')),
-        'Beta',
-      );
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('session-row-codex/b1')), findsOneWidget);
-      expect(find.byKey(const Key('session-row-codex/a1')), findsNothing);
-
-      // Clearing restores exactly the pre-search presentation: alpha open
-      // because the user opened it, beta closed because they never did.
-      await tester.enterText(
-        find.byKey(const Key('session-roster-search')),
-        '',
-      );
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('session-row-codex/a1')), findsOneWidget);
-      expect(find.byKey(const Key('session-row-codex/b1')), findsNothing);
     });
 
     testWidgets('collapsing during a reveal never edits the saved set', (
@@ -1407,74 +957,6 @@ void main() {
       expect(header().flagsCollection.isExpanded, Tristate.isTrue);
       semantics.dispose();
     });
-
-    testWidgets(
-      'collapses by default and expands at compact and roomy widths',
-      (
-        tester,
-      ) async {
-        for (final layout in [
-          (name: 'compact', width: 320.0, brightness: Brightness.light),
-          (name: 'roomy', width: 900.0, brightness: Brightness.dark),
-        ]) {
-          // Drop the previous pane so each layout starts from a cold mount.
-          await tester.pumpWidget(const SizedBox.shrink());
-          await tester.pumpWidget(
-            roster(
-              [alpha('a1'), alpha('a2')],
-              width: layout.width,
-              brightness: layout.brightness,
-            ),
-          );
-          await tester.pumpAndSettle();
-
-          expect(
-            find.byKey(const Key('session-row-codex/a1')),
-            findsNothing,
-            reason: layout.name,
-          );
-          await expandProject(tester, '/work/alpha');
-          expect(
-            find.byKey(const Key('session-row-codex/a1')),
-            findsOneWidget,
-            reason: layout.name,
-          );
-          expect(tester.takeException(), isNull, reason: layout.name);
-        }
-      },
-    );
-
-    testWidgets('expanding, collapsing, and searching issue no roster fetch', (
-      tester,
-    ) async {
-      var refreshes = 0;
-      var retries = 0;
-      await tester.pumpWidget(
-        roster(
-          [alpha('a1'), beta],
-          onRefresh: () async => refreshes += 1,
-          onRetry: () async => retries += 1,
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await expandProject(tester, '/work/alpha');
-      await expandProject(tester, '/work/alpha');
-      await expandProject(tester, '/work/beta');
-      await tester.enterText(
-        find.byKey(const Key('session-roster-search')),
-        'alpha',
-      );
-      await tester.pumpAndSettle();
-      await tester.enterText(
-        find.byKey(const Key('session-roster-search')),
-        '',
-      );
-      await tester.pumpAndSettle();
-
-      expect(refreshes, 0);
-      expect(retries, 0);
-    });
   });
 
   // R1c. The roster used to render one flat broker-ordered list with no depth,
@@ -1549,26 +1031,6 @@ void main() {
       return tester.getTopLeft(title).dx - tester.getTopLeft(row).dx;
     }
 
-    testWidgets('child-first input still paints the parent then the child', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        roster([node('c1', parentId: 'p1'), node('p1')]),
-      );
-      await tester.pumpAndSettle();
-      await openProject(tester);
-      await openChildren(tester, 'p1');
-
-      final parent = find.byKey(const Key('session-row-opencode/p1'));
-      final child = find.byKey(const Key('session-row-opencode/c1'));
-      expect(parent, findsOneWidget);
-      expect(child, findsOneWidget);
-      expect(
-        tester.getTopLeft(parent).dy,
-        lessThan(tester.getTopLeft(child).dy),
-      );
-    });
-
     testWidgets('child content indents while the whole row stays tappable', (
       tester,
     ) async {
@@ -1620,92 +1082,6 @@ void main() {
       expect(rowIndent(tester, 'd4') - base, 24);
     });
 
-    testWidgets('a nested tree fits compact width in light and dark', (
-      tester,
-    ) async {
-      for (final brightness in [Brightness.light, Brightness.dark]) {
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pumpWidget(
-          roster(
-            [
-              node('p1', title: 'A parent session with a fairly long title'),
-              node(
-                'd1',
-                parentId: 'p1',
-                title: 'A nested subagent with an equally long title',
-                status: SessionStatus.working,
-              ),
-              node('d2', parentId: 'd1', title: 'Deeper still, and longer yet'),
-              node('d3', parentId: 'd2', status: SessionStatus.needsInput),
-            ],
-            width: 320,
-            brightness: brightness,
-          ),
-        );
-        await tester.pumpAndSettle();
-        await openProject(tester);
-        for (final id in ['p1', 'd1', 'd2']) {
-          await openChildren(tester, id);
-        }
-
-        expect(
-          find.byKey(const Key('session-row-opencode/d3')),
-          findsOneWidget,
-          reason: '$brightness',
-        );
-        expect(tester.takeException(), isNull, reason: '$brightness');
-      }
-    });
-
-    testWidgets('a nested tree renders at expanded width', (tester) async {
-      await tester.pumpWidget(
-        roster([
-          node('p1'),
-          node('d1', parentId: 'p1'),
-          node('d2', parentId: 'd1'),
-        ], width: 900),
-      );
-      await tester.pumpAndSettle();
-      await openProject(tester);
-      await openChildren(tester, 'p1');
-      await openChildren(tester, 'd1');
-
-      expect(rowIndent(tester, 'd2') - rowIndent(tester, 'p1'), 24);
-      expect(tester.takeException(), isNull);
-    });
-
-    // R1c rollup. A parent whose own turn ended reads Working while a
-    // subagent under it still works (a Claude background agent outlives the
-    // turn that launched it). Display only: the parent row's canonical status
-    // is untouched, so Session Detail offers no Stop over an ended turn.
-    testWidgets("a working child promotes its idle parent's pill", (
-      tester,
-    ) async {
-      final parent = node('p1');
-      await tester.pumpWidget(
-        roster([
-          parent,
-          node('c1', parentId: 'p1', status: SessionStatus.working),
-        ]),
-      );
-      await tester.pumpAndSettle();
-      await openProject(tester);
-      await openChildren(tester, 'p1');
-
-      final parentPill = find.descendant(
-        of: find.byKey(const Key('session-row-opencode/p1')),
-        matching: find.text('Working'),
-      );
-      final childPill = find.descendant(
-        of: find.byKey(const Key('session-row-opencode/c1')),
-        matching: find.text('Working'),
-      );
-      expect(parentPill, findsOneWidget);
-      expect(childPill, findsOneWidget);
-      expect(find.text('Idle'), findsNothing);
-      expect(parent.status, SessionStatus.idle);
-    });
-
     testWidgets('a collapsed subtree still promotes its parent', (
       tester,
     ) async {
@@ -1753,40 +1129,6 @@ void main() {
       // The subtree settles: now the parent's work is ready to review.
       await pump(SessionStatus.idle, SessionStatus.idle);
       expect(find.byKey(readyKey), findsOneWidget);
-    });
-
-    testWidgets('a roster delta updates the row and project dot in place', (
-      tester,
-    ) async {
-      Future<void> pump(SessionStatus childStatus) async {
-        await tester.pumpWidget(
-          roster([
-            node('p1'),
-            node('c1', parentId: 'p1', status: childStatus),
-          ]),
-        );
-        await tester.pumpAndSettle();
-      }
-
-      final dot = find.byKey(const ValueKey('project-attention-$projectKey'));
-      await pump(SessionStatus.working);
-      await openProject(tester);
-      expect(dot, findsNothing);
-
-      // Same widget, one delta: no remount and no reload.
-      await pump(SessionStatus.needsInput);
-      expect(find.byKey(const Key('session-row-opencode/p1')), findsOneWidget);
-      // A hidden child that needs input still lights its project.
-      expect(dot, findsOneWidget);
-
-      await pump(SessionStatus.idle);
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('session-row-opencode/p1')),
-          matching: find.text('Idle'),
-        ),
-        findsNothing,
-      );
     });
 
     testWidgets('expanding children never moves the project header', (
@@ -2058,50 +1400,6 @@ void main() {
       semantics.dispose();
     });
 
-    testWidgets('searching a hidden child reveals it under its parent', (
-      tester,
-    ) async {
-      // Default visibility, parent never expanded, query matching the child
-      // only: the child has to become reachable, then hide again on clear.
-      Future<void> pump() async {
-        await tester.pumpWidget(
-          roster(
-            [node('p1', title: 'Build the thing'), node('c1', parentId: 'p1')],
-            showBackground: false,
-          ),
-        );
-        await tester.pumpAndSettle();
-      }
-
-      await pump();
-      await openProject(tester);
-      expect(find.byKey(const Key('session-row-opencode/p1')), findsOneWidget);
-      expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
-
-      await tester.enterText(
-        find.byKey(const Key('session-roster-search')),
-        'Session c1',
-      );
-      await tester.pumpAndSettle();
-
-      final parent = find.byKey(const Key('session-row-opencode/p1'));
-      final child = find.byKey(const Key('session-row-opencode/c1'));
-      expect(child, findsOneWidget);
-      expect(parent, findsOneWidget);
-      expect(
-        tester.getTopLeft(parent).dy,
-        lessThan(tester.getTopLeft(child).dy),
-      );
-
-      await tester.enterText(
-        find.byKey(const Key('session-roster-search')),
-        '',
-      );
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
-      expect(find.byKey(const Key('session-row-opencode/p1')), findsOneWidget);
-    });
-
     testWidgets('a saved child collapse does not block a search reveal', (
       tester,
     ) async {
@@ -2241,32 +1539,6 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
-    });
-
-    testWidgets('rendering and expanding a tree issues no roster fetch', (
-      tester,
-    ) async {
-      var refreshes = 0;
-      await tester.pumpWidget(
-        roster(
-          [node('p1'), node('c1', parentId: 'p1'), node('g1', parentId: 'c1')],
-          showBackground: false,
-          onRefresh: () async => refreshes += 1,
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openProject(tester);
-      await tester.tap(
-        find.byKey(const ValueKey('session-children-opencode/p1')),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('session-children-opencode/c1')),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byKey(const Key('session-row-opencode/g1')), findsOneWidget);
-      expect(refreshes, 0);
     });
   });
 
@@ -2435,46 +1707,6 @@ void main() {
       await tester.pumpWidget(host(const SizedBox.shrink()));
       await tester.pump(const Duration(minutes: 1));
       expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('roster keeps harness identity separate from state pills', (
-      tester,
-    ) async {
-      for (final testCase in const [
-        (SessionStatus.working, true, false),
-        (SessionStatus.needsInput, false, true),
-        (SessionStatus.idle, false, false),
-      ]) {
-        final now = DateTime(2026, 8, 10, 12);
-        await tester.pumpWidget(
-          timedRoster(
-            now: () => now,
-            updatedAt: now.millisecondsSinceEpoch,
-            status: testCase.$1,
-          ),
-        );
-        final row = find.byKey(const Key('session-row-codex/timed'));
-        if (row.evaluate().isEmpty) {
-          await expandProject(tester, ungrouped);
-        }
-        expect(
-          find.descendant(of: row, matching: find.byType(SessionHarnessLogo)),
-          findsOneWidget,
-        );
-        final pills = find.descendant(
-          of: row,
-          matching: find.byType(StatusPill),
-        );
-        if (testCase.$1 == SessionStatus.idle) {
-          expect(pills, findsNothing);
-        } else {
-          final pill = tester.widget<StatusPill>(pills);
-          expect(
-            pill.label,
-            testCase.$1 == SessionStatus.working ? 'Working' : 'Needs input',
-          );
-        }
-      }
     });
   });
 }

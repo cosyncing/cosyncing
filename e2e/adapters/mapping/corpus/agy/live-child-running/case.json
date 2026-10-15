@@ -1,0 +1,9 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/adapters/antigravity/test/test-agy-mapping.ts",
+  "description": "the same RUNNING tool row WITH a live child is not marked failed",
+  "userTexts": [
+    "run it"
+  ],
+  "liveChild": true,
+  "sessionId": "31cba6fa-8071-44e4-84e4-31cba6fa8071"
+}

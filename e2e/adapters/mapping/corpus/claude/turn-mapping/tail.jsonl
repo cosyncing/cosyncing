@@ -1,0 +1,15 @@
+{"type":"user","uuid":"ur1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_edit","content":"ok"}]},"toolUseResult":{"filePath":"/tmp/x/a.ts","oldString":"a","newString":"b\nc","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":2,"lines":[" ctx","-a","+b","+c"]}]}}
+{"type":"user","uuid":"ur2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bash","content":"file1\nfile2"}]},"toolUseResult":{"stdout":"file1\nfile2","stderr":"","interrupted":false,"isImage":false}}
+{"type":"assistant","uuid":"a5","message":{"id":"m2","stop_reason":"end_turn","role":"assistant","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":130,"output_tokens":8}}}
+{"type":"assistant","uuid":"a6","message":{"id":"m3","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"Reading now."},{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/tmp/x/a.ts"}}],"usage":{"input_tokens":140,"output_tokens":10}}}
+{"type":"user","uuid":"ur3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"<file>"}]},"toolUseResult":{"type":"text","file":{"filePath":"/tmp/x/a.ts","numLines":2,"totalLines":9999,"startLine":1,"content":"…","truncatedByTokenCap":true}}}
+{"type":"system","subtype":"compact_boundary","level":"info","content":"Conversation compacted","uuid":"sys1","compactMetadata":{"trigger":"manual","preTokens":500000,"postTokens":15000}}
+{"type":"user","uuid":"u-cs","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation…"}}
+{"type":"system","subtype":"local_command","level":"info","content":"<local-command-stdout>Not enough messages to compact.</local-command-stdout>","uuid":"sys-local"}
+{"type":"user","uuid":"u-cmd","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"}}
+{"type":"user","uuid":"u-cmdout","message":{"role":"user","content":"<local-command-stdout>\u001b[2mCompacted (ctrl+o to see full summary)\u001b[22m</local-command-stdout>"}}
+{"type":"user","uuid":"u-caveat","message":{"role":"user","content":"<local-command-caveat>Caveat: the messages below were generated…</local-command-caveat>"}}
+{"type":"system","subtype":"turn_duration","durationMs":1234,"uuid":"sys2","messageCount":5}
+{"type":"assistant","uuid":"a7","isApiErrorMessage":true,"apiErrorStatus":429,"message":{"id":"m4","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your session limit.\nReset at 5pm."}]}}
+{"type":"user","uuid":"u-int1","message":{"role":"user","content":"[Request interrupted by user]"}}
+{"type":"user","uuid":"u-int2","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}

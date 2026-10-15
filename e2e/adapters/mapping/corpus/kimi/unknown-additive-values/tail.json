@@ -1,0 +1,41 @@
+{
+  "items": [
+    {
+      "id": "f_7",
+      "role": "user",
+      "metadata": {
+        "origin": {
+          "kind": "user"
+        }
+      },
+      "content": [
+        {
+          "type": "a-user-block-from-the-future"
+        },
+        {
+          "type": "text",
+          "text": "prompt with a new block"
+        }
+      ]
+    },
+    {
+      "id": "f_6",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking"
+        },
+        {
+          "type": "text"
+        },
+        {
+          "type": "tool_result"
+        },
+        null,
+        7,
+        "x"
+      ]
+    }
+  ],
+  "has_more": false
+}

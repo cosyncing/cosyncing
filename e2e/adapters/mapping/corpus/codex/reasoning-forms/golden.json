@@ -1,0 +1,45 @@
+{
+  "history": [
+    {"type":"user-message","text":"first prompt","key":"c1","sentAt":1788256800000},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:turn-old","turnId":"turn-old","userMessageKey":"c1","status":"running","startedAt":1788256801000,"source":"codex-rollout"},
+    {"type":"thinking","text":"Old part one.\nOld part two.","key":"c5"},
+    {"type":"thinking","text":"Old identified part.","key":"codex:turn-old:rs_old_2:r"},
+    {"type":"model-output","text":"first answer","final":true,"key":"codex:turn-old:msg_old:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:turn-old","turnId":"turn-old","userMessageKey":"c1","assistantMessageKey":"codex:turn-old:msg_old:t","status":"done","startedAt":1788256801000,"completedAt":1788256805000,"totalRuntimeMs":4000,"source":"codex-rollout"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":4000,"turnCount":1,"updatedAt":1788256805000,"source":"codex-rollout"}},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:turn-new","turnId":"turn-new","status":"running","startedAt":1788256860000,"source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"thinking","text":"New raw step.\nNew raw step two.","key":"codex:turn-new:rs_new_1:r"},
+    {"type":"thinking","text":"New summary.","key":"codex:turn-new:rs_new_3:r"},
+    {"type":"thinking","text":"Metadata spelling.","key":"codex:turn-new:rs_new_4:r"},
+    {"type":"model-output","text":"second answer","final":true,"key":"codex:turn-new:msg_new:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:turn-new","turnId":"turn-new","assistantMessageKey":"codex:turn-new:msg_new:t","status":"done","completedAt":1788256869000,"source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"first prompt","key":"c1","sentAt":1788256800000},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:turn-old","turnId":"turn-old","userMessageKey":"c1","status":"running","startedAt":1788256801000,"source":"codex-rollout"},
+    {"type":"thinking","text":"Old part one.\nOld part two.","key":"c5"},
+    {"type":"thinking","text":"Old identified part.","key":"codex:turn-old:rs_old_2:r"},
+    {"type":"model-output","text":"first answer","final":true,"key":"codex:turn-old:msg_old:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:turn-old","turnId":"turn-old","userMessageKey":"c1","assistantMessageKey":"codex:turn-old:msg_old:t","status":"done","startedAt":1788256801000,"completedAt":1788256805000,"totalRuntimeMs":4000,"source":"codex-rollout"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":4000,"turnCount":1,"updatedAt":1788256805000,"source":"codex-rollout"}},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:turn-new","turnId":"turn-new","status":"running","startedAt":1788256860000,"source":"codex-rollout"},
+    {"type":"thinking","text":"New raw step.\nNew raw step two.","key":"codex:turn-new:rs_new_1:r"},
+    {"type":"thinking","text":"New summary.","key":"codex:turn-new:rs_new_3:r"},
+    {"type":"thinking","text":"Metadata spelling.","key":"codex:turn-new:rs_new_4:r"},
+    {"type":"model-output","text":"second answer","final":true,"key":"codex:turn-new:msg_new:t"},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:turn-new","turnId":"turn-new","assistantMessageKey":"codex:turn-new:msg_new:t","status":"done","startedAt":1788256860000,"completedAt":1788256869000,"totalRuntimeMs":9000,"source":"codex-rollout"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":13000,"turnCount":2,"updatedAt":1788256869000,"source":"codex-rollout"}},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

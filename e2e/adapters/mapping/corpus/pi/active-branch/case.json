@@ -1,0 +1,11 @@
+{
+  "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
+  "description": "the same forked tree in a real file, which starts with the session header row: the abandoned branch must not show",
+  "knownBugMatch": "user bubbles are exactly the real prompts",
+  "knownBug": "Pi engine: activePiJsonlRows only prunes to the active branch when EVERY row with an id also has a parentId; the session header row carries an id and no parentId (every header in the repo and in the Pi kit fake), so a real forked session file maps all branches, abandoned ones included",
+  "userTexts": [
+    "start",
+    "chosen branch prompt"
+  ],
+  "sessionId": "e160b9c4-4f92-4510-8510-e160b9c44f92"
+}
