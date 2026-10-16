@@ -445,6 +445,9 @@ enum FailureLead {
   /// Notice: the broker rejected the export request.
   exportBadParam,
 
+  /// Notice: the transcript is over the broker's export size cap.
+  exportTooLarge,
+
   /// Notice: this agent cannot export transcripts.
   exportUnsupported,
 

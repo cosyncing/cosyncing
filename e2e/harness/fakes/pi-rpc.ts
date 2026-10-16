@@ -11,8 +11,9 @@
  *   const file = pi.sessionFile('work');
  *   pi.spawns()   // [{ pid, session }]
  *   pi.exited(pid)
+ *   pi.holdExports()  // export_html writes its file, then never answers
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FixturePaths } from '../broker.ts';
 import { installFakeCommand } from './command.ts';
@@ -71,6 +72,15 @@ process.stdin.on('data', (chunk) => {
       } });
     } else if (command.type === 'get_messages') {
       reply(command.id, { command: command.type, success: true, data: { messages: [] } });
+    } else if (command.type === 'export_html') {
+      // Pi writes the transcript where it is told, then answers. The marker is made here, at run time,
+      // so no fixture file carries it: a test that finds it on disk found the export.
+      const marker = 'pi-unredacted-' + require('node:crypto').randomUUID();
+      fs.writeFileSync(command.outputPath, '<!doctype html><title>transcript</title><p>' + marker + '</p>\n');
+      // Held: the file is written and the answer never comes, so the export stays mid-flight.
+      if (!fs.existsSync(path.join(path.dirname(ledgerPath), 'pi.export-hold'))) {
+        reply(command.id, { command: command.type, success: true, data: { path: command.outputPath } });
+      }
     } else {
       reply(command.id, { command: command.type, success: true, data: {} });
     }
@@ -110,6 +120,16 @@ export class PiRpcFake {
 
   exited(pid: number): boolean {
     return this.events().some((entry) => entry.pid === pid && entry.event === 'exit');
+  }
+
+  /** From now on `export_html` writes its file and never answers: an export held mid-flight. */
+  holdExports(): void {
+    writeFileSync(join(this.#paths.bin, 'pi.export-hold'), '');
+  }
+
+  /** `export_html` answers again. */
+  releaseExports(): void {
+    rmSync(join(this.#paths.bin, 'pi.export-hold'), { force: true });
   }
 
   /** A stored Pi session file (its header only) with its working directory. */

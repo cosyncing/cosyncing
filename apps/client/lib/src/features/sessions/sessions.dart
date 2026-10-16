@@ -27,7 +27,6 @@ export 'list/session_list_controller.dart';
 export 'list/session_list_repository.dart';
 export 'list/session_list_state.dart';
 export 'list/session_model_preference_store.dart';
-export 'list/sessions_page.dart';
 export 'roster/session_status_registry.dart';
 export 'transcript/session_diff_body_loader.dart';
 export 'transcript/session_draft_keepalive.dart';

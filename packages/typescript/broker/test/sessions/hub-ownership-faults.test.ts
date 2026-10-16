@@ -1655,3 +1655,128 @@ test('C32: the failed-admission close is AWAITED, not fired and forgotten', asyn
         && (incumbent as any).closed === false);
   }
 });
+
+
+// ── C33: an ENDED drive wrapper is replaced on the next attach ──────────────
+//
+// A drive wrapper whose connection gives up writing (demoted, revoked, its
+// native side gone) reports Observe under the drive key and stays registered
+// until its last client leaves. An ordinary attach used to be handed that
+// dead wrapper — read-only for as long as any tab kept it open — although the
+// adapter would have opened a new writer. It now gets a fresh connection, the
+// clients on the ended wrapper move to it, and the ended one is closed. A
+// wrapper that is only withheld (still at its drive mode) is joined, and one
+// the adapter answered as Observe from the start (never a writer) is not
+// churned.
+const endedInfo = (tool: string, id: string): SessionInfo => ({
+  ...info(id, 'observe'),
+  tool,
+  control: {
+    drive: { supported: false, state: 'unavailable', reason: 'the live server disconnected' },
+    terminalSync: { supported: false, syncAvailable: false, active: false },
+  },
+} as SessionInfo);
+
+function writerFixture(tool = 'kilo') {
+  const registry = new AgentRegistry();
+  const conns: Array<ReturnType<typeof fakeConn>> = [];
+  const asked: Array<{ mode?: string; reason?: string }> = [];
+  let refuse: Error | undefined;
+  registry.register({
+    id: tool, displayName: tool, capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (id: string, mode?: string, opts?: { reason?: string }) => {
+      asked.push({ mode, reason: opts?.reason });
+      if (refuse) throw refuse;
+      const conn = fakeConn(controlledInfo(tool, id, mode === 'live' || mode === 'resume' ? mode : 'observe',
+        mode === 'live' || mode === 'resume' ? 'driving' : 'observing'));
+      conns.push(conn);
+      return conn;
+    },
+  } as any);
+  return { registry, conns, asked, refuse: (error: Error | undefined) => { refuse = error; } };
+}
+
+test('C33: an ENDED drive wrapper is replaced by a fresh connection on the next attach', async () => {
+  for (const mode of ['live', 'resume'] as const) {
+    const fixture = writerFixture();
+    const hub = track(new Hub(fixture.registry, 15000));
+    const id = `s33-${mode}`;
+    const first = await hub.ensure('kilo', id, mode);
+    const frames: any[] = [];
+    first.addClient((ev: any) => frames.push(ev));
+    // The connection ends: it says so the way every drive does, by reporting Observe.
+    first.updateInfo(endedInfo('kilo', id));
+
+    const next = await hub.ensure('kilo', id, mode);
+    check(`C33 (${mode}) an ordinary attach does not hand back the ended wrapper`, next !== first);
+    check(`C33b (${mode}) ...it asks the adapter afresh, with no reason it was not given`,
+      fixture.asked.length === 2 && fixture.asked[1]?.mode === mode && fixture.asked[1]?.reason === undefined,
+      JSON.stringify(fixture.asked));
+    check(`C33c (${mode}) ...and gets the new writer`,
+      next.conn.info.control?.drive?.state === 'driving' && next.conn.info.attachMode === mode,
+      JSON.stringify(next.conn.info.control?.drive));
+    check(`C33d (${mode}) the ended connection is closed`, fixture.conns[0]!.closed === true);
+    check(`C33e (${mode}) its client moved to the new one instead of being told the session ended`,
+      frames.every((frame) => frame.kind !== 'ended'), JSON.stringify(frames.map((frame) => frame.kind)));
+    const before = frames.length;
+    fixture.conns[1]!.emit({ type: 'notice', message: 'from the new writer' } as AgentMessage);
+    check(`C33f (${mode}) ...and receives from it`, frames.length > before);
+    check(`C33g (${mode}) a later attach joins the new writer`,
+      (await hub.ensure('kilo', id, mode)) === next && fixture.asked.length === 2);
+  }
+});
+
+test('C34: a WITHHELD drive wrapper is joined, and a never-writer is not churned', async () => {
+  const fixture = writerFixture();
+  const hub = track(new Hub(fixture.registry, 15000));
+  const owner = await hub.ensure('kilo', 's34', 'live');
+  // Waiting for its server to answer again: Drive withheld, still the live owner.
+  owner.updateInfo({
+    ...owner.conn.info,
+    control: {
+      drive: { supported: false, state: 'unavailable', reason: 'waiting for the server' },
+      terminalSync: { supported: false, syncAvailable: false, active: false },
+    },
+  } as SessionInfo);
+  check('C34 a withheld owner is joined, not replaced',
+    (await hub.ensure('kilo', 's34', 'live')) === owner && fixture.asked.length === 1,
+    `attaches=${fixture.asked.length}`);
+
+  // An adapter that answers a drive attach with an Observe connection never admitted a writer.
+  const registry = new AgentRegistry();
+  let attaches = 0;
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (id: string) => { attaches += 1; return fakeConn(demotedInfo(id)); },
+  } as any);
+  const observeHub = track(new Hub(registry, 15000));
+  const observer = await observeHub.ensure('kimi', 's34b', 'live');
+  check('C34b a wrapper that never was a writer is joined, not re-attached on every attach',
+    (await observeHub.ensure('kimi', 's34b', 'live')) === observer && attaches === 1, `attaches=${attaches}`);
+});
+
+test('C35: a refused fresh attach leaves the ended wrapper and its clients as they were', async () => {
+  const fixture = writerFixture();
+  const hub = track(new Hub(fixture.registry, 15000));
+  const first = await hub.ensure('kilo', 's35', 'live');
+  const frames: any[] = [];
+  first.addClient((ev: any) => frames.push(ev));
+  first.updateInfo(endedInfo('kilo', 's35'));
+  fixture.refuse(new OwnershipConflictError('another writer owns this session', 'peer-driver-active'));
+  let refusal = '';
+  try {
+    await hub.ensure('kilo', 's35', 'live');
+  } catch (error) {
+    refusal = isOwnershipConflictError(error) ? error.conflict : String(error);
+  }
+  check('C35 the adapter refusal reaches the caller', refusal === 'peer-driver-active', refusal || '(resolved)');
+  check('C35b ...the ended wrapper is still registered and open',
+    hub.getConn('kilo', 's35') === first && fixture.conns[0]!.closed === false);
+  check('C35c ...and its clients were neither moved nor told the session ended',
+    first.clientCount === 1 && frames.every((frame) => frame.kind !== 'ended'));
+  fixture.refuse(undefined);
+  const next = await hub.ensure('kilo', 's35', 'live');
+  check('C35d a later attach the adapter accepts replaces it', next !== first && next.conn.info.control?.drive?.state === 'driving');
+});

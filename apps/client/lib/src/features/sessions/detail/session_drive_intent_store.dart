@@ -1,4 +1,5 @@
 import 'package:cosyncing_client/src/local/app_database.dart';
+import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Sliding lease for a terminal-created/unknown session the app explicitly
@@ -285,8 +286,14 @@ class DriftSessionDriveIntentStore implements SessionDriveIntentStore {
 }
 
 /// Provider for durable Drive provenance.
+///
+/// The takeover lease is judged on [appClockProvider], so the 30-minute window
+/// moves with the same clock as everything else the app times.
 final sessionDriveIntentStoreProvider = Provider<SessionDriveIntentStore>((
   ref,
 ) {
-  return DriftSessionDriveIntentStore(ref.watch(appDatabaseProvider));
+  return DriftSessionDriveIntentStore(
+    ref.watch(appDatabaseProvider),
+    now: ref.watch(appClockProvider),
+  );
 });

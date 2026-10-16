@@ -1677,6 +1677,36 @@ void main() {
     );
 
     test(
+      'transcript export over the size cap maps to its own notice',
+      () async {
+        fakeBrokerClient.exportError = const BrokerException(
+          message: 'Export failed',
+          statusCode: 413,
+          error: BrokerError(
+            error: 'export exceeds the configured size cap',
+            code: 'EXPORT_TOO_LARGE',
+          ),
+        );
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final exported = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .exportTranscript(nonce: 'nonce-1');
+
+        expect(exported, isFalse);
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(
+          state.transcriptExportActionState.errorCode,
+          'EXPORT_TOO_LARGE',
+        );
+        expect(state.error?.lead, FailureLead.exportTooLarge);
+      },
+    );
+
+    test(
       'forkSession passes the message boundary and stores action state',
       () async {
         keepSessionDetailAlive(container, key);

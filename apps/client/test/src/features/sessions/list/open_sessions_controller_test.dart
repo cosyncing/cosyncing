@@ -113,21 +113,6 @@ void main() {
       },
     );
 
-    test('closeOthers keeps only the target', () async {
-      final container = buildContainer(profile: _profile('p1'));
-      addTearDown(container.dispose);
-      await container.read(openSessionsControllerProvider.future);
-      final controller = container.read(openSessionsControllerProvider.notifier)
-        ..open(_ref('claude', 'a'))
-        ..open(_ref('codex', 'b'))
-        ..open(_ref('pi', 'c'));
-      await controller.closeOthers('codex/b');
-
-      final state = container.read(openSessionsControllerProvider).value!;
-      expect(state.refs.map((ref) => ref.key), ['codex/b']);
-      expect(state.activeKey, 'codex/b');
-    });
-
     test('undo refuses a different broker source', () async {
       final container = buildContainer(profile: _profile('p1'));
       addTearDown(container.dispose);
@@ -537,6 +522,12 @@ class _WatchedOpenSessionsStore implements LosslessOpenSessionsStore {
   Future<void> saveActiveHint(String sourceKey, String? sessionKey) async {
     activeHint = sessionKey;
   }
+
+  @override
+  Future<void> copyMembers(String fromSourceKey, String toSourceKey) async {}
+
+  @override
+  Future<void> clearMembers(String sourceKey) async {}
 }
 
 class _FakeOpenSessionsStore implements OpenSessionsStore {

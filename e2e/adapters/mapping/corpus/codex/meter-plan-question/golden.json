@@ -17,7 +17,7 @@
     {"type":"model-output","text":"Continuing with Crimson.","final":true,"key":"codex:tq1:msg_ok:t"},
     {"type":"goal-state","key":"t-goal","title":"resume the last goal","status":"paused","startedAt":1783006625000,"elapsedMs":69811000,"detail":"12971511 tokens"},
     {"type":"status","status":"idle"},
-    {"type":"run-summary","key":"codex:run:tq1","turnId":"tq1","assistantMessageKey":"codex:tq1:msg_ok:t","status":"done","source":"codex-rollout"}
+    {"type":"run-summary","key":"codex:run:tq1","turnId":"tq1","userMessageKey":"c1","assistantMessageKey":"codex:tq1:msg_ok:t","status":"done","source":"codex-rollout"}
   ],
   "replay": [
     {"type":"user-message","text":"plan and ask","key":"c1"},

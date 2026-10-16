@@ -643,6 +643,22 @@ export async function startManagedHost(
   // slow. Each earlier phase is separately bounded, so the whole start still is.
   const deadline = effects.now() + plan.readyTimeoutMs;
   const spawned = effects.liveProcess(child.pid, { fresh: true });
+  if (spawned.state === 'absent') {
+    // Already exited: a child this broker has not reaped yet is a zombie, which
+    // reads as gone. That is the same event the readiness loop reports, so it
+    // reports the same way, with what the child printed once it is reaped.
+    // Nothing is recorded and nothing is left to stop. Bounded, so a read that
+    // was wrong falls through to the unreadable-identity path below.
+    const settle = effects.deadline(Math.max(0, deadline - effects.now()));
+    const exited = await Promise.race([
+      child.exited.then(() => true, () => true),
+      settle.expired.then(() => false),
+    ]);
+    settle.cancel();
+    if (exited) {
+      return { action: 'start-failed', detailCode: 'host-exited-during-start', capturedOutput: child.readOutput() };
+    }
+  }
   if (spawned.state !== 'running') {
     // Stop it with the handle we still hold — this is the one moment ownership
     // needs no proof, because the child has not left this function.

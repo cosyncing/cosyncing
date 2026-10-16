@@ -2690,6 +2690,33 @@ try {
         conn.info.status === 'idle' && sessionRowReads > readsBeforeWatchdog,
         `status=${conn.info.status} reads=${sessionRowReads - readsBeforeWatchdog}`);
 
+      // ── No client attached: the tick reads nothing that loads the session ──
+      //
+      // The broker's hub stays subscribed through its reconnect grace and any
+      // zero-client attention lease, so the handler count never says nobody is
+      // watching; the client count the broker reports does. The session row
+      // loads nothing, and a running turn's badge is what such a lease is held
+      // for, so the watchdog keeps reading it.
+      conn.setClientCount(0);
+      liveSocket.deliver(busyEdge(true));
+      await settle();
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
+      const loadsBeforeAlone = messageCalls;
+      const rowReadsBeforeAlone = sessionRowReads;
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
+      repairTick?.();
+      await settle();
+      check('with no client attached a poll tick reads no messages',
+        messageCalls === loadsBeforeAlone, `${messageCalls - loadsBeforeAlone} reads`);
+      check('with no client attached the watchdog still heals the badge from the session row',
+        conn.info.status === 'idle' && sessionRowReads > rowReadsBeforeAlone,
+        `status=${conn.info.status} reads=${sessionRowReads - rowReadsBeforeAlone}`);
+      conn.setClientCount(1);
+      repairTick?.();
+      await settle();
+      check('the next client brings the poll back',
+        messageCalls > loadsBeforeAlone, `${messageCalls - loadsBeforeAlone} reads`);
+
       // ── Never fabricate: a drifted row leaves the held state alone ─────────
       liveSocket.deliver(busyEdge(true));
       await settle();

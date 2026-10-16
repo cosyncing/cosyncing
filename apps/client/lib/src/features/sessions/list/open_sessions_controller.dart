@@ -423,65 +423,6 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     }
   }
 
-  /// Closes every open session except [key].
-  ///
-  /// Carries the same draft-durability contract as [close], for N tabs at
-  /// once: closing a tab drops the resident lease on its detail controller, so
-  /// a value typed inside the 300 ms debounce dies with it — and "close
-  /// others" is precisely the gesture aimed at the tabs the user is NOT
-  /// looking at, where an unsaved draft is most likely to be sitting.
-  ///
-  /// Every closing key's barrier is gathered first and awaited together, then
-  /// the working set is mutated once. Barriers must not be serialized behind
-  /// each other (N debounce flushes in sequence), and the mutation must not be
-  /// split per tab (each split would publish an intermediate strip).
-  ///
-  /// Like [close], a working set with nothing staged never awaits at all, so
-  /// the tabs still leave the strip synchronously in that case.
-  Future<void> closeOthers(String key) {
-    final current = _current;
-    final kept = current.refs.where((ref) => ref.key == key).toList();
-    if (kept.isEmpty) {
-      return Future<void>.value();
-    }
-    final barriers = <Future<void>>[];
-    for (final ref in current.refs) {
-      if (ref.key == key) {
-        continue;
-      }
-      final barrier = _draftDurabilityBarrier(ref.key);
-      if (barrier != null) {
-        barriers.add(barrier);
-      }
-    }
-    if (barriers.isEmpty) {
-      _closeOthersNow(key);
-      return Future<void>.value();
-    }
-    return Future.wait(barriers).then((_) => _closeOthersNow(key));
-  }
-
-  void _closeOthersNow(String key) {
-    final current = _current;
-    final kept = current.refs.where((ref) => ref.key == key).toList();
-    if (kept.isEmpty) {
-      return;
-    }
-    final next = OpenSessionsState(refs: kept, activeKey: key);
-    if (_store case final LosslessOpenSessionsStore _) {
-      _setLocal(next);
-      _runLosslessOperation(
-        (store, sourceKey) => store.closeOtherMembers(sourceKey, [
-          for (final ref in current.refs)
-            if (ref.key != key) ref.key,
-        ]),
-      );
-      _saveActiveHint(key);
-    } else {
-      _commitLegacy(next);
-    }
-  }
-
   /// Closes a snapshot of the working set, flushing each staged draft first.
   /// New tabs opened during the barrier and other broker sources are untouched.
   Future<ClosedSessionTabs?> closeAll() async {

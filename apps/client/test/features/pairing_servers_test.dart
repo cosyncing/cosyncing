@@ -28,6 +28,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../support/feature/app_driver.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
+import '../support/feature/roster_driver.dart';
 import '../support/feature/store_faults.dart';
 
 final AppLocalizations en = lookupAppLocalizations(const Locale('en'));
@@ -178,6 +179,27 @@ void main() {
         expect(app.activeServer, isNull);
         expect(await f.storage.activeServer.getActiveProfileId(), isNull);
         expect(await app.savedServers(), hasLength(1));
+
+        // A server that takes the connection and never answers is given up
+        // on after a bounded wait and said so plainly; Retry asks again.
+        final mute = f.network.add('http://mute.test:7734');
+        final silent = mute.hold('GET', '/api/health');
+        await app.connectTo('mute.test');
+        expect(find.text(en.connectionCheckingTitle), findsOneWidget);
+        await app.pumpUntil(
+          () => find.text(en.connectionBrokerNoAnswer).evaluate().isNotEmpty,
+          reason: 'the probe stops waiting',
+          every: const Duration(seconds: 1),
+          steps: 30,
+        );
+        expect(find.text(en.connectionFailedTitle), findsOneWidget);
+        expect(silent.arrivals, 1);
+        expect(app.activeServer, isNull);
+        app.expectNoRawErrorLeak();
+        silent.release();
+        await app.tapKey('connection-retry');
+        await app.waitFor(find.text(en.connectionConnectedTitle));
+        expect(app.activeServer?.id, 'http://mute.test:7734');
       },
     );
 
@@ -424,6 +446,33 @@ void main() {
         expect(find.byKey(const Key('broker-gate-token-field')), findsNothing);
         await app.tapKey('broker-gate-retry');
         await app.waitFor(find.byKey(const Key('broker-gate-connected')));
+
+        // A server that takes the connection and never answers stops being
+        // "checking" after a bounded wait: it is named as not answering,
+        // still never asks for a credential, and Retry asks again.
+        final silent = studio.hold('GET', '/api/broker/health');
+        final restarted = await f.restart(
+          initialLocation: brokerDevicesSettingsRoute,
+        );
+        await restarted.waitFor(find.byKey(const Key('broker-gate-checking')));
+        final noAnswer = find.byKey(const Key('broker-gate-no-answer'));
+        await restarted.pumpUntil(
+          () => noAnswer.evaluate().isNotEmpty,
+          reason: 'the gate stops waiting for an answer',
+          every: const Duration(seconds: 1),
+          steps: 30,
+        );
+        expect(find.text(en.brokerGateNoAnswerTitle('Studio')), findsOne);
+        expect(
+          find.text(en.brokerGateNoAnswerBodyAt('http://studio.test:7734')),
+          findsOne,
+        );
+        expect(find.byKey(const Key('broker-auth-barrier')), findsNothing);
+        expect(find.byKey(const Key('broker-gate-token-field')), findsNothing);
+        restarted.expectNoRawErrorLeak();
+        silent.release();
+        await restarted.tapKey('broker-gate-retry');
+        await restarted.waitFor(find.byKey(const Key('broker-gate-connected')));
       },
     );
 
@@ -787,7 +836,7 @@ void main() {
       'a pasted pairing payload creates and activates its server, storing a '
       'token only when the payload carries one',
       (f) async {
-        for (final host in const ['desk', 'home', 'alias', 'plain']) {
+        for (final host in const ['desk', 'home', 'alias', 'plain', 'link']) {
           f.network.add('https://$host.test:9443');
         }
         final app = await f.launch(initialLocation: pairingRoute);
@@ -817,6 +866,14 @@ void main() {
             'https://plain.test:9443',
             'plain.test',
             null,
+          ),
+          // The pairing link form: its server and token ride the query.
+          (
+            'cosyncing://pair?brokerUrl=https%3A%2F%2Flink.test%3A9443'
+                '&token=from-link&displayName=Laptop',
+            'https://link.test:9443',
+            'Laptop',
+            'from-link',
           ),
         ];
         for (final (payload, server, name, token) in rows) {
@@ -872,11 +929,12 @@ void main() {
           ('{ "token": "abc" }', en.pairingInvalidError),
           ('http://', en.pairingInvalidError),
           ('cosyncing://pair?payload=not-base64!', en.pairingQrInvalidError),
-          // The legacy query-string link form is no longer importable: every
-          // cosyncing://pair link is read as a transport QR code.
+          // A pairing link that names neither a QR payload nor a server.
+          ('cosyncing://pair?token=abc', en.pairingQrInvalidError),
+          // A pairing link whose server address is not one.
           (
-            'cosyncing://pair?brokerUrl=https%3A%2F%2Fdesk.test%3A9443&token=abc',
-            en.pairingQrInvalidError,
+            'cosyncing://pair?brokerUrl=ftp%3A%2F%2F&token=abc',
+            en.pairingInvalidError,
           ),
         ]) {
           await app.importPairing(payload);
@@ -1677,6 +1735,14 @@ void main() {
           ],
         );
 
+        // The device cannot record the choice: the switch is refused and
+        // says so, on the Servers page and in the workspace switcher alike.
+        active.sets.failNext = true;
+        await app.useSavedServer(labUrl);
+        expect(find.text(en.brokerProfileActivateFailed), findsOneWidget);
+        expect(app.activeServer?.id, studioUrl);
+        await app.waitForAbsent(find.byType(SnackBar));
+
         await app.useSavedServer(labUrl);
         expect(app.activeServer?.id, labUrl);
         expect(find.text(en.brokerProfileActivated('Lab')), findsOneWidget);
@@ -1706,6 +1772,12 @@ void main() {
         expect(option(studioUrl), findsNothing, reason: 'the menu closed');
         expect(active.sets.calls, writes, reason: 'nothing to switch');
 
+        active.sets.failNext = true;
+        await pick(labUrl);
+        expect(find.text(en.brokerProfileActivateFailed), findsOneWidget);
+        expect(app.activeServer?.id, studioUrl);
+        await app.waitForAbsent(find.byType(SnackBar));
+
         // Lab is deleted elsewhere (another window) while the menu is open.
         await app.tapKey('workspace-server-row');
         await f.storage.profiles.delete(
@@ -1720,7 +1792,8 @@ void main() {
 
     featureTest(
       'renaming a server keeps its sign-in; pointing it at another address '
-      'signs out and forgets the roster it cached (N3)',
+      'signs out and forgets the roster it cached (N3), but keeps the '
+      "server's open tabs",
       (f) async {
         final studio = f.network.add(studioUrl)
           ..addSession('s-old', 'Old broker task');
@@ -1733,6 +1806,8 @@ void main() {
         final key = saved.credentialKey!;
         var app = await f.launch();
         await app.waitFor(projectOf(studio));
+        await app.openFromRoster('s-old', cwd: '/work/${studio.machine}');
+        expect(app.openTabKeys, ['codex/s-old']);
 
         // The cached roster is what shows while a slow broker answers.
         final slow = studio.hold('GET', '/api/sessions');
@@ -1754,6 +1829,10 @@ void main() {
         await app.tapKey('broker-profile-edit-cancel');
         expect((await app.savedServers()).single.baseUri, studio.baseUri);
 
+        // The switch loads the new address's roster at once, and its answer
+        // would replace the cached row: hold it, so the check below is of the
+        // deletion and not of that overwrite.
+        final movedRoster = moved.hold('GET', '/api/sessions');
         await app.editSavedServer(studioUrl, address: 'moved.test');
         expect(find.text(en.brokerProfileUpdated), findsOneWidget);
         server = (await app.savedServers()).single;
@@ -1767,6 +1846,28 @@ void main() {
               .get(),
           isEmpty,
           reason: "the old broker's roster is deleted, not just ignored",
+        );
+        movedRoster.release();
+
+        // The tabs belong to the server entry, not to the address string.
+        await app.go(sessionsRoute);
+        await app.flushRealAsync();
+        await app.pumpUntil(
+          () => app.openTabKeys.contains('codex/s-old'),
+          reason: 'the open tab follows its server to the new address',
+        );
+        expect(app.openTabKeys, ['codex/s-old']);
+        expect(app.activeTabKey, 'codex/s-old');
+        final tabRows = await f.storage.database
+            .customSelect(
+              'SELECT key FROM app_setting_rows WHERE key LIKE '
+              "'open_session_v2:%'",
+            )
+            .get();
+        expect(
+          tabRows,
+          hasLength(1),
+          reason: "the old address's copy is gone, not kept beside it",
         );
 
         moved.hold('GET', '/api/sessions');
@@ -1783,6 +1884,7 @@ void main() {
           findsNothing,
           reason: "the old broker's sessions never show as the new one's",
         );
+        expect(app.openTabKeys, ['codex/s-old'], reason: 'and after a restart');
       },
     );
 

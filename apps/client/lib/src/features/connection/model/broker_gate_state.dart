@@ -45,6 +45,7 @@ class BrokerGateState {
     this.brokerUrl,
     this.profileId,
     this.profileDisplayName,
+    this.noAnswer = false,
   });
 
   /// No saved server profile is currently selected.
@@ -62,17 +63,22 @@ class BrokerGateState {
   /// The broker could not be reached.
   ///
   /// [detail] carries transport diagnostics and never contains secrets.
+  ///
+  /// [noAnswer] marks a server that took the connection and then sent nothing
+  /// back within the probe's bounded wait.
   const BrokerGateState.unreachable({
     String? detail,
     Uri? brokerUrl,
     String? profileId,
     String? profileDisplayName,
+    bool noAnswer = false,
   }) : this(
          status: BrokerGateStatus.unreachable,
          detail: detail,
          brokerUrl: brokerUrl,
          profileId: profileId,
          profileDisplayName: profileDisplayName,
+         noAnswer: noAnswer,
        );
 
   /// The broker rejected the request with HTTP 401.
@@ -108,6 +114,10 @@ class BrokerGateState {
   /// Saved display name evaluated by this probe.
   final String? profileDisplayName;
 
+  /// Set only when [status] is [BrokerGateStatus.unreachable]: the server took
+  /// the connection but did not answer in time.
+  final bool noAnswer;
+
   /// Binds a transport result to the exact saved profile it evaluated.
   BrokerGateState bindProfile({
     required String id,
@@ -121,6 +131,7 @@ class BrokerGateState {
     brokerUrl: baseUri,
     profileId: id,
     profileDisplayName: displayName,
+    noAnswer: noAnswer,
   );
 
   /// Whether the app may operate normally.
@@ -140,5 +151,6 @@ class BrokerGateState {
   String toString() =>
       'BrokerGateState(status: $status, credentialIssue: $credentialIssue, '
       'machine: $machine, detail: $detail, brokerUrl: $brokerUrl, '
-      'profileId: $profileId, profileDisplayName: $profileDisplayName)';
+      'profileId: $profileId, profileDisplayName: $profileDisplayName, '
+      'noAnswer: $noAnswer)';
 }

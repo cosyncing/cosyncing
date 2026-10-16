@@ -99,7 +99,7 @@ void main() {
     Widget pane(
       List<SessionInfo> sessions, {
       String? active,
-      Set<String>? unread = const {},
+      Set<String> unread = const {},
       SessionRosterQueryWindow queryWindow = SessionRosterQueryWindow.any,
     }) => host(
       SessionListPane(
@@ -115,7 +115,7 @@ void main() {
     testWidgets('remote acknowledgement clears row and descendant markers', (
       tester,
     ) async {
-      Future<void> pump(SessionStatus status, Set<String>? unread) async {
+      Future<void> pump(SessionStatus status, Set<String> unread) async {
         await tester.pumpWidget(
           pane([
             node('parent'),
@@ -125,18 +125,17 @@ void main() {
         await tester.pumpAndSettle();
       }
 
-      // Seed a legacy transition as well: attaching the authoritative feed
-      // must retire that history, including if an embedding later detaches it.
-      await pump(SessionStatus.working, null);
+      await pump(SessionStatus.working, {});
       await expandProject(tester, '/work/alpha');
       final children = find.byKey(
         const ValueKey('session-children-codex/parent'),
       );
       await tester.tap(children);
       await tester.pumpAndSettle();
-      await pump(SessionStatus.idle, null);
       final dot = find.byKey(const Key('session-ready-/codex/child'));
-      expect(dot, findsOneWidget);
+      // A Working -> Idle change alone marks nothing: only the inbox does.
+      await pump(SessionStatus.idle, {});
+      expect(dot, findsNothing);
       await pump(SessionStatus.idle, {'codex/child'});
       expect(dot, findsOneWidget);
       String description() => tester
@@ -148,8 +147,6 @@ void main() {
       await pump(SessionStatus.idle, {});
       expect(dot, findsNothing);
       expect(description(), contains('0 recently completed'));
-      await pump(SessionStatus.idle, null);
-      expect(dot, findsNothing);
     });
 
     for (final cold in [false, true]) {
@@ -315,6 +312,7 @@ void main() {
       String cwd = projectKey,
       String? projectName,
       double? width,
+      Set<String> unread = const {},
     }) {
       final pane = SessionListPane(
         sessions: [
@@ -331,6 +329,7 @@ void main() {
         activeKey: null,
         onOpen: (_) {},
         onNewProject: onNew == null ? null : (_) => onNew(),
+        unreadCompletionKeys: unread,
         visibilityPreferences: const SessionVisibilityPreferences(),
       );
       return width == null ? pane : SizedBox(width: width, child: pane);
@@ -643,8 +642,13 @@ void main() {
     );
 
     testWidgets('the attention dot follows live transitions', (tester) async {
-      Future<void> pumpStatuses(List<SessionStatus> statuses) async {
-        await tester.pumpWidget(host(projectRoster(statuses)));
+      Future<void> pumpStatuses(
+        List<SessionStatus> statuses, {
+        Set<String> unread = const {},
+      }) async {
+        await tester.pumpWidget(
+          host(projectRoster(statuses, unread: unread)),
+        );
         await tester.pumpAndSettle();
       }
 
@@ -658,9 +662,9 @@ void main() {
       expect(dot, findsNothing);
       await pumpStatuses([SessionStatus.working]);
       expect(dot, findsNothing, reason: 'running is not attention');
-      // A run that finishes leaves work to review, which a collapsed project
-      // must still signal.
-      await pumpStatuses([SessionStatus.idle]);
+      // A run that finishes leaves work to review (the inbox says so), which
+      // a collapsed project must still signal.
+      await pumpStatuses([SessionStatus.idle], unread: {'codex/project-0'});
       expect(dot, findsOneWidget);
     });
 
@@ -1103,32 +1107,6 @@ void main() {
         ),
         findsOneWidget,
       );
-    });
-
-    testWidgets('a parent is not ready to review while a child still works', (
-      tester,
-    ) async {
-      final readyKey = ValueKey(
-        'session-ready-${sessionCompositeRosterKey(node('p1'))}',
-      );
-      Future<void> pump(SessionStatus parent, SessionStatus child) async {
-        await tester.pumpWidget(
-          roster([
-            node('p1', status: parent),
-            node('c1', parentId: 'p1', status: child),
-          ]),
-        );
-        await tester.pumpAndSettle();
-      }
-
-      await pump(SessionStatus.working, SessionStatus.working);
-      await openProject(tester);
-      // The parent's own turn ends, but its subagent is still working.
-      await pump(SessionStatus.idle, SessionStatus.working);
-      expect(find.byKey(readyKey), findsNothing);
-      // The subtree settles: now the parent's work is ready to review.
-      await pump(SessionStatus.idle, SessionStatus.idle);
-      expect(find.byKey(readyKey), findsOneWidget);
     });
 
     testWidgets('expanding children never moves the project header', (

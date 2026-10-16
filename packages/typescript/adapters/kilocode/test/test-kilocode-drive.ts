@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -8,8 +8,11 @@ import {
   SessionCreateTemporarilyUnavailableError,
   type AgentMessage,
   type HistorySourceIdentity,
+  type SessionConnection,
+  type SessionInfo,
 } from '@cosyncing/adapter-api';
-import { KiloAdapter } from '../src/implementation.ts';
+import { EventEmitter } from 'node:events';
+import { KiloAdapter, type KiloAdapterOptions } from '../src/implementation.ts';
 import { discoverKiloStore, kiloHistorySourceIdentity, readKiloHistory } from '../src/store.ts';
 import { KILO_MEASURED_VERSIONS, kiloVerifiedInvocation } from '../src/version.ts';
 import { AttentionPolicy } from '../../../broker/src/attention/attention-policy.ts';
@@ -110,7 +113,23 @@ let createdPermissionPending = false;
 let healthStatus = 200;
 let healthVersion = '7.4.23';
 let nextCreateStatusAfterMutation: number | undefined;
+/** The managed serve is gone: every request fails as a refused connection would. */
+let serveDown = false;
+/** Whether the serve answering is the exact managed host the broker owns. */
+let hostOwnedNow = true;
 const childPromptHistory: any[] = [];
+
+// The store watch a driven session opens, fired by hand: a check says when the store changed.
+const storeListeners = new Set<(event: string, filename: string | null) => void>();
+const manualStoreWatch = ((_directory: string, _options: unknown, listener: (event: string, filename: string | null) => void) => {
+  storeListeners.add(listener);
+  const watcher = new EventEmitter() as EventEmitter & { close(): void };
+  watcher.close = () => { storeListeners.delete(listener); };
+  return watcher;
+}) as unknown as NonNullable<KiloAdapterOptions['storeWatch']>;
+const storeChanged = (filename: string): void => {
+  for (const listener of [...storeListeners]) listener('change', filename);
+};
 
 const json = (value: unknown, statusCode = 200) => new Response(JSON.stringify(value), {
   status: statusCode,
@@ -121,6 +140,7 @@ const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {})
   const url = String(input instanceof Request ? input.url : input);
   const parsed = new URL(url);
   const method = String(init.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+  if (serveDown) throw new TypeError('fixture serve is down');
   const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined;
   calls.push({ url: parsed.pathname, search: parsed.search, method, ...(body === undefined ? {} : { body }), hasSignal: !!init.signal });
   if (init.signal?.aborted) throw init.signal.reason;
@@ -242,6 +262,7 @@ const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {})
     return json({ id: 'ses_created', title: body?.title ?? 'Created', directory: root });
   }
   if (parsed.pathname === '/session/ses_disk' && method === 'GET') return json(diskSession);
+  if (parsed.pathname === '/session/ses_disk' && method === 'PATCH') return json({ ...diskSession, title: body?.title ?? diskSession.title });
   if (parsed.pathname === '/session/ses_disk/message' && method === 'GET') return json(diskHistoryBody);
   if (parsed.pathname === '/session/ses_created' && method === 'GET') return json({
     id: 'ses_created', title: 'Created fixture', directory: root,
@@ -377,7 +398,7 @@ try {
     isManagedHostOwned: async () => {
       ownershipChecks += 1;
       await Promise.resolve();
-      return true;
+      return hostOwnedNow;
     },
     resolveStoredDriveState: (info: { id: string }) => boundaries.get(info.id)
       ? { historyBoundary: boundaries.get(info.id)! }
@@ -387,6 +408,7 @@ try {
       reconciliations += 1;
     },
     revokeStoredDriveEligibility: (info: { id: string }) => { boundaries.delete(info.id); reconciliations += 1; },
+    storeWatch: manualStoreWatch,
   };
   const adapter = new KiloAdapter({
     command: fakeKilo,
@@ -467,6 +489,25 @@ try {
       && error.detailCode === 'kilo-managed-host-unavailable',
   );
   check('temporary managed-host ownership loss is classified as retryable create unavailability', true);
+  // A kilo that cannot drive (missing, or below the floor) is the typed, retryable refusal the
+  // broker answers as 503 SESSION_CREATE_TEMPORARILY_UNAVAILABLE, never a plain 500.
+  const oldKilo = join(root, 'kilo-below-floor');
+  writeFileSync(oldKilo, '#!/bin/sh\nprintf "7.4.22\\n"\n');
+  chmodSync(oldKilo, 0o700);
+  for (const [label, command, detailCode] of [
+    ['missing', join(root, 'no-such-kilo'), 'kilo-binary-missing'],
+    ['below the floor', oldKilo, 'kilo-version-unsupported'],
+  ] as const) {
+    const unverified = new KiloAdapter({
+      command, env: { PATH: '', KILO_DATA_DIR: root }, homeDir: root,
+      baseUrl: 'http://127.0.0.1:4097', serverPassword: 'fixture-password', fetch: fakeFetch, ...ownershipOptions,
+    });
+    await assert.rejects(
+      unverified.prepareCreateSession(),
+      (error: unknown) => error instanceof SessionCreateTemporarilyUnavailableError && error.detailCode === detailCode,
+    );
+    check(`create with a ${label} kilo is the typed retryable create unavailability (${detailCode})`, true);
+  }
   check('API-only Kilo child rows preserve native lineage immediately',
     roster.some((row) => row.id === lineageChild.id && row.origin === 'subagent'
       && row.parentThreadId === 'ses_parent' && row.attachMode === 'observe'
@@ -808,6 +849,27 @@ try {
   await until('late attach seeding', () => conn.info.status === 'needs-input');
   check('late attach seeds needs-input from point-in-time busy and pending state',
     conn.info.status === 'needs-input' && (await conn.getPending!()).some((row) => row.type === 'permission-request'));
+  // Every (re)opened event stream re-reads the pending list. A card this connection already sent is not
+  // sent again: each client holds it, and a reconnect used to put it in every tab once more.
+  const pendingCards = () => live.filter((row) => row.type === 'permission-request' && row.requestId === 'perm-existing').length;
+  const liveSeeds = () => live.filter((row) => row.type === 'metadata-update' && row.key === 'sessionInfo'
+    && (row.value as Partial<SessionInfo>).status === 'needs-input').length;
+  const reopenEventStream = async (what: string): Promise<void> => {
+    const seedsBefore = liveSeeds();
+    const streamsBefore = globalEventCalls;
+    streamController?.close();
+    await until(what, () => globalEventCalls > streamsBefore && liveSeeds() > seedsBefore);
+  };
+  await reopenEventStream('the event stream to reopen and re-read the pending list');
+  const cardsAfterFirstReopen = pendingCards();
+  await reopenEventStream('the event stream to reopen once more');
+  await reopenEventStream('and once more');
+  check('a reopened event stream re-sends no pending card this connection already sent',
+    cardsAfterFirstReopen <= 1 && pendingCards() === cardsAfterFirstReopen && conn.info.status === 'needs-input',
+    `cards=${cardsAfterFirstReopen}->${pendingCards()}`);
+  // The attach's own stream and the three reopened here: the count the demotion below must not grow.
+  const eventStreamsOpened = globalEventCalls;
+  check('...each reopen was one new event stream', eventStreamsOpened === 4, `streams=${eventStreamsOpened}`);
   let busyRefused = false;
   try { await conn.sendPrompt({ text: 'must not overlap' }); } catch { busyRefused = true; }
   check('unmeasured overlapping prompt queue fails closed', busyRefused);
@@ -822,6 +884,22 @@ try {
   check('Kilo permission.replied maps to resolution and nested provider errors stay specific',
     live.some((row) => row.type === 'permission-resolved' && row.requestId === 'perm-external' && row.decision === 'approve-session')
       && live.some((row) => row.type === 'error' && row.message === 'nested provider refusal'));
+  // The serve reports one failure twice — `session.error`, then the assistant message carrying the
+  // same error — and re-announces that message as it updates: the transcript shows one row. The
+  // reverse order is absorbed the same way.
+  const errorRows = (text: string) => live.filter((row) => row.type === 'error' && row.message === text).length;
+  const failedInfo = (id: string, text: string) => ({
+    id, sessionID: 'ses_child', role: 'assistant', time: { created: 30, completed: 31 }, error: { data: { message: text } },
+  });
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: failedInfo('msg_failed_turn', 'nested provider refusal\nsecret') } });
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: failedInfo('msg_failed_turn', 'nested provider refusal\nsecret') } });
+  emit({ type: 'message.updated', properties: { sessionID: 'ses_child', info: failedInfo('msg_failed_later', 'model exploded') } });
+  emit({ type: 'session.error', properties: { sessionID: 'ses_child', error: { data: { message: 'model exploded' } } } });
+  emit({ type: 'session.error', properties: { sessionID: 'ses_child', error: { data: { message: 'quota exhausted' } } } });
+  await until('the last reported failure', () => errorRows('quota exhausted') === 1);
+  check('a native failure reported by session.error and by its assistant message shows once, in either order',
+    errorRows('nested provider refusal') === 1 && errorRows('model exploded') === 1,
+    JSON.stringify(live.filter((row) => row.type === 'error')));
   const history = await conn.getHistory();
   check('history and live use the same bounded nested provider error extraction',
     history.some((row) => row.type === 'error' && row.message === 'provider refusal'));
@@ -995,7 +1073,7 @@ try {
   await assert.rejects(conn.respondPermission('perm-stale', 'reject'), /read-only|ambiguous|may have been accepted/u);
   await flush();
   check('demotion stops SSE reconnect and refuses every stale mutation',
-    globalEventCalls === 1 && calls.length === mutationCallsAfterDemotion);
+    globalEventCalls === eventStreamsOpened && calls.length === mutationCallsAfterDemotion);
   await conn.close();
 
   status = 'idle';
@@ -1072,6 +1150,98 @@ try {
       && finalPrompt.body.model.modelID === 'later-native-model');
   await settleIdle(created.id);
   await afterNativeRestart.close();
+
+  // The managed serve dies between turns (the supervisor replaces it): Drive is withheld, not revoked,
+  // and comes back only once the serve answering is the owned managed host again and the session is
+  // unchanged, the guards a fresh attach applies.
+  const lossConnection = await secondRestartedAdapter.attach(created.id, 'live');
+  const driveStates: string[] = [];
+  lossConnection.subscribe((message) => {
+    if (message.type !== 'metadata-update' || message.key !== 'sessionInfo') return;
+    const state = (message.value as Partial<SessionInfo>).control?.drive?.state;
+    if (state) driveStates.push(state);
+  });
+  serveDown = true;
+  streamController?.error(new Error('fixture serve crashed'));
+  await until('Drive withheld while the serve is away', () => driveStates.includes('unavailable'));
+  const callsDuringLoss = calls.length;
+  await assert.rejects(lossConnection.sendPrompt({ text: 'while the serve is away' }), /read-only|unavailable|disconnected|away/iu);
+  check('a serve lost between turns withholds Drive and refuses mutations without revoking it',
+    calls.length === callsDuringLoss && boundaries.has(created.id));
+  hostOwnedNow = false;
+  serveDown = false;
+  const eventCallsBeforeAnswer = globalEventCalls;
+  await until('the answering serve to be asked for proof', () => globalEventCalls >= eventCallsBeforeAnswer + 2);
+  await flush();
+  check('a serve that answers but is not the owned managed host never restores Drive',
+    !driveStates.includes('driving') && boundaries.has(created.id), JSON.stringify(driveStates));
+  hostOwnedNow = true;
+  await until('Drive back on the owned replacement', () => driveStates.at(-1) === 'driving');
+  await lossConnection.sendPrompt({ text: 'after the replacement', clientMessageId: 'after-replacement' });
+  check('Drive resumes on the owned replacement once the unchanged session is proved again',
+    calls.some((call) => call.url.endsWith('/session/ses_created/prompt_async') && call.body?.parts?.[0]?.text === 'after the replacement'));
+  await settleIdle(created.id);
+  check('the turn on the replacement settles as this Drive\'s own', boundaries.has(created.id));
+  await lossConnection.close();
+  // A turn the serve fails with `session.error`, and no `session.idle` after it, is over all the same:
+  // a serve lost after it is lost between turns (Drive withheld, then back), never mid-turn (revoked).
+  const erroredConnection = await secondRestartedAdapter.attach(created.id, 'live');
+  const erroredStates: string[] = [];
+  erroredConnection.subscribe((message) => {
+    if (message.type !== 'metadata-update' || message.key !== 'sessionInfo') return;
+    const state = (message.value as Partial<SessionInfo>).control?.drive?.state;
+    if (state) erroredStates.push(state);
+  });
+  await erroredConnection.sendPrompt({ text: 'a turn the serve fails', clientMessageId: 'failed-without-idle' });
+  const settlesBeforeError = reconciliations;
+  emit({ type: 'session.error', properties: { sessionID: created.id, error: { data: { message: 'provider refused the turn' } } } });
+  await until('the failed turn to settle without an idle', () => reconciliations > settlesBeforeError);
+  check('a turn failed by session.error alone settles as this Drive\'s own', boundaries.has(created.id));
+  serveDown = true;
+  streamController?.error(new Error('fixture serve crashed after a failed turn'));
+  await until('Drive withheld after the failed turn', () => erroredStates.includes('unavailable'));
+  check('a serve lost after a turn failed without an idle withholds Drive and keeps its eligibility',
+    boundaries.has(created.id) && erroredConnection.info.attachMode === 'live', JSON.stringify(erroredStates));
+  serveDown = false;
+  await until('Drive back after the failed turn', () => erroredStates.at(-1) === 'driving');
+  await erroredConnection.close();
+  // A serve that never comes back within the window ends the connection, and nothing else: the
+  // session's eligibility stands for the next attach to prove against whatever serve answers then.
+  const shortWaitAdapter = new KiloAdapter({
+    command: fakeKilo,
+    env: { PATH: '', KILO_DATA_DIR: root },
+    homeDir: root,
+    baseUrl: 'http://127.0.0.1:4097',
+    serverPassword: 'fixture-password',
+    testOnlyEnableUnverifiedDrive: true,
+    fetch: fakeFetch,
+    ...ownershipOptions,
+    serveRecoveryMs: 1_500,
+  });
+  const abandoned = await shortWaitAdapter.attach(created.id, 'live');
+  const abandonedStates: string[] = [];
+  abandoned.subscribe((message) => {
+    if (message.type !== 'metadata-update' || message.key !== 'sessionInfo') return;
+    const state = (message.value as Partial<SessionInfo>).control?.drive?.state;
+    if (state) abandonedStates.push(state);
+  });
+  serveDown = true;
+  streamController?.error(new Error('fixture serve crashed for good'));
+  const eventCallsWhileDown = globalEventCalls;
+  await until('Drive withheld', () => abandonedStates.includes('unavailable'));
+  await new Promise((resolve) => setTimeout(resolve, 2_500));
+  serveDown = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  check('a serve that never comes back within the window is given up on, without revoking eligibility',
+    boundaries.has(created.id) && globalEventCalls === eventCallsWhileDown && !abandonedStates.includes('driving'),
+    `events=${globalEventCalls - eventCallsWhileDown} states=${JSON.stringify(abandonedStates)}`);
+  await abandoned.close();
+  const afterAbandoned = await shortWaitAdapter.attach(created.id, 'live');
+  await afterAbandoned.sendPrompt({ text: 'after the serve came back', clientMessageId: 'after-abandoned' });
+  check('the next attach drives once a serve answers again',
+    calls.some((call) => call.url.endsWith('/session/ses_created/prompt_async') && call.body?.parts?.[0]?.text === 'after the serve came back'));
+  await settleIdle(created.id);
+  await afterAbandoned.close();
 
   const foreignWriterConnection = await secondRestartedAdapter.attach(created.id, 'live');
   const foreignWriterMessages: AgentMessage[] = [];
@@ -1172,6 +1342,234 @@ try {
     !boundaries.has(created.id)
       && activeCloseMessages.some((message) => message.type === 'permission-resolved'
         && message.requestId === 'perm-created' && message.decision === 'external'));
+  // A mid-turn mutation's ownership read meets a store another process is using: the serve writes
+  // the turn, and every connection that reads records how far it read in the WAL index (`-shm`).
+  // Neither is a reason to refuse the mutation, and a store that cannot be read right now is never
+  // a reason to give up Drive.
+  createdPermissionPending = false;
+  const busyStored = (await discoverKiloStore({
+    env: { KILO_DATA_DIR: root }, homeDir: root, includeUnverifiedChildren: true,
+  })).find((session) => session.id === created.id)!;
+  boundaries.set(created.id, kiloHistorySourceIdentity(busyStored, (await readKiloHistory(busyStored))!));
+  const busyConnection = await secondRestartedAdapter.attach(created.id, 'live');
+  const busyDatabase = join(root, 'kilo.db');
+  const stopFile = join(root, 'busy-store.stop');
+  // Another process using the store until `stopFile` appears (or `forMs` elapses), saying when it started.
+  const useStore = async (mode: 'commit' | 'read-mark', forMs: number) => {
+    rmSync(stopFile, { force: true });
+    const child = Bun.spawn(['bun', '-e', `
+      const { Database } = require('bun:sqlite');
+      const { existsSync, utimesSync } = require('node:fs');
+      const database = new Database(${JSON.stringify(busyDatabase)});
+      // Unsynced, so the commits come back to back as a busy serve's do, not one per fsync.
+      database.exec('pragma journal_mode = WAL; pragma synchronous = OFF;');
+      const touch = database.query('update session set time_updated = time_updated + 1 where id = ?');
+      touch.run('ses_hang_0');
+      console.log('started');
+      const until = Date.now() + ${forMs};
+      // A reader's write to the WAL index, as the snapshot sees it: a new modification time each time
+      // (set explicitly, so two within one clock tick still differ).
+      let mark = Date.now() / 1000;
+      while (Date.now() < until && !existsSync(${JSON.stringify(stopFile)})) {
+        if (${JSON.stringify(mode)} === 'commit') touch.run('ses_hang_0');
+        else { mark += 0.000001; utimesSync(${JSON.stringify(`${busyDatabase}-shm`)}, mark, mark); }
+      }
+      database.close();
+    `], { stdout: 'pipe', stderr: 'inherit' });
+    const reader = child.stdout.getReader();
+    let said = '';
+    while (!said.includes('started')) {
+      const next = await reader.read();
+      if (next.done) throw new Error(`the ${mode} process ended before it started`);
+      said += new TextDecoder().decode(next.value);
+    }
+    return { done: async () => { writeFileSync(stopFile, ''); await child.exited; } };
+  };
+  const abortsBefore = calls.filter((call) => call.url.endsWith(`/session/${created.id}/abort`)).length;
+  const burst = await useStore('commit', 400);
+  await busyConnection.runCommand?.('stop');
+  await burst.done();
+  check('a Stop whose ownership read meets a burst of the serve\'s commits waits them out and is accepted',
+    calls.filter((call) => call.url.endsWith(`/session/${created.id}/abort`)).length === abortsBefore + 1
+      && busyConnection.info.attachMode === 'live' && boundaries.has(created.id));
+  const readMarks = await useStore('read-mark', 10_000);
+  const readMarkStarted = Date.now();
+  await busyConnection.runCommand?.('stop');
+  const readMarkMs = Date.now() - readMarkStarted;
+  await readMarks.done();
+  check('a reader recording its WAL position during an ownership read is not a torn snapshot',
+    calls.filter((call) => call.url.endsWith(`/session/${created.id}/abort`)).length === abortsBefore + 2
+      && busyConnection.info.attachMode === 'live' && boundaries.has(created.id) && readMarkMs < 1_500,
+    `${readMarkMs} ms`);
+  // A store that cannot be read at all right now (here a stray rollback journal) proves nothing
+  // either way: the mutation is refused, and Drive stays for the next one.
+  writeFileSync(`${busyDatabase}-journal`, '');
+  await assert.rejects(busyConnection.runCommand?.('stop') ?? Promise.resolve(), /could not be read; refusing this mutation/u);
+  rmSync(`${busyDatabase}-journal`, { force: true });
+  check('an unreadable store refuses the mutation and keeps Drive',
+    busyConnection.info.attachMode === 'live' && busyConnection.info.control?.drive.supported === true
+      && boundaries.has(created.id)
+      && calls.filter((call) => call.url.endsWith(`/session/${created.id}/abort`)).length === abortsBefore + 2);
+  await busyConnection.runCommand?.('stop');
+  check('the next mutation after an unreadable store is accepted',
+    calls.filter((call) => call.url.endsWith(`/session/${created.id}/abort`)).length === abortsBefore + 3);
+  await busyConnection.close();
+
+  // A rewritten prompt is seen when it lands: the Drive watches the store (fired by hand here), and
+  // a prompt never streams, so even the newest one, which the store may still be completing, may
+  // not change its text. During this Drive's own turn, the settle read is the check.
+  const reseed = async () => {
+    const stored = (await discoverKiloStore({
+      env: { KILO_DATA_DIR: root }, homeDir: root, includeUnverifiedChildren: true,
+    })).find((session) => session.id === created.id)!;
+    boundaries.set(created.id, kiloHistorySourceIdentity(stored, (await readKiloHistory(stored))!));
+  };
+  const writeRows = (rows: Array<{ id: string; at: number; data: unknown; parts: Array<{ id: string; data: unknown }> }>) => {
+    const database = new Database(join(root, 'kilo.db'));
+    for (const row of rows) {
+      database.query('insert into message values (?, ?, ?, ?, ?)').run(row.id, created.id, row.at, row.at, JSON.stringify(row.data));
+      for (const part of row.parts) {
+        database.query('insert into part values (?, ?, ?, ?, ?, ?)').run(part.id, row.id, created.id, row.at, row.at, JSON.stringify(part.data));
+      }
+    }
+    database.close();
+  };
+  const userRow = (id: string, at: number, text: string) => ({
+    id, at, data: { role: 'user', time: { created: at } }, parts: [{ id: `prt-${id}`, data: { type: 'text', text } }],
+  });
+  // The serve's half of a prompt of this Drive: the turn's rows in the store, and the prompt's echo.
+  const servePrompt = async (connection: SessionConnection, text: string, at: number, answered = true): Promise<string> => {
+    await connection.sendPrompt({ text });
+    const messageID = String(calls.filter((call) => call.url.endsWith(`/session/${created.id}/prompt_async`)).at(-1)!.body.messageID);
+    writeRows([userRow(messageID, at, text), ...answered ? [{
+      id: `${messageID}-answer`, at: at + 1,
+      data: {
+        role: 'assistant', parentID: messageID, providerID: 'fixture', modelID: 'model',
+        time: { created: at + 1, completed: at + 2 }, finish: 'stop', cost: 0,
+        tokens: { input: 1, output: 1, cache: { read: 0, write: 0 }, total: 2 },
+      },
+      parts: [{ id: `prt-${messageID}-answer`, data: { type: 'text', text: `answer: ${text}`, time: { start: at + 1, end: at + 2 } } }],
+    }] : []]);
+    emit({ type: 'message.updated', properties: { sessionID: created.id, info: { id: messageID, sessionID: created.id, role: 'user', time: { created: at } } } });
+    emit({ type: 'message.part.updated', properties: { sessionID: created.id, part: { id: `prt-${messageID}`, messageID, sessionID: created.id, type: 'text', text } } });
+    await flush();
+    return messageID;
+  };
+  const rewritePrompt = (messageID: string, text: string) => {
+    const database = new Database(join(root, 'kilo.db'));
+    database.query('update part set data = ? where id = ?').run(JSON.stringify({ type: 'text', text }), `prt-${messageID}`);
+    database.close();
+  };
+  const settleFor = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Later than every row already stored, so each prompt here is the session's newest.
+  const watchedAt = Date.now() + 60_000;
+  await reseed();
+  const earlierDrive = await secondRestartedAdapter.attach(created.id, 'live');
+  // Its turn ended before any answer was stored, so the prompt is the session's last row: the one
+  // the store may still be completing, which only the prompt's own text can show was rewritten.
+  const earlierPrompt = await servePrompt(earlierDrive, 'a prompt to keep', watchedAt, false);
+  await settleIdle(created.id);
+  await earlierDrive.close();
+  // A later Drive knows that prompt only from the store it proved at attach.
+  const watched = await secondRestartedAdapter.attach(created.id, 'live');
+  const watchedMessages: AgentMessage[] = [];
+  watched.subscribe((message) => watchedMessages.push(message));
+  storeChanged('kilo.db-wal');
+  await settleFor(600);
+  check('a store change that rewrites nothing leaves Drive alone',
+    watched.info.attachMode === 'live' && boundaries.has(created.id));
+  rewritePrompt(earlierPrompt, 'a prompt rewritten in place');
+  storeChanged('kilo.db-shm');
+  await settleFor(600);
+  check('a reader marking its place in -shm is not a store change',
+    watched.info.attachMode === 'live' && boundaries.has(created.id));
+  const promptsBeforeRewrite = calls.filter((call) => call.url.endsWith('/prompt_async')).length;
+  storeChanged('kilo.db-wal');
+  await until('the watched rewrite to demote Drive', () => watched.info.attachMode === 'observe');
+  check('a rewritten stored prompt demotes Drive for every client when it lands, before any mutation',
+    !boundaries.has(created.id)
+      && watchedMessages.some((message) => message.type === 'error' && /rewritten or replaced/u.test(message.message))
+      && calls.filter((call) => call.url.endsWith('/prompt_async')).length === promptsBeforeRewrite);
+  await watched.close();
+
+  await reseed();
+  const turnDrive = await secondRestartedAdapter.attach(created.id, 'live');
+  const turnPrompt = await servePrompt(turnDrive, 'a prompt rewritten mid-turn', watchedAt + 10_000);
+  rewritePrompt(turnPrompt, 'rewritten before the turn settled');
+  await settleIdle(created.id);
+  check('a prompt of this Drive rewritten before its turn settled is caught by the settle read',
+    turnDrive.info.attachMode === 'observe' && !boundaries.has(created.id));
+  await turnDrive.close();
+
+  // A terminal writes while no serve answers: the replacement's proof finds the session changed,
+  // ends this Drive, and leaves the verdict to a fresh attach, which refuses the changed session.
+  await reseed();
+  const awayDrive = await secondRestartedAdapter.attach(created.id, 'live');
+  const awayStates: string[] = [];
+  awayDrive.subscribe((message) => {
+    if (message.type !== 'metadata-update' || message.key !== 'sessionInfo') return;
+    const state = (message.value as Partial<SessionInfo>).control?.drive?.state;
+    if (state) awayStates.push(state);
+  });
+  serveDown = true;
+  streamController?.error(new Error('fixture serve crashed'));
+  await until('Drive withheld while the serve is away', () => awayStates.includes('unavailable'));
+  writeRows([userRow('msg-terminal-away', watchedAt + 20_000, 'typed while the serve was away')]);
+  storeChanged('kilo.db-wal');
+  await settleFor(600);
+  serveDown = false;
+  await until('the replacement to be asked for proof', () => awayDrive.info.attachMode === 'observe');
+  check('a session written while its serve was away is not driven again on the replacement',
+    !awayStates.includes('driving') && boundaries.has(created.id), JSON.stringify(awayStates));
+  await assert.rejects(secondRestartedAdapter.attach(created.id, 'live'), /boundary changed/u);
+  check('a fresh attach refuses the session changed while the serve was away', true);
+  await awayDrive.close();
+
+  // The database itself replaced by a copy holding the very same rows (a restored backup): not the
+  // store this Drive proved, so it is not driven on.
+  await reseed();
+  const replacedDrive = await secondRestartedAdapter.attach(created.id, 'live');
+  const checkpoint = new Database(join(root, 'kilo.db'));
+  checkpoint.query('pragma wal_checkpoint(TRUNCATE)').run();
+  checkpoint.close();
+  copyFileSync(join(root, 'kilo.db'), join(root, 'kilo.db.restored'));
+  renameSync(join(root, 'kilo.db.restored'), join(root, 'kilo.db'));
+  storeChanged('kilo.db');
+  await until('the replaced database to demote Drive', () => replacedDrive.info.attachMode === 'observe');
+  check('a database replaced by an identical copy demotes Drive', !boundaries.has(created.id));
+  await replacedDrive.close();
+
+  // The roster offers Drive only where an attach would take it, from evidence the discovery pass
+  // already has (the session's message count, the database's identity), not a history read per row.
+  const diskStored = async () => (await discoverKiloStore({
+    env: { KILO_DATA_DIR: root }, homeDir: root, includeUnverifiedChildren: true,
+  })).find((session) => session.id === diskSession.id)!;
+  const diskDrive = async () => (await secondRestartedAdapter.discoverSessions())
+    .find((row) => row.id === diskSession.id)?.control?.drive?.supported;
+  boundaries.set(diskSession.id, kiloHistorySourceIdentity(await diskStored(), (await readKiloHistory(await diskStored()))!));
+  check('the roster offers Drive for an owned session the store still holds as proved', await diskDrive() === true);
+  const renamedDrive = async (title: string) =>
+    (await secondRestartedAdapter.renameSession!(diskSession.id, title)).control?.drive?.supported;
+  check('...and so does the row its rename returns', await renamedDrive('Renamed while proved') === true);
+  const terminalRows = new Database(join(root, 'kilo.db'));
+  terminalRows.query('insert into message values (?, ?, ?, ?, ?)').run(
+    'msg-terminal-roster', diskSession.id, Date.now() + 120_000, Date.now() + 120_000,
+    JSON.stringify({ role: 'user', time: { created: Date.now() + 120_000 } }),
+  );
+  terminalRows.close();
+  check('the roster withholds Drive from an owned session another writer added to', await diskDrive() === false);
+  check('...and so does the row its rename returns', await renamedDrive('Renamed after another writer') === false);
+  await assert.rejects(secondRestartedAdapter.attach(diskSession.id, 'live'), /boundary changed/u);
+  check('...which an attach refuses too', true);
+  boundaries.set(diskSession.id, kiloHistorySourceIdentity(await diskStored(), (await readKiloHistory(await diskStored()))!));
+  const rosterCheckpoint = new Database(join(root, 'kilo.db'));
+  rosterCheckpoint.query('pragma wal_checkpoint(TRUNCATE)').run();
+  rosterCheckpoint.close();
+  copyFileSync(join(root, 'kilo.db'), join(root, 'kilo.db.restored'));
+  renameSync(join(root, 'kilo.db.restored'), join(root, 'kilo.db'));
+  check('the roster withholds Drive from an owned session whose database was replaced', await diskDrive() === false);
+  check('...and so does the row its rename returns', await renamedDrive('Renamed after a replacement') === false);
+
   // The updater suppression, at the ONE place this adapter starts a kilo child.
   //
   // This existed only as a claim before: `kiloChildEnv` was applied to the env

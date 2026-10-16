@@ -56,10 +56,99 @@ const INHERITED_ACE = 0x10;
 const ACCESS_ALLOWED_ACE_TYPE = 0x00;
 const ACCESS_DENIED_ACE_TYPE = 0x01;
 
+/** `PROCESS_QUERY_LIMITED_INFORMATION`: enough to read a process's command line, nothing more. */
+const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+/** `PROCESSINFOCLASS` `ProcessCommandLineInformation` (Windows 8.1 and later). */
+const PROCESS_COMMAND_LINE_INFORMATION = 60;
+/** `ERROR_INVALID_PARAMETER`: `OpenProcess` names no running process. */
+const ERROR_INVALID_PARAMETER = 87;
+/** `STATUS_PROCESS_IS_TERMINATING`: the process has exited; a handle still names it. */
+const STATUS_PROCESS_IS_TERMINATING = 0xc000010a | 0;
+/** NTSTATUS values that mean "the buffer was too small; here is the size". */
+const STATUS_RESIZE = new Set([0xc0000004 | 0, 0xc0000023 | 0, 0x80000005 | 0]);
+/** A command line is at most 32,767 UTF-16 units, after the 16-byte `UNICODE_STRING` header. */
+const COMMAND_LINE_MAX_BYTES = 16 + 32_768 * 2;
+
 /** `IMAGE_FILE_MACHINE_*` values `IsWow64Process2` reports. */
 const IMAGE_FILE_MACHINE_AMD64 = 0x8664;
 const IMAGE_FILE_MACHINE_ARM64 = 0xaa64;
 const IMAGE_FILE_MACHINE_UNKNOWN = 0x0000;
+
+/** `TH32CS_SNAPPROCESS`: a Toolhelp snapshot of the process list and nothing else. */
+const TH32CS_SNAPPROCESS = 0x0000_0002;
+/** `ERROR_NO_MORE_FILES`: `Process32NextW` reached the end of the list, which is the only clean end. */
+const ERROR_NO_MORE_FILES = 18;
+/**
+ * `PROCESSENTRY32W` in a 64-bit process: `dwSize`, `cntUsage`, `th32ProcessID` at 8, the pointer-sized
+ * `th32DefaultHeapID` at 16, `th32ModuleID`, `cntThreads`, `th32ParentProcessID` at 32,
+ * `pcPriClassBase`, `dwFlags`, then `szExeFile[MAX_PATH]` at 44, padded to 568.
+ */
+const PROCESSENTRY32W_SIZE = 568;
+const PROCESSENTRY32W_PID = 8;
+const PROCESSENTRY32W_PARENT_PID = 32;
+const PROCESSENTRY32W_EXE_FILE = 44;
+const MAX_PATH = 260;
+/** More processes than this is not a list this walk will finish; it refuses rather than truncates. */
+const PROCESS_TABLE_MAX = 65_536;
+/** A `FILETIME` (100 ns ticks since 1601-01-01 UTC) at the Unix epoch. */
+const FILETIME_UNIX_EPOCH = 116_444_736_000_000_000n;
+const FILETIME_TICKS_PER_SECOND = 10_000_000n;
+
+/**
+ * A `FILETIME` as UTC in the round-trip form .NET's `ToString('o')` writes
+ * (`2026-10-15T10:00:00.1234567Z`), or '' for a time before 1970, which no running process has.
+ *
+ * The same shape the PowerShell snapshot reports for a process start, so every start in a snapshot
+ * orders by plain string comparison, which is how ancestry compares them. WMI truncates
+ * `CreationDate` to the microsecond; this keeps the kernel's full 100 ns, which agrees with it to the
+ * microsecond and orders two processes created within one microsecond correctly.
+ */
+export function windowsFileTimeIso(ticks: bigint): string {
+  const sinceEpoch = ticks - FILETIME_UNIX_EPOCH;
+  if (sinceEpoch < 0n) return '';
+  const seconds = sinceEpoch / FILETIME_TICKS_PER_SECOND;
+  const fraction = sinceEpoch % FILETIME_TICKS_PER_SECOND;
+  const whole = new Date(Number(seconds) * 1000).toISOString().slice(0, 19);
+  return `${whole}.${fraction.toString().padStart(7, '0')}Z`;
+}
+
+/**
+ * The start a process-table row may claim: its creation time, unless that is unknown (0) or LATER than
+ * the moment the list was taken. A pid is free for reuse the instant its process is gone, and the
+ * creation time is read after the list, so a process created after the list cannot be the one the
+ * list named under that pid. Claiming its start would splice two processes into one identity. One
+ * created before the list was taken was alive the whole time, so it holds the pid the list saw.
+ */
+export function windowsProcessStart(created: bigint, listedAt: bigint): string {
+  if (created <= 0n || created > listedAt) return '';
+  return windowsFileTimeIso(created);
+}
+
+/** One `PROCESSENTRY32W`: pid, parent pid, and the image name (`szExeFile`, read up to its NUL). */
+export function readProcessEntry32W(entry: Uint8Array): { pid: number; parentPid: number; name: string } {
+  if (entry.byteLength < PROCESSENTRY32W_SIZE) throw new Error('a PROCESSENTRY32W is 568 bytes');
+  const view = new DataView(entry.buffer, entry.byteOffset, entry.byteLength);
+  let end = PROCESSENTRY32W_EXE_FILE;
+  const limit = PROCESSENTRY32W_EXE_FILE + MAX_PATH * 2;
+  while (end < limit && view.getUint16(end, true) !== 0) end += 2;
+  return {
+    pid: view.getUint32(PROCESSENTRY32W_PID, true),
+    parentPid: view.getUint32(PROCESSENTRY32W_PARENT_PID, true),
+    name: Buffer.from(entry.buffer, entry.byteOffset + PROCESSENTRY32W_EXE_FILE, end - PROCESSENTRY32W_EXE_FILE)
+      .toString('utf16le'),
+  };
+}
+
+/** One row of the host process table. */
+export interface WindowsProcessTableEntry {
+  pid: number;
+  /** 0 when Windows reported none. */
+  parentPid: number;
+  /** The image name, as Windows lists it (`codex.exe`). */
+  name: string;
+  /** `windowsFileTimeIso` of its creation time; '' when the process would not say (see `processTable`). */
+  start: string;
+}
 
 export interface WindowsAceSnapshot {
   sid: string;
@@ -103,6 +192,20 @@ export interface WindowsFfi {
   applySecurity(path: string, sddl: string): void;
   createDirectory(path: string, sddl: string): void;
   pathOwnerSid(path: string): string;
+  /**
+   * The command line of a running process, read-only (`PROCESS_QUERY_LIMITED_INFORMATION`), or
+   * `null` when no process has that pid or it has exited. Throws when the process exists but will not
+   * say.
+   */
+  processCommandLine(pid: number): string | null;
+  /**
+   * Every process on the host (pid 0, the idle process, excepted), read-only and without a process
+   * spawned: a Toolhelp snapshot for pid, parent pid and image name, then `GetProcessTimes` for each
+   * start. A start is '' where the process will not open for `PROCESS_QUERY_LIMITED_INFORMATION`
+   * (another user's, or a protected service's) and where its pid was reused after the list was taken.
+   * Throws when the list cannot be read to its end.
+   */
+  processTable(): WindowsProcessTableEntry[];
 }
 
 type Pointer = number;
@@ -143,7 +246,27 @@ function load(): WindowsFfi {
     IsWow64Process2: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
     CreateDirectoryW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
     GetLastError: { args: [], returns: FFIType.u32 },
+    OpenProcess: { args: [FFIType.u32, FFIType.bool, FFIType.u32], returns: FFIType.ptr },
   });
+  // Resolved on first use, so a missing export can never take the security primitives down with it.
+  let ntQueryInformationProcess: ((...args: never[]) => number) | undefined;
+  const ntQuery = () => (ntQueryInformationProcess ??= dlopen('ntdll.dll', {
+    NtQueryInformationProcess: {
+      args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+  }).symbols.NtQueryInformationProcess as (...args: never[]) => number);
+  // The process-table entry points, resolved on first use like the one above. A Toolhelp handle is
+  // INVALID_HANDLE_VALUE (-1) on failure, which a pointer return cannot carry intact, so it travels
+  // as an i64 -- and its own CloseHandle binding takes it that way.
+  const openProcessList = () => dlopen('kernel32.dll', {
+    CreateToolhelp32Snapshot: { args: [FFIType.u32, FFIType.u32], returns: FFIType.i64 },
+    Process32FirstW: { args: [FFIType.i64, FFIType.ptr], returns: FFIType.bool },
+    Process32NextW: { args: [FFIType.i64, FFIType.ptr], returns: FFIType.bool },
+    CloseHandle: { args: [FFIType.i64], returns: FFIType.bool },
+    GetProcessTimes: {
+      args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
+    GetSystemTimeAsFileTime: { args: [FFIType.ptr], returns: FFIType.void },
+  }).symbols;
+  let processList: ReturnType<typeof openProcessList> | undefined;
   const advapi32 = dlopen('advapi32.dll', {
     OpenProcessToken: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.bool },
     GetTokenInformation: {
@@ -389,6 +512,103 @@ function load(): WindowsFfi {
       } finally {
         kernel32.symbols.LocalFree(descriptor as never);
       }
+    },
+
+    processCommandLine: (pid: number): string | null => {
+      if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffff_ffff) throw new Error('invalid process id');
+      const handle = kernel32.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+      if (!handle) {
+        const error = kernel32.symbols.GetLastError();
+        if (error === ERROR_INVALID_PARAMETER) return null;
+        throw new Error(`the process could not be opened (Windows error ${error})`);
+      }
+      try {
+        const query = ntQuery();
+        const returned = new Uint32Array(1);
+        let size = 4096;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const buffer = new Uint8Array(size);
+          const base = ptr(buffer);
+          const status = query(
+            handle as never, PROCESS_COMMAND_LINE_INFORMATION as never, base as never, size as never, ptr(returned) as never,
+          ) | 0;
+          if (status === 0) {
+            // UNICODE_STRING { USHORT Length; USHORT MaximumLength; PWSTR Buffer; }, its text after it
+            // in the same buffer. The pointer is checked to land inside what was handed over.
+            const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+            const length = view.getUint16(0, true);
+            if (length === 0) return '';
+            const offset = Number(view.getBigUint64(8, true) - BigInt(base));
+            if (!Number.isSafeInteger(offset) || offset < 16 || offset + length > size) {
+              throw new Error('the command line came back outside its buffer');
+            }
+            return Buffer.from(buffer.buffer, buffer.byteOffset + offset, length).toString('utf16le');
+          }
+          // Exited, but its process object outlives it while any handle (its parent's) is open.
+          if (status === STATUS_PROCESS_IS_TERMINATING) return null;
+          const needed = returned[0]!;
+          if (!STATUS_RESIZE.has(status) || needed <= size || needed > COMMAND_LINE_MAX_BYTES) {
+            throw new Error(`the command line could not be read (NTSTATUS 0x${(status >>> 0).toString(16)})`);
+          }
+          size = needed;
+        }
+        throw new Error('the command line kept growing while it was read');
+      } finally {
+        kernel32.symbols.CloseHandle(handle as never);
+      }
+    },
+
+    processTable: (): WindowsProcessTableEntry[] => {
+      const api = (processList ??= openProcessList());
+      // Taken BEFORE the list, so a start read afterwards can be checked against it (see
+      // `windowsProcessStart`). A process created between this and the list loses only its start.
+      const clock = new BigUint64Array(1);
+      api.GetSystemTimeAsFileTime(ptr(clock) as never);
+      const listedAt = clock[0]!;
+      const snapshot = BigInt(api.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+      if (snapshot === -1n || snapshot === 0n) {
+        throw new Error(`the process list could not be taken (Windows error ${kernel32.symbols.GetLastError()})`);
+      }
+      const listed: Array<{ pid: number; parentPid: number; name: string }> = [];
+      try {
+        const entry = new Uint8Array(PROCESSENTRY32W_SIZE);
+        new DataView(entry.buffer).setUint32(0, PROCESSENTRY32W_SIZE, true);
+        for (
+          let more = api.Process32FirstW(snapshot, ptr(entry) as never);
+          more;
+          more = api.Process32NextW(snapshot, ptr(entry) as never)
+        ) {
+          if (listed.length >= PROCESS_TABLE_MAX) throw new Error('the process list did not end');
+          listed.push(readProcessEntry32W(entry));
+        }
+        // Anything but the end of the list is a list cut short, and a short list could leave out
+        // exactly the process a caller is asking about.
+        const error = kernel32.symbols.GetLastError();
+        if (error !== ERROR_NO_MORE_FILES) throw new Error(`the process list stopped early (Windows error ${error})`);
+      } finally {
+        api.CloseHandle(snapshot);
+      }
+      // FILETIME creation, exit, kernel and user times; only the first is read.
+      const times = new BigUint64Array(4);
+      const startOf = (pid: number): string => {
+        const handle = kernel32.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (!handle) return '';
+        try {
+          times.fill(0n);
+          const base = ptr(times);
+          if (!api.GetProcessTimes(
+            handle as never, base as never, (base + 8) as never, (base + 16) as never, (base + 24) as never,
+          )) {
+            return '';
+          }
+          return windowsProcessStart(times[0]!, listedAt);
+        } finally {
+          kernel32.symbols.CloseHandle(handle as never);
+        }
+      };
+      return listed
+        .filter((entry) => entry.pid > 0)
+        .map((entry) => ({ ...entry, start: startOf(entry.pid) }));
     },
 
     createDirectory: (path: string, sddl: string): void => {

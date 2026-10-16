@@ -95,6 +95,17 @@ class _ChatPanel extends ConsumerWidget {
   onModelAndEffortSelected;
   final ValueChanged<ModeOption> onPermissionModeSelected;
 
+  /// The transcript's theme: body text at the reader's chosen size (see
+  /// [DerivedTheme]).
+  static final DerivedTheme<double> _transcriptTheme = DerivedTheme(
+    (theme, fontSize) => theme.copyWith(
+      textTheme: theme.textTheme.copyWith(
+        bodyMedium: theme.textTheme.bodyMedium?.copyWith(fontSize: fontSize),
+        bodyLarge: theme.textTheme.bodyLarge?.copyWith(fontSize: fontSize),
+      ),
+    ),
+  );
+
   /// Opens the slash-command sheet. Selection, args parsing and send all stay
   /// owned by the page — the sheet only presents them.
   Future<void> _openCommandPicker(BuildContext context, bool enabled) {
@@ -198,18 +209,8 @@ class _ChatPanel extends ConsumerWidget {
     final display =
         ref.watch(conversationDisplayControllerProvider).valueOrNull ??
         const ConversationDisplayPreferences();
-    final theme = Theme.of(context);
     final transcript = Theme(
-      data: theme.copyWith(
-        textTheme: theme.textTheme.copyWith(
-          bodyMedium: theme.textTheme.bodyMedium?.copyWith(
-            fontSize: display.fontSize,
-          ),
-          bodyLarge: theme.textTheme.bodyLarge?.copyWith(
-            fontSize: display.fontSize,
-          ),
-        ),
-      ),
+      data: _transcriptTheme.of(Theme.of(context), display.fontSize),
       child: _TranscriptSurface(
         state: state,
         controller: controller,

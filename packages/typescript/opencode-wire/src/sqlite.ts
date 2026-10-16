@@ -219,6 +219,11 @@ export interface OpenCodeSqliteHistoryRows {
    * Rows from here on can change on the next read; rows before it cannot without a rewrite.
    */
   settledRows: number;
+  /**
+   * The stored text of every text part of a user message, by part id. A user prompt is written once
+   * and never streams, so a text that changes here was rewritten, however recently it was written.
+   */
+  userTextParts: Map<string, string>;
 }
 
 /** Whether the store may still rewrite [message] (see {@link OpenCodeSqliteHistoryRows.settledRows}). */
@@ -328,6 +333,7 @@ export function readOpenCodeSqliteHistory(
   };
   let lastUserKey: string | undefined;
   let lastUserAt: number | undefined;
+  const userTextParts = new Map<string, string>();
   const durableUserKeys = new Set<string>();
   const canonicalUserKeys = new Set<string>();
   const canonicalUserTimes = new Map<string, number>();
@@ -346,6 +352,9 @@ export function readOpenCodeSqliteHistory(
     }
     if (message.role === 'user') {
       durableUserKeys.add(message.id);
+      for (const part of parts) {
+        if (part?.type === 'text' && part.id !== undefined) userTextParts.set(String(part.id), String(part.text ?? ''));
+      }
       const text = parts.filter((part) => part?.type === 'text')
         .map((part) => cleanUserText(String(part.text ?? ''))).filter((part) => part.length > 0).join('\n');
       const sentAt = nativeTimeMs(message.time?.created ?? row.time_created);
@@ -388,7 +397,7 @@ export function readOpenCodeSqliteHistory(
       cacheRead: message.tokens.cache?.read, cacheWrite: message.tokens.cache?.write, cost: message.cost,
     })) return undefined;
   }
-  return { messages: out, settledRows: settledRows ?? out.length };
+  return { messages: out, settledRows: settledRows ?? out.length, userTextParts };
 }
 
 function activeTool(part: any): boolean {

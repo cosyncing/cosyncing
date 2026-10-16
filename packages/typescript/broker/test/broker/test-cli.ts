@@ -826,9 +826,14 @@ try {
   const exportPath = join(exportTemp, 'review.json');
   writeFileSync(exportPath, '{"redacted":true}\n');
   const exitPort = await freePort();
+  // The record is seeded with the generation the broker process below runs under, so it is that
+  // process's own export: the start sweep (which removes another process's) must leave it, and only the
+  // exit listener can remove it.
+  const exitGeneration = 'exit-backstop-same-process';
   const seededStore = new ArtifactStore(
     `broker-instance:${loadOrCreateBrokerInstanceId(exitHome)}`,
     exitCache,
+    { exportGeneration: exitGeneration },
   );
   seededStore.putExportAttachment(
     { tool: 'fixture', id: 'exit-backstop' },
@@ -842,7 +847,10 @@ try {
   const lastResort = await runProcess([
     'bun',
     '-e',
-    "const { startBrokerRuntime } = await import('./packages/typescript/broker/src/main.ts'); startBrokerRuntime(); process.exit(17)",
+    "const { readFileSync } = await import('node:fs'); "
+      + "const { startBrokerRuntime } = await import('./packages/typescript/broker/src/main.ts'); startBrokerRuntime(); "
+      + "const index = JSON.parse(readFileSync(process.env.COSYNCING_CACHE_DIR + '/artifacts/index.json', 'utf8')); "
+      + "console.log('exports-after-start=' + index.records.length); process.exit(17)",
   ], {
     HOME: exitHome,
     COSYNCING_HOME: exitHome,
@@ -853,14 +861,17 @@ try {
     COSYNCING_TOKDASH_URL: 'http://127.0.0.1:1',
     COSYNCING_TOKEN_FILE: '',
     COSYNCING_PI_INTEGRATION_FILE: '',
+    COSYNCING_TEST_ARTIFACT_EXPORT_GENERATION: exitGeneration,
     HOST: '127.0.0.1',
     PORT: String(exitPort),
   });
+  const afterStart = lastResort.stdout.match(/exports-after-start=(\d+)/)?.[1];
   const cleanedIndex = JSON.parse(readFileSync(exitIndexPath, 'utf8')) as { records: unknown[] };
   check('process-exit backstop removes R2 export attachments without orderly shutdown',
-    lastResort.exitCode === 17 && seededIndex.records.length === 1 && cleanedIndex.records.length === 0 &&
-      typeof seededBlob === 'string' && !existsSync(seededBlob),
-    `exit=${lastResort.exitCode}, before=${seededIndex.records.length}, after=${cleanedIndex.records.length}`);
+    lastResort.exitCode === 17 && seededIndex.records.length === 1 && afterStart === '1' &&
+      cleanedIndex.records.length === 0 && typeof seededBlob === 'string' && !existsSync(seededBlob),
+    `exit=${lastResort.exitCode}, before=${seededIndex.records.length}, afterStart=${afterStart}, `
+      + `after=${cleanedIndex.records.length}, stderr=${lastResort.stderr.trim().slice(-200)}`);
 
   const configuredHome = join(testRoot, 'configured-home');
   mkdirSync(configuredHome, { recursive: true });

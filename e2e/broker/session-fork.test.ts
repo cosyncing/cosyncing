@@ -5,14 +5,17 @@
  * parent's run, so forking it could only produce another Observe-only thread.
  * The broker refuses it with a typed 409 rather than a retry-inviting 502,
  * both when the roster knows the source and when only the adapter can tell,
- * and the refusal never reaches Codex. An ordinary fork goes through Codex's
- * `thread/fork` and returns a new session the app can open and drive.
+ * and the refusal never reaches Codex. A source outside the Codex store is not
+ * a session at all: 404 NOT_FOUND, and Codex is never asked. An ordinary fork
+ * goes through Codex's `thread/fork` and returns a new session the app can
+ * open and drive; one Codex answers with a session already in its store is
+ * refused, and that session is neither named nor written.
  *
  * Codex is a fake (`codex app-server --stdio` answering `thread/fork` by
  * writing the fork's rollout); its ledger shows every request it received.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { type Broker, type BrokerClient, startBroker } from '../harness/index.ts';
 import { CodexDriveFake, type CodexRollout, installCodexDriveFake } from '../harness/fakes/codex-drive.ts';
 
@@ -25,6 +28,7 @@ describe('forking a session', () => {
   let normal: CodexRollout;
   let child: CodexRollout;
   let hiddenChild: CodexRollout;
+  let unlistedChild: CodexRollout;
 
   beforeAll(async () => {
     broker = await startBroker({
@@ -34,7 +38,9 @@ describe('forking a session', () => {
         codex = installCodexDriveFake(paths);
         normal = codex.rollout('parent');
         child = codex.rollout('child', { thread_source: 'subagent', parent_thread_id: normal.threadId });
-        // The same kind of child, stored where discovery does not look: only the adapter can tell.
+        // The same kind of child, named by an id no roster row carries: only the adapter can tell.
+        unlistedChild = codex.unlistedSpelling('unlisted-child', { thread_source: 'subagent', parent_thread_id: normal.threadId });
+        // The same kind of child, stored outside the Codex store: not a session the adapter publishes.
         hiddenChild = codex.hiddenRollout('hidden-child', { thread_source: 'subagent', parent_thread_id: normal.threadId });
       },
       env: (paths) => CodexDriveFake.environment(paths),
@@ -59,11 +65,22 @@ describe('forking a session', () => {
 
   test('the same refusal holds when only the adapter can see the source is agent-owned', async () => {
     const roster = await client.sessions({ refresh: true });
-    expect(roster.some((row) => row.id === hiddenChild.id)).toBe(false);
-    const refused = await client.post(`/api/sessions/codex/${hiddenChild.id}/fork`, {});
+    expect(roster.some((row) => row.id === unlistedChild.id)).toBe(false);
+    const refused = await client.post(`/api/sessions/codex/${unlistedChild.id}/fork`, {});
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('SESSION_AGENT_OWNED');
     expect(codex.requests('thread/fork')).toEqual([]);
+  });
+
+  test('a source outside the Codex store is not found, and Codex is never asked', async () => {
+    const roster = await client.sessions({ refresh: true });
+    expect(roster.some((row) => row.id === hiddenChild.id)).toBe(false);
+    const refused = await client.post(`/api/sessions/codex/${hiddenChild.id}/fork`, {});
+    expect({ status: refused.status, code: refused.body.code }).toEqual({ status: 404, code: 'NOT_FOUND' });
+    const renamed = await client.post(`/api/sessions/codex/${hiddenChild.id}/rename`, { title: 'outside' });
+    expect({ status: renamed.status, code: renamed.body.code }).toEqual({ status: 404, code: 'NOT_FOUND' });
+    expect(codex.requests('thread/fork')).toEqual([]);
+    expect(codex.requests('thread/name/set')).toEqual([]);
   });
 
   test('an ordinary session forks into a new session the app can open and drive', async () => {
@@ -99,5 +116,45 @@ describe('forking a session', () => {
     }
     expect(codex.requests('thread/fork').map((entry) => entry.params.threadId))
       .toEqual([normal.threadId, ...launched.map((source) => source.threadId)]);
+  });
+
+  test('a fork Codex answers with a session already in its store is refused, and that session is left alone', async () => {
+    // One session stored before the fork is asked for (born more than the guard's clock slack earlier);
+    // every other one is stored just now, so only what it says, not its age, gives it away.
+    const settled = codex.rollout('settled');
+    const born = statSync(settled.path);
+    await Bun.sleep(Math.max(0, (born.birthtimeMs || born.mtimeMs) + 1_100 - Date.now()));
+    const freshSource = codex.rollout('fresh-source');
+    const forkOfAnother = codex.rollout('fork-of-another', { forked_from_id: settled.threadId });
+    const namesAnother = codex.rollout('names-another');
+    const answeredFromAnother = codex.rollout('answered-from-another');
+    const cases = [
+      { why: 'the source itself', source: freshSource, answer: { threadId: freshSource.threadId, path: freshSource.path } },
+      { why: 'stored before the request', source: normal, answer: { threadId: settled.threadId, path: settled.path } },
+      { why: 'its rollout forked from another session', source: normal, answer: { threadId: forkOfAnother.threadId, path: forkOfAnother.path } },
+      { why: 'its rollout names another thread', source: normal, answer: { threadId: '00000000-0000-4000-8000-00000000f0f0', path: namesAnother.path } },
+      {
+        why: 'the answer says it forked from another session',
+        source: normal,
+        answer: { threadId: answeredFromAnother.threadId, path: answeredFromAnother.path, forkedFromId: settled.threadId },
+      },
+    ];
+    try {
+      for (const { why, source, answer } of cases) {
+        codex.answerForkWith(answer);
+        const before = readFileSync(answer.path);
+        const named = codex.requests('thread/name/set').length;
+        const refused = await client.post(`/api/sessions/codex/${source.id}/fork`, {});
+        expect({ why, status: refused.status, ok: refused.body.ok }).toEqual({ why, status: 502, ok: undefined });
+        // Never named (an index row would retitle the stored session) and never written.
+        expect({ why, named: codex.requests('thread/name/set').length }).toEqual({ why, named });
+        expect({ why, unchanged: readFileSync(answer.path).equals(before) }).toEqual({ why, unchanged: true });
+      }
+    } finally {
+      codex.answerForkWith(null);
+    }
+    const forked = await client.post(`/api/sessions/codex/${normal.id}/fork`, {});
+    expect(forked.status).toBe(200);
+    expect(cases.map((entry) => entry.answer.path)).not.toContain(decode(forked.body.session.id));
   });
 });

@@ -36,12 +36,18 @@ import type {
 
 import {
   PRODUCT_IDENTITY,
+  ControlRefusedError,
   SessionCreateTemporarilyUnavailableError,
+  SessionNotFoundError,
+  TranscriptExportTooLargeError,
   bunSpawnResolvedInvocation,
+  isOpaqueSessionId,
+  isRegularSqliteStoreSync,
+  readRegularFileSync,
   resolveInvocation,
 } from '@cosyncing/adapter-api';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, statSync, watch, type FSWatcher } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { join, basename, extname, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
@@ -133,6 +139,25 @@ export interface OpenCodeAdapterOptions {
   /** Broker-owned startup/restart boundary. It never creates a session; after it settles the adapter
    * re-probes once with GET. External users of the adapter may omit it. */
   waitForManagedCreateReadiness?: () => Promise<void>;
+  /** The model the app last chose for a session, persisted by the broker (the create choice, or a
+   *  prompt's). OpenCode records a model only once a turn runs on it, so until the session shows one
+   *  of its own this is the model a prompt that names none runs on — not OpenCode's default. */
+  resolveStoredCurrentModel?: (info: {
+    tool: string;
+    id: string;
+    nativeId?: string;
+  }) => SessionInfo['currentModel'] | undefined;
+}
+
+/** The model a native OpenCode message says it ran on: a user row's `model`, or an assistant row's
+ *  `providerID`/`modelID`. Native evidence that the session has a model of its own. */
+function openCodeMessageModel(info: any): NonNullable<SessionInfo['currentModel']> | undefined {
+  const nested = info?.model && typeof info.model === 'object' ? info.model : undefined;
+  const providerID = nested?.providerID ?? info?.providerID;
+  const modelID = nested?.modelID ?? nested?.id ?? info?.modelID;
+  return typeof providerID === 'string' && providerID && typeof modelID === 'string' && modelID
+    ? { providerID, modelID }
+    : undefined;
 }
 
 function nativeTimeMs(value: unknown): number | undefined {
@@ -327,6 +352,7 @@ export class OpenCodeAdapter implements AgentBackend {
   private readonly sseIdleMs: number;
   private readonly sseReconnectMs: number;
   private readonly waitForManagedCreateReadiness?: () => Promise<void>;
+  private readonly resolveStoredCurrentModel?: OpenCodeAdapterOptions['resolveStoredCurrentModel'];
   /** Real-time working/needs-input/idle for every session, from one global event sub. */
   private readonly tracker: SessionStatusTracker;
   /** Last authoritative model catalog. A transient refresh must not erase a usable picker. */
@@ -343,6 +369,7 @@ export class OpenCodeAdapter implements AgentBackend {
     this.sseIdleMs = opencodeSseIdleMs(opts.sseIdleMs);
     this.sseReconnectMs = opencodeSseReconnectMs(opts.sseReconnectMs);
     this.waitForManagedCreateReadiness = opts.waitForManagedCreateReadiness;
+    this.resolveStoredCurrentModel = opts.resolveStoredCurrentModel;
     this.tracker = new SessionStatusTracker(this.baseUrl, this.sseIdleMs);
     this.dataDir = this.resolveDataDir(opts.storageDir);
     this.sessionStoreDir = this.dataDir ? join(this.dataDir, 'storage', 'session') : '';
@@ -490,7 +517,10 @@ export class OpenCodeAdapter implements AgentBackend {
     const serverIds = new Set<string>();
     for (const l of lists) {
       for (const s of l) {
-        if (!s?.id) continue;
+        // The serve's own listing is the authority on which sessions exist, but not on what an id may
+        // be: an id is spliced into serve URLs and storage paths, so one that is not a single opaque
+        // segment (`../../etc/passwd`, `..`, a separator) is never published, and attach refuses it.
+        if (!isOpaqueSessionId(s?.id)) continue;
         byId.set(s.id, s);
         serverIds.add(s.id);
       }
@@ -502,7 +532,7 @@ export class OpenCodeAdapter implements AgentBackend {
     // they carry live model/time/title) and only top-level sessions (no parentID), to avoid flooding
     // the roster with sub-agent children. Attach still works: GET /session/:id and /session/:id/message
     // resolve cross-projectID.
-    for (const s of disk.parents) if (!byId.has(s.id)) byId.set(s.id, s);
+    for (const s of disk.parents) if (isOpaqueSessionId(s.id) && !byId.has(s.id)) byId.set(s.id, s);
     const list = [...byId.values()];
     // The global event stream is edge-triggered: if cosyncing starts or reconnects while a turn is
     // already running, there may be no fresh `session.status` event to seed the roster. Reconcile
@@ -647,7 +677,8 @@ export class OpenCodeAdapter implements AgentBackend {
     if (!this.dataDir) return undefined;
     const path = join(this.dataDir, 'opencode.db');
     try {
-      if (!existsSync(path)) return undefined;
+      // SQLite's opens block on a FIFO: the database and its sidecars must be regular files.
+      if (!isRegularSqliteStoreSync(path)) return undefined;
       return new Database(path, { readonly: true });
     } catch {
       return undefined;
@@ -678,7 +709,7 @@ export class OpenCodeAdapter implements AgentBackend {
           continue;
         }
         options?.onWork?.({ kind: 'decode-file', source: f });
-        const s = JSON.parse(readFileSync(f, 'utf8')) as OcSession;
+        const s = JSON.parse(readRegularFileSync(f, 'utf8')) as OcSession;
         if (!s?.id) continue;
         if (s.directory && s.directory !== '/') dirs.add(s.directory); // a real cwd to API-query
         if (!s.parentID) parents.push(s); // top-level sessions only (skip sub-agent children)
@@ -731,23 +762,20 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async attach(sessionId: string, mode?: AttachMode): Promise<SessionConnection> {
+    if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const serverOk = await this.serverAvailable();
     const list = await this.discoverSessions();
     // GET /session (used by discoverSessions) is scoped to the serve's default project dir, so a
     // session living in any other directory isn't listed. Resolve it directly by id (works
     // cross-directory) to recover its real cwd — without it sendFile writes nothing, directory-
     // scoped question/permission replies 404, and the outbox watcher never starts.
+    // An id that neither the serve nor the private store knows names nothing: it is refused, never
+    // opened as an empty placeholder session.
     const info =
       list.find((s) => s.id === sessionId) ??
       (serverOk ? await this.fetchSessionInfo(sessionId) : undefined) ??
-      this.privateSessionInfo(sessionId, serverOk) ?? {
-        id: sessionId,
-        tool: this.id,
-        title: sessionId,
-        status: 'idle' as const,
-        attachMode: 'observe' as const,
-        control: opencodePrivateControlState({ canDrive: !!this.opencodeBin }),
-      };
+      this.privateSessionInfo(sessionId, serverOk);
+    if (!info) throw new SessionNotFoundError('OpenCode does not list this session.');
     if (mode === 'resume') {
       if (!this.opencodeBin) throw new Error(`OpenCode CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`);
       return new OpenCodeRunConnection(this.storageRoot, this.opencodeBin, {
@@ -766,12 +794,18 @@ export class OpenCodeAdapter implements AgentBackend {
         control: info.control ?? opencodePrivateControlState({ canDrive: !!this.opencodeBin, terminalSyncHint: info.terminalSyncHint }),
       });
     }
+    // A session that names no model of its own runs a model-less prompt on OpenCode's default. The
+    // model the app chose for it (persisted by the broker) is the one it should run on until it does.
+    const modelHint = info.currentModel
+      ? undefined
+      : this.resolveStoredCurrentModel?.({ tool: this.id, id: info.id, ...(info.nativeId ? { nativeId: info.nativeId } : {}) });
     const conn = new OpenCodeConnection(
       this.baseUrl,
       info,
       this.sseIdleMs,
       this.sseReconnectMs,
       (current) => this.loadModelCatalog(current),
+      modelHint,
     );
     conn.start();
     // Wait until the /event SSE reader is actually connected before returning, so the
@@ -808,7 +842,7 @@ export class OpenCodeAdapter implements AgentBackend {
     if (!this.sessionStoreDir) return undefined;
     for (const f of this.walkJson(this.sessionStoreDir, 2)) {
       try {
-        const s = JSON.parse(readFileSync(f, 'utf8')) as OcSession;
+        const s = JSON.parse(readRegularFileSync(f, 'utf8')) as OcSession;
         if (s?.id === id) return s;
       } catch {
         /* skip */
@@ -923,10 +957,13 @@ export class OpenCodeAdapter implements AgentBackend {
    *  serve's default project, unlike the GET /session listing) — the authoritative source of a
    *  session's real cwd when it isn't in discoverSessions(). */
   private async fetchSessionInfo(id: string): Promise<SessionInfo | undefined> {
+    if (!isOpaqueSessionId(id)) return undefined;
     try {
-      const res = await fetch(this.url(`/session/${id}`), { signal: AbortSignal.timeout(4000) });
+      const res = await fetch(this.url(`/session/${encodeURIComponent(id)}`), { signal: AbortSignal.timeout(4000) });
       if (!res.ok) return undefined;
       const s = (await res.json()) as OcSession;
+      // The serve answers for exactly the id asked: anything else is not this session.
+      if (s?.id !== id) return undefined;
       return {
         id: s.id,
         tool: this.id,
@@ -987,12 +1024,14 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
+    if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const trimmed = title == null ? null : title.trim().slice(0, 160);
     const res = await fetch(this.url(`/session/${encodeURIComponent(sessionId)}`), {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: trimmed || null }),
     });
+    if (res.status === 404) throw new SessionNotFoundError('OpenCode does not list this session.');
     if (!res.ok) throw new Error(`opencode rename failed (${res.status})`);
     const s = (await res.json()) as OcSession;
     return {
@@ -1013,12 +1052,14 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async forkSession(sessionId: string, opts: { messageId?: string | null } = {}): Promise<SessionInfo> {
+    if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const messageID = opts.messageId?.trim() || undefined;
     const res = await fetch(this.url(`/session/${encodeURIComponent(sessionId)}/fork`), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(messageID ? { messageID } : {}),
     });
+    if (res.status === 404) throw new SessionNotFoundError('OpenCode does not list this session.');
     if (!res.ok) throw new Error(`opencode fork failed (${res.status})`);
     const s = (await res.json().catch(() => null)) as OcSession | null;
     if (!s?.id) throw new Error('opencode fork did not return a session');
@@ -1051,6 +1092,8 @@ export class OpenCodeAdapter implements AgentBackend {
     opts: { tempDir: string; maxBytes: number; timeoutMs: number },
   ): Promise<{ path: string; format: 'json' }> {
     if (!this.opencodeBin) throw new Error('OpenCode CLI is not available on PATH; cannot export transcript.');
+    // The id becomes an argv word: one that is not a session id must never reach the CLI.
+    if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const outPath = join(opts.tempDir, 'export.json');
     const proc = spawnOpenCode(this.opencodeBin, ['export', sessionId, '--sanitize'], {
       stdout: 'pipe',
@@ -1088,7 +1131,7 @@ export class OpenCodeAdapter implements AgentBackend {
         chunks.push(Buffer.from(value));
       }
       const code = await proc.exited;
-      if (tooLarge) throw new Error('opencode export exceeded the size cap');
+      if (tooLarge) throw new TranscriptExportTooLargeError('opencode export exceeded the size cap', opts.maxBytes);
       if (timedOut) throw new Error('opencode export timed out');
       if (code !== 0) {
         const stderr = await new Response(proc.stderr).text().catch(() => '');
@@ -1332,6 +1375,8 @@ class OpenCodeObserveConnection implements SessionConnection {
 
 class OpenCodeRunConnection extends OpenCodeObserveConnection {
   private running?: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
+  /** The user stopped the running turn: the child's signal exit is that outcome, not a failure. */
+  private stopRequested = false;
 
   constructor(
     storageRoot: string,
@@ -1367,6 +1412,7 @@ class OpenCodeRunConnection extends OpenCodeObserveConnection {
       env: process.env,
     });
     this.running = proc;
+    this.stopRequested = false;
     let stderr = '';
     try {
       const stdoutP = this.consumeRunStdout(proc.stdout);
@@ -1377,18 +1423,29 @@ class OpenCodeRunConnection extends OpenCodeObserveConnection {
       const code = await proc.exited;
       await Promise.all([stdoutP, stderrP]);
       const completedAt = Date.now();
+      // A run the user stopped ends `cancelled`, as a Stop on a serve does: the signal exit (143) is
+      // the Stop itself, not a failure. A run that finished before the signal landed is just done.
+      const status = code === 0 ? 'done' : this.stopRequested ? 'cancelled' : 'error';
       this.emitRun({
         type: 'run-summary',
         key: `opencode:run:${turnId}`,
         turnId,
         userMessageKey: userKey,
-        status: code === 0 ? 'done' : 'error',
+        status,
         startedAt,
         completedAt,
         totalRuntimeMs: Math.max(0, completedAt - startedAt),
         source: 'opencode-run',
       });
-      if (code !== 0) this.emitRun({ type: 'error', message: (stderr || `opencode run exited ${code}`).split('\n')[0]!.slice(0, 240) });
+      if (status === 'cancelled') {
+        this.emitRun({
+          type: 'notice',
+          message: 'Interrupted by user.',
+          semantic: { kind: 'interruption', reason: 'user', turnId },
+        });
+      } else if (status === 'error') {
+        this.emitRun({ type: 'error', message: (stderr || `opencode run exited ${code}`).split('\n')[0]!.slice(0, 240) });
+      }
     } finally {
       this.running = undefined;
       this.emitRun({ type: 'history-reset' });
@@ -1423,8 +1480,11 @@ class OpenCodeRunConnection extends OpenCodeObserveConnection {
   }
 
   async runCommand(name: string): Promise<CommandResult | void> {
-    if (name !== 'stop' && name !== 'abort') throw new Error(`OpenCode private Drive does not support /${name}.`);
+    if (name !== 'stop' && name !== 'abort') {
+      throw new ControlRefusedError(`OpenCode private Drive does not support /${name}.`, 'command-unsupported');
+    }
     if (!this.running) return { notice: 'No private Drive turn is running.' };
+    this.stopRequested = true;
     this.running.kill();
     return { notice: 'Stopped the private Drive turn.' };
   }
@@ -1524,9 +1584,24 @@ class OpenCodeConnection implements SessionConnection {
   /** One abort surfaces on BOTH session.error and the assistant message.updated error — without a
    *  guard the user reads "Interrupted by user." twice per Stop (issues-part2 item 5 re-flag). */
   private lastInterruptNoticeAt = 0;
+  /** Assistant messages whose native error row was already shown (a failed message is announced
+   *  again as it updates). Bounded like the other per-message maps. */
+  private readonly failedMessages = new Set<string>();
+  /** The serve reports one run failure twice: `session.error`, then the assistant message carrying
+   *  the same error (either may come alone, in either order). The first report shows the row and
+   *  leaves what it matched on here; the matching report from the other source is absorbed. Cleared
+   *  when a new turn starts, so the same failure in a later turn shows again. */
+  private unmatchedFailure?: { match: string; from: 'session' | 'message' };
+  /** The user message that last started a turn, for {@link unmatchedFailure}: a user row announced
+   *  again (OpenCode updates it after the turn) is not a new turn. */
+  private failureTurnUserId?: string;
   private resolveReady!: () => void;
   /** Resolves once the /event SSE reader is connected (safe to send prompts). */
   readonly ready: Promise<void> = new Promise((r) => (this.resolveReady = r));
+  /** The app's persisted model choice, while the session shows no model of its own: what a prompt
+   *  that names no model runs on. Dropped at the first native evidence of a model (the session's, or
+   *  a message's), which from then on is what OpenCode itself uses for such a prompt. */
+  private modelHint?: NonNullable<SessionInfo['currentModel']>;
 
   constructor(
     private readonly baseUrl: string,
@@ -1536,12 +1611,28 @@ class OpenCodeConnection implements SessionConnection {
     private readonly loadModels: (
       current?: SessionInfo['currentModel'],
     ) => Promise<ModelOption[]>,
+    modelHint?: SessionInfo['currentModel'],
   ) {
     this.liveSessionActive = info.status === 'working' || info.status === 'needs-input';
+    if (modelHint && !info.currentModel) {
+      this.modelHint = { ...modelHint };
+      this.info.currentModel = { ...modelHint };
+      this.info.model = modelHint.modelID;
+    }
+  }
+
+  /** The session (or one of its messages) names a model: OpenCode uses it, and the hint retires. */
+  private noteNativeModelEvidence(): void {
+    this.modelHint = undefined;
   }
 
   private url(path: string): string {
     return this.baseUrl + path;
+  }
+
+  /** This session's id as one URL path segment. */
+  private get sessionSegment(): string {
+    return encodeURIComponent(this.info.id);
   }
 
   /** OpenCode's question/permission reply registries are partitioned by directory — a reply
@@ -1573,6 +1664,29 @@ class OpenCodeConnection implements SessionConnection {
         ...(ownedTurnId ? { turnId: ownedTurnId } : {}),
       },
     });
+  }
+
+  /** One transcript row per native run failure (see {@link unmatchedFailure}). `shown` is the text the
+   *  row displays; the match is on the native error's own text, so the two sources' different
+   *  fallbacks for an error that names nothing still pair up. */
+  private emitFailure(error: any, shown: unknown, from: 'session' | 'message', messageId?: string): void {
+    if (messageId !== undefined) {
+      if (this.failedMessages.has(messageId)) return;
+      this.failedMessages.add(messageId);
+      while (this.failedMessages.size > OPENCODE_RUN_RECORD_LIMIT) {
+        this.failedMessages.delete(this.failedMessages.values().next().value!);
+      }
+    }
+    const firstLine = (value: unknown) => (String(value).split('\n')[0] ?? '').slice(0, 200);
+    const native = error?.data?.message ?? error?.message ?? error?.name;
+    const match = native === undefined || native === null ? '' : firstLine(native);
+    const unmatched = this.unmatchedFailure;
+    if (unmatched && unmatched.from !== from && unmatched.match === match) {
+      this.unmatchedFailure = undefined;
+      return;
+    }
+    this.unmatchedFailure = { match, from };
+    this.emit({ type: 'error', message: firstLine(shown) });
   }
 
   private noteUserBoundary(info: any): void {
@@ -1812,7 +1926,7 @@ class OpenCodeConnection implements SessionConnection {
   }
 
   async getHistory(): Promise<AgentMessage[]> {
-    const res = await fetch(this.url(`/session/${this.info.id}/message`), {
+    const res = await fetch(this.url(`/session/${this.sessionSegment}/message`), {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return [];
@@ -1863,6 +1977,7 @@ class OpenCodeConnection implements SessionConnection {
       const row = rows[rowIndex]!;
       let rowInfo = row.info;
       const role = rowInfo?.role;
+      if (openCodeMessageModel(rowInfo)) this.noteNativeModelEvidence();
       if (role === 'user') {
         const text = (row.parts ?? [])
           .filter((p) => p?.type === 'text')
@@ -1953,7 +2068,7 @@ class OpenCodeConnection implements SessionConnection {
   async getHistorySourceIdentity(): Promise<HistorySourceIdentity | undefined> {
     try {
       const response = await fetch(
-        this.url(`/session/${this.info.id}${this.dirq()}`),
+        this.url(`/session/${this.sessionSegment}${this.dirq()}`),
         { signal: AbortSignal.timeout(3000) },
       );
       if (!response.ok) return undefined;
@@ -1978,7 +2093,7 @@ class OpenCodeConnection implements SessionConnection {
   /** The session's current revert pointer (messageID), or undefined if not reverted. */
   private async fetchRevertId(): Promise<string | undefined> {
     try {
-      const r = await fetch(this.url(`/session/${this.info.id}${this.dirq()}`), { signal: AbortSignal.timeout(3000) });
+      const r = await fetch(this.url(`/session/${this.sessionSegment}${this.dirq()}`), { signal: AbortSignal.timeout(3000) });
       if (r.ok) return (await r.json())?.revert?.messageID;
     } catch {
       /* server gone */
@@ -2105,7 +2220,7 @@ class OpenCodeConnection implements SessionConnection {
 
   private async probeSession(): Promise<OpenCodeSessionProbe> {
     try {
-      const res = await fetch(this.url(`/session/${this.info.id}${this.dirq()}`), { signal: AbortSignal.timeout(1500) });
+      const res = await fetch(this.url(`/session/${this.sessionSegment}${this.dirq()}`), { signal: AbortSignal.timeout(1500) });
       if (res.ok) return 'exists';
       if (res.status === 404 || res.status === 410) return 'missing';
       if (res.status >= 500) return 'inconclusive';
@@ -2224,6 +2339,7 @@ class OpenCodeConnection implements SessionConnection {
         if (info?.id !== this.info.id) return;
         const currentModel = currentModelOf(info);
         if (currentModel) {
+          this.noteNativeModelEvidence();
           this.info.currentModel = currentModel;
           this.info.model = info.model?.id ?? info.model?.modelID ?? currentModel.modelID;
         }
@@ -2278,7 +2394,7 @@ class OpenCodeConnection implements SessionConnection {
         if (terminalStatus === 'cancelled') {
           this.noticeInterrupted();
         } else {
-          this.emit({ type: 'error', message: (String(msg).split('\n')[0] ?? '').slice(0, 200) });
+          this.emitFailure(err, msg, 'session');
         }
         this.liveSessionActive = false;
         this.fenceTerminal(terminalStatus);
@@ -2291,7 +2407,15 @@ class OpenCodeConnection implements SessionConnection {
           const createdAt = nativeTimeMs(p.info?.time?.created);
           if (createdAt) this.msgCreatedAt.set(String(p.info.id), createdAt);
         }
-        if (p.info?.role === 'user') this.noteUserBoundary(p.info);
+        if (openCodeMessageModel(p.info)) this.noteNativeModelEvidence();
+        if (p.info?.role === 'user') {
+          this.noteUserBoundary(p.info);
+          const userId = p.info?.id ? String(p.info.id) : undefined;
+          if (userId && userId !== this.failureTurnUserId) {
+            this.failureTurnUserId = userId;
+            this.unmatchedFailure = undefined;
+          }
+        }
         const tok = p.info?.tokens;
         if (tok) {
           this.emit({
@@ -2314,7 +2438,7 @@ class OpenCodeConnection implements SessionConnection {
               p.info?.id ? String(p.info.id) : undefined,
             );
           }
-          else this.emit({ type: 'error', message: (String(msg).split('\n')[0] ?? '').slice(0, 200) });
+          else this.emitFailure(e, msg, 'message', p.info?.id ? String(p.info.id) : undefined);
         }
         if (p.info?.role === 'assistant') {
           this.bufferAssistantRun(p.info, {
@@ -2438,11 +2562,14 @@ class OpenCodeConnection implements SessionConnection {
       parts.push({ type: 'file', mime: img.mimeType, filename: img.name ?? 'image', url: `data:${img.mimeType};base64,${img.data}` });
     }
     const body: any = { parts };
-    if (input.model) {
+    // A prompt that names no model runs on the app's persisted choice while the session shows none of
+    // its own (see `modelHint`); otherwise OpenCode picks, from the session's own last model.
+    const model = input.model ?? this.modelHint;
+    if (model) {
       // OpenCode's HTTP schema keeps variant as a sibling of model, not inside model.
       // Contract: docs/protocol/adapter-support.md
-      body.model = { providerID: input.model.providerID, modelID: input.model.modelID };
-      if (input.model.variant) body.variant = input.model.variant;
+      body.model = { providerID: model.providerID, modelID: model.modelID };
+      if (model.variant) body.variant = model.variant;
     }
     if (input.agent) body.agent = input.agent; // per-prompt agent/mode (build/plan)
     // Native app-send correlation: supply the user message's id ourselves (the TUI does the same),
@@ -2457,7 +2584,9 @@ class OpenCodeConnection implements SessionConnection {
         this.appSendClientKeys.delete(this.appSendClientKeys.keys().next().value!);
       }
     }
-    const res = await fetch(this.url(`/session/${this.info.id}/prompt_async`), {
+    // This send starts a new turn: a failure it ends with is that turn's own, not a repeat of the last.
+    this.unmatchedFailure = undefined;
+    const res = await fetch(this.url(`/session/${this.sessionSegment}/prompt_async`), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -2466,6 +2595,9 @@ class OpenCodeConnection implements SessionConnection {
       if (messageID) this.appSendClientKeys.delete(messageID); // rejected send never materializes
       throw new Error(`opencode prompt ${res.status}: ${await safeText(res)}`);
     }
+    // The model this turn names is recorded on its user message: from here OpenCode runs a prompt that
+    // names none on it by itself.
+    if (body.model) this.noteNativeModelEvidence();
   }
 
   /** OpenCode's exact model roster, grouped-friendly label "provider · name" (the UI filters/searches).
@@ -2499,7 +2631,7 @@ class OpenCodeConnection implements SessionConnection {
     if (this.info.attachMode === 'observe' || this.info.control?.drive.state === 'unavailable') {
       throw new Error(this.info.control?.drive.reason ?? 'OpenCode session is read-only because the shared server connection is unavailable.');
     }
-    const res = await fetch(this.url(`/api/session/${this.info.id}/agent`), {
+    const res = await fetch(this.url(`/api/session/${this.sessionSegment}/agent`), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent }),
@@ -2522,7 +2654,7 @@ class OpenCodeConnection implements SessionConnection {
       throw new Error('OpenCode does not support persistent approval rules through this connection');
     }
     const reply = decision === 'reject' ? 'reject' : decision === 'approve-session' ? 'always' : 'once';
-    const res = await fetch(this.url(`/permission/${requestId}/reply${this.dirq()}`), {
+    const res = await fetch(this.url(`/permission/${encodeURIComponent(requestId)}/reply${this.dirq()}`), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ reply }),
@@ -2532,7 +2664,7 @@ class OpenCodeConnection implements SessionConnection {
 
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
     // answers: one array of selected labels per question (custom text is just a label).
-    const res = await fetch(this.url(`/question/${requestId}/reply${this.dirq()}`), {
+    const res = await fetch(this.url(`/question/${encodeURIComponent(requestId)}/reply${this.dirq()}`), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ answers }),
@@ -2541,7 +2673,7 @@ class OpenCodeConnection implements SessionConnection {
   }
 
   async rejectQuestion(requestId: string): Promise<void> {
-    const res = await fetch(this.url(`/question/${requestId}/reject${this.dirq()}`), { method: 'POST' });
+    const res = await fetch(this.url(`/question/${encodeURIComponent(requestId)}/reject${this.dirq()}`), { method: 'POST' });
     if (!res.ok) throw new Error(`opencode question reject ${res.status}: ${await safeText(res)}`);
   }
 
@@ -2562,7 +2694,7 @@ class OpenCodeConnection implements SessionConnection {
   }
 
   async runCommand(name: string, args?: string): Promise<CommandResult | void> {
-    const sid = this.info.id;
+    const sid = encodeURIComponent(this.info.id);
     const post = (path: string, body?: unknown) =>
       fetch(this.url(path), {
         method: 'POST',
@@ -3120,10 +3252,28 @@ function opencodeDbActivity(storageRoot: string, sessionId: string): SessionInfo
   const db = openOpenCodeDb(storageRoot);
   if (!db) return undefined;
   try {
-    const session = db.query(`select id, time_updated from session where id = ?`).get(sessionId) as any;
+    const session = db.query(`select id, time_updated, revert from session where id = ?`).get(sessionId) as any;
     if (!session) return undefined;
-    const latest = db
-      .query(`select id, session_id, time_created, time_updated, data from message where session_id = ? order by time_created desc, id desc limit 1`)
+    const columns = `id, session_id, time_created, time_updated, data`;
+    let latest: any;
+    // The revert pointer hides its message and every one after it, exactly as history does (see
+    // opencodeDbHistory): an unfinished turn past it is not the session's current turn. A pointer that
+    // names no message of this session is ignored, again as history ignores it.
+    const revertId = parseJsonObject(session.revert)?.messageID;
+    if (revertId) {
+      const ordered = db
+        .query(`select id from message where session_id = ? order by time_created, id`)
+        .all(sessionId) as any[];
+      const cut = ordered.findIndex((row) => row.id === revertId);
+      if (cut === 0) return 'idle';
+      if (cut > 0) {
+        latest = db
+          .query(`select ${columns} from message where session_id = ? and id = ?`)
+          .get(sessionId, ordered[cut - 1].id);
+      }
+    }
+    latest ??= db
+      .query(`select ${columns} from message where session_id = ? order by time_created desc, id desc limit 1`)
       .get(sessionId) as any;
     if (!latest) return 'idle';
     const msg = { id: latest.id, sessionID: latest.session_id, ...parseJsonObject(latest.data) };
@@ -3256,7 +3406,8 @@ function openOpenCodeDb(storageRoot: string): Database | undefined {
   if (!storageRoot) return undefined;
   const path = join(dirname(storageRoot), 'opencode.db');
   try {
-    if (!existsSync(path)) return undefined;
+    // SQLite's opens block on a FIFO: the database and its sidecars must be regular files.
+    if (!isRegularSqliteStoreSync(path)) return undefined;
     return new Database(path, { readonly: true });
   } catch {
     return undefined;
@@ -3304,6 +3455,7 @@ function openCodeSessionRewriteToken(
 ): string | undefined {
   let database: Database | undefined;
   try {
+    if (!isRegularSqliteStoreSync(databasePath)) return undefined;
     database = new Database(databasePath, { readonly: true });
     const row = database
       .query('select revert from session where id = ? limit 1')
@@ -3327,7 +3479,7 @@ function readJsonDir(dir: string): any[] {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       if (!ent.isFile() || !ent.name.endsWith('.json')) continue;
       try {
-        out.push(JSON.parse(readFileSync(join(dir, ent.name), 'utf8')));
+        out.push(JSON.parse(readRegularFileSync(join(dir, ent.name), 'utf8')));
       } catch {
         /* skip partial/corrupt JSON */
       }
@@ -3348,7 +3500,7 @@ function readJsonTree(dir: string, maxDepth: number): any[] {
       if (ent.isDirectory()) out.push(...readJsonTree(full, maxDepth - 1));
       else if (ent.isFile() && ent.name.endsWith('.json')) {
         try {
-          out.push(JSON.parse(readFileSync(full, 'utf8')));
+          out.push(JSON.parse(readRegularFileSync(full, 'utf8')));
         } catch {
           /* skip partial/corrupt JSON */
         }

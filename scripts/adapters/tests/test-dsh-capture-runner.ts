@@ -113,6 +113,18 @@ function fixtureHost(port: number): void {
   console.log(`dsh web: http://127.0.0.1:${String(server.port)}/?token=fixture-launch-token`);
 }
 
+async function reapedWithin(child: { exited: Promise<number> }, boundMs: number): Promise<boolean> {
+  let bound: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      child.exited.then(() => true),
+      new Promise<boolean>((resolve) => { bound = setTimeout(() => resolve(false), boundMs); }),
+    ]);
+  } finally {
+    clearTimeout(bound);
+  }
+}
+
 async function unusedPort(): Promise<number> {
   const listener = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -178,8 +190,12 @@ async function testRunner(): Promise<void> {
           && record.provenance.defaultWorkspace.probed === false
           && record.provenance.defaultWorkspace.reason.includes(platform === 'linux' ? 'unavailable' : 'cannot be pinned'));
       check(`${platform}: free captures never attempt a model turn`, record.provenance.modelTurn.attempted === false && record.provenance.credentialEnvsForwarded.length === 0);
+      // Cleanup proves the exit from the process table, where an exited child its parent has not yet
+      // reaped already reads as gone. This process's own exit status for it arrives only when Bun's
+      // event loop reaps it, so wait for that (bounded) rather than read it the moment capture returns.
+      const reaped = !!child && record.captures.hostCleanup?.ok === true && await reapedWithin(child, 30_000);
       check(`${platform}: the real fixture child exits and its home is removed`,
-        !!child && (child.exitCode !== null || child.signalCode !== null)
+        reaped && !!child && (child.exitCode !== null || child.signalCode !== null)
           && home !== '' && !existsSync(home) && record.provenance.homeRemoved === true);
     }
 

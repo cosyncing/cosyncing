@@ -1,0 +1,24 @@
+{
+  "history": [
+    {"type":"user-message","text":"run it","key":"c1"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tr1","turnId":"tr1","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"tool-call","callId":"c1","toolName":"exec_command","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"tool-result","callId":"c1","toolName":"exec_command","toolClass":"execute","semantic":{"kind":"command","command":"ls","state":"failed"},"isError":true,"result":"boom","exitCode":2,"durationMs":1250},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tr1","turnId":"tr1","userMessageKey":"c1","status":"done","source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"run it","key":"c1"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:tr1","turnId":"tr1","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"tool-call","callId":"c1","toolName":"exec_command","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}},
+    {"type":"tool-result","callId":"c1","toolName":"exec_command","toolClass":"execute","semantic":{"kind":"command","command":"ls","state":"failed"},"isError":true,"result":"boom","exitCode":2,"durationMs":1250},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:tr1","turnId":"tr1","userMessageKey":"c1","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

@@ -2,8 +2,8 @@
  * Cline's managed Hub as the product runs it: the daemon the broker launches and owns (argv, environment,
  * isolated profile and port, the owner-only discovery file and the health answer that must agree with it), what
  * the broker refuses to use (a loosened or contradicted discovery record), a Hub that is replaced (its sessions
- * lose Drive), runs that fail or are stopped, attention events (exactly one per outcome), and the native title
- * write rename escalates to.
+ * lose Drive), runs that fail or are stopped (Stop keeps Drive), attention events (exactly one per outcome), and
+ * the native title write rename escalates to.
  *
  * Every Hub here is the compiled fake `cline` (`kits/fakes/cline-program.ts`) on a leased loopback port, handed to
  * the broker through the product's own `COSYNCING_CLINE_HUB_PORT`, with its profile under the fixture root:
@@ -250,24 +250,32 @@ posix('a stopped run settles', () => {
     return { id, stream, turn };
   };
 
-  test('Stop against a Hub that never answers the aborted run fails closed: the Hub is idle and the session is read-only', async () => {
+  test('Stop against a Hub that never answers the aborted run proves the Hub idle, acks, and keeps Drive', async () => {
     const { fake, client } = running;
-    const { id, stream } = await heldTurn('stop-fails-closed');
+    const { id, stream } = await heldTurn('stop-keeps-drive');
     const stopped = await stream.sendAndAwait({ kind: 'command', name: 'stop' });
-    expect(stopped.kind).toBe('nack');
-    expect(String(stopped.message)).toContain('Stop failed closed');
+    expect(stopped.kind, JSON.stringify(stopped)).toBe('ack');
     expect(fake.ledger.since(0).filter((entry) => entry.kind === 'abort' && entry.sessionId === id).length).toBe(1);
-    const row = await client.waitForSession((candidate) => candidate.id === id && candidate.control?.drive?.supported === false);
-    expect(row.status).toBe('idle');
-    expect(stream.ofKind('session').at(-1)?.authority?.canMutate).toBe(false);
+    // The Hub never answered the aborted run.start, and nothing waited for it to.
+    expect(fake.ledger.since(0).some((entry) => entry.kind === 'run-end' && entry.how === 'aborted' && String(entry.text).includes('[[hold:stop-keeps-drive]]'))).toBe(true);
+    const row = await client.waitForSession((candidate) => candidate.id === id && candidate.status === 'idle');
+    expect(row.control?.drive?.supported).toBe(true);
+    expect(stream.ofKind('session').at(-1)?.authority?.canMutate).toBe(true);
+    expect((await stream.sendAndAwait({ kind: 'prompt', text: 'after stop' })).kind).toBe('ack');
+    await stream.waitForMessage((message) => message.type === 'model-output' && (message.text ?? message.delta) === 'answer: after stop');
     stream.close();
   });
 
-  test.failing('the prompt whose turn was stopped is answered (ack or nack) rather than left pending forever', async () => {
+  test('the prompt whose turn was stopped is answered (ack or nack) rather than left pending forever', async () => {
     const { stream, turn } = await heldTurn('stop-answers-the-turn');
-    expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('nack');
-    const answered = await eventually(async () => Promise.race([turn.then(() => true), Promise.resolve(false)]), { what: 'the stopped prompt to be answered', timeoutMs: 8_000 });
+    // Settlement is observed, not raced: a race against an already-resolved `false` always loses.
+    let settled = false;
+    void turn.then(() => { settled = true; }, () => { settled = true; });
+    expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+    const answered = await eventually(() => settled, { what: 'the stopped prompt to be answered', timeoutMs: 8_000 });
     expect(answered).toBe(true);
+    // Answered as stopped: the prompt is acked, never refused.
+    expect((await turn).kind).toBe('ack');
     stream.close();
   });
 });

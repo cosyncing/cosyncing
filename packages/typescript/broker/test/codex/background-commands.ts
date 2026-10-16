@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+// First: the adapter fixes its session store when it loads, and admits only rollouts inside it.
+import { codexTestRolloutDir } from '../helpers/codex-test-home.ts';
 import { mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -229,7 +231,9 @@ export async function testBackgroundReconciliation(): Promise<void> {
 export async function testBackgroundDaemonAndClients(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'codex-background-test-'));
   const sock = join(dir, 'daemon.sock');
-  const path = join(dir, 'rollout.jsonl');
+  // Inside the adapter's session store (an importer loads `codex-test-home.ts` first), so the
+  // rollout is one the adapter may attach.
+  const path = join(codexTestRolloutDir('codex-background-'), 'rollout-thread.jsonl');
   writeFileSync(path, JSON.stringify({ type: 'session_meta', payload: { id: 'thread', cwd: dir } }) + '\n');
   const prior = { sock: process.env.COSYNCING_CODEX_APP_SERVER_SOCK, sync: process.env.COSYNCING_CODEX_SYNC_SERVER };
   process.env.COSYNCING_CODEX_APP_SERVER_SOCK = join(dir, 'control-link.sock');

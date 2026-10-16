@@ -22,7 +22,7 @@ import type {
   SessionInfo,
   SlashCommand,
 } from '@cosyncing/adapter-api';
-import { CONTEXT_INJECTION_EVENT, boundContextBody } from '@cosyncing/adapter-api';
+import { CONTEXT_INJECTION_EVENT, ControlRefusedError, boundContextBody } from '@cosyncing/adapter-api';
 import {
   boundedReasonixToolPayload,
   mapReasonixInterruptedTail,
@@ -54,7 +54,9 @@ export interface ReasonixAcpTransport {
   listModels?(): Promise<ModelOption[]>;
   listModes?(): Promise<ModeOption[]>;
   configureModel?(selection: PromptInput['model']): Promise<void>;
-  configureMode?(mode: string | undefined): Promise<void>;
+  /** Resolves `true` only when `session/set_config_option` changed the mode and its answer
+   *  confirmed the requested one; a mode Reasonix already reports changes nothing. */
+  configureMode?(mode: string | undefined): Promise<boolean | void>;
   close(force?: boolean): Promise<void>;
 }
 
@@ -352,15 +354,15 @@ class LazyReasonixAcpTransport implements ReasonixAcpTransport {
     }));
   }
 
-  async configureMode(value: string | undefined): Promise<void> {
-    if (value === undefined) return;
+  async configureMode(value: string | undefined): Promise<boolean> {
+    if (value === undefined) return false;
     const mode = reasonixApprovalMode(value);
     if (!mode) throw new Error(`Reasonix permission mode ${value} is not in the measured native vocabulary.`);
     const client = await this.ensureClient();
     if (!this.configCatalog.modeConfigId || !this.configCatalog.modes.some((entry) => entry.value === mode)) {
       throw new Error(`Reasonix did not advertise permission mode ${mode}.`);
     }
-    if (this.configCatalog.currentMode === mode) return;
+    if (this.configCatalog.currentMode === mode) return false;
     const result = await client.sessionSetConfigOption({
       sessionId: this.session.id,
       configId: this.configCatalog.modeConfigId,
@@ -370,6 +372,7 @@ class LazyReasonixAcpTransport implements ReasonixAcpTransport {
     if (this.configCatalog.currentMode !== mode) {
       throw new Error(`Reasonix did not confirm permission mode ${mode}.`);
     }
+    return true;
   }
 
   async configureModel(selection: PromptInput['model']): Promise<void> {
@@ -535,14 +538,14 @@ class CreatedReasonixAcpTransport implements ReasonixAcpTransport {
     }));
   }
 
-  async configureMode(value: string | undefined): Promise<void> {
-    if (value === undefined) return;
+  async configureMode(value: string | undefined): Promise<boolean> {
+    if (value === undefined) return false;
     const mode = reasonixApprovalMode(value);
     if (!mode || !this.configCatalog.modeConfigId
       || !this.configCatalog.modes.some((entry) => entry.value === mode)) {
       throw new Error(`Reasonix did not advertise permission mode ${value}.`);
     }
-    if (this.configCatalog.currentMode === mode) return;
+    if (this.configCatalog.currentMode === mode) return false;
     const result = await this.client.sessionSetConfigOption({
       sessionId: this.sessionId,
       configId: this.configCatalog.modeConfigId,
@@ -552,6 +555,7 @@ class CreatedReasonixAcpTransport implements ReasonixAcpTransport {
     if (this.configCatalog.currentMode !== mode) {
       throw new Error(`Reasonix did not confirm permission mode ${mode}.`);
     }
+    return true;
   }
 
   async close(force = false): Promise<void> {
@@ -1149,7 +1153,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
         if (!admitted) throw new Error('Reasonix queued prompt disappeared before native delivery.');
         await this.assertFreshDriveEligibility();
         await this.transport.configureModel?.(input.model);
-        await this.transport.configureMode?.(input.permissionMode);
+        const modeChanged = await this.transport.configureMode?.(input.permissionMode) === true;
         if (this.closedDrive || admissionCancelGeneration !== this.cancelGeneration) {
           throw new ReasonixPromptCancelledBeforeDelivery();
         }
@@ -1190,7 +1194,10 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
           || this.publishCreatedInitialSnapshot
           || this.pendingCreate !== undefined;
         await this.materializeCreatedSession();
-        if (input.permissionMode) {
+        // Only a change Reasonix confirmed has to be stored before the turn resolves. A prompt that
+        // names the mode Reasonix already reports changed nothing, and a session Reasonix never
+        // wrote a mode for stays without one: demanding it there ended Drive after a good turn.
+        if (modeChanged && input.permissionMode) {
           const requestedMode = reasonixApprovalMode(input.permissionMode);
           if (requestedMode) await this.requireDurableMode(requestedMode);
         }
@@ -1266,7 +1273,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
       throw new Error('Reasonix Drive is read-only; refusing permission response.');
     }
     const pending = this.pendingPermissions.get(requestId);
-    if (!pending) throw new Error(`Reasonix permission ${requestId} is not pending.`);
+    if (!pending) throw new ControlRefusedError(`Reasonix permission ${requestId} is not pending.`, 'request-not-pending');
     this.pendingPermissions.delete(requestId);
     const selected = pending.optionIds.get(decision);
     // Resolve first — a decision we cannot map must still settle the native
@@ -1296,7 +1303,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
       throw new Error('Reasonix Drive is read-only; refusing question response.');
     }
     const pending = this.pendingQuestions.get(requestId);
-    if (!pending) throw new Error(`Reasonix question ${requestId} is not pending.`);
+    if (!pending) throw new ControlRefusedError(`Reasonix question ${requestId} is not pending.`, 'request-not-pending');
     const labels = answers[0];
     if (answers.length !== 1 || !labels || labels.length !== 1) {
       throw new Error('Reasonix ACP questions require exactly one selected option.');
@@ -1313,7 +1320,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
       throw new Error('Reasonix Drive is read-only; refusing question response.');
     }
     const pending = this.pendingQuestions.get(requestId);
-    if (!pending) throw new Error(`Reasonix question ${requestId} is not pending.`);
+    if (!pending) throw new ControlRefusedError(`Reasonix question ${requestId} is not pending.`, 'request-not-pending');
     this.pendingQuestions.delete(requestId);
     pending.resolve({ outcome: { outcome: 'cancelled' } });
     this.emitLive({ type: 'question-resolved', requestId });

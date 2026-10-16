@@ -20,6 +20,7 @@ import {
   queryCodexLoadedThreadIdsStrict,
   readCodexDaemonVersion,
   stopCodexDaemon,
+  codexAppServerLiveSocketFingerprint,
   codexAppServerSocketFingerprint,
 } from '@cosyncing/adapter-codex';
 import {
@@ -1095,8 +1096,12 @@ function samePlan(left: RepairPlan | UninstallPlan, right: RepairPlan | Uninstal
  * `queryCodexLoadedThreadIdsStrict` talk to the daemon directly over its control socket — no running broker.
  */
 async function defaultCodexDaemonProbe(context: SetupDiagnosisContext): Promise<CodexDaemonStatus> {
-  const socketFingerprint = codexAppServerSocketFingerprint();
-  if (!context.resolveExecutable('codex')) return { binaryAvailable: false, running: false, ...(socketFingerprint ? { socketFingerprint } : {}) };
+  if (!context.resolveExecutable('codex')) {
+    const socketFingerprint = codexAppServerSocketFingerprint();
+    return { binaryAvailable: false, running: false, ...(socketFingerprint ? { socketFingerprint } : {}) };
+  }
+  // A socket a crashed daemon left behind fingerprints no live instance, so it never proves ownership.
+  const socketFingerprint = await codexAppServerLiveSocketFingerprint();
   let version;
   try {
     version = await readCodexDaemonVersion();

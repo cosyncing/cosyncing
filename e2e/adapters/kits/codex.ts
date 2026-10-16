@@ -31,6 +31,7 @@ import {
   existsSync,
   linkSync,
   copyFileSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -38,8 +39,8 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, delimiter, join } from 'node:path';
-import { fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
+import { basename, delimiter, join, relative, sep } from 'node:path';
+import { eventually, fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
 import { installFakeExecutable as compileFakeExecutable } from '../../harness/fakes/executable.ts';
 import {
   answerRecords,
@@ -62,6 +63,7 @@ import {
   type ConformanceProfile,
   type FakeController,
   Ledger,
+  makeFifo,
   type LedgerEntry,
   type SeededSession,
   type SeedOptions,
@@ -127,15 +129,6 @@ export const codexProfile: ConformanceProfile = {
   terminal: { resumeHint: 'codex resume --remote unix://', syncAvailable: true },
   subagents: true,
   missingBinaryRoster: 'observe-only',
-  knownBugs: {
-    C11: 'Codex acks a permission decision for an unknown or already-settled request id and drops it '
-      + '(respondPermission ignores ids it does not hold), where it should refuse it',
-    C19: 'Codex acks an unknown command and drops it (runCommand has no refusal), where it should refuse it',
-    C07: 'Create trusts the path thread/start answers: one naming a rollout already in the store is accepted '
-      + 'and claimed as app-created, with no freshness check',
-    C21: 'Codex attach decodes any base64url path and reads it as a rollout, with no check that it is a listed '
-      + 'rollout under $CODEX_HOME/sessions: a withheld or outside-the-store path still yields history',
-  },
   scenarios: {
     C06: {
       skip: 'Codex rollouts are append-only and the Observe tail reads them by offset: a rewritten prefix is '
@@ -155,21 +148,41 @@ export const codexProfile: ConformanceProfile = {
         + '(C22 asserts the verdicts); Create and Resume are not gated by the broker.',
     },
   },
-  // Codex discovery tags rather than drops (every `rollout-*.jsonl` it can stat is listed, with or
-  // without session_meta, and a session_meta naming another thread is believed): the shapes it withholds
-  // are the ones it cannot stat. The lenient shapes are open questions in the coverage map.
+  // Codex discovery tags rather than drops (every `rollout-*.jsonl` inside the store it can stat is
+  // listed, with or without session_meta, and a session_meta naming another thread is believed): the
+  // shapes it withholds are the ones it cannot stat or that resolve outside the store. The lenient
+  // shapes are open questions in the coverage map.
   hostileStore: [
     {
       name: 'an id naming a rollout outside the store',
+      plant: (fake) => codexSessionId(plantOutsideRollout(fake, 'outside')),
+    },
+    {
+      name: 'an id that climbs out of the store through ..',
+      plant: (fake) => {
+        const outside = plantOutsideRollout(fake, 'climb');
+        // Spelled from inside the store, so only resolving `..` shows where it lands.
+        return codexSessionId(`${join(fake.storeRoot, 'sessions')}${sep}..${sep}${relative(fake.storeRoot, outside)}`);
+      },
+    },
+    {
+      name: 'a symlink named like a rollout that resolves to a rollout outside the store',
+      unsupportedOn: ['win32'],
+      plant: (fake) => {
+        const outside = plantOutsideRollout(fake, 'linked');
+        const path = codexRolloutPath(fake.storeRoot, codexUuid());
+        mkdirSync(join(path, '..'), { recursive: true });
+        symlinkSync(outside, path);
+        return codexSessionId(path);
+      },
+    },
+    {
+      name: 'an id naming a file in the store that is not a rollout',
       plant: (fake) => {
         const id = codexUuid();
-        const cwd = fake.workspace('outside');
-        const path = codexRolloutPath(join(cwd, 'not-codex-home'), id);
-        appendRecords(path, [
-          sessionMetaRecord({ id, cwd }),
-          ...turnOpenRecords(`turn-outside-${id.slice(-6)}`, cwd, defaultCodexSettings(cwd)),
-          ...userRecords('a row from outside the store'),
-        ]);
+        const cwd = fake.workspace('not-a-rollout');
+        const path = join(fake.storeRoot, 'sessions', `notes-${id}.jsonl`);
+        appendRecords(path, [sessionMetaRecord({ id, cwd }), ...userRecords('a row from a file discovery never lists')]);
         return codexSessionId(path);
       },
     },
@@ -186,14 +199,10 @@ export const codexProfile: ConformanceProfile = {
     {
       name: 'a FIFO named like a rollout',
       unsupportedOn: ['win32'],
-      knownBug: 'discovery opens the FIFO synchronously (readFirstLine → openSync) and blocks the broker '
-        + 'event loop until a writer appears: the roster, and every socket, wedge',
       plant: (fake) => {
         const id = codexUuid();
         const path = codexRolloutPath(fake.storeRoot, id);
-        mkdirSync(join(path, '..'), { recursive: true });
-        const made = Bun.spawnSync(['mkfifo', path], { timeout: 5_000 });
-        if (made.exitCode !== 0) throw new Error(`mkfifo failed: ${made.stderr.toString()}`);
+        makeFifo(path);
         return codexSessionId(path);
       },
     },
@@ -599,3 +608,113 @@ function lastSession(stream: SessionStream): any {
 }
 
 const codexExtras: ConformanceExtra[] = [];
+
+/** Native requests that write into a thread: its settings, its name (an index row), or a turn. */
+const THREAD_WRITES = new Set(['thread/settings/update', 'thread/name/set', 'turn/start', 'turn/steer']);
+
+codexExtras.push({
+  title: 'a create thread/start answers with a rollout already in the store is refused, and nothing is written into that session',
+  async run(context) {
+    const fake = context.fake as CodexFake;
+    const existing = fake.seedSession({ title: 'Already stored' });
+    await context.client.waitForSession((candidate) => candidate.id === existing.id);
+    const rollout = fake.rolloutOf(existing.id);
+    const index = join(fake.codexHome, 'session_index.jsonl');
+    const rolloutBefore = readFileSync(rollout);
+    const indexBefore = readFileSync(index, 'utf8');
+    fake.prepareCreate(existing.id);
+    const mark = fake.ledger.mark();
+    const refused = await context.client.post('/api/sessions/codex', {
+      directory: existing.cwd,
+      title: 'Claimed by create',
+      model: codexProfile.catalog.createModel,
+    });
+    expect(refused.ok, refused.text).toBe(false);
+    // Refused at the thread/start answer: no effort, name or turn reached the runtime for that thread.
+    expect(fake.ledger.nativeRequests('thread/start', mark).length).toBe(1);
+    const writes = fake.ledger.since(mark)
+      .filter((entry) => entry.kind === 'recv' && THREAD_WRITES.has(entry.frame?.method)
+        && entry.frame?.params?.threadId === existing.nativeId)
+      .map((entry) => entry.frame?.method);
+    expect(writes).toEqual([]);
+    // No byte reached the rollout, and its title row is the one it had.
+    expect(readFileSync(rollout).equals(rolloutBefore)).toBe(true);
+    expect(readFileSync(index, 'utf8')).toBe(indexBefore);
+    const row = await context.client.waitForSession((candidate) => candidate.id === existing.id);
+    expect(row.title).toBe('Already stored');
+    expect(row.control?.drive?.state).toBe('observing');
+  },
+});
+
+/** The row offers a runnable `codex resume --remote` join. */
+const offersJoin = (row: any): boolean =>
+  String(row?.terminalSyncHint?.command ?? '').includes('codex resume --remote unix://')
+  && row?.control?.terminalSync?.syncAvailable === true;
+/** The row's join offer is withdrawn: nothing to run, and terminal sync unavailable. */
+const joinWithdrawn = (row: any): boolean =>
+  row?.terminalSyncHint?.command === '' && row?.control?.terminalSync?.syncAvailable === false;
+
+codexExtras.push({
+  title: 'a daemon that crashed and left its socket holds no thread and offers no join, while a silent one changes nothing',
+  async run(context) {
+    const fake = context.fake as CodexFake;
+    const loaded = fake.seedSession({ title: 'Loaded on the daemon' });
+    const never = fake.seedSession({ title: 'Never loaded' });
+    await rowWhen(context, never.id, offersJoin);
+    // A terminal joins the thread on the daemon and leaves; the daemon keeps the thread loaded.
+    const joinedAt = fake.ledger.mark();
+    const terminal = fake.startTerminal(['resume', '--remote', `unix://${fake.socketPath}`, loaded.nativeId!], loaded.cwd);
+    await eventually(() => fake.ledger.since(joinedAt)
+      .some((entry) => entry.kind === 'writer' && entry.transport === 'daemon' && entry.threadId === loaded.nativeId),
+    { what: 'the terminal to join the thread on the daemon' });
+    terminal.kill('SIGKILL');
+    await terminal.exited;
+    await rowWhen(context, loaded.id, (row) => row.control?.drive?.state === 'driving' && offersJoin(row));
+
+    const before = fake.configure({ faults: { daemonSilent: true } }) as unknown as FakeCodexAppServerConfig;
+    try {
+      // A daemon that still listens but answers nothing proves nothing: every row keeps what it had.
+      const silentFrom = fake.ledger.mark();
+      // Each probe's connection opens with `initialize`, which the silent daemon never answers.
+      await eventually(() => fake.ledger.nativeRequests('initialize', silentFrom)
+        .filter((entry) => entry.transport === 'daemon').length >= 4,
+      { what: 'several daemon probes the silent daemon left unanswered' });
+      const rows = await context.client.sessions({ refresh: true });
+      const stillLoaded = rows.find((row) => row.id === loaded.id);
+      expect(stillLoaded?.control?.drive?.state).toBe('driving');
+      expect(offersJoin(stillLoaded)).toBe(true);
+      expect(offersJoin(rows.find((row) => row.id === never.id))).toBe(true);
+
+      // A crash leaves the socket file behind, and nothing listens on it.
+      fake.crashDaemon();
+      expect(lstatSync(fake.socketPath).isSocket()).toBe(true);
+      // The thread the daemon held is no longer driven there, and no row offers to join it. (An open
+      // daemon connection can drop the cached loaded set before the socket is proven dead, so the
+      // row may read observing a poll before its join is withdrawn.)
+      const unloaded = await rowWhen(context, loaded.id, (row) => row.control?.drive?.state === 'observing' && joinWithdrawn(row));
+      expect(unloaded.terminalSyncHint.note).toMatch(/daemon is not running or reachable/);
+      expect(joinWithdrawn(await rowWhen(context, never.id, () => true))).toBe(true);
+      // Read-only: the socket a crash left behind is neither removed nor replaced.
+      expect(lstatSync(fake.socketPath).isSocket()).toBe(true);
+    } finally {
+      fake.configure({ faults: before.faults ?? {} });
+      if (fake.daemonPid() === undefined) fake.startDaemon();
+    }
+    // A daemon that starts again binds a new socket: the join returns, and it holds nothing yet.
+    await rowWhen(context, never.id, offersJoin);
+    await rowWhen(context, loaded.id, (row) => row.control?.drive?.state === 'observing' && offersJoin(row));
+  },
+});
+
+/** A real, readable rollout outside `$CODEX_HOME/sessions`, the target of the hostile-store cases. */
+function plantOutsideRollout(fake: FakeController, label: string): string {
+  const id = codexUuid();
+  const cwd = fake.workspace(label);
+  const path = codexRolloutPath(join(cwd, 'not-codex-home'), id);
+  appendRecords(path, [
+    sessionMetaRecord({ id, cwd }),
+    ...turnOpenRecords(`turn-${label}-${id.slice(-6)}`, cwd, defaultCodexSettings(cwd)),
+    ...userRecords('a row from outside the store'),
+  ]);
+  return path;
+}

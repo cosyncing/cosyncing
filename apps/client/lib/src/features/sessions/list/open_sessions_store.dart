@@ -128,6 +128,16 @@ abstract interface class LosslessOpenSessionsStore
 
   /// Saves a restart hint. It is never emitted by [watchMembership].
   Future<void> saveActiveHint(String sourceKey, String? sessionKey);
+
+  /// Copies every member of [fromSourceKey], in order, and its active hint to
+  /// [toSourceKey]. Members [toSourceKey] already has are kept as they are.
+  ///
+  /// The working set belongs to the saved server, not to the address it is
+  /// reached at: an address edit carries the open tabs to the new source.
+  Future<void> copyMembers(String fromSourceKey, String toSourceKey);
+
+  /// Removes every member of [sourceKey] and its active hint.
+  Future<void> clearMembers(String sourceKey);
 }
 
 @immutable
@@ -369,6 +379,50 @@ class DriftOpenSessionsStore implements LosslessOpenSessionsStore {
             updatedAt: DateTime.now(),
           ),
         );
+  }
+
+  @override
+  Future<void> copyMembers(String fromSourceKey, String toSourceKey) {
+    if (fromSourceKey == toSourceKey) return Future<void>.value();
+    return database.transaction(() async {
+      final from = await _loadMemberships(fromSourceKey);
+      if (from.isEmpty) return;
+      final existing = await _loadMemberships(toSourceKey);
+      final present = {for (final membership in existing) membership.ref.key};
+      var order = existing.isEmpty ? 1024 : existing.last.order + 1024;
+      for (final membership in from) {
+        if (present.contains(membership.ref.key)) continue;
+        await _writeMembership(
+          _OpenSessionMembership(
+            sourceKey: toSourceKey,
+            ref: membership.ref,
+            order: order,
+          ),
+        );
+        order += 1024;
+      }
+      final hint =
+          await (database.select(database.appSettingRows)..where(
+                (table) => table.key.equals(_activeHintKey(fromSourceKey)),
+              ))
+              .getSingleOrNull();
+      final active = hint?.value;
+      if (active != null &&
+          from.any((membership) => membership.ref.key == active)) {
+        await saveActiveHint(toSourceKey, active);
+      }
+    });
+  }
+
+  @override
+  Future<void> clearMembers(String sourceKey) {
+    return database.transaction(() async {
+      await (database.delete(database.appSettingRows)..where(
+            (table) => table.key.like('${_membershipPrefix(sourceKey)}%'),
+          ))
+          .go();
+      await saveActiveHint(sourceKey, null);
+    });
   }
 
   Future<List<_OpenSessionMembership>> _loadMemberships(

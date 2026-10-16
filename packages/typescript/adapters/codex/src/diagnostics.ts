@@ -9,6 +9,7 @@ import {
 import { CODEX_MAC_LSOF_PATH, CODEX_MAC_PS_PATH } from './tui-presence.ts';
 import { readCodexDaemonProcess } from './daemon-process.ts';
 import { codexDaemonReviewerCheck } from './daemon-reviewer.ts';
+import { unixSocketTableListensFor } from './runtime-socket.ts';
 
 export const CODEX_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.144.5',
@@ -221,23 +222,6 @@ function daemonEndpoint(options: {
       : `${CODEX_DAEMON_SOCKET_LABEL} aliases something that is not a socket.`,
     evidence: { path: inspected.displayPath, resolved: context.displayPath(link.resolvedPath) },
     remediation: { kind: 'command', message: 'Inspect and repair the Codex installation state.', command: 'cosyncing repair' },
-  });
-}
-
-/**
- * Match a Unix-socket table row by PATH rather than by substring.
- *
- * `/proc/net/unix` puts the bound path in the last column, so a row matches only when the path ends the
- * row at a column boundary. The substring test this replaces let one socket answer for every longer path
- * that merely contained its name, and a runtime directory holding several generation-named sockets is
- * exactly where that coincidence stops being hypothetical.
- */
-function unixSocketTableListensFor(table: string, socketPath: string): boolean {
-  if (socketPath.length === 0) return false;
-  return table.split('\n').some((line) => {
-    if (!line.endsWith(socketPath)) return false;
-    const boundary = line[line.length - socketPath.length - 1];
-    return boundary === undefined || /\s/.test(boundary);
   });
 }
 

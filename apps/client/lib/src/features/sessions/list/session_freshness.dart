@@ -112,7 +112,10 @@ final class RosterFreshnessPresentation {
 @immutable
 final class SessionDetailFreshnessPresentation {
   /// Creates a detail freshness presentation.
-  const SessionDetailFreshnessPresentation({required this.freshness});
+  const SessionDetailFreshnessPresentation({
+    required this.freshness,
+    this.detached = false,
+  });
 
   /// Derives the detail's freshness from its own transport and session frame.
   ///
@@ -126,6 +129,17 @@ final class SessionDetailFreshnessPresentation {
   ) {
     final connected =
         state.connectionStatus == SessionDetailConnectionStatus.connected;
+    if (state.detachedByUser &&
+        (state.connectionStatus == SessionDetailConnectionStatus.closed ||
+            state.connectionStatus ==
+                SessionDetailConnectionStatus.disconnected)) {
+      // The user closed the stream on purpose and it never reopens on its
+      // own: what is on screen is last-known, but nothing is reconnecting.
+      return const SessionDetailFreshnessPresentation(
+        freshness: SessionFreshness.reconnecting,
+        detached: true,
+      );
+    }
     if (!connected) {
       return switch (state.connectionStatus) {
         SessionDetailConnectionStatus.connecting =>
@@ -153,7 +167,16 @@ final class SessionDetailFreshnessPresentation {
   }
 
   /// The single freshness state for the detail's control footprint.
+  ///
+  /// A deliberate Detach keeps [SessionFreshness.reconnecting]'s meaning for
+  /// the data (last-known, not authoritative) and says why with [detached].
   final SessionFreshness freshness;
+
+  /// Whether the stream is closed because the user pressed Detach.
+  ///
+  /// The control footprint then reads Detached, never Reconnecting: nothing
+  /// will reopen the stream until the user attaches again.
+  final bool detached;
 
   /// Whether the broker-authored control pill may be rendered.
   ///

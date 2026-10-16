@@ -405,23 +405,19 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
                   ),
                 ),
               const SizedBox(height: 32),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      l10n.workspaceCompletionReadNote,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: tokens.textTertiary,
-                      ),
-                    ),
+              _BesideLink(
+                gap: 16,
+                lead: Text(
+                  l10n.workspaceCompletionReadNote,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: tokens.textTertiary,
                   ),
-                  const SizedBox(width: 16),
-                  _QuietLink(
-                    glyph: StrokeGlyph.bell,
-                    label: l10n.notificationsTitle,
-                    onTap: () => context.go(attentionRoute),
-                  ),
-                ],
+                ),
+                link: _QuietLink(
+                  glyph: StrokeGlyph.bell,
+                  label: l10n.notificationsTitle,
+                  onTap: () => context.go(attentionRoute),
+                ),
               ),
             ],
           ),
@@ -452,6 +448,30 @@ class _Heading extends StatelessWidget {
       fontWeight: FontWeight.w700,
       letterSpacing: -0.2,
       color: context.tokens.textPrimary,
+    ),
+  );
+}
+
+/// [lead] filling a row beside a [link] that takes at most half its width,
+/// so a large text size shortens the link instead of overflowing the row.
+class _BesideLink extends StatelessWidget {
+  const _BesideLink({required this.lead, required this.link, this.gap = 0});
+
+  final Widget lead;
+  final Widget link;
+  final double gap;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => Row(
+      children: [
+        Expanded(child: lead),
+        if (gap > 0) SizedBox(width: gap),
+        ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: constraints.maxWidth / 2),
+          child: link,
+        ),
+      ],
     ),
   );
 }
@@ -762,16 +782,14 @@ class _TodayUsage extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            Expanded(child: _Heading(l10n.workspaceToday)),
-            _QuietLink(
-              key: const Key('workspace-overview-usage-details'),
-              label: l10n.workspaceUsageDetails,
-              trailingGlyph: StrokeGlyph.arrowRight,
-              onTap: () => context.go('$usageReportRoute?period=today'),
-            ),
-          ],
+        _BesideLink(
+          lead: _Heading(l10n.workspaceToday),
+          link: _QuietLink(
+            key: const Key('workspace-overview-usage-details'),
+            label: l10n.workspaceUsageDetails,
+            trailingGlyph: StrokeGlyph.arrowRight,
+            onTap: () => context.go('$usageReportRoute?period=today'),
+          ),
         ),
         const SizedBox(height: 24),
         LayoutBuilder(

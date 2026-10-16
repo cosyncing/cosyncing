@@ -232,7 +232,14 @@ export class GrokAdapter implements AgentBackend {
     if (options.recordStoredDriveBoundary) this.recordStoredDriveBoundary = options.recordStoredDriveBoundary;
   }
 
+  /** The store alone is enough: a removed binary leaves sessions the broker can still read, and the
+   *  broker lists them Observe-only (see {@link isInstalled}). */
   async isAvailable(): Promise<boolean> {
+    return this.isInstalled() || stat(this.root).then((value) => value.isDirectory(), () => false);
+  }
+
+  /** The resolve every Grok spawn starts from; never a launch. */
+  isInstalled(): boolean {
     return resolveInvocation(this.command, { env: this.env }) !== undefined;
   }
 

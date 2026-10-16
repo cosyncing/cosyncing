@@ -9,7 +9,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { Browser, Page } from 'playwright-core';
-import { type Broker } from '../harness/index.ts';
+import { type Broker, scaled } from '../harness/index.ts';
 import { SHELL_GONE, launchBrowser, waitUntil } from '../harness/browser.ts';
 import { settledEvaluate, startWebBroker, webScenario } from '../harness/web-scenario.ts';
 
@@ -22,8 +22,8 @@ async function readCurrentVersion(broker: Broker): Promise<string> {
 
 async function openApp(page: Page, url: string): Promise<void> {
   await page.goto(url);
-  await page.waitForFunction(SHELL_GONE, undefined, { timeout: 90_000 });
-  await page.waitForFunction(`navigator.serviceWorker.controller !== null`, undefined, { timeout: 60_000 });
+  await page.waitForFunction(SHELL_GONE, undefined, { timeout: scaled(90_000) });
+  await page.waitForFunction(`navigator.serviceWorker.controller !== null`, undefined, { timeout: scaled(60_000) });
 }
 
 /** Ask the page's controlling worker something over a MessageChannel. */
@@ -88,7 +88,7 @@ describe('web build upgrade', () => {
       // The page records the exact moment its handoff hook refuses.
       await page.waitForFunction(`Array.isArray(window.cosyncingHandoffDiagnostics)
         && window.cosyncingHandoffDiagnostics.some((entry) => entry.k === 'round' && entry.d === 'coordinator-busy')`,
-        undefined, { timeout: 60_000 });
+        undefined, { timeout: scaled(60_000) });
 
       const open = await page.evaluate(`(async () => {
         const registration = await navigator.serviceWorker.getRegistration();
@@ -112,7 +112,7 @@ describe('web build upgrade', () => {
       await page.close();
       const next = await context.newPage();
       await next.goto(proxy.base);
-      await next.waitForFunction(SHELL_GONE, undefined, { timeout: 90_000 });
+      await next.waitForFunction(SHELL_GONE, undefined, { timeout: scaled(90_000) });
       await waitUntil(next, `caches.keys().then((names) => names.includes(${JSON.stringify(newCache)}))`, { timeoutMs: 60_000 });
       await waitUntil(next, `caches.keys().then((names) => !names.includes(${JSON.stringify(oldCache)}))`, { timeoutMs: 60_000 });
       const after = await next.evaluate(`caches.keys()`) as string[];

@@ -46,6 +46,8 @@ export const legacyTasks: Record<LegacyJob, Task[]> = {
     { id: "agy-store", run: ["bun", "run", "packages/typescript/adapters/antigravity/test/test-agy-store.ts"], estimateMs: 270 },
     { id: "claude-artifacts", run: ["bun", "run", "packages/typescript/adapters/claude/test/test-claude-artifacts.ts"], estimateMs: 40 },
     { id: "claude-driven-queue", run: ["bun", "run", "packages/typescript/adapters/claude/test/test-claude-driven-queue.ts"], estimateMs: 62 },
+    // Kept on purpose (the Claude export's containment and size-cap refusals); never wired before.
+    { id: "claude-export", run: ["bun", "run", "packages/typescript/adapters/claude/test/test-claude-export.ts"] },
     { id: "claude-hooks", run: ["bun", "run", "packages/typescript/broker/test/claude/test-claude-hooks.ts"], estimateMs: 3057 },
     { id: "claude-jsonl-type-audit", run: ["bun", "run", "scripts/adapters/test-audit-claude-jsonl-types.ts"], estimateMs: 90 },
     { id: "claude-mod-framing", run: ["bun", "run", "packages/typescript/broker/test/claude/test-mod-http-framing.ts"], estimateMs: 3003 },
@@ -72,13 +74,16 @@ export const legacyTasks: Record<LegacyJob, Task[]> = {
     { id: "claude-transcript-mapping", run: ["bun", "run", "packages/typescript/adapters/claude/test/test-claude-jsonl.ts"], estimateMs: 2612 },
     { id: "cline-auth", run: ["bun", "run", "packages/typescript/adapters/cline/test/test-cline-auth.ts"], estimateMs: 60 },
     { id: "cline-diagnostics", run: ["bun", "run", "packages/typescript/adapters/cline/test/test-cline-diagnostics.ts"], estimateMs: 32 },
-    { id: "cline-drive", run: ["bun", "run", "packages/typescript/adapters/cline/test/test-cline-drive.ts"], estimateMs: 5500 },
     { id: "cline-hub", run: ["bun", "run", "packages/typescript/adapters/cline/test/test-cline-hub.ts"], estimateMs: 9600 },
     { id: "cline-mapping", run: ["bun", "run", "packages/typescript/adapters/cline/test/test-cline-mapping.ts"], estimateMs: 30 },
     { id: "cline-observe", run: ["bun", "run", "packages/typescript/adapters/cline/test/test-cline-observe.ts"], estimateMs: 300 },
     { id: "cline-owner-port-refusal", run: ["bun", "run", "packages/typescript/broker/test/cline/test-cline-owner-port-refusal.ts"], estimateMs: 104 },
     { id: "cline-registration-gate", run: ["bun", "run", "packages/typescript/broker/test/cline/test-cline-registration-gate.ts"], estimateMs: 426 },
     { id: "cline-store", run: ["bun", "run", "packages/typescript/adapters/cline/test/test-cline-store.ts"], estimateMs: 60 },
+    // Isolated in a temporary CODEX_HOME (with a stand-in daemon socket) on wiring; never wired before.
+    { id: "codex-fork", run: ["bun", "run", "packages/typescript/adapters/codex/test/test-codex-fork.ts"], estimateMs: 300 },
+    // Kept on purpose (>200 consecutive native pages over a >32 MiB rollout, no time budget); never wired before.
+    { id: "codex-history-paging-large", run: ["bun", "run", "packages/typescript/broker/test/codex/history-paging-large.ts"], estimateMs: 1500 },
     { id: "codex-loaded-watch", run: ["bun", "run", "packages/typescript/adapters/codex/test/test-codex-watch.ts"], serial: true, estimateMs: 2869 },
     { id: "codex-loaded-watch-unknown", run: ["bun", "run", "packages/typescript/adapters/codex/test/test-loaded-watch-unknown.ts"], serial: true, estimateMs: 1550 },
     { id: "codex-macos-tui-presence", run: ["bun", "run", "packages/typescript/adapters/codex/test/test-codex-macos-tui-presence.ts"], serial: true },

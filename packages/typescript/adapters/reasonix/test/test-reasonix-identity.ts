@@ -218,6 +218,51 @@ try {
     JSON.stringify(exitMessages));
   await exitConnection.close();
 
+  // A session Reasonix never wrote a mode for: its metadata carries no toolApprovalMode, and this
+  // fake stores none unless a set_config_option asks it to.
+  const modeTree = buildReasonixFixtureTree();
+  try {
+    const modeFake = writeFakeReasonixBinary(join(modeTree.root, 'bin'), modeTree.id);
+    const modeAdapter = new ReasonixAdapter({
+      command: modeFake.path,
+      env: {
+        ...modeFake.env,
+        REASONIX_HOME: modeTree.root,
+        FAKE_REASONIX_MODELS: '1',
+        FAKE_REASONIX_LOAD_CONFIG_OPTIONS_FULL: '1',
+      },
+    });
+    const setOptions = () => modeFake.events().filter((event) => event.kind === 'frame'
+      && (event.frame as { method?: unknown }).method === 'session/set_config_option').length;
+    const storedMode = () => (JSON.parse(readFileSync(modeTree.acpMetadataPath, 'utf8')) as { toolApprovalMode?: unknown })
+      .toolApprovalMode;
+    const unchanged = await modeAdapter.attach(modeTree.id, 'resume');
+    let unchangedError: unknown;
+    try {
+      await unchanged.sendPrompt({ text: 'the mode Reasonix already runs', permissionMode: 'ask' });
+    } catch (error) { unchangedError = error; }
+    check('a prompt naming the mode Reasonix already reports keeps Drive though no mode is stored',
+      unchangedError === undefined
+        && modeAdapter.isDriving(modeTree.id)
+        && unchanged.info.currentMode === 'ask'
+        && setOptions() === 0
+        && storedMode() === undefined,
+      JSON.stringify({ error: String(unchangedError), driving: modeAdapter.isDriving(modeTree.id), sets: setOptions() }));
+    let changedError: unknown;
+    try {
+      await unchanged.sendPrompt({ text: 'a confirmed change Reasonix never stores', permissionMode: 'yolo' });
+    } catch (error) { changedError = error; }
+    check('a mode change Reasonix confirms but never stores still ends Drive',
+      changedError !== undefined
+        && String(changedError).includes('did not durably persist permission mode yolo')
+        && setOptions() === 1
+        && !modeAdapter.isDriving(modeTree.id),
+      JSON.stringify({ error: String(changedError), driving: modeAdapter.isDriving(modeTree.id), sets: setOptions() }));
+    await unchanged.close();
+  } finally {
+    modeTree.cleanup();
+  }
+
   const createRoot = mkdtempSync(join(tmpdir(), 'cosyncing-reasonix-create-'));
   try {
     const createCwd = join(createRoot, 'workspace');

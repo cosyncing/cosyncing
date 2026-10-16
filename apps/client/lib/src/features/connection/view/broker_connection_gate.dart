@@ -116,11 +116,20 @@ class _UnreachableCard extends ConsumerWidget {
     final l10n = AppLocalizations.of(context);
     final target = state.brokerUrl;
     final name = state.profileDisplayName ?? target?.host ?? '';
+    final address = target?.toString() ?? '';
+    // A server that took the connection and then went silent is not "can't
+    // reach": it is there, busy or stuck, and asking again is the remedy.
     return _GateCard(
-      key: const Key('broker-gate-unreachable'),
-      icon: Icons.cloud_off,
-      title: l10n.brokerGateUnreachableTitle(name),
-      body: l10n.brokerGateUnreachableBodyAt(target?.toString() ?? ''),
+      key: Key(
+        state.noAnswer ? 'broker-gate-no-answer' : 'broker-gate-unreachable',
+      ),
+      icon: state.noAnswer ? Icons.hourglass_empty : Icons.cloud_off,
+      title: state.noAnswer
+          ? l10n.brokerGateNoAnswerTitle(name)
+          : l10n.brokerGateUnreachableTitle(name),
+      body: state.noAnswer
+          ? l10n.brokerGateNoAnswerBodyAt(address)
+          : l10n.brokerGateUnreachableBodyAt(address),
       detail: state.detail,
       children: [
         _RetryButton(

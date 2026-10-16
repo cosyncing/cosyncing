@@ -20,6 +20,7 @@ import {
   startHealthyFixtureBroker,
   type ProcessOutputCapture,
 } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
+import { recordHarnessRoot } from '../../scripts/ci/lib/harness-leaks.ts';
 import { BrokerClient, type ClientAuth } from './client.ts';
 import { scaled } from './wait.ts';
 
@@ -134,8 +135,10 @@ export class Broker {
       spawn: (port) => {
         const spawned = Bun.spawn(['bun', 'run', BROKER_ENTRY], {
           cwd: REPO_ROOT,
-          env: { ...this.#env, PORT: String(port), HOST: '127.0.0.1' },
-          stdin: 'ignore',
+          // A pipe this process never writes: when it dies, however it dies, the broker reads end of
+          // file and shuts down, taking its managed hosts with it (the source-only stdin hook).
+          env: { ...this.#env, PORT: String(port), HOST: '127.0.0.1', COSYNCING_TEST_EXIT_ON_STDIN_EOF: '1' },
+          stdin: 'pipe',
           stdout: 'pipe',
           stderr: 'pipe',
         });
@@ -244,6 +247,8 @@ function bunOnlyDirectory(bin: string): string {
 export async function startBroker(options: BrokerOptions = {}): Promise<Broker> {
   const ownsRoot = !options.root;
   const root = options.root ?? mkdtempSync(join(tmpdir(), `cosyncing-e2e-${options.name ?? 'broker'}-`));
+  // Under `bun run check`, anything still running under this root once the test is over is a leak.
+  recordHarnessRoot(root);
   const paths = fixturePaths(root);
   await options.setup?.(paths);
   const token = options.token === true

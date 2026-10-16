@@ -196,10 +196,32 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
     // The same unfinished turn hours old is a crashed run, not a working session.
     expect((await row(ids.stale)).status).toBe('idle');
     // The unfinished turn sits past the revert pointer: it is hidden, so the session is idle.
-    // (The sqlite reader ignores the pointer when it reads activity: an open product defect.)
-    if (layout === 'json' || process.env.COSYNCING_E2E_KNOWN_BUGS === '1') expect((await row(ids.reverted)).status).toBe('idle');
+    expect((await row(ids.reverted)).status).toBe('idle');
     // Tools that are open todo state are not liveness either.
     expect((await row(ids.todo)).status).toBe('idle');
+  });
+
+  test('activity follows the revert pointer as it moves, and a pointer that names nothing hides nothing', async () => {
+    const id = 'ses_private_revert_moves';
+    seed(id, 'Private revert moves');
+    const hidden = unfinishedTurn(id, 1_000);
+    const status = (expected: string, what: string) =>
+      client.waitForSession((candidate) => candidate.id === id && candidate.status === expected, { what });
+    store.setRevert(id, hidden, Date.now());
+    await status('idle', 'the unfinished turn past the pointer to be hidden');
+    // Redo clears the pointer: the unfinished turn is the session's current turn again.
+    store.setRevert(id, null, Date.now());
+    await status('working', 'the restored unfinished turn to read working');
+    // A pointer at the first message hides the whole transcript, and with it any turn.
+    store.setRevert(id, `msg_${id}_1_u`, Date.now());
+    await status('idle', 'a pointer at the first message to hide every turn');
+    // A pointer that names no message of this session hides nothing, as history ignores it too.
+    store.setRevert(id, 'msg_not_in_this_session', Date.now());
+    await status('working', 'a pointer naming nothing to hide nothing');
+    const stream = await client.attach('opencode', id);
+    const history = await stream.waitForKind('history');
+    expect(userTexts(history.messages)).toEqual(['seeded prompt 1', 'a turn that never finished']);
+    stream.close();
   });
 
   test('history applies the revert pointer', async () => {
@@ -269,6 +291,7 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
       // One socket serializes its own messages; a second tab reaches the same run while it is open.
       const tab = await open();
       const mark = ledger.mark();
+      const from = stream.frames.length;
       const first = stream.sendAndAwait({ kind: 'prompt', text: '[[hold:private-stop]] a long run' });
       first.catch(() => undefined);
       await eventually(() => spawns(mark).length === 1, { what: 'the run to start' });
@@ -284,14 +307,19 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
       expect((await tab.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
       await eventually(() => ledger.entries().slice(mark).some((entry) => entry.kind === 'signal'), { what: 'the run to be signalled' });
       await first;
-      // The run is over and the session idle. A user's Stop should read as cancelled, like it does on a serve;
-      // a private run reports `error` and `opencode run exited 143` (open product defect, asserted with the opt-in).
-      const ended = await stream.waitForMessage((message) => message.type === 'run-summary' && message.status !== 'running');
-      await stream.waitForMessage((message) => message.type === 'status' && message.status === 'idle');
-      if (process.env.COSYNCING_E2E_KNOWN_BUGS === '1') {
-        expect(ended.status).toBe('cancelled');
-        expect(stream.messages().some((message) => message.type === 'error')).toBe(false);
-      }
+      // The run is over and the session idle. A user's Stop reads as cancelled, as it does on a serve: the
+      // signal exit is the Stop, not a failure, so no error row is shown. (Read from this run's live frames:
+      // the attach history already holds earlier turns' finished summaries.)
+      const live = () => stream.frames.slice(from).filter((frame) => frame.kind === 'message').map((frame) => frame.message);
+      const own = await eventually(() => live().find((message) => message.type === 'user-message' && message.text === '[[hold:private-stop]] a long run'),
+        { what: 'the stopped run\'s own prompt row' });
+      const ended = await eventually(() => live().find((message) => message.type === 'run-summary' && message.turnId === own.turnId
+        && message.status !== 'running'), { what: 'the stopped run to end' });
+      await eventually(() => live().some((message) => message.type === 'status' && message.status === 'idle'), { what: 'the session to be idle' });
+      expect(ended.status).toBe('cancelled');
+      expect(stream.messages().some((message) => message.type === 'error')).toBe(false);
+      expect(live().some((message) => message.type === 'notice' && message.semantic?.kind === 'interruption'
+        && message.semantic?.reason === 'user' && message.semantic?.turnId === ended.turnId)).toBe(true);
       expect(spawns(mark).length).toBe(1);
       // The session is usable again.
       expect((await stream.sendAndAwait({ kind: 'prompt', text: 'after stop' })).kind).toBe('ack');

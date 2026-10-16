@@ -10,7 +10,7 @@
 import { assertSupportedBrokerHost } from './assert-supported-host.ts';
 import { canSendBackgroundMessage } from '../sessions/background-compatibility.ts';
 import os from 'node:os';
-import { appendFileSync, closeSync, createReadStream, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { appendFileSync, closeSync, createReadStream, fstatSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -18,6 +18,7 @@ import type { Server, ServerWebSocket } from 'bun';
 import {
   AgentRegistry,
   BROKER_CONTRACT,
+  ControlRefusedError,
   DRIVE_ATTACH_REASONS,
   evaluateBrokerClientCompatibility,
   isAgentOwnedSessionError,
@@ -26,6 +27,7 @@ import {
   isOwnershipConflictError,
   OwnershipConflictError,
   isSessionCreateTemporarilyUnavailableError,
+  isSessionNotFoundError,
   SessionCreateTemporarilyUnavailableError,
   type AggregatedMachines,
   type AgentMessage,
@@ -121,7 +123,7 @@ import {
 } from '../artifacts/artifact-store.ts';
 import { buildDiffRefMessage, INLINE_DIFF_CAP } from '../sessions/diff-reference.ts';
 import { assertR2ActionsSafe, consumeConfirmNonce, deriveSessionRevision, getR2Action, issueConfirmNonce, r2ActionAvailable, r2EnabledActions, r2MaxBytes, reserveR2RateSlot } from '../security/r2-policy.ts';
-import { runTranscriptExport } from '../security/r2-export.ts';
+import { runTranscriptExport, sweepTranscriptExportWorkRoot, transcriptExportWorkRoot } from '../security/r2-export.ts';
 import {
   backwardHistoryCursorBoundary,
   capHistoryDelta,
@@ -251,7 +253,7 @@ import { BUILD_INFO, buildFingerprint } from './build-info.ts';
 import { createBrokerClock } from './test-clock.ts';
 import { currentApplicationIdentity } from './application-identity.ts';
 import { serveWebHandoff, WEB_HANDOFF_PATH } from '../artifacts/web-handoff.ts';
-import { driveAttachRefusalCode } from '../sessions/client-message-policy.ts';
+import { controlRefusalCode, driveAttachRefusalCode } from '../sessions/client-message-policy.ts';
 import { canMutateSession, canPromptSession } from '../sessions/session-owner.ts';
 import { ClientHandoffSequencer } from '../sessions/client-handoff-sequencer.ts';
 import { APP_MOUNT_PATH, APP_PATH } from '../transport/http-contracts.ts';
@@ -327,6 +329,27 @@ export interface BrokerRuntime {
   shutdown(reason?: string): Promise<void>;
 }
 
+/**
+ * Test hook (source runs only, never a packaged build): with `COSYNCING_TEST_EXIT_ON_STDIN_EOF=1` the
+ * broker shuts down, as it does on SIGTERM, once its stdin pipe reaches end of file. The e2e harness
+ * hands every broker it starts a pipe it never writes, so the broker ends with the test process that
+ * started it however that process ends, SIGKILL included, instead of running on reparented to init
+ * with its fake agents. Inert when stdin is not a pipe: a relaunched replacement (stdin `ignore`) and
+ * every installed broker leave it unarmed.
+ */
+const EXIT_ON_STDIN_EOF_TEST = !BUILD_INFO.packaged && process.env.COSYNCING_TEST_EXIT_ON_STDIN_EOF === '1';
+/** How long a shutdown begun by the stdin hook may take before the broker exits regardless. */
+const STDIN_EOF_SHUTDOWN_BOUND_MS = 15_000;
+
+function stdinIsPipe(): boolean {
+  try {
+    const stat = fstatSync(0);
+    return stat.isFIFO() || stat.isSocket();
+  } catch {
+    return false;
+  }
+}
+
 export function installBrokerSignalHandlers(runtime: Pick<BrokerRuntime, 'shutdown'>): () => void {
   let active = true;
   const remove = () => {
@@ -335,8 +358,13 @@ export function installBrokerSignalHandlers(runtime: Pick<BrokerRuntime, 'shutdo
     process.off('SIGINT', onSigint);
     process.off('SIGTERM', onSigterm);
   };
-  const handle = (signal: 'SIGINT' | 'SIGTERM') => {
+  const handle = (signal: 'SIGINT' | 'SIGTERM' | 'stdin-eof') => {
+    if (!active) return;
     remove();
+    if (signal === 'stdin-eof') {
+      // Nobody follows this with a SIGKILL: the process that would have is gone.
+      setTimeout(() => process.exit(1), STDIN_EOF_SHUTDOWN_BOUND_MS).unref?.();
+    }
     void runtime.shutdown(signal).then(
       () => process.exit(Number(process.exitCode ?? 0)),
       (error) => {
@@ -349,6 +377,14 @@ export function installBrokerSignalHandlers(runtime: Pick<BrokerRuntime, 'shutdo
   const onSigterm = () => handle('SIGTERM');
   process.on('SIGINT', onSigint);
   process.on('SIGTERM', onSigterm);
+  if (EXIT_ON_STDIN_EOF_TEST && stdinIsPipe()) {
+    const onEof = () => handle('stdin-eof');
+    process.stdin.on('end', onEof);
+    process.stdin.on('close', onEof);
+    process.stdin.on('error', onEof);
+    process.stdin.on('data', () => { /* the harness never writes; nothing to read */ });
+    process.stdin.resume();
+  }
   return remove;
 }
 
@@ -513,6 +549,13 @@ const HTTP_R2_ENABLED_ACTIONS = new Set([
     : []),
   ...(!BUILD_INFO.packaged ? r2EnabledActions() : []),
 ]);
+// Where a running transcript export keeps its native, unredacted output: this broker's own state home.
+const TRANSCRIPT_EXPORT_WORK_ROOT = transcriptExportWorkRoot(setupStateHome());
+// Test hook (source runs only): pins the artifact store's export generation, so a suite can seed an export
+// this very process owns and watch what removes it. Never set otherwise: each process needs a fresh one.
+const ARTIFACT_EXPORT_GENERATION_TEST = BUILD_INFO.packaged
+  ? undefined
+  : process.env.COSYNCING_TEST_ARTIFACT_EXPORT_GENERATION?.trim() || undefined;
 // Broker-instance v2 is the one-way rollback fence. Revision-16 startup rejects it, while the
 // already-running revision-16 updater can still health-check this candidate. Cross the fence before
 // any legacy credential, delayed action, or wake destination can be migrated.
@@ -864,6 +907,7 @@ const registry = new AgentRegistry(
 const ompPathCollision = inspectOmpPathCollision(process.env);
 registry.register(new OpenCodeAdapter({
   waitForManagedCreateReadiness: waitForManagedOpencodeCreateReadiness,
+  resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
 }));
 registry.register(new PiAdapter({
   brokerUrl: BROKER_URL,
@@ -912,8 +956,7 @@ registry.register(new GrokAdapter({
   },
 }));
 // Cline — default-profile parent/subagent Observe plus Create/Resume through
-// the isolated broker-owned Hub/profile. The fixture-only ACP writer is never
-// registered: it cannot causally bind a native prompt to durable message ids.
+// the isolated broker-owned Hub/profile.
 registry.register(new ClineAdapter({
   resolveStoredDriveState: (info) => sessionMetadata.wasAppCreatedSession(info)
     ? {
@@ -1140,8 +1183,12 @@ registry.register(new DshAdapter(dshAdapterOptions()));
 // supervise or stop, and no host address to configure. Registered
 // UNCONDITIONALLY and with no `minimumClientRevision`: its integration kind and
 // both its attach modes predate every client-decode tolerance, so no released
-// client loses its roster over this row.
-registry.register(new AgyAdapter());
+// client loses its roster over this row. agy records no per-conversation mode,
+// so the mode the app last drove a conversation with comes back from the
+// broker's own record of its sends, across a restart.
+registry.register(new AgyAdapter({
+  resolveStoredCurrentMode: (info) => sessionMetadata.currentModeHint(info),
+}));
 
 let latestBrokerHealth: BrokerHealthSnapshot;
 let attentionService: AttentionService;
@@ -1167,6 +1214,7 @@ try {
   artifactStore = new ArtifactStore(ARTIFACT_BROKER_SOURCE, artifactCacheRoot(), {
     legacyBrokerSources: LEGACY_ARTIFACT_BROKER_SOURCES,
     onPersistenceResult: (result) => { brokerHealth.recordStoreWrite('artifact-store', result.ok); },
+    exportGeneration: ARTIFACT_EXPORT_GENERATION_TEST,
   });
 } catch (error) {
   brokerHealth.recordStoreWrite('artifact-store', false);
@@ -1175,12 +1223,14 @@ try {
   artifactStore = new ArtifactStore(ARTIFACT_BROKER_SOURCE, artifactFallbackRoot, {
     legacyBrokerSources: LEGACY_ARTIFACT_BROKER_SOURCES,
     onPersistenceResult: (result) => { brokerHealth.recordStoreWrite('artifact-store', result.ok); },
+    exportGeneration: ARTIFACT_EXPORT_GENERATION_TEST,
   });
 }
 
 // R2 rule 18: orderly shutdown calls this function explicitly, while the process exit listener is the
 // synchronous last resort for an uncaught exception. Export attachments contain redacted transcripts and
-// must not survive the broker process. SIGKILL and hard runtime aborts remain outside process cleanup.
+// must not survive the broker process. SIGKILL, a Windows terminate and hard runtime aborts run neither;
+// the start sweep after the listener binds (`sweepStaleExportAttachments`) removes what they leave.
 function cleanupTransientArtifactsSync(): void {
   try {
     artifactStore.clearExportAttachments();
@@ -1442,17 +1492,21 @@ attentionClock.onMove(() => { void scheduleRunner.tick().catch(() => {}); });
 const scheduledConnectionReleaseTimers = new Set<ReturnType<typeof setInterval>>();
 
 /** Runs one scheduled send end-to-end. D6: identical to a composer prompt — attach the way the app
- *  would, pass the SAME control gates, and carry NO model/agent/permissionMode overrides so the
- *  session's current settings apply. Resolution means the prompt reached the agent. */
+ *  would, pass the SAME control gates, and carry NO agent/permissionMode overrides so the session's
+ *  current settings apply. A new-session schedule's model is part of creating that session, not an
+ *  override: its first prompt carries the model wherever the created session does not already run
+ *  on it (see sendScheduledPrompt). Resolution means the prompt reached the agent. */
 async function deliverScheduledSend(schedule: ScheduleRecord): Promise<ScheduleDeliveryResult> {
   if (schedule.kind === 'new-session') {
     const backend = registry.get(schedule.tool);
     if (!backend?.createSession) throw new Error(`tool '${schedule.tool}' cannot create sessions`);
     if (schedule.pendingSessionId) {
       // Retry-safe: a target session was already durably created for this occurrence; reuse it rather
-      // than multiplying empty sessions after a restart or a failed prompt handoff.
+      // than multiplying empty sessions after a restart or a failed prompt handoff. A model retired
+      // since fails the occurrence, as it would before creation, rather than being sent anyway.
+      await requireSupportedModelSelection(backend, schedule.model);
       const info = await discoverSession(schedule.tool, schedule.pendingSessionId);
-      const mutated = await sendScheduledPrompt(schedule.tool, schedule.pendingSessionId, info, schedule.text);
+      const mutated = await sendScheduledPrompt(schedule.tool, schedule.pendingSessionId, info, schedule.text, schedule.model);
       recordAndBroadcastAppMutation(mutated);
       return { createdSessionId: schedule.pendingSessionId };
     }
@@ -1477,7 +1531,7 @@ async function deliverScheduledSend(schedule: ScheduleRecord): Promise<ScheduleD
     if (!scheduleStore.recordPendingSession(schedule.id, info.id)) {
       throw new Error('schedule is no longer live after creating its target session');
     }
-    const mutated = await sendScheduledPrompt(schedule.tool, info.id, info, schedule.text);
+    const mutated = await sendScheduledPrompt(schedule.tool, info.id, info, schedule.text, schedule.model);
     recordAndBroadcastAppMutation(mutated);
     return { createdSessionId: info.id };
   }
@@ -1491,11 +1545,26 @@ async function deliverScheduledSend(schedule: ScheduleRecord): Promise<ScheduleD
   return {};
 }
 
+/** Does a session that reports `current` already run on `selection`? An effort the session does not
+ *  report is not evidence that it runs on the chosen one. */
+function sessionRunsOnModel(current: SessionInfo['currentModel'], selection: ModelSelection): boolean {
+  if (!current) return false;
+  if (current.providerID !== selection.providerID || current.modelID !== selection.modelID) return false;
+  if ((current.variant ?? undefined) !== (selection.variant ?? undefined)) return false;
+  return selection.reasoningEffort === undefined || current.reasoningEffort === selection.reasoningEffort;
+}
+
+/** `model` is a new-session schedule's chosen model. Some agents apply it when the session is created
+ *  (Claude argv, a Codex thread, a Pi model change); OpenCode's create cannot take one, so the model
+ *  only takes effect on the prompt, the way the composer sends it. The first prompt therefore carries
+ *  the model exactly when the attached session does not already report running on it. Sending it
+ *  unconditionally would trip agents that apply it at create and refuse a per-turn model. */
 async function sendScheduledPrompt(
   tool: string,
   id: string,
   info: SessionInfo | undefined,
   text: string,
+  model?: ModelSelection,
 ): Promise<SessionInfo> {
   const ensured: (AttachMode | undefined)[] = [];
   const ensure = async (mode: AttachMode | undefined) => {
@@ -1522,8 +1591,9 @@ async function sendScheduledPrompt(
       lastError = new Error(mc.conn.info.control?.drive.reason || 'this session cannot accept remote prompts right now');
       continue;
     }
+    const promptModel = model && !sessionRunsOnModel(mc.conn.info.currentModel, model) ? model : undefined;
     try {
-      await mc.conn.sendPrompt({ text });
+      await mc.conn.sendPrompt({ text, ...(promptModel ? { model: promptModel } : {}) });
     } catch (err) {
       for (const m of ensured) hub.release(tool, id, m);
       throw err;
@@ -2149,6 +2219,14 @@ async function prepareBackendSessionCreation(backend: {
   canCreateSession?: () => Promise<boolean> | boolean;
 }): Promise<void> {
   await backend.prepareCreateSession?.();
+  // After the adapter's own preparation, whose refusal is the more specific one where it has one.
+  if (await registry.probeNativeInstalled(backend.id) === false) {
+    throw new SessionCreateTemporarilyUnavailableError(
+      `${backend.displayName} is not installed, or is not visible to ${PRODUCT_IDENTITY.productName}, so a new `
+        + 'session cannot be created from the app. Run `cosyncing doctor` for setup guidance.',
+      `${backend.id}-binary-missing`,
+    );
+  }
   if (typeof backend.canCreateSession === 'function'
       && !(await Promise.resolve(backend.canCreateSession()).catch(() => false))) {
     throw new SessionCreateTemporarilyUnavailableError(
@@ -2792,6 +2870,15 @@ interface WsData {
    *  records only WHY, so a refusal can say so accurately instead of blaming a
    *  contract mismatch that did not happen. */
   readOnlyRequested: boolean;
+  /** The client asked for Observe by name (`?mode=observe`). Observe is read-only
+   *  on every adapter, but the Hub keys it on the bare connection, and for some
+   *  adapters (OpenCode's shared serve, the Codex daemon proxy) that bare
+   *  connection is the mutable writer itself. So this socket renounces the
+   *  connection's authority locally: no published authority, every mutation
+   *  refused. Unlike {@link readOnlyRequested} it is not folded into
+   *  {@link compatibility}: the client asked to watch, not to be denied Drive, so
+   *  the hello it reads keeps offering Drive and Take over. */
+  observeRequested?: boolean;
   /** An actual shared/peer credential was supplied; loopback's credential-less baseline is false. */
   credentialAuthenticated: boolean;
   clientVersion?: string;
@@ -3611,12 +3698,19 @@ function handleProtocolReceipt(ws: ServerWebSocket<WsData>, msg: any): void {
 function healthWithSecurityState(): Record<string, unknown> {
   const inspections = inspectDurableSchemas();
   const recoveredCorruption = inspectDurableCorruptionEvidence();
-  const critical = inspections.filter((item) =>
-    item.status === 'unsafe' || item.status === 'malformed' || item.status === 'unsupported-version');
+  // What the paired-device registry could not use from its store, beyond what the file inspection sees
+  // (a store it cannot read, a record it refuses). Its codes may repeat the inspection's; they are merged.
+  const peerStore = transportPairings.storeEvidence();
+  const critical = [
+    ...inspections.filter((item) =>
+      item.status === 'unsafe' || item.status === 'malformed' || item.status === 'unsupported-version'),
+    ...peerStore.filter((item) => item.severity === 'critical'),
+  ];
   const migrations = inspections.filter((item) => item.status === 'migration-required');
+  const refusedPeerRecords = peerStore.filter((item) => item.severity === 'degraded');
   const securityStatus = critical.length > 0
     ? 'critical'
-    : migrations.length > 0 || recoveredCorruption.length > 0 ? 'degraded' : 'healthy';
+    : migrations.length > 0 || recoveredCorruption.length > 0 || refusedPeerRecords.length > 0 ? 'degraded' : 'healthy';
   const status = latestBrokerHealth.status === 'critical' || securityStatus === 'critical'
     ? 'critical'
     : latestBrokerHealth.status === 'degraded' || securityStatus === 'degraded' ? 'degraded' : 'healthy';
@@ -3629,7 +3723,8 @@ function healthWithSecurityState(): Record<string, unknown> {
       ...latestBrokerHealth.components,
       'security-state': {
         status: securityStatus,
-        detailCodes: [...critical, ...migrations, ...recoveredCorruption].map((item) => item.detailCode),
+        detailCodes: [...new Set([...critical, ...migrations, ...recoveredCorruption, ...refusedPeerRecords]
+          .map((item) => item.detailCode))],
         checkedAt,
       },
     },
@@ -3749,6 +3844,16 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
         && ws.data.compatibility.status !== 'hard-incompatible'
         ? `read-only session: ${ws.data.compatibility.reason}`
         : `read-only compatibility mode: ${ws.data.compatibility.reason}`,
+      ...(clientMessageId ? { clientMessageId } : {}),
+    } satisfies WireEvent));
+    return;
+  }
+  if (ws.data.observeRequested && isMutatingClientMessage(msg?.kind)) {
+    const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
+    ws.send(JSON.stringify({
+      kind: 'nack',
+      code: 'CLIENT_MESSAGE_FAILED',
+      message: 'read-only observe session: this client attached for Observe; attach to Drive before sending input',
       ...(clientMessageId ? { clientMessageId } : {}),
     } satisfies WireEvent));
     return;
@@ -4645,10 +4750,13 @@ async function handleManagedClientMessage(
       if (!modRouted) await mc.conn.rejectQuestion?.(String(msg.requestId));
     } else if (msg.kind === 'command') {
       const commandName = String(msg.name);
-      const res = mc.conn.runCommand
-        ? await mc.conn.runCommand(commandName, msg.args, { model, agent, permissionMode })
-        : undefined;
-      if (mc.conn.runCommand && isAcceptedMutationCommand(commandName, msg.args, res)) {
+      // A connection that runs no commands offers none: acking would tell the sender a command
+      // (a crafted Stop on an agent with no interrupt) was delivered when nothing reached the agent.
+      if (!mc.conn.runCommand) {
+        throw new ControlRefusedError(`this session offers no /${commandName} command`, 'command-unsupported');
+      }
+      const res = await mc.conn.runCommand(commandName, msg.args, { model, agent, permissionMode });
+      if (isAcceptedMutationCommand(commandName, msg.args, res)) {
         recordAndBroadcastManagedAppMutation(mc);
       }
       // Surface requester-facing feedback (e.g. "Reverted last message") so a successful
@@ -4695,10 +4803,10 @@ async function handleManagedClientMessage(
       } catch {
         /* ignore */
       }
-    } else if (err instanceof ClientMessagePolicyError) {
+    } else if (err instanceof ClientMessagePolicyError || controlRefusalCode(err)) {
       resultForId = {
         kind: 'nack',
-        code: err.code,
+        code: err instanceof ClientMessagePolicyError ? err.code : controlRefusalCode(err)!,
         message,
         ...(clientMessageId ? { clientMessageId } : {}),
       };
@@ -5893,6 +6001,7 @@ server = Bun.serve<WsData>({
           id,
           mode,
           readOnlyRequested,
+          ...(requestedMode === 'observe' ? { observeRequested: true } : {}),
           ...(reason ? { reason } : {}),
           ...(expectedOwnerRevision ? { expectedOwnerRevision } : {}),
           since,
@@ -6003,6 +6112,13 @@ server = Bun.serve<WsData>({
     const revokeTransportPeer = path.match(/^\/api\/transport\/peers\/([^/]+)$/);
     if (revokeTransportPeer && req.method === 'DELETE') {
       const peerId = decodeURIComponent(revokeTransportPeer[1]!);
+      // A peer store this broker must not rewrite refuses before anything, wake registrations included.
+      try {
+        transportPairings.assertStoreWritable();
+      } catch (err) {
+        if (err instanceof PairingHttpError) return json({ error: err.message, code: err.code }, err.status);
+        throw err;
+      }
       // Remove durable peer-owned wake registrations before committing the
       // credential revocation. If this write fails, the peer remains active
       // and the owner receives an error that can be retried; a committed
@@ -6500,6 +6616,10 @@ server = Bun.serve<WsData>({
         } catch (error) {
           if (isNativeSessionRenameUnsupportedError(error)) {
             record = sessionMetadata.renameSession(tool, id, title);
+          } else if (isSessionNotFoundError(error)) {
+            // The id names nothing the adapter's store or native server publishes: a permanent
+            // answer, not the transient-sounding 502 below.
+            return json({ ok: false, error: 'session not found', code: 'NOT_FOUND' }, 404);
           } else {
             return json({ error: 'native session rename failed' }, 502);
           }
@@ -6573,6 +6693,8 @@ server = Bun.serve<WsData>({
           // initializers by AST and only understands a plain StringLiteral.
           return json({ error: AGENT_OWNED_FORK_REFUSAL, code: 'SESSION_AGENT_OWNED' }, 409);
         }
+        // An id the adapter's store or native server does not publish is a permanent answer too.
+        if (isSessionNotFoundError(err)) return json({ ok: false, error: 'session not found', code: 'NOT_FOUND' }, 404);
         return json({ error: 'native session fork failed' }, 502);
       }
       const base = nativeSession || await discoverSession(tool, id);
@@ -6592,7 +6714,8 @@ server = Bun.serve<WsData>({
       let nativeSession: Awaited<ReturnType<NonNullable<typeof backend.cloneSession>>> | undefined;
       try {
         nativeSession = await backend.cloneSession(id);
-      } catch {
+      } catch (err) {
+        if (isSessionNotFoundError(err)) return json({ ok: false, error: 'session not found', code: 'NOT_FOUND' }, 404);
         return json({ error: 'native session clone failed' }, 502);
       }
       const base = nativeSession || await discoverSession(tool, id);
@@ -6687,6 +6810,7 @@ server = Bun.serve<WsData>({
         action,
         session: { tool, id, cwd: base.cwd, title: base.title },
         artifactStore,
+        workRoot: TRANSCRIPT_EXPORT_WORK_ROOT,
       });
       if (!result.ok || !result.artifact) {
         return json({ error: result.error, code: result.code }, result.status);
@@ -7020,7 +7144,10 @@ server = Bun.serve<WsData>({
       conn.ingestHistory(b?.history); // backfill the conversation-so-far (idempotent on re-hello)
       conn.setCommands(b?.commands); // the user's skills/templates → richer palette than /stop
       conn.setModelOptions(b?.models, bridgeCurrentModel?.reasoningEffort);
-      hub.adopt('pi', id, conn); // pinned: lives as long as the terminal session, not the clients
+      const adopted = hub.adopt('pi', id, conn); // pinned: lives as long as the terminal session, not the clients
+      // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
+      // poller would otherwise learn of this live session only at its first frame.
+      rosterPublication.publishOwnerFrame(adopted.conn.info);
       return json({ ok: true, id });
     }
     // events: the extension pushes a batch of session events → fan out to attached clients.
@@ -7148,7 +7275,10 @@ server = Bun.serve<WsData>({
       conn.ingestHistory(b?.history); // backfill the conversation-so-far (idempotent on re-hello)
       conn.setCommands(b?.commands); // the user's skills/templates → richer palette than /stop
       conn.setModelOptions(b?.models, bridgeCurrentModel?.reasoningEffort);
-      hub.adopt('omp', id, conn); // pinned: lives as long as the terminal session, not the clients
+      const adopted = hub.adopt('omp', id, conn); // pinned: lives as long as the terminal session, not the clients
+      // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
+      // poller would otherwise learn of this live session only at its first frame.
+      rosterPublication.publishOwnerFrame(adopted.conn.info);
       return json({ ok: true, id });
     }
     // events: the extension pushes a batch of session events → fan out to attached clients.
@@ -7662,6 +7792,8 @@ server = Bun.serve<WsData>({
           supportsCreateSession: typeof b.createSession === 'function',
           canCreateSession:
             typeof b.createSession === 'function' &&
+            // The latest discovery leg's answer, not a fresh probe: Create itself re-checks.
+            registry.nativeInstalled(b.id) !== false &&
             (typeof b.canCreateSession === 'function' ? await Promise.resolve(b.canCreateSession()).catch(() => false) : true),
           canSelectModelAtCreation: typeof b.listModels === 'function',
           canSelectPermissionModeAtCreation: typeof b.listModes === 'function',
@@ -7992,7 +8124,7 @@ server = Bun.serve<WsData>({
                     ws.data.mc,
                     ws.data.credentialAuthenticated && !compatibility.readOnly,
                     decorateSession(ev.info),
-                    compatibility.readOnly,
+                    compatibility.readOnly || ws.data.observeRequested === true,
                   )
                 : ev;
           const status = ws.send(JSON.stringify(prepared));
@@ -8058,8 +8190,15 @@ server = Bun.serve<WsData>({
             // Live eligibility can change between the roster/create response
             // and socket open. Fall back to the bare Observe owner on the SAME
             // socket; the authoritative session frame disarms the client's
-            // retained live mode, preventing a reconnect loop. No new wire
-            // frame is needed: the read-only control reason is in that frame.
+            // retained live mode, preventing a reconnect loop.
+            //
+            // The refusal is still the drive-ownership conflict a reason-tagged
+            // attach is told about, and it goes out in the same frame, so the
+            // client can say why it is read-only instead of leaving a user who
+            // reopened their own Drive to guess. `reason` is the one the client
+            // sent: none. The frame and its codes are unchanged.
+            const message = err instanceof Error ? err.message : String(err);
+            sendRaw({ kind: 'attach-conflict', requestedMode: mode, reason: '', code: driveAttachRefusalCode(err), message });
             mode = undefined;
             ws.data.mode = undefined;
             mc = await hub.ensure(tool, id);
@@ -8443,7 +8582,15 @@ server = Bun.serve<WsData>({
         // Seed resync reconciliation from a cursor the client has actually accepted. Reads started
         // after replay recording begins cannot serve as a pre-race baseline.
         if (nativeHistoryAuthoritative) mc.acceptResyncHistoryCursor(delta.cursor);
-        for (const m of derivedHistory) sendRaw({ kind: 'message', seq: 0, message: m });
+        // An open request card can be BOTH in the adapter's history (non-durable, so it rides here)
+        // and in the live snapshot or `getPending` below. Each goes out once per attach: the live
+        // snapshot keeps its own copy, and whatever this sends the pending replay skips.
+        for (const m of derivedHistory) {
+          const key = pendingReplayKey(m);
+          if (key && replayedPending.has(key)) continue;
+          if (key) replayedPending.add(key);
+          sendRaw({ kind: 'message', seq: 0, message: m });
+        }
         for (const m of artifactSnapshot) sendRaw({ kind: 'message', seq: 0, message: m });
         // One logical message can be BOTH persisted in history and still held in the live text
         // accumulator: a final that reached the adapter's saved history before the turn's idle
@@ -8572,6 +8719,27 @@ server = Bun.serve<WsData>({
     },
   },
 });
+
+// R2 rule 18 whatever ended the previous process: a transcript export it delivered is removed now,
+// with its file, before this process answers anything — this runs synchronously in the turn the
+// listener bound in, and a second process that lost the bind to a live broker never gets here. The
+// store already refuses to serve another process's exports, so a sweep that cannot be persisted
+// still never serves one; the next artifact write retries the removal.
+try {
+  const swept = artifactStore.sweepStaleExportAttachments();
+  if (swept > 0) console.log(`${LOG_PREFIX} removed ${swept} transcript export(s) left by a previous broker process`);
+} catch (error) {
+  console.warn(`${LOG_PREFIX} could not remove transcript exports left by a previous broker process: ${error instanceof Error ? error.message : String(error)}`);
+}
+// The same for an export the previous process was still running: its working directory holds the
+// native, unredacted transcript. That directory is in this broker's own state home, never the shared
+// system temp directory, so nothing another broker on the host is exporting can be in it.
+try {
+  const abandoned = sweepTranscriptExportWorkRoot(TRANSCRIPT_EXPORT_WORK_ROOT);
+  if (abandoned > 0) console.log(`${LOG_PREFIX} removed ${abandoned} unfinished transcript export(s) left by a previous broker process`);
+} catch (error) {
+  console.warn(`${LOG_PREFIX} could not remove unfinished transcript exports left by a previous broker process: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 console.log(`${LOG_PREFIX} broker on http://${server.hostname}:${server.port}  (machine: ${MACHINE})`);
 console.log(`${LOG_PREFIX} adapters: ${registry.list().map((b) => b.id).join(', ')}`);

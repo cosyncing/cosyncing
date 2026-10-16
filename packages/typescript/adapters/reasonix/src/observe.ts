@@ -18,6 +18,7 @@ import type {
   SessionInfo,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
+import { classifyDirectoryWatchEvent } from '@cosyncing/adapter-api';
 import {
   mapReasonixRecord,
   mapReasonixInterruptedTail,
@@ -196,6 +197,9 @@ export class ReasonixObserveConnection implements SessionConnection {
   private pendingDrain?: ReturnType<typeof setTimeout>;
   private pendingWatcherRearm?: ReturnType<typeof setTimeout>;
   private pendingWatcherStable?: ReturnType<typeof setTimeout>;
+  private pendingReplacementCheck?: ReturnType<typeof setTimeout>;
+  /** This session's files as the last complete drain found them (see `watchedFilesSignature`). */
+  private drainedSignature?: string;
   private watcherRearmAttempts = 0;
   private draining = false;
   private drainAgain = false;
@@ -402,6 +406,8 @@ export class ReasonixObserveConnection implements SessionConnection {
     this.pendingWatcherRearm = undefined;
     if (this.pendingWatcherStable) clearTimeout(this.pendingWatcherStable);
     this.pendingWatcherStable = undefined;
+    if (this.pendingReplacementCheck) clearTimeout(this.pendingReplacementCheck);
+    this.pendingReplacementCheck = undefined;
     this.watcher?.close();
     this.watcher = undefined;
     this.unsubscribeCorrelation?.();
@@ -562,12 +568,15 @@ export class ReasonixObserveConnection implements SessionConnection {
       ]);
       const watcher = this.watchFactory(dirname(this.session.transcriptPath), { persistent: false }, (eventType, filename) => {
         const changedName = filename === null || filename === undefined ? undefined : String(filename);
-        if (changedName !== undefined && !watchedNames.has(changedName)) return;
-        if (this.pendingDrain || this.closed) return;
-        this.pendingDrain = setTimeout(() => {
-          this.pendingDrain = undefined;
-          void this.drain();
-        }, TAIL_DEBOUNCE_MS);
+        const event = classifyDirectoryWatchEvent(eventType, filename, watchedNames);
+        if (event === 'unrelated') return;
+        // Bun names a rename-over by its source, so any rename may have replaced one of this
+        // session's files. Every session shares this directory: look before reading them all.
+        if (event === 'renamed') {
+          this.scheduleReplacementCheck();
+          return;
+        }
+        this.scheduleDrain();
         if (eventType === 'rename' && (changedName === undefined || changedName === transcriptName)) {
           this.scheduleWatcherRearm();
         }
@@ -586,6 +595,52 @@ export class ReasonixObserveConnection implements SessionConnection {
       this.trace?.({ op: 'observe', detail: `watch unavailable: ${error instanceof Error ? error.message : String(error)}` });
       this.scheduleWatcherRearm();
     }
+  }
+
+  private scheduleDrain(): void {
+    if (this.pendingDrain || this.closed) return;
+    this.pendingDrain = setTimeout(() => {
+      this.pendingDrain = undefined;
+      void this.drain();
+    }, TAIL_DEBOUNCE_MS);
+  }
+
+  /**
+   * A rename of another name drains only when one of this session's files is not the file, or
+   * no longer has the size and times, the last complete drain started from: another session's
+   * atomic write then costs a few `stat`s instead of re-reading this transcript.
+   */
+  private scheduleReplacementCheck(): void {
+    if (this.pendingDrain || this.pendingReplacementCheck || this.closed) return;
+    this.pendingReplacementCheck = setTimeout(() => {
+      this.pendingReplacementCheck = undefined;
+      void this.checkReplacement();
+    }, TAIL_DEBOUNCE_MS);
+  }
+
+  private async checkReplacement(): Promise<void> {
+    try {
+      const signature = await this.watchedFilesSignature();
+      if (this.closed || (this.drainedSignature !== undefined && signature === this.drainedSignature)) return;
+      await this.drain();
+    } catch (error) {
+      this.trace?.({ op: 'observe', detail: `replacement check failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+
+  /** Which file holds each of this session's paths (`dev:ino`), with its size and times. */
+  private async watchedFilesSignature(): Promise<string> {
+    const boundaries = await Promise.all([
+      this.session.transcriptPath,
+      this.session.metaPath,
+      this.session.acpMetadataPath,
+      this.session.eventIndexPath,
+      this.session.eventLogPath,
+      this.session.displayIndexPath,
+    ].map(fileBoundary));
+    return boundaries.map((boundary) => boundary === undefined
+      ? '-'
+      : `${boundary.dev}:${boundary.ino}:${boundary.size}:${boundary.mtimeNs}:${boundary.ctimeNs}`).join('|');
   }
 
   private scheduleWatcherRearm(): void {
@@ -621,6 +676,9 @@ export class ReasonixObserveConnection implements SessionConnection {
     try {
       do {
         this.drainAgain = false;
+        // Taken before the read: a file replaced after it differs at the next rename check.
+        const signature = await this.watchedFilesSignature();
+        this.drainedSignature = undefined;
         const snapshot = await this.readStableSnapshot();
         if (!snapshot) {
           this.trace?.({ op: 'observe', detail: 'tail drain deferred until Reasonix sidecars converge' });
@@ -673,10 +731,14 @@ export class ReasonixObserveConnection implements SessionConnection {
           }
           this.setTailCursor(read, identity);
           this.afterTailPublish(read);
+          this.drainedSignature = signature;
           continue;
         }
 
-        if (rewritten) continue;
+        if (rewritten) {
+          this.drainedSignature = signature;
+          continue;
+        }
 
         const displayByIndex = new Map(read.displayEntries.map((entry) => [entry.index, entry]));
         for (let lineIndex = this.recordCount; lineIndex < read.records.length; lineIndex += 1) {
@@ -697,6 +759,7 @@ export class ReasonixObserveConnection implements SessionConnection {
         for (const issue of read.issues) this.emit({ type: 'notice', message: `Reasonix history: ${issue}.` });
         this.setTailCursor(read, identity);
         this.afterTailPublish(read);
+        this.drainedSignature = signature;
       } while (this.drainAgain && !this.closed);
     } catch (error) {
       this.trace?.({ op: 'observe', detail: `tail drain failed: ${error instanceof Error ? error.message : String(error)}` });

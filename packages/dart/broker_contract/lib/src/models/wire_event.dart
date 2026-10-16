@@ -723,17 +723,19 @@ class NackWireEvent extends WireEvent {
 }
 
 /// `{ kind: 'attach-conflict', requestedMode, reason, code, message }` — the
-/// broker's structured answer to a reason-tagged DRIVE attach it denied.
+/// broker's structured answer to a DRIVE attach it denied: a reason-tagged
+/// one, or a `mode=live` attach another owner holds the session against.
 ///
 /// [requestedMode] names the mode that was actually asked for: `resume`, or
-/// `live` for a takeover of a session whose Drive lives on the live key. A
-/// client reading this frame to decide what to retry must use that value
-/// rather than assume resume.
+/// `live` for a takeover of a session whose Drive lives on the live key or
+/// for a plain live attach. A client reading this frame to decide what to
+/// retry must use that value rather than assume resume.
 ///
 /// The socket stays open and continues as an Observe-class attach; this frame
 /// tells the client the machine reason so it can keep its local Drive
 /// provenance and surface an honest state instead of a generic failure. Never
-/// sent for a mode-only attach.
+/// sent for a mode-only `resume` attach, which keeps its error-and-close
+/// answer.
 class AttachConflictWireEvent extends WireEvent {
   /// Creates a structured drive-attach conflict.
   const AttachConflictWireEvent({
@@ -753,11 +755,12 @@ class AttachConflictWireEvent extends WireEvent {
     );
   }
 
-  /// The attach mode the client requested (currently always `resume`).
+  /// The attach mode the client requested: `resume` or `live`.
   final String requestedMode;
 
   /// The drive-attach reason the client sent (`create`, `app-restore`,
-  /// `lease-restore`, or `takeover`).
+  /// `lease-restore`, or `takeover`), or empty for a `mode=live` attach that
+  /// carried none.
   final String reason;
 
   /// Stable broker code: `DRIVE_OWNERSHIP_CONFLICT` when ownership facts deny

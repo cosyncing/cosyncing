@@ -17,6 +17,7 @@
  * The scenarios live in `e2e/adapters/conformance/scenarios.ts`; a kit's test
  * file is one line: `conformanceSuite(grokKit)`.
  */
+import { expect } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import type { Broker, BrokerClient, FixturePaths, Frame, SessionStream } from '../../harness/index.ts';
@@ -40,7 +41,7 @@ export const SCENARIOS = {
   C14: 'a foreign durable user row demotes every joined socket',
   C15: 'a replaced or rewritten log demotes Drive',
   C16: 'version floor gates Create and Resume',
-  C17: 'a missing binary refuses Create and never drives stored sessions',
+  C17: 'a missing binary refuses Create and keeps stored sessions listed Observe-only',
   C18: 'model and mode catalog, and switching',
   C19: 'slash-command catalog rides the prompt queue',
   C20: 'broker restart restores only exact Drive provenance',
@@ -224,7 +225,10 @@ export interface ConformanceProfile {
   boundaryChanges?: Array<'replaceLog' | 'rewriteHistory'>;
   /** Whether a Drive attach publishes a `commands` frame at all. Default true; agy offers no slash commands, so it sends none. */
   commandsFrame?: boolean;
-  /** A refused `mode=live` attach: `error` (default) or `observe` (the socket falls back to read-only Observe, with no conflict frame). */
+  /**
+   * A refused `mode=live` attach: `error` (default) or `observe` (the socket falls back to read-only Observe, after
+   * one `attach-conflict` frame that says why).
+   */
   liveRefusal?: 'error' | 'observe';
   /** What a Drive session offers for the native terminal (C08). */
   terminal: {
@@ -261,9 +265,10 @@ export interface ConformanceProfile {
   subagents: boolean;
   /**
    * What the roster does with stored sessions while the binary is missing
-   * (C17): `hidden` when availability gates the whole discovery leg (the
-   * registry skips an unavailable backend), `observe-only` when they stay
-   * listed without Drive.
+   * (C17): `observe-only` when they stay listed and readable, with Drive off and
+   * a "not installed" reason, and no new Drive writer may open; `hidden` when the
+   * agent's sessions are reachable only through the host the binary runs (a
+   * `kimi web` or `opencode serve`), so with it gone there is no store to list.
    */
   missingBinaryRoster: 'hidden' | 'observe-only';
   scenarios: Partial<Record<ScenarioId, Applicability>>;
@@ -331,6 +336,50 @@ export interface ConformanceContext {
 export interface ConformanceExtra {
   title: string;
   run(context: ConformanceContext): Promise<void>;
+}
+
+/**
+ * An extra for a kit whose `replaceLog` writes the session log aside and renames it over the
+ * original: an open Observe reader is reset to the same conversation, without waiting for another
+ * write. Bun reports such a rename only under the temporary name it was renamed from.
+ */
+export function replacedLogResetsObserve(agent: string): ConformanceExtra {
+  return {
+    title: 'an open Observe reader is reset when the log is replaced by rename',
+    async run(context) {
+      const seeded = context.fake.seedSession({ turns: 2 });
+      await context.client.waitForSession((row) => row.id === seeded.id);
+      const stream = await context.client.attach(agent, seeded.id);
+      await stream.waitForKind('history');
+      const from = stream.frames.length;
+      context.fake.replaceLog(seeded);
+      const reset = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true,
+        { after: from, what: 'a reset after the log was replaced' });
+      expect((reset.messages as any[]).filter((message) => message.type === 'user-message').map((message) => message.text))
+        .toEqual([seeded.texts[0], seeded.texts[2]]);
+      await expectOneResetSince(stream, context.fake, seeded, from);
+      stream.close();
+    },
+  };
+}
+
+/**
+ * One change to a session's log reaches an open reader as exactly one reset frame, with at most one
+ * notice (some adapters reset without one). A turn appended afterwards and read live marks the point
+ * by which a second reset for the same change would have arrived.
+ */
+export async function expectOneResetSince(
+  stream: SessionStream,
+  fake: FakeController,
+  session: { id: string; cwd: string },
+  from: number,
+): Promise<void> {
+  fake.appendTurn(session, 'after the change', 'answer after the change');
+  await stream.waitForMessage((message) => message.type === 'model-output'
+    && (message.text ?? message.delta) === 'answer after the change');
+  const after = stream.frames.slice(from);
+  expect(after.filter((frame) => frame.kind === 'history' && frame.reset === true).length).toBe(1);
+  expect(after.filter((frame) => frame.kind === 'notice').length).toBeLessThanOrEqual(1);
 }
 
 // ------------------------------------------------------------- fake controller
@@ -588,6 +637,16 @@ export function treeSnapshot(root: string): Map<string, string> {
   };
   walk(root);
   return out;
+}
+
+/**
+ * A named pipe at `path` (parents created), for hostile-store cases: a reader that opens it
+ * without `O_NONBLOCK` waits for a writer that never comes. POSIX only (`unsupportedOn: ['win32']`).
+ */
+export function makeFifo(path: string): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  const made = Bun.spawnSync(['mkfifo', path], { timeout: 10_000, stdout: 'pipe', stderr: 'pipe' });
+  if (made.exitCode !== 0) throw new Error(`mkfifo ${path} failed: ${made.stderr.toString()}`);
 }
 
 /** A canonical lowercase UUIDv7 (the id shape Grok's store requires). */

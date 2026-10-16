@@ -1,8 +1,6 @@
 {
   "provenance": "synthetic, derived from packages/typescript/broker/test/codex/rollout.ts",
   "description": "a mid-turn steer delivered on the tail after attaching inside that turn must take the next canonical ordinal (u1) like a cold read does",
-  "knownBugMatch": "replay: identity user-message#codex:turn-steer:u0 used twice",
-  "knownBug": "Codex Observe: a user_message on the tail inside a turn already open at attach is keyed codex:<turn>:u0, the key of the prompt read at attach, and the connection resync then returns two rows under u0; a cold read keys them u0 and u1",
   "userTexts": [
     "open",
     "steer"

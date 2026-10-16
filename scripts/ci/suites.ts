@@ -303,6 +303,8 @@ export const suites: Suite[] = [
         'e2e/broker/status-truth.test.ts',
         'packages/typescript/broker/test/sessions/session-status-fold.test.ts',
         'packages/typescript/broker/test/sessions/session-truth-manifest.test.ts',
+        'packages/typescript/adapter-api/test/windows-process-table.test.ts',
+        'packages/typescript/adapters/codex/test/windows-presence.test.ts',
       ),
       { id: 'install-ps1', run: ['bun', 'run', 'scripts/broker/tests/release/test-install-ps1.ts'], serial: true, timeoutMs: 300_000 },
       ...e2eTasks('windows'),

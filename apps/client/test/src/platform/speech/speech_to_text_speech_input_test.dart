@@ -7,6 +7,23 @@ import 'package:cosyncing_client/src/platform/speech/speech_to_text_backend.dart
 import 'package:cosyncing_client/src/platform/speech/speech_to_text_speech_input.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+/// Long enough that the finalization timer decides no test that does not ask
+/// it to: a final callback a test delivers before the timeout has to win
+/// however slowly the host runs the test between the two.
+const _finalizationNotInThisTest = Duration(minutes: 10);
+
+/// The timeout the timer's own tests wait out. Each waits past it with a
+/// timer of its own, which fires after this one.
+const _finalizationShort = Duration(milliseconds: 20);
+
+Duration _finalizationTimeout = _finalizationNotInThisTest;
+
+/// The tests of this group are about the finalization timer firing.
+void _finalizationTimesOut() {
+  setUpAll(() => _finalizationTimeout = _finalizationShort);
+  tearDownAll(() => _finalizationTimeout = _finalizationNotInThisTest);
+}
+
 void main() {
   late _FakeBackend backend;
   late SpeechToTextSpeechInput input;
@@ -16,7 +33,7 @@ void main() {
     input = SpeechToTextSpeechInput(
       backend,
       onDeviceCapable: true,
-      finalizationTimeout: const Duration(milliseconds: 20),
+      finalizationTimeout: _finalizationTimeout,
     );
   });
 
@@ -339,40 +356,44 @@ void main() {
       expect((input.current as SpeechInputReady).transcript, 'already final');
     });
 
-    test('stop timeout uses latest partial when no final arrives', () async {
-      backend.deliverPartial('partial text');
-      await pumpEventQueue();
-      await input.stop();
-      await Future<void>.delayed(const Duration(milliseconds: 30));
-      await pumpEventQueue();
-      expect(input.current, isA<SpeechInputReady>());
-      expect((input.current as SpeechInputReady).transcript, 'partial text');
-    });
+    group('when no final callback arrives in time', () {
+      _finalizationTimesOut();
 
-    test('final after stop timeout cannot emit a second ready', () async {
-      final ready = <SpeechInputReady>[];
-      final sub = input.states
-          .where((state) => state is SpeechInputReady)
-          .cast<SpeechInputReady>()
-          .listen(ready.add);
-      backend.deliverPartial('timeout text');
-      await pumpEventQueue();
-      await input.stop();
-      await Future<void>.delayed(const Duration(milliseconds: 30));
-      backend.deliverFinal('late final text');
-      await pumpEventQueue();
+      test('stop timeout uses latest partial when no final arrives', () async {
+        backend.deliverPartial('partial text');
+        await pumpEventQueue();
+        await input.stop();
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        await pumpEventQueue();
+        expect(input.current, isA<SpeechInputReady>());
+        expect((input.current as SpeechInputReady).transcript, 'partial text');
+      });
 
-      expect(ready, hasLength(1));
-      expect(ready.single.transcript, 'timeout text');
-      await sub.cancel();
-    });
+      test('final after stop timeout cannot emit a second ready', () async {
+        final ready = <SpeechInputReady>[];
+        final sub = input.states
+            .where((state) => state is SpeechInputReady)
+            .cast<SpeechInputReady>()
+            .listen(ready.add);
+        backend.deliverPartial('timeout text');
+        await pumpEventQueue();
+        await input.stop();
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        backend.deliverFinal('late final text');
+        await pumpEventQueue();
 
-    test('stop exception is contained', () async {
-      backend.stopException = Exception('stop failed');
-      await input.stop();
-      await pumpEventQueue();
-      await Future<void>.delayed(const Duration(milliseconds: 30));
-      expect(input.current, isA<SpeechInputIdle>());
+        expect(ready, hasLength(1));
+        expect(ready.single.transcript, 'timeout text');
+        await sub.cancel();
+      });
+
+      test('stop exception is contained', () async {
+        backend.stopException = Exception('stop failed');
+        await input.stop();
+        await pumpEventQueue();
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(input.current, isA<SpeechInputIdle>());
+      });
     });
   });
 
@@ -733,24 +754,34 @@ void main() {
       expect(input.current, isA<SpeechInputListening>());
     });
 
-    test('done status preserves bounded partial fallback after stop', () async {
-      backend.deliverPartial('status fallback');
-      await input.stop();
-      backend.deliverStatus('done');
-      await Future<void>.delayed(const Duration(milliseconds: 30));
-      expect((input.current as SpeechInputReady).transcript, 'status fallback');
-    });
+    group('when no final callback arrives in time', () {
+      _finalizationTimesOut();
 
-    test('automatic done status cannot leave listening stuck', () async {
-      backend
-        ..deliverPartial('automatic fallback')
-        ..deliverStatus('done');
-      expect(input.current, isA<SpeechInputProcessing>());
-      await Future<void>.delayed(const Duration(milliseconds: 30));
-      expect(
-        (input.current as SpeechInputReady).transcript,
-        'automatic fallback',
+      test(
+        'done status preserves bounded partial fallback after stop',
+        () async {
+          backend.deliverPartial('status fallback');
+          await input.stop();
+          backend.deliverStatus('done');
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          expect(
+            (input.current as SpeechInputReady).transcript,
+            'status fallback',
+          );
+        },
       );
+
+      test('automatic done status cannot leave listening stuck', () async {
+        backend
+          ..deliverPartial('automatic fallback')
+          ..deliverStatus('done');
+        expect(input.current, isA<SpeechInputProcessing>());
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(
+          (input.current as SpeechInputReady).transcript,
+          'automatic fallback',
+        );
+      });
     });
   });
 

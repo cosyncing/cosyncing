@@ -26,6 +26,8 @@
  *
  *   [[permission]]   an `extension_ui_request` confirm; the turn waits for the product's reply
  *   [[question]]     an `extension_ui_request` select (Left / Right); the choice rides the reply
+ *   [[expiringconfirm]] a confirm the runtime stops waiting on by itself, without a word to the
+ *                    client (as Pi's dialog timeout or the run's abort settles one); the turn goes on
  *   [[hold:TAG]]     keep the run open until the control file `release-TAG` appears, or `abort`
  *   [[retry]]        one failed attempt (`auto_retry_start`/`auto_retry_end`) before the answer
  *   [[tool]]         a bash tool call and its result before the answer
@@ -404,6 +406,10 @@ function runFakePi(): void {
       const method = text.includes('[[editor]]') ? 'editor' : 'input';
       const reply = await ui({ id: `question-${process.pid}-${turnNumber}-${method}`, method, title: 'Name', message: 'Enter a name' });
       outcome = typeof reply.value === 'string' && reply.value ? ` (typed ${reply.value})` : ' (nothing typed)';
+    }
+    if (text.includes('[[expiringconfirm]]')) {
+      // `dialog-` ids are the ones the fake raised without waiting on: a reply for one is no fault.
+      emit({ type: 'extension_ui_request', id: `dialog-${process.pid}-${turnNumber}-expiring`, method: 'confirm', title: 'Expires', message: 'Nobody answers this' });
     }
     if (text.includes('[[unknowndialog]]')) {
       // A blocking dialog method this build does not know: the product must cancel it rather than hang the turn.

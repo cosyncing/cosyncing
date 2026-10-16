@@ -544,6 +544,12 @@ export class KimiObserveConnection implements SessionConnection {
    *  posture that is not `needs-input`; the drive layer's reconciliation retracts answered cards. */
   readonly pendingListMayOmitOpenRequests = true;
   private readonly handlers = new Set<AgentMessageHandler>();
+  /**
+   * Product clients attached to this connection, as the broker last reported them through
+   * {@link setClientCount}. `undefined` until it reports at all — a connection nobody hosts that
+   * way answers to its handler count alone. See {@link hasSubscribers}.
+   */
+  private clientCount?: number;
   private readonly seen = new Set<string>();
   private readonly pollIntervalMs: number;
   private readonly socketFactory?: KimiSocketFactory;
@@ -1048,7 +1054,8 @@ export class KimiObserveConnection implements SessionConnection {
    * after the read), every trigger here is evidence rather than speculation,
    * and a drive connection's standing completion fence has to be reconciled
    * whether or not anyone is currently watching. The one speculative trigger,
-   * {@link maybeRepairRunState}, carries the gate itself.
+   * {@link maybeRepairRunState}, carries a narrower gate of its own: a listener,
+   * not a client.
    */
   protected async repairRunState(): Promise<void> {
     if (this.runStateRepairing || this.closed) return;
@@ -1105,7 +1112,9 @@ export class KimiObserveConnection implements SessionConnection {
    * window costs one session-row read.
    */
   private maybeRepairRunState(): void {
-    if (this.closed || !this.hasSubscribers || this.info.status === 'idle') return;
+    // Gated on a LISTENER, not on a client: the row it reads loads nothing, and a
+    // zero-client attention lease is held for exactly the run-state this heals.
+    if (this.closed || this.handlers.size === 0 || this.info.status === 'idle') return;
     // The LATER of the two: fresh evidence and a recent attempt each buy a full
     // window, so a repair that answered and a repair that could not both leave
     // exactly one read per window behind them.
@@ -1703,11 +1712,42 @@ export class KimiObserveConnection implements SessionConnection {
    * terminal holding the same session, and paying that coexistence cost for a
    * session no client is watching is never right.
    *
+   * A HANDLER IS NOT A CLIENT. The broker's hub subscribes once for as long as
+   * it holds the connection — through the reconnect grace after the last client
+   * leaves, and for as long as a zero-client attention lease keeps a running
+   * turn — so the handler count alone never reaches zero while the hub lives,
+   * and every poll tick of that window force-loaded the session for nobody. The
+   * client count the broker reports through {@link setClientCount} is the
+   * answer when it has reported one; a connection hosted without it keeps the
+   * handler rule.
+   *
    * `protected` because the subclass owns reads of its own; the handler set
    * itself stays private, so no subclass can deliver to it directly.
    */
   protected get hasSubscribers(): boolean {
-    return this.handlers.size > 0;
+    return this.handlers.size > 0 && this.clientCount !== 0;
+  }
+
+  /**
+   * The broker's report of attached product clients.
+   *
+   * At zero every force-loading read stops at its {@link hasSubscribers} gate:
+   * the poll walk, the overlay read and the card reconciliation all read
+   * nothing, so an idle session costs the Kimi server no request at all. What
+   * keeps running is passive or loads nothing: the socket, which still carries
+   * the run-state, the approval cards and the turn ends a zero-client attention
+   * lease is held for; its restoration on the tick; the run-state watchdog's
+   * session-row read; and the local wire-journal tail.
+   *
+   * Back above zero the next tick polls again, and the overlap walk in
+   * {@link refresh} covers whatever the socket did not deliver in between; a
+   * drive connection's held card reconciliation rides that same refresh. No
+   * walk is started here: the client that ends the zero is attaching, and its
+   * attach reads an authoritative history page of its own — a walk racing that
+   * read would deliver the rows it carries a second time.
+   */
+  setClientCount(count: number): void {
+    this.clientCount = count;
   }
 
   /**
@@ -1721,9 +1761,10 @@ export class KimiObserveConnection implements SessionConnection {
    * file-watching and transcript-tailing adapters observe passively, whereas
    * each poll tick here is an active REST read that force-loads the session
    * server-side. So while the timer and socket do keep running, the reads gate
-   * themselves on {@link hasSubscribers} — the socket may stay open because that
-   * half is passive and cheap. The invariant that makes it safe is `close()`,
-   * not the handler count.
+   * themselves on {@link hasSubscribers} — handlers AND, once the broker reports
+   * them, attached clients (see {@link setClientCount}) — and the socket may stay
+   * open because that half is passive and cheap. The invariant that makes it
+   * safe is `close()`, not the handler count.
    */
   subscribe(handler: AgentMessageHandler): Unsubscribe {
     this.handlers.add(handler);

@@ -81,6 +81,19 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+/** Process groups this process started and has not yet seen the end of. */
+const liveGroups = new Set<number>();
+
+/**
+ * Signal every process group {@link runSupervised} started and still owns. For a supervisor that is
+ * itself being stopped: its groups are their own sessions, so a Ctrl-C or a SIGTERM that ends it
+ * never reaches them, and they would run on unsupervised.
+ */
+export function signalSupervisedGroups(signal: NodeJS.Signals): number {
+  for (const pid of liveGroups) signalGroup(pid, signal);
+  return liveGroups.size;
+}
+
 /** A readable snapshot of every process in the group (the descendant tree on Windows). */
 export function describeTree(pid: number, isolated: boolean): string {
   if (IS_WINDOWS) {
@@ -118,6 +131,7 @@ export async function runSupervised(
     stdin: 'ignore',
   });
 
+  if (isolated) liveGroups.add(child.pid);
   let timedOut = false;
   let treeAtTimeout: string | undefined;
   // Chained so kills never interleave, and awaited before returning so no
@@ -189,6 +203,7 @@ export async function runSupervised(
     }
   }
   await termination;
+  if (!groupAlive(child.pid)) liveGroups.delete(child.pid);
   // A pipe can outlive every process we know about, so this wait is bounded.
   await Promise.race([pumps, Bun.sleep(grace)]);
 
@@ -207,14 +222,20 @@ export async function runSupervised(
 }
 
 /**
+ * Test switches that only choose which assertions run, never an endpoint:
+ * `COSYNCING_E2E_KNOWN_BUGS=1` asserts the pinned known bugs too.
+ */
+const TEST_SWITCHES = new Set(['COSYNCING_E2E_KNOWN_BUGS']);
+
+/**
  * The host environment minus everything that could point a test at a real
- * broker or agent endpoint: every `COSYNCING_*` variable, `PORT`, `HOST`,
- * `OPENCODE_URL`.
+ * broker or agent endpoint: every `COSYNCING_*` variable (except the
+ * {@link TEST_SWITCHES}), `PORT`, `HOST`, `OPENCODE_URL`.
  */
 export function testEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const environment = { ...source };
   for (const key of Object.keys(environment)) {
-    if (key.startsWith('COSYNCING_')) delete environment[key];
+    if (key.startsWith('COSYNCING_') && !TEST_SWITCHES.has(key)) delete environment[key];
   }
   delete environment.PORT;
   delete environment.HOST;

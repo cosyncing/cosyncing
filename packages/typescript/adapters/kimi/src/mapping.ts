@@ -17,6 +17,7 @@ import {
   commandSemantic,
   CONTEXT_INJECTION_EVENT,
   fileReadSemantic,
+  isOpaqueSessionId,
   searchGroup,
   searchSemantic,
   unwrapContextBlock,
@@ -403,7 +404,9 @@ export function mapKimiSession(
   isOwned?: KimiOwnershipPredicate,
 ): SessionInfo | undefined {
   const id = optionalString(raw?.id);
-  if (!id) return undefined;
+  // Every id is spliced into host URLs (`/api/v1/sessions/{id}/…`): one that is not a single
+  // opaque segment is never published, so nothing can attach to it.
+  if (!id || !isOpaqueSessionId(id)) return undefined;
   const meta = raw.meta ?? {};
   const cwd = optionalString(raw.workspace?.cwd);
   const title = optionalString(meta.title) ?? optionalString(meta.last_prompt) ?? kimiFallbackTitle(id, cwd);

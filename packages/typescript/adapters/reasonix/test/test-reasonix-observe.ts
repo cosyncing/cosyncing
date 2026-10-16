@@ -492,6 +492,51 @@ try {
       && !('recordPrefixValue' in (replayRace as unknown as Record<string, unknown>)));
   await replayRace.close();
 
+  // Bun reports a rename-over only under the name renamed FROM, and every session's files share
+  // this directory: a replacement of ours is found by its identity, another session's costs no read.
+  let replacementReads = 0;
+  const replaced = new ReasonixObserveConnection({
+    session: stored,
+    info,
+    snapshotTestHook: (attempt) => { if (attempt === 0) replacementReads += 1; },
+  });
+  await replaced.getHistory();
+  const replacedLive: AgentMessage[] = [];
+  replaced.subscribe((message) => replacedLive.push(message));
+  // One ordinary append drains first, so the reader knows this session's files.
+  const settledRow = { role: 'assistant', content: 'before the replacement' };
+  const settledLine = JSON.stringify(settledRow);
+  const settledOffset = statSync(transcript).size;
+  appendFileSync(transcript, `${settledLine}\n`);
+  displayEntries.push({
+    index: displayEntries.length,
+    offset: settledOffset,
+    length: Buffer.byteLength(settledLine),
+    role: 'assistant',
+    authored_turn: 2,
+  });
+  updateSidecars(43);
+  const settledSeen = await waitFor(() => replacedLive.some((message) =>
+    message.type === 'model-output' && message.text === 'before the replacement'));
+  await sleep(200);
+  const readsBeforeForeign = replacementReads;
+  const foreignTranscript = join(sessionDir, 'another-session.jsonl');
+  writeFileSync(`${foreignTranscript}.tmp`, `${JSON.stringify({ role: 'user', content: 'elsewhere' })}\n`);
+  renameSync(`${foreignTranscript}.tmp`, foreignTranscript);
+  await sleep(300);
+  check('another session\'s file renamed in the shared directory reads nothing of this session',
+    settledSeen && replacementReads === readsBeforeForeign
+      && !replacedLive.some((message) => message.type === 'history-reset'),
+    JSON.stringify({ settledSeen, readsBeforeForeign, replacementReads }));
+  // The same bytes, written aside and renamed over the transcript; no sidecar changes.
+  writeFileSync(`${transcript}.tmp`, readFileSync(transcript));
+  renameSync(`${transcript}.tmp`, transcript);
+  const replacementReset = await waitFor(() => replacedLive.some((message) => message.type === 'history-reset'));
+  check('a transcript renamed over with the same bytes resets the open reader once',
+    replacementReset && replacedLive.filter((message) => message.type === 'history-reset').length === 1,
+    JSON.stringify(replacedLive.map((message) => message.type)));
+  await replaced.close();
+
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));
 } finally {

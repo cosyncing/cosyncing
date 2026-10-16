@@ -45,6 +45,10 @@ final sessionListRepositoryProvider = FutureProvider<SessionListRepository>(
 /// - `docs/architecture/monorepo.md`
 class SessionListController extends Notifier<SessionListState> {
   bool _inFlight = false;
+
+  /// Whether a screen has asked for the roster yet; a switch reloads only a
+  /// started roster.
+  bool _started = false;
   bool _feedActive = false;
   bool _feedUnsupported = false;
   int _feedGeneration = 0;
@@ -127,9 +131,13 @@ class SessionListController extends Notifier<SessionListState> {
       // showing (and keep caching) the previous broker's roster under a profile
       // that now points somewhere else entirely.
       ..listen<BrokerProfile?>(activeBrokerProfileProvider, (previous, next) {
+        final previousSource = RosterSource.of(previous);
         final nextSource = RosterSource.of(next);
-        if (RosterSource.of(previous) == nextSource) return;
+        if (previousSource == nextSource) return;
         _handleSourceChanged(nextSource);
+        if (_started && previousSource != null && nextSource != null) {
+          _loadSwitchedSource(nextSource);
+        }
       })
       ..listen<AsyncValue<SessionRosterQueryWindow>>(
         sessionRosterWindowProvider,
@@ -169,6 +177,29 @@ class SessionListController extends Notifier<SessionListState> {
     // Working/Idle facts must not survive into the new broker's roster.
     ref.read(sessionStatusRegistryProvider.notifier).adoptSource(source);
     state = SessionListState(source: source);
+  }
+
+  /// Loads the roster of the server just switched to, at once.
+  ///
+  /// Nothing else does: the workspace reloads only when a broker client
+  /// arrives where there was none, and its poll waits out its interval, so
+  /// the new server stayed on "Connecting…" for up to 15 s. A first server
+  /// (no source before) is still loaded by that arrival, not here, so it is
+  /// never fetched twice; a roster no screen has started (see [load]) is not
+  /// started by a switch either.
+  ///
+  /// Deferred by a microtask: this runs inside the profile's notification,
+  /// before the providers built on the profile are marked stale, and a load
+  /// started here would resolve the previous server's repository. A load
+  /// someone else started in between (a Refresh, the workspace's own) already
+  /// serves the new source, so it is not superseded by a second one.
+  void _loadSwitchedSource(RosterSource source) {
+    final generation = _loadGeneration;
+    scheduleMicrotask(() {
+      if (_disposed || generation != _loadGeneration) return;
+      if (_activeSource != source) return;
+      unawaited(load());
+    });
   }
 
   /// Publishes an authoritative roster revision into the single status owner.
@@ -212,6 +243,7 @@ class SessionListController extends Notifier<SessionListState> {
   /// (the roster poll) pass `true` so the "Updating…" affordance stays reserved
   /// for user-initiated loads and slow polls cannot stack.
   Future<void> load({bool silent = false}) async {
+    _started = true;
     // Existing workspace timers may still call the compatibility refresh.
     // Once the delta feed is healthy, those ticks perform no HTTP request.
     if (silent && _feedActive) return;

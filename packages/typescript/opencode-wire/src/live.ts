@@ -12,6 +12,7 @@ import type {
   SessionInfo,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
+import { ControlRefusedError } from '@cosyncing/adapter-api';
 import { mapOpenCodePart } from './mapping.ts';
 
 const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
@@ -44,21 +45,58 @@ export interface OpenCodeLivePermissionDialect {
 
 export class OpenCodeLiveMutationAmbiguousError extends Error {}
 
+/**
+ * Ownership could not be proved right now (the durable store could not be read), and nothing was
+ * proved against it either. The mutation is refused and Drive is kept: a later one may prove it.
+ * Every other error an ownership hook throws demotes the connection.
+ */
+export class OpenCodeLiveOwnershipUnprovenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OpenCodeLiveOwnershipUnprovenError';
+  }
+}
+
 export interface OpenCodeLiveDialect {
   productId: string;
   displayName: string;
   permissions?: OpenCodeLivePermissionDialect;
 }
 
+/**
+ * Why the connection stopped. `disconnected`: the server stopped answering (its event stream ended
+ * and the session could no longer be read), which proves nothing about the session itself. Absent:
+ * evidence against this writer (another writer, a rewrite, a deleted session, a rejected
+ * credential, a mutation that may have landed).
+ */
+export type OpenCodeLiveUnavailableCause = 'disconnected';
+
 export interface OpenCodeLiveOwnershipHooks {
   beforeMutation(action: 'prompt' | 'permission' | 'cancel'): Promise<void>;
   promptClaimed(nativeId: string, clientKey?: string): void;
   promptRejected(nativeId: string): void;
   reconcileHistory(nativeUserIds: readonly string[]): void;
+  /** The server echoed the text of a prompt this Drive claimed: what its store must hold for that part. */
+  promptEchoed?(nativeId: string, partId: string, text: string): void;
   sessionSettled(): void | Promise<void>;
-  onUnavailable(reason: string): void;
+  onUnavailable(reason: string, cause?: OpenCodeLiveUnavailableCause): void;
   onClose(status: SessionInfo['status']): void;
+  /**
+   * The server stopped answering. True keeps this connection waiting, Drive withheld, for the server
+   * or its replacement, and asks {@link recover} when one answers; false (or no hook) ends the
+   * connection now through `onUnavailable(reason, 'disconnected')`. Consulted only with
+   * {@link OpenCodeLiveConnectionOptions.serverRecoveryMs}.
+   */
+  serverLost?(reason: string): boolean;
+  /**
+   * A server answers again after a loss: prove the session is still this writer's, with the guards
+   * a fresh attach applies. `retry` asks again at the next answer within the recovery window; a
+   * refusal ends the connection (the hook has already settled what its durable state should be).
+   */
+  recover?(): Promise<OpenCodeLiveRecovery>;
 }
+
+export type OpenCodeLiveRecovery = 'proven' | 'retry' | { refused: string };
 
 export interface OpenCodeLiveConnectionOptions {
   baseUrl: string;
@@ -75,6 +113,22 @@ export interface OpenCodeLiveConnectionOptions {
   fetch?: typeof globalThis.fetch;
   trace?: (detail: string) => void;
   ownership?: OpenCodeLiveOwnershipHooks;
+  /**
+   * How long a Drive whose server stopped answering waits for it (or a replacement) to answer and
+   * for its ownership to be proved again (`ownership.serverLost` / `ownership.recover`). Default 0:
+   * a lost server ends the connection at once.
+   */
+  serverRecoveryMs?: number;
+}
+
+/** While a lost server is awaited, its address is tried this often. */
+const SERVER_RECOVERY_RETRY_MS = 1_000;
+
+interface ServerLoss {
+  reason: string;
+  until: number;
+  attachMode: SessionInfo['attachMode'];
+  control: SessionInfo['control'];
 }
 
 interface LocalPromptClaim {
@@ -220,9 +274,20 @@ export class OpenCodeLiveConnection implements SessionConnection {
   /** A part can precede its message.updated envelope on the SSE stream. */
   private readonly pendingLiveUserParts = new Map<string, PendingLiveUserPart>();
   private readonly emittedLiveUserParts = new Set<string>();
+  /** Assistant messages whose native error row was already shown. */
+  private readonly failedMessages = new Set<string>();
+  /**
+   * The serve reports one run failure twice: `session.error`, then the assistant message carrying
+   * the same error (OpenCode publishes them in that order; either may come alone). The first report
+   * shows the row and leaves its text here; the matching second one is absorbed. Cleared when a
+   * turn starts, so the same failure in a later turn shows again.
+   */
+  private unmatchedFailure?: { text: string; from: 'session' | 'message' };
   private readonly pendingRequestIds = new Set<string>();
   private closed = false;
   private unavailable = false;
+  /** The server stopped answering and this Drive waits for it, withheld (see `serverRecoveryMs`). */
+  private serverLoss?: ServerLoss;
   private promptReserved = false;
   private eventRevision = 0;
   private nativeModelGeneration = 0;
@@ -379,6 +444,7 @@ export class OpenCodeLiveConnection implements SessionConnection {
     }
     this.promptReserved = true;
     this.eventRevision += 1;
+    this.unmatchedFailure = undefined;
     this.info.status = 'working';
     this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { status: 'working' } });
     const body: Record<string, unknown> = {
@@ -476,7 +542,9 @@ export class OpenCodeLiveConnection implements SessionConnection {
   }
 
   async runCommand(name: string) {
-    if (name !== 'stop' && name !== 'abort') throw new Error(`${this.options.dialect.displayName} does not support /${name}.`);
+    if (name !== 'stop' && name !== 'abort') {
+      throw new ControlRefusedError(`${this.options.dialect.displayName} does not support /${name}.`, 'command-unsupported');
+    }
     this.assertWritable('cancel');
     await this.checkOwnershipBeforeMutation('cancel');
     this.assertWritable('cancel');
@@ -514,9 +582,13 @@ export class OpenCodeLiveConnection implements SessionConnection {
         this.options.dialect.permissions?.loadPending(this.context) ?? Promise.resolve([]),
       ]);
       if (revision !== this.eventRevision || this.closed || this.unavailable) return;
-      const nextPendingIds = new Set(pending.flatMap((message) =>
-        message.type === 'permission-request' || message.type === 'question-request'
-          ? [message.requestId] : []));
+      const requestIdOf = (message: AgentMessage): string | undefined =>
+        message.type === 'permission-request' || message.type === 'question-request' ? message.requestId : undefined;
+      const nextPendingIds = new Set(pending.flatMap((message) => {
+        const requestId = requestIdOf(message);
+        return requestId === undefined ? [] : [requestId];
+      }));
+      const alreadySent = new Set(this.pendingRequestIds);
       for (const requestId of this.pendingRequestIds) {
         if (!nextPendingIds.has(requestId)) {
           this.emit({ type: 'permission-resolved', requestId, decision: 'external' });
@@ -524,7 +596,13 @@ export class OpenCodeLiveConnection implements SessionConnection {
       }
       this.pendingRequestIds.clear();
       for (const requestId of nextPendingIds) this.pendingRequestIds.add(requestId);
-      for (const message of pending) this.emit(message);
+      // Only the cards this connection has not sent yet. Every (re)opened event stream re-reads the
+      // pending list, and re-sending what each client already holds put the same card in every tab
+      // again on each reconnect; a client that subscribes later reads the pending list with its history.
+      for (const message of pending) {
+        const requestId = requestIdOf(message);
+        if (requestId === undefined || !alreadySent.has(requestId)) this.emit(message);
+      }
       const next = pending.length > 0 ? 'needs-input' : status;
       if (!next) return;
       this.info.status = next;
@@ -553,6 +631,11 @@ export class OpenCodeLiveConnection implements SessionConnection {
         const openedAt = Date.now();
         const response = await this.fetcher(this.url('/global/event'), { signal: streamAbort.signal });
         if (!response.ok || !response.body) throw new Error(`SSE ${response.status}`);
+        if (this.serverLoss && !await this.recoverFromServerLoss()) {
+          await response.body.cancel().catch(() => undefined);
+          if (this.closed || this.unavailable) return;
+          throw new Error('the answering server has not been proved yet');
+        }
         streamOpenedAt = openedAt;
         if (!this.readySettled) {
           this.readySettled = true;
@@ -585,14 +668,27 @@ export class OpenCodeLiveConnection implements SessionConnection {
         }
       } catch (error) {
         if (this.closed || this.unavailable) return;
-        if (streamOpenedAt && Date.now() - streamOpenedAt >= reconnectMs) firstFailureAt = 0;
         this.options.trace?.(`SSE reconnect: ${error instanceof Error ? error.message : String(error)}`);
+        if (this.serverLoss) {
+          if (Date.now() >= this.serverLoss.until) {
+            this.markUnavailable(this.serverLoss.reason, 'disconnected');
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, SERVER_RECOVERY_RETRY_MS));
+          continue;
+        }
+        if (streamOpenedAt && Date.now() - streamOpenedAt >= reconnectMs) firstFailureAt = 0;
         firstFailureAt ||= Date.now();
         if (Date.now() - firstFailureAt < reconnectMs && await this.sessionExists()) {
           await new Promise((resolve) => setTimeout(resolve, Math.min(500, reconnectMs)));
           continue;
         }
-        this.markUnavailable(`${this.options.dialect.displayName} live server disconnected.`);
+        const reason = `${this.options.dialect.displayName} live server disconnected.`;
+        if (this.awaitServerRecovery(reason)) {
+          await new Promise((resolve) => setTimeout(resolve, SERVER_RECOVERY_RETRY_MS));
+          continue;
+        }
+        this.markUnavailable(reason, 'disconnected');
         return;
       } finally {
         if (idle) clearTimeout(idle);
@@ -642,11 +738,12 @@ export class OpenCodeLiveConnection implements SessionConnection {
         if (createdAt) this.rememberNativeUserTime(id, createdAt);
         this.flushPendingLiveUserParts(id);
       }
+      if (info?.role === 'user') this.unmatchedFailure = undefined;
       const summary = summaryOf(info, this.options.dialect.productId);
       if (summary) this.emit(summary);
       const tokens = tokensOf(info);
       if (tokens) this.emit(tokens);
-      if (info?.error) this.emit({ type: 'error', message: providerErrorMessage(info.error) });
+      if (info?.error) this.emitFailure(providerErrorMessage(info.error), 'message', id);
       return;
     }
     if (event?.type === 'message.part.delta') {
@@ -674,6 +771,7 @@ export class OpenCodeLiveConnection implements SessionConnection {
           return;
         }
         const partId = String(part.id ?? `${nativeId}:text`);
+        if (claim && part.id) this.options.ownership?.promptEchoed?.(nativeId, String(part.id), part.text);
         if (this.emittedLiveUserParts.has(partId)) return;
         if (!this.roles.has(nativeId)) {
           this.rememberPendingLiveUserPart({
@@ -708,19 +806,17 @@ export class OpenCodeLiveConnection implements SessionConnection {
     if (event?.type === 'session.idle') {
       this.info.status = 'idle';
       this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { status: 'idle' } });
-      void Promise.resolve()
-        .then(() => this.options.ownership?.sessionSettled())
-        .catch((error) => this.markUnavailable(
-          error instanceof Error
-            ? error.message
-            : `${this.options.dialect.displayName} could not reconcile durable ownership.`,
-        ));
+      this.settleOwnership();
       return;
     }
     if (event?.type === 'session.error') {
       this.info.status = 'idle';
-      this.emit({ type: 'error', message: providerErrorMessage(properties.error ?? properties) });
+      this.emitFailure(providerErrorMessage(properties.error ?? properties), 'session');
       this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { status: 'idle' } });
+      // A failed turn is over, whether or not the serve follows its error with `session.idle`. Left
+      // unsettled, the ownership would count the turn as still running, and a serve lost after it
+      // would be read as lost mid-turn, revoking Drive instead of waiting for the serve.
+      this.settleOwnership();
       return;
     }
     if (event?.type === 'session.updated') {
@@ -748,10 +844,114 @@ export class OpenCodeLiveConnection implements SessionConnection {
     }
   }
 
-  private markUnavailable(message: string): void {
+  /** The native session settled (its turn is over): the ownership proves the store it left. */
+  private settleOwnership(): void {
+    void Promise.resolve()
+      .then(() => this.options.ownership?.sessionSettled())
+      .catch((error) => {
+        if (error instanceof OpenCodeLiveOwnershipUnprovenError) {
+          this.options.trace?.(`settle ownership left unproven: ${error.message}`);
+          return;
+        }
+        this.markUnavailable(
+          error instanceof Error
+            ? error.message
+            : `${this.options.dialect.displayName} could not reconcile durable ownership.`,
+        );
+      });
+  }
+
+  /** One transcript row per native run failure (see {@link unmatchedFailure}). */
+  private emitFailure(text: string, from: 'session' | 'message', messageId?: string): void {
+    if (messageId !== undefined) {
+      // The same failed message is announced again as it is updated (completion, final tokens).
+      if (this.failedMessages.has(messageId)) return;
+      this.failedMessages.add(messageId);
+      while (this.failedMessages.size > MAX_LIVE_USER_IDENTITIES) {
+        this.failedMessages.delete(this.failedMessages.values().next().value!);
+      }
+    }
+    const unmatched = this.unmatchedFailure;
+    if (unmatched && unmatched.from !== from && unmatched.text === text) {
+      this.unmatchedFailure = undefined;
+      return;
+    }
+    this.unmatchedFailure = { text, from };
+    this.emit({ type: 'error', message: text });
+  }
+
+  /**
+   * A Drive whose server stopped answering keeps its connection and waits, withheld, for the server
+   * or its replacement: every mutation is refused, and every client is told Drive is unavailable
+   * until ownership is proved again. Only for an established Drive the ownership agrees to hold.
+   */
+  private awaitServerRecovery(reason: string): boolean {
+    const windowMs = this.options.serverRecoveryMs ?? 0;
+    if (windowMs <= 0 || !this.readySettled || this.options.ownership?.serverLost?.(reason) !== true) return false;
+    this.serverLoss = { reason, until: Date.now() + windowMs, attachMode: this.info.attachMode, control: this.info.control };
+    this.eventRevision += 1;
+    this.ownershipGeneration += 1;
+    this.localPromptClaims.clear();
+    this.clearLiveUserIdentityState();
+    for (const requestId of this.pendingRequestIds) {
+      this.emit({ type: 'permission-resolved', requestId, decision: 'external' });
+    }
+    this.pendingRequestIds.clear();
+    const waiting = `${reason} Drive resumes when it answers again and this session is unchanged.`;
+    this.info.status = 'idle';
+    this.info.control = this.options.disconnectedControl?.(waiting) ?? {
+      drive: { supported: false, state: 'unavailable', reason: waiting },
+      terminalSync: { supported: false, syncAvailable: false, active: false, reason: waiting },
+    };
+    this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { status: 'idle', control: this.info.control } });
+    return true;
+  }
+
+  /** A server answers again after a loss: Drive resumes only once ownership is proved again. */
+  private async recoverFromServerLoss(): Promise<boolean> {
+    const loss = this.serverLoss!;
+    let verdict: OpenCodeLiveRecovery;
+    try {
+      // A turn running on the answering server was not started by this Drive.
+      const status = await this.options.loadStatus?.(this.context);
+      verdict = status === 'working' || status === 'needs-input'
+        ? { refused: `${this.options.dialect.displayName} session is running a turn this Drive did not start.` }
+        : status === undefined && this.options.loadStatus
+          ? 'retry'
+          : await this.options.ownership?.recover?.() ?? { refused: loss.reason };
+    } catch (error) {
+      this.options.trace?.(`server recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+      verdict = 'retry';
+    }
+    if (this.closed || this.unavailable || this.serverLoss !== loss) return false;
+    if (verdict === 'retry') return false;
+    if (verdict !== 'proven') {
+      this.markUnavailable(verdict.refused, 'disconnected');
+      return false;
+    }
+    this.serverLoss = undefined;
+    this.info.attachMode = loss.attachMode;
+    this.info.control = loss.control;
+    this.emit({
+      type: 'metadata-update', key: 'sessionInfo',
+      value: { attachMode: this.info.attachMode, control: this.info.control },
+    });
+    return true;
+  }
+
+  /**
+   * Evidence found outside this connection (the ownership's own read of the store) ends Drive now,
+   * the way evidence on the event stream does: mutations are refused and every client is told.
+   */
+  demote(reason: string): void {
+    if (this.closed) return;
+    this.markUnavailable(reason);
+  }
+
+  private markUnavailable(message: string, cause?: OpenCodeLiveUnavailableCause): void {
     if (this.unavailable) return;
     this.unavailable = true;
-    this.options.ownership?.onUnavailable(message);
+    this.options.ownership?.onUnavailable(message, cause);
     this.ownershipGeneration += 1;
     this.localPromptClaims.clear();
     this.clearLiveUserIdentityState();
@@ -852,7 +1052,7 @@ export class OpenCodeLiveConnection implements SessionConnection {
   }
 
   private assertWritable(action: string): void {
-    if (!this.closed && !this.unavailable && this.info.attachMode !== 'observe') return;
+    if (!this.closed && !this.unavailable && !this.serverLoss && this.info.attachMode !== 'observe') return;
     throw new Error(this.info.control?.drive.reason
       ?? `${this.options.dialect.displayName} ${action} refused: this connection is read-only.`);
   }
@@ -861,6 +1061,7 @@ export class OpenCodeLiveConnection implements SessionConnection {
     try {
       await this.options.ownership?.beforeMutation(action);
     } catch (error) {
+      if (error instanceof OpenCodeLiveOwnershipUnprovenError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       this.markUnavailable(message);
       throw error;

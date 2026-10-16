@@ -1,5 +1,5 @@
 import { randomBytes, createHash, createPublicKey, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PairingErrorCode } from '@cosyncing/protocol';
 import {
@@ -44,7 +44,15 @@ export interface AcceptedTransportPeer {
   authGeneration: number;
   roles: PeerRole[];
   revokedAt?: string;
+  /** Stored fields this broker does not read (a newer broker's), written back unchanged. Never listed. */
+  extraFields?: Readonly<Record<string, unknown>>;
 }
+
+/** Every field this broker reads from a stored record. `brokerPeerToken` is legacy and saved as its hash. */
+const STORED_PEER_FIELDS: ReadonlySet<string> = new Set([
+  'peerId', 'label', 'identityPublicKey', 'peerTokenHash', 'brokerPeerId', 'brokerPeerTokenHash', 'brokerPeerToken',
+  'brokerIdentityPublicKey', 'dataKey', 'wrappedDataKey', 'acceptedAt', 'authGeneration', 'roles', 'revokedAt',
+]);
 
 export type PeerRole = 'observe' | 'drive' | 'files' | 'admin';
 
@@ -96,18 +104,39 @@ interface PairingFailureBucket {
   windowStart: number;
 }
 
-interface LegacyPairingStoreFile {
-  version: 1;
+interface PairingStoreFile {
+  version: 2;
+  /** Readable records, then refused and malformed ones exactly as they were stored. */
   peers: unknown[];
 }
 
-interface PairingStoreFile {
-  version: 2;
-  peers: AcceptedTransportPeer[];
+/**
+ * - `unsupported`: an integer version this broker does not know, most likely a newer broker's store.
+ *   It is never rewritten: pairing and revocation refuse until a broker that reads it runs.
+ * - `unreadable`: content no broker can read (not JSON, not an object, no usable version, no peer
+ *   list). The first write sets it aside as a `.corrupt-` file instead of overwriting it.
+ */
+type PairingStoreState = 'readable' | 'unsupported' | 'unreadable';
+
+export interface PairingStoreEvidence {
+  id: 'peers';
+  detailCode: 'peers-malformed' | 'peers-unsupported-version' | 'peers-unknown-role' | 'peers-record-malformed';
+  severity: 'critical' | 'degraded';
+}
+
+/**
+ * A stored record whose roles this broker cannot read — most likely a role a newer broker granted
+ * before a downgrade. It admits nothing here and is never listed, but it keeps its ids, and every
+ * rewrite carries the stored record forward unchanged so a broker that knows the role still finds it.
+ */
+interface RefusedTransportPeer {
+  /** Ids, credential hash and revocation state only: `roles` is always empty. */
+  peer: AcceptedTransportPeer;
+  stored: Readonly<Record<string, unknown>>;
 }
 
 export class PairingHttpError extends Error {
-  constructor(readonly status: number, readonly code: PairingErrorCode, message: string) {
+  constructor(readonly status: number, readonly code: PairingErrorCode | 'PERSISTENCE_FAILED', message: string) {
     super(message);
   }
 }
@@ -125,6 +154,10 @@ const DEFAULT_PEER_ROLES: readonly PeerRole[] = ['observe', 'drive', 'files'];
 export class TransportPairingRegistry {
   private readonly offers = new Map<string, PairingOffer>();
   private readonly peers = new Map<string, AcceptedTransportPeer>();
+  private readonly refusedPeers = new Map<string, RefusedTransportPeer>();
+  /** Stored entries that fail the structural checks: they admit nothing and are written back as they were. */
+  private readonly malformedRecords: unknown[] = [];
+  private storeState: PairingStoreState = 'readable';
   private readonly path: string;
   private readonly keyDir: string;
   private readonly pairingAcceptFailures = new Map<string, PairingFailureBucket>();
@@ -152,6 +185,8 @@ export class TransportPairingRegistry {
     brokerPeerId: string;
     broker?: QrBrokerDescriptor;
   } {
+    // An offer that could never be accepted is refused before a device scans it.
+    this.assertStoreWritable();
     for (const [id, offer] of this.offers) {
       if (offer.expiresAt <= this.now()) this.offers.delete(id);
     }
@@ -321,10 +356,13 @@ export class TransportPairingRegistry {
     };
   }
 
-  listPeers(): Array<Omit<AcceptedTransportPeer, 'peerTokenHash' | 'brokerPeerTokenHash' | 'dataKey' | 'wrappedDataKey'>> {
+  listPeers(): Array<Omit<AcceptedTransportPeer, 'peerTokenHash' | 'brokerPeerTokenHash' | 'dataKey' | 'wrappedDataKey' | 'extraFields'>> {
     return [...this.peers.values()]
       .filter((peer) => !peer.revokedAt)
-      .map(({ peerTokenHash: _token, brokerPeerTokenHash: _brokerToken, dataKey: _dataKey, wrappedDataKey: _wrapped, ...peer }) => peer);
+      .map(({
+        peerTokenHash: _token, brokerPeerTokenHash: _brokerToken, dataKey: _dataKey, wrappedDataKey: _wrapped,
+        extraFields: _extra, ...peer
+      }) => peer);
   }
 
   revoke(peerId: string): boolean {
@@ -333,17 +371,23 @@ export class TransportPairingRegistry {
 
   /** Persist revocation before publishing it to memory. */
   revokeWithState(peerId: string): RevokedTransportPeer | undefined {
-    const peer = this.peers.get(peerId);
+    this.assertStoreWritable();
+    const refused = this.refusedPeers.get(peerId);
+    const peer = refused?.peer ?? this.peers.get(peerId);
     if (!peer || peer.revokedAt) return undefined;
-    const revoked: AcceptedTransportPeer = {
-      ...peer,
-      authGeneration: peer.authGeneration + 1,
-      revokedAt: new Date(this.now()).toISOString(),
-    };
-    const candidatePeers = new Map(this.peers);
-    candidatePeers.set(peerId, revoked);
-    this.save(candidatePeers);
-    this.peers.set(peerId, revoked);
+    const revocation = { authGeneration: peer.authGeneration + 1, revokedAt: new Date(this.now()).toISOString() };
+    const revoked: AcceptedTransportPeer = { ...peer, ...revocation };
+    if (refused) {
+      // A refused record keeps every field it was stored with; only the revocation is added.
+      const record: RefusedTransportPeer = { peer: revoked, stored: { ...refused.stored, ...revocation } };
+      this.save(this.peers, new Map(this.refusedPeers).set(peerId, record));
+      this.refusedPeers.set(peerId, record);
+    } else {
+      const candidatePeers = new Map(this.peers);
+      candidatePeers.set(peerId, revoked);
+      this.save(candidatePeers);
+      this.peers.set(peerId, revoked);
+    }
     return {
       peerId: revoked.peerId,
       brokerPeerId: revoked.brokerPeerId,
@@ -379,6 +423,34 @@ export class TransportPairingRegistry {
     return undefined;
   }
 
+  /**
+   * What this broker could not use from the store, as stable health codes that never carry an id or a
+   * path. A store it cannot read at all is critical; a record it refuses costs only that device.
+   */
+  storeEvidence(): PairingStoreEvidence[] {
+    if (this.storeState === 'unsupported') return [{ id: 'peers', detailCode: 'peers-unsupported-version', severity: 'critical' }];
+    if (this.storeState === 'unreadable') return [{ id: 'peers', detailCode: 'peers-malformed', severity: 'critical' }];
+    const evidence: PairingStoreEvidence[] = [];
+    // A revoked record admits nothing whatever its roles, so only an unrevoked one is reported.
+    if ([...this.refusedPeers.values()].some((record) => !record.peer.revokedAt)) {
+      evidence.push({ id: 'peers', detailCode: 'peers-unknown-role', severity: 'degraded' });
+    }
+    if (this.malformedRecords.length > 0) {
+      evidence.push({ id: 'peers', detailCode: 'peers-record-malformed', severity: 'degraded' });
+    }
+    return evidence;
+  }
+
+  /** Pairing and revocation refuse while the store is one this broker must not rewrite. */
+  assertStoreWritable(): void {
+    if (this.storeState !== 'unsupported') return;
+    throw new PairingHttpError(
+      409,
+      'PERSISTENCE_FAILED',
+      'paired devices are stored in a version this broker does not support; run a broker that supports it, or restore a compatible backup, then run cosy doctor',
+    );
+  }
+
   isPeerGenerationActive(peerId: string, authGeneration: number): boolean {
     const peer = this.peers.get(peerId);
     return !!peer && !peer.revokedAt && peer.authGeneration === authGeneration;
@@ -398,24 +470,37 @@ export class TransportPairingRegistry {
 
   private load(): void {
     if (!existsSync(this.path)) return;
-    let parsed: LegacyPairingStoreFile | PairingStoreFile;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(this.path, 'utf8')) as LegacyPairingStoreFile | PairingStoreFile;
+      parsed = JSON.parse(readFileSync(this.path, 'utf8'));
     } catch {
-      this.peers.clear();
+      this.storeState = 'unreadable';
       return;
     }
-    if (!Array.isArray(parsed.peers)) return;
+    const file = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as { version?: unknown; peers?: unknown }
+      : undefined;
+    if (file && Number.isSafeInteger(file.version) && file.version !== 1 && file.version !== 2) {
+      this.storeState = 'unsupported';
+      return;
+    }
+    if (!file || (file.version !== 1 && file.version !== 2) || !Array.isArray(file.peers)) {
+      this.storeState = 'unreadable';
+      return;
+    }
 
-    if (parsed.version === 1) {
+    if (file.version === 1) {
       // Revision 16 allowed every peer token to create another peer, so no record from that
       // schema has trustworthy owner-issued authorization provenance. Invalidate every legacy
       // credential before publishing the migrated map. A failed durable write aborts startup.
       const invalidatedAt = new Date(this.now()).toISOString();
       const candidate = new Map<string, AcceptedTransportPeer>();
-      for (const rawPeer of parsed.peers) {
-        const peer = normalizeStoredPeer(rawPeer, true);
-        if (!peer) continue;
+      for (const rawPeer of file.peers) {
+        const peer = normalizeStoredPeer(rawPeer, []);
+        if (!peer) {
+          this.malformedRecords.push(rawPeer);
+          continue;
+        }
         candidate.set(peer.peerId, {
           ...peer,
           authGeneration: peer.authGeneration + (peer.revokedAt ? 0 : 1),
@@ -428,20 +513,34 @@ export class TransportPairingRegistry {
       for (const [peerId, peer] of candidate) this.peers.set(peerId, peer);
       return;
     }
-    if (parsed.version !== 2) return;
-    try {
-      for (const rawPeer of parsed.peers) {
-        const peer = normalizeStoredPeer(rawPeer, false);
-        if (peer) this.peers.set(peer.peerId, peer);
-      }
-    } catch {
-      this.peers.clear();
+    // Records are judged one by one: one this broker cannot read is refused alone, never the store.
+    for (const rawPeer of file.peers) {
+      const roles = normalizePeerRoles((rawPeer as { roles?: unknown } | null)?.roles);
+      const peer = normalizeStoredPeer(rawPeer, roles ?? []);
+      if (!peer) this.malformedRecords.push(rawPeer);
+      else if (roles) this.peers.set(peer.peerId, peer);
+      else this.refusedPeers.set(peer.peerId, { peer, stored: rawPeer as Record<string, unknown> });
     }
   }
 
-  private save(peers: ReadonlyMap<string, AcceptedTransportPeer> = this.peers): void {
+  private save(
+    peers: ReadonlyMap<string, AcceptedTransportPeer> = this.peers,
+    refused: ReadonlyMap<string, RefusedTransportPeer> = this.refusedPeers,
+  ): void {
+    this.assertStoreWritable();
+    if (this.storeState === 'unreadable') {
+      // Nothing in it could be read, but it is never overwritten: keep the bytes for diagnosis beside
+      // the store, where health reports them as recovered corruption.
+      if (existsSync(this.path)) renameSync(this.path, `${this.path}.corrupt-${this.now()}-${randomBytes(4).toString('hex')}`);
+      this.storeState = 'readable';
+    }
+    const records = [
+      ...[...peers.values()].map(({ extraFields, ...peer }) => ({ ...peer, ...extraFields })),
+      ...[...refused.values()].map((record) => record.stored),
+      ...this.malformedRecords,
+    ];
     // The store holds raw per-peer data keys; POSIX modes alone do not protect them on Windows.
-    atomicWriteOwnerOnly(this.path, JSON.stringify({ version: 2, peers: [...peers.values()] } satisfies PairingStoreFile, null, 2) + '\n');
+    atomicWriteOwnerOnly(this.path, JSON.stringify({ version: 2, peers: records } satisfies PairingStoreFile, null, 2) + '\n');
   }
 
   private now(): number {
@@ -489,16 +588,24 @@ export class TransportPairingRegistry {
     return [...this.peers.values()].find((peer) => peer.brokerPeerId === peerId);
   }
 
+  /** Every stored record's ids, refused ones included: a refused record still owns its endpoints. */
+  private storedPeers(): AcceptedTransportPeer[] {
+    return [...this.peers.values(), ...[...this.refusedPeers.values()].map((record) => record.peer)];
+  }
+
   private endpointIdExists(peerId: string): boolean {
     return this.peers.has(peerId)
-      || [...this.peers.values()].some((peer) => peer.brokerPeerId === peerId)
+      || this.refusedPeers.has(peerId)
+      || this.storedPeers().some((peer) => peer.brokerPeerId === peerId)
       || [...this.offers.values()].some((offer) => offer.brokerPeerId === peerId);
   }
 
   private clientPeerIdAvailable(peerId: string): boolean {
     const direct = this.peers.get(peerId);
     if (direct && !direct.revokedAt) return false;
-    return ![...this.peers.values()].some((peer) => peer.brokerPeerId === peerId)
+    // Pairing over a refused record, even a revoked one, would erase what this broker cannot read.
+    if (this.refusedPeers.has(peerId)) return false;
+    return !this.storedPeers().some((peer) => peer.brokerPeerId === peerId)
       && ![...this.offers.values()].some((offer) => offer.brokerPeerId === peerId);
   }
 
@@ -624,7 +731,7 @@ function safeTokenHashEquals(a: string, b: string): boolean {
   return timingSafeEqual(aBuffer, bBuffer);
 }
 
-function normalizeStoredPeer(raw: any, legacy: boolean): AcceptedTransportPeer | undefined {
+function normalizeStoredPeer(raw: any, roles: PeerRole[]): AcceptedTransportPeer | undefined {
   if (!raw?.peerId || !raw?.identityPublicKey || !raw?.peerTokenHash || !raw?.brokerPeerId) return undefined;
   const brokerPeerTokenHash = typeof raw.brokerPeerTokenHash === 'string'
     ? raw.brokerPeerTokenHash
@@ -632,6 +739,7 @@ function normalizeStoredPeer(raw: any, legacy: boolean): AcceptedTransportPeer |
       ? tokenHash(raw.brokerPeerToken)
       : '';
   if (!brokerPeerTokenHash) return undefined;
+  const extraFields = Object.fromEntries(Object.entries(raw).filter(([field]) => !STORED_PEER_FIELDS.has(field)));
   return {
     peerId: String(raw.peerId),
     ...(raw.label ? { label: String(raw.label) } : {}),
@@ -646,16 +754,16 @@ function normalizeStoredPeer(raw: any, legacy: boolean): AcceptedTransportPeer |
     authGeneration: Number.isSafeInteger(raw.authGeneration) && raw.authGeneration > 0
       ? raw.authGeneration
       : 1,
-    roles: legacy ? [] : normalizePeerRoles(raw.roles),
+    roles,
     ...(raw.revokedAt ? { revokedAt: String(raw.revokedAt) } : {}),
+    ...(Object.keys(extraFields).length ? { extraFields } : {}),
   };
 }
 
-function normalizePeerRoles(raw: unknown): PeerRole[] {
-  if (!Array.isArray(raw)) throw new Error('peer-roles-invalid');
+/** The record's roles, or undefined when it names one this broker does not know. */
+function normalizePeerRoles(raw: unknown): PeerRole[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
   const allowed = new Set<PeerRole>(['observe', 'drive', 'files', 'admin']);
-  if (raw.some((role) => typeof role !== 'string' || !allowed.has(role as PeerRole))) {
-    throw new Error('peer-roles-invalid');
-  }
+  if (raw.some((role) => typeof role !== 'string' || !allowed.has(role as PeerRole))) return undefined;
   return [...new Set(raw as PeerRole[])];
 }

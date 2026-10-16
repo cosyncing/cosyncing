@@ -1055,7 +1055,12 @@ class _ObserveComposerBarState extends ConsumerState<_ObserveComposerBar> {
     final l10n = AppLocalizations.of(context);
     final conflict = widget.conflict;
     final takeoverRefusal = conflict?.reason == kDriveAttachReasonTakeover
-        ? _driveConflictFeedback(l10n, conflict!)
+        ? _driveConflictFeedback(
+            l10n,
+            conflict!,
+            tool: widget.sessionKey.tool,
+            takeOverOffered: widget.control.canTakeOver,
+          )
         : null;
     final joinCommand = _usableJoinCommand(widget.control);
     final takeOverOnly =

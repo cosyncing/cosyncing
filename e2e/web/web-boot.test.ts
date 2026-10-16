@@ -9,26 +9,31 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import type { Browser, Page } from 'playwright-core';
-import { type Broker, eventually } from '../harness/index.ts';
+import { type Broker, eventually, scaled } from '../harness/index.ts';
 import { SHELL_GONE, SHELL_STATE, launchBrowser, waitUntil } from '../harness/browser.ts';
 import { startWebBroker, webScenario } from '../harness/web-scenario.ts';
 
 const SHELL = `document.getElementById('cosyncing-startup-shell')`;
-/** The failed state and its offer, read in one step: the page may reload between two reads. */
+/** Set on a document whose Retry was clicked: its offer is spent, and the reload replaces it. */
+const RETRIED = 'window.__cosyncingRetryClicked === true';
+/**
+ * The failed state and its offer, read in one step: the page may reload between two reads. Only a
+ * document whose Retry has not been clicked answers, so after a retry this waits for the reloaded one.
+ */
 const failedOffer = (page: Page) => eventually(
-  () => page.evaluate(`(${SHELL_STATE}) === 'failed' ? { label: ${SHELL}.querySelector('#cosyncing-startup-shell-retry')?.textContent ?? null, text: document.getElementById('cosyncing-startup-shell-status').textContent } : null`) as Promise<{ label: string | null; text: string } | null>,
+  () => page.evaluate(`!(${RETRIED}) && (${SHELL_STATE}) === 'failed' ? { label: ${SHELL}.querySelector('#cosyncing-startup-shell-retry')?.textContent ?? null, text: document.getElementById('cosyncing-startup-shell-status').textContent } : null`) as Promise<{ label: string | null; text: string } | null>,
   { timeoutMs: 60_000, what: 'the failed state' },
 );
 const waitForShell = (page: Page) => page.waitForFunction(`!!${SHELL}`);
-const waitForHandover = (page: Page) => page.waitForFunction(SHELL_GONE, undefined, { timeout: 90_000 });
+const waitForHandover = (page: Page) => page.waitForFunction(SHELL_GONE, undefined, { timeout: scaled(90_000) });
 const waitForState = (page: Page, state: string) =>
-  page.waitForFunction(`(${SHELL_STATE}) === ${JSON.stringify(state)}`, undefined, { timeout: 60_000 });
+  page.waitForFunction(`(${SHELL_STATE}) === ${JSON.stringify(state)}`, undefined, { timeout: scaled(60_000) });
 const cacheNames = (page: Page): Promise<string[]> => page.evaluate(`caches.keys()`) as Promise<string[]>;
 
 /** The page is controlled by the app worker and its versioned cache exists. */
 async function waitForWorkerControl(page: Page): Promise<void> {
   await page.waitForFunction(
-    `navigator.serviceWorker.controller !== null`, undefined, { timeout: 60_000 });
+    `navigator.serviceWorker.controller !== null`, undefined, { timeout: scaled(60_000) });
   await waitUntil(page, `caches.keys().then((names) => names.some((n) => n.startsWith('cosyncing-app:')))`, { timeoutMs: 60_000 });
 }
 
@@ -85,26 +90,31 @@ describe('web startup', () => {
         expect(loading.state).toBe('booting');
         expect(loading.background).toBe(canvas);
 
-        // Sample the document background across the handover on every frame.
+        // Sample the document background across the handover on every frame, and record every value
+        // the shell's dismissing flag takes. The flag is observed, not sampled: the shell is removed a
+        // fixed 400 ms after it starts dismissing, and a loaded host can paint no frame in between.
         await page.evaluate(`window.__samples = (async () => {
           const seen = [];
+          const dismissing = [];
+          const shell = ${SHELL};
+          new MutationObserver(() => dismissing.push(shell.dataset.dismissing ?? null))
+            .observe(shell, { attributes: true, attributeFilter: ['data-dismissing'] });
           for (;;) {
-            const shell = ${SHELL};
-            seen.push({
-              shell: !!shell,
-              dismissing: shell?.dataset.dismissing ?? null,
-              background: getComputedStyle(document.documentElement).backgroundColor,
-            });
-            if (!shell) return seen;
+            const present = ${SHELL};
+            seen.push({ shell: !!present, background: getComputedStyle(document.documentElement).backgroundColor });
+            if (!present) return { seen, dismissing };
             await new Promise((r) => requestAnimationFrame(r));
           }
         })(); true`);
         release();
-        const samples = await page.evaluate(`window.__samples`) as Array<{ shell: boolean; dismissing: string | null; background: string }>;
+        const { seen: samples, dismissing } = await page.evaluate(`window.__samples`) as {
+          seen: Array<{ shell: boolean; background: string }>;
+          dismissing: Array<string | null>;
+        };
         const backgrounds = new Set(samples.map((s) => s.background));
         expect(backgrounds.has('rgb(255, 255, 255)')).toBe(false);
         expect(backgrounds.has('rgba(0, 0, 0, 0)')).toBe(false);
-        expect(samples.some((s) => s.dismissing === 'true')).toBe(true);
+        expect(dismissing).toContain('true');
         expect(await page.evaluate(`!!document.querySelector('flt-glass-pane, flutter-view, flt-scene-host')`) as boolean).toBe(true);
       });
     });
@@ -144,10 +154,13 @@ describe('web startup', () => {
         labels.push(label);
         if (label === null) break;
         const before = proxy.requestCount('/cosy/flutter_bootstrap.js');
-        // Click after the evaluation returns: the retry reloads the document.
-        await page.evaluate(`(setTimeout(() => document.getElementById('cosyncing-startup-shell-retry').click(), 0), true)`);
+        // Mark the document, and click after the evaluation returns: the retry reloads it, so the next
+        // offer is read in the reloaded document. A request count is no such barrier: the app worker's
+        // install fetches the bootstrap too, and could answer for a reload that has not happened yet.
+        await page.evaluate(`(window.__cosyncingRetryClicked = true, setTimeout(() => document.getElementById('cosyncing-startup-shell-retry').click(), 0), true)`);
         // The retry reloads the app: its bootstrap is requested again.
-        await eventually(() => proxy.requestCount('/cosy/flutter_bootstrap.js') > before, { what: 'retry reload' });
+        await failedOffer(page);
+        expect(proxy.requestCount('/cosy/flutter_bootstrap.js')).toBeGreaterThan(before);
       }
       expect(labels.length).toBeGreaterThanOrEqual(3);
       expect(labels.at(-1)).toBeNull();

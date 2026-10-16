@@ -312,6 +312,22 @@ try {
   // ── platform gate ──────────────────────────────────────────────────────────────────────────────
   check('presence supports bounded Linux and macOS evidence while other platforms under-claim',
     codexTuiPresenceSupported('linux') && codexTuiPresenceSupported('darwin') && !codexTuiPresenceSupported('win32'));
+  // Windows has no scanner: the scan says so, so a restore can tell "no evidence exists" from "a scan failed".
+  const windowsScan = await codexAttachedTuisAsync(SOCK, procRoot, { platform: 'win32', fresh: true });
+  check('a platform without a terminal scanner marks its scan unsupported, not failed',
+    windowsScan.source === 'unsupported' && windowsScan.processScanAvailable === false && windowsScan.candidates.length === 0);
+  if (process.platform === 'linux') {
+    // No daemon socket on disk: the same /proc is still scanned, no socket pairing runs, and nothing is shared.
+    let noSocketProbes = 0;
+    const noSocket = await codexAttachedTuisAsync('', procRoot, {
+      fresh: true,
+      socketProbe: async () => { noSocketProbes += 1; return PROBE_POST_DAEMON; },
+    });
+    check('with no daemon socket, terminals are still scanned and none is shared',
+      noSocket.processScanAvailable === true && noSocket.candidates.length > 0 && noSocketProbes === 0
+        && noSocket.attributed.size === 0 && noSocket.unattributed.length === 0
+        && noSocket.candidates.every((candidate) => candidate.proof !== 'shared'));
+  }
   if (!codexTuiPresenceSupported()) {
     const unsupportedScan = codexAttachedTuis(SOCK, procRoot);
     check('unsupported cached presence marks process scan unavailable', unsupportedScan.processScanAvailable === false);

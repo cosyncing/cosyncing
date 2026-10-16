@@ -37,6 +37,7 @@ const transcriptBody =
 writeFileSync(jsonlPath, transcriptBody);
 
 const { ClaudeAdapter, isClaudeTranscriptPathAllowed } = await import('../src/index.ts');
+const { isTranscriptExportTooLargeError } = await import('@cosyncing/adapter-api');
 const adapter = new ClaudeAdapter();
 const tempDir = mkdtempSync(join(tmpdir(), 'cosyncing-claude-export-out-'));
 
@@ -91,14 +92,14 @@ try {
   check('hook guard REFUSES a path outside the projects roots', !isClaudeTranscriptPathAllowed('/etc/passwd.jsonl'));
   check('hook guard REFUSES a symlink escaping the projects root (realpath containment)', !isClaudeTranscriptPathAllowed(planted));
 
-  // Size cap enforced BEFORE the copy.
+  // Size cap enforced BEFORE the copy, as the typed refusal the broker answers 413 for.
   let tooLarge = false;
   try {
     await adapter.exportTranscript(enc(jsonlPath), { tempDir, maxBytes: 8, timeoutMs: 10_000 });
-  } catch {
-    tooLarge = true;
+  } catch (error) {
+    tooLarge = isTranscriptExportTooLargeError(error);
   }
-  check('export enforces the size cap before copying', tooLarge);
+  check('export enforces the size cap before copying, as a typed too-large refusal', tooLarge);
 } finally {
   rmSync(configDir, { recursive: true, force: true });
   rmSync(tempDir, { recursive: true, force: true });

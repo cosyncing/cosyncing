@@ -26,13 +26,6 @@ export function clearClineVersionProbeCache(): void {
   versionCache.clear();
 }
 
-export async function clineBinaryMatchesVerifiedVersion(
-  command: string,
-  env: NodeJS.ProcessEnv,
-): Promise<boolean> {
-  return await clineVerifiedInvocation(command, env) !== undefined;
-}
-
 export async function clineVerifiedInvocation(
   command: string,
   env: NodeJS.ProcessEnv,

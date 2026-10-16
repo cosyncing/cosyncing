@@ -1,18 +1,68 @@
 /**
  * R2 transcript-export orchestration (GPT-Pro §2 rules 7-16). Generic over the adapter: the broker
- * creates a private `0700` temp root, asks the adapter to write a native export INTO it (never a
- * client-supplied path), then enforces path containment + size cap, runs the mandatory fail-closed
- * redaction pass, and ingests the redacted bytes as an `export-attachment` artifact. The temp root is
- * ALWAYS deleted in `finally` — success, refusal, timeout, or crash (rule 18 / "temp cleanup on every
- * failure phase"). Dispatch is by `backend.exportTranscript` presence, never a tool name.
+ * creates a private `0700` temp root inside its own state home ({@link transcriptExportWorkRoot}), asks
+ * the adapter to write a native export INTO it (never a client-supplied path), then enforces path
+ * containment + size cap, runs the mandatory fail-closed redaction pass, and ingests the redacted
+ * bytes as an `export-attachment` artifact. Output over the cap
+ * answers `413 EXPORT_TOO_LARGE` whether the adapter stopped at it (`TranscriptExportTooLargeError`) or
+ * the broker measured it afterwards; any other adapter failure is `502 EXPORT_FAILED`. The temp root is
+ * ALWAYS deleted in `finally` — success, refusal, timeout, or adapter crash (rule 18 / "temp cleanup on
+ * every failure phase"); one the broker process itself died during is removed by the next start
+ * ({@link sweepTranscriptExportWorkRoot}). Dispatch is by `backend.exportTranscript` presence, never a
+ * tool name.
  */
-import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
 import { extname, join, sep } from 'node:path';
-import type { AgentBackend, AgentMessage } from '@cosyncing/adapter-api';
+import { isTranscriptExportTooLargeError, type AgentBackend, type AgentMessage } from '@cosyncing/adapter-api';
 import type { ArtifactStore } from '../artifacts/artifact-store.ts';
 import { redactTranscript } from './r2-redactor.ts';
 import { r2MaxBytes, r2TimeoutMs, type R2ActionDescriptor } from './r2-policy.ts';
+import { ensureOwnerOnlyDirectory } from './secure-files.ts';
+
+/**
+ * Where every export's working directory lives: `exports-tmp/` in the broker's own state home. While an
+ * export runs, its directory holds the native, UNREDACTED transcript.
+ *
+ * Never the system temp directory. Every broker on the host (an installed one, a review broker) shares
+ * that, so no broker could tell an export a dead process abandoned there from one another live broker
+ * is running, and the start sweep below could not exist. A state home belongs to one broker: two
+ * brokers with different state homes never share this directory, and a state home serves one running
+ * broker at a time, which is what lets that broker empty it at start.
+ */
+export function transcriptExportWorkRoot(stateHome: string): string {
+  return join(stateHome, 'exports-tmp');
+}
+
+/**
+ * Remove every export a previous process of this broker left in its working root: one that was running
+ * when the process crashed, was killed, or was terminated still holds the unredacted native transcript.
+ * Call it once at start, after the listener bound and before a request is answered — no export of this
+ * process can exist yet. Returns how many entries were removed. A missing root is nothing to do; a root
+ * that is a symlink, not a directory, or owned by someone else throws, and nothing in it is touched.
+ */
+export function sweepTranscriptExportWorkRoot(workRoot: string): number {
+  if (!existsSync(workRoot)) return 0;
+  ensureOwnerOnlyDirectory(workRoot);
+  let removed = 0;
+  for (const name of readdirSync(workRoot)) {
+    // `rmSync` removes a symlink entry itself, never what it points at.
+    rmSync(join(workRoot, name), { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
+}
 
 export interface TranscriptExportSession {
   tool: string;
@@ -48,16 +98,24 @@ export async function runTranscriptExport(opts: {
   action: R2ActionDescriptor;
   session: TranscriptExportSession;
   artifactStore: ArtifactStore;
+  /** The broker-owned parent of the export's working directory ({@link transcriptExportWorkRoot}). */
+  workRoot: string;
   brokerUrl?: string;
 }): Promise<TranscriptExportResult> {
-  const { backend, action, session, artifactStore, brokerUrl } = opts;
+  const { backend, action, session, artifactStore, workRoot, brokerUrl } = opts;
   const refuse = (status: number, error: string, code: string): TranscriptExportResult => ({ ok: false, status, error, code });
   if (typeof backend.exportTranscript !== 'function') {
     return refuse(501, 'native transcript export is not available for this agent', 'NOT_SUPPORTED');
   }
   const maxBytes = r2MaxBytes(action);
   const timeoutMs = r2TimeoutMs(action);
-  const tempRoot = mkdtempSync(join(tmpdir(), 'cosyncing-r2-'));
+  let tempRoot: string;
+  try {
+    ensureOwnerOnlyDirectory(workRoot);
+    tempRoot = mkdtempSync(join(workRoot, 'export-'));
+  } catch {
+    return refuse(500, 'the broker\'s export working directory is unavailable', 'TEMP_ROOT_MISSING');
+  }
   try {
     try {
       chmodSync(tempRoot, 0o700);
@@ -69,6 +127,10 @@ export async function runTranscriptExport(opts: {
     try {
       produced = await backend.exportTranscript(session.id, { tempDir: tempRoot, maxBytes, timeoutMs });
     } catch (err) {
+      // The adapter counted the bytes and stopped at the cap: the export is too large, not broken.
+      // Typed, never read from the error text, so a native failure that happens to mention a size
+      // still answers 502.
+      if (isTranscriptExportTooLargeError(err)) return refuse(413, 'export exceeds the configured size cap', 'EXPORT_TOO_LARGE');
       return refuse(502, `native transcript export failed: ${err instanceof Error ? err.message.split('\n')[0] : 'error'}`, 'EXPORT_FAILED');
     }
 

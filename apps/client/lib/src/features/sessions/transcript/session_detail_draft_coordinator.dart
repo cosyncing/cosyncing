@@ -382,7 +382,7 @@ extension SessionDetailDrafts on SessionDetailController {
   void stageLocalDraft(String text) {
     if (_disposed) return;
     _stagedLocalDraftText = text;
-    _lastLocalDraftEditAt = DateTime.now();
+    _lastLocalDraftEditAt = ref.read(appClockProvider)();
     if (text.isNotEmpty) _composerHeldContentGeneration = _composerGeneration;
     recordSessionDraftKeepalive(
       ref,
@@ -819,7 +819,7 @@ extension SessionDetailDrafts on SessionDetailController {
       // SQLite and republish text the shared copy already holds.
       return existing;
     }
-    _lastLocalDraftEditAt = DateTime.now();
+    _lastLocalDraftEditAt = ref.read(appClockProvider)();
     try {
       final stored = await _saveLocalDraft(edited(existing), scope);
       _draftPublishRetries = 0; // a new value earns a fresh attempt budget
@@ -1544,7 +1544,7 @@ extension SessionDetailDrafts on SessionDetailController {
     final lastEdit = _lastLocalDraftEditAt;
     final recentlyEdited =
         lastEdit != null &&
-        DateTime.now().difference(lastEdit) <
+        ref.read(appClockProvider)().difference(lastEdit) <
             const Duration(milliseconds: 1500);
     if (recentlyEdited) {
       // Live two-client typing race (existing 1.5s guard semantics): local
@@ -2201,11 +2201,22 @@ extension SessionDetailDrafts on SessionDetailController {
       if (_loadedDraftScopeKey != profileId) return;
       await _withDraftRowRetry<void>(() async {
         final row = _localDraft;
-        if (row != null &&
-            (unproven ||
-                (row.submittedClientMessageId != clientMessageId &&
-                    row.text.isNotEmpty &&
-                    row.text != text))) {
+        // Text typed since the send that the debounce has not stored yet: it
+        // is in the composer, so it holds the composer as surely as a stored
+        // edit holds the row, and a restore into an empty composer only would
+        // drop the refused prompt before that edit overwrites the row.
+        final staged = _stagedLocalDraftText;
+        final typedSince =
+            staged != null &&
+            staged.isNotEmpty &&
+            staged != text &&
+            staged != row?.text;
+        if (typedSince ||
+            (row != null &&
+                (unproven ||
+                    (row.submittedClientMessageId != clientMessageId &&
+                        row.text.isNotEmpty &&
+                        row.text != text)))) {
           // Either other text owns the row, or the prompt's outcome is
           // unproven and must not be handed back as if it were merely unsent.
           // Both want the same answer: keep it as the second version and offer
@@ -2218,16 +2229,23 @@ extension SessionDetailDrafts on SessionDetailController {
           // text everywhere. Preserve the failed prompt as the second version
           // instead AND surface the choice — text kept only in SQLite is text
           // the user cannot recover.
-          if (row.conflictText != text) {
+          final base =
+              row ??
+              SessionLocalDraft.create(
+                brokerProfileId: profileId,
+                sessionKey: arg,
+                text: staged!,
+              );
+          if (base.conflictText != text) {
             await _saveLocalDraft(
-              row.copyWith(conflictText: text, updatedAt: DateTime.now()),
+              base.copyWith(conflictText: text, updatedAt: DateTime.now()),
               scope,
             );
           }
           if (state.draftConflict == null) {
             state = state.copyWith(
               draftConflict: SessionDraftConflict(
-                localText: row.text,
+                localText: typedSince ? staged : base.text,
                 sharedText: text,
                 kind: SessionDraftConflictKind.unsentPrompt,
               ),

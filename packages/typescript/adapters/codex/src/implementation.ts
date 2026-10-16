@@ -25,7 +25,8 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { CodexBackgroundCommands } from './background-commands.ts';
-import { inspectCodexRuntimeSocket } from './runtime-socket.ts';
+import { type CodexRuntimeSocketListener, inspectCodexRuntimeSocket, probeCodexRuntimeSocketListener } from './runtime-socket.ts';
+import { codexWindowsTerminalPresence, type CodexWindowsPresenceEvidence } from './windows-presence.ts';
 import { connect, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import {
@@ -35,7 +36,6 @@ import {
   readFileSync,
   readdirSync,
   statSync,
-  openSync,
   readSync,
   closeSync,
   watch,
@@ -43,6 +43,7 @@ import {
   writeFileSync,
   realpathSync,
   type FSWatcher,
+  type Stats,
 } from 'node:fs';
 import { join, basename, dirname, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +58,10 @@ import {
   AgentOwnedSessionError,
   NativeSessionUnresumableError,
   OwnershipConflictError,
+  SessionNotFoundError,
+  containedStorePath,
+  ControlRefusedError,
+  openRegularFileSync,
   type AgentBackend,
   type AttachOptions,
   type FileChange,
@@ -165,15 +170,31 @@ const CODEX_RECENT_COMPLETED_TURN_LIMIT = 32;
 const CODEX_RESUME_START_TIMEOUT_MS = 30_000;
 const CODEX_RESUME_PROCESS_STOP_TIMEOUT_MS = 2_000;
 type CodexTurnRunState = { kind: 'hydrating' } | { kind: 'unknown' } | { kind: 'idle' } | { kind: 'active'; turnId: string };
+/** What qualifying one rollout's run state needs to know about the thread (see
+ *  {@link codexQualificationFromEvidence}). */
+type CodexQualificationTarget = {
+  threadId: string;
+  parentThreadId?: string;
+  agentOwned: boolean;
+  cwd?: string;
+  createdAtMs?: number;
+  threadSource?: string;
+};
 /** A live owner the adapter may ask to re-derive its run state from exact native evidence (R0c.4). */
 type CodexRepairableOwner = {
   readonly info: SessionInfo;
   requestRunStateRepair(): Promise<void>;
   reconcileDaemonTransport?(): Promise<void>;
+  /** Present on an Observe owner: the thread whose possible owners the watcher checks for it when
+   *  the daemon does not report that thread. */
+  readonly qualificationTarget?: CodexQualificationTarget;
 };
 type BootstrapQueuedMessage = { method: string; params: any; rpcId?: number | string };
 type CodexCompletedTurnEvidence = { params: any; emitted: boolean };
 export type CodexLoadedThreadDecision = 'loaded' | 'absent' | 'unknown';
+/** `daemon` says what the decision rests on: the daemon answered the loaded-thread RPC, or nothing
+ *  listens at its control socket any more (a crash left the socket file behind). */
+type CodexLoadedThreadProbe = { decision: CodexLoadedThreadDecision; daemon?: 'answered' | 'gone' };
 
 /** Redacted, bounded attach diagnostics. No rollout paths, cwd, prompts, transcript
  *  bodies, credentials, or dynamic-tool schemas are admitted to this shape. */
@@ -213,6 +234,28 @@ const CODEX_DEFAULT_SESSION_MODE = ((): string => {
 const enc = (s: string): string => Buffer.from(s, 'utf8').toString('base64url');
 const dec = (s: string): string => Buffer.from(s, 'base64url').toString('utf8');
 
+/** A file name discovery publishes: `rollout-<iso>-<uuid>.jsonl`. */
+const ROLLOUT_FILE_NAME = /^rollout-.*\.jsonl$/;
+
+/**
+ * The rollout a session id names, admitted only when it is one discovery would publish: a
+ * `rollout-*.jsonl` that lies inside `$CODEX_HOME/sessions` with every symlink and `..` resolved.
+ * A path that does not exist yet is admitted (a thread created but not yet written has no rollout
+ * on Codex >= 0.151); a dangling symlink is not, and neither is a FIFO, socket, device or directory
+ * under a rollout name. Returns the decoded path exactly as the id spells it, so a valid id behaves
+ * as it always did.
+ */
+function codexRolloutPathOf(sessionId: string): string {
+  const path = dec(sessionId);
+  if (
+    !ROLLOUT_FILE_NAME.test(basename(path))
+    || !containedStorePath([SESSIONS_ROOT], path, { allowMissing: true, regularFile: true })
+  ) {
+    throw new SessionNotFoundError('This Codex session id does not name a rollout in the Codex session store.');
+  }
+  return path;
+}
+
 export class CodexAdapter implements AgentBackend {
   readonly id = 'codex';
   readonly displayName = 'Codex';
@@ -223,6 +266,21 @@ export class CodexAdapter implements AgentBackend {
   } as const;
   private liveThreadCache: { at: number; ids: Set<string> } | undefined;
   private liveActivityCache: { at: number; activities: Map<string, CodexThreadActivityStatus> } | undefined;
+  /** Creates between their `thread/start` request and their outcome. A create can hold a thread
+   *  loaded on the shared daemon only until it releases it (a stored thread `thread/start` answered
+   *  with, which the create refuses), so the daemon's loaded threads read across a create are not
+   *  settled evidence: published, they would show that stored session as driven. */
+  private createsInFlight = 0;
+  /** Bumped as each create starts and ends, so a probe that spanned one is recognised. */
+  private createEpoch = 0;
+  /** What the daemon's control socket last proved about its listener. Taken only after the daemon
+   *  failed to answer, never on a healthy read, and reused for one watch interval. `dead` speaks only
+   *  for the socket file it was read against (`key`): a daemon that starts again binds a new one. */
+  private daemonListener: { socket: string; key: string; at: number; verdict: CodexRuntimeSocketListener } | undefined;
+  /** The listener probe in flight, shared by every failed read that asks while it runs. */
+  private daemonListenerProbe: { socket: string; key: string; verdict: Promise<CodexRuntimeSocketListener> } | undefined;
+  /** Bumped each time the daemon answers, so a probe that started before an answer records nothing. */
+  private daemonAnswers = 0;
   /** Connections this adapter handed out and that are still open, for the R0c.4 owner self-check.
    *  Bounded by the number of live owners; every connection removes itself on close. */
   private readonly openOwners = new Set<CodexRepairableOwner>();
@@ -230,7 +288,10 @@ export class CodexAdapter implements AgentBackend {
   constructor(private readonly options: {
     queryLoadedThreadIds?: () => Promise<Set<string>>;
     queryLoadedThreadActivities?: () => Promise<CodexLoadedThreadActivity[]>;
-    scanCodexTuiPresence?: (sockPath: string, fresh?: boolean) => Promise<CodexTuiScan>;
+    /** `sockPath` is undefined when no daemon control socket exists; terminals are scanned regardless. */
+    scanCodexTuiPresence?: (sockPath: string | undefined, fresh?: boolean) => Promise<CodexTuiScan>;
+    /** Test seam: the Windows process snapshot and command-line reads a restore consults there. */
+    windowsTerminalEvidence?: CodexWindowsPresenceEvidence;
     reportManagedStart?: ManagedRuntimeStartReporter;
     reportDaemonOwnership?: CodexDaemonOwnershipReporter;
     reportAttachDiagnostic?: CodexAttachDiagnosticReporter;
@@ -246,6 +307,9 @@ export class CodexAdapter implements AgentBackend {
      *  when the session is idle (default 3 s). */
     daemonProbeTimeoutMs?: number;
     goalPauseTurnWaitMs?: number;
+    /** Test seam, never set by the broker runtime: the clock an Observe history read measures its
+     *  wait for a trailing answer's paired record on (default `Date.now`). */
+    historySettleClock?: () => number;
   } = {}) {}
 
   private reportAttachDiagnostic(diagnostic: CodexAttachDiagnostic): void {
@@ -265,6 +329,12 @@ export class CodexAdapter implements AgentBackend {
   }
 
   canCreateSession(): boolean {
+    return resolveBin('codex') !== null;
+  }
+
+  /** The same PATH/override resolve every Codex spawn uses; never a launch. A `live` join of a
+   *  daemon-synced thread is not gated by it (the terminal is that writer). */
+  isInstalled(): boolean {
     return resolveBin('codex') !== null;
   }
 
@@ -302,7 +372,15 @@ export class CodexAdapter implements AgentBackend {
   } = {}): Promise<SessionInfo> {
     const cwd = opts.directory?.trim() || homedir();
     if (!existsSync(cwd)) throw new Error(`Codex createSession directory does not exist: ${cwd}`);
-    const started = await createCodexThread(cwd, opts.title, opts.model, this.capabilities.supportsLiveAttach);
+    this.createsInFlight += 1;
+    this.createEpoch += 1;
+    let started: any;
+    try {
+      started = await createCodexThread(cwd, opts.title, opts.model, this.capabilities.supportsLiveAttach);
+    } finally {
+      this.createsInFlight -= 1;
+      this.createEpoch += 1;
+    }
     const thread = started?.thread ?? {};
     const path = typeof thread.path === 'string' && thread.path ? thread.path : undefined;
     if (!path) throw new Error('Codex thread/start did not return a durable rollout path.');
@@ -397,7 +475,10 @@ export class CodexAdapter implements AgentBackend {
       // surface work across many small rollouts that resolve without entering a long authority scan.
       if (++scannedFiles % 25 === 0) await new Promise((r) => setTimeout(r, 0));
       const st = statSafe(full);
-      if (!st) continue;
+      // Only a regular file is a rollout: a FIFO named like one would block every read of it, and a
+      // socket, device or directory under the name holds no session either. Every rollout read opens
+      // through `openRegularFileSync`, which refuses them without blocking.
+      if (!st?.isFile()) continue;
       // Incremental discovery must apply its cutoff before decoding an old rollout. A daemon-loaded
       // thread is the one bounded exception: it is live native authority and still needs projection.
       const pathId = rolloutUuid(full);
@@ -408,6 +489,9 @@ export class CodexAdapter implements AgentBackend {
       ) {
         continue;
       }
+      // Only a rollout inside the store is a session: a symlink (or a symlinked directory) named
+      // like one that resolves elsewhere is never decoded or listed, because attach refuses it.
+      if (!containedStorePath([SESSIONS_ROOT], full)) continue;
       const facts = await rolloutFacts(full, st); // meta (line 1: cwd + id) + surface + exact status, stat-cached
       const meta = facts.meta;
       const id = meta?.id ? String(meta.id) : pathId;
@@ -488,6 +572,7 @@ export class CodexAdapter implements AgentBackend {
     const missingPolls = new Map<string, number>();
     let lastPresenceKey = '';
     let lastActivityKey = '';
+    let lastDaemonGone = false;
     let lastInfoKeys = new Map<string, string>();
     const readScan = (): Promise<CodexTuiScan> => this.presenceScan();
     // Fingerprint of the TUI presence scan. A terminal join/exit usually changes NOTHING in the
@@ -500,27 +585,37 @@ export class CodexAdapter implements AgentBackend {
       try {
         let observedLive: Set<string>;
         let activities: Map<string, CodexThreadActivityStatus>;
-        let scan: CodexTuiScan;
-        try {
-          // Both probes are async. In particular, the presence path uses the coalesced async
-          // socket diagnostic and never runs the synchronous `ss` probe from the watch timer.
-          [observedLive, activities, scan] = await Promise.all([
-            this.refreshLiveLoadedThreadIds(),
-            this.refreshLiveLoadedThreadActivities(),
-            readScan(),
-          ]);
-        } catch {
+        // Both probes are async. In particular, the presence path uses the coalesced async
+        // socket diagnostic and never runs the synchronous `ss` probe from the watch timer.
+        const [loaded, active, scanned] = await Promise.allSettled([
+          this.refreshLiveLoadedThreadIds(),
+          this.refreshLiveLoadedThreadActivities(),
+          readScan(),
+        ]);
+        if (scanned.status === 'rejected') return;
+        const scan = scanned.value;
+        if (loaded.status === 'fulfilled' && active.status === 'fulfilled') {
+          observedLive = loaded.value;
+          activities = active.value;
+        } else {
           // Probe failure is unknown, never an authoritative empty loaded list. Treating a socket/RPC
           // error as empty would synthesize a sync-degraded transition and downgrade live terminals.
-          return;
+          // The one exception is proof that nothing listens at the daemon socket: a crashed daemon
+          // holds no thread, and keeping its last set would leave those rows driven indefinitely.
+          const failures = [loaded, active].flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
+          if (!await this.daemonGoneAfter(failures)) return;
+          observedLive = new Set();
+          activities = new Map();
         }
         if (stopped) return;
+        const daemonGone = this.daemonProvenGone();
         // Exact native evidence for every open owner, on the interval that already exists.
-        this.checkOpenOwnerRunStates(activities);
+        this.checkOpenOwnerRunStates(activities, observedLive, scan);
         if (!initialized) {
           confirmedLive = observedLive;
           lastPresenceKey = presenceKey(scan);
           lastActivityKey = codexActivityFingerprint(activities);
+          lastDaemonGone = daemonGone;
           const firstInfos = await this.sessionInfosForLiveIds(confirmedLive, scan, activities);
           if (stopped) return;
           lastInfoKeys = sessionInfoKeys(firstInfos);
@@ -547,6 +642,10 @@ export class CodexAdapter implements AgentBackend {
         const ak = codexActivityFingerprint(activities);
         const activityRefresh = ak !== lastActivityKey;
         if (activityRefresh) lastActivityKey = ak;
+        // The daemon dying (or a new one starting) changes every row's join offer even when no thread
+        // was loaded, so it re-derives the roster like a presence change does.
+        const daemonRefresh = daemonGone !== lastDaemonGone;
+        lastDaemonGone = daemonGone;
         for (const id of confirmedLive) {
           if (observedLive.has(id)) {
             missingPolls.delete(id);
@@ -569,7 +668,7 @@ export class CodexAdapter implements AgentBackend {
           }
         }
 
-        if (!presenceRefresh && !activityRefresh && changedLoadedIds.size === 0) return;
+        if (!presenceRefresh && !activityRefresh && !daemonRefresh && changedLoadedIds.size === 0) return;
         const nextInfos = await this.sessionInfosForLiveIds(confirmedLive, scan, activities);
         if (stopped) return;
         const nextInfoKeys = sessionInfoKeys(nextInfos);
@@ -616,7 +715,7 @@ export class CodexAdapter implements AgentBackend {
     const out: SessionInfo[] = [];
     for (const full of findRollouts(SESSIONS_ROOT)) {
       const st = statSafe(full);
-      if (!st) continue;
+      if (!st?.isFile()) continue; // a FIFO, socket or directory under a rollout name is no session
       const facts = await rolloutFacts(full, st);
       const meta = facts.meta;
       const originTag = codexSessionOrigin(meta); // tag-not-drop (same contract as discoverSessions)
@@ -699,7 +798,7 @@ export class CodexAdapter implements AgentBackend {
   /** Native rename via `thread/name/set` — propagates to the codex TUI/session index, not just our
    *  roster alias (issues-part2 rename check). Short-lived app-server RPC; the rollout stays put. */
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
-    const path = dec(sessionId);
+    const path = codexRolloutPathOf(sessionId);
     const meta = readSessionMeta(path);
     const threadId = meta?.id ? String(meta.id) : rolloutUuid(path);
     const cwd = meta?.cwd ? String(meta.cwd) : process.cwd();
@@ -747,7 +846,7 @@ export class CodexAdapter implements AgentBackend {
    *  therefore ignored. The forked rollout is forced to disk before we return so the immediate attach can
    *  find it. Command-surface action (maintainer §4.6): no button, honest evidence D,L0. */
   async forkSession(sessionId: string, _opts: { messageId?: string | null } = {}): Promise<SessionInfo> {
-    const path = dec(sessionId);
+    const path = codexRolloutPathOf(sessionId);
     const meta = readSessionMeta(path);
     const threadId = meta?.id ? String(meta.id) : rolloutUuid(path);
     const cwd = meta?.cwd ? String(meta.cwd) : process.cwd();
@@ -774,7 +873,7 @@ export class CodexAdapter implements AgentBackend {
     if (codexAgentOwned(codexSessionOrigin(meta).origin)) {
       throw new AgentOwnedSessionError(`Codex subagent threads cannot be forked. ${CODEX_AGENT_OWNED_DRIVE_REASON}`, 'fork');
     }
-    const forked = await forkCodexThread(cwd, threadId);
+    const forked = await forkCodexThread(cwd, threadId, path);
     const thread = forked?.thread ?? {};
     const newPath = typeof thread.path === 'string' && thread.path ? thread.path : undefined;
     if (!newPath) throw new Error('Codex thread/fork did not return a durable rollout path.');
@@ -837,7 +936,7 @@ export class CodexAdapter implements AgentBackend {
   }
 
   async attach(sessionId: string, mode?: AttachMode, opts?: AttachOptions): Promise<SessionConnection> {
-    const path = dec(sessionId);
+    const path = codexRolloutPathOf(sessionId);
     const meta = readSessionMeta(path);
     const cwd = meta?.cwd ? String(meta.cwd) : undefined;
     const threadId = meta?.id ? String(meta.id) : rolloutUuid(path);
@@ -867,13 +966,15 @@ export class CodexAdapter implements AgentBackend {
     if (mode === 'live' && !this.capabilities.supportsLiveAttach) {
       throw new Error('Codex sync server mode is not enabled; set COSYNCING_CODEX_SYNC_SERVER=1 after configuring the app-server daemon.');
     }
-    const loadedDecision = this.capabilities.supportsLiveAttach
+    const loadedProbe: CodexLoadedThreadProbe = this.capabilities.supportsLiveAttach
       ? await this.liveLoadedDecision(threadId, mode === 'resume' || mode === 'live')
-      : 'absent';
+      : { decision: 'absent' };
+    const loadedDecision = loadedProbe.decision;
     this.reportAttachDiagnostic({
       event: 'daemon-loaded-probe',
       threadId,
       outcome: loadedDecision,
+      ...(loadedProbe.daemon === 'gone' ? { message: 'nothing listens at the daemon control socket' } : {}),
     });
     if ((mode === 'resume' || mode === 'live') && loadedDecision === 'unknown') {
       throw new OwnershipConflictError(
@@ -890,8 +991,15 @@ export class CodexAdapter implements AgentBackend {
     // a child thread without any caller asking for Drive. It stays a read-only Observe conn instead.
     const providerReason = codexSharedProviderReason(surface.currentModel?.providerID
       ?? firstMetadataString([meta], ['modelProvider', 'model_provider', 'provider']));
-    const daemonReachable = liveLoaded || (loadedDecision === 'absent'
-      && inspectCodexRuntimeSocket(codexAppServerSock()).state === 'socket');
+    const daemonSocket = codexAppServerSock();
+    const daemonSocketPresent = inspectCodexRuntimeSocket(daemonSocket).state === 'socket';
+    let daemonGone = loadedProbe.daemon === 'gone';
+    if (!loadedProbe.daemon && mode === 'resume' && loadedDecision === 'absent' && daemonSocketPresent && daemonSocket) {
+      // Drive is about to route through the daemon and nothing has proved it alive (sync off asks no
+      // RPC first). A socket a crash left behind is no daemon: Drive starts its own app-server instead.
+      daemonGone = await probeCodexRuntimeSocketListener(daemonSocket) === 'dead';
+    }
+    const daemonReachable = liveLoaded || (loadedDecision === 'absent' && !daemonGone && daemonSocketPresent);
     const liveEligible = !agentOwned && !providerReason && daemonReachable
       && mode !== 'observe' && (liveLoaded || mode === 'resume');
     if (mode === 'resume' && !liveEligible && resolveBin('codex') === null) {
@@ -910,7 +1018,13 @@ export class CodexAdapter implements AgentBackend {
     // Restoration is a control decision, not a badge refresh. It must bypass a cached absence so a
     // terminal that appeared inside the normal 2-second display TTL cannot be overwritten.
     const presenceScan = await this.presenceScan(restorationAttempt);
-    const terminalPresence = classifyCodexTerminalPresence(presenceScan, threadId, cwd, timestampToMs(meta?.timestamp), meta?.thread_source);
+    let terminalPresence = classifyCodexTerminalPresence(presenceScan, threadId, cwd, timestampToMs(meta?.timestamp), meta?.thread_source);
+    if (restorationAttempt && presenceScan.source === 'unsupported') {
+      // Windows has no terminal scanner. A restore checks this one thread, here and nowhere else:
+      // no foreign `codex.exe` is absent, one whose command line names the thread is private, and an
+      // unreadable host is unknown. Discovery and an explicit Take over never run it.
+      terminalPresence = (await codexWindowsTerminalPresence(threadId, this.options.windowsTerminalEvidence)).presence;
+    }
     const liveActivities = await this.liveLoadedThreadActivities();
     const parentThreadId = originTag.parentThreadId;
     const st = statSafe(path);
@@ -981,18 +1095,21 @@ export class CodexAdapter implements AgentBackend {
       }),
     };
     if (observe) {
+      const target: CodexQualificationTarget = {
+        threadId,
+        parentThreadId,
+        agentOwned,
+        cwd,
+        createdAtMs: timestampToMs(meta?.timestamp),
+        threadSource: meta?.thread_source,
+      };
       const observeConn = new CodexObserveConnection(
         path,
         info,
         qualification,
-        () => this.freshQualification({
-          threadId,
-          parentThreadId,
-          agentOwned,
-          cwd,
-          createdAtMs: timestampToMs(meta?.timestamp),
-          threadSource: meta?.thread_source,
-        }),
+        () => this.freshQualification(target),
+        target,
+        this.options.historySettleClock,
       );
       await observeConn.start();
       return this.trackOwner(observeConn);
@@ -1041,45 +1158,26 @@ export class CodexAdapter implements AgentBackend {
    * false negative: a failed daemon probe cannot prove idle, and a failed presence scan cannot prove
    * no terminal owns the rollout.
    */
-  private async freshQualification(target: {
-    threadId: string;
-    parentThreadId?: string;
-    agentOwned: boolean;
-    cwd?: string;
-    createdAtMs?: number;
-    threadSource?: string;
-  }): Promise<CodexRolloutQualificationContext> {
-    const base: CodexRolloutQualificationContext = {
-      liveLoaded: false,
-      nativeActivity: 'unknown',
-      terminalPresence: 'unknown',
-      agentOwned: target.agentOwned,
+  private async freshQualification(target: CodexQualificationTarget): Promise<CodexRolloutQualificationContext> {
+    if (!this.capabilities.supportsLiveAttach) {
+      return { liveLoaded: false, nativeActivity: 'unknown', terminalPresence: 'unknown', agentOwned: target.agentOwned };
+    }
+    const failures: unknown[] = [];
+    const failed = (error: unknown): undefined => {
+      failures.push(error);
+      return undefined;
     };
-    if (!this.capabilities.supportsLiveAttach) return base;
-    const [ids, activities, scan] = await Promise.all([
-      this.refreshLiveLoadedThreadIds().then((value) => value, () => undefined),
-      this.refreshLiveLoadedThreadActivities().then((value) => value, () => undefined),
+    let [ids, activities, scan] = await Promise.all([
+      this.refreshLiveLoadedThreadIds().then((value) => value, failed),
+      this.refreshLiveLoadedThreadActivities().then((value) => value, failed),
       this.presenceScan().then((value) => value, () => undefined),
     ]);
-    // Either daemon probe failing makes the whole daemon side unprovable: reporting "not loaded"
-    // from a failed probe would hand the qualifier a fabricated absence of an owner.
-    const daemon = ids !== undefined && activities !== undefined ? { ids, activities } : undefined;
-    const presence = (threadId: string): SessionTerminalPresence => scan
-      ? classifyCodexTerminalPresence(scan, threadId, target.cwd, target.createdAtMs, target.threadSource)
-      : 'unknown';
-    return {
-      liveLoaded: daemon?.ids.has(target.threadId) ?? false,
-      nativeActivity: daemon ? daemon.activities.get(target.threadId) : 'unknown',
-      terminalPresence: presence(target.threadId),
-      agentOwned: target.agentOwned,
-      ...(target.parentThreadId
-        ? {
-            parentLiveLoaded: daemon?.ids.has(target.parentThreadId) ?? false,
-            parentNativeActivity: daemon ? daemon.activities.get(target.parentThreadId) : 'unknown',
-            parentTerminalPresence: presence(target.parentThreadId),
-          }
-        : {}),
-    };
+    // A daemon proven gone holds nothing: that is evidence, not an unanswered probe.
+    if (failures.length > 0 && await this.daemonGoneAfter(failures)) {
+      ids ??= new Set();
+      activities ??= new Map();
+    }
+    return codexQualificationFromEvidence(target, ids, activities, scan);
   }
 
   /**
@@ -1091,16 +1189,35 @@ export class CodexAdapter implements AgentBackend {
    * activity map the poll already fetched is exact native evidence, and any open owner whose
    * published run state disagrees with it is asked to re-derive. The owner still decides — this
    * passes no status, only the fact that a contradiction exists.
+   *
+   * The daemon speaks only for threads it holds. For an Observe owner of any other thread — a
+   * private terminal's, say — the poll's own loaded set and terminal scan are the evidence: a turn
+   * it still shows open while the same qualifier discovery runs finds no possible owner left (no
+   * terminal process names the thread, the daemon does not hold it) is the contradiction. Without
+   * this, a terminal that died mid-turn left the owner Working for as long as a client stayed
+   * attached. The owner's repair re-takes every input at one instant and still needs the absence to
+   * survive a round over unchanged rollout bytes ({@link decideCodexObserveRunState} rule (b)).
    */
-  private checkOpenOwnerRunStates(activities: Map<string, CodexThreadActivityStatus>): void {
+  private checkOpenOwnerRunStates(
+    activities: Map<string, CodexThreadActivityStatus>,
+    loadedIds: Set<string>,
+    scan: CodexTuiScan,
+  ): void {
     if (this.openOwners.size === 0) return;
     for (const owner of this.openOwners) {
       const threadId = owner.info.nativeId;
       if (!threadId) continue;
       const activity = activities.get(threadId);
-      if (activity !== 'idle' && activity !== 'working' && activity !== 'needs-input') continue;
-      const nativeInFlight = activity !== 'idle';
-      if (nativeInFlight === (owner.info.status !== 'idle')) continue;
+      if (activity === 'idle' || activity === 'working' || activity === 'needs-input') {
+        const nativeInFlight = activity !== 'idle';
+        if (nativeInFlight === (owner.info.status !== 'idle')) continue;
+        void owner.requestRunStateRepair().catch(() => {});
+        continue;
+      }
+      const target = owner.qualificationTarget;
+      if (!target || owner.info.status === 'idle') continue;
+      const context = codexQualificationFromEvidence(target, loadedIds, activities, scan);
+      if (qualifyCodexRolloutStatus('working', context) !== 'idle') continue;
       void owner.requestRunStateRepair().catch(() => {});
     }
   }
@@ -1110,17 +1227,40 @@ export class CodexAdapter implements AgentBackend {
     if (this.liveThreadCache && Date.now() - this.liveThreadCache.at < LIVE_THREAD_CACHE_MS) return this.liveThreadCache.ids;
     try {
       return await this.refreshLiveLoadedThreadIds();
-    } catch {
+    } catch (error) {
+      // A daemon that crashed left its socket behind and nothing listens there: the threads it held
+      // went with it, so its last-known set is no longer anyone's.
+      if (await this.daemonGoneAfter([error])) {
+        this.liveThreadCache = undefined;
+        return new Set();
+      }
       // Discovery remains available while the daemon probe is transiently unhealthy, but we do not
       // overwrite a last-known loaded set with fabricated emptiness.
       return this.liveThreadCache?.ids ?? new Set();
     }
   }
 
-  private async refreshLiveLoadedThreadIds(): Promise<Set<string>> {
+  /**
+   * The daemon's loaded threads, now. A read that overlapped a create is not settled (see
+   * {@link createsInFlight}): it is never cached, and for anything that publishes it — the watcher,
+   * discovery, a run-state repair — it fails like an unanswered probe, which each already treats as
+   * unknown (the watcher skips that poll, discovery keeps the last settled set). A Drive decision
+   * about one thread still gets the answer: the daemon either holds that thread or does not.
+   */
+  private async refreshLiveLoadedThreadIds(purpose: 'publish' | 'decide' = 'publish'): Promise<Set<string>> {
+    const epoch = this.createEpoch;
     const ids = await (this.options.queryLoadedThreadIds ?? (() => queryCodexLoadedThreadIds(this.options.daemonProbeTimeoutMs)))();
+    this.daemonAnswered();
+    if (this.createSpanned(epoch)) {
+      if (purpose === 'publish') throw new CodexUnsettledDaemonRead('Codex loaded threads were read while a create was in flight.');
+      return ids;
+    }
     this.liveThreadCache = { at: Date.now(), ids };
     return ids;
+  }
+
+  private createSpanned(epoch: number): boolean {
+    return this.createsInFlight > 0 || this.createEpoch !== epoch;
   }
 
   private async liveLoadedThreadActivities(): Promise<Map<string, CodexThreadActivityStatus>> {
@@ -1130,7 +1270,12 @@ export class CodexAdapter implements AgentBackend {
     }
     try {
       return await this.refreshLiveLoadedThreadActivities();
-    } catch {
+    } catch (error) {
+      // Nothing listens at the daemon's socket any more: no thread there is doing anything.
+      if (await this.daemonGoneAfter([error])) {
+        this.liveActivityCache = undefined;
+        return new Map();
+      }
       // A point-in-time native status failure is unknown. Preserve a recent successful snapshot;
       // otherwise the rollout/process qualification below fails open rather than inventing Idle.
       const previous = this.liveActivityCache;
@@ -1144,32 +1289,92 @@ export class CodexAdapter implements AgentBackend {
     // Existing tests inject only the older loaded-id seam. Do not reach the operator's real daemon
     // from those fixtures; absence from this map means unknown, not Idle.
     if (this.options.queryLoadedThreadIds && !this.options.queryLoadedThreadActivities) return new Map();
+    const epoch = this.createEpoch;
     const rows = await (this.options.queryLoadedThreadActivities ?? (() => queryCodexLoadedThreadActivitiesStrict(this.options.daemonProbeTimeoutMs)))();
+    this.daemonAnswered();
+    // Activity of a thread a create holds only until it releases it is no more settled than its
+    // being loaded (see refreshLiveLoadedThreadIds).
+    if (this.createSpanned(epoch)) throw new CodexUnsettledDaemonRead('Codex thread activity was read while a create was in flight.');
     const activities = new Map(rows.map((row) => [row.id, row.status] as const));
     this.liveActivityCache = { at: Date.now(), activities };
     return activities;
   }
 
-  private async liveLoadedDecision(threadId: string, requireCurrentProof = false): Promise<CodexLoadedThreadDecision> {
+  /** The daemon answered: whatever an earlier probe proved about its socket no longer holds. */
+  private daemonAnswered(): void {
+    this.daemonAnswers += 1;
+    this.daemonListener = undefined;
+  }
+
+  /**
+   * After loaded-set or activity reads failed: is the daemon proven gone? Only positive evidence that
+   * nothing listens at its control socket counts ({@link probeCodexRuntimeSocketListener}); an
+   * unresponsive listener, a timeout, or a host that cannot tell is `unknown` and stays unknown, as
+   * does a read that failed only because a create was in flight (the daemon answered it). The probe
+   * runs only on a failure, is shared by concurrent callers, and is reused for one watch interval.
+   * Injected loaded-thread seams never reach a socket.
+   */
+  private async daemonGoneAfter(errors: unknown[]): Promise<boolean> {
+    if (this.options.queryLoadedThreadIds || errors.some((error) => error instanceof CodexUnsettledDaemonRead)) return false;
+    const socket = codexDaemonSocketPath();
+    const key = codexSocketObservationKey(socket);
+    const known = this.daemonListener;
+    if (known && known.socket === socket && known.key === key && Date.now() - known.at < CODEX_SYNC_WATCH_MS) {
+      return known.verdict === 'dead';
+    }
+    let probe = this.daemonListenerProbe;
+    if (!probe || probe.socket !== socket || probe.key !== key) {
+      const answers = this.daemonAnswers;
+      const verdict = probeCodexRuntimeSocketListener(socket).catch((): CodexRuntimeSocketListener => 'unknown');
+      const started = { socket, key, verdict };
+      probe = started;
+      this.daemonListenerProbe = started;
+      void verdict.then((value) => {
+        if (this.daemonListenerProbe === started) this.daemonListenerProbe = undefined;
+        // An answer that arrived while the probe ran outranks it.
+        if (this.daemonAnswers === answers) this.daemonListener = { socket, key, at: Date.now(), verdict: value };
+      });
+    }
+    return await probe.verdict === 'dead';
+  }
+
+  /** The last probe proved nothing listens at the daemon socket, and that socket file is unchanged. */
+  private daemonProvenGone(): boolean {
+    const known = this.daemonListener;
+    if (known?.verdict !== 'dead') return false;
+    const socket = codexDaemonSocketPath();
+    return known.socket === socket && known.key === codexSocketObservationKey(socket);
+  }
+
+  private async liveLoadedDecision(threadId: string, requireCurrentProof = false): Promise<CodexLoadedThreadProbe> {
     const socket = codexAppServerSock();
-    if (!this.options.queryLoadedThreadIds) {
+    const nativeDaemon = !this.options.queryLoadedThreadIds;
+    // Only positive evidence that nothing can listen there turns an unanswered socket into "no daemon";
+    // an unresponsive listener, a timeout, or a host that cannot tell stays unknown.
+    const gone = async () => nativeDaemon && !!socket && await probeCodexRuntimeSocketListener(socket) === 'dead';
+    if (nativeDaemon) {
       const observation = inspectCodexRuntimeSocket(socket);
-      if (observation.state !== 'socket') return observation.state;
+      if (observation.state === 'absent') return { decision: 'absent' };
+      // An alias whose target is gone has nothing behind it for a daemon to listen on.
+      if (observation.state === 'unknown') return await gone() ? { decision: 'absent', daemon: 'gone' } : { decision: 'unknown' };
     }
     const cached = this.liveThreadCache;
     // Display discovery may reuse a short-lived cache. A Drive/take-over
     // decision may not: cached non-membership cannot prove that a daemon did
     // not load the thread after the snapshot was taken.
     if (!requireCurrentProof && cached && Date.now() - cached.at < LIVE_THREAD_CACHE_MS) {
-      return cached.ids.has(threadId) ? 'loaded' : 'absent';
+      return { decision: cached.ids.has(threadId) ? 'loaded' : 'absent' };
     }
     try {
-      return (await this.refreshLiveLoadedThreadIds()).has(threadId) ? 'loaded' : 'absent';
+      return { decision: (await this.refreshLiveLoadedThreadIds('decide')).has(threadId) ? 'loaded' : 'absent', daemon: 'answered' };
     } catch {
+      // A crashed daemon leaves its socket file behind. Proof that nothing listens there outranks the
+      // last-known loaded set: the process that held those threads is gone.
+      if (await gone()) return { decision: 'absent', daemon: 'gone' };
       // A last-known loaded thread remains potentially owned even after the
       // daemon stops answering. Cached non-membership is not equivalent: a
       // failed current probe cannot prove the thread stayed absent.
-      return cached?.ids.has(threadId) ? 'loaded' : 'unknown';
+      return { decision: cached?.ids.has(threadId) ? 'loaded' : 'unknown' };
     }
   }
 
@@ -1188,8 +1393,11 @@ export class CodexAdapter implements AgentBackend {
   ): SessionInfo['terminalSyncHint'] | undefined {
     if (!this.capabilities.supportsLiveAttach || agentOwned) return undefined;
     const privateOwner = [...this.openOwners].find((owner) => owner.info.nativeId === threadId && owner.info.attachMode === 'resume');
+    // A socket a crashed daemon left behind is no daemon to join: the hint names it only while
+    // something may still listen there.
     const reason = codexSharedProviderReason(provider)
-      ?? (inspectCodexRuntimeSocket(codexAppServerSock()).state !== 'socket' ? CODEX_DAEMON_UNAVAILABLE_REASON : undefined)
+      ?? (inspectCodexRuntimeSocket(codexAppServerSock()).state !== 'socket' || this.daemonProvenGone()
+        ? CODEX_DAEMON_UNAVAILABLE_REASON : undefined)
       ?? (privateOwner ? privateOwner.info.control?.terminalSync.reason ?? CODEX_DAEMON_UNAVAILABLE_REASON : undefined);
     return unavailableCodexSyncHint(codexTerminalSyncHint(threadId, cwd, model, provider, profile), reason);
   }
@@ -1198,9 +1406,7 @@ export class CodexAdapter implements AgentBackend {
    *  arbitration is deterministic under the fake-codex harness. */
   private async presenceScan(fresh = false): Promise<CodexTuiScan> {
     const sock = codexAppServerSock();
-    if (this.options.scanCodexTuiPresence) {
-      return sock ? this.options.scanCodexTuiPresence(sock, fresh) : emptyCodexTuiScan();
-    }
+    if (this.options.scanCodexTuiPresence) return this.options.scanCodexTuiPresence(sock, fresh);
     return codexPresenceScanAsync(sock, fresh);
   }
 
@@ -1392,6 +1598,21 @@ export function codexAppServerSocketFingerprint(pathOverride?: string): CodexDae
   }
 }
 
+/**
+ * {@link codexAppServerSocketFingerprint} for a daemon that may still be alive. A socket a crashed daemon
+ * left behind is that dead instance's file, so it cannot prove a live daemon is the one cosyncing started:
+ * on proof that nothing listens there ({@link probeCodexRuntimeSocketListener}) this is undefined, and so
+ * is a socket replaced while the probe ran. A listener, or a host that cannot tell, keeps the fingerprint.
+ */
+export async function codexAppServerLiveSocketFingerprint(pathOverride?: string): Promise<CodexDaemonSocketFingerprint | undefined> {
+  const before = codexAppServerSocketFingerprint(pathOverride);
+  if (!before) return undefined;
+  const path = pathOverride?.trim() || process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim() || DEFAULT_APP_SERVER_CONTROL_SOCK;
+  if (await probeCodexRuntimeSocketListener(path) === 'dead') return undefined;
+  const after = codexAppServerSocketFingerprint(pathOverride);
+  return after && after.dev === before.dev && after.ino === before.ino && after.mtimeMs === before.mtimeMs ? after : undefined;
+}
+
 async function ensureCodexDaemonAsync(
   bin: string,
   reporter?: ManagedRuntimeStartReporter,
@@ -1485,6 +1706,19 @@ function codexAppServerSock(): string | undefined {
     ? undefined : DEFAULT_APP_SERVER_CONTROL_SOCK;
 }
 
+/** The control socket the daemon listens on, named even when it is absent (absence is evidence too). */
+function codexDaemonSocketPath(): string {
+  return codexAppServerSock() ?? DEFAULT_APP_SERVER_CONTROL_SOCK;
+}
+
+/** Identity of what sits at the socket path: a daemon that starts again binds a new file. */
+function codexSocketObservationKey(path: string): string {
+  return JSON.stringify(inspectCodexRuntimeSocket(path));
+}
+
+/** A daemon read that was answered but overlapped a create: unsettled, yet proof the daemon is up. */
+class CodexUnsettledDaemonRead extends Error {}
+
 function emptyCodexTuiScan(): CodexTuiScan {
   return {
     attributed: new Set(),
@@ -1505,8 +1739,10 @@ const readCodexNewThreadFolders = createCodexNewThreadFolderScan();
  *  synchronous `ss` on the broker event loop (same rule as the watch poll). Shares the sync
  *  variant's TTL cache, so cached results stay consistent across both paths. */
 async function codexPresenceScanAsync(sockPath?: string, fresh = false): Promise<CodexTuiScan> {
-  const sock = sockPath?.trim() ? sockPath : codexAppServerSock();
-  if (!sock) return emptyCodexTuiScan();
+  // No daemon socket on disk is not "no evidence": terminals are scanned all the same. None of them can
+  // share a daemon that does not exist, so a `--remote` one is private and a plain one unknown, and a host
+  // with no Codex terminal at all proves absence. Skipping the scan refused every automatic restore.
+  const sock = (sockPath?.trim() ? sockPath : codexAppServerSock()) ?? '';
   const scan = await codexAttachedTuisAsync(sock, undefined, {
     fresh,
     macConfiguredExecutable: macConfiguredCodexExecutableIdentity(),
@@ -1819,6 +2055,38 @@ export interface CodexRolloutQualificationContext {
   parentLiveLoaded?: boolean;
   parentNativeActivity?: CodexThreadActivityStatus;
   parentTerminalPresence?: SessionTerminalPresence;
+}
+
+/**
+ * The qualification context for one thread from one set of probe results. A probe that failed is
+ * `undefined` and becomes an explicit unknown rather than a false negative: a failed daemon probe
+ * cannot prove idle (either one failing makes the whole daemon side unprovable, since "not loaded"
+ * from a failed probe would fabricate an absent owner), and a failed presence scan cannot prove no
+ * terminal owns the rollout.
+ */
+export function codexQualificationFromEvidence(
+  target: CodexQualificationTarget,
+  ids: Set<string> | undefined,
+  activities: Map<string, CodexThreadActivityStatus> | undefined,
+  scan: CodexTuiScan | undefined,
+): CodexRolloutQualificationContext {
+  const daemon = ids !== undefined && activities !== undefined ? { ids, activities } : undefined;
+  const presence = (threadId: string): SessionTerminalPresence => scan
+    ? classifyCodexTerminalPresence(scan, threadId, target.cwd, target.createdAtMs, target.threadSource)
+    : 'unknown';
+  return {
+    liveLoaded: daemon?.ids.has(target.threadId) ?? false,
+    nativeActivity: daemon ? daemon.activities.get(target.threadId) : 'unknown',
+    terminalPresence: presence(target.threadId),
+    agentOwned: target.agentOwned,
+    ...(target.parentThreadId
+      ? {
+          parentLiveLoaded: daemon?.ids.has(target.parentThreadId) ?? false,
+          parentNativeActivity: daemon ? daemon.activities.get(target.parentThreadId) : 'unknown',
+          parentTerminalPresence: presence(target.parentThreadId),
+        }
+      : {}),
+  };
 }
 
 export function qualifyCodexRolloutStatus(
@@ -2691,6 +2959,8 @@ async function createCodexThread(
     ? <T>(fn: (rpc: CodexRpc) => Promise<T>) => withCodexDaemonRpc(sock!, (rpc) => fn((method, params, timeoutMs = 30000) => rpc(method, params, timeoutMs)))
     : <T>(fn: (rpc: CodexRpc) => Promise<T>) => withCodexAppServerRpc(cwd, fn);
   return run(async (rpc) => {
+    // Before the request goes out: a rollout born before this instant is not one this thread wrote.
+    const requestedAt = Date.now();
     const started = await rpc('thread/start', {
       cwd,
       serviceName: brokerClientInfo().name,
@@ -2720,6 +2990,14 @@ async function createCodexThread(
     // without a prompt. Keep the file check before handing the session out.
     const threadId = started?.thread?.id;
     const path = typeof started?.thread?.path === 'string' ? started.thread.path : undefined;
+    // Refused before anything below can write into it: the effort update, the name (an index row
+    // that would retitle the stored session), and the session the caller would then claim.
+    if (path && codexCreateAnsweredStoredRollout(path, requestedAt, threadId)) {
+      // thread/start loaded that stored thread for this connection. Let go of it, so a shared daemon
+      // is not left holding it loaded as though the app were driving it.
+      if (threadId != null) await rpc('thread/unsubscribe', { threadId: String(threadId) }, 5000).catch(() => undefined);
+      throw new Error('Codex answered with a session that already exists in its session store, so it was not created.');
+    }
     if (threadId != null) {
       // Codex 0.146.0's generated ThreadStartParams accepts model and
       // modelProvider, but not reasoningEffort. Effort is a supported
@@ -2751,13 +3029,132 @@ async function createCodexThread(
   });
 }
 
+/** Filesystem clocks are coarse (a scheduler tick, or worse): a rollout this create's thread wrote
+ *  can carry a birth time a little before the instant measured before `thread/start` was sent. */
+const CODEX_CREATE_CLOCK_SLACK_MS = 1_000;
+/** Far more than a fresh thread's setup records take (its `session_meta` carries the base
+ *  instructions, tens of KiB), and the bound on how much of the named file this check reads. */
+const CODEX_CREATE_FRESH_ROLLOUT_MAX_BYTES = 1024 * 1024;
+
+/** A record only a turn writes: its context, its lifecycle, its prompt, or anything the model
+ *  produced. A `response_item` message from the user, developer or system role is not one: Codex
+ *  can record a thread's initial instructions and environment that way before any turn. */
+function codexRolloutRecordShowsTurn(record: any): boolean {
+  const p = record?.payload;
+  if (record?.type === 'turn_context' || record?.type === 'compacted') return true;
+  if (record?.type === 'event_msg') {
+    return rolloutTurnTransition(record) !== undefined
+      || p?.type === 'user_message'
+      || p?.type === 'agent_message'
+      || p?.type === 'item_completed';
+  }
+  if (record?.type === 'response_item') return p?.type !== 'message' || p?.role === 'assistant';
+  return false;
+}
+
+/**
+ * Whether the rollout a create's `thread/start` names belongs to a session already in the store.
+ *
+ * Legacy history allocates the path at start and persists it no earlier than the thread's own
+ * setup (name/set at the latest), so a create names a path that is absent, or one its own thread
+ * wrote after the request went out. A file that is not a regular file, was born before the request,
+ * is larger than a fresh thread's setup, records a turn, or whose `session_meta` names another
+ * thread is a stored session: accepting it would claim that session as app-created and write the
+ * create's settings and name into it. A path that cannot be examined is not proven new either.
+ */
+function codexCreateAnsweredStoredRollout(path: string, requestedAt: number, threadId: unknown): boolean {
+  const st = codexAnsweredRolloutFile(path, requestedAt);
+  if (st === 'absent') return false;
+  if (st === 'stored' || st.size > CODEX_CREATE_FRESH_ROLLOUT_MAX_BYTES) return true;
+  let text: string;
+  try {
+    text = readBytesFrom(path, 0, st.size).toString('utf8');
+  } catch {
+    return true;
+  }
+  const thread = threadId == null ? '' : String(threadId);
+  for (const raw of text.split('\n')) {
+    const record = parseLineOrNull(raw);
+    if (!record) continue;
+    if (record.type === 'session_meta') {
+      const metaId = record.payload?.id;
+      if (thread && metaId != null && String(metaId) !== thread) return true;
+      continue;
+    }
+    if (codexRolloutRecordShowsTurn(record)) return true;
+  }
+  return false;
+}
+
+/**
+ * The part of the stored-rollout judgement the file itself answers, before its records are read: a
+ * path that does not exist yet (the new thread has not persisted) is `absent`; one that is not a
+ * regular file, was born before the request went out, or cannot be examined is `stored`.
+ */
+function codexAnsweredRolloutFile(path: string, requestedAt: number): 'absent' | 'stored' | Stats {
+  let st: Stats;
+  try {
+    st = lstatSync(path);
+  } catch (error) {
+    const code = String((error as { code?: unknown })?.code ?? '');
+    return isEnoent(error) || code === 'ENOTDIR' ? 'absent' : 'stored';
+  }
+  if (!st.isFile()) return 'stored';
+  const born = st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+  return born < requestedAt - CODEX_CREATE_CLOCK_SLACK_MS ? 'stored' : st;
+}
+
+/**
+ * Whether the rollout a `thread/fork` names belongs to a session already in the store: the create
+ * guard above, as far as it applies to a fork. A fork is a NEW thread with a new rollout, persisted
+ * no earlier than the fork itself, so the source's own thread or rollout, a path that is not a
+ * regular file or was born before the request, a `session_meta` naming another thread, or an answer
+ * or `session_meta` forked from another thread is a stored session. A fork copies its source's
+ * history (its size, its turns, and the source's own `session_meta` further down say nothing), so
+ * only its own setup record, the first line, read within the same bound, is examined.
+ */
+function codexForkAnsweredStoredRollout(
+  path: string,
+  requestedAt: number,
+  answered: { threadId: unknown; forkedFromId: unknown },
+  source: { path: string; threadId: string },
+): boolean {
+  const thread = answered.threadId == null ? '' : String(answered.threadId);
+  if (thread === source.threadId || resolve(path) === resolve(source.path)) return true;
+  if (answered.forkedFromId != null && String(answered.forkedFromId) !== source.threadId) return true;
+  const st = codexAnsweredRolloutFile(path, requestedAt);
+  if (st === 'absent') return false;
+  if (st === 'stored') return true;
+  let head: string;
+  try {
+    head = readBytesFrom(path, 0, Math.min(st.size, CODEX_CREATE_FRESH_ROLLOUT_MAX_BYTES)).toString('utf8');
+  } catch {
+    return true;
+  }
+  const newline = head.indexOf('\n');
+  const record = newline < 0 ? null : parseLineOrNull(head.slice(0, newline));
+  if (record?.type !== 'session_meta') return false;
+  const metaId = record.payload?.id;
+  if (thread && metaId != null && String(metaId) !== thread) return true;
+  const forkedFrom = record.payload?.forked_from_id;
+  return forkedFrom != null && String(forkedFrom) !== source.threadId;
+}
+
 /** Fork an existing thread into a new one via `thread/fork`, forcing the forked rollout to disk (same
  *  lazy-write concern as thread/start) so a create→attach flow can find the new file. */
-async function forkCodexThread(cwd: string, threadId: string): Promise<any> {
+async function forkCodexThread(cwd: string, threadId: string, sourcePath: string): Promise<any> {
   return withCodexAppServerRpc(cwd, async (rpc) => {
+    // Before the request goes out: a rollout born before this instant is not one the fork wrote.
+    const requestedAt = Date.now();
     const forked = await rpc('thread/fork', { threadId }, 30000);
     const newThreadId = forked?.thread?.id;
     const path = typeof forked?.thread?.path === 'string' ? forked.thread.path : undefined;
+    // Refused before the name below (an index row that would retitle the stored session) and before
+    // the caller hands that session out as the fork. The private app-server goes with this call.
+    const answered = { threadId: newThreadId, forkedFromId: forked?.thread?.forkedFromId };
+    if (path && codexForkAnsweredStoredRollout(path, requestedAt, answered, { path: sourcePath, threadId })) {
+      throw new Error('Codex answered the fork with a session that already exists in its session store, so it was not forked.');
+    }
     if (newThreadId != null) {
       try {
         const name = typeof forked?.thread?.name === 'string' && forked.thread.name ? forked.thread.name : `${basename(cwd) || 'Codex session'} (fork)`;
@@ -2798,7 +3195,7 @@ async function drainStream(stream: ReadableStream<Uint8Array>): Promise<void> {
  *  Both surfaces derive from this one constant deliberately. Two independent deadlines would let a
  *  tailed line and a history read of the same file time out against different clocks and publish two
  *  identities for one answer. */
-const ASSISTANT_PAIR_WAIT_MS = 150;
+export const ASSISTANT_PAIR_WAIT_MS = 150;
 /** How long a synthetic-baseline tail holds deferred lines after a capture ends WITHOUT adoption,
  *  waiting for the attach sequence's next capture (indexed refusal → bounded tail). See
  *  {@link CodexObserveConnection.captureHistorySnapshot}. */
@@ -2854,76 +3251,82 @@ class CodexPublishedIdentities {
   }
 }
 
+/**
+ * The mapping state a live tail inherits from the records before its boundary.
+ *
+ * A tail that starts mid-rollout maps each appended record with what a whole-file read knows at
+ * that point, or the two surfaces disagree about the same line: a steer inside a turn open at attach
+ * took that turn's first ordinal again, a tailed result for a call read at attach lost the call's
+ * name, class and command, and a child joined on the tail lost the nickname and role its spawn
+ * named. So the boundary carries the very tracker a whole-file read builds, fed every record before
+ * it through {@link mapLine}, and the detail of the calls still waiting for their result.
+ */
 type ActiveRolloutContext = {
-  turnId: string | undefined;
-  automaticApprovalDenials: number;
-  toolNameByCallId: Map<string, string>;
+  /** Turn, prompt, run and subagent bookkeeping exactly as {@link mapRollout} holds it here. */
+  runtime: CodexRuntimeTracker;
+  /** Enrichment of the tool calls read before the boundary whose result has not been read yet. */
+  pendingCalls: CodexEnrichStore;
 };
 
+/** Calls a boundary keeps waiting for their result; the oldest are forgotten beyond this. */
 const ACTIVE_ROLLOUT_CONTEXT_TOOL_LIMIT = 256;
 
-/** Fold one rollout record into the live tail's bounded inherited context. */
-function updateActiveRolloutContext(
-  context: ActiveRolloutContext,
-  line: any,
-): void {
-  const transition = rolloutTurnTransition(line);
-  if (transition?.opens) {
-    if (context.turnId !== transition.turnId) {
-      context.automaticApprovalDenials = 0;
-      context.toolNameByCallId.clear();
-    }
-    context.turnId = transition.turnId;
-  } else if (
-    transition
-    && !transition.opens
-    && transition.turnId !== undefined
-    && transition.turnId === context.turnId
+function freshActiveRolloutContext(): ActiveRolloutContext {
+  return { runtime: new CodexRuntimeTracker(), pendingCalls: new CodexEnrichStore() };
+}
+
+/** Fold one record's call detail into the pending calls: a call opens an entry, every later
+ *  call-scoped record of a pending call adds to it (bounded like the live tail's own map). */
+function notePendingCall(pending: CodexEnrichStore, record: any): void {
+  const p = record?.payload;
+  if (p?.call_id == null) return;
+  const callId = String(p.call_id);
+  const opens = record.type === 'response_item'
+    && (p.type === 'function_call' || p.type === 'custom_tool_call');
+  if (!opens && !pending.entries.has(callId)) return;
+  pending.accumulate(record);
+  pending.evictUntilWithin(ACTIVE_ROLLOUT_CONTEXT_TOOL_LIMIT, CODEX_LIVE_ENRICH_MAX_BYTES, callId);
+}
+
+/** A call's result settles it: nothing after the result needs the call's detail any more. */
+function settlePendingCall(pending: CodexEnrichStore, record: any): void {
+  const p = record?.payload;
+  if (
+    record?.type === 'response_item'
+    && (p?.type === 'function_call_output' || p?.type === 'custom_tool_call_output')
+    && p.call_id != null
   ) {
-    context.turnId = undefined;
-    context.automaticApprovalDenials = 0;
-    context.toolNameByCallId.clear();
-  } else if (
-    context.turnId !== undefined
-    && line.type === 'response_item'
-    && (
-      line.payload?.type === 'function_call'
-      || line.payload?.type === 'custom_tool_call'
-    )
-    && line.payload?.call_id != null
-    && line.payload?.name != null
-  ) {
-    const callId = String(line.payload.call_id);
-    context.toolNameByCallId.delete(callId);
-    context.toolNameByCallId.set(callId, String(line.payload.name));
-    while (
-      context.toolNameByCallId.size > ACTIVE_ROLLOUT_CONTEXT_TOOL_LIMIT
-    ) {
-      const oldest = context.toolNameByCallId.keys().next().value;
-      if (oldest === undefined) break;
-      context.toolNameByCallId.delete(oldest);
-    }
-  } else if (
-    context.turnId !== undefined
-    && line.type === 'response_item'
-    && (
-      line.payload?.type === 'function_call_output'
-      || line.payload?.type === 'custom_tool_call_output'
-    )
-  ) {
-    const callId = line.payload?.call_id == null
-      ? undefined
-      : String(line.payload.call_id);
-    const toolName = callId === undefined
-      ? undefined
-      : context.toolNameByCallId.get(callId);
-    if (callId !== undefined) context.toolNameByCallId.delete(callId);
-    if (isAutomaticApprovalReviewDenial(toolName, line.payload?.output)) {
-      context.automaticApprovalDenials = Math.min(
-        AUTOMATIC_APPROVAL_DENIAL_THRESHOLD,
-        context.automaticApprovalDenials + 1,
-      );
-    }
+    pending.delete(String(p.call_id));
+  }
+}
+
+/**
+ * Feeds records into an {@link ActiveRolloutContext} the way {@link mapRollout} maps them: each
+ * record through {@link mapLine} once the record after it is known (assistant text takes its
+ * identity from that next record), with the pending calls as its enrichment. The messages are
+ * discarded; only the state they leave behind is the point.
+ */
+class ActiveRolloutContextFolder {
+  private held?: { record: any; index: number };
+
+  constructor(readonly context: ActiveRolloutContext) {}
+
+  push(record: any, index: number): void {
+    if (this.held) this.map(this.held.record, this.held.index, record);
+    notePendingCall(this.context.pendingCalls, record);
+    this.held = { record, index };
+  }
+
+  /** Maps the last record with no successor, as a whole-file read of these bytes does. */
+  finish(): ActiveRolloutContext {
+    if (this.held) this.map(this.held.record, this.held.index, undefined);
+    this.held = undefined;
+    return this.context;
+  }
+
+  private map(record: any, index: number, next: any): void {
+    mapLine(record, index, this.context.pendingCalls.entries, this.context.runtime, next);
+    settlePendingCall(this.context.pendingCalls, record);
   }
 }
 
@@ -2935,8 +3338,8 @@ type ObserveTailBaseline = {
    *  that moved yields no run-state evidence at all — treating its empty task state as "no open
    *  turn" would manufacture Idle for exactly the largest, busiest rollouts. */
   scanned: boolean;
-  /** The unmatched `task_started` at the tail boundary, or undefined. Distinct from
-   *  {@link ActiveRolloutContext.turnId}, which `turn_context` also opens: a turn_context can persist
+  /** The unmatched `task_started` at the tail boundary, or undefined. Distinct from the turn the
+   *  context's tracker holds open, which `turn_context` also opens: a turn_context can persist
    *  settings for an idle thread and is not lifecycle evidence (same exclusion
    *  {@link exactActiveRolloutTurnId} documents). */
   openTaskTurnId?: string;
@@ -2959,22 +3362,18 @@ type ObserveTailBaseline = {
 async function readObserveTailBaseline(path: string): Promise<ObserveTailBaseline | undefined> {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const before = fstatSync(fd);
     const size = before.size;
     let startOffset = 0;
     let startRecordIndex = 0;
     let openTaskTurnId: string | undefined;
-    let context: ActiveRolloutContext = {
-      turnId: undefined,
-      automaticApprovalDenials: 0,
-      toolNameByCallId: new Map(),
-    };
+    let context = freshActiveRolloutContext();
     if (size > HISTORY_SNAPSHOT_MAX_SOURCE_BYTES) {
       // Over the whole-source scan ceiling. A completed bounded-tail capture may have left an
-      // exact watermark for these same bytes: record count, enclosing turn, and prefix token at
-      // its stop position. Scanning only [watermark, EOF) then yields the SAME line base and turn
-      // context a full scan would, so live-tailed rows key identically to a history read — the
+      // exact watermark for these same bytes: record count, mapping state, and prefix token at
+      // its stop position. Scanning only [watermark, EOF) then yields the SAME line base and
+      // mapping state a full scan would, so live-tailed rows key identically to a history read — the
       // synthetic byte base below survives only for a source no capture has ever completed on.
       const watermark = codexTailPositions.get(`${before.dev}:${before.ino}`);
       const delta = watermark ? size - watermark.size : Number.POSITIVE_INFINITY;
@@ -3011,6 +3410,7 @@ async function readObserveTailBaseline(path: string): Promise<ObserveTailBaselin
     }
 
     let lineIndex = startRecordIndex;
+    const folder = new ActiveRolloutContextFolder(context);
     const scan = await scanFileLinesAsync(fd, size, (raw, _start, _end, index) => {
       lineIndex = index + 1;
       // Folded from the SAME bytes that fix the tail boundary. The observe seed used to come from a
@@ -3022,7 +3422,7 @@ async function readObserveTailBaseline(path: string): Promise<ObserveTailBaselin
         openTaskTurnId = undefined;
       }
       const line = parseLineOrNull(raw);
-      if (line) updateActiveRolloutContext(context, line);
+      if (line) folder.push(line, index);
       return true;
       // The delta path skips oversized records exactly as the bounded-tail capture it resumes
       // does, so both count record indices identically; the whole-source path keeps its
@@ -3032,7 +3432,7 @@ async function readObserveTailBaseline(path: string): Promise<ObserveTailBaselin
     // Source fencing: see {@link codexBaselineSourceIntact} for why the PATH, not the descriptor,
     // is the thing whose identity has to be checked.
     if (!codexBaselineSourceIntact(before, fstatSync(fd), statSafe(path), size)) return undefined;
-    return { size, lineIndex, context, scanned: true, ...(openTaskTurnId ? { openTaskTurnId } : {}) };
+    return { size, lineIndex, context: folder.finish(), scanned: true, ...(openTaskTurnId ? { openTaskTurnId } : {}) };
   } catch {
     return undefined;
   } finally {
@@ -3063,12 +3463,12 @@ function endsOnUnpairedAssistant(segs: string[]): boolean {
  *  {@link ASSISTANT_PAIR_WAIT_MS} (the same bound the live tail holds a deferred line for) and gated
  *  on the file still being written. A record that is never paired at all pays the full bound, so that
  *  bound is kept close to the physical window rather than to what a client would tolerate. */
-async function readRolloutSegmentsSettled(path: string): Promise<string[]> {
+async function readRolloutSegmentsSettled(path: string, now: () => number = Date.now): Promise<string[]> {
   let segs = splitRolloutLines(readFileText(path));
-  const deadline = Date.now() + ASSISTANT_PAIR_WAIT_MS;
-  while (endsOnUnpairedAssistant(segs) && Date.now() < deadline) {
+  const deadline = now() + ASSISTANT_PAIR_WAIT_MS;
+  while (endsOnUnpairedAssistant(segs) && now() < deadline) {
     const st = statSafe(path);
-    if (!st || Date.now() - st.mtimeMs > ROLLOUT_ACTIVE_WRITE_MS) break;
+    if (!st || now() - st.mtimeMs > ROLLOUT_ACTIVE_WRITE_MS) break;
     await new Promise((r) => setTimeout(r, ROLLOUT_PAIR_SETTLE_POLL_MS));
     segs = splitRolloutLines(readFileText(path));
   }
@@ -3145,9 +3545,12 @@ class CodexObserveConnection implements SessionConnection {
    *  completed call's detail until disconnect. Eviction is oldest-call-first and
    *  costs only enrichment: an output whose call was evicted still renders from
    *  its own canonical fields. */
-  private readonly liveEnrichStore = new CodexEnrichStore();
-  private readonly liveEnrich = this.liveEnrichStore.entries;
-  private readonly liveRuntime = new CodexRuntimeTracker();
+  private liveEnrichStore = new CodexEnrichStore();
+  private get liveEnrich(): Map<string, CodexEnrich> {
+    return this.liveEnrichStore.entries;
+  }
+  /** Replaced by the boundary's own tracker when the baseline (or an adopted watermark) is fixed. */
+  private liveRuntime = new CodexRuntimeTracker();
   /** One assistant line held until the following line settles its identity — the native id lives on
    *  the paired record, so emitting before seeing it would key the answer differently here than a
    *  fresh getHistory() of the same file does. Never held longer than
@@ -3183,6 +3586,10 @@ class CodexObserveConnection implements SessionConnection {
      *  consults loaded-state, native activity AND terminal presence, and any of them can be the
      *  stale one. */
     private readonly refreshQualification?: () => Promise<CodexRolloutQualificationContext>,
+    /** The thread the adapter's watcher checks for possible owners on this owner's behalf. */
+    readonly qualificationTarget?: CodexQualificationTarget,
+    /** The clock {@link readRolloutSegmentsSettled} measures a history read's pair wait on. */
+    private readonly historyClock: () => number = Date.now,
   ) {}
 
   /**
@@ -3201,15 +3608,12 @@ class CodexObserveConnection implements SessionConnection {
     if (baseline) {
       this.offset = baseline.size;
       this.lineIndex = baseline.lineIndex;
-      // Prime the enclosing turn from the history this tail starts after. Attaching mid-turn leaves
-      // the turn's opening marker behind us, and assistant text carries no turn of its own — without
-      // this, the tail would key the rest of the turn differently than getHistory() does. Attaching
-      // after that turn ENDED must leave no turn at all, or the next turn's opening records would be
-      // keyed under the finished one.
-      this.liveRuntime.primeActiveTurn(
-        baseline.context.turnId,
-        baseline.context.automaticApprovalDenials,
-      );
+      // Continue the mapping state of the history this tail starts after. Attaching mid-turn leaves
+      // the turn's opening marker, its prompts, its calls and its spawned children behind us —
+      // without them, the tail would key, name and title the rest of the turn differently than
+      // getHistory() does. Attaching after that turn ENDED leaves no turn open at all, or the next
+      // turn's opening records would be keyed under the finished one.
+      this.adoptRolloutContext(baseline.context);
       // R0c.4: close the attach seed race. The seed `attach` computed came from stat-cached rollout
       // facts plus a <=5s activity cache, several awaits before this scan fixed the tail at the
       // then-current EOF. A task_started written inside that window is BEHIND the tail — it will
@@ -3263,12 +3667,17 @@ class CodexObserveConnection implements SessionConnection {
     if (!codexTailWatermarkValid(watermark, st)) return;
     this.offset = watermark.size;
     this.lineIndex = watermark.recordIndex;
-    this.liveRuntime.primeActiveTurn(
-      watermark.context.turnId,
-      watermark.context.automaticApprovalDenials,
-    );
+    // The watermark keeps its own copy for the next baseline that resumes from it.
+    this.adoptRolloutContext(cloneActiveRolloutContext(watermark.context));
     this.baselineSynthetic = false;
     this.initialCapturePending = false;
+  }
+
+  /** The tail maps on from [context]: its tracker becomes the tail's, and the detail of the calls
+   *  still waiting for a result seeds the tail's enrichment, which accumulates on from there. */
+  private adoptRolloutContext(context: ActiveRolloutContext): void {
+    this.liveRuntime = context.runtime;
+    this.liveEnrichStore = context.pendingCalls;
   }
 
   subscribe(handler: AgentMessageHandler): Unsubscribe {
@@ -3374,7 +3783,7 @@ class CodexObserveConnection implements SessionConnection {
   async getHistory(): Promise<AgentMessage[]> {
     // Position-preserving parse: each newline segment maps to its raw index (blank/malformed → null
     // slot that still occupies its index), so keys match the live tail's per-segment counter.
-    const segs = await readRolloutSegmentsSettled(this.path);
+    const segs = await readRolloutSegmentsSettled(this.path, this.historyClock);
     return [...mapRollout(segs.map(parseLineOrNull), this.published), ...await this.getHistoryOverlays()];
   }
 
@@ -5804,7 +6213,8 @@ class CodexResumeConnection implements SessionConnection {
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
     const pending = this.pendingApprovals.get(requestId);
-    if (!pending) return;
+    // Never issued, already answered by any client, or settled by Codex: nothing is waiting on it.
+    if (!pending) throw new ControlRefusedError(`Codex approval ${requestId} is not pending.`, 'request-not-pending');
     const result = approvalResponse(pending.method, pending.params, decision);
     this.pendingApprovals.delete(requestId);
     this.write({ id: pending.rpcId, result });
@@ -5813,14 +6223,17 @@ class CodexResumeConnection implements SessionConnection {
 
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
     if (isAsyncQuestionRequestId(requestId)) {
+      // Never asked here, already answered or dismissed: no answer would reach Codex.
+      if (!this.asyncQuestions.isOpen(requestId)) throw codexQuestionNotPending(requestId);
       const resolved = await this.asyncQuestions.answer(requestId, answers, (text, isPending) =>
         this.enqueueContent([{ type: 'text', text, text_elements: [] }], undefined, undefined, undefined, isPending));
       if (resolved) this.emit({ type: 'question-resolved', requestId });
       return;
     }
     const pending = this.pendingQuestions.get(requestId);
+    // Never issued, already answered by any client, or settled by Codex: nothing is waiting on it.
+    if (!pending) throw codexQuestionNotPending(requestId);
     this.pendingQuestions.delete(requestId);
-    if (!pending) return;
     if (pending.method === 'mcpServer/elicitation/request') {
       this.write({ id: pending.rpcId, result: mcpElicitationResponse(pending.params, answers) });
       this.emit({ type: 'question-resolved', requestId });
@@ -5840,12 +6253,13 @@ class CodexResumeConnection implements SessionConnection {
     // Native async-question skip records nothing on any channel (measured: no wire event, no
     // rollout line), so dismissing the card locally IS the complete and correct operation.
     if (isAsyncQuestionRequestId(requestId)) {
+      if (!this.asyncQuestions.isOpen(requestId)) throw codexQuestionNotPending(requestId);
       if (await this.asyncQuestions.dismiss(requestId)) this.emit({ type: 'question-resolved', requestId });
       return;
     }
     const pending = this.pendingQuestions.get(requestId);
+    if (!pending) throw codexQuestionNotPending(requestId);
     this.pendingQuestions.delete(requestId);
-    if (!pending) return;
     const result = pending.method === 'mcpServer/elicitation/request'
       ? { action: 'decline', content: null, _meta: null }
       : { answers: {} };
@@ -5943,7 +6357,9 @@ class CodexResumeConnection implements SessionConnection {
       const content: any[] = [{ type: 'skill', name: skill.name, path: skill.path }];
       if (args?.trim()) content.push({ type: 'text', text: args.trim(), text_elements: [] });
       await this.enqueueContent(content, input?.model, input?.permissionMode);
+      return;
     }
+    throw new ControlRefusedError(`Codex has no /${name} command.`, 'command-unsupported');
   }
 
   async listModels(): Promise<ModelOption[]> {
@@ -6670,18 +7086,31 @@ class CodexRuntimeTracker {
     return 'retired';
   }
 
-  /** Adopt the turn and denial evidence left open by history before a live tail starts. */
-  primeActiveTurn(
-    turnId: string | undefined,
-    automaticApprovalDenials = 0,
-  ): void {
-    this.activeTurnId = turnId;
-    this.automaticApprovalDenials = turnId === undefined
-      ? 0
-      : Math.min(
-          AUTOMATIC_APPROVAL_DENIAL_THRESHOLD,
-          automaticApprovalDenials,
-        );
+  /**
+   * An independent copy, so one boundary's state can seed a live tail while another reader keeps
+   * mapping on from the original (see {@link ActiveRolloutContext}). Every field is copied: a field
+   * added to this class and left out here would silently reset across that boundary.
+   */
+  clone(): CodexRuntimeTracker {
+    const copy = new CodexRuntimeTracker();
+    for (const [turnId, run] of this.active) copy.active.set(turnId, { ...run });
+    copy.order.push(...this.order);
+    copy.lastUserMessageKey = this.lastUserMessageKey;
+    copy.pendingLegacyAssistantText = this.pendingLegacyAssistantText;
+    copy.pendingUserDualEmission = this.pendingUserDualEmission ? { ...this.pendingUserDualEmission } : undefined;
+    for (const [turnId, keys] of this.userKeysByTurn) copy.userKeysByTurn.set(turnId, { ...keys });
+    for (const turnId of this.retiredTurnIds) copy.retiredTurnIds.add(turnId);
+    for (const [turnId, generation] of this.runGeneration) copy.runGeneration.set(turnId, generation);
+    copy.unclaimedUserKey = this.unclaimedUserKey;
+    copy.totalRuntimeMs = this.totalRuntimeMs;
+    copy.turnCount = this.turnCount;
+    copy.updatedAt = this.updatedAt;
+    for (const [agentId, state] of this.subagents) copy.subagents.set(agentId, { ...state });
+    for (const agentId of this.resolvedSubagents) copy.resolvedSubagents.add(agentId);
+    copy.activeTurnId = this.activeTurnId;
+    copy.automaticApprovalDenials = this.automaticApprovalDenials;
+    for (const callId of this.modelCallIds) copy.modelCallIds.add(callId);
+    return copy;
   }
 
   get currentTurnId(): string | undefined {
@@ -8376,6 +8805,11 @@ function codexApprovalOptions(method: string, params: any): string[] {
   ];
 }
 
+/** A question decision for an id this connection holds no open card for. */
+function codexQuestionNotPending(requestId: string): ControlRefusedError {
+  return new ControlRefusedError(`Codex question ${requestId} is not pending.`, 'request-not-pending');
+}
+
 function approvalMessage(method: string, requestId: string, params: any): AgentMessage {
   const options = codexApprovalOptions(method, params);
   if (method === 'item/commandExecution/requestApproval') {
@@ -8735,6 +9169,8 @@ export type RolloutStatusInference =
 export interface RolloutStatusScanOptions {
   maxSourceBytes?: number;
   maxElapsedMs?: number;
+  /** The clock {@link maxElapsedMs} is measured on (default `Date.now`). */
+  now?: () => number;
   beforeValidation?: () => void;
 }
 
@@ -8941,7 +9377,8 @@ async function scanRolloutColdStatus(
     ROLLOUT_STATUS_CHUNK_BYTES,
     options.maxSourceBytes ?? ROLLOUT_STATUS_MAX_SOURCE_BYTES,
   );
-  const deadline = Date.now() + Math.max(1, options.maxElapsedMs ?? ROLLOUT_STATUS_MAX_ELAPSED_MS);
+  const now = options.now ?? Date.now;
+  const deadline = now() + Math.max(1, options.maxElapsedMs ?? ROLLOUT_STATUS_MAX_ELAPSED_MS);
   let fd: number | undefined;
   let scannedBytes = 0;
   let scannedThrough: number | undefined;
@@ -8977,7 +9414,7 @@ async function scanRolloutColdStatus(
     return 'resolved';
   };
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const opened = fstatSync(fd);
     if (!rolloutAuthorityStatMatches(st, opened)) {
       return { kind: 'fallback', status: 'idle', reason: 'source-changed', scannedThrough: st.size, scannedBytes };
@@ -8996,7 +9433,7 @@ async function scanRolloutColdStatus(
         result = { kind: 'fallback', status: 'idle', reason: 'source-limit', scannedThrough: st.size, scannedBytes };
         break;
       }
-      if (Date.now() > deadline) {
+      if (now() > deadline) {
         result = { kind: 'fallback', status: 'idle', reason: 'time-limit', scannedThrough: st.size, scannedBytes };
         break;
       }
@@ -9127,7 +9564,8 @@ async function scanRolloutAuthorityRange(
     ROLLOUT_STATUS_CHUNK_BYTES,
     options.maxSourceBytes ?? ROLLOUT_STATUS_MAX_SOURCE_BYTES,
   );
-  const deadline = Date.now() + Math.max(1, options.maxElapsedMs ?? ROLLOUT_STATUS_MAX_ELAPSED_MS);
+  const now = options.now ?? Date.now;
+  const deadline = now() + Math.max(1, options.maxElapsedMs ?? ROLLOUT_STATUS_MAX_ELAPSED_MS);
   const initialStatus = cached.status;
   let candidateStatus = cached.candidateStatus;
   let candidateActiveTurnId = cached.candidateActiveTurnId;
@@ -9136,7 +9574,7 @@ async function scanRolloutAuthorityRange(
   let scannedBytes = 0;
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const opened = fstatSync(fd);
     if (!rolloutAuthorityStatMatches(st, opened)) {
       return {
@@ -9159,7 +9597,7 @@ async function scanRolloutAuthorityRange(
         boundedReason = 'source-limit';
         break;
       }
-      if (Date.now() > deadline) {
+      if (now() > deadline) {
         boundedReason = 'time-limit';
         break;
       }
@@ -9468,7 +9906,7 @@ function rolloutTaskMarker(line: string): RolloutTaskMarker | undefined {
 function readFirstLine(path: string, maxBytes: number): string | undefined {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const buf = Buffer.alloc(maxBytes);
     const n = readSync(fd, buf, 0, maxBytes, 0);
     const s = buf.toString('utf8', 0, n);
@@ -9484,7 +9922,7 @@ function readFirstLine(path: string, maxBytes: number): string | undefined {
 function readBytesFrom(path: string, offset: number, length: number): Buffer {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const buf = Buffer.alloc(length);
     const n = readSync(fd, buf, 0, length, offset);
     return buf.subarray(0, n);
@@ -9496,7 +9934,7 @@ function readBytesFrom(path: string, offset: number, length: number): Buffer {
 function readFileText(path: string): string {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const size = statSync(path).size;
     const buf = Buffer.alloc(size);
     const n = readSync(fd, buf, 0, size, 0);
@@ -9745,6 +10183,25 @@ export class CodexEnrichStore {
   /** Number of retained calls. */
   get size(): number {
     return this.entries.size;
+  }
+
+  /** Forgets one call's detail, with its bytes. */
+  delete(key: string): void {
+    if (!this.entries.delete(key)) return;
+    this.total -= this.entryBytes.get(key) ?? 0;
+    this.entryBytes.delete(key);
+  }
+
+  /** An independent copy: entries are copied (accumulation mutates them in place), in the same
+   *  order, which is the eviction order. */
+  clone(): CodexEnrichStore {
+    const copy = new CodexEnrichStore();
+    for (const [key, entry] of this.entries) {
+      copy.entries.set(key, { ...entry, ...(entry.fileChanges ? { fileChanges: [...entry.fileChanges] } : {}) });
+      copy.entryBytes.set(key, this.entryBytes.get(key) ?? enrichEntryBytes(entry));
+    }
+    copy.total = this.total;
+    return copy;
   }
 
   /** Accumulates one record, re-measuring only the entry it touched. */
@@ -10120,7 +10577,7 @@ class CodexHistoryPageReader implements HistorySnapshotPageReader {
     }
     let fd: number | undefined;
     try {
-      fd = openSync(this.path, 'r');
+      fd = openRegularFileSync(this.path);
       const before = fstatSync(fd);
       if (
         before.dev !== this.dev
@@ -10527,8 +10984,9 @@ type CodexTailCaptureResume = {
   skippedRecords: number;
   enrichStore: CodexEnrichStore;
   runtime: CodexRuntimeTracker;
-  /** Observe-tail turn inheritance state at `size`, folded alongside the mapping pass. */
-  context: ActiveRolloutContext;
+  /** Calls still waiting for their result at `size`, folded alongside the mapping pass for the
+   *  observe watermark (see {@link ActiveRolloutContext}). */
+  pendingCalls: CodexEnrichStore;
   openTaskTurnId?: string;
 };
 
@@ -10578,11 +11036,7 @@ function storeCodexTailPosition(devIno: string, position: CodexTailPosition): vo
 }
 
 function cloneActiveRolloutContext(context: ActiveRolloutContext): ActiveRolloutContext {
-  return {
-    turnId: context.turnId,
-    automaticApprovalDenials: context.automaticApprovalDenials,
-    toolNameByCallId: new Map(context.toolNameByCallId),
-  };
+  return { runtime: context.runtime.clone(), pendingCalls: context.pendingCalls.clone() };
 }
 
 /** Hash the same prefix window a stored token covered, so growth cannot fake a rewrite. */
@@ -10640,7 +11094,7 @@ export async function captureFileHistoryInto(
 ): Promise<HistorySnapshotCapture | HistorySnapshotRefusal | undefined> {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const stat = fstatSync(fd);
     const size = stat.size;
     // A sink that retains only a bounded newest window does not grow with the
@@ -10780,16 +11234,10 @@ export async function captureFileHistoryInto(
 
     // Pass 2 — map and emit. Resident: one record, its lookahead, and the run tracker.
     const runtime = resume?.runtime ?? new CodexRuntimeTracker();
-    // Folded beside the mapping so an over-ceiling observe tail can later inherit the
-    // enclosing turn and the exact record count from this capture instead of a synthetic
-    // byte-based line base (see {@link readObserveTailBaseline}).
-    const tailContext = resume
-      ? cloneActiveRolloutContext(resume.context)
-      : {
-          turnId: undefined,
-          automaticApprovalDenials: 0,
-          toolNameByCallId: new Map<string, string>(),
-        };
+    // Folded beside the mapping so an over-ceiling observe tail can later inherit this mapping
+    // state and the exact record count from this capture instead of a synthetic byte-based line
+    // base (see {@link readObserveTailBaseline}). The tracker is the mapping's own.
+    const pendingCalls = resume ? resume.pendingCalls.clone() : new CodexEnrichStore();
     let tailOpenTaskTurnId = resume?.openTaskTurnId;
     let pending: { record: any; index: number } | undefined;
     let refused = false;
@@ -10833,7 +11281,10 @@ export async function captureFileHistoryInto(
       }
       const record = parseLineOrNull(raw);
       if (!record) return true;
-      if (tailOnly) updateActiveRolloutContext(tailContext, record);
+      if (tailOnly) {
+        notePendingCall(pendingCalls, record);
+        settlePendingCall(pendingCalls, record);
+      }
       if (pending && !emit(pending.record, pending.index, record)) return false;
       pending = { record, index: at };
       return true;
@@ -10909,12 +11360,13 @@ export async function captureFileHistoryInto(
         skippedRecords: totalSkippedRecords,
         enrichStore,
         runtime,
-        context: tailContext,
+        pendingCalls,
         ...(tailOpenTaskTurnId !== undefined ? { openTaskTurnId: tailOpenTaskTurnId } : {}),
       });
+      // A copy: this sink's resume keeps mapping on with the originals.
       storeCodexTailPosition(devIno, {
         ...watermark,
-        context: cloneActiveRolloutContext(tailContext),
+        context: cloneActiveRolloutContext({ runtime, pendingCalls }),
         ...(tailOpenTaskTurnId !== undefined ? { openTaskTurnId: tailOpenTaskTurnId } : {}),
       });
     }
@@ -10944,7 +11396,7 @@ function fileHistorySourceIdentity(path: string): HistorySourceIdentity | undefi
   );
   let prefixBytes = 0;
   try {
-    const fd = openSync(path, 'r');
+    const fd = openRegularFileSync(path);
     try {
       prefixBytes = readSync(fd, prefix, 0, prefix.length, 0);
     } finally {

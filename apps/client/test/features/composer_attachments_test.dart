@@ -151,11 +151,6 @@ void main() {
       'the refusal of a file prompt says why the files are marked '
       'undelivered, and the banner stays until the user acts',
       (f) async {
-        // KNOWN PRODUCT GAP: the controller sets this banner when the NACK
-        // lands, but the restored text is republished as a shared draft and
-        // the broker's echo of that is a wire event, and every wire event
-        // clears the controller's error. The banner is gone a few frames
-        // after it appears, leaving only the chip's own "Not delivered".
         final (app, _, desk, picker) = await openWithFiles(f);
         picker.next = [textFile('notes.txt', 'hello')];
         await app.pressAttach();
@@ -168,15 +163,18 @@ void main() {
         await app.send('Keep this draft');
         await app.settle();
         await app.tick(const Duration(seconds: 1));
-        expect(
-          find.text(
-            "The agent didn't receive every file. "
-            'Your prompt and files are still here.',
-          ),
-          findsOneWidget,
+        final banner = find.text(
+          "The agent didn't receive every file. "
+          'Your prompt and files are still here.',
         );
+        expect(banner, findsOneWidget);
+
+        // Sending again is acting on the files: the banner goes with them.
+        desk.answer = PromptAnswer.accept;
+        await app.pressSend();
+        await app.settle();
+        expect(banner, findsNothing);
       },
-      skip: true,
     );
 
     featureTest(

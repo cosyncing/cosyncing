@@ -6,11 +6,14 @@
  * root sessions created by this broker may Drive; native children and foreign
  * sessions remain visible but Observe-only.
  */
+import { watch, type FSWatcher } from 'node:fs';
 import { lstat } from 'node:fs/promises';
+import { basename, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   SessionCreateTemporarilyUnavailableError,
+  SessionNotFoundError,
   resolveInvocation,
   type AgentBackend,
   type AgentMessage,
@@ -32,7 +35,10 @@ import {
 import {
   OpenCodeLiveConnection,
   OpenCodeLiveMutationAmbiguousError,
+  OpenCodeLiveOwnershipUnprovenError,
   type OpenCodeLiveOwnershipHooks,
+  type OpenCodeLiveRecovery,
+  type OpenCodeLiveUnavailableCause,
   type OpenCodeLivePermissionDialect,
   type OpenCodeLiveRequestContext,
 } from '@cosyncing/opencode-wire';
@@ -45,6 +51,8 @@ import {
   KILO_MAX_RAW_HISTORY_BYTES,
   kiloDataRoot,
   kiloDatabasePaths,
+  kiloSessionDirectoryAdmissible,
+  kiloSessionIdAdmissible,
   readKiloHistory,
   type KiloHistorySnapshot,
   type KiloStoredSession,
@@ -63,6 +71,23 @@ const KILO_HTTP_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const KILO_LIVE_MAX_ROWS_PER_SCOPE = 4_096;
 const KILO_LIVE_MAX_STATUS_ENTRIES = 4_096;
 const KILO_LIVE_MAX_MERGED_SESSIONS = 8_192;
+/**
+ * How long a Drive ownership read keeps retrying a store the serve is writing. It gates a mutation
+ * the user is waiting on (Stop, an approval), usually while the turn it belongs to is running.
+ */
+const KILO_OWNERSHIP_READ_WITHIN_MS = 2_000;
+/**
+ * How long an open Drive waits for its managed serve to answer again after it stopped: the broker's
+ * supervisor notices a dead serve within its 60 s tick and gives a replacement up to 20 s to start.
+ */
+const KILO_SERVE_RECOVERY_MS = 120_000;
+/**
+ * A driven session's store changed (a commit to the database, its WAL or its rollback journal):
+ * how long to let it settle before reading it, and how often an unreadable read is tried again.
+ */
+const KILO_STORE_WATCH_DEBOUNCE_MS = 250;
+const KILO_STORE_WATCH_RETRY_MS = 500;
+const KILO_STORE_WATCH_RETRIES = 3;
 
 type KiloLiveReadiness =
   | { kind: 'ready' }
@@ -92,7 +117,34 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
   private knownSettledRows = 0;
   private knownUserIds = new Set<string>();
   private claimedUserIds = new Set<string>();
-  private invalid = false;
+  /** Evidence against this writer was found: its durable Drive eligibility is revoked. */
+  private revoked = false;
+  /**
+   * This connection is over with no evidence against the session: it closed idle, or its serve
+   * stopped answering while the session was settled. Durable eligibility stands, and the next
+   * attach proves it again from scratch (the exact managed host, the live session, and the exact
+   * durable boundary this Drive last proved).
+   */
+  private ended = false;
+  /** A prompt of this Drive is running: claimed, and the native session has not reported idle since. */
+  private turnRunning = false;
+  /** The durable boundary of the last snapshot this Drive proved (at attach, a mutation or a settle). */
+  private lastProven: HistorySourceIdentity;
+  /** The settle read in flight: the boundary it proves is the one a recovery must find. */
+  private settling?: Promise<unknown>;
+  /** Store reads run one at a time, so an older read never records over a newer one. */
+  private reconciling: Promise<unknown> = Promise.resolve();
+  /**
+   * The text of every user prompt part this Drive knows, by part id: read from a proved snapshot
+   * (`durable`), or echoed by the serve for a prompt of this Drive before any read saw it. A prompt
+   * never streams, so a text that changes was rewritten, however new its message is.
+   */
+  private knownUserText = new Map<string, { text: string; durable: boolean }>();
+  /** The serve stopped answering: the next proof that counts is {@link recover}'s. */
+  private away = false;
+  private watcher?: FSWatcher;
+  private watchTimer?: ReturnType<typeof setTimeout>;
+  private watchRetries = 0;
 
   constructor(
     private readonly session: KiloStoredSession,
@@ -100,10 +152,14 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
     private readonly publish: (boundary: HistorySourceIdentity) => void,
     private readonly revoke: (reason: string) => void,
     private readonly closed: () => void,
-  ) {}
+    /** Whether the serve answering now is the exact managed host this broker launched and owns. */
+    private readonly hostOwned: () => Promise<boolean>,
+  ) {
+    this.lastProven = expected;
+  }
 
   async prime(): Promise<void> {
-    const snapshot = await readKiloHistory(this.session);
+    const snapshot = await readKiloHistory(this.session, { stableWithinMs: KILO_OWNERSHIP_READ_WITHIN_MS });
     if (!snapshot) throw new Error('Kilo Drive requires one stable SQLite snapshot.');
     const boundary = kiloHistorySourceIdentity(this.session, snapshot);
     if (!sameBoundary(this.expected, boundary)) throw new Error('Kilo durable ownership boundary changed before live attach.');
@@ -112,11 +168,23 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
 
   async beforeMutation(): Promise<void> { await this.reconcileDisk(false); }
 
-  promptClaimed(nativeId: string): void { this.claimedUserIds.add(nativeId); }
-  promptRejected(nativeId: string): void { this.claimedUserIds.delete(nativeId); }
+  promptClaimed(nativeId: string): void {
+    this.claimedUserIds.add(nativeId);
+    this.turnRunning = true;
+  }
+
+  promptEchoed(nativeId: string, partId: string, text: string): void {
+    if (!this.claimedUserIds.has(nativeId) || this.knownUserText.get(partId)?.durable) return;
+    this.knownUserText.set(partId, { text, durable: false });
+  }
+
+  promptRejected(nativeId: string): void {
+    this.claimedUserIds.delete(nativeId);
+    this.turnRunning = false;
+  }
 
   reconcileHistory(nativeUserIds: readonly string[]): void {
-    if (this.invalid) return;
+    if (this.revoked) return;
     // A user row whose parts carry no text — an image-only prompt — is projected to NO user-message,
     // so knownUserIds never learns its id even though the durable snapshot listed the row. Admitting
     // ids already seen in a snapshot keeps the live check consistent with the disk check, which only
@@ -127,24 +195,149 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
     for (const id of nativeUserIds) this.knownUserIds.add(id);
   }
 
-  async sessionSettled(): Promise<void> { await this.reconcileDisk(true); }
-  onUnavailable(reason: string): void { this.invalidate(reason); }
-  onClose(status: SessionInfo['status']): void {
-    this.closed();
-    if (status !== 'idle') this.invalidate('Kilo Drive closed before the native session settled.');
+  async sessionSettled(): Promise<void> {
+    // The native session reported idle: no turn of this Drive runs any more, whatever this read finds.
+    this.turnRunning = false;
+    const settling = this.reconcileDisk(true);
+    this.settling = settling.catch(() => undefined);
+    await settling;
   }
 
-  private async reconcileDisk(publish: boolean): Promise<void> {
-    if (this.invalid) throw new Error('Kilo Drive ownership has been revoked.');
-    const snapshot = await readKiloHistory(this.session);
+  /**
+   * A serve that stopped answering while the session was settled proves nothing about the session:
+   * the store any serve reads is unchanged, and a replacement serve may drive it again once a new
+   * attach proves it. Lost mid-turn, the turn's outcome is unknown, so it is revoked as before, as is
+   * every other cause (another writer, a rewrite, a deletion, a rejected credential, a mutation that
+   * may have landed).
+   */
+  onUnavailable(reason: string, cause?: OpenCodeLiveUnavailableCause): void {
+    if (cause === 'disconnected' && !this.turnRunning) this.end();
+    else this.invalidate(reason);
+  }
+
+  onClose(status: SessionInfo['status']): void {
+    if (this.ended) return;
+    if (status !== 'idle') this.invalidate('Kilo Drive closed before the native session settled.');
+    else this.end();
+  }
+
+  /** Lost between turns, the serve may come back (or be replaced): this Drive waits for it. */
+  serverLost(): boolean {
+    if (this.turnRunning || this.ended || this.revoked) return false;
+    this.away = true;
+    return true;
+  }
+
+  /**
+   * The guards of a fresh attach, against the serve that answers now: it is the exact managed host
+   * this broker owns (until it is, the connection keeps waiting), and the durable session is exactly
+   * the one this Drive last proved. Anything else ends the connection; eligibility is left as a fresh
+   * attach would find it, and that attach refuses the same changed session.
+   */
+  async recover(): Promise<OpenCodeLiveRecovery> {
+    if (this.ended || this.revoked) return { refused: 'Kilo Drive ownership has ended.' };
+    // A serve that went away just after the turn settled: that settle's read is the last proof.
+    await this.settling;
+    if (!await this.hostOwned()) return 'retry';
+    const snapshot = await readKiloHistory(this.session, { stableWithinMs: KILO_OWNERSHIP_READ_WITHIN_MS });
+    if (!snapshot) return 'retry';
+    if (this.ended || this.revoked) return { refused: 'Kilo Drive ownership has ended.' };
+    if (!sameBoundary(this.lastProven, kiloHistorySourceIdentity(this.session, snapshot))) {
+      this.end();
+      return { refused: 'Kilo SQLite history changed while the Kilo Code serve was away; open the session again to check it.' };
+    }
+    this.away = false;
+    return 'proven';
+  }
+
+  /**
+   * Watch the store while this Drive holds the session, so a rewrite or another writer's prompt is
+   * seen when it lands rather than at the next mutation. A turn of this Drive is checked by its
+   * settle read instead, and a serve that is away by {@link recover}.
+   */
+  watch(factory: typeof watch = watch): void {
+    if (this.watcher || this.ended || this.revoked) return;
+    const name = basename(this.session.databasePath);
+    // Not `-shm`: every reader of a WAL database writes its read mark there.
+    const relevant = new Set([name, `${name}-wal`, `${name}-journal`]);
+    try {
+      this.watcher = factory(dirname(this.session.databasePath), { persistent: false }, (_event, filename) => {
+        if (filename != null && !relevant.has(String(filename))) return;
+        this.watchRetries = 0;
+        this.scheduleWatchRead(KILO_STORE_WATCH_DEBOUNCE_MS);
+      });
+      this.watcher.on('error', () => this.stopWatching());
+    } catch {
+      this.watcher = undefined;
+    }
+  }
+
+  private scheduleWatchRead(delayMs: number): void {
+    if (this.watchTimer || this.ended || this.revoked) return;
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = undefined;
+      void this.watchRead();
+    }, delayMs);
+    this.watchTimer.unref?.();
+  }
+
+  private async watchRead(): Promise<void> {
+    if (this.ended || this.revoked || this.turnRunning || this.away) return;
+    try {
+      await this.reconcileDisk(true);
+    } catch (error) {
+      // Evidence against this writer has already revoked and demoted it; an unreadable store is
+      // read again a few times, and otherwise waits for its next change or mutation.
+      if (error instanceof OpenCodeLiveOwnershipUnprovenError && this.watchRetries < KILO_STORE_WATCH_RETRIES) {
+        this.watchRetries += 1;
+        this.scheduleWatchRead(KILO_STORE_WATCH_RETRY_MS);
+      }
+    }
+  }
+
+  private stopWatching(): void {
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = undefined;
+    try { this.watcher?.close(); } catch { /* best effort */ }
+    this.watcher = undefined;
+  }
+
+  /** Whether a known user prompt's stored text changed, or a proved one is gone. */
+  private userTextRewritten(snapshot: KiloHistorySnapshot): boolean {
+    for (const [partId, known] of this.knownUserText) {
+      const stored = snapshot.userTextParts.get(partId);
+      if (stored === undefined ? known.durable : stored !== known.text) return true;
+    }
+    return false;
+  }
+
+  private end(): void {
+    if (this.ended || this.revoked) return;
+    this.ended = true;
+    this.stopWatching();
+    this.closed();
+  }
+
+  private reconcileDisk(publish: boolean): Promise<void> {
+    const read = this.reconciling.then(() => this.reconcileDiskNow(publish));
+    this.reconciling = read.catch(() => undefined);
+    return read;
+  }
+
+  private async reconcileDiskNow(publish: boolean): Promise<void> {
+    if (this.revoked) throw new Error('Kilo Drive ownership has been revoked.');
+    const snapshot = await readKiloHistory(this.session, { stableWithinMs: KILO_OWNERSHIP_READ_WITHIN_MS });
     // Refuse the mutation, but do NOT revoke. `readKiloHistory` answers
     // undefined for "could not read" as well as for "is not there": a `-wal`
-    // that will not stabilise across its three attempts is the signature of a
-    // BUSY session, which is exactly when a caller is most likely to be here.
-    // Revoking on it would surrender durable ownership over a transient read,
-    // and `prime()` thirty lines above already treats the same answer as a
-    // refusal rather than a revocation.
-    if (!snapshot) throw new Error('Kilo SQLite ownership snapshot could not be read; refusing this mutation.');
+    // that will not stabilise is the signature of a BUSY session, which is
+    // exactly when a caller is most likely to be here. Revoking on it would
+    // surrender durable ownership over a transient read, and `prime()` already
+    // treats the same answer as a refusal rather than a revocation. The
+    // unproven error is the one the live connection refuses with and does not
+    // demote on; a plain Error here used to revoke Drive along with the refusal.
+    if (!snapshot) {
+      throw new OpenCodeLiveOwnershipUnprovenError('Kilo SQLite ownership snapshot could not be read; refusing this mutation.');
+    }
     // The disk was last read at `beforeMutation`, usually mid-turn (a permission reply is the
     // ordinary case), so the turn's own progress since then is not a rewrite: Kilo writes a message
     // in place until it completes (see kiloHistoryContinuation). Read as an append-only prefix, that
@@ -152,20 +345,28 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
     const prefix = snapshot.messageIds.length >= this.knownMessageIds.length
       && this.knownMessageIds.every((id, index) => snapshot.messageIds[index] === id)
       && kiloHistoryContinuation({ encodings: this.knownEncodings, settledRows: this.knownSettledRows }, snapshot) !== undefined;
-    if (!prefix) return this.fail('Kilo SQLite history was rewritten or replaced.');
+    if (!prefix || this.userTextRewritten(snapshot)
+      || kiloHistorySourceIdentity(this.session, snapshot).sourceId !== this.lastProven.sourceId) {
+      return this.fail('Kilo SQLite history was rewritten or replaced.');
+    }
     const users = snapshot.messages.flatMap((message) =>
       message.type === 'user-message' && message.key ? [message.key] : []);
     const foreign = users.find((id) => !this.knownUserIds.has(id) && !this.claimedUserIds.has(id));
     if (foreign) return this.fail('Kilo SQLite history contains a foreign user prompt.');
     this.remember(snapshot);
-    if (publish) this.publish(kiloHistorySourceIdentity(this.session, snapshot));
+    // A read that finished after a revocation must not record a boundary for it. One that finished
+    // after the connection ended (its serve went away just after the turn settled) is still the
+    // settled turn's proof, and the next attach starts from it.
+    if (publish && !this.revoked) this.publish(kiloHistorySourceIdentity(this.session, snapshot));
   }
 
   private remember(snapshot: KiloHistorySnapshot): void {
+    this.lastProven = kiloHistorySourceIdentity(this.session, snapshot);
     this.knownMessageIds = [...snapshot.messageIds];
     for (const id of snapshot.messageIds) this.knownRowIds.add(id);
     this.knownEncodings = [...snapshot.encodings];
     this.knownSettledRows = snapshot.settledRows;
+    for (const [partId, text] of snapshot.userTextParts) this.knownUserText.set(partId, { text, durable: true });
     for (const message of snapshot.messages) {
       if (message.type === 'user-message' && message.key) this.knownUserIds.add(message.key);
     }
@@ -177,8 +378,10 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
   }
 
   private invalidate(reason: string): void {
-    if (this.invalid) return;
-    this.invalid = true;
+    if (this.revoked) return;
+    this.revoked = true;
+    this.ended = true;
+    this.stopWatching();
     this.revoke(reason);
   }
 }
@@ -292,6 +495,10 @@ export interface KiloAdapterOptions {
   fetch?: typeof globalThis.fetch;
   /** The loopback port the broker may launch and own `kilo serve` on (default 4097). Fixture hook, see runtime.ts. */
   managedPort?: number;
+  /** How long an open Drive waits for its serve to answer again (default {@link KILO_SERVE_RECOVERY_MS}). Fixture hook. */
+  serveRecoveryMs?: number;
+  /** How a driven session watches its store for changes (default `fs.watch`). Fixture hook. */
+  storeWatch?: typeof watch;
   serverUsername?: string;
   serverPassword?: string;
   isManagedHostOwned?: (identityKey: string) => boolean | Promise<boolean>;
@@ -562,6 +769,8 @@ export class KiloAdapter implements AgentBackend {
   private readonly recordNativeCurrentModel?: KiloAdapterOptions['recordNativeCurrentModel'];
   private readonly baseUrl: string;
   private readonly managedPort: number;
+  private readonly serveRecoveryMs: number;
+  private readonly storeWatch?: typeof watch;
   private readonly serverUsername: string;
   private readonly serverPassword?: string;
   private readonly fetcher: typeof globalThis.fetch;
@@ -593,6 +802,8 @@ export class KiloAdapter implements AgentBackend {
     this.capabilities = KILO_CAPABILITIES;
     this.command = options.command ?? (this.env.COSYNCING_KILO_BIN?.trim() || 'kilo');
     this.managedPort = options.managedPort ?? KILO_MANAGED_PORT;
+    this.serveRecoveryMs = options.serveRecoveryMs ?? KILO_SERVE_RECOVERY_MS;
+    if (options.storeWatch) this.storeWatch = options.storeWatch;
     this.baseUrl = (options.baseUrl ?? this.env.KILO_URL?.trim() ?? `http://127.0.0.1:${this.managedPort}`).replace(/\/$/u, '');
     this.serverUsername = options.serverUsername?.trim() || this.env.KILO_SERVER_USERNAME?.trim() || 'kilo';
     this.serverPassword = (options.serverPassword ?? this.env.KILO_SERVER_PASSWORD)?.trim()
@@ -613,8 +824,14 @@ export class KiloAdapter implements AgentBackend {
     this.renameSession = (sessionId, title) => this.renameLiveSession(sessionId, title);
   }
 
+  /** The resolve Create and the managed serve start from; never a launch. Without it the broker
+   *  lists stored sessions Observe-only and refuses a new live writer, as Create already does. */
+  isInstalled(): boolean {
+    return resolveInvocation(this.command, { env: this.env }) !== undefined;
+  }
+
   async isAvailable(): Promise<boolean> {
-    if (resolveInvocation(this.command, { env: this.env })) return true;
+    if (this.isInstalled()) return true;
     const root = kiloDataRoot(this.env, this.homeDir);
     return lstat(root).then((value) => !value.isSymbolicLink() && value.isDirectory()
       && kiloDatabasePaths(root).length > 0, () => false);
@@ -713,7 +930,14 @@ export class KiloAdapter implements AgentBackend {
       includeUnverifiedChildren: true,
       collectDirectories: liveDirectories,
       ...(this.trace ? { trace: this.trace } : {}),
+      ...(this.resolveStoredDriveState ? {
+        ownedBoundary: (session: { id: string; nativeId: string }) =>
+          this.resolveStoredDriveState?.({ tool: this.id, id: session.id, nativeId: session.nativeId })?.historyBoundary,
+      } : {}),
     });
+    // The roster offers Drive only where an attach would take it: not where the store already
+    // differs from what the session's Drive last proved.
+    const ownedHistoryChanged = new Set(sessions.flatMap((session) => session.ownedHistoryChanged ? [session.id] : []));
     const local = sessions.map(sessionInfo);
     if (!await this.liveServerAvailable(signal)) return local;
     const live = await this.listLiveSessions(
@@ -745,7 +969,7 @@ export class KiloAdapter implements AgentBackend {
         delete combined.currentModel;
         delete combined.model;
       }
-      merged.set(info.id, this.retagLiveInfo(combined, false, false, managedHostOwned));
+      merged.set(info.id, this.retagLiveInfo(combined, false, false, managedHostOwned, ownedHistoryChanged.has(info.id)));
     }
     return [...merged.values()];
   }
@@ -757,8 +981,16 @@ export class KiloAdapter implements AgentBackend {
   }
 
   async prepareCreateSession(): Promise<void> {
+    // The same typed, retryable refusal every adapter gives when it cannot create right now
+    // (`canCreateSession` false): installing or upgrading Kilo is how the user recovers.
     if (!await kiloVerifiedInvocation(this.command, this.env)) {
-      throw new Error(`Kilo Code Drive requires an authenticated ${KILO_MINIMUM_SUPPORTED_VERSION}-or-newer server at ${this.safeBaseUrl()}.`);
+      const installed = resolveInvocation(this.command, { env: this.env }) !== undefined;
+      throw new SessionCreateTemporarilyUnavailableError(
+        installed
+          ? `Kilo Code Drive requires kilo ${KILO_MINIMUM_SUPPORTED_VERSION} or newer; the installed kilo reports an older or unreadable version. Run \`cosyncing doctor\` for setup guidance.`
+          : `Kilo Code Drive requires kilo ${KILO_MINIMUM_SUPPORTED_VERSION} or newer, and no kilo executable was found. Run \`cosyncing doctor\` for setup guidance.`,
+        installed ? 'kilo-version-unsupported' : 'kilo-binary-missing',
+      );
     }
     const readiness = await this.probeLiveServer();
     if (readiness.kind === 'temporary') {
@@ -780,6 +1012,7 @@ export class KiloAdapter implements AgentBackend {
   }
 
   async attach(sessionId: string, mode?: AttachMode): Promise<SessionConnection> {
+    if (!kiloSessionIdAdmissible(sessionId)) throw new SessionNotFoundError('This Kilo Code session id is not a session id.');
     if (mode === 'live') {
       if (!await this.liveServerAvailable()) {
         throw new Error('Kilo Code live attach requires the authenticated broker-owned managed server.');
@@ -815,10 +1048,19 @@ export class KiloAdapter implements AgentBackend {
         this.opening.delete(sessionId);
         throw error;
       }
+      // Scoped to THIS connection: an earlier one that ended (its serve went away) is closed later by
+      // the Hub, and must not release the Drive slot a newer attach now holds.
+      let connection: OpenCodeLiveConnection | undefined;
+      const release = () => {
+        if (connection && this.driven.get(sessionId) === connection) this.driven.delete(sessionId);
+      };
       const revoke = (reason: string) => {
-        this.driven.delete(sessionId);
+        release();
         this.revokeStoredDriveEligibility?.({ tool: this.id, id: sessionId, nativeId: storedSession.nativeId });
         this.trace?.({ op: 'observe', detail: reason });
+        // Evidence the ownership found in the store itself (a watched change, a settle read) ends
+        // Drive for every client now, not at the next mutation.
+        connection?.demote(reason);
       };
       const ownership = new KiloDriveOwnership(
         storedSession,
@@ -827,7 +1069,12 @@ export class KiloAdapter implements AgentBackend {
           tool: this.id, id: sessionId, nativeId: storedSession.nativeId, historyBoundary,
         }),
         revoke,
-        () => this.driven.delete(sessionId),
+        release,
+        async () => {
+          if (!await this.liveServerAvailable()) return false;
+          const descriptor = await this.describeManagedHost();
+          return !!descriptor && await this.isManagedHostOwned?.(descriptor.identityKey) === true;
+        },
       );
       try {
         await ownership.prime();
@@ -835,7 +1082,7 @@ export class KiloAdapter implements AgentBackend {
         this.opening.delete(sessionId);
         throw error;
       }
-      const connection = new OpenCodeLiveConnection({
+      const driver = new OpenCodeLiveConnection({
         baseUrl: this.baseUrl,
         info: this.retagLiveInfo(live, true),
         dialect: { productId: 'kilo', displayName: this.displayName, permissions: KILO_PERMISSIONS },
@@ -854,15 +1101,18 @@ export class KiloAdapter implements AgentBackend {
         fetch: this.fetcher,
         disconnectedControl: (reason) => liveControl(reason)!,
         ownership,
+        serverRecoveryMs: this.serveRecoveryMs,
         trace: (detail) => this.trace?.({ op: 'observe', detail }),
       });
-      connection.start();
+      connection = driver;
+      driver.start();
       try {
-        await readyWithin(connection.ready, 'Kilo Code SSE did not become ready within 4 seconds.');
-        this.driven.set(sessionId, connection);
-        return connection;
+        await readyWithin(driver.ready, 'Kilo Code SSE did not become ready within 4 seconds.');
+        this.driven.set(sessionId, driver);
+        ownership.watch(this.storeWatch);
+        return driver;
       } catch (error) {
-        await connection.close();
+        await driver.close();
         throw error;
       } finally {
         this.opening.delete(sessionId);
@@ -883,10 +1133,10 @@ export class KiloAdapter implements AgentBackend {
       });
     }
     if (!await this.liveServerAvailable()) {
-      throw new Error('Kilo Code session is missing or its SQLite schema is unsupported.');
+      throw new SessionNotFoundError('Kilo Code session is missing or its SQLite schema is unsupported.');
     }
     const live = await this.fetchLiveSession(sessionId);
-    if (!live) throw new Error('Kilo Code session is unavailable from both SQLite and the managed server.');
+    if (!live) throw new SessionNotFoundError('Kilo Code session is unavailable from both SQLite and the managed server.');
     live.attachMode = 'observe';
     live.control = observeControl(live.origin === 'subagent'
       ? 'Kilo Code subagent sessions are Observe-only.'
@@ -1049,6 +1299,7 @@ export class KiloAdapter implements AgentBackend {
   }
 
   private async renameLiveSession(sessionId: string, title: string | null): Promise<SessionInfo> {
+    if (!kiloSessionIdAdmissible(sessionId)) throw new SessionNotFoundError('This Kilo Code session id is not a session id.');
     await this.prepareCreateSession();
     let response: Response;
     try {
@@ -1086,7 +1337,26 @@ export class KiloAdapter implements AgentBackend {
     const identity = this.currentManagedIdentity();
     const managedHostOwned = !!identity
       && await this.isManagedHostOwned?.(identity) === true;
-    return this.retagLiveInfo(info, false, false, managedHostOwned);
+    // The renamed row offers Drive only where an attach would take it, by the roster's own check:
+    // not where the store already differs from what the session's Drive last proved.
+    const ownedHistoryChanged = managedHostOwned && !this.driven.has(info.id)
+      && await this.ownedHistoryChanged(info.id);
+    return this.retagLiveInfo(info, false, false, managedHostOwned, ownedHistoryChanged);
+  }
+
+  /** Discovery's drift check for one session (the `ownedBoundary` of discoverKiloStore). */
+  private async ownedHistoryChanged(sessionId: string): Promise<boolean> {
+    if (!this.resolveStoredDriveState) return false;
+    const stored = (await discoverKiloStore({
+      env: this.env,
+      ...(this.homeDir ? { homeDir: this.homeDir } : {}),
+      includeUnverifiedChildren: true,
+      ...(this.trace ? { trace: this.trace } : {}),
+      ownedBoundary: (session: { id: string; nativeId: string }) => session.id === sessionId
+        ? this.resolveStoredDriveState?.({ tool: this.id, id: session.id, nativeId: session.nativeId })?.historyBoundary
+        : undefined,
+    })).find((session) => session.id === sessionId);
+    return stored?.ownedHistoryChanged === true;
   }
 
   private retagLiveInfo(
@@ -1094,6 +1364,7 @@ export class KiloAdapter implements AgentBackend {
     forceDriving = false,
     forceEligible = false,
     managedHostOwned = false,
+    ownedHistoryChanged = false,
   ): SessionInfo {
     const selection = this.candidateSelections.get(info.id);
     const nativeSelection = this.nativeSelections.get(info.id);
@@ -1112,7 +1383,7 @@ export class KiloAdapter implements AgentBackend {
       info.model = `${pendingModel.providerID}/${pendingModel.modelID}`;
     }
     delete info.terminalSyncHint;
-    const durable = info.origin !== 'subagent'
+    const durable = info.origin !== 'subagent' && !ownedHistoryChanged
       && this.resolveStoredDriveState?.({ tool: this.id, id: info.id, nativeId: info.nativeId })?.historyBoundary !== undefined;
     const driving = forceDriving || this.driven.has(info.id);
     const eligible = forceEligible || driving || (durable && managedHostOwned);
@@ -1140,9 +1411,16 @@ export class KiloAdapter implements AgentBackend {
     this.recordNativeCurrentModel?.({ tool: this.id, id, ...(nativeId ? { nativeId } : {}), currentModel });
   }
 
+  /** A live serve row, admitted only under the store's own id and directory rules: the serve lists
+   *  what the store holds, so a row the store would withhold is withheld here too, and nothing
+   *  attaches to it. A row that names no directory (absent or empty) has no workspace to expose and
+   *  stays as it was. */
   private liveSessionInfo(raw: any): SessionInfo | undefined {
-    const id = typeof raw?.id === 'string' ? raw.id : undefined;
-    if (!id) return undefined;
+    const id = raw?.id;
+    if (!kiloSessionIdAdmissible(id)) return undefined;
+    if (raw.directory != null && raw.directory !== '' && !kiloSessionDirectoryAdmissible(raw.directory)) return undefined;
+    if (raw.parentID !== undefined && raw.parentID !== null && raw.parentID !== ''
+      && !kiloSessionIdAdmissible(raw.parentID)) return undefined;
     const model = raw?.model && typeof raw.model === 'object'
       ? { providerID: String(raw.model.providerID ?? ''), modelID: String(raw.model.modelID ?? '') }
       : undefined;
@@ -1251,10 +1529,14 @@ export class KiloAdapter implements AgentBackend {
   }
 
   private async fetchLiveSession(sessionId: string): Promise<SessionInfo | undefined> {
+    if (!kiloSessionIdAdmissible(sessionId)) return undefined;
     const response = await this.fetcher(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}`, {
       signal: AbortSignal.timeout(3_000),
     });
-    return response.ok ? this.liveSessionInfo(await readBoundedJson(response)) : undefined;
+    if (!response.ok) return undefined;
+    const info = this.liveSessionInfo(await readBoundedJson(response));
+    // The serve answers for exactly the id asked: anything else is not this session.
+    return info?.id === sessionId ? info : undefined;
   }
 
   /** A refused `/provider` is not an empty catalogue: an empty array reaches the

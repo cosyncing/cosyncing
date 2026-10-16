@@ -185,7 +185,9 @@ if (import.meta.main) {
       models: config.models,
       agents: config.agents,
       commands: config.commands,
-      sequenceStart: Math.floor(Date.now() / 1000),
+      // Milliseconds, not seconds: a serve hands out several ids a second, so a replacement started a second or
+      // two after its predecessor reused their message ids and wrote a new turn over a settled one.
+      sequenceStart: Date.now(),
       emitSessionIdle: true,
       onPublish: mirror,
       intercept: async (request, next) => {

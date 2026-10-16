@@ -1,4 +1,6 @@
 /** Production Cline Drive over one broker-owned isolated Hub connection. */
+import { watch, type FSWatcher } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import type {
   AgentMessage,
   AgentMessageHandler,
@@ -11,7 +13,7 @@ import type {
   SessionInfo,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
-import { TerminalSummaryRegistry } from '@cosyncing/adapter-api';
+import { classifyDirectoryWatchEvent, ControlRefusedError, TerminalSummaryRegistry } from '@cosyncing/adapter-api';
 import {
   ClineHubClient,
   type ClineHubEvent,
@@ -27,9 +29,11 @@ import {
   clineNativeMessageDigest,
   clinePromptCorrelationHistoryIdentity,
   clineTerminalSummaryHistoryIdentity,
+  readClineMessages,
   type ClineNativeMessage,
   type ClinePromptCorrelation,
   type ClinePromptCorrelations,
+  type ClineStoredSession,
 } from './store.ts';
 
 /** Bounded poll for token counts that land after the turn settles.
@@ -43,17 +47,22 @@ import {
 const CLINE_LATE_USAGE_ATTEMPTS = 3;
 const CLINE_LATE_USAGE_INTERVAL_MS = 200;
 
-/** How long Stop waits for the prior run's reply once native idle is proved.
+/** How long Stop waits for the prior turn to settle once native idle is proved.
  *
- *  Do not raise this hoping the reply is merely slow -- it was tried, with a
- *  measurement that looked conclusive and was not. At a 5000ms bound the chain
- *  settled at 5055ms; at 15000ms it settled at 15050ms. Always ~50ms PAST
- *  whatever the bound was, because giving up is what settles it: the timeout
- *  demotes, the demotion rejects the in-flight prompt, and the chain resolves.
- *  The native reply to an aborted `run.start` never arrives on its own, so a
- *  larger bound buys nothing and costs the user the whole wait before the same
- *  read-only outcome. */
+ *  The measured Hub never answers the `run.start` of a run it aborted: it
+ *  announces `run.aborted` and leaves the request open. Waiting for that reply
+ *  is what made Stop fail closed. Measured: at a 5000ms bound the chain settled
+ *  at 5055ms, at 15000ms at 15050ms, because only giving up released it. So
+ *  once Stop has proved the session idle and its transcript stable, it releases
+ *  the wait itself (`releaseRunStart`) and the turn settles as cancelled. This
+ *  bound now only covers a turn still inside its own settle proof. */
 const CLINE_AUTHORITY_SETTLE_MS = 5_000;
+
+/** Debounce for a change to the session's transcript file, as Observe's reparse uses. */
+const TRANSCRIPT_CHECK_DEBOUNCE_MS = 80;
+/** A transcript caught mid-write is read again this often, this many times, before giving up. */
+const TRANSCRIPT_RETRY_MS = 50;
+const TRANSCRIPT_RETRY_ATTEMPTS = 5;
 
 const MAX_PENDING_PROMPTS = 64;
 const MAX_PENDING_PERMISSIONS = 64;
@@ -62,7 +71,8 @@ const MAX_FIELD_CHARS = 4_096;
 interface PendingPrompt {
   key: string;
   text: string;
-  beforeMessages: readonly ClineNativeMessage[];
+  /** The transcript its turn started from; absent while it waits behind an earlier turn. */
+  beforeMessages?: readonly ClineNativeMessage[];
   row: Extract<AgentMessage, { type: 'user-message' }>;
 }
 
@@ -93,6 +103,10 @@ export interface ClineHubDriveOptions {
   terminalSummaries?: readonly ClineTerminalSummary[];
   terminalSummaryRegistry?: TerminalSummaryRegistry<ClineTerminalSummary>;
   requireEmptyIdleBoundary?: boolean;
+  /** The session's durable transcript file. Drive reads through the Hub, but Observe and every
+   *  later Resume read this file: a rewrite or replacement of it between turns ends Drive. */
+  transcript?: ClineStoredSession;
+  watchFactory?: typeof watch;
   trace?: (event: ClineMapTrace | { op: 'observe'; detail: string }) => void;
   onHistoryBoundary?: (
     identity: HistorySourceIdentity,
@@ -346,6 +360,15 @@ export class ClineHubDriveConnection implements SessionConnection {
   private foreignRunSeen = false;
   private ownRunStarted = false;
   private terminalRunEvent?: ClineNativeTerminal;
+  /** Stops the active turn waiting for a `run.start` reply the Hub will not send (see Stop). */
+  private releaseRunStart?: AbortController;
+  private transcriptWatcher?: FSWatcher;
+  private transcriptCheckTimer?: ReturnType<typeof setTimeout>;
+  private transcriptChecking = false;
+  private transcriptCheckAgain = false;
+  private transcriptRetries = 0;
+  /** The file (`dev:ino`) the owned boundary was last read back from. */
+  private ownedTranscriptFile?: string;
   private authorityRecovery?: Promise<boolean>;
   private readonly terminalSummaryRegistry: TerminalSummaryRegistry<ClineTerminalSummary>;
 
@@ -432,6 +455,7 @@ export class ClineHubDriveConnection implements SessionConnection {
     this.restorePromptCorrelations(messages);
     if (messages.length > 0) this.reconcileClaims(messages);
     this.initialized = true;
+    await this.captureOwnedTranscript();
   }
 
   /** Streamed rows coalesce by `key`, so keying each chunk by its own event id makes every chunk a
@@ -550,32 +574,43 @@ export class ClineHubDriveConnection implements SessionConnection {
     if (input.permissionMode && input.permissionMode !== this.options.permissionMode) {
       throw new Error('Cline Hub permission mode is fixed at session creation.');
     }
+    if (this.pendingPrompts.length >= MAX_PENDING_PROMPTS) {
+      throw new Error(`Cline Hub Drive has ${MAX_PENDING_PROMPTS} pending prompts; refusing another.`);
+    }
     const generation = this.turnGeneration;
+    const key = input.clientMessageId?.trim()
+      || `cline:queued:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const pending: PendingPrompt = {
+      key,
+      text: input.text,
+      row: { type: 'user-message', text: input.text, key, clientKey: key, queued: true },
+    };
+    // Admitted now, so every tab shows it queued while an earlier turn still runs, not only once
+    // its own turn starts.
+    this.pendingPrompts.push(pending);
+    this.emit(pending.row);
     const run = async () => {
-      this.assertPromptAdmission(generation);
-      const before = await this.readNativeMessages();
-      this.assertPromptAdmission(generation);
-      if (this.ownershipBoundary
-        && !sameClineHubHistoryIdentity(this.ownershipBoundary, before.identity)) {
-        const reconciled = await this.reconcileLateAssistantAppend(before);
-        if (!reconciled) {
-          this.demote('The Cline Hub transcript changed before prompt delivery.');
-          throw new Error('Cline Hub Drive became read-only because ownership changed.');
+      let before: Awaited<ReturnType<ClineHubDriveConnection['readNativeMessages']>>;
+      try {
+        this.assertPromptAdmission(generation);
+        before = await this.readNativeMessages();
+        this.assertPromptAdmission(generation);
+        if (this.ownershipBoundary
+          && !sameClineHubHistoryIdentity(this.ownershipBoundary, before.identity)) {
+          const reconciled = await this.reconcileLateAssistantAppend(before);
+          if (!reconciled) {
+            this.demote('The Cline Hub transcript changed before prompt delivery.');
+            throw new Error('Cline Hub Drive became read-only because ownership changed.');
+          }
+          before.messages = reconciled.messages;
+          before.identity = reconciled.identity;
         }
-        before.messages = reconciled.messages;
-        before.identity = reconciled.identity;
+      } catch (error) {
+        // Never delivered: its queued row goes. (A demotion has already reset every view.)
+        if (this.removePendingPrompt(key)) this.emit({ type: 'history-reset' });
+        throw error;
       }
-      const key = input.clientMessageId?.trim()
-        || `cline:queued:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      const pending: PendingPrompt = {
-        key,
-        text: input.text,
-        beforeMessages: before.messages,
-        row: { type: 'user-message', text: input.text, key, clientKey: key, queued: true },
-      };
-      this.pendingPrompts.push(pending);
-      while (this.pendingPrompts.length > MAX_PENDING_PROMPTS) this.pendingPrompts.shift();
-      this.emit(pending.row);
+      pending.beforeMessages = before.messages;
       this.activeTurn = true;
       this.liveTurn = { anchor: key, segment: 0 };
       this.ownRunStarted = false;
@@ -688,24 +723,35 @@ export class ClineHubDriveConnection implements SessionConnection {
             /* the turn is already settled; late usage is an enrichment, never a gate */
           }
         }
+        // Before the prompt is answered: a replacement right after the turn must not be taken
+        // for the file this turn's transcript was written to.
+        await this.captureOwnedTranscript();
       };
       try {
         this.assertPromptAdmission(generation);
         const mode = this.options.permissionMode === 'plan' ? 'plan' : 'act';
         let reply: Record<string, unknown>;
+        const release = new AbortController();
+        this.releaseRunStart = release;
         try {
           reply = await this.options.client.command('run.start', {
             prompt: input.text,
             mode,
             timeoutSeconds: this.options.turnTimeoutSeconds ?? 600,
-          }, this.info.id, null);
+          }, this.info.id, null, release.signal);
         } catch (commandError) {
+          // Stop proved the session idle and the run aborted, and released this wait: Stop
+          // reconciles the still-pending prompt against its final snapshot and answers it.
+          if (release.signal.aborted && commandError === release.signal.reason
+            && this.stopping && !this.demoted && !this.closed && !this.closing) return;
           const terminalEvent = this.readTerminalRunEvent();
           if (this.ownRunStarted && !this.foreignRunSeen && !this.demoted && !this.closed && terminalEvent) {
             await settleOwnedTurn(undefined, terminalEvent);
             return;
           }
           throw commandError;
+        } finally {
+          if (this.releaseRunStart === release) this.releaseRunStart = undefined;
         }
         if (generation !== this.turnGeneration) {
           if (this.stopping && !this.demoted && !this.closed && !this.closing) return;
@@ -728,7 +774,8 @@ export class ClineHubDriveConnection implements SessionConnection {
         this.liveTurn = undefined;
         this.ownRunStarted = false;
         this.terminalRunEvent = undefined;
-        this.cancelPendingPermissions('Cline turn ended before the permission was resolved.');
+        // A Stop in progress rejects the open cards itself: the user did refuse them.
+        if (!this.stopping) this.cancelPendingPermissions('Cline turn ended before the permission was resolved.');
         if (!this.demoted && !this.closed && generation === this.turnGeneration) {
           this.info.status = 'idle';
           this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { status: 'idle' } });
@@ -745,7 +792,7 @@ export class ClineHubDriveConnection implements SessionConnection {
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
     this.assertWritable('permission');
     const pending = this.pendingPermissions.get(requestId);
-    if (!pending) throw new Error('Cline Hub permission request is no longer pending.');
+    if (!pending) throw new ControlRefusedError('Cline Hub permission request is no longer pending.', 'request-not-pending');
     if (decision !== 'approve' && decision !== 'reject') {
       throw new Error(`Cline Hub does not advertise permission decision ${decision}.`);
     }
@@ -769,7 +816,7 @@ export class ClineHubDriveConnection implements SessionConnection {
   }
 
   async runCommand(name: string) {
-    if (name !== 'stop' && name !== 'abort') throw new Error(`Cline Hub does not support /${name}.`);
+    if (name !== 'stop' && name !== 'abort') throw new ControlRefusedError(`Cline Hub does not support /${name}.`, 'command-unsupported');
     this.assertWritable('cancel');
     if (this.stopping) throw new Error('Cline Hub Stop is already in progress.');
     this.stopping = true;
@@ -782,6 +829,9 @@ export class ClineHubDriveConnection implements SessionConnection {
         await this.authorityRecovery;
         throw new Error('Cline Stop failed closed because the native turn did not become idle.');
       }
+      // The session is idle with a stable transcript, so the aborted run is over. The measured Hub
+      // never answers its `run.start`; stop waiting for that reply instead of failing closed on it.
+      this.releaseRunStart?.abort(new Error('Cline Stop proved the native run aborted.'));
       if (!await this.settleTurnChain(priorTurnChain)) {
         this.demote('Cline Stop proved native idle but did not receive the terminal run reply.');
         await this.authorityRecovery;
@@ -807,6 +857,7 @@ export class ClineHubDriveConnection implements SessionConnection {
       }
       this.reconcileClaims(snapshot.messages);
       this.recordOwnership(snapshot.messages, snapshot.identity);
+      await this.captureOwnedTranscript();
       this.publishUnpublishedClaims();
       this.cancelPendingPermissions('Stopped from cosyncing.', 'reject');
       this.pendingPrompts.length = 0;
@@ -861,71 +912,19 @@ export class ClineHubDriveConnection implements SessionConnection {
     throw new Error('Cline Hub completed without one durable assistant response.');
   }
 
+  /** Whether the turn Stop interrupted settles within the bound. Stop has already released the
+   *  `run.start` wait, so only a turn still inside its own settle proof can take this long. */
   private settleTurnChain(chain: Promise<void>): Promise<boolean> {
-    // The bound is not what withholds the reply, and reading it that way is a
-    // trap this comment used to set. `settled 5055ms after Stop, past the
-    // 5000ms authority settle bound` looks like a bound 55ms too tight. It is
-    // not: raising it to 15_000 produced `settled 15050ms after Stop, past the
-    // 15000ms bound` -- ~50ms past ANY bound, because the timeout demotes, the
-    // demotion rejects the in-flight prompt, and THAT is what settles the
-    // chain. The native reply to an aborted `run.start` never arrives on its
-    // own; see the constant's own doc above.
-    //
-    // So the number is deliberately 5_000, and the report below names the cause
-    // rather than the timing.
     const timeoutMs = this.options.authoritySettleTimeoutMs ?? CLINE_AUTHORITY_SETTLE_MS;
-    const startedAt = Date.now();
     return new Promise((resolve) => {
-      let settled = false;
-      const finish = (value: boolean) => {
-        if (settled) return;
-        settled = true;
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      void chain.then(() => {
         clearTimeout(timer);
-        resolve(value);
-      };
-      const timer = setTimeout(() => {
-        finish(false);
-        // The bound expired; the question did not. Keep watching, and say
-        // whether the reply ever came. A read-only session whose only
-        // explanation is "did not receive the terminal run reply" cannot tell
-        // its owner whether the bound was too tight or the reply never exists
-        // -- and those want opposite answers. Nothing here changes what the
-        // gate decides; it only stops the decision being unexplainable.
-        // HOW it settles is the discriminator, not `this.demoted` at the time.
-        // The caller demotes on the very next microtask after this resolves
-        // false, so by the time the chain moves, `demoted` is always true and a
-        // check on it can only ever report one of its two cases. A genuine late
-        // reply RESOLVES the chain; the demotion rejects the in-flight prompt,
-        // so a demotion-released chain REJECTS. That distinction survives the
-        // ordering.
-        void chain.then(
-          () => this.reportLateTurnSettle(startedAt, timeoutMs, 'native-reply'),
-          () => this.reportLateTurnSettle(startedAt, timeoutMs, 'demotion'),
-        );
-      }, timeoutMs);
-      void chain.then(() => finish(true), () => finish(true));
-    });
-  }
-
-  private reportLateTurnSettle(
-    startedAt: number,
-    timeoutMs: number,
-    released: 'native-reply' | 'demotion',
-  ): void {
-    if (this.closed) return;
-    const elapsed = Date.now() - startedAt;
-    // Say WHY it settled, not just when. A chain released by the demotion --
-    // which rejects the in-flight prompt -- reported as a late native reply
-    // reads as "the bound is too tight" and sends the next reader off to raise
-    // it. Measured: raising 5_000 to 15_000 just moved the number.
-    //
-    // `elapsed` counts from when this settle wait began, which is after
-    // `abortAndVerify` has already returned, not from when Stop was sent.
-    this.emit({
-      type: 'notice',
-      message: released === 'demotion'
-        ? `Cline's prior run settled ${elapsed}ms into the settle wait, and only because demoting this connection rejected the in-flight request: the native reply to the aborted run never arrived, and the ${timeoutMs}ms authority settle bound is not what withheld it.`
-        : `Cline's prior run settled ${elapsed}ms into the settle wait, past the ${timeoutMs}ms authority settle bound, by replying on its own.`,
+        resolve(true);
+      }, () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
     });
   }
 
@@ -989,6 +988,8 @@ export class ClineHubDriveConnection implements SessionConnection {
   ): void {
     this.ownershipMessages = messages;
     this.ownershipBoundary = identity;
+    // The Hub rewrote the file with this turn: which file holds it is learned again.
+    this.ownedTranscriptFile = undefined;
     this.terminalSummaryRegistry.publish(
       clineTerminalSummaryHistoryIdentity(this.info.id, messages),
       terminalSummary,
@@ -1013,6 +1014,7 @@ export class ClineHubDriveConnection implements SessionConnection {
       || this.foreignRunSeen || this.demoted || this.closed || this.closing
       || !isAssistantOnlyAppend(this.ownershipMessages, stable.messages)) return undefined;
     this.recordOwnership(stable.messages, stable.identity);
+    await this.captureOwnedTranscript();
     return stable;
   }
 
@@ -1100,6 +1102,7 @@ export class ClineHubDriveConnection implements SessionConnection {
       } else if (event.event === 'run.started' && this.activeTurn && !this.demoted) {
         this.ownRunStarted = true;
         this.terminalRunEvent = undefined;
+        this.restateStartedPrompt();
       }
       return;
     }
@@ -1202,6 +1205,16 @@ export class ClineHubDriveConnection implements SessionConnection {
     }
   }
 
+  /** The Hub started this connection's turn: its prompt is no longer queued, and every tab says so
+   *  now rather than when the settled transcript replaces the row. */
+  private restateStartedPrompt(): void {
+    const key = this.liveTurn?.anchor;
+    const pending = key ? this.pendingPrompts.find((entry) => entry.key === key) : undefined;
+    if (!pending || pending.row.queued !== true) return;
+    pending.row = { ...pending.row, queued: false };
+    this.emit(pending.row);
+  }
+
   private readTerminalRunEvent(): ClineNativeTerminal | undefined {
     return this.terminalRunEvent;
   }
@@ -1279,6 +1292,8 @@ export class ClineHubDriveConnection implements SessionConnection {
   ): ClinePromptCorrelation[] {
     const claimed: ClinePromptCorrelation[] = [];
     for (const pending of [...this.pendingPrompts]) {
+      // A prompt still waiting behind an earlier turn has no native echo to reconcile yet.
+      if (!pending.beforeMessages) continue;
       if (!isPrefix(pending.beforeMessages, messages)) {
         this.demote('The Cline Hub rewrote the transcript before the queued prompt was reconciled.');
         return claimed;
@@ -1383,9 +1398,11 @@ export class ClineHubDriveConnection implements SessionConnection {
     return end > 0 ? tail.slice(0, end) : undefined;
   }
 
-  private removePendingPrompt(key: string): void {
+  private removePendingPrompt(key: string): boolean {
     const index = this.pendingPrompts.findIndex((entry) => entry.key === key);
-    if (index >= 0) this.pendingPrompts.splice(index, 1);
+    if (index < 0) return false;
+    this.pendingPrompts.splice(index, 1);
+    return true;
   }
 
   private retirePermissionId(id: string): void {
@@ -1476,6 +1493,7 @@ export class ClineHubDriveConnection implements SessionConnection {
       }
       if (sameClineHubHistoryIdentity(before.identity, after.identity)) {
         this.recordOwnership(after.messages, after.identity);
+        await this.captureOwnedTranscript();
       }
       mutationProved = generation === this.turnGeneration
         && !this.demoted && !this.closed && !this.closing;
@@ -1485,6 +1503,141 @@ export class ClineHubDriveConnection implements SessionConnection {
         this.demote('Cline could not prove that native rename preserved writer ownership.');
       }
       this.nativeMutation = false;
+    }
+  }
+
+  /** Remembers which file holds the transcript just proved, so a later replacement is noticed. */
+  private async captureOwnedTranscript(): Promise<void> {
+    const transcript = this.options.transcript;
+    const owned = this.ownershipBoundary;
+    if (!transcript || !owned || this.closed || this.closing || this.demoted) return;
+    this.armTranscriptWatch();
+    try {
+      const snapshot = await readClineMessages(transcript);
+      if (owned !== this.ownershipBoundary || this.ownedTranscriptFile !== undefined
+        || snapshot.issues.length > 0 || !snapshot.fileId) return;
+      // A file the Hub has not written this boundary to yet is learned at its next change.
+      if (sameClineHubHistoryIdentity(owned, this.transcriptFileIdentity(snapshot.messages))) {
+        this.ownedTranscriptFile = snapshot.fileId;
+      }
+    } catch {
+      // Learned at the file's next change instead.
+    }
+  }
+
+  private transcriptFileIdentity(messages: readonly ClineNativeMessage[]): HistorySourceIdentity {
+    return clineHubHistoryIdentity(
+      this.options.profileRoot,
+      this.info.id,
+      clineHubEpoch(this.options.client.options.discovery),
+      messages,
+    );
+  }
+
+  private armTranscriptWatch(): void {
+    const transcript = this.options.transcript;
+    if (!transcript || this.transcriptWatcher || this.closed || this.closing || this.demoted) return;
+    const names = new Set([basename(transcript.messagesPath)]);
+    try {
+      const watcher = (this.options.watchFactory ?? watch)(
+        dirname(transcript.messagesPath),
+        { persistent: false },
+        (eventType, filename) => {
+          // Bun names a rename by the file renamed FROM, so any rename may have replaced ours.
+          if (classifyDirectoryWatchEvent(eventType, filename, names) === 'unrelated') return;
+          this.transcriptRetries = 0;
+          this.scheduleTranscriptCheck(TRANSCRIPT_CHECK_DEBOUNCE_MS);
+        },
+      );
+      watcher.on('error', () => {
+        if (this.transcriptWatcher === watcher) this.disarmTranscriptWatch();
+      });
+      this.transcriptWatcher = watcher;
+    } catch {
+      // No session directory yet (nothing persisted): armed again at the next proved boundary.
+    }
+  }
+
+  private disarmTranscriptWatch(): void {
+    if (this.transcriptCheckTimer) clearTimeout(this.transcriptCheckTimer);
+    this.transcriptCheckTimer = undefined;
+    this.transcriptWatcher?.close();
+    this.transcriptWatcher = undefined;
+  }
+
+  private scheduleTranscriptCheck(delayMs: number): void {
+    if (this.transcriptCheckTimer || this.closed || this.closing || this.demoted) return;
+    this.transcriptCheckTimer = setTimeout(() => {
+      this.transcriptCheckTimer = undefined;
+      void this.checkTranscriptFile();
+    }, delayMs);
+    this.transcriptCheckTimer.unref?.();
+  }
+
+  private async checkTranscriptFile(): Promise<void> {
+    if (this.transcriptChecking) {
+      this.transcriptCheckAgain = true;
+      return;
+    }
+    this.transcriptChecking = true;
+    try {
+      do {
+        this.transcriptCheckAgain = false;
+        await this.inspectTranscriptFile();
+      } while (this.transcriptCheckAgain && !this.closed && !this.demoted);
+    } catch {
+      // A failed read decides nothing: the next prompt still proves its boundary through the Hub.
+    } finally {
+      this.transcriptChecking = false;
+    }
+  }
+
+  /** Between turns of this connection, nothing but a foreign writer changes the transcript. */
+  private betweenOwnedTurns(): boolean {
+    return this.initialized && !this.demoted && !this.closed && !this.closing
+      && !this.activeTurn && !this.stopping && !this.nativeMutation;
+  }
+
+  /**
+   * Notices a rewrite or replacement of the transcript file as it happens, rather than at the next
+   * prompt, so every tab learns Drive ended before anyone writes. Drive reads through the Hub,
+   * which never sees a file replaced under it; Observe and a later Resume read the file.
+   */
+  private async inspectTranscriptFile(): Promise<void> {
+    const transcript = this.options.transcript;
+    const owned = this.ownershipBoundary;
+    const ownedMessages = this.ownershipMessages;
+    if (!transcript || !owned || !ownedMessages || !this.betweenOwnedTurns()) return;
+    const generation = this.turnGeneration;
+    const unchanged = () => this.betweenOwnedTurns() && generation === this.turnGeneration
+      && owned === this.ownershipBoundary;
+    const snapshot = await readClineMessages(transcript);
+    if (!unchanged()) return;
+    if (snapshot.issues.length > 0 || !snapshot.fileId) {
+      // Caught mid-write: read it again shortly.
+      if (this.transcriptRetries < TRANSCRIPT_RETRY_ATTEMPTS) {
+        this.transcriptRetries += 1;
+        this.scheduleTranscriptCheck(TRANSCRIPT_RETRY_MS);
+      }
+      return;
+    }
+    if (sameClineHubHistoryIdentity(owned, this.transcriptFileIdentity(snapshot.messages))) {
+      if (this.ownedTranscriptFile === undefined) this.ownedTranscriptFile = snapshot.fileId;
+      else if (this.ownedTranscriptFile !== snapshot.fileId) {
+        this.demote('The Cline transcript file was replaced outside this Drive.');
+      }
+      return;
+    }
+    // The Hub has not written the owned boundary out yet.
+    if (snapshot.messages.length < ownedMessages.length && isPrefix(snapshot.messages, ownedMessages)) return;
+    const current = await this.readNativeMessages();
+    if (!unchanged()) return;
+    if (sameClineHubHistoryIdentity(owned, current.identity)) {
+      this.demote('The Cline transcript file was rewritten outside this Drive.');
+      return;
+    }
+    if (!await this.reconcileLateAssistantAppend(current) && unchanged()) {
+      this.demote('The Cline Hub transcript changed outside the owned prompt boundary.');
     }
   }
 
@@ -1509,6 +1662,7 @@ export class ClineHubDriveConnection implements SessionConnection {
     if (this.demoted || this.closed) return;
     this.demoted = true;
     this.turnGeneration += 1;
+    this.disarmTranscriptWatch();
     this.info.attachMode = 'observe';
     this.info.status = 'idle';
     this.info.control = {
@@ -1563,6 +1717,7 @@ export class ClineHubDriveConnection implements SessionConnection {
       unsafeAuthority = 'Cline Hub Drive authority recovery and the managed-Hub stop fence both failed.';
     }
     this.closed = true;
+    this.disarmTranscriptWatch();
     this.cancelPendingPermissions('Cline Hub Drive connection closed.');
     this.pendingPrompts.length = 0;
     this.unsubscribeEvent();

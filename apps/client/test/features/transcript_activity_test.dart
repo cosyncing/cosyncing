@@ -343,10 +343,19 @@ void main() {
     });
 
     featureTest('a harness that stamps no start time keeps first-seen order '
-        'through the idle sweep', (f) async {
+        'through the idle sweep, live and replayed from history alike', (
+      f,
+    ) async {
       // OpenCode, Grok and Antigravity report no startedAtMs: their running
       // agents order by first sight, and a sweep must not re-file one behind
       // the other when it comes back.
+      final frames = [
+        activity('agent:first', 'First agent', 'running'),
+        activity('agent:second', 'Second agent', 'running'),
+        idleStatus,
+        activity('agent:second', 'Second agent', 'running'),
+        activity('agent:first', 'First agent', 'running'),
+      ];
       final studio = f.network.add('http://studio.test:7734');
       final app = await openTranscript(
         f,
@@ -355,15 +364,19 @@ void main() {
         viewport: FeatureViewport.desktop,
         broker: studio,
       );
-      await app.liveAll(studio, [
-        activity('agent:first', 'First agent', 'running'),
-        activity('agent:second', 'Second agent', 'running'),
-        idleStatus,
-        activity('agent:second', 'Second agent', 'running'),
-        activity('agent:first', 'First agent', 'running'),
-      ]);
+      await app.liveAll(studio, frames);
 
       expect(strip('agent:first'), findsOneWidget);
+      await app.expandBand('agent:first');
+      app.expectAbove(row('agent:first'), row('agent:second'));
+
+      // The same frames as another session's saved history: the band the
+      // reader finds after a reload is the one they watched arrive.
+      studio
+        ..addSession('s2', 'Replayed', tool: 'claude', cwd: '/work/studio')
+        ..transcripts['s2'] = frames;
+      await app.go('/sessions/claude/s2');
+      await app.waitFor(strip('agent:first'));
       await app.expandBand('agent:first');
       app.expectAbove(row('agent:first'), row('agent:second'));
     });

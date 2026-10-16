@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_auth_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -27,11 +30,56 @@ final brokerAuthProbeProvider = Provider<BrokerAuthProbe>(
 class BrokerGateController extends AsyncNotifier<BrokerGateState> {
   int _generation = 0;
 
+  /// When a refused request last made the gate probe again.
+  ///
+  /// Cleared by every verdict the user or a server change asked for (build,
+  /// [refresh]). While it is recent, further 401s are ignored: a burst of
+  /// refused calls costs one probe, and a route that refuses while the probe
+  /// still succeeds (a tokenless loopback server asked for a stream ticket)
+  /// costs one probe per [unauthorizedReprobeCooldown] instead of turning the
+  /// roster's retries into a probe loop.
+  DateTime? _lastReprobeAt;
+
+  /// Shortest gap between two re-probes started by refused requests.
+  static const Duration unauthorizedReprobeCooldown = Duration(minutes: 5);
+
   @override
   Future<BrokerGateState> build() {
     final profile = ref.watch(activeBrokerProfileProvider);
     _generation += 1;
+    _lastReprobeAt = null;
+    final subscription = ref
+        .read(brokerUnauthorizedSignalProvider)
+        .reports
+        .listen((source) => unawaited(_onUnauthorized(source)));
+    ref.onDispose(subscription.cancel);
     return _evaluate(profile);
+  }
+
+  /// A request the app sent with the active server's credential came back
+  /// 401: ask the gate's own question again, once, so a credential that
+  /// stopped working while the app runs shows the same sign-in gate a launch
+  /// would. Nothing changes while the probe runs; only its verdict is
+  /// published.
+  Future<void> _onUnauthorized(BrokerUnauthorizedSource reported) async {
+    final profile = ref.read(activeBrokerProfileProvider);
+    if (profile == null ||
+        reported != BrokerUnauthorizedSource.ofProfile(profile) ||
+        !(state.valueOrNull?.isConnected ?? false)) {
+      return;
+    }
+    final now = ref.read(appClockProvider)();
+    final last = _lastReprobeAt;
+    if (last != null && now.difference(last) < unauthorizedReprobeCooldown) {
+      return;
+    }
+    _lastReprobeAt = now;
+    final source = _BrokerGateSource.of(profile);
+    final generation = ++_generation;
+    final result = await AsyncValue.guard(() => _evaluate(profile));
+    if (!_canPublish(source, generation)) return;
+    if (result.valueOrNull?.isConnected ?? false) return;
+    state = result;
   }
 
   Future<BrokerGateState> _evaluate(BrokerProfile? profile) async {
@@ -76,6 +124,7 @@ class BrokerGateController extends AsyncNotifier<BrokerGateState> {
     final profile = ref.read(activeBrokerProfileProvider);
     final source = _BrokerGateSource.of(profile);
     final generation = ++_generation;
+    _lastReprobeAt = null;
     state = const AsyncValue<BrokerGateState>.loading();
     final result = await AsyncValue.guard(() => _evaluate(profile));
     if (!_canPublish(source, generation)) return;

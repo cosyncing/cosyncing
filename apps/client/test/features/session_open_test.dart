@@ -407,6 +407,86 @@ void main() {
     );
 
     featureTest(
+      'a token rotated while the app is open is noticed at the next refused '
+      'call: the sign-in gate appears once, without a relaunch, and the new '
+      'token brings the roster and the open session back',
+      (f) async {
+        final studio = f.network.add(
+          'http://studio.test:7734',
+          ownerToken: 'tok-1',
+        )..addSession('s1', 'Fix login');
+        await f.storage.seedServer(studio, ownerToken: 'tok-1');
+        final app = await f.launch();
+        await app.openFromRoster('s1', cwd: cwd);
+        expect(studio.socketsFor('s1').single.credential, 'tok-1');
+        final barrier = find.byKey(const Key('broker-auth-barrier'));
+        expect(barrier, findsNothing);
+        final probes = studio.requestsTo('/api/broker/health').length;
+
+        // The broker's token is rotated while the app runs.
+        studio.ownerToken = 'tok-2';
+        await app.pumpUntil(
+          () => barrier.evaluate().isNotEmpty,
+          reason: 'a refused call brings up the sign-in gate',
+          every: const Duration(seconds: 1),
+        );
+        expect(
+          find.byKey(const Key('broker-gate-credential-rejected')),
+          findsOneWidget,
+          reason:
+              'the same gate a launch shows for a token that stopped '
+              'working',
+        );
+        expect(
+          studio.requestsTo('/api/broker/health'),
+          hasLength(probes + 1),
+          reason: 'one probe confirmed the refusal',
+        );
+
+        // Refused calls go on behind the gate; none of them probes again.
+        await app.elapse(const Duration(minutes: 3));
+        expect(studio.requestsTo('/api/broker/health'), hasLength(probes + 1));
+        expect(barrier, findsOneWidget);
+
+        final sockets = studio.socketsFor('s1').length;
+        await app.saveGateToken('tok-2');
+        await app.waitForAbsent(barrier);
+        await app.pumpUntil(
+          () => studio.requests.any(
+            (r) => r.path == '/api/sessions' && r.ownerToken == 'tok-2',
+          ),
+          reason: 'the roster asks again with the new token',
+          every: const Duration(seconds: 1),
+        );
+        await app.pumpUntil(
+          () => studio
+              .socketsFor('s1')
+              .skip(sockets)
+              .any((s) => s.isConnected && s.credential == 'tok-2'),
+          reason: 'the open session comes back with the new token',
+          every: const Duration(seconds: 1),
+        );
+
+        // A route that refuses on its own while the token still works costs
+        // one probe, never one per refusal.
+        const deltas = '/api/session-roster-deltas';
+        final checks = studio.requestsTo('/api/broker/health').length;
+        final polls = studio.requestsTo(deltas).length;
+        studio
+          ..deltaFeedStatus = 401
+          ..updateSession('s1', {'title': 'Fix login (renamed)'});
+        await app.elapse(const Duration(minutes: 2));
+        expect(
+          studio.requestsTo(deltas).length - polls,
+          greaterThan(5),
+          reason: 'the roster feed kept retrying the refused route',
+        );
+        expect(studio.requestsTo('/api/broker/health'), hasLength(checks + 1));
+        expect(barrier, findsNothing);
+      },
+    );
+
+    featureTest(
       'a token saved in Settings while a session is open on an anonymous '
       'socket replaces that socket with one that carries the token',
       (f) async {
@@ -591,10 +671,10 @@ void main() {
 
   group('a server that moves to another machine', () {
     featureTest(
-      "editing a saved server's address leaves the old machine's session "
-      'behind: its stream is closed, the new machine shows only its own '
-      'session, and a prompt that was waiting for the old one never reaches '
-      'it [REG]',
+      "editing a saved server's address keeps its open tab but leaves the "
+      "old machine's session behind: its stream is closed, the new machine "
+      'shows only its own session, and a prompt that was waiting for the old '
+      'one never reaches it [REG]',
       (f) async {
         final old = f.network.add('http://old.test:7734', machine: 'old')
           ..addSession('s1', 'Old machine');
@@ -620,11 +700,11 @@ void main() {
         await app.go(brokerProfilesRoute);
         await app.editSavedServer(profile.id, address: 'http://new.test:7734');
         await app.go(sessionsRoute);
-        expect(
-          app.openTabKeys,
-          isEmpty,
-          reason: "the old machine's tabs do not follow the address",
+        await app.pumpUntil(
+          () => app.openTabKeys.contains('codex/s1'),
+          reason: 'the tab belongs to the saved server, not to its address',
         );
+        expect(app.openTabKeys, ['codex/s1']);
         expect(
           [for (final s in old.socketsFor('s1')) s.isConnected],
           everyElement(isFalse),

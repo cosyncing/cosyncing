@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { resolveClineAcpEnvironment } from '../src/auth.ts';
 import { CLINE_NATIVE_RENAME_TIMEOUT_MS } from '../src/implementation.ts';
 
-// The shipped half of the old drive suite: how Cline API-key authentication is resolved. None of it
-// involves the unshipped ACP writer.
+// How Cline API-key authentication is resolved (an explicit owner-only auth file or the CLINE_*
+// environment), and the native rename budget.
 let passed = 0;
 const check = (name: string, condition: unknown, detail = '') => {
   assert.ok(condition, `${name}${detail ? ` — ${detail}` : ''}`);

@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { windowsFfi } from './windows-ffi.ts';
+import { windowsFfi, type WindowsProcessTableEntry } from './windows-ffi.ts';
 
 const WINDOWS_SNAPSHOT_TTL_MS = 250;
 /** Budget for a probe that READS something (an ACL, a process table). Exported so a claim can hold
@@ -179,6 +179,82 @@ export function captureWindowsProcessSnapshot(): WindowsProcessSnapshot | null {
   return parseWindowsProcessSnapshot(result.stdout.trim());
 }
 
+/**
+ * The same snapshot without blocking the event loop, for a request path. Bounded: past `timeoutMs`
+ * the PowerShell child is killed and the answer is null, and its output is read only up to the
+ * synchronous probe's buffer limit. Null means the machine did not say, never "no processes".
+ */
+export async function captureWindowsProcessSnapshotAsync(timeoutMs = PROBE_TIMEOUT_MS): Promise<WindowsProcessSnapshot | null> {
+  const executable = windowsExecutable(join('WindowsPowerShell', 'v1.0', 'powershell.exe'), process.env);
+  if (!executable) return null;
+  let child: ReturnType<typeof Bun.spawn>;
+  try {
+    child = Bun.spawn(
+      [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_WINDOWS_SNAPSHOT],
+      { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', env: windowsPowerShellChildEnvironment(), windowsHide: true },
+    );
+  } catch {
+    return null;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      try { child.kill(); } catch { /* already exited */ }
+      resolve(null);
+    }, timeoutMs);
+  });
+  const answered = (async (): Promise<WindowsProcessSnapshot | null> => {
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+    for (let next = await reader.read(); !next.done; next = await reader.read()) {
+      const chunk = next.value;
+      bytes += chunk.byteLength;
+      if (bytes > WINDOWS_MAX_BUFFER) {
+        try { child.kill(); } catch { /* already exited */ }
+        return null;
+      }
+      chunks.push(chunk);
+    }
+    if (await child.exited !== 0 || child.signalCode) return null;
+    return parseWindowsProcessSnapshot(Buffer.concat(chunks).toString('utf8').trim());
+  })().catch(() => null);
+  try {
+    return await Promise.race([answered, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The process half of the snapshot, read through the Windows API instead of a PowerShell process: a
+ * median 21 ms against 2.07 s on a Windows 11 host with 567 processes, and no child process at all.
+ * Enough for ancestry (pid, parent pid, start, image name). Listeners are not read (`listenersOk` is
+ * false), and `executable` is null, which `liveProcess` already treats as a partial identity that
+ * proves nothing.
+ *
+ * Null when the table cannot be read: not Windows, no FFI, or a list that did not reach its end.
+ */
+export function captureWindowsProcessTable(
+  readTable: () => WindowsProcessTableEntry[] | undefined = () => windowsFfi()?.processTable(),
+): WindowsProcessSnapshot | null {
+  let table: WindowsProcessTableEntry[] | undefined;
+  try {
+    table = readTable();
+  } catch {
+    return null;
+  }
+  if (!table) return null;
+  return {
+    processesOk: true,
+    listenersOk: false,
+    processes: table.map((entry) => ({
+      pid: entry.pid, parentPid: entry.parentPid, start: entry.start, name: entry.name, executable: null,
+    })),
+    listeners: [],
+  };
+}
+
 export interface HostProcessProviderOptions {
   platform?: NodeJS.Platform;
   runWindowsSnapshot?: WindowsProcessSnapshotRunner;
@@ -209,6 +285,11 @@ export function parseLinuxProcessStat(raw: string): LinuxProcessStat | null {
   return Number.isInteger(parentPid) && parentPid >= 0 && typeof start === 'string' && /^\d+$/.test(start)
     ? { parentPid, start }
     : null;
+}
+
+/** A POSIX process state of a process that has exited: Z (zombie), or X (dead). */
+function exitedProcessState(state: string | undefined): boolean {
+  return state !== undefined && /^[ZX]/.test(state);
 }
 
 /** Shared, fail-closed process identity and listener attribution provider. */
@@ -282,6 +363,12 @@ export class HostProcessProvider {
     return this.bootId;
   }
 
+  /**
+   * Whether `pid` is a running process, and its identity (pid + start token + boot id). A zombie
+   * (POSIX state Z, or X) has exited and is waiting only for its parent to reap it: it is `absent`,
+   * like a process that is gone, so no caller waits on, adopts, or signals a dead process. The
+   * identity of a running process is read exactly as before.
+   */
   liveProcess(pid: number, options: { fresh?: boolean } = {}): HostProcessRead {
     if (!positiveInteger(pid)) return { state: 'unknown' };
     if (this.platform === 'win32') {
@@ -304,6 +391,7 @@ export class HostProcessProvider {
       const raw = this.readLinuxStat(pid);
       if (raw === null) return { state: 'absent' };
       if (raw === undefined) return { state: 'unknown' };
+      if (exitedProcessState(raw.slice(raw.lastIndexOf(')') + 1).trim().split(/\s+/)[0])) return { state: 'absent' };
       const stat = parseLinuxProcessStat(raw);
       let comm = '';
       try { comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { /* classified below */ }
@@ -327,6 +415,9 @@ export class HostProcessProvider {
     };
     const start = field('lstart=');
     if (!start.value) return start.absent ? { state: 'absent' } : { state: 'unknown' };
+    const state = field('stat=');
+    if (!state.value) return state.absent ? { state: 'absent' } : { state: 'unknown' };
+    if (exitedProcessState(state.value)) return { state: 'absent' };
     const comm = field('comm=');
     if (!comm.value) return comm.absent ? { state: 'absent' } : { state: 'unknown' };
     return { state: 'running', identity: { pid, start: start.value, boot: '', comm: comm.value } };

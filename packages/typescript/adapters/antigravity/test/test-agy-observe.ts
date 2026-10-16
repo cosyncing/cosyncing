@@ -17,7 +17,7 @@
  *   bun run packages/typescript/adapters/antigravity/test/test-agy-observe.ts   (exit 0 = all pass)
  */
 export {};
-import { appendFileSync, mkdirSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentMessage } from '@cosyncing/adapter-api';
 import {
@@ -284,6 +284,67 @@ function duplicates(messages: AgentMessage[]): string[] {
     check('the settlement block still replays (a separate durable source)',
       rebuilt.some((m) => m.type === 'tool-call' && String((m as { callId: string }).callId).includes(':task:')));
     check('the post-reset history has no duplicates', duplicates(rebuilt).length === 0);
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// ── 4b. A rewrite the size cannot show, a replacement, and a sibling's chatter ──
+{
+  const tree = buildAgyFixtureTree();
+  /** Wait (bounded) for the connection's own watch and debounce to act, then report the resets seen. */
+  const resetsWithin = async (live: AgentMessage[], ms: number): Promise<number> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline && !live.some((m) => m.type === 'history-reset')) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return live.filter((m) => m.type === 'history-reset').length;
+  };
+  try {
+    const original = jsonl(FIXTURE.transcript.slice(0, 6));
+    writeFileSync(tree.transcriptPath, original);
+    const traces: AgyTrace[] = [];
+    const connection = new AgyObserveConnection({
+      roots: tree.roots, conversationId: CONVERSATION, info: infoFor(CONVERSATION), trace: (t) => traces.push(t),
+    });
+    const live: AgentMessage[] = [];
+    connection.subscribe((message) => live.push(message));
+    await connection.getHistory();
+
+    // A sibling the host rewrites constantly is not the transcript: nothing reloads.
+    const logs = join(tree.transcriptPath, '..');
+    for (let index = 0; index < 3; index += 1) writeFileSync(join(logs, 'agy.log'), `${Date.now()} ${index}\n`);
+    check('a sibling log written beside the transcript reloads nothing', await resetsWithin(live, 400) === 0,
+      live.map((m) => m.type).join(','));
+
+    // The same number of bytes, other words: only the content says it changed.
+    const sameLength = original.replace('review the demo project', 'REVIEW THE DEMO PROJECT');
+    check('the fixture rewrite keeps the byte length', Buffer.byteLength(sameLength) === Buffer.byteLength(original));
+    writeFileSync(tree.transcriptPath, sameLength);
+    check('a rewrite in place that keeps the size resets the reader', await resetsWithin(live, 5_000) === 1,
+      live.map((m) => m.type).join(','));
+    check('the rewrite is traced as one', traces.filter((trace) => trace.op === 'transcript-rewritten').length === 1,
+      traces.map((t) => t.op).join(', '));
+    const rebuilt = await connection.getHistory();
+    check('the reload reads the rewritten words',
+      rebuilt.some((m) => m.type === 'user-message' && (m as { text: string }).text.includes('REVIEW THE DEMO PROJECT')));
+
+    // The same bytes written aside and renamed over: another file holds the name.
+    live.length = 0;
+    writeFileSync(`${tree.transcriptPath}.tmp`, sameLength);
+    renameSync(`${tree.transcriptPath}.tmp`, tree.transcriptPath);
+    check('a transcript replaced by rename resets the reader, however alike the bytes', await resetsWithin(live, 5_000) === 1,
+      live.map((m) => m.type).join(','));
+    await connection.getHistory();
+
+    // An ordinary append after all that is an append again.
+    live.length = 0;
+    const extra = { ...FIXTURE.transcript[6], step_index: 999 };
+    appendFileSync(tree.transcriptPath, jsonl([extra]));
+    await drainNow(connection);
+    check('an append after the reloads is read as an append, not a rewrite',
+      !live.some((m) => m.type === 'history-reset') && live.length > 0, live.map((m) => m.type).join(','));
     await connection.close();
   } finally {
     tree.cleanup();

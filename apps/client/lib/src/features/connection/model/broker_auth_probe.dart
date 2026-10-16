@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
 
 /// Probes an *authenticated* broker endpoint to classify the connection gate.
 ///
@@ -47,6 +50,7 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
     })?
     clientFactory,
     BrokerHttpTransport? transport,
+    this.timeout = brokerProbeTimeout,
   }) : _clientFactory =
            clientFactory ??
            (({required baseUrl, token, peerToken}) => BrokerClient(
@@ -62,6 +66,10 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
     String? peerToken,
   })
   _clientFactory;
+
+  /// Longest wait for the broker's answer before the probe reports that it
+  /// did not answer.
+  final Duration timeout;
 
   @override
   Future<BrokerGateState> probe({
@@ -84,7 +92,7 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
     );
 
     try {
-      final response = await client.getBrokerHealth();
+      final response = await client.getBrokerHealth().timeout(timeout);
       return BrokerGateState.connected(
         machine: response.machine,
         brokerUrl: baseUrl,
@@ -106,6 +114,14 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
       return BrokerGateState.unreachable(
         detail: e.error?.error ?? e.message,
         brokerUrl: baseUrl,
+      );
+    } on TimeoutException catch (e) {
+      // Reached, but silent: not a credential verdict and not a refused
+      // connection either.
+      return BrokerGateState.unreachable(
+        detail: e.toString(),
+        brokerUrl: baseUrl,
+        noAnswer: true,
       );
     } on Object catch (e) {
       return BrokerGateState.unreachable(

@@ -32,7 +32,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, delimiter, join } from 'node:path';
+import { basename, delimiter, join, relative, sep } from 'node:path';
 import { eventually, fixturePath, type FixturePaths, type Frame, type SessionStream } from '../../harness/index.ts';
 import {
   appendRows,
@@ -55,6 +55,7 @@ import {
   type FakeController,
   installFakeExecutable,
   Ledger,
+  makeFifo,
   type LedgerEntry,
   type SeededSession,
   type SeedOptions,
@@ -135,8 +136,6 @@ export const claudeProfile: ConformanceProfile = {
     'C20.mode': 'the app-selected Claude permission mode is lost when the Drive connection is rebuilt (broker '
       + 'restart): the roster row has no currentMode and the next child launches without --permission-mode',
     'C13.clientKey': 'the joined socket replays the owner\'s pending row without its clientKey (same defect as C09)',
-    C11: 'Claude Drive writes any permission decision to the child and broadcasts permission-resolved: a forged '
-      + 'request id and a second decision on a settled card are both acked',
     C16: 'nothing gates Claude Create or Take over on the CLI version: doctor fails a build below 2.1.207 '
       + '(version-below-minimum), and the product still creates and drives it',
     C17: 'stored Claude rows keep offering Drive (drive.supported) while the claude binary is missing; the '
@@ -161,52 +160,60 @@ export const claudeProfile: ConformanceProfile = {
     {
       name: 'a project directory that is a symlink to a directory outside the store',
       unsupportedOn: ['win32'],
-      knownBug: {
-        aspect: 'roster',
-        bug: 'discovery follows a symlinked project directory and lists its transcripts, which attach then refuses '
-          + 'as outside the store',
-      },
       plant: (fake) => plantClaude(fake as ClaudeFake, { link: 'project' }),
+    },
+    {
+      name: 'a dangling symlink named like a transcript',
+      unsupportedOn: ['win32'],
+      plant: (fake) => plantClaude(fake as ClaudeFake, { link: 'dangling' }),
+    },
+    {
+      name: 'an id that climbs out of the projects root through ..',
+      plant: (fake) => plantClaude(fake as ClaudeFake, { climb: true }),
     },
     {
       name: 'a FIFO named like a transcript',
       unsupportedOn: ['win32'],
-      knownBug: {
-        aspect: 'attach',
-        bug: 'attaching to a row id that names a FIFO inside the store blocks the broker\'s event loop in a '
-          + 'synchronous open (the whole broker stops answering)',
-      },
       plant: (fake) => plantClaude(fake as ClaudeFake, { fifo: true }),
     },
     {
       name: 'a subagent transcript that is a symlink to a file outside the store',
       unsupportedOn: ['win32'],
-      knownBug: {
-        aspect: 'roster',
-        bug: 'discovery follows a symlinked subagent transcript and lists it as a child row, which attach then '
-          + 'refuses as outside the store',
-      },
       plant: (fake) => plantClaudeChild(fake as ClaudeFake, { link: true }),
+    },
+    {
+      // Discovery reads a child's `.meta.json` before its transcript, so both are pipes.
+      name: 'a subagent whose transcript and metadata are FIFOs',
+      unsupportedOn: ['win32'],
+      plant: (fake) => plantClaudeChild(fake as ClaudeFake, { fifo: true }),
     },
   ],
 };
 
 /** A hostile parent transcript entry. Returns the row id that must stay unpublished. */
-function plantClaude(fake: ClaudeFake, options: { link?: 'file' | 'project'; fifo?: boolean }): string {
+function plantClaude(fake: ClaudeFake, options: { link?: 'file' | 'project' | 'dangling'; fifo?: boolean; climb?: boolean }): string {
   const uuid = crypto.randomUUID();
   const cwd = fake.workspace('hostile');
   const context: TranscriptContext = { sessionId: uuid, cwd, entrypoint: 'cli' };
   const rows = [claudeUserRow(context, null, 'hostile row'), { type: 'custom-title', customTitle: `hostile ${uuid}`, sessionId: uuid }];
   const path = claudeTranscriptPath(fake.storeRoot, cwd, uuid);
   if (options.fifo) {
+    makeFifo(path);
+    return claudeRowId(path);
+  }
+  if (options.link === 'dangling') {
     mkdirSync(join(path, '..'), { recursive: true });
-    const made = Bun.spawnSync(['mkfifo', path], { timeout: 10_000 });
-    if (made.exitCode !== 0) throw new Error(`mkfifo failed: ${made.stderr}`);
+    symlinkSync(join(fake.workspace('gone'), `${uuid}.jsonl`), path);
     return claudeRowId(path);
   }
   const outside = join(fake.workspace('outside'), 'project');
   mkdirSync(outside, { recursive: true });
   appendRows(join(outside, `${uuid}.jsonl`), rows);
+  if (options.climb) {
+    // Spelled from inside the projects root, so only resolving `..` shows where it lands.
+    const projects = join(fake.storeRoot, 'projects');
+    return claudeRowId(`${projects}${sep}..${sep}${relative(fake.storeRoot, join(outside, `${uuid}.jsonl`))}`);
+  }
   if (options.link === 'file') {
     mkdirSync(join(path, '..'), { recursive: true });
     symlinkSync(join(outside, `${uuid}.jsonl`), path);
@@ -217,12 +224,20 @@ function plantClaude(fake: ClaudeFake, options: { link?: 'file' | 'project'; fif
 }
 
 /** A hostile subagent entry under a fresh parent. Returns the row id that must stay unpublished. */
-function plantClaudeChild(fake: ClaudeFake, options: { meta?: Record<string, unknown>; rawMeta?: string; nested?: boolean; link?: boolean }): string {
+function plantClaudeChild(
+  fake: ClaudeFake,
+  options: { meta?: Record<string, unknown>; rawMeta?: string; nested?: boolean; link?: boolean; fifo?: boolean },
+): string {
   const parent = fake.seedSession({ title: 'hostile parent' });
   const agent = `agent-${crypto.randomUUID().replaceAll('-', '').slice(0, 17)}`;
   const subagents = join(fake.transcriptOf(parent).replace(/\.jsonl$/, ''), 'subagents');
   const dir = options.nested ? join(subagents, 'workflows', `wf-${crypto.randomUUID().slice(0, 8)}`) : subagents;
   mkdirSync(dir, { recursive: true });
+  if (options.fifo) {
+    makeFifo(join(dir, `${agent}.meta.json`));
+    makeFifo(join(dir, `${agent}.jsonl`));
+    return claudeRowId(join(dir, `${agent}.jsonl`));
+  }
   writeFileSync(join(dir, `${agent}.meta.json`), options.rawMeta ?? JSON.stringify(options.meta ?? { agentType: 'general-purpose', description: 'hostile child', toolUseId: 'toolu_hostile' }));
   const context: TranscriptContext = { sessionId: claudeUuidOf(parent.id), cwd: parent.cwd, entrypoint: 'cli' };
   const rows = [{ ...claudeUserRow(context, null, 'hostile child prompt'), isSidechain: true }];

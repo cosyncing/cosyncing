@@ -1,8 +1,6 @@
 {
   "provenance": "synthetic, derived from packages/typescript/broker/test/pi/test-tool-result-enrich.ts",
   "description": "an assistant entry whose content array holds null or primitive blocks must cost those blocks, never the history read",
-  "knownBugMatch": "null is not an object",
-  "knownBug": "Pi engine mapPiMessage: `for (const c of content) if (c.type ...)` throws TypeError on a null or primitive block, so one malformed assistant entry makes getHistory() (attach) throw; Claude and Codex skip such lines",
   "userTexts": [
     "before"
   ],

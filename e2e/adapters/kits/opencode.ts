@@ -103,14 +103,6 @@ export const opencodeProfile: ConformanceProfile = {
   },
   subagents: false,
   missingBinaryRoster: 'hidden',
-  knownBugs: {
-    C21: 'attaching to an id the serve never listed (or the roster withholds) yields an empty history frame '
-      + 'instead of an error: the adapter falls back to a placeholder session for any id',
-    'C11.lateDuplicate': 'a tab that joins while a permission card is open receives that card twice as live '
-      + 'messages (same requestId, around the status frame), outside its history frame',
-    'C04.explicit': 'an explicit mode=observe attach of a shared-serve session is granted full authority '
-      + '(canMutate true, prompt full) and its prompts reach the serve; only readOnly=1 renounces it',
-  },
   scenarios: {
     C07: {
       skip: 'a serve session is created by one POST /session, with no child: the create child-adoption and '
@@ -150,18 +142,20 @@ export const opencodeProfile: ConformanceProfile = {
         return '42';
       },
     },
-    {
-      name: 'a session id that climbs out of the session route',
-      knownBug: 'the roster publishes an id like ../../etc/passwd as a session, and the adapter splices ids into serve '
-        + 'URLs unencoded, so attaching to it requests GET /etc/passwd (and /etc/passwd/message) on the serve',
-      plant: (fake) => {
-        const directory = fake.workspace('hostile');
-        (fake as OpencodeFake).serve.plantRaw(directory, { id: '../../etc/passwd', title: 'traversal', directory, time: { created: 1, updated: 2 } });
-        return '../../etc/passwd';
-      },
-    },
+    { name: 'a session id that climbs out of the session route', plant: (fake) => plantOpencodeId(fake, '../../etc/passwd') },
+    { name: 'a session id that is a dot-dot segment', plant: (fake) => plantOpencodeId(fake, '..') },
+    { name: 'a session id that climbs out once percent-decoded', plant: (fake) => plantOpencodeId(fake, '%2e%2e%2f%2e%2e%2fetc%2fpasswd') },
+    { name: 'a session id that is an absolute path', plant: (fake) => plantOpencodeId(fake, '/etc/passwd') },
+    { name: 'a session id that reads as a command-line option', plant: (fake) => plantOpencodeId(fake, '--help') },
   ],
 };
+
+/** A session the serve lists under a hostile id: it must stay unpublished, and nothing may reach the serve for it. */
+function plantOpencodeId(fake: FakeController, id: string): string {
+  const directory = fake.workspace('hostile');
+  (fake as OpencodeFake).serve.plantRaw(directory, { id, title: 'hostile id', directory, time: { created: 1, updated: 2 } });
+  return id;
+}
 
 // --------------------------------------------------------------------- ledger
 
@@ -476,6 +470,52 @@ const opencodeExtras: ConformanceExtra[] = [
     },
   },
   {
+    title: 'a prompt that names no model runs on the model the app chose, across a restart, until the session names its own',
+    async run(context) {
+      const fake = fakeOf(context);
+      const id = fake.prepareCreate();
+      const cwd = fake.workspace('chosen-model');
+      const target = { providerID: OPENCODE_PROVIDER, modelID: 'model-b' };
+      const created = await context.client.post('/api/sessions/opencode', { directory: cwd, title: 'Chosen model', model: target });
+      expect(created.status, created.text).toBe(200);
+      // OpenCode records no model at create, so after a restart the broker's durable choice is all there is.
+      await context.restart();
+      await context.client.waitForSession((row) => row.id === id);
+      const stream = await context.openDrive({ id, cwd, reason: 'create' });
+      expect(lastSession(stream).info.currentModel).toMatchObject(target);
+      const mark = fake.ledger.mark();
+      // Named by neither the prompt nor the session: it runs on the chosen model, not OpenCode's default.
+      expect((await context.prompt(stream, 'no model named')).kind).toBe('ack');
+      // Once a turn has run on it the session names it itself, and OpenCode picks it for a model-less prompt.
+      expect((await context.prompt(stream, 'still no model named')).kind).toBe('ack');
+      expect(fake.ledger.routed('POST', /\/prompt_async$/, mark).map((entry) => (entry.body as any).model ?? null))
+        .toEqual([target, null]);
+      expect(fake.serve.session(id).info.model).toMatchObject({ providerID: OPENCODE_PROVIDER, modelID: 'model-b' });
+      stream.close();
+      // A session whose own messages name a model (a turn run in a terminal) is not sent the app's choice
+      // over it either, though the session record names none.
+      const termId = fake.prepareCreate();
+      const termCwd = fake.workspace('terminal-model');
+      const termCreated = await context.client.post('/api/sessions/opencode', { directory: termCwd, title: 'Terminal model', model: target });
+      expect(termCreated.status, termCreated.text).toBe(200);
+      fake.serve.addRow(termId, { info: { id: 'msg_term_model_u', role: 'user', time: { created: Date.now() }, model: { providerID: OPENCODE_PROVIDER, modelID: 'model-a' } },
+        parts: [{ id: 'prt_term_model_u', type: 'text', text: 'typed in the terminal' }] });
+      const term = await context.openDrive({ id: termId, cwd: termCwd, reason: 'create' });
+      const termMark = fake.ledger.mark();
+      expect((await context.prompt(term, 'after the terminal turn')).kind).toBe('ack');
+      expect(fake.ledger.routed('POST', /\/prompt_async$/, termMark).map((entry) => (entry.body as any).model ?? null)).toEqual([null]);
+      term.close();
+      // A session that names its own model is never sent the app's earlier choice over it.
+      const seeded = fake.seedSession({ title: 'own model' });
+      await context.client.waitForSession((row) => row.id === seeded.id);
+      const own = await context.openDrive({ id: seeded.id, cwd: seeded.cwd, reason: 'takeover' });
+      const ownMark = fake.ledger.mark();
+      expect((await context.prompt(own, 'on its own model')).kind).toBe('ack');
+      expect(fake.ledger.routed('POST', /\/prompt_async$/, ownMark).map((entry) => (entry.body as any).model ?? null)).toEqual([null]);
+      own.close();
+    },
+  },
+  {
     title: 'rename PATCHes the trimmed title, fork POSTs the message id, and a failure names no serve detail',
     async run(context) {
       const fake = fakeOf(context);
@@ -669,13 +709,75 @@ const opencodeExtras: ConformanceExtra[] = [
     },
   },
   {
+    title: 'a native failure shows once, whichever of its two reports comes first and however often its message is announced',
+    async run(context) {
+      const fake = fakeOf(context);
+      const seeded = fake.seedSession({ title: 'failure once' });
+      await context.client.waitForSession((row) => row.id === seeded.id);
+      const stream = await context.openDrive({ id: seeded.id, cwd: seeded.cwd, reason: 'takeover' });
+      const from = stream.frames.length;
+      const errorRows = (text: string) => stream.frames.slice(from)
+        .filter((frame) => frame.kind === 'message' && frame.message.type === 'error' && frame.message.message === text).length;
+      // Everything the serve published before a sentinel has been handled once the sentinel shows.
+      let sentinels = 0;
+      const settled = async () => {
+        const text = `sentinel ${++sentinels}`;
+        fake.serve.publish({ type: 'message.part.updated', properties: {
+          sessionID: seeded.id, part: { id: `prt_sentinel_${sentinels}`, type: 'text', text, sessionID: seeded.id, messageID: `msg_sentinel_${sentinels}` },
+        } });
+        await stream.waitForMessage((message) => message.type === 'model-output' && textOf(message) === text);
+      };
+      // The serve's own order: `session.error`, then the assistant message carrying the same error. (The
+      // prompt's ack waits for the serve to finish the turn it started.)
+      expect((await context.prompt(stream, '[[error]] explode')).kind).toBe('ack');
+      await settled();
+      expect(errorRows('model exploded')).toBe(1);
+      // The other order, with the failed message announced twice as it updates: still one row.
+      const failed = (id: string, text: string) => ({ type: 'message.updated', properties: { sessionID: seeded.id, info: {
+        id, sessionID: seeded.id, role: 'assistant', time: { created: Date.now(), completed: Date.now() }, error: { name: 'ProviderError', data: { message: text } },
+      } } });
+      fake.serve.publish(failed('msg_failed_twice', 'quota exhausted'));
+      fake.serve.publish(failed('msg_failed_twice', 'quota exhausted'));
+      fake.serve.publish({ type: 'session.error', properties: { sessionID: seeded.id, error: { name: 'ProviderError', data: { message: 'quota exhausted' } } } });
+      await settled();
+      expect(errorRows('quota exhausted')).toBe(1);
+      // A failure reported once, then the same failure in the next turn: a new failure, and it shows. The
+      // next turn's user row announced again (the serve updates it after the turn) does not start another.
+      const user = (id: string) => ({ type: 'message.updated', properties: { sessionID: seeded.id, info: { id, sessionID: seeded.id, role: 'user', time: { created: Date.now() } } } });
+      const sessionError = (text: string) => ({ type: 'session.error', properties: { sessionID: seeded.id, error: { name: 'ProviderError', data: { message: text } } } });
+      fake.serve.publish(user('msg_turn_a'));
+      fake.serve.publish(sessionError('rate limited'));
+      await settled();
+      expect(errorRows('rate limited')).toBe(1);
+      fake.serve.publish(user('msg_turn_b'));
+      fake.serve.publish(failed('msg_failed_b', 'rate limited'));
+      await settled();
+      expect(errorRows('rate limited')).toBe(2);
+      fake.serve.publish(user('msg_turn_b'));
+      fake.serve.publish(sessionError('rate limited'));
+      await settled();
+      expect(errorRows('rate limited')).toBe(2);
+      stream.close();
+      // A reader of the history sees the failed turn's error once too.
+      const fresh = await context.client.attach('opencode', seeded.id);
+      const history = (await fresh.waitForKind('history')).messages as any[];
+      expect(history.filter((message) => message.type === 'error' && message.message === 'model exploded').length).toBe(1);
+      fresh.close();
+    },
+  },
+  {
     title: 'an identical message typed in a terminal is not stamped as the app\'s own send',
     async run(context) {
       const fake = fakeOf(context);
       const session = await context.drivableSession('stamp');
       const stream = await context.openDrive(session);
       expect((await context.prompt(stream, 'same words', { clientMessageId: 'stamp-1' })).kind).toBe('ack');
-      await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+      // The app's own echo and its own turn's end are in before the cursor is taken. The ack answers the
+      // POST, which can beat the echo on the event stream, and the seeded turn's finished summary is
+      // already in the history, so neither alone says the echo arrived.
+      const ownEcho = await stream.waitForMessage((message) => message.type === 'user-message' && message.clientKey === 'stamp-1');
+      await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done'
+        && message.userMessageKey === ownEcho.key);
       const from = stream.frames.length;
       // The TUI types the very same text: the echo is a different native message, so it has no app key.
       fake.serve.appendTurn(session.id, 'same words', 'terminal answer');

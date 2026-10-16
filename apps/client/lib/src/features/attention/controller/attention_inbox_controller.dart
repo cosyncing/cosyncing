@@ -205,14 +205,13 @@ final class AttentionInboxActions {
         .markRead(brokerScopeKey, entry.event.id, readAt: readAt);
     _invalidate();
     await _clearNotification(entry);
-    final client = await ref.read(
-      attentionProfileClientProvider(entry.profile).future,
-    );
-    final clientId = await ref.read(attentionClientIdProvider.future);
-    await client.acknowledgeAttentionEvent(
-      entry.event.id,
-      clientId: clientId,
-    );
+    await _withProfileClient(entry.profile, (client) async {
+      final clientId = await ref.read(attentionClientIdProvider.future);
+      await client.acknowledgeAttentionEvent(
+        entry.event.id,
+        clientId: clientId,
+      );
+    });
     await ref
         .read(attentionRepositoryProvider)
         .markBrokerReadSynced(
@@ -235,14 +234,13 @@ final class AttentionInboxActions {
         );
     _invalidate();
     await _clearNotification(entry);
-    final client = await ref.read(
-      attentionProfileClientProvider(entry.profile).future,
-    );
-    final clientId = await ref.read(attentionClientIdProvider.future);
-    await client.dismissAttentionEvent(
-      entry.event.id,
-      clientId: clientId,
-    );
+    await _withProfileClient(entry.profile, (client) async {
+      final clientId = await ref.read(attentionClientIdProvider.future);
+      await client.dismissAttentionEvent(
+        entry.event.id,
+        clientId: clientId,
+      );
+    });
     await ref
         .read(attentionRepositoryProvider)
         .markBrokerDismissedSynced(
@@ -335,30 +333,29 @@ final class AttentionInboxActions {
           continue;
         }
         try {
-          final client = await ref.read(
-            attentionProfileClientProvider(profile).future,
-          );
-          for (
-            var offset = 0;
-            offset < profileEntry.value.length;
-            offset += attentionBulkDismissMax
-          ) {
-            final end =
-                offset + attentionBulkDismissMax < profileEntry.value.length
-                ? offset + attentionBulkDismissMax
-                : profileEntry.value.length;
-            final result = await client.dismissAttentionEvents(
-              profileEntry.value
-                  .sublist(offset, end)
-                  .map((snapshot) => snapshot.bulkItem)
-                  .toList(growable: false),
-              clientId: clientId,
-            );
-            staleEvents += await repository.reconcileBulkDismissResult(
-              brokerProfileId: profileEntry.key,
-              result: result,
-            );
-          }
+          await _withProfileClient(profile, (client) async {
+            for (
+              var offset = 0;
+              offset < profileEntry.value.length;
+              offset += attentionBulkDismissMax
+            ) {
+              final end =
+                  offset + attentionBulkDismissMax < profileEntry.value.length
+                  ? offset + attentionBulkDismissMax
+                  : profileEntry.value.length;
+              final result = await client.dismissAttentionEvents(
+                profileEntry.value
+                    .sublist(offset, end)
+                    .map((snapshot) => snapshot.bulkItem)
+                    .toList(growable: false),
+                clientId: clientId!,
+              );
+              staleEvents += await repository.reconcileBulkDismissResult(
+                brokerProfileId: profileEntry.key,
+                result: result,
+              );
+            }
+          });
         } on Object {
           // Local revision-scoped dismissals stay durable for the profile
           // mutation drain.
@@ -376,6 +373,25 @@ final class AttentionInboxActions {
       pendingProfiles: pendingProfiles,
       staleEvents: staleEvents,
     );
+  }
+
+  /// Runs [action] with [profile]'s client held open until it is done.
+  ///
+  /// The client provider is auto-disposed and these actions are not widgets:
+  /// a bare read left it with no listener, so it was disposed — and the
+  /// client closed — before the post went out, and the broker heard of the
+  /// action only at the next mutation drain.
+  Future<void> _withProfileClient(
+    BrokerProfile profile,
+    Future<void> Function(BrokerClient client) action,
+  ) async {
+    final provider = attentionProfileClientProvider(profile);
+    final hold = ref.listen(provider, (_, _) {});
+    try {
+      await action(await ref.read(provider.future));
+    } finally {
+      hold.close();
+    }
   }
 
   static String _snapshotKey(

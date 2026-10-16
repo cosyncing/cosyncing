@@ -374,11 +374,9 @@ describe('scheduled sends', () => {
     expect(claude.option(launch, '--effort')).toBe('high');
   });
 
-  // Product bug: an OpenCode new-session schedule accepts and validates a model, but delivery sends
-  // the first prompt with only its text, so OpenCode runs it on its default model. A Claude schedule
-  // keeps the model (the test above). The schedule record and the created session both claim the
-  // chosen model.
-  test.failing('a scheduled OpenCode session’s first prompt runs on the model it was scheduled with', async () => {
+  // OpenCode's create cannot take a model (the fake, like the real server, refuses one), so the
+  // chosen model only reaches OpenCode on the first prompt, the way the composer sends it.
+  test('a scheduled OpenCode session’s first prompt runs on the model it was scheduled with', async () => {
     const model = { providerID: CATALOG_PROVIDER, modelID: 'test-model' };
     const scheduled = await world.create({ kind: 'new-session', tool: 'opencode', directory: broker.paths.home, text: 'scheduled with a model', at: clock.now() + HOUR, model });
     expect(scheduled.model).toEqual(model);

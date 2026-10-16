@@ -87,6 +87,15 @@ export interface PiDialect {
    * not append an entry type omp does not own.
    */
   createTimeTitle: 'session_info' | 'native';
+  /**
+   * What the runtime itself writes to a session file it has loaded, besides appending entries.
+   * `never`: pi appends only (its load-time migration rewrite happens before it answers RPC).
+   * `title-slot`: omp keeps a fixed-width title slot as the first line, overwrites it in place, and
+   * otherwise rewrites the whole body (atomically, through a new inode) always starting with that
+   * slot and carrying every entry, as it loaded them (migrated or sanitized). Drive judges another
+   * writer's changes against this.
+   */
+  sessionFileRewrites: 'never' | 'title-slot';
   /** Durable run-summary key namespace (`pi:run:` / `omp:run:`). */
   eventKeyNamespace: string;
   /** `source` labels stamped on mapped messages. */
@@ -197,6 +206,7 @@ export const PI_DIALECT: PiDialect = {
   lifecycleCommands: { fork: true, clone: true },
   titleEntryTypes: ['session_info'],
   createTimeTitle: 'session_info',
+  sessionFileRewrites: 'never',
   eventKeyNamespace: 'pi:run:',
   eventSources: { rpc: 'pi-rpc', jsonl: 'pi-jsonl', bridge: 'pi-bridge' },
   parseModelChange: piParseModelChange,

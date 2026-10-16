@@ -162,6 +162,25 @@
       }
     }
   },
+  "brokerGateNoAnswerTitle": "{serverName} didn't answer",
+  "@brokerGateNoAnswerTitle": {
+    "description": "Title shown when the selected saved server took the connection but did not answer the sign-in check in time.",
+    "placeholders": {
+      "serverName": {
+        "type": "String"
+      }
+    }
+  },
+  "brokerGateNoAnswerBodyAt": "The server at {brokerUrl} took the connection but didn't answer in time. It may be busy or stuck. Try again in a moment, or restart the server.",
+  "@brokerGateNoAnswerBodyAt": {
+    "description": "Body shown when the server at a known address took the connection but sent nothing back in time.",
+    "placeholders": {
+      "brokerUrl": {
+        "type": "String",
+        "example": "http://127.0.0.1:7734"
+      }
+    }
+  },
   "brokerGateSwitchServer": "Switch server",
   "brokerGateAddServer": "Add another server",
   "brokerGateMissingTitle": "Connect this device",
@@ -353,6 +372,10 @@
   "sessionExportBadParam": "Transcript export request was rejected by the server.",
   "@sessionExportBadParam": {
     "description": "Refusal: the broker rejected the export request."
+  },
+  "sessionExportTooLarge": "This transcript is larger than the server's export size limit.",
+  "@sessionExportTooLarge": {
+    "description": "Refusal: the transcript export is over the broker's size cap."
   },
   "failureNoticeHistoryPageTimeout": "Loading earlier history timed out. Reconnect or try again.",
   "@failureNoticeHistoryPageTimeout": {
@@ -1156,70 +1179,6 @@
   "@sessionsWorkspaceEmptyCreationCheckFailed": {
     "description": "Expanded roster empty copy when creation capability discovery failed."
   },
-  "sessionsNewAction": "New",
-  "sessionsMachineTitle": "Machine sessions",
-  "sessionsMachineRefresh": "Refresh machine sessions",
-  "sessionsMachineLoadFailed": "Couldn't load machine sessions. Check the server connection and retry.",
-  "sessionsMachineNone": "No configured machines.",
-  "sessionsMachineStale": "This machine record is out of date. Refresh the list and try again.",
-  "sessionsMachineOwnerUnknown": "Couldn't determine which server owns this session. Refresh the list and try again.",
-  "sessionsMachineOwnerUnreachable": "The server that owns this session is not reachable right now.",
-  "sessionsMachineOwnerAmbiguous": "More than one server reported this session. Refresh the machine list before opening it.",
-  "sessionsMachineOwnerNotFound": "This session is no longer available on its reported server.",
-  "sessionsMachineNoRoute": "The owning server didn't provide a direct connection address.",
-  "sessionsMachineConnectTitle": "Connect to {machine}?",
-  "@sessionsMachineConnectTitle": {
-    "placeholders": {
-    }
-  },
-  "sessionsMachineConnectBody": "This session belongs to another server. cosyncing will switch to the independently paired “{profileName}” profile.",
-  "@sessionsMachineConnectBody": {
-    "placeholders": {
-      "profileName": {
-        "type": "String"
-      }
-    }
-  },
-  "sessionsMachinePairTitle": "Pair this server separately",
-  "sessionsMachinePairBody": "{machine} owns this session at {brokerUrl}. Save and pair that server as its own profile before connecting. Credentials from the current server are never forwarded.",
-  "@sessionsMachinePairBody": {
-    "placeholders": {
-      "brokerUrl": {
-        "type": "String"
-      }
-    }
-  },
-  "sessionsMachineOpenProfiles": "Server Profiles",
-  "sessionsMachineRoleLocal": "This device",
-  "sessionsMachineRolePeer": "Remote device",
-  "sessionsMachineRoleUnknown": "Unknown device",
-  "sessionsMachineFresh": "Current",
-  "sessionsMachineStaleStatus": "Out of date",
-  "sessionsMachineFreshnessUnknown": "Freshness unknown",
-  "sessionsMachineDegraded": "Degraded",
-  "sessionsMachineInvalidCount": "{count, plural, =1{1 invalid session} other{{count} invalid sessions}}",
-  "@sessionsMachineInvalidCount": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "sessionsMachineRouteLocal": "local",
-  "sessionsMachineRouteDirect": "direct",
-  "sessionsMachineRouteUnavailable": "route unavailable",
-  "sessionsMachineReadOnly": "Read-only",
-  "sessionsScheduledConfirmation": "Session scheduled for {date}.",
-  "@sessionsScheduledConfirmation": {
-    "placeholders": {
-      "date": {
-        "type": "String"
-      }
-    }
-  },
-  "sessionsLoading": "Loading sessions…",
-  "sessionsLoadFailedTitle": "Couldn't load sessions",
-  "sessionsLoadFailedBody": "Check the server connection and try again.",
   "@sessionsEmptyActiveBody": {
     "description": "Body of the sessions empty state when a broker is connected but idle."
   },
@@ -3377,25 +3336,51 @@
   "@sessionDriveRestoreConflictNote": {
     "description": "Status note after ownership facts block an automatic Drive restore; the manual Take over stays available."
   },
+  "sessionDriveRestoreConflictNoTakeoverNote": "Drive was not restored automatically because another owner may be active. It stays in Observe.",
+  "@sessionDriveRestoreConflictNoTakeoverNote": {
+    "description": "Status note after ownership facts block an automatic Drive restore on a session that offers no Take over, so none is suggested."
+  },
   "sessionDriveRestoreFailureNote": "Drive could not be restored automatically. You can still choose Take over.",
   "@sessionDriveRestoreFailureNote": {
     "description": "Status note after a non-ownership Drive restore failure; the manual Take over stays available."
   },
-  "sessionDriveNativeRestoreUnresumableNote": "Codex could not resume this session to restore Drive automatically. It stays in Observe.",
-  "@sessionDriveNativeRestoreUnresumableNote": {
-    "description": "Status note after the native Codex runtime rejects thread resume during automatic Drive restoration."
+  "sessionDriveRestoreFailureNoTakeoverNote": "Drive could not be restored automatically. It stays in Observe.",
+  "@sessionDriveRestoreFailureNoTakeoverNote": {
+    "description": "Status note after a non-ownership Drive restore failure on a session that offers no Take over (for example, its agent is not installed), so none is suggested."
   },
-  "sessionDriveNativeTakeoverUnresumableNote": "Codex could not resume this session for Take over. It stays in Observe.",
+  "sessionDriveNativeRestoreUnresumableNote": "{agentName} could not resume this session to restore Drive automatically. It stays in Observe.",
+  "@sessionDriveNativeRestoreUnresumableNote": {
+    "description": "Status note after the session's agent rejects resuming it during automatic Drive restoration. agentName is the agent's display name.",
+    "placeholders": {
+      "agentName": {
+        "type": "String",
+        "example": "Grok Build"
+      }
+    }
+  },
+  "sessionDriveNativeTakeoverUnresumableNote": "{agentName} could not resume this session for Take over. It stays in Observe.",
   "@sessionDriveNativeTakeoverUnresumableNote": {
-    "description": "Immediate feedback after the native Codex runtime rejects thread resume during a manual takeover."
+    "description": "Immediate feedback after the session's agent rejects resuming it during a manual takeover. agentName is the agent's display name.",
+    "placeholders": {
+      "agentName": {
+        "type": "String",
+        "example": "Grok Build"
+      }
+    }
   },
   "sessionDriveTakeoverTimeoutNote": "The server did not confirm the takeover. The session stays in Observe; you can try Take over again.",
   "@sessionDriveTakeoverTimeoutNote": {
     "description": "Status note after a manual takeover was not confirmed by the broker in time; the session remains observed and the action can be retried."
   },
-  "sessionDriveTakeoverOwnershipConflictNote": "Couldn’t take over because Codex Desktop or another Codex client may still control this session. It remains read-only in Cosyncing.",
+  "sessionDriveTakeoverOwnershipConflictNote": "Couldn’t take over because another {agentName} client or terminal may still control this session. It remains read-only in Cosyncing.",
   "@sessionDriveTakeoverOwnershipConflictNote": {
-    "description": "Persistent composer and immediate feedback after a manual Codex takeover is refused because another native writer is active."
+    "description": "Persistent composer and immediate feedback after a manual takeover is refused because another writer of the session (a desktop app, another client or a terminal) may be active. agentName is the session's agent display name.",
+    "placeholders": {
+      "agentName": {
+        "type": "String",
+        "example": "Claude"
+      }
+    }
   },
   "sessionDriveTakeoverOwnershipUnknownNote": "Couldn’t verify who controls this session because the Codex daemon’s ownership check failed. It remains read-only; this does not mean Codex Desktop is open.",
   "@sessionDriveTakeoverOwnershipUnknownNote": {
@@ -3404,6 +3389,10 @@
   "sessionDriveRestoreOwnershipUnknownNote": "Drive was not restored because Codex daemon ownership could not be verified. The session remains read-only; you can retry Take over.",
   "@sessionDriveRestoreOwnershipUnknownNote": {
     "description": "Automatic restoration refused because daemon ownership could not be verified."
+  },
+  "sessionDriveRestoreOwnershipUnknownNoTakeoverNote": "Drive was not restored because Codex daemon ownership could not be verified. The session remains read-only.",
+  "@sessionDriveRestoreOwnershipUnknownNoTakeoverNote": {
+    "description": "Automatic restoration refused because daemon ownership could not be verified, on a session that offers no Take over, so none is suggested."
   },
   "sessionDriveTakeoverFailureNote": "Couldn’t take over. The session remains in Observe.",
   "@sessionDriveTakeoverFailureNote": {
@@ -4272,6 +4261,14 @@
   "@sessionControlReconnecting": {
     "description": "Session Detail control pill while the session transport is being re-established."
   },
+  "sessionControlDetached": "Detached",
+  "@sessionControlDetached": {
+    "description": "Session Detail control pill after the user pressed Detach: the stream is closed on purpose and does not reopen on its own."
+  },
+  "sessionControlDetachedDescription": "You detached this device. The agent keeps running on the Server; Attach to follow it again.",
+  "@sessionControlDetachedDescription": {
+    "description": "Session control card text after the user pressed Detach; Attach is the way back."
+  },
   "sessionComposerPromptHint": "Send a prompt",
   "@sessionComposerPromptHint": {
     "description": "Placeholder in the Session Detail prompt composer."
@@ -4686,6 +4683,10 @@
   "connectionInvalidUrl": "That server address isn't valid. Check it and try again.",
   "connectionBrokerUnhealthy": "The server responded, but its health check failed. Check the server host, then try again.",
   "connectionBrokerUnreachable": "Couldn't reach the server. Check that it's running and that the address and network are right, then try again.",
+  "connectionBrokerNoAnswer": "The server took the connection but didn't answer in time. It may be busy or stuck. Try again in a moment.",
+  "@connectionBrokerNoAnswer": {
+    "description": "Connection status when the server took the connection but its health check sent nothing back in time."
+  },
   "pairingFieldLabel": "Pairing code or link",
   "pairingFieldHint": "Paste what the server gave you",
   "pairingBrokerUrlLabel": "Broker URL (optional)",

@@ -516,7 +516,10 @@ final class TranscriptHistoryWindow {
               total: event.truncated?.total ?? event.messages.length,
             )
           : event.truncated,
-      liveState: SessionLiveState.fromMessages(tailMessages),
+      // Every frame, not the collapsed tail: the projection orders work by
+      // when it was first seen, which the collapse moves to the last
+      // restatement. Live delivery and a delta frame fold every row too.
+      liveState: SessionLiveState.fromMessages(event.messages),
       telemetry: SessionTelemetry.fromMessages(tailMessages),
       questionState: questionState,
       releasedRanges: const {},

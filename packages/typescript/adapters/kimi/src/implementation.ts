@@ -73,6 +73,8 @@ import {
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   OwnershipConflictError,
   SessionCreateTemporarilyUnavailableError,
+  SessionNotFoundError,
+  isOpaqueSessionId,
   type AgentBackend,
   type AgentMessage,
   type AgentCapabilities,
@@ -224,6 +226,9 @@ export const KIMI_LIVE_ATTACH_NO_STREAM =
  * oldest costs at worst a first prompt that runs on the session default.
  */
 export const KIMI_PENDING_MODEL_LIMIT = 64;
+
+/** The host's business code for an unknown session (answered with HTTP 200, see `server.ts`). */
+const KIMI_SESSION_NOT_FOUND_CODE = 40401;
 
 /** Why a foreign session refuses a live attach, in the caller's language. */
 export const KIMI_FOREIGN_ATTACH_REFUSAL =
@@ -1135,6 +1140,22 @@ export class KimiAdapter implements AgentBackend {
     };
   }
 
+  /**
+   * Prove the host holds `sessionId` before an attach falls back to a session its listing did not
+   * return: `GET /api/v1/sessions/{id}` must answer for exactly that id. The host's own "no such
+   * session" (code 40401, or HTTP 404), another id, or an id that is not one is
+   * {@link SessionNotFoundError}; a host that could not answer at all is a plain failure.
+   */
+  private async confirmHostSession(http: KimiReadOnlyHttp, sessionId: string): Promise<void> {
+    if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This Kimi session id is not a session id.');
+    const result = await http.getJson<{ id?: unknown }>(`/api/v1/sessions/${encodeURIComponent(sessionId)}`);
+    if (result.ok && result.data?.id === sessionId) return;
+    if (!result.ok && result.code !== KIMI_SESSION_NOT_FOUND_CODE && result.status !== 404) {
+      throw new Error('The Kimi server could not confirm this session; try again.');
+    }
+    throw new SessionNotFoundError('The Kimi server does not list this session.');
+  }
+
   /** `/api/v1/models` against an ALREADY verified client — the attach's own generation. */
   private async readCatalogFrom(http: KimiReadOnlyHttp): Promise<ModelOption[]> {
     const result = await http.getJson<unknown>('/api/v1/models');
@@ -1251,6 +1272,10 @@ export class KimiAdapter implements AgentBackend {
     if (promoting && !known) {
       throw new OwnershipConflictError(KIMI_TAKEOVER_UNKNOWN_SESSION_REFUSAL, KIMI_FOREIGN_ATTACH_CONFLICT);
     }
+    // The fallback below covers a create the listing has not caught up with, so an unlisted id must
+    // still be one the host answers for. Anything else names nothing: refused, never opened as an
+    // empty Observe session.
+    if (!known) await this.confirmHostSession(http, sessionId);
     const info: SessionInfo = known ?? {
       id: sessionId,
       tool: this.id,

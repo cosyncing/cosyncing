@@ -196,7 +196,9 @@ export async function runDshContractCapture(
 ): Promise<number> {
   const args = parseArgs(argv);
   const platform = runtime.platform ?? process.platform;
-  const runId = new Date().toISOString().replace(/[:.]/g, '-');
+  // The process id keeps two captures started in the same millisecond (a `--repeat` of the runner
+  // test, or two operators) from sharing one disposable home, where either would delete the other's.
+  const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${String(process.pid)}`;
   const runDir = join(args.out, runId);
   const home = join(tmpdir(), `cosyncing-dsh-capture-${runId}`);
   assertDisposableHome(home);

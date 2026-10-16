@@ -130,7 +130,7 @@ const _olderBrokerScenarios = [
 ];
 
 Future<MatrixMetrics> _run(String scenario, {required bool revision28}) async {
-  final results = await runOrdinaryUseMatrix(
+  final results = runOrdinaryUseMatrixOnFakeClock(
     revision28: revision28,
     only: {scenario},
   );

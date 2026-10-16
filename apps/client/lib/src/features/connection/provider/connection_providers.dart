@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_client/broker_client.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/credential_store.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/secure_credential_store.dart';
@@ -11,7 +13,7 @@ import 'package:cosyncing_client/src/features/connection/model/broker_health_pro
 import 'package:cosyncing_client/src/features/connection/model/connection_state.dart';
 import 'package:cosyncing_client/src/features/connection/model/real_broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/same_origin_broker_profile.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show immutable, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Provides the [BrokerHealthProbe] singleton.
@@ -20,6 +22,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 final brokerHealthProbeProvider = Provider<BrokerHealthProbe>(
   (ref) => RealBrokerHealthProbe(
     transport: ref.watch(brokerHttpTransportProvider),
+    timeout: brokerProbeTimeout,
   ),
 );
 
@@ -263,7 +266,9 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
       state = ConnectionStateModel(
         status: ConnectionStatus.failure,
         brokerUrl: normalized,
-        failureKind: result.unhealthy
+        failureKind: result.noAnswer
+            ? ConnectionFailureKind.noAnswer
+            : result.unhealthy
             ? ConnectionFailureKind.brokerUnhealthy
             : ConnectionFailureKind.unreachable,
         technicalDetail: result.detail ?? result.error?.detail,
@@ -313,13 +318,21 @@ Future<BrokerClient> createBrokerClientForProfile(
         'created-${profile.createdAt.toUtc().microsecondsSinceEpoch}',
   );
   final transport = ref.read(brokerHttpTransportProvider);
+  // Read now, not from the callback: the caller's ref may be gone by the time
+  // a request this client sent comes back refused.
+  final unauthorized = ref.read(brokerUnauthorizedSignalProvider);
+  final source = BrokerUnauthorizedSource.ofProfile(profile);
+  void reportUnauthorized() => unauthorized.report(source);
   final credentialKey = profile.credentialKey;
   if (credentialKey == null) {
     return BrokerClient(
       baseUrl: profile.baseUri.toString(),
       clientProfileId: sourceArguments.profileId,
       clientProfileIncarnation: sourceArguments.incarnation,
-      dio: brokerTransportDio(transport),
+      dio: brokerTransportDioReportingUnauthorized(
+        transport,
+        onUnauthorized: reportUnauthorized,
+      ),
     );
   }
 
@@ -337,17 +350,96 @@ Future<BrokerClient> createBrokerClientForProfile(
       token: credential,
       clientProfileId: sourceArguments.profileId,
       clientProfileIncarnation: sourceArguments.incarnation,
-      dio: brokerTransportDio(transport),
+      dio: brokerTransportDioReportingUnauthorized(
+        transport,
+        onUnauthorized: reportUnauthorized,
+      ),
     ),
     BrokerCredentialKind.peerToken => BrokerClient(
       baseUrl: profile.baseUri.toString(),
       peerToken: credential,
       clientProfileId: sourceArguments.profileId,
       clientProfileIncarnation: sourceArguments.incarnation,
-      dio: brokerTransportDio(transport),
+      dio: brokerTransportDioReportingUnauthorized(
+        transport,
+        onUnauthorized: reportUnauthorized,
+      ),
     ),
   };
 }
+
+/// The saved server a refused request was sent to: profile, endpoint and
+/// incarnation, so a refusal from another server (an attention feed polls
+/// every saved one) or from before an edit is never read as the active
+/// server's.
+@immutable
+final class BrokerUnauthorizedSource {
+  /// Creates a source.
+  const BrokerUnauthorizedSource({
+    required this.profileId,
+    required this.endpoint,
+    required this.incarnationId,
+  });
+
+  /// The source [profile] names.
+  factory BrokerUnauthorizedSource.ofProfile(BrokerProfile profile) =>
+      BrokerUnauthorizedSource(
+        profileId: profile.id,
+        endpoint: profile.baseUri.toString(),
+        incarnationId: profile.incarnationId,
+      );
+
+  /// Saved profile id.
+  final String profileId;
+
+  /// Endpoint the request went to.
+  final String endpoint;
+
+  /// Profile incarnation.
+  final String? incarnationId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is BrokerUnauthorizedSource &&
+      other.profileId == profileId &&
+      other.endpoint == endpoint &&
+      other.incarnationId == incarnationId;
+
+  @override
+  int get hashCode => Object.hash(profileId, endpoint, incarnationId);
+}
+
+/// Carries every HTTP 401 an authenticated broker client receives.
+///
+/// The connection gate probes only at launch and on an explicit retry, so a
+/// credential the broker stopped accepting while the app runs (a rotated
+/// token, a revoked device) was never noticed: the roster went on asking and
+/// being refused. Every client [createBrokerClientForProfile] builds reports
+/// its 401s here and the gate decides whether to probe again.
+class BrokerUnauthorizedSignal {
+  final StreamController<BrokerUnauthorizedSource> _reports =
+      StreamController<BrokerUnauthorizedSource>.broadcast();
+
+  /// Refusals, as they arrive.
+  Stream<BrokerUnauthorizedSource> get reports => _reports.stream;
+
+  /// Records that a request to [source] came back 401.
+  void report(BrokerUnauthorizedSource source) {
+    if (!_reports.isClosed) _reports.add(source);
+  }
+
+  /// Closes the stream.
+  void dispose() => unawaited(_reports.close());
+}
+
+/// The app's one [BrokerUnauthorizedSignal].
+final brokerUnauthorizedSignalProvider = Provider<BrokerUnauthorizedSignal>((
+  ref,
+) {
+  final signal = BrokerUnauthorizedSignal();
+  ref.onDispose(signal.dispose);
+  return signal;
+});
 
 /// Returns true for local hostnames that typically use loopback auth.
 ///

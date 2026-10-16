@@ -1,0 +1,24 @@
+{
+  "history": [
+    {"type":"user-message","text":"run it","key":"ku1","turnId":"ku1","sentAt":1781913600000},
+    {"type":"tool-call","callId":"b1","toolName":"bash","toolClass":"execute","args":{"command":"false"},"semantic":{"kind":"command","command":"false","state":"running"}},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"ku1","status":"running","startedAt":1781913600000,"tokens":{"input":20,"output":10,"cacheRead":2,"cacheWrite":4,"cost":0.02},"source":"pi-jsonl"}
+  ],
+  "live": [
+    {"type":"tool-result","callId":"b1","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"false","state":"failed"},"isError":true,"result":"boom\nCommand exited with code 1","exitCode":1},
+    {"type":"model-output","text":"it failed","final":true,"key":"ka2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"ku1","assistantMessageKey":"ka2:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913603000,"totalRuntimeMs":3000,"tokens":{"input":20,"output":10,"cacheRead":2,"cacheWrite":4,"cost":0.02},"source":"pi-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"run it","key":"ku1","turnId":"ku1","sentAt":1781913600000},
+    {"type":"tool-call","callId":"b1","toolName":"bash","toolClass":"execute","args":{"command":"false"},"semantic":{"kind":"command","command":"false","state":"running"}},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"tool-result","callId":"b1","toolName":"bash","toolClass":"execute","semantic":{"kind":"command","command":"false","state":"failed"},"isError":true,"result":"boom\nCommand exited with code 1","exitCode":1},
+    {"type":"model-output","text":"it failed","final":true,"key":"ka2:t:0"},
+    {"type":"token-count","input":10,"output":5,"cacheRead":1,"cacheWrite":2,"cost":0.01},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"ku1","assistantMessageKey":"ka2:t:0","status":"done","startedAt":1781913600000,"completedAt":1781913603000,"totalRuntimeMs":3000,"tokens":{"input":20,"output":10,"cacheRead":2,"cacheWrite":4,"cost":0.02},"source":"pi-jsonl"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":3000,"turnCount":1,"updatedAt":1781913603000,"source":"pi"}}
+  ]
+}

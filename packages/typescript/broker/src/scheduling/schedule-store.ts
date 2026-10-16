@@ -8,7 +8,9 @@
  *
  * The prompt fires with NO model/agent/permissionMode overrides (D6: "everything has to be the
  * same, basically like sending another prompt, but just scheduled") — delivery goes through the
- * exact same session-control gates the composer uses.
+ * exact same session-control gates the composer uses. A new-session schedule's model is not an
+ * override but part of the session it creates; its first prompt carries it wherever the agent
+ * could not apply it at creation.
  *
  * Location: `${setupStateHome()}/schedules.json` — survives broker restarts and cache wipes; the
  * runner rearms from this file at startup and applies the missed-fire policy (D7).

@@ -1,7 +1,6 @@
-import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import type { PromptInput } from '@cosyncing/adapter-api';
+import { NO_FOLLOW_FLAG, STORE_READ_FLAGS, type PromptInput } from '@cosyncing/adapter-api';
 
 const MAX_PROVIDER_FILE_BYTES = 64 * 1024;
 const MAX_FIELD_CHARS = 4_096;
@@ -21,7 +20,7 @@ async function explicitAuthFile(path: string): Promise<Record<string, unknown> |
   if (!isAbsolute(path)) return undefined;
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(path, STORE_READ_FLAGS | NO_FOLLOW_FLAG); // a FIFO here must not park a worker
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_PROVIDER_FILE_BYTES) return undefined;
     if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return undefined;

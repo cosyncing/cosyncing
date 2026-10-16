@@ -10,7 +10,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,7 +24,35 @@ import { createOffer, pairDevice } from '../harness/pairing.ts';
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-e2e-startup-'));
 const hash = (token: string): string => createHash('sha256').update(token).digest('base64url');
 const UNKNOWN_ROLE_TOKEN = 'unknown-role-device-credential-0123456789';
+const KNOWN_ROLE_TOKEN = 'known-role-device-credential-0123456789';
+const BROKEN_RECORD_TOKEN = 'broken-record-device-credential-0123456789';
 afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+/** A v2 peer-store record as a broker writes it, whose device presents `token`. */
+function storedPeer(name: string, token: string, roles: string[], extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    peerId: `peer-${name}`,
+    identityPublicKey: `identity-${name}`,
+    peerTokenHash: hash(`mailbox-${name}`),
+    brokerPeerId: `broker-peer-${name}`,
+    brokerPeerTokenHash: hash(token),
+    brokerIdentityPublicKey: `broker-identity-${name}`,
+    dataKey: { algorithm: 'AES-256-GCM', bytes: '' },
+    wrappedDataKey: {},
+    acceptedAt: new Date(0).toISOString(),
+    authGeneration: 1,
+    roles,
+    ...extra,
+  };
+}
+
+function writePeerStore(cosyncingHome: string, peers: Array<Record<string, unknown>>): void {
+  writeFileSync(join(cosyncingHome, 'transport-peers.json'), `${JSON.stringify({ version: 2, peers })}\n`, { mode: 0o600 });
+}
+
+function readPeerStore(cosyncingHome: string): Array<Record<string, unknown>> {
+  return JSON.parse(readFileSync(join(cosyncingHome, 'transport-peers.json'), 'utf8')).peers;
+}
 
 /** A home and an environment for a process this file starts by hand. */
 function processCase(name: string, overrides: Record<string, string> = {}): { home: string; env: NodeJS.ProcessEnv } {
@@ -324,60 +352,207 @@ describe('damaged state', () => {
     }
   });
 
-  test('a malformed peer store is reported with a stable code and no path, and pairing recovers it', async () => {
+  // No broker can read any of these, so pairing may start a new store, but never over the old bytes:
+  // they are set aside beside it, where health reports them as recovered corruption.
+  const UNREADABLE_PEER_STORES: Array<[what: string, bytes: string]> = [
+    ['a malformed peer store', '{ malformed peer state'],
+    ['a peer store holding JSON null', 'null\n'],
+    ['a peer store with no peer list', '{"version":2,"peers":{}}\n'],
+  ];
+  for (const [what, bytes] of UNREADABLE_PEER_STORES) {
+    test(`${what} is reported with a stable code and no path, and pairing recovers it without erasing it`, async () => {
+      const broker = await startBroker({
+        name: 'startup-malformed-peers',
+        token: true,
+        setup: (paths) => writeFileSync(join(paths.cosyncingHome, 'transport-peers.json'), bytes, { mode: 0o600 }),
+      });
+      try {
+        const health = await broker.client().get('/api/broker/health');
+        expect(health.status).toBe(200);
+        expect(health.body.status).toBe('critical');
+        expect(health.body.components['security-state'].detailCodes).toContain('peers-malformed');
+        expect(health.text).not.toContain(broker.paths.root);
+        expect((await broker.client().get('/api/transport/peers')).body.peers).toEqual([]);
+
+        await pairDevice(broker.client(), { peerId: 'phone-after-malformed' });
+        expect(readPeerStore(broker.paths.cosyncingHome).map((peer) => peer.peerId)).toEqual(['phone-after-malformed']);
+        const setAside = readdirSync(broker.paths.cosyncingHome).filter((name) => name.startsWith('transport-peers.json.corrupt-'));
+        expect(setAside).toHaveLength(1);
+        expect(readFileSync(join(broker.paths.cosyncingHome, setAside[0]!), 'utf8')).toBe(bytes);
+        await eventually(async () => {
+          const after = await broker.client().get('/api/broker/health');
+          const codes: string[] = after.body.components['security-state'].detailCodes;
+          return !codes.includes('peers-malformed') && codes.includes('peers-corruption-recovered');
+        }, { what: 'the security state to report recovered corruption once the store is rewritten' });
+      } finally {
+        await broker.stop();
+      }
+    });
+  }
+
+  test('a peer store from a newer broker is never rewritten: pairing and revocation refuse', async () => {
+    // A downgrade: the newer broker's devices are lost to this one, but must not be lost to that one.
+    const newer = `${JSON.stringify({
+      version: 3,
+      peers: [storedPeer('from-newer-broker', KNOWN_ROLE_TOKEN, ['observe'])],
+      storedBy: 'a-newer-broker',
+    })}\n`;
     const broker = await startBroker({
-      name: 'startup-malformed-peers',
+      name: 'startup-newer-peer-store',
       token: true,
-      setup: (paths) => writeFileSync(join(paths.cosyncingHome, 'transport-peers.json'), '{ malformed peer state', { mode: 0o600 }),
+      setup: (paths) => writeFileSync(join(paths.cosyncingHome, 'transport-peers.json'), newer, { mode: 0o600 }),
     });
     try {
-      const health = await broker.client().get('/api/broker/health');
-      expect(health.status).toBe(200);
+      const owner = broker.client();
+      const home = broker.paths.cosyncingHome;
+      const health = await owner.get('/api/broker/health');
       expect(health.body.status).toBe('critical');
-      expect(health.body.components['security-state'].detailCodes).toContain('peers-malformed');
+      expect(health.body.components['security-state'].detailCodes).toContain('peers-unsupported-version');
       expect(health.text).not.toContain(broker.paths.root);
-      expect((await broker.client().get('/api/transport/peers')).body.peers).toEqual([]);
+      expect((await broker.client({ kind: 'peer', peerToken: KNOWN_ROLE_TOKEN }).get('/api/sessions')).status).toBe(401);
+      expect((await owner.get('/api/transport/peers')).body.peers).toEqual([]);
 
-      await pairDevice(broker.client(), { peerId: 'phone-after-malformed' });
-      const store = JSON.parse(readFileSync(join(broker.paths.cosyncingHome, 'transport-peers.json'), 'utf8'));
-      expect(store.peers.map((peer: any) => peer.peerId)).toEqual(['phone-after-malformed']);
-      await eventually(async () => {
-        const after = await broker.client().get('/api/broker/health');
-        return !after.body.components['security-state'].detailCodes.includes('peers-malformed');
-      }, { what: 'the security state to clear once the store is rewritten' });
+      const offer = await owner.post('/api/transport/pairings', { clientLabel: 'phone' });
+      expect(offer.status).toBe(409);
+      expect(offer.body.code).toBe('PERSISTENCE_FAILED');
+      expect(offer.text).not.toContain(broker.paths.root);
+      const revoke = await owner.delete('/api/transport/peers/peer-from-newer-broker');
+      expect(revoke.status).toBe(409);
+      expect(revoke.body.code).toBe('PERSISTENCE_FAILED');
+
+      expect(readFileSync(join(home, 'transport-peers.json'), 'utf8')).toBe(newer);
+      expect(readdirSync(home).filter((name) => name.startsWith('transport-peers.json.'))).toEqual([]);
+      expect((await owner.get('/api/broker/health')).body.components['security-state'].detailCodes)
+        .toContain('peers-unsupported-version');
     } finally {
       await broker.stop();
     }
   });
 
-  test('a stored device holding a role nobody can grant admits nobody', async () => {
-    // Structurally valid, so only the authorization check can refuse it. (Health
-    // does not flag this shape today; that gap is reported, not pinned here.)
+  test('a structurally broken device record admits nothing, shows in health, and survives a pairing as stored', async () => {
+    const { identityPublicKey: _missing, ...broken } = storedPeer('broken', BROKEN_RECORD_TOKEN, ['observe', 'drive', 'files']);
+    const known = storedPeer('known-role', KNOWN_ROLE_TOKEN, ['observe', 'drive', 'files']);
+    const broker = await startBroker({
+      name: 'startup-broken-peer-record',
+      token: true,
+      setup: (paths) => writePeerStore(paths.cosyncingHome, [known, broken, null as unknown as Record<string, unknown>]),
+    });
+    try {
+      const owner = broker.client();
+      const asKnown = broker.client({ kind: 'peer', peerToken: KNOWN_ROLE_TOKEN });
+      expect((await broker.client({ kind: 'peer', peerToken: BROKEN_RECORD_TOKEN }).get('/api/sessions')).status).toBe(401);
+      expect((await asKnown.get('/api/sessions')).status).toBe(200);
+      expect((await owner.get('/api/transport/peers')).body.peers.map((peer: any) => peer.peerId)).toEqual(['peer-known-role']);
+      const health = await owner.get('/api/broker/health');
+      expect(health.body.status).toBe('degraded');
+      expect(health.body.components['security-state']).toMatchObject({ status: 'degraded', detailCodes: ['peers-record-malformed'] });
+      expect(health.text).not.toContain(broker.paths.root);
+
+      await pairDevice(owner, { peerId: 'phone-after-broken-record' });
+      const stored = readPeerStore(broker.paths.cosyncingHome);
+      expect(stored.map((peer) => peer?.peerId ?? null)).toEqual(['peer-known-role', 'phone-after-broken-record', 'peer-broken', null]);
+      expect(JSON.stringify(stored[2])).toBe(JSON.stringify(broken));
+      expect((await asKnown.get('/api/sessions')).status).toBe(200);
+      expect((await broker.client({ kind: 'peer', peerToken: BROKEN_RECORD_TOKEN }).get('/api/sessions')).status).toBe(401);
+      expect((await owner.get('/api/broker/health')).body.components['security-state'].detailCodes).toEqual(['peers-record-malformed']);
+    } finally {
+      await broker.stop();
+    }
+  });
+
+  test('a stored device holding a role nobody can grant admits nobody, and health says so', async () => {
+    // Structurally valid, so only the authorization check can refuse it: not even
+    // the role it shares with this broker ('observe') admits it.
     const broker = await startBroker({
       name: 'startup-unknown-peer-role',
       token: true,
-      setup: (paths) => writeFileSync(join(paths.cosyncingHome, 'transport-peers.json'), `${JSON.stringify({
-        version: 2,
-        peers: [{
-          peerId: 'peer-unknown-role',
-          identityPublicKey: 'identity-unknown-role',
-          peerTokenHash: hash('mailbox-unknown-role'),
-          brokerPeerId: 'broker-peer-unknown-role',
-          brokerPeerTokenHash: hash(UNKNOWN_ROLE_TOKEN),
-          brokerIdentityPublicKey: 'broker-identity-unknown-role',
-          dataKey: { algorithm: 'AES-256-GCM', bytes: '' },
-          wrappedDataKey: {},
-          acceptedAt: new Date(0).toISOString(),
-          authGeneration: 1,
-          roles: ['observe', 'invalid-role'],
-        }],
-      })}\n`, { mode: 0o600 }),
+      setup: (paths) => writePeerStore(paths.cosyncingHome, [
+        storedPeer('unknown-role', UNKNOWN_ROLE_TOKEN, ['observe', 'invalid-role']),
+      ]),
     });
     try {
       const asDevice = broker.client({ kind: 'peer', peerToken: UNKNOWN_ROLE_TOKEN });
       expect((await asDevice.get('/api/sessions')).status).toBe(401);
+      expect((await asDevice.get('/api/broker/health')).status).toBe(401);
       expect((await asDevice.get('/api/transport/peers')).status).toBe(401);
       expect((await broker.client().get('/api/transport/peers')).body.peers).toEqual([]);
+      const health = await broker.client().get('/api/broker/health');
+      expect(health.body.status).toBe('degraded');
+      expect(health.body.components['security-state']).toMatchObject({ status: 'degraded', detailCodes: ['peers-unknown-role'] });
+      expect(health.text).not.toContain(broker.paths.root);
+      expect(health.text).not.toContain('peer-unknown-role');
+    } finally {
+      await broker.stop();
+    }
+  });
+
+  test('a device holding a role nobody can grant costs only itself, and no rewrite erases it', async () => {
+    // The likeliest cause is a downgrade: a newer broker granted a role this one
+    // does not know. The record must survive this broker for the newer one.
+    const unknown = storedPeer('unknown-role', UNKNOWN_ROLE_TOKEN, ['observe', 'invalid-role'], { grantedBy: 'a-newer-broker' });
+    // A readable record can carry fields this broker does not read; they are a newer broker's too.
+    const known = storedPeer('known-role', KNOWN_ROLE_TOKEN, ['observe', 'drive', 'files'], { deviceClass: { kind: 'tablet' } });
+    const broker = await startBroker({
+      name: 'startup-unknown-peer-role-beside-others',
+      token: true,
+      setup: (paths) => writePeerStore(paths.cosyncingHome, [unknown, known]),
+    });
+    try {
+      const owner = broker.client();
+      const asKnown = broker.client({ kind: 'peer', peerToken: KNOWN_ROLE_TOKEN });
+      const asUnknown = broker.client({ kind: 'peer', peerToken: UNKNOWN_ROLE_TOKEN });
+      const peerIds = async (): Promise<string[]> =>
+        (await owner.get('/api/transport/peers')).body.peers.map((peer: any) => peer.peerId).sort();
+      const storedRecord = (peerId: string): Record<string, unknown> | undefined =>
+        readPeerStore(broker.paths.cosyncingHome).find((peer) => peer.peerId === peerId);
+
+      // The other device keeps its credential and its roles; only the unknown one is refused.
+      expect((await asKnown.get('/api/sessions')).status).toBe(200);
+      expect((await asKnown.get('/api/broker/health')).body.principal).toEqual({ kind: 'peer', roles: ['drive', 'files', 'observe'] });
+      expect((await asUnknown.get('/api/sessions')).status).toBe(401);
+      expect(await peerIds()).toEqual(['peer-known-role']);
+      const listed = (await owner.get('/api/transport/peers')).body.peers[0];
+      expect(listed).not.toHaveProperty('deviceClass');
+      expect(listed).not.toHaveProperty('extraFields');
+      const health = await owner.get('/api/broker/health');
+      expect(health.body.status).toBe('degraded');
+      expect(health.body.components['security-state'].status).toBe('degraded');
+      expect(health.body.components['security-state'].detailCodes).toContain('peers-unknown-role');
+      expect(health.text).not.toContain(broker.paths.root);
+
+      // Pairing rewrites the store: every record survives, the refused one field for field.
+      const phone = await pairDevice(owner, { peerId: 'phone-after-unknown-role' });
+      expect(readPeerStore(broker.paths.cosyncingHome).map((peer) => peer.peerId).sort())
+        .toEqual(['peer-known-role', 'peer-unknown-role', 'phone-after-unknown-role']);
+      expect(JSON.stringify(storedRecord('peer-unknown-role'))).toBe(JSON.stringify(unknown));
+      expect(storedRecord('peer-known-role')).toEqual(known);
+      expect((await asKnown.get('/api/sessions')).status).toBe(200);
+      expect((await broker.client({ kind: 'peer', peerToken: phone.peerToken }).get('/api/sessions')).status).toBe(200);
+      expect((await asUnknown.get('/api/sessions')).status).toBe(401);
+      expect(await peerIds()).toEqual(['peer-known-role', 'phone-after-unknown-role']);
+
+      // Revoking another device rewrites the store again; the refused record is still untouched.
+      expect((await owner.delete('/api/transport/peers/phone-after-unknown-role')).body).toEqual({ ok: true, revoked: true });
+      expect(JSON.stringify(storedRecord('peer-unknown-role'))).toBe(JSON.stringify(unknown));
+      expect((await asKnown.get('/api/sessions')).status).toBe(200);
+
+      // The owner can still revoke the refused record by id: only its revocation is added.
+      expect((await owner.delete('/api/transport/peers/peer-unknown-role')).body).toEqual({ ok: true, revoked: true });
+      const revoked = storedRecord('peer-unknown-role')!;
+      expect(typeof revoked.revokedAt).toBe('string');
+      expect(revoked).toEqual({ ...unknown, authGeneration: 2, revokedAt: revoked.revokedAt });
+      expect(storedRecord('peer-known-role')).toEqual(known);
+      const afterRevoke = await owner.get('/api/broker/health');
+      expect(afterRevoke.body.components['security-state'].detailCodes).not.toContain('peers-unknown-role');
+
+      // A restart reads the same store back: the revocation holds and the other device still works.
+      await broker.restart();
+      expect((await owner.get('/api/broker/health')).body.components['security-state'].detailCodes).not.toContain('peers-unknown-role');
+      expect((await owner.delete('/api/transport/peers/peer-unknown-role')).body).toEqual({ ok: true, revoked: false });
+      expect((await asKnown.get('/api/sessions')).status).toBe(200);
+      expect((await asUnknown.get('/api/sessions')).status).toBe(401);
+      expect(await peerIds()).toEqual(['peer-known-role']);
+      expect(storedRecord('peer-unknown-role')).toEqual(revoked);
     } finally {
       await broker.stop();
     }

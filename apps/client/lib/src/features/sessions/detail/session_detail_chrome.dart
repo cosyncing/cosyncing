@@ -394,7 +394,7 @@ class _SessionControlPill extends StatelessWidget {
     final (label, icon, color) = overrideLabel != null
         ? (
             overrideLabel,
-            Icons.autorenew,
+            freshness.detached ? Icons.link_off : Icons.autorenew,
             freshness.controlIsAuthoritative
                 ? tokens.statusWorking
                 : tokens.textSecondary,
@@ -459,6 +459,7 @@ String? _controlPillOverrideLabel(
   required bool restoringDrive,
 }) {
   final l10n = AppLocalizations.of(context);
+  if (freshness.detached) return l10n.sessionControlDetached;
   return switch (freshness.freshness) {
     SessionFreshness.reconnecting ||
     SessionFreshness.failed => l10n.sessionControlReconnecting,
@@ -475,6 +476,7 @@ String _controlPillStateName({
   required SessionDetailFreshnessPresentation freshness,
   required bool restoringDrive,
 }) {
+  if (freshness.detached) return 'detached';
   return switch (freshness.freshness) {
     SessionFreshness.reconnecting || SessionFreshness.failed => 'reconnecting',
     SessionFreshness.initialLoading ||
@@ -631,6 +633,9 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
   bool _handoffPending = false;
   bool? _warningSuppressed;
 
+  /// Scrolls the panel; the Session control card is its first child.
+  final ScrollController _scrollController = ScrollController();
+
   @override
   void initState() {
     super.initState();
@@ -649,7 +654,29 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
   @override
   void dispose() {
     widget.draftController?.removeListener(_draftChanged);
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  /// Detaches, then brings the Session control card back into view.
+  ///
+  /// Detach sits at the bottom of the panel, and the card that now says
+  /// Detached and offers Attach sits at the top. Left where it was, the panel
+  /// showed no way back and the user had to find the composer's Attach.
+  void _detach() {
+    widget.onDetach();
+    if (!_scrollController.hasClients) return;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _scrollController.jumpTo(0);
+    } else {
+      unawaited(
+        _scrollController.animateTo(
+          0,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        ),
+      );
+    }
   }
 
   void _draftChanged() {
@@ -859,7 +886,8 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
         joinCommand == null &&
         handoffCommand == null &&
         state.driveRestoreConflict == null;
-    final statusDescription = syncedSharedHealthy
+    final detached = freshness.detached;
+    final statusDescription = syncedSharedHealthy || detached
         ? null
         : joinPresentation
         ? joinCommand != null
@@ -878,6 +906,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
       key: const Key('session-detail-status-selection'),
       child: ListView(
         key: const Key('session-detail-status-panel'),
+        controller: _scrollController,
         children: [
           KeyedSubtree(
             key: const Key('session-detail-status-sheet'),
@@ -903,7 +932,22 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                     // behind General → Developer options → Show debug views,
                     // default off — already owns it. Normal Status answers "who
                     // controls this session", not "what is its fingerprint".
-                    if (!isConnected &&
+                    if (detached)
+                      // A deliberate Detach is not a fault: say what it means
+                      // in the quiet description colour, not the error one.
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          l10n.sessionControlDetachedDescription,
+                          key: const Key(
+                            'session-detail-status-detached-hint',
+                          ),
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: context.tokens.textSecondary,
+                          ),
+                        ),
+                      )
+                    else if (!isConnected &&
                         state.connectionStatus !=
                             SessionDetailConnectionStatus.reconnecting &&
                         state.connectionStatus !=
@@ -960,7 +1004,12 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                     if (state.driveRestoreConflict case final conflict?) ...[
                       const SizedBox(height: 8),
                       Text(
-                        _driveConflictFeedback(l10n, conflict),
+                        _driveConflictFeedback(
+                          l10n,
+                          conflict,
+                          tool: widget.sessionKey.tool,
+                          takeOverOffered: control.canTakeOver,
+                        ),
                         key: const Key(
                           'session-detail-drive-restore-conflict',
                         ),
@@ -979,7 +1028,8 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                           icon: const Icon(Icons.link),
                           label: Text(
                             state.connectionStatus ==
-                                    SessionDetailConnectionStatus.closed
+                                        SessionDetailConnectionStatus.closed &&
+                                    !detached
                                 ? l10n.sessionRetryAttach
                                 : l10n.sessionAttach,
                           ),
@@ -1190,7 +1240,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
             canClone: canClone,
             canExport: canExport,
             hasActiveBrokerClient: widget.hasActiveBrokerClient,
-            onDetach: widget.onDetach,
+            onDetach: _detach,
             onForkSession: widget.onForkSession,
             onCloneSession: widget.onCloneSession,
             onExportTranscript: widget.onExportTranscript,
@@ -1316,7 +1366,12 @@ Future<bool> _confirmAndTakeOver(
         ..showSnackBar(
           SnackBar(
             content: Text(
-              _driveConflictFeedback(AppLocalizations.of(context), conflict),
+              _driveConflictFeedback(
+                AppLocalizations.of(context),
+                conflict,
+                tool: sessionKey.tool,
+                takeOverOffered: latestControl.canTakeOver,
+              ),
               key: const Key('session-detail-take-over-refusal'),
             ),
           ),
@@ -1433,29 +1488,52 @@ String _controlStatusDescription(
   };
 }
 
+/// What the app says about a Drive request the broker refused.
+///
+/// [tool] is the session's agent: a native refusal to resume, or another
+/// writer holding the session, is that agent's, whichever it is.
+/// [takeOverOffered] is whether the session offers Take over right now; a
+/// restore note points to Take over only when it does (a session whose agent
+/// is not installed, for one, offers none).
 String _driveConflictFeedback(
   AppLocalizations l10n,
-  SessionDriveRestoreConflict conflict,
-) {
+  SessionDriveRestoreConflict conflict, {
+  required String tool,
+  required bool takeOverOffered,
+}) {
   final manualTakeover = conflict.reason == kDriveAttachReasonTakeover;
   return switch (conflict.code) {
     'DRIVE_OWNERSHIP_UNKNOWN' =>
       manualTakeover
           ? l10n.sessionDriveTakeoverOwnershipUnknownNote
-          : l10n.sessionDriveRestoreOwnershipUnknownNote,
+          : takeOverOffered
+          ? l10n.sessionDriveRestoreOwnershipUnknownNote
+          : l10n.sessionDriveRestoreOwnershipUnknownNoTakeoverNote,
+    // Codex, Claude and Kimi refuse a takeover this way, and so does the
+    // broker for any agent; only the unknown ownership above is Codex's alone.
     'DRIVE_OWNERSHIP_CONFLICT' =>
       manualTakeover
-          ? l10n.sessionDriveTakeoverOwnershipConflictNote
-          : l10n.sessionDriveRestoreConflictNote,
+          ? l10n.sessionDriveTakeoverOwnershipConflictNote(
+              sessionToolLabel(l10n, tool),
+            )
+          : takeOverOffered
+          ? l10n.sessionDriveRestoreConflictNote
+          : l10n.sessionDriveRestoreConflictNoTakeoverNote,
     'DRIVE_NATIVE_SESSION_UNRESUMABLE' =>
       manualTakeover
-          ? l10n.sessionDriveNativeTakeoverUnresumableNote
-          : l10n.sessionDriveNativeRestoreUnresumableNote,
+          ? l10n.sessionDriveNativeTakeoverUnresumableNote(
+              sessionToolLabel(l10n, tool),
+            )
+          : l10n.sessionDriveNativeRestoreUnresumableNote(
+              sessionToolLabel(l10n, tool),
+            ),
     'DRIVE_RESTORE_TIMEOUT' => l10n.sessionDriveTakeoverTimeoutNote,
     _ =>
       manualTakeover
           ? l10n.sessionDriveTakeoverFailureNote
-          : l10n.sessionDriveRestoreFailureNote,
+          : takeOverOffered
+          ? l10n.sessionDriveRestoreFailureNote
+          : l10n.sessionDriveRestoreFailureNoTakeoverNote,
   };
 }
 

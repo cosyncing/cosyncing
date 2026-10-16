@@ -10,18 +10,20 @@
  * 2026-08-25), so the tail is fenced by BOTH: the offset bounds the work, and
  * the step set makes a double-admit impossible even if the offset is wrong.
  */
-import { existsSync, statSync, watch, type FSWatcher } from 'node:fs';
-import type {
-  AgentMessage,
-  AgentMessageHandler,
-  HistoryQuery,
-  ModeOption,
-  ModelOption,
-  PermissionDecision,
-  PromptInput,
-  SessionConnection,
-  SessionInfo,
-  Unsubscribe,
+import { existsSync, watch, type FSWatcher } from 'node:fs';
+import { basename, dirname } from 'node:path';
+import {
+  classifyDirectoryWatchEvent,
+  type AgentMessage,
+  type AgentMessageHandler,
+  type HistoryQuery,
+  type ModeOption,
+  type ModelOption,
+  type PermissionDecision,
+  type PromptInput,
+  type SessionConnection,
+  type SessionInfo,
+  type Unsubscribe,
 } from '@cosyncing/adapter-api';
 import {
   agySettlementOutcome,
@@ -36,6 +38,7 @@ import {
   parseAgySettlement,
   parseAgyStep,
   type AgyMapState,
+  type AgyQueuedSends,
   type AgyStep,
   type AgyTaskLog,
   type AgyTaskReference,
@@ -46,10 +49,12 @@ import {
   AGY_TAIL_READ_MAX_BYTES,
   AGY_TRANSCRIPT_MAX_BYTES,
   AgyLineFramer,
+  agyPrefixDigest,
   isAgyReadRefusal,
-  readContainedRange,
+  readContainedTail,
   readContainedThroughLastNewline,
   type AgyFrame,
+  type AgyTailReadResult,
 } from './safe-read.ts';
 import { ensureAgyCliCatalog } from './cli-catalog.ts';
 import {
@@ -104,6 +109,13 @@ export interface AgyObserveOptions {
    * file is the only catalog (the drive subclass always has one).
    */
   binary?: string;
+  /**
+   * The adapter's queued-send state for this conversation, when a Drive connection made one.
+   * Looked up, never created: an Observe of a conversation nobody drives must not evict a driven
+   * one's correlations. The line that delivers a Drive prompt is keyed through it, so a fresh
+   * reader shows that prompt under the key (and `clientKey`) its sender held.
+   */
+  queuedSends?: () => AgyQueuedSends | undefined;
 }
 
 export class AgyObserveConnection implements SessionConnection {
@@ -113,6 +125,7 @@ export class AgyObserveConnection implements SessionConnection {
   protected readonly conversationId: string;
   protected readonly trace?: AgyTraceSink;
   private readonly catalogBinary?: string;
+  private readonly queuedSendsLookup?: () => AgyQueuedSends | undefined;
   private readonly handlers = new Set<AgentMessageHandler>();
   protected readonly path: string;
 
@@ -122,6 +135,14 @@ export class AgyObserveConnection implements SessionConnection {
   private offset = 0;
   /** File size seen at the last baseline, so a SHRINK is detectable as a rewrite. */
   private baselineSize = 0;
+  /**
+   * Which file the consumed bytes came from (`dev:ino`), and the digest of those bytes
+   * (`[0, offset)`). The transcript is append-only, so a tail read that finds another file under
+   * the name, or other bytes before `offset`, has found a rewrite, however the size moved.
+   * Undefined identity: no file was read yet (the first one is adopted).
+   */
+  private sourceIdentity?: string;
+  private prefixDigest?: Buffer;
   /** Frames the tail's bytes into lines, bounding each one as it closes. */
   private readonly tailFramer = new AgyLineFramer(AGY_MAX_LINE_BYTES);
   /** Per-drain read ceiling. The production value unless a test injects a reachable one. */
@@ -142,6 +163,7 @@ export class AgyObserveConnection implements SessionConnection {
     this.info = options.info;
     if (options.trace) this.trace = options.trace;
     if (options.binary) this.catalogBinary = options.binary;
+    if (options.queuedSends) this.queuedSendsLookup = options.queuedSends;
     this.tailReadMaxBytes = options.tailReadMaxBytes ?? AGY_TAIL_READ_MAX_BYTES;
     this.path = agyTranscriptPath(options.roots, options.conversationId);
     this.state = this.buildMapState();
@@ -159,16 +181,43 @@ export class AgyObserveConnection implements SessionConnection {
    * rather than running (see `agyIsErrorRow` in the mapper).
    */
   protected buildMapState(): AgyMapState {
+    const queuedSends = this.queuedSendsLookup?.();
     return createAgyMapState(this.conversationId, {
       liveChild: false,
+      ...(queuedSends ? { queuedSends } : {}),
       ...(this.trace ? { trace: this.trace } : {}),
     });
+  }
+
+  /**
+   * Adopt the adapter's queued-send state when a Drive connection made it after this fold began,
+   * so the tail keys a Drive prompt's delivering line as its sender did.
+   */
+  private adoptQueuedSends(): void {
+    if (this.state.queuedSends || !this.queuedSendsLookup) return;
+    const queuedSends = this.queuedSendsLookup();
+    if (queuedSends) this.state.queuedSends = queuedSends;
   }
 
   /** Rows appended AFTER the transcript replay. Drive returns its minted pending prompts here,
    *  because an ordinary attach replays `getHistory()` and nothing else (reflection §6). */
   protected extraHistoryRows(): AgentMessage[] {
     return [];
+  }
+
+  /**
+   * Whether a final answer read on the TAIL closes its turn with a `run-summary`. Observe has no
+   * other turn-end evidence, so yes; a Drive connection with a live child answers no, because the
+   * child's `result` event is the turn's end and its outcome.
+   */
+  protected tailClosesTurns(): boolean {
+    return true;
+  }
+
+  /** Read whatever the transcript gained, now. Drive calls it to admit a turn's lines before naming the turn. */
+  protected drainNow(): void {
+    this.armTail();
+    void this.drainTail();
   }
 
   /** Called for every step admitted on either path, after it is mapped. Drive uses it to notice a
@@ -213,8 +262,7 @@ export class AgyObserveConnection implements SessionConnection {
     if (!existsSync(this.path)) {
       this.trace?.({ op: 'transcript-missing', detail: `no transcript.jsonl for ${this.conversationId}` });
       this.primed = true;
-      this.offset = 0;
-      this.baselineSize = 0;
+      this.baselineAt(0, 0);
       return [
         {
           type: 'notice',
@@ -238,8 +286,7 @@ export class AgyObserveConnection implements SessionConnection {
     // Say which rather than rendering an empty conversation.
     if (isAgyReadRefusal(read)) {
       this.primed = true;
-      this.offset = 0;
-      this.baselineSize = 0;
+      this.baselineAt(0, 0);
       return [
         {
           type: 'notice',
@@ -314,15 +361,25 @@ export class AgyObserveConnection implements SessionConnection {
       });
     }
 
-    this.offset = boundary;
-    this.baselineSize = size;
-    this.tailFramer.reset();
+    this.baselineAt(boundary, size, read.identity, agyPrefixDigest(bytes));
     this.primed = true;
+    // A conversation created from the app has no log directory until its first turn, so its
+    // watch could not be armed at subscribe: arm it once there is something to watch.
+    this.armTail();
     // Catch anything appended DURING this read — and, after a capped replay,
     // everything past the cap.
     if (this.watcher) this.scheduleDrain(0);
 
     return [...out, ...this.extraHistoryRows()];
+  }
+
+  /** Re-baseline the tail at `offset`: the bytes before it are `digest`, read from `identity`. */
+  private baselineAt(offset: number, size: number, identity?: string, digest?: Buffer): void {
+    this.offset = offset;
+    this.baselineSize = size;
+    this.sourceIdentity = identity;
+    this.prefixDigest = digest ?? (offset === 0 ? agyPrefixDigest(Buffer.alloc(0)) : undefined);
+    this.tailFramer.reset();
   }
 
   protected emit(message: AgentMessage): void {
@@ -353,14 +410,35 @@ export class AgyObserveConnection implements SessionConnection {
     });
   }
 
+  /**
+   * Watch the transcript's DIRECTORY, not the file: a watch on the file follows its inode, so a
+   * transcript replaced whole would never be read again. Bun reports a file renamed over another
+   * only under the name it was renamed FROM, so a rename of any name may have replaced the
+   * transcript; the drain decides from the file's identity and content. A sibling the host
+   * rewrites constantly (`agy.log`) changes nothing.
+   */
   private startTail(): void {
+    const watched = new Set([basename(this.path)]);
     try {
-      this.watcher = watch(this.path, () => this.scheduleDrain(TAIL_DEBOUNCE_MS));
+      this.watcher = watch(dirname(this.path), { persistent: false }, (eventType, filename) => {
+        if (classifyDirectoryWatchEvent(eventType, filename, watched) === 'unrelated') return;
+        this.scheduleDrain(TAIL_DEBOUNCE_MS);
+      });
+      this.watcher.on('error', (error) => {
+        this.trace?.({ op: 'tail-watch-failed', detail: `${dirname(this.path)}: ${String(error)}` });
+      });
     } catch {
-      // fs.watch is unavailable here (a missing file, an unsupported filesystem):
+      // fs.watch is unavailable here (no log directory yet, an unsupported filesystem):
       // history still works, the session just does not follow live.
-      this.trace?.({ op: 'tail-watch-unavailable', detail: `cannot watch ${this.path}` });
+      this.watcher = undefined;
+      this.trace?.({ op: 'tail-watch-unavailable', detail: `cannot watch ${dirname(this.path)}` });
     }
+  }
+
+  /** Arm the tail's watch when someone is listening and the log directory now exists. */
+  private armTail(): void {
+    if (this.watcher || this.closed || this.handlers.size === 0 || !existsSync(dirname(this.path))) return;
+    this.startTail();
   }
 
   private scheduleDrain(delayMs: number): void {
@@ -386,48 +464,36 @@ export class AgyObserveConnection implements SessionConnection {
     if (!this.primed || this.closed || this.draining) return;
     this.draining = true;
     try {
-      let size: number;
-      try {
-        size = statSync(this.path).size;
-      } catch {
-        return;
-      }
-
-      // A SHRINK means the file was replaced or rewritten, not appended to. The
-      // offset now points into unrelated bytes and the admitted-step set describes
-      // a file that no longer exists, so the only correct move is to re-baseline
-      // WHOLESALE and tell every client to reload — a partial re-read would splice
-      // two different transcripts together.
-      if (size < this.baselineSize) {
-        this.trace?.({
-          op: 'transcript-rewritten',
-          detail: `size fell from ${this.baselineSize} to ${size}; re-baselining ${this.conversationId}`,
-        });
-        this.offset = 0;
-        this.baselineSize = 0;
-        this.tailFramer.reset();
-        this.primed = false;
-        this.emit({ type: 'history-reset', notice: 'The Antigravity transcript was rewritten; reloading it.' });
-        return;
-      }
-      if (size <= this.offset) return;
-
-      const readFrom = this.offset;
-      const chunk = readContainedRange(
+      const chunk = readContainedTail(
         this.roots.appData,
         this.path,
         this.offset,
-        size,
         this.tailReadMaxBytes,
         this.trace,
       );
       if (isAgyReadRefusal(chunk)) return;
+
+      // A rewrite, not an append: the file shrank, another file holds the name, or the bytes
+      // already consumed changed. The offset now points into unrelated bytes and the
+      // admitted-step set describes a file that no longer exists, so the only correct move is to
+      // re-baseline WHOLESALE and tell every client to reload — a partial re-read would splice
+      // two different transcripts together.
+      const rewrite = this.rewriteOf(chunk);
+      if (rewrite) {
+        this.onTranscriptRewritten(rewrite);
+        return;
+      }
+      this.sourceIdentity = chunk.identity;
+      if (chunk.bytesRead === 0) return;
+
+      const readFrom = this.offset;
       // RAW BYTES, deliberately. Consecutive drains cut the file at an arbitrary
       // offset, so a multibyte character routinely straddles that cut; decoding
       // each range on its own produced U+FFFD on both sides and changed the
       // line's measured length, drifting every later `byteOffset` in the drain.
       this.offset = readFrom + chunk.bytesRead;
-      this.baselineSize = size;
+      this.baselineSize = chunk.size;
+      this.prefixDigest = chunk.extendedDigest;
       // The read is capped, so a huge append is consumed across drains rather
       // than in one allocation. Keep draining until the offset catches up.
       if (chunk.truncated) this.scheduleDrain(0);
@@ -435,6 +501,8 @@ export class AgyObserveConnection implements SessionConnection {
       // below carries its true byte offset — the drive fence needs the absolute
       // position, not one relative to this read.
       let lineOffset = readFrom - this.tailFramer.buffered;
+      this.adoptQueuedSends();
+      this.state.closesTurns = this.tailClosesTurns();
 
       // The framer enforces the per-line cap as each line CLOSES. The previous
       // loop checked only the unterminated remainder afterwards, so a line past
@@ -468,6 +536,37 @@ export class AgyObserveConnection implements SessionConnection {
     } finally {
       this.draining = false;
     }
+  }
+
+  /** Why this tail read is not an append to what was consumed, or undefined when it is. */
+  private rewriteOf(read: AgyTailReadResult): string | undefined {
+    if (this.sourceIdentity !== undefined && read.identity !== this.sourceIdentity) {
+      return `another file (${read.identity}) replaced ${this.sourceIdentity}`;
+    }
+    if (read.size < this.baselineSize || !read.prefixDigest) {
+      return `size fell from ${Math.max(this.baselineSize, this.offset)} to ${read.size}`;
+    }
+    if (this.prefixDigest && !read.prefixDigest.equals(this.prefixDigest)) {
+      return `the ${this.offset} bytes already read were rewritten in place`;
+    }
+    return undefined;
+  }
+
+  /**
+   * The transcript stopped being the history this connection holds. Observe re-baselines and asks
+   * every client to reload, once: the tail stays inert until the reload's `getHistory()` primes it
+   * against the new file. The Drive subclass also gives up writing.
+   */
+  protected onTranscriptRewritten(detail: string): void {
+    this.trace?.({ op: 'transcript-rewritten', detail: `${detail}; re-baselining ${this.conversationId}` });
+    this.baselineAt(0, 0);
+    this.primed = false;
+    this.emit({ type: 'history-reset', notice: this.rewriteNotice() });
+  }
+
+  /** What the reload after a rewrite says. */
+  protected rewriteNotice(): string {
+    return 'The Antigravity transcript was rewritten; reloading it.';
   }
 
   /**

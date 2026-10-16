@@ -19,7 +19,8 @@
     {"type":"thinking","text":"Metadata spelling.","key":"codex:turn-new:rs_new_4:r"},
     {"type":"model-output","text":"second answer","final":true,"key":"codex:turn-new:msg_new:t"},
     {"type":"status","status":"idle"},
-    {"type":"run-summary","key":"codex:run:turn-new","turnId":"turn-new","assistantMessageKey":"codex:turn-new:msg_new:t","status":"done","completedAt":1788256869000,"source":"codex-rollout"}
+    {"type":"run-summary","key":"codex:run:turn-new","turnId":"turn-new","assistantMessageKey":"codex:turn-new:msg_new:t","status":"done","startedAt":1788256860000,"completedAt":1788256869000,"totalRuntimeMs":9000,"source":"codex-rollout"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":13000,"turnCount":2,"updatedAt":1788256869000,"source":"codex-rollout"}}
   ],
   "replay": [
     {"type":"user-message","text":"first prompt","key":"c1","sentAt":1788256800000},

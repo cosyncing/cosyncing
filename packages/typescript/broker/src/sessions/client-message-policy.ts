@@ -1,6 +1,6 @@
 import { PROMPT_ATTACHMENT_LIMITS } from '@cosyncing/protocol';
 import type { AgentMessage, AgentOption, ModeOption, ModelOption, ModelSelection, PlanAction, PlanSemantic, SessionConnection } from '@cosyncing/protocol';
-import { isNativeSessionUnresumableError, isOwnershipConflictError } from '@cosyncing/adapter-api';
+import { isControlRefusedError, isNativeSessionUnresumableError, isOwnershipConflictError } from '@cosyncing/adapter-api';
 import { trustTierForAddress } from '../security/r2-policy.ts';
 import { isJoinExistingError } from './session-owner.ts';
 
@@ -27,6 +27,16 @@ export function driveAttachRefusalCode(error: unknown): DriveAttachRefusalCode {
   }
   if (isNativeSessionUnresumableError(error)) return 'DRIVE_NATIVE_SESSION_UNRESUMABLE';
   return 'DRIVE_RESTORE_FAILED';
+}
+
+/**
+ * The typed `nack` code for a control an adapter refused before it reached the agent (a decision
+ * on a request it does not hold open, a command it does not offer), or undefined for any other
+ * failure. Existing registry codes, so the contract surface does not move.
+ */
+export function controlRefusalCode(error: unknown): 'NOT_FOUND' | 'NOT_SUPPORTED' | undefined {
+  if (!isControlRefusedError(error)) return undefined;
+  return error.refusal === 'request-not-pending' ? 'NOT_FOUND' : 'NOT_SUPPORTED';
 }
 
 export type ClientMessagePolicyErrorCode =

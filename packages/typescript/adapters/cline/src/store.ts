@@ -1,13 +1,14 @@
 /** Read-only, bounded Cline session-snapshot discovery, across the schema
  *  versions listed in `CLINE_OBSERVE_VERSIONS`. */
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   compareSemanticVersions,
   lowestSemanticVersion,
+  NO_FOLLOW_FLAG,
+  STORE_READ_FLAGS,
   type HistorySourceIdentity,
   type SessionDiscoveryWork,
   type Unsubscribe,
@@ -32,8 +33,6 @@ export const CLINE_MEASURED_VERSIONS: readonly string[] = Object.freeze([
  * What actually protects Drive is checked structurally, at use, each failing
  * closed with its own message:
  *
- *  - ACP protocol major — `AcpClient.connect` refuses an untested major;
- *  - agent identity — the initialize response must name `cline`;
  *  - Hub protocol — discovery must carry `protocolVersion` v1 exactly, plus a
  *    matching hubId, auth token, pid, port, host and URL;
  *  - Hub epoch — a replacement Hub revokes Drive rather than inheriting it;
@@ -316,6 +315,8 @@ export interface ClineMessagesSnapshot {
   issues: string[];
   byteLength: number;
   identity?: HistorySourceIdentity;
+  /** Which file was read (`dev:ino`): a snapshot renamed over it is another file. */
+  fileId?: string;
   updatedAt?: number;
   agent?: string;
   taskType?: string;
@@ -439,7 +440,8 @@ async function openRegularInside(root: string, path: string): Promise<FileHandle
       const info = await lstat(parent);
       if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
     }
-    handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Non-blocking: a FIFO in place of a session file must not park a worker waiting for a writer.
+    handle = await open(absolutePath, STORE_READ_FLAGS | NO_FOLLOW_FLAG);
     const info = await handle.stat({ bigint: true });
     if (!info.isFile()) throw new Error('not a regular file');
     const rootAfter = await realpath(absoluteRoot);
@@ -736,6 +738,7 @@ export async function readClineMessages(
       revision: `${String(file.mtimeNs)}:${String(file.size)}:${lastId}`,
       rewriteToken: firstId,
     },
+    fileId: `${String(file.dev)}:${String(file.ino)}`,
     updatedAt: parseTimestamp(parsed.updated_at),
     version: 1,
     ...(boundedString(parsed.agent, 64, true) ? { agent: boundedString(parsed.agent, 64, true) } : {}),

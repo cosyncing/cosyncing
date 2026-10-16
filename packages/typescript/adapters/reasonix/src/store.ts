@@ -1,5 +1,4 @@
 /** Read-only Reasonix v1.25.2 store discovery and bounded transcript reads. */
-import { constants } from 'node:fs';
 import {
   lstat,
   open,
@@ -16,7 +15,7 @@ import {
   resolve,
   sep,
 } from 'node:path';
-import type { HistorySourceIdentity } from '@cosyncing/adapter-api';
+import { NO_FOLLOW_FLAG, STORE_READ_FLAGS, type HistorySourceIdentity } from '@cosyncing/adapter-api';
 import type {
   ReasonixDisplayEntry,
   ReasonixTranscriptRecord,
@@ -225,7 +224,8 @@ async function openRegularInside(root: string, path: string): Promise<FileHandle
       const parentInfo = await lstat(parent);
       if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) return undefined;
     }
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Non-blocking: a FIFO in place of a session file must not park a worker waiting for a writer.
+    handle = await open(path, STORE_READ_FLAGS | NO_FOLLOW_FLAG);
     const info = await handle.stat();
     if (!info.isFile()) throw new Error('not a regular file');
 

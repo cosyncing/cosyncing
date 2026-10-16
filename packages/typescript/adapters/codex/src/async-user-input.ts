@@ -228,6 +228,12 @@ export class CodexAsyncQuestionTracker {
     return submission;
   }
 
+  /** Whether a decision for [requestId] can still reach Codex: its card is pending, or an answer
+   *  to it is being sent (a concurrent decision shares that outcome). */
+  isOpen(requestId: string): boolean {
+    return this.pending.has(requestId) || this.submissions.has(requestId);
+  }
+
   async dismiss(requestId: string): Promise<boolean> {
     // A competing dismiss shares the answer's outcome instead of acknowledging a failed send.
     const submission = this.submissions.get(requestId);

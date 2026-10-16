@@ -4,6 +4,8 @@
  *   bun run packages/typescript/broker/test/codex/resume-fake.ts
  */
 export {};
+// First: the adapter fixes its session store when it loads, and admits only rollouts inside it.
+import { CODEX_TEST_SESSIONS } from '../helpers/codex-test-home.ts';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { CodexAsyncQuestionTracker } from '../../../adapters/codex/src/async-user-input.ts';
@@ -13,6 +15,7 @@ import { testBackgroundLedger, testBackgroundIncrementalReconnect, testBackgroun
 import {
   appendFileSync,
   chmodSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -27,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   AgentRegistry,
+  isControlRefusedError,
   isNativeSessionUnresumableError,
   isOwnershipConflictError,
 } from '../../../adapter-api/src/index.ts';
@@ -105,7 +109,8 @@ async function waitFor(pred: () => boolean, ms: number): Promise<boolean> {
 }
 
 function fakeCodexDir(scriptBody: string): { dir: string; rollout: string; fake: string; marker: string } {
-  const dir = join('/tmp', `cosyncing-codex-fake-${rand()}`);
+  // Inside the adapter's session store, so the fixture rollout is one it may attach.
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-fake-${rand()}`);
   const binDir = join(dir, 'bin');
   mkdirSync(binDir, { recursive: true });
   const rollout = join(dir, 'rollout-2026-06-16T00-00-00-00000000-0000-4000-8000-000000000000.jsonl');
@@ -3068,6 +3073,14 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 });
 
+/** How a decision call ended: accepted, refused as not pending, or some other error. */
+function refusedAsNotPending(call: Promise<void>): Promise<string> {
+  return call.then(
+    () => 'accepted',
+    (error) => (isControlRefusedError(error) && error.refusal === 'request-not-pending' ? 'refused' : String(error)),
+  );
+}
+
 await test('CR2 native requests settle exactly once and one id cannot clear another', async () => {
   return await withFakeCodex(`#!/usr/bin/env bun
 const enc = new TextDecoder();
@@ -3114,17 +3127,19 @@ for await (const chunk of Bun.stdin.stream()) {
       const perm = messages.find((m) => m.type === 'permission-request');
       await conn.respondPermission(perm.requestId, 'approve');
       await waitFor(() => messages.some((m) => m.type === 'status' && m.status === 'idle'), 5000);
-      // Duplicate answers after settling must be no-ops.
-      await conn.respondPermission(perm.requestId, 'reject');
+      // A duplicate answer after settling is refused (the sender is told so) and settles nothing again.
+      const duplicate = await conn.respondPermission(perm.requestId, 'reject')
+        .then(() => 'accepted', (error) => (isControlRefusedError(error) && error.refusal === 'request-not-pending' ? 'refused' : String(error)));
       const counts = requestCounts(messages);
       const pendingAtEnd = await Promise.resolve(conn.getPending?.() ?? []);
       return [
         approvalStillPending &&
+          duplicate === 'refused' &&
           counts.permReq === 1 && counts.qReq === 1 &&
           counts.permRes === 1 && counts.qRes === 1 &&
           messages.find((m) => m.type === 'permission-resolved')?.decision === 'approve' &&
           pendingAtEnd.length === 0,
-        `approvalStillPending=${approvalStillPending} ${JSON.stringify(counts)} pendingAtEnd=${pendingAtEnd.length}`,
+        `approvalStillPending=${approvalStillPending} duplicate=${duplicate} ${JSON.stringify(counts)} pendingAtEnd=${pendingAtEnd.length}`,
       ];
     } finally {
       await conn.close().catch(() => {});
@@ -3566,9 +3581,9 @@ for await (const chunk of Bun.stdin.stream()) {
         conn.answerQuestion!(card.requestId, [['Crimson'], []]),
       ]);
       await waitFor(() => messages.some((m) => m.type === 'question-resolved' && m.requestId === card.requestId), 5000);
-      // Duplicate and late answers are no-ops (no second steer).
-      await conn.answerQuestion!(card.requestId, [['Crimson'], []]);
-      await conn.rejectQuestion!(card.requestId);
+      // Duplicate and late decisions are refused (the sender is told so) and send nothing: no second steer.
+      const lateAnswer = await refusedAsNotPending(conn.answerQuestion!(card.requestId, [['Crimson'], []]));
+      const lateSkip = await refusedAsNotPending(conn.rejectQuestion!(card.requestId));
       const pendingAfter: any[] = await Promise.resolve(conn.getPending?.() ?? []);
       const steers = readMarkers(marker).filter((m) => m.kind === 'turn/steer-request');
       return [
@@ -3587,8 +3602,9 @@ for await (const chunk of Bun.stdin.stream()) {
           messages.filter((m) => m.type === 'question-request').length === 1 &&
           steers[0].expectedTurnId === 'turn1' &&
           steers[0].text === '> Which color?\n\nTeal\n\n> Any notes?\n\ncustom note' &&
+          lateAnswer === 'refused' && lateSkip === 'refused' &&
           pendingAfter.length === 0,
-        `cards=${cards.length} steers=${JSON.stringify(steers)} textLeak=${textLeak} pendingAfter=${pendingAfter.length}`,
+        `cards=${cards.length} steers=${JSON.stringify(steers)} textLeak=${textLeak} pendingAfter=${pendingAfter.length} late=${lateAnswer}/${lateSkip}`,
       ];
     } finally {
       await conn.close().catch(() => {});
@@ -3805,6 +3821,89 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 });
 
+await test('a question decision for an id with no open card is refused and nothing reaches Codex', async () => {
+  return await withFakeCodex(`#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+const { appendFileSync } = require('node:fs');
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      send({ id: msg.id, result: { turn: { id: 'turn1' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn1' } } });
+      setTimeout(() => {
+        send({ id: 71, method: 'item/tool/requestUserInput', params: { threadId: 'fake-thread', turnId: 'turn1', itemId: 'tool-answered', questions: [{ id: 'a1', header: 'H', question: 'Answered?', options: [{ label: 'Yes', description: 'y' }] }] } });
+        send({ id: 72, method: 'item/tool/requestUserInput', params: { threadId: 'fake-thread', turnId: 'turn1', itemId: 'tool-skipped', questions: [{ id: 's1', header: 'H', question: 'Skipped?', options: [{ label: 'No', description: 'n' }] }] } });
+      }, 40);
+    } else if (msg.id !== undefined && msg.method === undefined) {
+      // Any reply the app writes to a request Codex made: the only way a question decision reaches it.
+      mark({ kind: 'reply', rpcId: msg.id, result: msg.result ?? null });
+    } else if (msg.method === 'turn/steer') {
+      mark({ kind: 'turn/steer' });
+      send({ id: msg.id, result: {} });
+    }
+  }
+}
+`, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'ask' });
+      await waitFor(() => messages.filter((m) => m.type === 'question-request').length === 2, 5000);
+      const answered = messages.find((m) => m.type === 'question-request' && m.questions?.[0]?.question === 'Answered?');
+      const skipped = messages.find((m) => m.type === 'question-request' && m.questions?.[0]?.question === 'Skipped?');
+      const before = readMarkers(marker).length;
+      // Ids this connection never issued, for an RPC question and an async one.
+      const forged = await Promise.all([
+        refusedAsNotPending(conn.answerQuestion!('codex:question:never-asked', [['Yes']])),
+        refusedAsNotPending(conn.rejectQuestion!('codex:question:never-asked')),
+        refusedAsNotPending(conn.answerQuestion!('codex:aq:call_never_asked', [['Yes']])),
+        refusedAsNotPending(conn.rejectQuestion!('codex:aq:call_never_asked')),
+      ]);
+      const forgedWrites = readMarkers(marker).slice(before);
+      // One answer and one dismissal reach Codex; repeating either is refused.
+      await conn.answerQuestion!(answered.requestId, [['Yes']]);
+      await conn.rejectQuestion!(skipped.requestId);
+      await waitFor(() => readMarkers(marker).filter((m) => m.kind === 'reply').length === 2, 5000);
+      const repeated = await Promise.all([
+        refusedAsNotPending(conn.answerQuestion!(answered.requestId, [['Yes']])),
+        refusedAsNotPending(conn.rejectQuestion!(answered.requestId)),
+        refusedAsNotPending(conn.answerQuestion!(skipped.requestId, [['No']])),
+        refusedAsNotPending(conn.rejectQuestion!(skipped.requestId)),
+      ]);
+      await new Promise((r) => setTimeout(r, 100));
+      const replies = readMarkers(marker).filter((m) => m.kind === 'reply');
+      const resolved = messages.filter((m) => m.type === 'question-resolved').map((m) => m.requestId);
+      return [
+        Boolean(answered && skipped) &&
+          forged.every((outcome) => outcome === 'refused') &&
+          forgedWrites.length === 0 &&
+          repeated.every((outcome) => outcome === 'refused') &&
+          replies.length === 2 &&
+          replies.some((m) => m.rpcId === 71 && JSON.stringify(m.result) === JSON.stringify({ answers: { a1: { answers: ['Yes'] } } })) &&
+          replies.some((m) => m.rpcId === 72 && JSON.stringify(m.result) === JSON.stringify({ answers: {} })) &&
+          resolved.length === 2 && resolved.includes(answered.requestId) && resolved.includes(skipped.requestId),
+        `forged=${forged.join(',')} forgedWrites=${JSON.stringify(forgedWrites)} repeated=${repeated.join(',')} replies=${JSON.stringify(replies)} resolved=${resolved.join(',')}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
 // ── CR1: reason-tagged Drive attach arbitration (presence fail-closed) ──────────────────────────
 
 /** Minimal resume-capable fake: initialize/loaded-list/settings/resume only.
@@ -3940,6 +4039,68 @@ await test('CR1 restore reason fails closed on shared, private, and unknown term
           outcomes[2] === 'conflict:terminal-unknown' &&
           outcomes[3] === 'conflict:terminal-unknown',
         outcomes.join(' | '),
+      ];
+    });
+  });
+});
+
+await test('CR1 a Windows restore reads only foreign codex.exe command lines, and refuses one naming the thread', async () => {
+  return await withFakeCodex(RESUME_ONLY_FAKE, async (rollout) => {
+    return await withFakeSock(async () => {
+      const id = Buffer.from(rollout, 'utf8').toString('base64url');
+      const windowsScan = async () => fakeTuiScan({ processScanAvailable: false, socketDiagAvailable: false, source: 'unsupported' });
+      const at = (minute: number) => `2026-10-15T10:${String(minute).padStart(2, '0')}:00.0000000Z`;
+      const processes = (...codex: Array<[pid: number, parentPid: number]>) => ({
+        processesOk: true, listenersOk: true, listeners: [],
+        processes: [
+          { pid: 10, parentPid: 4, start: at(0), name: 'explorer.exe', executable: 'C:\\Windows\\explorer.exe' },
+          { pid: 700, parentPid: 10, start: at(1), name: 'bun.exe', executable: 'C:\\bun.exe' },
+          ...codex.map(([pid, parentPid]) => ({ pid, parentPid, start: at(5), name: 'codex.exe', executable: 'C:\\codex.exe' })),
+        ],
+      });
+      const reads: number[][] = [];
+      const evidence = (table: any, lines?: Record<number, string>) => ({
+        brokerPid: 700,
+        snapshot: async () => table,
+        commandLines: (pids: readonly number[]) => {
+          reads.push([...pids]);
+          return lines ? new Map(pids.map((pid) => [pid, lines[pid]] as const)) : undefined;
+        },
+      });
+      const outcomes: string[] = [];
+      const attempt = async (windowsTerminalEvidence: any, reason: 'app-restore' | 'takeover' = 'app-restore') => {
+        try {
+          const conn = await new CodexAdapter({ scanCodexTuiPresence: windowsScan, windowsTerminalEvidence }).attach(id, 'resume', { reason });
+          outcomes.push(`${conn.info.control?.drive.state}:${conn.info.control?.terminalSync.presence}`);
+          await conn.close().catch(() => {});
+        } catch (err) {
+          outcomes.push(isOwnershipConflictError(err) ? `conflict:${err.conflict}` : `error:${String(err)}`);
+        }
+      };
+      // Only the broker's own Resume owner runs codex.exe: absent, nothing read.
+      await attempt(evidence(processes([701, 700])));
+      // A terminal outside the broker names the thread: private. The app-server beside it does not.
+      await attempt(evidence(processes([701, 700], [30, 10], [31, 10]), { 30: 'codex.exe resume fake-thread', 31: 'codex.exe app-server' }));
+      // Foreign codex.exe that do not name the thread: absent after one read.
+      await attempt(evidence(processes([31, 10]), { 31: 'codex.exe app-server' }));
+      // A host that will not say: unknown, refused.
+      await attempt(evidence(null));
+      await attempt(evidence(processes([30, 10])));
+      // An explicit Take over never consults it.
+      const before = reads.length;
+      await attempt(evidence(processes([30, 10]), { 30: 'codex.exe resume fake-thread' }), 'takeover');
+      const expected = [
+        'driving:absent',
+        'conflict:terminal-private',
+        'driving:absent',
+        'conflict:terminal-unknown',
+        'conflict:terminal-unknown',
+        'driving:unknown',
+      ];
+      const readsOk = JSON.stringify(reads) === JSON.stringify([[30, 31], [31], [30]]) && reads.length === before;
+      return [
+        JSON.stringify(outcomes) === JSON.stringify(expected) && readsOk,
+        `${outcomes.join(' | ')} reads=${JSON.stringify(reads)}`,
       ];
     });
   });
@@ -5306,6 +5467,7 @@ let buf = '';
 const { appendFileSync } = require('node:fs');
 const send = (o) => console.log(JSON.stringify(o));
 const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+let started = null;
 for await (const chunk of Bun.stdin.stream()) {
   buf += enc.decode(chunk, { stream: true });
   let nl;
@@ -5317,7 +5479,11 @@ for await (const chunk of Bun.stdin.stream()) {
     if (msg.method === 'initialize') send({ id: msg.id, result: {} });
     else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
     else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
-    else if (msg.method === 'thread/name/set') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/name/set') {
+      // Legacy history persists the new thread's rollout here, as Codex does.
+      if (started) appendFileSync(started.path, JSON.stringify({ type: 'session_meta', payload: { id: started.id, cwd: started.cwd } }) + String.fromCharCode(10));
+      send({ id: msg.id, result: {} });
+    }
     else if (msg.method === 'thread/start') {
       const config = msg.params && msg.params.config ? msg.params.config : null;
       mark({ kind: 'thread/start', provider: msg.params.modelProvider, model: msg.params.model, config, allowProviderModelFallback: msg.params.allowProviderModelFallback });
@@ -5325,8 +5491,11 @@ for await (const chunk of Bun.stdin.stream()) {
       if (msg.params.modelProvider === 'vllm-hpc' && !providers['vllm-hpc']) {
         send({ id: msg.id, error: { code: -32600, message: "Model provider 'vllm-hpc' not found" } });
       } else {
+        // Every create allocates a rollout of its own that does not exist yet.
+        const id = crypto.randomUUID();
+        started = { id, cwd: msg.params.cwd, path: '__DIR__/rollout-2026-06-16T00-00-00-' + id + '.jsonl' };
         send({ id: msg.id, result: {
-          thread: { id: 'created-thread', sessionId: 'created-thread', path: '__ROLLOUT__', cwd: msg.params.cwd, name: 'created', createdAt: 1800000000, updatedAt: 1800000001, turns: [] },
+          thread: { id, sessionId: id, path: started.path, cwd: msg.params.cwd, name: 'created', createdAt: 1800000000, updatedAt: 1800000001, turns: [] },
           cwd: msg.params.cwd,
           model: msg.params.model,
           modelProvider: msg.params.modelProvider,
@@ -5660,10 +5829,23 @@ await test('Codex background commands support control-socket symlinks without gr
     writeFileSync(regular, 'not a socket');
     symlinkSync(regular, join(dir, 'regular-link'));
     assert.equal(inspectCodexRuntimeSocket(join(dir, 'regular-link')).state, 'unknown');
-    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = dangling;
+    // An alias to something that is not a socket proves nothing about a daemon: Drive stays refused.
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = join(dir, 'regular-link');
     await assert.rejects(new CodexAdapter().attach(Buffer.from(rollout).toString('base64url'), 'resume'),
       /ownership could not be verified/);
-    return [true, 'real socket aliases support live attach; dangling/non-socket aliases remain unknown and replacement changes scope'];
+    // An alias whose target is gone has nothing behind it to listen: no daemon, so Drive runs its own
+    // app-server. The alias itself is still unknown routing evidence and is left in place.
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = dangling;
+    const privateOwner = await new CodexAdapter().attach(Buffer.from(rollout).toString('base64url'), 'resume');
+    try {
+      assert.equal(privateOwner.info.attachMode, 'resume');
+      assert.equal(privateOwner.info.control?.drive.state, 'driving');
+    } finally {
+      await privateOwner.close();
+    }
+    assert.equal(lstatSync(dangling).isSymbolicLink(), true);
+    assert.equal(inspectCodexRuntimeSocket(dangling).state, 'unknown');
+    return [true, 'real socket aliases support live attach; a dangling alias is no daemon, a non-socket alias stays unknown, and replacement changes scope'];
   }));
 });
 

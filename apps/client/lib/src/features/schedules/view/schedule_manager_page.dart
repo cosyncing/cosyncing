@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/features/connection/provider/connection_pro
 import 'package:cosyncing_client/src/features/schedules/controller/schedule_controller.dart';
 import 'package:cosyncing_client/src/features/schedules/platform/device_time_zone.dart';
 import 'package:cosyncing_client/src/features/schedules/view/schedule_date_time_field.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -57,13 +58,22 @@ class _ScheduleManagerPageState extends ConsumerState<ScheduleManagerPage> {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    ref.listen(activeBrokerProfileProvider.select((profile) => profile?.id), (
+    // The same source the controller rebuilds on. The reload waits for the
+    // frame after the switch: started inside this notification it read the
+    // previous server's client, and the controller's own rebuild for the new
+    // server then discarded it, so a page kept alive in its branch showed no
+    // rows and asked the new server nothing.
+    ref.listen(activeBrokerProfileProvider.select(RosterSource.of), (
       previous,
       next,
     ) {
-      if (previous != next && mounted) {
-        unawaited(ref.read(scheduleControllerProvider.notifier).load());
-      }
+      if (previous == next || !mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(ref.read(scheduleControllerProvider.notifier).load());
+        }
+      });
+      WidgetsBinding.instance.scheduleFrame();
     });
     final state = ref.watch(scheduleControllerProvider);
     return Scaffold(

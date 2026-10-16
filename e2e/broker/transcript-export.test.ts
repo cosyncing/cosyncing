@@ -7,14 +7,16 @@
  * redacts it, and hands back an attachment-only download. HTTP clients may do
  * this only when the owner enabled it locally. These tests assert what the app
  * is told, what it downloads, what the CLI was asked, and that nothing the
- * export wrote outlives the request.
+ * export wrote outlives the request — or the broker process, however it ended.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PRODUCT_IDENTITY } from '../../packages/typescript/protocol/src/index.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../packages/typescript/broker/src/runtime/configuration.ts';
 import { type Broker, type BrokerClient, eventually, startBroker } from '../harness/index.ts';
 import { installOpenCodeExport, opencodeData, type OpenCodeExportFixture } from '../harness/fakes/opencode-export.ts';
+import { installPiRpcFake, type PiRpcFake } from '../harness/fakes/pi-rpc.ts';
 
 // Split so the public-tree scanner, which rejects secret-shaped literals in
 // source, never sees one here; the strings the redactor gets are whole.
@@ -39,23 +41,47 @@ const SECRETS: Array<[line: string, secret: string]> = [
 const MAX_BYTES = 64 * 1024;
 
 const tempRoot = (broker: Broker): string => join(broker.paths.root, 'tmp');
-/** The broker's private export directories still on disk. */
-const leftoverExportDirs = (broker: Broker): string[] =>
-  readdirSync(tempRoot(broker)).filter((name) => name.startsWith('cosyncing-r2-'));
+/** Where a running export keeps the native transcript: the broker's own state home, never the system temp dir. */
+const exportWorkDir = (broker: Broker): string => join(broker.paths.cosyncingHome, 'exports-tmp');
+/** Export working directories still on disk: the broker's own, and any in the system temp dir (never one). */
+const leftoverExportDirs = (broker: Broker): string[] => [
+  ...(existsSync(exportWorkDir(broker)) ? readdirSync(exportWorkDir(broker)) : []),
+  ...readdirSync(tempRoot(broker)).filter((name) => name.startsWith('cosyncing-r2-')),
+];
+/** Every regular file under `root` whose bytes contain `text`. */
+function filesContaining(root: string, text: string): string[] {
+  return readdirSync(root, { recursive: true, encoding: 'utf8' })
+    .map((relative) => join(root, relative))
+    .filter((path) => {
+      const stat = lstatSync(path, { throwIfNoEntry: false });
+      return !!stat?.isFile() && stat.size < 4 * 1024 * 1024 && readFileSync(path, 'latin1').includes(text);
+    });
+}
+/** The broker's artifact cache (under the fixture HOME): its index and content-addressed files. */
+const artifactsDir = (broker: Broker): string =>
+  join(broker.paths.home, '.cache', PRODUCT_IDENTITY.cacheDirectoryName, 'artifacts');
+const storedFile = (broker: Broker, contentHash: string): string =>
+  join(artifactsDir(broker), 'blobs', contentHash.slice(0, 2), contentHash);
+/** Export attachments the artifact index still lists. */
+const indexedExports = (broker: Broker): unknown[] =>
+  JSON.parse(readFileSync(join(artifactsDir(broker), 'index.json'), 'utf8')).records
+    .filter((record: { deliveryClass?: string }) => record.deliveryClass === 'export-attachment');
 
-const exportRoutes = (id: string) => ({
-  preflight: `/api/sessions/opencode/${encodeURIComponent(id)}/export/preflight`,
-  execute: `/api/sessions/opencode/${encodeURIComponent(id)}/export`,
+const exportRoutes = (id: string, tool = 'opencode') => ({
+  preflight: `/api/sessions/${tool}/${encodeURIComponent(id)}/export/preflight`,
+  execute: `/api/sessions/${tool}/${encodeURIComponent(id)}/export`,
 });
 
-/** The broker environment every export broker shares: fake CLI on PATH, storage, temp dir, size cap. */
+/** The broker environment every export broker shares: fake CLIs on PATH, storage, temp dir, size cap. */
 function exportBroker(name: string, extra: Record<string, string>, configure?: (home: string) => void) {
   let fixture!: OpenCodeExportFixture;
+  let pi!: PiRpcFake;
   const started = startBroker({
     name,
     token: true,
     setup: (paths) => {
       fixture = installOpenCodeExport(paths);
+      pi = installPiRpcFake(paths);
       mkdirSync(join(paths.root, 'tmp'));
       configure?.(paths.cosyncingHome);
     },
@@ -68,7 +94,7 @@ function exportBroker(name: string, extra: Record<string, string>, configure?: (
       ...extra,
     }),
   });
-  return started.then((broker) => ({ broker, opencode: fixture }));
+  return started.then((broker) => ({ broker, opencode: fixture, pi }));
 }
 
 describe('by default', () => {
@@ -100,10 +126,11 @@ describe('enabled in the broker configuration', () => {
   let broker: Broker;
   let owner: BrokerClient;
   let opencode: OpenCodeExportFixture;
+  let pi: PiRpcFake;
   let cwd: string;
 
   beforeAll(async () => {
-    ({ broker, opencode } = await exportBroker('transcript-export', {}, (home) => {
+    ({ broker, opencode, pi } = await exportBroker('transcript-export', {}, (home) => {
       writeBrokerConfig({ ...defaultBrokerConfig(), features: { httpTranscriptExport: true } }, home);
     }));
     owner = broker.client();
@@ -162,6 +189,7 @@ describe('enabled in the broker configuration', () => {
     expect(body).not.toContain(broker.paths.home);
     expect(body).not.toContain('window.__COSYNCING__');
     expect(body).toContain('[REDACTED_PROJECT]');
+    expect(existsSync(exportWorkDir(broker))).toBe(true);
     expect(leftoverExportDirs(broker)).toEqual([]);
   });
 
@@ -229,9 +257,9 @@ describe('enabled in the broker configuration', () => {
     opencode.session('ses_binary', { cwd, title: 'Binary' }, { stdout: 'text then a NUL: \u0000 binary tail' });
     const failed = await exportSession('ses_fail');
     expect([failed.status, failed.body.code]).toEqual([502, 'EXPORT_FAILED']);
-    // OpenCode's own reader stops at the cap, so an oversize export fails in the native step.
+    // OpenCode's own reader stops at the cap; the broker hears that it was the cap, not a failure.
     const big = await exportSession('ses_big');
-    expect([big.status, big.body.code]).toEqual([502, 'EXPORT_FAILED']);
+    expect([big.status, big.body.code]).toEqual([413, 'EXPORT_TOO_LARGE']);
     const pem = await exportSession('ses_pem');
     expect([pem.status, pem.body.code]).toEqual([422, 'REDACTION_REFUSED']);
     const binary = await exportSession('ses_binary');
@@ -240,15 +268,60 @@ describe('enabled in the broker configuration', () => {
     expect(leftoverExportDirs(broker)).toEqual([]);
   });
 
-  // Export attachments are dropped when the broker shuts down. The harness can stop a Windows broker
-  // only by terminating it, which runs no shutdown path, so this is asserted on POSIX.
-  test.skipIf(process.platform === 'win32')('a delivered export does not outlive the broker process', async () => {
+  // Shutdown drops export attachments, and so does the next start, whatever ended the process before
+  // it. The harness stops a Windows broker by terminating it, which runs no shutdown path; the start
+  // sweep makes that the same answer.
+  test('a delivered export does not outlive the broker process', async () => {
     opencode.session('ses_transient', { cwd, title: 'Transient' }, { stdout: '{"parts":["gone after restart"]}' });
     const executed = await exportSession('ses_transient');
     const url = new URL(executed.body.artifact.fetchUrl, broker.url);
     expect((await fetch(url, { headers: owner.credentialHeaders() })).status).toBe(200);
     await broker.restart();
     expect((await fetch(url, { headers: owner.credentialHeaders() })).status).toBe(404);
+  });
+
+  test('a delivered export does not outlive a broker that was killed, and its file is gone', async () => {
+    opencode.session('ses_killed', { cwd, title: 'Killed' }, { stdout: '{"parts":["gone after a crash"]}' });
+    const executed = await exportSession('ses_killed');
+    expect(executed.status).toBe(200);
+    const url = new URL(executed.body.artifact.fetchUrl, broker.url);
+    const served = await fetch(url, { headers: owner.credentialHeaders() });
+    expect(served.status).toBe(200);
+    const file = storedFile(broker, served.headers.get('x-cosyncing-content-hash') ?? '');
+    expect(existsSync(file)).toBe(true);
+    expect(indexedExports(broker).length).toBeGreaterThan(0);
+
+    await broker.restart({ crash: true }); // SIGKILL: no shutdown path, no exit listener
+    expect((await fetch(url, { headers: owner.credentialHeaders() })).status).toBe(404);
+    expect(existsSync(file)).toBe(false);
+    expect(indexedExports(broker)).toEqual([]);
+  });
+
+  test('an export the broker was killed in the middle of leaves no unredacted transcript behind', async () => {
+    // Pi writes its HTML export into the broker's working directory and only then answers; held, the
+    // unredacted file sits there while the broker waits.
+    const session = pi.sessionFile('held');
+    const routes = exportRoutes(session.id, 'pi');
+    const preflight = await owner.post(routes.preflight);
+    expect(preflight.status).toBe(200);
+    pi.holdExports();
+    try {
+      const inFlight = owner.post(routes.execute, { nonce: preflight.body.nonce }).catch(() => undefined);
+      const native = await eventually(() => {
+        const [entry] = existsSync(exportWorkDir(broker)) ? readdirSync(exportWorkDir(broker)) : [];
+        const path = entry ? join(exportWorkDir(broker), entry, 'export.html') : '';
+        return path && existsSync(path) && readFileSync(path, 'utf8').includes('pi-unredacted-') ? path : undefined;
+      }, { what: 'the native export to be written into the broker\'s working directory' });
+      const marker = readFileSync(native, 'utf8').match(/pi-unredacted-[0-9a-f-]+/)![0];
+      expect(filesContaining(broker.paths.root, marker)).toEqual([native]);
+
+      await broker.restart({ crash: true }); // the export never finished, and no shutdown path ran
+      await inFlight;
+      expect(readdirSync(exportWorkDir(broker))).toEqual([]);
+      expect(filesContaining(broker.paths.root, marker)).toEqual([]);
+    } finally {
+      pi.releaseExports();
+    }
   });
 });
 

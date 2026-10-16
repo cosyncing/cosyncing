@@ -135,12 +135,19 @@ void main() {
     });
 
     test('session widgets use centralized route helpers', () {
-      final source = File(
-        'lib/src/features/sessions/list/sessions_page.dart',
-      ).readAsStringSync();
-
-      expect(source, isNot(contains("context.go('/sessions/")));
-      expect(source, contains('sessionDetailLocation('));
+      final sources = Directory('lib/src')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((file) => file.path.endsWith('.dart'));
+      for (final file in sources) {
+        final source = file.readAsStringSync();
+        expect(
+          source,
+          isNot(contains("context.go('/sessions/")),
+          reason: '${file.path} builds a session location by hand',
+        );
+        expect(source, isNot(contains("context.push('/sessions/")));
+      }
     });
   });
 
@@ -759,10 +766,9 @@ void main() {
         }
 
         // These assertions mirror the real bindings in router.dart,
-        // sessions_page.dart, session_detail_page.dart and
-        // transfer_manager_page.dart. The page previously documented
-        // Ctrl+2 as Connection, omitted Notifications entirely, and had every
-        // destination after Sessions shifted by one.
+        // session_detail_page.dart and transfer_manager_page.dart. The page
+        // previously documented Ctrl+2 as Connection, omitted Notifications
+        // entirely, and had every destination after Sessions shifted by one.
         await scrollTo('Navigation');
         expect(find.text('Navigation'), findsOneWidget);
         expect(find.text('Ctrl+1 / \u23181'), findsOneWidget);

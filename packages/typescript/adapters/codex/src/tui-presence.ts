@@ -130,8 +130,15 @@ export interface CodexTuiScan {
   candidates: CodexTuiCandidate[];
   socketDiagAvailable: boolean;
   processScanAvailable: boolean;
-  /** Scanner that produced the evidence. Additive so Linux classification stays byte-for-byte compatible. */
-  source?: 'linux' | 'darwin';
+  /** Scanner that produced the evidence. Additive so Linux classification stays byte-for-byte compatible.
+   *  `unsupported`: this platform has no terminal scanner (Windows), so the scan carries no evidence
+   *  either way, as opposed to a scanner that ran and failed. A restore there asks the narrower
+   *  per-thread question in `windows-presence.ts` instead. */
+  source?: 'linux' | 'darwin' | 'unsupported';
+}
+
+function unsupportedCodexTuiScan(): CodexTuiScan {
+  return { ...emptyCodexTuiScan(), source: 'unsupported' };
 }
 
 const EXCLUDED_INTERACTIVE_VERBS = new Set([
@@ -1051,7 +1058,9 @@ export function scanCodexRemoteTuis(
 }
 
 /** Async equivalent for recurring watch polls. The socket probe is awaited before the same
- * deterministic /proc scan is performed, so no synchronous `ss` process can block the broker. */
+ * deterministic /proc scan is performed, so no synchronous `ss` process can block the broker.
+ * An empty `sockPath` means no daemon socket exists: terminals are still scanned, and none of
+ * them can share a daemon that is not there. */
 export async function scanCodexRemoteTuisAsync(
   sockPath: string,
   procRoot = '/proc',
@@ -1076,10 +1085,11 @@ export async function scanCodexRemoteTuisAsync(
       ...(opts.outputMaxBytes !== undefined ? { outputMaxBytes: opts.outputMaxBytes } : {}),
     });
   }
-  if (platform !== 'linux') return emptyCodexTuiScan();
+  if (platform !== 'linux') return unsupportedCodexTuiScan();
   let socketDiagRaw: string | undefined;
   try {
-    socketDiagRaw = await (opts.socketProbe ?? runCodexSocketDiagAsync)();
+    // Socket pairing proves sharing with the daemon socket; with none there is nothing to pair with.
+    socketDiagRaw = sockPath ? await (opts.socketProbe ?? runCodexSocketDiagAsync)() : undefined;
   } catch {
     socketDiagRaw = undefined;
   }
@@ -1294,7 +1304,7 @@ export function codexAttachedTuisAsync(
 ): Promise<CodexTuiScan> {
   const root = procRoot ?? process.env.COSYNCING_CODEX_PROC_ROOT?.trim() ?? '/proc';
   const platform = opts.platform ?? process.platform;
-  if (!codexTuiPresenceSupported(platform)) return Promise.resolve(emptyCodexTuiScan());
+  if (!codexTuiPresenceSupported(platform)) return Promise.resolve(unsupportedCodexTuiScan());
   const key = codexTuiCacheKey(sockPath, root, platform, opts.macConfiguredExecutable);
   const now = Date.now();
   const hit = cache.get(key);

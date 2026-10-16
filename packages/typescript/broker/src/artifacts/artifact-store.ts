@@ -75,6 +75,10 @@ interface ArtifactRecord {
   deliveryClass?: DeliveryClass;
   /** Absolute expiry for `export-attachment` records (rule 18; 30-min default). */
   expiresAt?: number;
+  /** The broker process that delivered an `export-attachment`: the store's random per-instance
+   *  generation. An export never outlives that process, so a record carrying any other value (or
+   *  none, from a broker that predates the field) is never served and is swept. */
+  exportGeneration?: string;
   /** Export format + redaction summary shown on the file-artifact card (no secret content). */
   format?: string;
   redactionSummary?: string;
@@ -117,6 +121,9 @@ export interface ArtifactStoreOptions {
   /** URL-derived namespaces written by older brokers and retained readably
    * through the supported old-binary rollback window. Existing signed URLs expire. */
   legacyBrokerSources?: string[];
+  /** Test/embedding override for the generation stamped on export attachments. A broker never sets
+   * it outside a test: a fixed value would let an export outlive the process that delivered it. */
+  exportGeneration?: string;
 }
 
 interface ArtifactIndex {
@@ -382,6 +389,10 @@ export class ArtifactStore {
   private readonly legacyBrokerSources: ReadonlySet<string>;
   readonly replayLimit: number;
   private readonly records = new Map<string, ArtifactRecord>();
+  /** This store's generation, recorded on every export attachment it delivers. The broker builds
+   *  one store per process, so an export from any earlier process — whether it shut down, crashed
+   *  or was killed — carries a different value and is dead on arrival. */
+  private readonly exportGeneration: string;
   /** Strictly increasing LRU clock. Wall-clock milliseconds alone can collide,
    *  which must never let key ordering evict the record a successful call is
    *  about to acknowledge. Seeded from disk so restart preserves ordering. */
@@ -393,6 +404,7 @@ export class ArtifactStore {
     this.indexFile = join(root, 'artifacts', 'index.json');
     this.secretFile = join(root, 'artifact-url-secret');
     this.brokerSource = normalizeBrokerSource(brokerUrl);
+    this.exportGeneration = options.exportGeneration || randomBytes(16).toString('hex');
     this.legacyBrokerSources = new Set(
       (options.legacyBrokerSources ?? [])
         .map(normalizeBrokerSource)
@@ -855,6 +867,7 @@ export class ArtifactStore {
       lastAccessedAt: recency,
       deliveryClass: 'export-attachment',
       expiresAt: now + meta.retentionMs,
+      exportGeneration: this.exportGeneration,
       format: meta.format,
       redactionSummary: meta.redactionSummary,
     };
@@ -874,6 +887,24 @@ export class ArtifactStore {
       interactionPolicy: this.displayOnlyPolicy(),
       fetchUrl: this.signedUrl(session.tool, session.id, artifactKey, brokerUrl, meta.retentionMs),
     };
+  }
+
+  /**
+   * Delete every export attachment an earlier process of this broker delivered, with its blob
+   * (rule 18, whatever ended that process). Graceful shutdown already clears them; a crash, a
+   * SIGKILL or a Windows terminate does not, so the broker calls this at start, before it answers
+   * a request. Only this broker's own records (its source and legacy sources) are touched: other
+   * artifact classes stay, and so do exports a different broker sharing the cache delivered.
+   */
+  sweepStaleExportAttachments(): number {
+    const stale = [...this.records.values()].filter((rec) => this.isStaleExport(rec));
+    // Nothing to remove is the common start: leave the index file alone.
+    if (!stale.length) return 0;
+    this.commitMutation('sweep', () => {
+      for (const rec of stale) this.records.delete(rec.key);
+    });
+    this.removeUnreferenced(stale);
+    return stale.length;
   }
 
   /** Delete every export-attachment artifact + its blobs (rule 18: delete on broker shutdown). */
@@ -1144,6 +1175,13 @@ export class ArtifactStore {
   }
 
   private lookupRecord(tool: string, sessionId: string, artifactKey: string): ArtifactRecord | undefined {
+    const found = this.findRecord(tool, sessionId, artifactKey);
+    // An export from an earlier process is gone even before the start sweep removes it, and stays
+    // gone if that sweep could not be persisted.
+    return found && !this.isStaleExport(found) ? found : undefined;
+  }
+
+  private findRecord(tool: string, sessionId: string, artifactKey: string): ArtifactRecord | undefined {
     const current = this.records.get(recordKey(this.brokerSource, tool, sessionId, artifactKey));
     if (current && this.ownsSource(current.brokerSource)) return current;
     for (const source of this.legacyBrokerSources) {
@@ -1151,6 +1189,13 @@ export class ArtifactStore {
       if (legacy && normalizeBrokerSource(legacy.brokerSource ?? '') === source) return legacy;
     }
     return undefined;
+  }
+
+  /** An export attachment this broker delivered in an earlier process. */
+  private isStaleExport(rec: ArtifactRecord): boolean {
+    return rec.deliveryClass === 'export-attachment'
+      && this.ownsSource(rec.brokerSource)
+      && rec.exportGeneration !== this.exportGeneration;
   }
 
   private ownsSource(source: string | undefined): boolean {
@@ -1321,9 +1366,11 @@ export class ArtifactStore {
     const removed: ArtifactRecord[] = [];
     const now = Date.now();
     for (const [key, rec] of [...this.records.entries()]) {
-      // Export attachments expire on an absolute retention deadline; other
-      // records age out by last access. The inserted record is never eligible.
-      const expired = rec.expiresAt ? now > rec.expiresAt : now - rec.lastAccessedAt > this.maxAgeMs;
+      // Export attachments expire on an absolute retention deadline, or with
+      // the process that delivered them; other records age out by last
+      // access. The inserted record is never eligible.
+      const expired = this.isStaleExport(rec)
+        || (rec.expiresAt ? now > rec.expiresAt : now - rec.lastAccessedAt > this.maxAgeMs);
       if (!expired || key === requiredKey) continue;
       this.records.delete(key);
       removed.push(rec);

@@ -17,7 +17,8 @@
     {"type":"tool-result","callId":"subagent:kid-D","toolName":"subagent","toolClass":"other","title":"Dirac · explorer","result":"Late.","isError":false},
     {"type":"agent-activity","key":"agent:kid-T","kind":"subagent","title":"Aquinas","subtitle":"explorer","status":"running","agentsTotal":1,"agentsDone":0},
     {"type":"status","status":"idle"},
-    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","status":"done","completedAt":1774050440000,"source":"codex-rollout"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","status":"done","startedAt":1774050300000,"completedAt":1774050440000,"totalRuntimeMs":140000,"source":"codex-rollout"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":140000,"turnCount":1,"updatedAt":1774050440000,"source":"codex-rollout"}},
     {"type":"agent-activity","key":"agent:kid-T","kind":"subagent","title":"Aquinas","subtitle":"explorer","status":"done","elapsedMs":8000,"agentsTotal":1,"agentsDone":1}
   ],
   "replay": [

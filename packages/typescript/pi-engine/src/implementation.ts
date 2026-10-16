@@ -72,8 +72,13 @@ import {
   boundedStream,
   bunSpawnResolvedInvocation,
   commandSemantic,
+  ControlRefusedError,
+  containedStorePath,
   fileReadSemantic,
+  openRegularFileSync,
+  readRegularFileSync,
   resolveInvocation,
+  SessionNotFoundError,
   terminateHostProcessTree,
   searchGroup,
   searchSemantic,
@@ -236,6 +241,25 @@ function canonicalSessionFile(file: string): string {
 }
 const sessionIdForFile = (file: string): string => enc(canonicalSessionFile(file));
 
+/**
+ * The session file a row id names. Only a `.jsonl` inside the dialect's session store, with every
+ * symlink and `..` resolved, is a session: discovery lists nothing else, so any other id is refused
+ * as not found before a file is opened. A FIFO, socket, device or directory under a session name is
+ * no session either: discovery never lists one, and opening a FIFO would block the broker. A missing
+ * file inside the store keeps its old answer (an Observe of nothing yet).
+ */
+function sessionFileOf(rt: PiDialectRuntime, sessionId: string): string {
+  const displayName = rt.dialect.displayName;
+  const decoded = dec(sessionId);
+  if (!decoded.endsWith('.jsonl') || !containedStorePath([rt.sessionsRoot], decoded, { allowMissing: true })) {
+    throw new SessionNotFoundError(`This ${displayName} session id does not name a session in its session store.`);
+  }
+  const path = canonicalSessionFile(decoded);
+  const st = statSafe(path);
+  if (st && !st.isFile()) throw new SessionNotFoundError(`This ${displayName} session id does not name a session file.`);
+  return path;
+}
+
 /** `--workspace-tester-Projects-x--` → `/workspace/tester/Projects/x` (best-effort; dashes are lossy). */
 function decodeCwdDir(dir: string): string | undefined {
   const m = dir.replace(/^--/, '').replace(/--$/, '');
@@ -301,6 +325,13 @@ export class PiEngineAdapter implements AgentBackend {
 
   async diagnoseSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
     return this.rt.hooks.diagnose(context, (agentDir) => inspectDialectBridgeAsset(this.rt, agentDir));
+  }
+
+  /** The resolve the dialect's readiness gate starts from (its override variable, else its bare
+   *  name on PATH); never a launch. Answered fresh, while readiness is held for the process. */
+  isInstalled(): boolean {
+    const { bin, binEnvOverride } = this.rt.dialect;
+    return resolveInvocation(process.env[binEnvOverride]?.trim() || bin, { env: process.env }) !== undefined;
   }
 
   canCreateSession(): boolean {
@@ -446,7 +477,7 @@ export class PiEngineAdapter implements AgentBackend {
   async attach(sessionId: string, mode: AttachMode = 'observe'): Promise<SessionConnection> {
     this.assertSessionAccess();
     const readiness = this.rt.hooks.readiness();
-    const path = canonicalSessionFile(dec(sessionId));
+    const path = sessionFileOf(this.rt, sessionId);
     const parentFile = piParentSessionFile(path);
     const parentThreadId = parentFile
       ? readSessionNativeId(parentFile)
@@ -484,7 +515,12 @@ export class PiEngineAdapter implements AgentBackend {
         runtimeUnavailableReason: readiness.message,
       }),
     };
-    if (mode !== 'resume') return new PiObserveConnection(this.rt, path, cwd, info);
+    if (mode !== 'resume') {
+      // Upstream Pi only: a Drive connection's prompts are keyed by the echo it sent live, and a
+      // fresh reader must give them the same key. Looked up, never created: an Observe of a session
+      // nobody drives must not evict a driven one's correlations.
+      return new PiObserveConnection(this.rt, path, cwd, info, () => this.userEchoRegistries.get(path));
+    }
     if (!canDrive) {
       throw new Error(readiness.ready
         ? `${this.rt.dialect.displayName} CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`
@@ -519,7 +555,7 @@ export class PiEngineAdapter implements AgentBackend {
     this.assertSessionAccess();
     const readiness = this.rt.hooks.readiness();
     if (!readiness.ready) throw new Error(readiness.message);
-    const path = canonicalSessionFile(dec(sessionId));
+    const path = sessionFileOf(this.rt, sessionId);
     if (piParentSessionFile(path)) {
       throw new Error(`${this.rt.dialect.displayName} subagent sessions are owned by their parent and cannot be renamed independently.`);
     }
@@ -568,7 +604,7 @@ export class PiEngineAdapter implements AgentBackend {
     opts: { tempDir: string; maxBytes: number; timeoutMs: number },
   ): Promise<{ path: string; format: 'html' }> {
     this.assertSessionAccess();
-    const sessionFile = canonicalSessionFile(dec(sessionId));
+    const sessionFile = sessionFileOf(this.rt, sessionId);
     const outputPath = join(opts.tempDir, 'export.html');
     const returned = await runPiExportHtmlRpc(this.rt, sessionFile, outputPath, opts.timeoutMs);
     // Verify Pi wrote exactly our contained path — realpath both and compare (rule 8).
@@ -601,7 +637,7 @@ export async function runPiLifecycleAction(
   action: 'fork' | 'clone',
   opts: { messageId?: string | null; brokerUrl: string; bridgeUsesIntegrationFile: boolean },
 ): Promise<SessionInfo> {
-  const path = canonicalSessionFile(dec(sessionId));
+  const path = sessionFileOf(rt, sessionId);
   const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path));
   const state = await runPiLifecycleRpc(rt, path, action, { messageId: opts.messageId });
   return piSessionInfoFromState(rt, state, path, cwd, rt.dialect.toolId, opts.brokerUrl, opts.bridgeUsesIntegrationFile, action);
@@ -637,6 +673,8 @@ async function createPiSessionViaRpc(
     args.push('--session-dir', rt.sessionsRootOverride);
     env.PI_CODING_AGENT_SESSION_DIR = rt.sessionsRootOverride;
   }
+  // Before the process exists: a session file born before this instant is not the one it creates.
+  const startedAt = Date.now();
   const proc = spawnPi(rt.dialect, bin, args, {
     stdin: 'pipe',
     stdout: 'pipe',
@@ -731,6 +769,13 @@ async function createPiSessionViaRpc(
     }
     let stateResp = await rpc({ type: 'get_state' }, 20000);
     if (stateResp?.success !== true) throw new Error(stateResp?.error ?? `${rt.dialect.displayName} get_state failed during create.`);
+    // Refused before anything below can write into it: the model and name commands, and the
+    // materialization createSession performs once this returns.
+    const answeredFile = stateResp.data?.sessionFile;
+    if (typeof answeredFile === 'string' && answeredFile
+        && piCreateAnsweredExistingSession(answeredFile, startedAt, stateResp.data?.sessionId)) {
+      throw new Error(`${rt.dialect.displayName} answered with a session that already exists in its session store, so it was not created.`);
+    }
     if (options.model) {
       const modelResp = await rpc(
         {
@@ -776,6 +821,48 @@ async function createPiSessionViaRpc(
     await endPiChild(proc);
     await Promise.race([Promise.allSettled([stdoutPump, stderrPump]), new Promise((r) => setTimeout(r, 1000))]);
   }
+}
+
+/** Filesystem clocks are coarse (a scheduler tick, or worse): a file this create wrote can carry a
+ *  birth time a little before the instant measured before its process started. */
+const PI_CREATE_CLOCK_SLACK_MS = 1_000;
+/** More than a fresh session's header and setup entries ever take. */
+const PI_CREATE_FRESH_FILE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Whether the session file a create's `get_state` names belongs to a session that was already in
+ * the store. Pi and omp write a new session's file only once it holds conversation (Pi creates it
+ * exclusively), so a create names a path that is absent, or one its own process wrote after it
+ * started. A file born before the create, holding conversation, or whose header names another
+ * session is an existing one: accepting it would claim that session as app-created and write the
+ * create's model and name into it.
+ */
+function piCreateAnsweredExistingSession(file: string, startedAt: number, sessionId: unknown): boolean {
+  const st = lstatSafe(file);
+  if (!st) return false;
+  if (!st.isFile() || st.size > PI_CREATE_FRESH_FILE_MAX_BYTES) return true;
+  const born = st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+  if (born < startedAt - PI_CREATE_CLOCK_SLACK_MS) return true;
+  let head: string;
+  try {
+    head = readTextHead(file, PI_CREATE_FRESH_FILE_MAX_BYTES);
+  } catch {
+    return true;
+  }
+  for (const line of head.split('\n')) {
+    if (!line.trim()) continue;
+    let row: any;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row?.type === 'session' && typeof row.id === 'string' && typeof sessionId === 'string' && sessionId && row.id !== sessionId) {
+      return true;
+    }
+    if (row?.type === 'custom_message' || (row?.type === 'message' && row.message?.role !== undefined)) return true;
+  }
+  return false;
 }
 
 async function renamePiSessionViaRpc(rt: PiDialectRuntime, sessionFile: string, title: string): Promise<PiRpcSessionState> {
@@ -1104,6 +1191,141 @@ function piSessionInfoFromState(
   };
 }
 
+/** A watched change to a driven session file: how long to let the write settle before reading it. */
+const PI_DRIVE_GUARD_DEBOUNCE_MS = 150;
+/** A failed check is read again this much later before Drive ends: a runtime event still in the
+ *  stdout pipe may yet announce the row the file already holds. */
+const PI_DRIVE_GUARD_CONFIRM_MS = 300;
+
+/** omp's first-line title slot: exactly this many UTF-8 bytes, newline included (omp 17.4.2). */
+const OMP_TITLE_SLOT_BYTES = 256;
+
+/** Whether a session body starts with omp's own fixed-width v1 title slot, which every whole-body
+ *  rewrite omp makes starts with. A replacement without one is not omp's. */
+function startsWithOmpTitleSlot(buffer: Buffer): boolean {
+  if (buffer.length < OMP_TITLE_SLOT_BYTES || buffer[OMP_TITLE_SLOT_BYTES - 1] !== 0x0a) return false;
+  try {
+    const slot = JSON.parse(buffer.subarray(0, OMP_TITLE_SLOT_BYTES - 1).toString('utf8'));
+    return slot?.type === 'title' && slot.v === 1 && typeof slot.title === 'string'
+      && typeof slot.updatedAt === 'string' && typeof slot.pad === 'string';
+  } catch {
+    return false;
+  }
+}
+
+/** A row that opens a user turn, as every reader of the file counts one. */
+function isPiUserBoundaryMessage(message: any): boolean {
+  return message?.role === 'user' || !!piCollabPromptCorrelation(message) || !!piSkillPromptInvocation(message);
+}
+
+type PiSessionFileVerdict = { ok: true } | { ok: false; reason: string };
+
+/**
+ * What a Drive connection has proved its session file holds, so another writer is noticed when it
+ * lands rather than never.
+ *
+ * The runtime this connection drives appends entries and never changes one it wrote in place; how
+ * else it may write the file is the dialect's {@link PiDialect.sessionFileRewrites}. So, against
+ * the file as Drive first read it:
+ *  - the header keeps its session id, and every entry with an id is still there;
+ *  - the file keeps its inode, and every entry keeps its content, unless the dialect rewrites whole
+ *    bodies and the new body is one of its own (omp: a new file that starts with omp's title slot,
+ *    whose entries omp may have migrated or sanitized as it loaded them);
+ *  - user turns appear only as the runtime announces them: a user-boundary row beyond the ones
+ *    its `message_start` events announced was written by someone else.
+ * A read that fails for any reason but a missing file proves nothing, and is not a verdict.
+ */
+class PiSessionFileGuard {
+  private established = false;
+  private sourceId?: string;
+  private headerId?: string;
+  /** Entry id → hash of its content, for every entry with an id read so far. */
+  private readonly entries = new Map<string, string>();
+  private baselineUserRows = 0;
+  private announcedUserRows = 0;
+  /** The stat of the last body proved: an unchanged stat needs no read. */
+  private provedStat?: string;
+
+  constructor(
+    private readonly path: string,
+    private readonly rewrites: PiDialect['sessionFileRewrites'],
+  ) {}
+
+  /** The runtime announced a user turn (a user `message_start`), which it persists. */
+  announceUserRow(): void {
+    this.announcedUserRows += 1;
+  }
+
+  /** Adopt the file as it is now; a file that does not exist yet is adopted when it first does. */
+  establish(): void {
+    this.check();
+  }
+
+  check(): PiSessionFileVerdict {
+    const stat = statSafe(this.path);
+    if (!stat) {
+      return this.established
+        ? { ok: false, reason: 'The session file was removed.' }
+        : { ok: true };
+    }
+    const statKey = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    if (this.established && statKey === this.provedStat) return { ok: true };
+    let snapshot: PiHistoryFileSnapshot;
+    try {
+      snapshot = readPiHistoryFileSnapshot(this.path);
+    } catch {
+      return { ok: true };
+    }
+    const rows = parsePiJsonlRows(snapshot.buffer.toString('utf8').split('\n'));
+    let headerId: string | undefined;
+    let userRows = 0;
+    const seen = new Map<string, string>();
+    for (const row of rows) {
+      if (row.obj?.type === 'session') {
+        if (headerId === undefined && typeof row.obj.id === 'string') headerId = row.obj.id;
+        continue;
+      }
+      if (isPiUserBoundaryMessage(piJsonlRowMessage(row.obj))) userRows += 1;
+      const id = typeof row.obj?.id === 'string' && row.obj.id ? row.obj.id : undefined;
+      if (id) seen.set(id, createHash('sha256').update(JSON.stringify(row.obj)).digest('base64url'));
+    }
+    const sourceId = snapshot.identity.sourceId;
+    if (!this.established) {
+      // Every row the runtime announced before now is in this baseline: adoption happens only
+      // before the runtime's first turn or between turns.
+      this.established = true;
+      this.announcedUserRows = 0;
+      this.sourceId = sourceId;
+      this.headerId = headerId;
+      for (const [id, hash] of seen) this.entries.set(id, hash);
+      this.baselineUserRows = userRows;
+      this.provedStat = statKey;
+      return { ok: true };
+    }
+    const ownRewrite = sourceId !== this.sourceId;
+    if (ownRewrite && (this.rewrites !== 'title-slot' || !startsWithOmpTitleSlot(snapshot.buffer))) {
+      return { ok: false, reason: 'The session file was replaced.' };
+    }
+    if (this.headerId !== undefined && headerId !== this.headerId) {
+      return { ok: false, reason: 'The session file was replaced.' };
+    }
+    for (const [id, hash] of this.entries) {
+      const now = seen.get(id);
+      if (now === undefined || (!ownRewrite && now !== hash)) {
+        return { ok: false, reason: 'The session history was rewritten.' };
+      }
+    }
+    if (userRows - this.baselineUserRows > this.announcedUserRows) {
+      return { ok: false, reason: 'Another program added a prompt to the session file.' };
+    }
+    this.sourceId = sourceId;
+    this.entries.clear();
+    for (const [id, hash] of seen) this.entries.set(id, hash);
+    this.provedStat = statKey;
+    return { ok: true };
+  }
+}
+
 class PiConnection implements SessionConnection {
   // Every row this connection streams live carries the key its session-file entry gets on reload:
   // assistant text and thinking by the message's own timestamp (`piAssistantKeyBase`), upstream Pi
@@ -1117,8 +1339,10 @@ class PiConnection implements SessionConnection {
    *  so the adapter must serialize native-state reconciliation, optimistic FIFO mutation, model
    *  override, and prompt acknowledgement across every caller sharing this PiConnection. */
   private promptDeliveryTail: Promise<void> = Promise.resolve();
-  /** extension UI requests awaiting a user decision: requestId → method. */
-  private readonly pendingUi = new Map<string, { method: string; options?: string[] }>();
+  /** extension UI requests awaiting a user decision: requestId → method, and whether the run that
+   *  was streaming when it arrived owns it (Pi settles such a dialog silently when the run aborts,
+   *  and emits nothing that says so). */
+  private readonly pendingUi = new Map<string, { method: string; options?: string[]; duringRun: boolean }>();
   /** The exact permission/question-request frames still UNRESOLVED — replayed on attach via
    *  {@link getPending} so a client joining a blocked Pi session sees the box, not just the badge.
    *  Tracked centrally in {@link emit} and cleared on the matching *-resolved frame. (Issue G.) */
@@ -1212,6 +1436,18 @@ class PiConnection implements SessionConnection {
    * same native user turn. The run remains keyed to that user until a later
    * successful assistant or explicit retry exhaustion closes it. */
   private retryActive = false;
+  /** What this Drive has proved its session file holds. Made once the runtime has answered (so it
+   *  has loaded the file, and its own load-time migration is not taken for a rewrite), or at the
+   *  first prompt when it never answered at start. */
+  private guard?: PiSessionFileGuard;
+  private readonly guardWatchers: FSWatcher[] = [];
+  private guardTimer?: ReturnType<typeof setTimeout>;
+  /** A check failed once and is read again before Drive ends. */
+  private guardSuspect = false;
+  /** Slash-command prompts sent outside the optimistic FIFO whose answer has not come back. */
+  private commandDeliveries = 0;
+  /** Another program wrote the session file: this connection is read-only and closing. */
+  private demoted = false;
 
   constructor(
     private readonly rt: PiDialectRuntime,
@@ -1290,7 +1526,7 @@ class PiConnection implements SessionConnection {
     // so a reconnect's fresh counters can never re-issue a key an earlier
     // connection's turns already own (see the field docs).
     try {
-      const raw = readFileSync(this.sessionPath, 'utf8');
+      const raw = readRegularFileSync(this.sessionPath, 'utf8');
       this.turnSeq = countJsonlLines(raw);
       this.userSeq = this.turnSeq;
       this.nextUserTurnOrdinal = countPiJsonlUserMessages(raw);
@@ -1329,8 +1565,127 @@ class PiConnection implements SessionConnection {
         this.info.model = String(m?.name ?? m?.id ?? currentModel.modelID);
       }
       if (st?.data?.sessionName) this.info.title = String(st.data.sessionName);
+      if (st?.success === true) this.establishGuard();
     } catch {
       /* state unavailable — picker still works via listModels() */
+    }
+  }
+
+  /** Nothing of this Drive's is in flight: the file must hold what was proved plus the rows the
+   *  runtime announced. While a turn runs its rows are its own, and the run's end checks again. */
+  private guardQuiescent(): boolean {
+    return !this.streaming && this.pendingUserTurns.length === 0 && this.commandDeliveries === 0;
+  }
+
+  private establishGuard(): void {
+    if (this.guard || this.closed) return;
+    this.guard = new PiSessionFileGuard(this.sessionPath, this.rt.dialect.sessionFileRewrites);
+    this.guard.establish();
+    // Watch the file so another writer is seen when it lands, not at the next prompt. The directory
+    // watch also sees a file renamed onto the path; the file watch serves where it does not.
+    const name = basename(this.sessionPath);
+    const changed = (): void => this.scheduleGuardCheck(PI_DRIVE_GUARD_DEBOUNCE_MS);
+    const watchers: Array<() => FSWatcher> = [
+      () => watch(dirname(this.sessionPath), { persistent: false }, (_event, filename) => {
+        if (filename != null && String(filename) !== name) return;
+        changed();
+      }),
+      () => watch(this.sessionPath, { persistent: false }, changed),
+    ];
+    for (const start of watchers) {
+      try {
+        const watcher = start();
+        watcher.on('error', () => { /* the pre-prompt check still holds */ });
+        this.guardWatchers.push(watcher);
+      } catch {
+        /* the pre-prompt check still holds */
+      }
+    }
+  }
+
+  private scheduleGuardCheck(delayMs: number): void {
+    if (this.closed || !this.guard || this.guardTimer) return;
+    this.guardTimer = setTimeout(() => {
+      this.guardTimer = undefined;
+      this.runGuardCheck();
+    }, delayMs);
+    this.guardTimer.unref?.();
+  }
+
+  private runGuardCheck(): void {
+    if (this.closed || !this.guard) return;
+    if (!this.guardQuiescent()) {
+      // The run's end checks again, from the start.
+      this.guardSuspect = false;
+      return;
+    }
+    const verdict = this.guard.check();
+    if (verdict.ok) {
+      this.guardSuspect = false;
+      return;
+    }
+    if (!this.guardSuspect) {
+      this.guardSuspect = true;
+      this.scheduleGuardCheck(PI_DRIVE_GUARD_CONFIRM_MS);
+      return;
+    }
+    this.demote(verdict.reason);
+  }
+
+  /** Between turns, prove the file before a prompt reaches the runtime: a watched change may not
+   *  have been read yet. Throws, having ended Drive, when another program wrote it. */
+  private async assertSessionFileOwned(): Promise<void> {
+    if (!this.guard) {
+      this.establishGuard();
+      return;
+    }
+    if (!this.guardQuiescent()) return;
+    let verdict = this.guard.check();
+    if (!verdict.ok) {
+      await Bun.sleep(PI_DRIVE_GUARD_CONFIRM_MS);
+      if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
+      verdict = this.guard.check();
+    }
+    if (verdict.ok) return;
+    throw new Error(this.demote(verdict.reason));
+  }
+
+  /**
+   * Another program wrote the session file, so the runtime this connection drives holds a history
+   * the file no longer has: Drive ends for every client now, and nothing more reaches the runtime.
+   * Taking over again starts one that reads the file afresh.
+   */
+  private demote(reason: string): string {
+    const message = `${reason} ${PRODUCT_IDENTITY.productName} stopped driving this ${this.rt.dialect.displayName} session; take it over again to drive it.`;
+    if (this.closed || this.demoted) return message;
+    this.demoted = true;
+    this.withdrawPendingUi(() => true);
+    this.info.status = 'idle';
+    this.info.attachMode = 'observe';
+    this.info.control = {
+      drive: { supported: true, state: 'observing', reason: message },
+      terminalSync: this.info.control?.terminalSync ?? { supported: false, syncAvailable: false, active: false },
+    };
+    this.emit({ type: 'status', status: 'idle' });
+    this.emit({
+      type: 'metadata-update', key: 'sessionInfo',
+      value: { status: 'idle', attachMode: 'observe', control: this.info.control },
+    });
+    this.emit({ type: 'error', message });
+    void this.close().catch(() => { /* teardown is best-effort */ });
+    return message;
+  }
+
+  /** Close the dialogs Pi is waiting on that `which` selects: the runtime is told each was
+   *  cancelled, and every client that it is no longer open. */
+  private withdrawPendingUi(which: (ui: { method: string; options?: string[]; duringRun: boolean }) => boolean): void {
+    for (const [requestId, ui] of [...this.pendingUi]) {
+      if (!which(ui)) continue;
+      this.pendingUi.delete(requestId);
+      this.write({ type: 'extension_ui_response', id: requestId, cancelled: true });
+      this.emit(this.pendingFrames.get(requestId)?.type === 'question-request'
+        ? { type: 'question-resolved', requestId }
+        : { type: 'permission-resolved', requestId, decision: 'external' });
     }
   }
 
@@ -1341,6 +1696,8 @@ class PiConnection implements SessionConnection {
   }
 
   private rpc<T = any>(cmd: Record<string, unknown>): Promise<T> {
+    // Nothing answers a closed connection: fail now rather than at the timeout.
+    if (this.closed) return Promise.resolve({ success: false, error: `${this.rt.dialect.displayName} Drive connection is closed.` } as T);
     const id = `rpc-${++this.reqId}`;
     return new Promise<T>((resolve) => {
       this.pendingRpc.set(id, resolve);
@@ -1486,7 +1843,7 @@ class PiConnection implements SessionConnection {
     if (!this.userEchoes) return;
     let fenceLine = 0;
     try {
-      fenceLine = countJsonlLines(readFileSync(this.sessionPath, 'utf8'));
+      fenceLine = countJsonlLines(readRegularFileSync(this.sessionPath, 'utf8'));
     } catch {
       /* no file yet: Pi writes the entry, and every other, after line 0 */
     }
@@ -1587,6 +1944,8 @@ class PiConnection implements SessionConnection {
         // reload then split the turn and re-keyed every later run-summary.
         const skill = piSkillPromptInvocation(m);
         if (m?.role !== 'user' && !correlation && !skill) return;
+        // The runtime persists the row it announces: this one is not another writer's.
+        this.guard?.announceUserRow();
         this.closeCurrentRun();
         // Hoisted above the emit below so a skill row can carry the SAME key the
         // mapper will derive for it on reload (`skillUserKey ?? …`, which the
@@ -1702,8 +2061,14 @@ class PiConnection implements SessionConnection {
         // streamed assistant output but forwards no message_end still gets its summary; a
         // prompt the agent truly never answered is suppressed, exactly as the mapper does.
         this.closeCurrentRun(nativeTimeMs(ev.timestamp) ?? Date.now());
+        // A dialog the run raised cannot outlive it: Pi settled it with the run (an abort or its
+        // timeout resolves it without a word), so its card must close too. Pi ignores a reply for a
+        // dialog it no longer holds.
+        this.withdrawPendingUi((ui) => ui.duringRun);
         this.emit({ type: 'status', status: 'idle' });
         void this.emitSessionStats();
+        // Changes watched during the run were left to its end.
+        this.scheduleGuardCheck(PI_DRIVE_GUARD_DEBOUNCE_MS);
         return;
       case 'message_update': {
         const e = ev.assistantMessageEvent ?? {};
@@ -1815,13 +2180,13 @@ class PiConnection implements SessionConnection {
         // confirm → a yes/no permission card; select → an interactive question card so the user's
         // ACTUAL choice is sent back (previously select collapsed to options[0] on approve).
         if (ev.method === 'confirm') {
-          this.pendingUi.set(ev.id, { method: 'confirm', options: ev.options });
+          this.pendingUi.set(ev.id, { method: 'confirm', options: ev.options, duringRun: this.streaming });
           // Deliberately no `options`: a confirm is a one-shot yes/no with no session scope to
           // grant, so the client's approve/reject default is the whole vocabulary here (the
           // bridged tool-approval card in bridge.ts is the path that advertises approve-session).
           this.emit({ type: 'permission-request', requestId: ev.id, title: ev.title ?? 'Confirm?', detail: ev.message });
         } else if (ev.method === 'select') {
-          this.pendingUi.set(ev.id, { method: 'select', options: ev.options });
+          this.pendingUi.set(ev.id, { method: 'select', options: ev.options, duringRun: this.streaming });
           this.emit({
             type: 'question-request',
             requestId: ev.id,
@@ -1834,7 +2199,7 @@ class PiConnection implements SessionConnection {
           // preset options so the app shows a text field; the user's text returns as the `value`.
           // WITHOUT this branch these methods fell through and Pi blocked FOREVER waiting for an
           // extension_ui_response (the resume-adapter hang). See docs deep-source-audit [pi/medium].
-          this.pendingUi.set(ev.id, { method: ev.method });
+          this.pendingUi.set(ev.id, { method: ev.method, duringRun: this.streaming });
           this.emit({
             type: 'question-request',
             requestId: ev.id,
@@ -1870,7 +2235,7 @@ class PiConnection implements SessionConnection {
     // be read; its summaries then carry no completion clock rather than one
     // inferred from adjacent message timestamps.
     try {
-      const raw = readFileSync(this.sessionPath, 'utf8');
+      const raw = readRegularFileSync(this.sessionPath, 'utf8');
       if (raw.trim()) {
         this.userEchoes?.bind(fileHistorySourceIdentity(this.sessionPath));
         const history = mapPiJsonlText(raw, 0, this.rt.dialect, this.userEchoes?.assigner());
@@ -2031,6 +2396,15 @@ class PiConnection implements SessionConnection {
     if (previousResp?.success !== true || !previousModel) {
       throw new Error(previousResp?.error ?? `${this.rt.dialect.displayName} get_state failed before model override.`);
     }
+    // Already on it: switching would change nothing but append a model entry to the session file.
+    if (
+      previousModel.providerID === model.providerID
+      && previousModel.modelID === model.modelID
+      && (!effort || normalizePiThinkingLevel(previousResp.data?.thinkingLevel ?? previousModel.reasoningEffort) === effort)
+    ) {
+      this.info.currentModel = previousModel;
+      return;
+    }
     if (
       effort
       && !normalizePiThinkingLevel(previousResp.data?.thinkingLevel ?? previousModel.reasoningEffort)
@@ -2103,6 +2477,7 @@ class PiConnection implements SessionConnection {
     // before creating the optimistic bubble; if state is still unavailable, this prompt is refused.
     await this.ensureNativeModelStateKnown();
     if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
+    await this.assertSessionFileOwned();
     // Pi (unlike OpenCode) emits NO event echoing the user's own prompt, so the app would never
     // show the message you just sent until a reattach reloads history. Echo it optimistically so
     // it renders immediately (and so the queued-bubble reconcile in the app has something to adopt).
@@ -2253,8 +2628,14 @@ class PiConnection implements SessionConnection {
       throw new Error(`${this.rt.dialect.displayName} does not support persistent approval rules through this connection`);
     }
     const ui = this.pendingUi.get(requestId);
+    // Never asked, or already answered by any client: Pi waits on nothing under this id.
+    if (!ui) {
+      throw new ControlRefusedError(
+        `${this.rt.dialect.displayName} permission ${requestId} is not pending.`,
+        'request-not-pending',
+      );
+    }
     this.pendingUi.delete(requestId);
-    if (!ui) return;
     if (decision === 'reject') {
       this.write({ type: 'extension_ui_response', id: requestId, cancelled: true });
     } else if (ui.method === 'confirm') {
@@ -2265,16 +2646,30 @@ class PiConnection implements SessionConnection {
     this.emit({ type: 'permission-resolved', requestId, decision });
   }
 
+  /** The question dialog Pi waits on under this id. Never asked, already answered by any client,
+   *  withdrawn with its run, or a confirm (a permission, answered as one): refused, never acked. */
+  private pendingQuestion(requestId: string): { method: string; options?: string[] } {
+    const ui = this.pendingUi.get(requestId);
+    if (!ui || ui.method === 'confirm') {
+      throw new ControlRefusedError(
+        `${this.rt.dialect.displayName} question ${requestId} is not pending.`,
+        'request-not-pending',
+      );
+    }
+    return ui;
+  }
+
   /** Answer a `select` dialog with the user's ACTUAL choice (was: always options[0]). */
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
-    const ui = this.pendingUi.get(requestId);
+    const ui = this.pendingQuestion(requestId);
     this.pendingUi.delete(requestId);
     const choice = answers?.[0]?.[0];
-    this.write({ type: 'extension_ui_response', id: requestId, value: choice ?? ui?.options?.[0] ?? '' });
+    this.write({ type: 'extension_ui_response', id: requestId, value: choice ?? ui.options?.[0] ?? '' });
     this.emit({ type: 'question-resolved', requestId });
   }
 
   async rejectQuestion(requestId: string): Promise<void> {
+    this.pendingQuestion(requestId);
     this.pendingUi.delete(requestId);
     this.write({ type: 'extension_ui_response', id: requestId, cancelled: true });
     this.emit({ type: 'question-resolved', requestId });
@@ -2309,6 +2704,9 @@ class PiConnection implements SessionConnection {
   async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void> {
     if (name === 'stop' || name === 'abort') {
       this.write({ type: 'abort' });
+      // The run's dialogs end with it: one Pi tied to the run is already settled, and one it was
+      // not would hold the stopped run open until someone answered it.
+      this.withdrawPendingUi((ui) => ui.duringRun);
       return { notice: 'Stopped the turn.' };
     }
     if (name === 'compact') {
@@ -2316,11 +2714,20 @@ class PiConnection implements SessionConnection {
       return { notice: 'Compacting the conversation…' };
     }
     // A dynamic command (template/skill/extension): deliver as a prompt that Pi expands.
+    if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
+    await this.assertSessionFileOwned();
     await this.applyModelOverride(input?.model);
     const message = '/' + name + (args ? ' ' + args : '');
     const cmd: Record<string, unknown> = { type: 'prompt', message };
     if (this.streaming) cmd.streamingBehavior = 'steer';
-    const resp = await this.rpc(cmd);
+    // Its user row is announced by the run it starts; until Pi answers, the file is not between turns.
+    this.commandDeliveries += 1;
+    let resp: any;
+    try {
+      resp = await this.rpc(cmd);
+    } finally {
+      this.commandDeliveries -= 1;
+    }
     if (resp && resp.success === false && !resp.timeout) throw new Error(resp.error ?? `${this.rt.dialect.toolId} command /${name} rejected`);
   }
 
@@ -2343,6 +2750,11 @@ class PiConnection implements SessionConnection {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.guardTimer) clearTimeout(this.guardTimer);
+    this.guardTimer = undefined;
+    for (const watcher of this.guardWatchers.splice(0)) {
+      try { watcher.close(); } catch { /* best effort */ }
+    }
     for (const pending of this.pendingNativePromptAcks.values()) {
       pending.reject(new Error(`${this.rt.dialect.displayName} Drive connection closed before prompt persistence.`));
     }
@@ -2383,12 +2795,17 @@ class PiObserveConnection implements SessionConnection {
    *  arrived in one read and whose final entry arrives in a later one closes
    *  with the SAME summary a whole-file reload computes. */
   private turnCarry: PiJsonlTurnCarry = {};
+  /** The last Drive echo key an entry this connection read took (see {@link PiUserEchoRegistry}),
+   *  so a tail window goes on from the correlations its earlier reads left. */
+  private echoCursor?: string;
 
   constructor(
     private readonly rt: PiDialectRuntime,
     private readonly sessionPath: string,
     private readonly cwd: string | undefined,
     readonly info: SessionInfo,
+    /** The adapter's Drive echo correlations for this file, when a Drive connection made any. */
+    private readonly userEchoes: () => PiUserEchoRegistry | undefined = () => undefined,
   ) {}
 
   subscribe(handler: AgentMessageHandler): Unsubscribe {
@@ -2414,10 +2831,17 @@ class PiObserveConnection implements SessionConnection {
     this.lastEntryId = undefined;
     this.correlationMessageKeys.clear();
     this.correlationClientKeys.clear();
+    this.echoCursor = undefined;
+    const registry = this.userEchoes();
+    registry?.bind(identity);
+    // The plain user entries a full replay asks for an echo key, asked in the same order.
+    const assign = registry?.assigner(undefined, (key) => { this.echoCursor = key; });
     const rows = activePiJsonlRows(parsePiJsonlRows(raw.split('\n')));
     for (const row of rows) {
       if (typeof row.obj?.id === 'string' && row.obj.id) this.lastEntryId = row.obj.id;
-      const correlation = piCollabPromptCorrelation(piJsonlRowMessage(row.obj));
+      const message = piJsonlRowMessage(row.obj);
+      if (assign && message?.role === 'user') assign(row.index, contentToText(message.content));
+      const correlation = piCollabPromptCorrelation(message);
       if (!correlation) continue;
       this.correlationMessageKeys.add(correlation.messageKey);
       if (correlation.clientKey) this.correlationClientKeys.add(correlation.clientKey);
@@ -2456,11 +2880,17 @@ class PiObserveConnection implements SessionConnection {
     this.lineIndex = countJsonlLines(raw);
     this.turnCarry = {};
     this.seedTranscriptState(raw, snapshot.identity);
-    return mapPiJsonlLines(raw.split('\n'), 0, true, this.turnCarry, this.rt.dialect, true);
+    return mapPiJsonlLines(raw.split('\n'), 0, true, this.turnCarry, this.rt.dialect, true, this.userEchoes()?.assigner());
   }
 
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {
-    return fileHistorySourceIdentity(this.sessionPath);
+    const identity = fileHistorySourceIdentity(this.sessionPath);
+    const registry = this.userEchoes();
+    // As the Drive connection does: rows keyed through the registry change only when it drops a
+    // correlation or is replaced, and the token names both.
+    return identity && registry
+      ? { ...identity, rewriteToken: `${identity.rewriteToken ?? ''}:echo${registry.token}` }
+      : identity;
   }
 
   private startWatch(): void {
@@ -2567,7 +2997,8 @@ class PiObserveConnection implements SessionConnection {
     for (const key of newMessageKeys) this.correlationMessageKeys.add(key);
     for (const key of newClientKeys) this.correlationClientKeys.add(key);
     if (!lines.length) return;
-    const messages = mapPiJsonlLines(lines, this.lineIndex, false, this.turnCarry, this.rt.dialect);
+    const assign = this.userEchoes()?.assigner(this.echoCursor, (key) => { this.echoCursor = key; });
+    const messages = mapPiJsonlLines(lines, this.lineIndex, false, this.turnCarry, this.rt.dialect, false, assign);
     this.lineIndex += lines.length;
     for (const m of messages) this.emit(m);
   }
@@ -2788,6 +3219,8 @@ function mapPiMessage(
     let textSeq = 0;
     let thinkingSeq = 0;
     for (const c of content) {
+      // A null or primitive block (a malformed entry) costs that block, never the history read.
+      if (!c || typeof c !== 'object') continue;
       if (c.type === 'text' && c.text) out.push({ type: 'model-output', text: c.text, final: true, key: base ? `${base}:t:${textSeq++}` : undefined });
       else if (c.type === 'thinking' && c.thinking) out.push({ type: 'thinking', text: c.thinking, key: base ? `${base}:r:${thinkingSeq++}` : undefined });
       else if (c.type === 'toolCall') {
@@ -2915,8 +3348,14 @@ export class PiUserEchoRegistry {
     this.prefixToken ??= prefixToken;
   }
 
-  assigner(): PiUserEchoAssigner | undefined {
-    const live = this.correlations.filter((correlation) => !correlation.retired);
+  /**
+   * `after` continues an earlier read of the same file: an Observe tail maps each appended window
+   * on its own, and the correlations up to the one its previous window gave an entry (`after`) are
+   * spent, taken or skipped. `onTake` reports each key handed out, so the caller can continue.
+   */
+  assigner(after?: string, onTake?: (key: string) => void): PiUserEchoAssigner | undefined {
+    const from = after === undefined ? 0 : this.correlations.findIndex((correlation) => correlation.key === after) + 1;
+    const live = this.correlations.slice(from).filter((correlation) => !correlation.retired);
     if (live.length === 0) return undefined;
     let next = 0;
     return (lineIndex, text) => {
@@ -2926,6 +3365,7 @@ export class PiUserEchoRegistry {
       const head = live[taken];
       if (!head || lineIndex < head.fenceLine) return undefined;
       next = taken + 1;
+      onTake?.(head.key);
       return { key: head.key, ...(head.clientKey ? { clientKey: head.clientKey } : {}) };
     };
   }
@@ -2968,7 +3408,12 @@ function parsePiJsonlRows(lines: string[], firstIndex = 0): ParsedPiJsonlRow[] {
  *  parentId fall back to their complete row order. Duplicate ids are structurally ambiguous and
  *  likewise fall back, where correlation uniqueness still fails closed. */
 function activePiJsonlRows(rows: ParsedPiJsonlRow[]): ParsedPiJsonlRow[] {
-  const identified = rows.filter((row) => typeof row.obj?.id === 'string' && row.obj.id);
+  // The session header carries the session's id and no parentId, but it is not a tree entry (Pi's
+  // own index skips it too): counted as one, every real file looked parentless and kept every
+  // branch, abandoned ones included.
+  const isTreeEntry = (row: ParsedPiJsonlRow): boolean =>
+    typeof row.obj?.id === 'string' && !!row.obj.id && row.obj.type !== 'session';
+  const identified = rows.filter(isTreeEntry);
   if (!identified.length || !identified.every((row) => Object.prototype.hasOwnProperty.call(row.obj, 'parentId'))) {
     return rows;
   }
@@ -2988,10 +3433,7 @@ function activePiJsonlRows(rows: ParsedPiJsonlRow[]): ParsedPiJsonlRow[] {
     if (parentId == null) break;
     cursor = byId.get(String(parentId));
   }
-  return rows.filter((row) => {
-    const id = row.obj?.id;
-    return typeof id !== 'string' || !id ? true : activeIds.has(id);
-  });
+  return rows.filter((row) => !isTreeEntry(row) || activeIds.has(String(row.obj.id)));
 }
 
 /**
@@ -3013,7 +3455,13 @@ export interface PiJsonlTurnCarry {
   /** Assistant messages per key base so far (see {@link nextPiAssistantKeyBase}), so a later window
    *  resolves a repeated timestamp exactly as a whole-file read does. */
   assistantKeyBaseCounts?: Map<string, number>;
+  /** Arguments of the tool calls read so far whose result has not been read yet, by call id: a
+   *  result in a later window is built from them exactly as a whole-file read builds it. */
+  toolArgs?: Map<string, any>;
 }
+
+/** Tool calls a tail keeps waiting for their result; the oldest are forgotten beyond this. */
+const PI_PENDING_TOOL_ARGS_MAX = 256;
 
 type PiOpenTurn = {
   /** Reload-stable summary identity. Pi's live user events expose no JSONL entry id, so all three
@@ -3059,14 +3507,26 @@ function mapPiJsonlLines(
       messageAt: nativeTimeMs(message.timestamp),
     });
   }
-  const argsByCallId = new Map<string, any>();
+  const argsByCallId = new Map<string, any>(carry?.toolArgs);
   for (const e of entries) {
     const m = e.message;
     if (m?.role === 'assistant' && Array.isArray(m.content)) {
       for (const c of m.content) if (c?.type === 'toolCall' && c.id != null) argsByCallId.set(String(c.id), c.arguments);
     }
   }
-  return mapPiMessages(entries, argsByCallId, includeTotals, carry, dialect, userEchoes);
+  const mapped = mapPiMessages(entries, argsByCallId, includeTotals, carry, dialect, userEchoes);
+  if (carry) {
+    const pending = new Map(argsByCallId);
+    for (const e of entries) {
+      if (e.message?.role === 'toolResult' && e.message.toolCallId != null) pending.delete(String(e.message.toolCallId));
+    }
+    for (const callId of pending.keys()) {
+      if (pending.size <= PI_PENDING_TOOL_ARGS_MAX) break;
+      pending.delete(callId);
+    }
+    carry.toolArgs = pending;
+  }
+  return mapped;
 }
 
 /** Pi's terminal stop reasons. `toolUse` means the run continues; absence proves nothing. */
@@ -3210,7 +3670,7 @@ function mapPiMessages(
       ? userEchoes?.(e.index, contentToText(e.message.content))
       : undefined;
     const assistantKeyBase = e.message?.role === 'assistant' ? assistantKeyBaseFor(e.message) : undefined;
-    out.push(...mapPiMessage(
+    const rows = mapPiMessage(
       e.message,
       e.index,
       argsByCallId,
@@ -3222,14 +3682,19 @@ function mapPiMessages(
         ...(echo ? { userKey: echo.key, ...(echo.clientKey ? { userClientKey: echo.clientKey } : {}) } : {}),
         ...(assistantKeyBase ? { assistantKeyBase } : {}),
       },
-    ));
+    );
+    out.push(...rows);
     if (isUserBoundary) {
       // A later prompt proves the previous run ended even without a terminal
       // stopReason (an abort can leave none behind).
       close(open, true);
-      const userKey = correlation && allowCorrelation
-        ? correlation.messageKey
-        : (skill ? ordinalAnchor! : echo?.key ?? e.keyBase);
+      // A prompt with no text and no image renders no row: its turn still opens (the agent answers
+      // it), but its summary names no user row.
+      const userKey = !rows.some((row) => row.type === 'user-message')
+        ? undefined
+        : correlation && allowCorrelation
+          ? correlation.messageKey
+          : (skill ? ordinalAnchor! : echo?.key ?? e.keyBase);
       open = {
         summaryAnchor: correlation
           ? (allowCorrelation ? correlation.messageKey : e.keyBase)
@@ -3956,7 +4421,7 @@ function readSessionCwd(file: string): string | undefined {
 }
 
 function readTextHead(file: string, maxBytes: number): string {
-  const fd = openSync(file, 'r');
+  const fd = openRegularFileSync(file);
   try {
     const buf = Buffer.alloc(maxBytes);
     const n = readSync(fd, buf, 0, maxBytes, 0);
@@ -3969,7 +4434,7 @@ function readTextHead(file: string, maxBytes: number): string {
 function readTextTail(file: string, size: number, maxBytes: number): string {
   const start = Math.max(0, size - maxBytes);
   const len = size - start;
-  const fd = openSync(file, 'r');
+  const fd = openRegularFileSync(file);
   try {
     const buf = Buffer.alloc(len);
     const n = readSync(fd, buf, 0, len, start);
@@ -4168,9 +4633,8 @@ function readPiHistoryFileSnapshot(
   for (let attempt = 0; attempt < 4; attempt++) {
     let fd: number | undefined;
     try {
-      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openRegularFileSync(path, { noFollow: true });
       const before = fstatSync(fd);
-      if (!before.isFile()) throw new Error('Pi history source is not a regular file');
       const buffer = Buffer.alloc(before.size);
       let offset = 0;
       while (offset < buffer.length) {
@@ -4213,9 +4677,8 @@ function fileHistorySourceIdentity(path: string): HistorySourceIdentity | undefi
   for (let attempt = 0; attempt < 3; attempt++) {
     let fd: number | undefined;
     try {
-      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openRegularFileSync(path, { noFollow: true });
       const before = fstatSync(fd);
-      if (!before.isFile()) return undefined;
       const prefix = Buffer.alloc(Math.min(HISTORY_SOURCE_REWRITE_PREFIX_BYTES, before.size));
       let offset = 0;
       while (offset < prefix.length) {

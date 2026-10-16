@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 export {};
 import { strict as assert } from 'node:assert';
-import { appendFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import {
   AcpRpcError,
   type AcpRequestPermissionParams,
@@ -38,6 +38,12 @@ function check(name: string, ok: boolean, detail = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+/** Settle `work`, or report `'timed out'` after `ms`: a Stop that never reaches the turn must fail
+ *  the check that waits for it, not hang the suite. */
+const within = <T>(work: Promise<T>, ms = 5_000): Promise<T | 'timed out'> => Promise.race([
+  work,
+  new Promise<'timed out'>((resolve) => { setTimeout(() => resolve('timed out'), ms).unref?.(); }),
+]);
 
 type RunSummary = Extract<AgentMessage, { type: 'run-summary' }>;
 const runSummaries = (messages: readonly AgentMessage[]): RunSummary[] =>
@@ -90,13 +96,18 @@ class FakeTransport implements GrokAcpTransport {
   models: ModelOption[] = [{ providerID: 'xai', modelID: 'grok-4.6', label: 'Grok 4.6' }];
   commands: SlashCommand[] = [{ name: 'compact', description: 'Compact context', kind: 'prompt' }];
   onPrompt?: (params: { sessionId: string; prompt: Array<{ type: string; text?: string }> }) => Promise<AcpSessionPromptResult>;
+  onCancel?: () => void;
+  onClose?: () => void;
 
   initialize(): Promise<void> { return Promise.resolve(); }
   async sessionPrompt(params: { sessionId: string; prompt: Array<{ type: string; text?: string }> }): Promise<AcpSessionPromptResult> {
     this.prompts.push(params);
     return this.onPrompt ? this.onPrompt(params) : { stopReason: 'end_turn' };
   }
-  sessionCancel(sessionId: string): void { this.cancels.push(sessionId); }
+  sessionCancel(sessionId: string): void {
+    this.cancels.push(sessionId);
+    this.onCancel?.();
+  }
   configure(model?: PromptInput['model'], mode?: string): Promise<void> {
     this.configurations.push({ ...(model ? { model } : {}), ...(mode ? { mode } : {}) });
     return Promise.resolve();
@@ -106,6 +117,7 @@ class FakeTransport implements GrokAcpTransport {
   close(force = false): Promise<void> {
     this.closes.push(force);
     this.alive = false;
+    this.onClose?.();
     return Promise.resolve();
   }
 }
@@ -1912,6 +1924,108 @@ try {
     heldRewriteTree.cleanup();
   }
 
+  const replacedTree = buildGrokFixtureTree();
+  try {
+    const replacedSession = (await discoverGrokStore({ root: replacedTree.root }))[0]!;
+    const observerInfo = driveInfo(replacedSession.id, replacedSession.cwd);
+    observerInfo.attachMode = 'observe';
+    const replacedObserver = new GrokObserveConnection({ session: replacedSession, info: observerInfo });
+    await replacedObserver.getHistory();
+    const observed: AgentMessage[] = [];
+    replacedObserver.subscribe((message) => observed.push(message));
+    const replacedTransport = new FakeTransport();
+    const replacedDrive = await GrokDriveConnection.fromTransport(
+      replacedSession,
+      driveInfo(replacedSession.id, replacedSession.cwd),
+      replacedTransport,
+    );
+    const driven: AgentMessage[] = [];
+    replacedDrive.subscribe((message) => driven.push(message));
+    await Bun.sleep(50);
+    // The same bytes, written aside and renamed over the log: Bun reports only the temporary name.
+    writeFileSync(`${replacedTree.updatesPath}.tmp`, readFileSync(replacedTree.updatesPath));
+    renameSync(`${replacedTree.updatesPath}.tmp`, replacedTree.updatesPath);
+    for (let attempt = 0; attempt < 300 && (replacedDrive.driving
+      || !observed.some((message) => message.type === 'history-reset')); attempt += 1) await Bun.sleep(10);
+    // Past the tail debounce: a second reset for the same replacement would have arrived by now.
+    await Bun.sleep(300);
+    check('a log renamed over between turns resets Observe once and demotes Drive before any prompt',
+      observed.filter((message) => message.type === 'history-reset').length === 1
+        && !replacedDrive.driving
+        && replacedTransport.closes.includes(true)
+        && replacedTransport.prompts.length === 0
+        && driven.some((message) => message.type === 'notice' && message.message.includes('read-only')),
+      JSON.stringify({ observed: observed.map((message) => message.type), driven: driven.map((message) => message.type) }));
+    await replacedObserver.close();
+    await replacedDrive.close();
+  } finally {
+    replacedTree.cleanup();
+  }
+
+  const settledFirstTree = buildGrokFixtureTree();
+  try {
+    const settledSession = (await discoverGrokStore({ root: settledFirstTree.root }))[0]!;
+    const settledTransport = new FakeTransport();
+    const settledConnection = await GrokDriveConnection.fromTransport(
+      settledSession,
+      driveInfo(settledSession.id, settledSession.cwd),
+      settledTransport,
+    );
+    const settledLive: AgentMessage[] = [];
+    settledConnection.subscribe((message) => settledLive.push(message));
+    settledTransport.onPrompt = async (params) => {
+      // The whole turn is durable before ACP answers, well inside the tail's debounce: the
+      // turn's own settle read is the first read of the echo.
+      const turn = { promptId: 'settled-prompt' };
+      settledFirstTree.append({
+        timestamp: '2026-08-23T10:06:00.000Z',
+        method: 'session/update',
+        params: {
+          sessionId: settledSession.id,
+          _meta: { eventId: 'settled-user', ...turn },
+          update: { sessionUpdate: 'user_message_chunk', content: params.prompt[0] },
+        },
+      });
+      settledFirstTree.append({
+        timestamp: '2026-08-23T10:06:00.100Z',
+        method: 'session/update',
+        params: {
+          sessionId: settledSession.id,
+          _meta: { eventId: 'settled-answer', ...turn },
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'settled answer' } },
+        },
+      });
+      settledFirstTree.append({
+        timestamp: '2026-08-23T10:06:00.200Z',
+        method: '_x.ai/session/update',
+        params: {
+          sessionId: settledSession.id,
+          _meta: { eventId: 'settled-done', ...turn },
+          update: { sessionUpdate: 'turn_completed', prompt_id: 'settled-prompt', stop_reason: 'end_turn' },
+        },
+      });
+      return { stopReason: 'end_turn' };
+    };
+    await settledConnection.sendPrompt({ text: 'settled before the tail', clientMessageId: 'settled-client' });
+    const ownRows = () => settledLive.filter((message): message is Extract<AgentMessage, { type: 'user-message' }> =>
+      message.type === 'user-message' && message.clientKey === 'settled-client');
+    const atSettle = ownRows();
+    // Past the tail's debounce: the drain that follows finds nothing left to publish.
+    await Bun.sleep(300);
+    const afterTail = ownRows();
+    check('a turn durable before the tail first reads it still takes the sender\'s row out of the queue live, once',
+      atSettle.length === 2
+        && atSettle[0]?.queued === true
+        && atSettle[1]?.queued === false
+        && atSettle[1]?.key === atSettle[0]?.key
+        && afterTail.length === 2
+        && settledConnection.driving,
+      JSON.stringify({ atSettle, afterTail }));
+    await settledConnection.close();
+  } finally {
+    settledFirstTree.cleanup();
+  }
+
   const stopTree = buildGrokFixtureTree();
   try {
     const stopSession = (await discoverGrokStore({ root: stopTree.root }))[0]!;
@@ -1953,6 +2067,137 @@ try {
     await stopConnection.close();
   } finally {
     stopTree.cleanup();
+  }
+
+  // The Stop action: Grok lists no stop command, so the adapter offers ACP `session/cancel` as one
+  // (conformance C12 drives it through a broker). Here: the catalog, the settled cancelled turn that
+  // keeps Drive, and the fail-closed bound when the stopped prompt never answers.
+  const stopActionTree = buildGrokFixtureTree();
+  try {
+    const session = (await discoverGrokStore({ root: stopActionTree.root }))[0]!;
+    const transport = new FakeTransport();
+    const connection = await GrokDriveConnection.fromTransport(
+      session,
+      driveInfo(session.id, session.cwd),
+      transport,
+      { stopSettleMs: 50 },
+    );
+    const commands = await connection.listCommands();
+    check('Stop is offered as an action ahead of the native ACP catalog',
+      commands[0]?.name === 'stop' && commands[0]?.kind === 'action'
+        && commands.some((command) => command.name === 'compact')
+        && commands.filter((command) => command.name === 'stop').length === 1,
+      JSON.stringify(commands));
+    const live: AgentMessage[] = [];
+    connection.subscribe((message) => live.push(message));
+    let started: (() => void) | undefined;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    let answer: ((result: AcpSessionPromptResult) => void) | undefined;
+    transport.onPrompt = (params) => {
+      stopActionTree.append({
+        timestamp: '2026-08-23T10:06:00.000Z',
+        method: 'session/update',
+        params: {
+          sessionId: session.id,
+          _meta: { eventId: 'stop-action-user', promptId: 'stop-action' },
+          update: { sessionUpdate: 'user_message_chunk', content: params.prompt[0] },
+        },
+      });
+      started?.();
+      return new Promise<AcpSessionPromptResult>((resolve) => { answer = resolve; });
+    };
+    const turn = connection.sendPrompt({ text: 'a long turn' }).then(() => 'answered');
+    await running;
+    transport.onCancel = () => answer?.({ stopReason: 'cancelled' });
+    const result = await connection.runCommand('stop');
+    const settled = await within(turn);
+    check('Stop cancels the running turn natively and acknowledges the request',
+      settled === 'answered'
+        && transport.cancels.filter((id) => id === session.id).length === 1
+        && (result as { notice?: string } | undefined)?.notice === 'Stop requested.',
+      JSON.stringify({ settled, cancels: transport.cancels, result }));
+    // Unblock a turn the Stop never reached, so the suite goes on to report it.
+    answer?.({ stopReason: 'end_turn' });
+    // Past the fail-closed bound: a turn that DID answer its Stop is never demoted afterwards.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    check('the stopped turn closes as a cancelled run and Drive stays',
+      terminalRuns(live).some((run) => run.status === 'cancelled')
+        && connection.driving
+        && !live.some((message) => message.type === 'notice' && /read-only/.test(message.message)),
+      JSON.stringify({ runs: runSummaries(live), driving: connection.driving }));
+    transport.onPrompt = undefined;
+    transport.onCancel = undefined;
+    await connection.close();
+    await assert.rejects(connection.runCommand('stop'), /read-only/u);
+    check('Stop on a closed connection is refused before touching native state',
+      transport.cancels.filter((id) => id === session.id).length === 1);
+  } finally {
+    stopActionTree.cleanup();
+  }
+
+  const stuckStopTree = buildGrokFixtureTree();
+  try {
+    const session = (await discoverGrokStore({ root: stuckStopTree.root }))[0]!;
+    const transport = new FakeTransport();
+    const connection = await GrokDriveConnection.fromTransport(
+      session,
+      driveInfo(session.id, session.cwd),
+      transport,
+      { stopSettleMs: 50 },
+    );
+    const live: AgentMessage[] = [];
+    connection.subscribe((message) => live.push(message));
+    let started: (() => void) | undefined;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    let fail: ((error: Error) => void) | undefined;
+    transport.onPrompt = () => {
+      started?.();
+      // Grok never answers the cancelled prompt; only the forced close ends the call.
+      return new Promise<AcpSessionPromptResult>((_resolve, reject) => { fail = reject; });
+    };
+    transport.onClose = () => fail?.(new Error('Grok ACP child exited'));
+    const turn = connection.sendPrompt({ text: 'a turn that ignores cancel' }).then(() => 'answered', () => 'failed');
+    await running;
+    await connection.runCommand('stop');
+    const outcome = await within(turn);
+    if (outcome === 'timed out') fail?.(new Error('released by the test after the Stop bound did not fire'));
+    const notice = live.find((message) => message.type === 'notice' && /did not end the turn/.test(message.message));
+    check('a stopped turn that never answers fails closed: demoted, read-only, with a notice saying why',
+      outcome === 'failed'
+        && !connection.driving
+        && transport.closes.includes(true)
+        && notice?.type === 'notice' && /within 1 second of Stop\. This connection is now read-only\./.test(notice.message),
+      JSON.stringify({ outcome, driving: connection.driving, closes: transport.closes, notices: live.filter((m) => m.type === 'notice') }));
+    await connection.close();
+  } finally {
+    stuckStopTree.cleanup();
+  }
+
+  const lateStopTree = buildGrokFixtureTree();
+  try {
+    const session = (await discoverGrokStore({ root: lateStopTree.root }))[0]!;
+    const transport = new FakeTransport();
+    const connection = await GrokDriveConnection.fromTransport(session, driveInfo(session.id, session.cwd), transport);
+    // The model label is read after the last admission check: hold that read, and Stop inside it.
+    let catalogRead: (() => void) | undefined;
+    const catalogReached = new Promise<void>((resolve) => { catalogRead = resolve; });
+    let releaseCatalog: (() => void) | undefined;
+    transport.listModels = () => {
+      catalogRead?.();
+      return new Promise<ModelOption[]>((resolve) => { releaseCatalog = () => resolve(transport.models); });
+    };
+    const turn = connection.sendPrompt({ text: 'stopped while its model label is read', model: { providerID: 'xai', modelID: 'grok-4.6' } });
+    await catalogReached;
+    await connection.runCommand('stop');
+    releaseCatalog?.();
+    await within(turn.catch(() => undefined));
+    check('a Stop that lands while the prompt reads its model label keeps that prompt from Grok',
+      transport.prompts.length === 0 && connection.driving
+        && connection.getPending().every((message) => message.type !== 'user-message'),
+      JSON.stringify({ prompts: transport.prompts, pending: connection.getPending() }));
+    await connection.close();
+  } finally {
+    lateStopTree.cleanup();
   }
 } finally {
   tree.cleanup();

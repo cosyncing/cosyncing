@@ -45,6 +45,7 @@ import 'dart:convert';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_telemetry.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'session_detail_controller_test_harness.dart';
@@ -1661,6 +1662,41 @@ Future<void> _traverse(MatrixClient session) async {
   await session.readForward();
   session.endTraversal();
 }
+
+/// [runOrdinaryUseMatrix] on a fake clock, run to completion before it
+/// returns.
+///
+/// The simulation answers every request by rows, never by time, so no real
+/// clock may decide anything in it. On the wall clock it did: the session
+/// controller's own deadlines (a page's, a refresh's, the cursor-recovery
+/// backoff) were real timers, and a scenario several seconds long on an idle
+/// host ran past the test timeout on a loaded one, leaving its body running
+/// beside the next test. Here every zero-delay step runs in process, and a
+/// controller deadline can only fire if fake time is moved, which nothing
+/// does. A scenario still unfinished once no zero-time work is left is
+/// waiting on something it does not drive, and says so.
+Map<String, MatrixMetrics> runOrdinaryUseMatrixOnFakeClock({
+  required bool revision28,
+  Set<String>? only,
+}) => fakeAsync((async) {
+  Map<String, MatrixMetrics>? results;
+  Object? error;
+  StackTrace? stack;
+  runOrdinaryUseMatrix(revision28: revision28, only: only).then(
+    (value) => results = value,
+    onError: (Object thrown, StackTrace trace) {
+      error = thrown;
+      stack = trace;
+    },
+  );
+  async.elapse(Duration.zero);
+  if (error != null) Error.throwWithStackTrace(error!, stack!);
+  return results ??
+      (throw StateError(
+        'the matrix stopped at fake time zero, waiting on a timer it does '
+        'not drive:\n${async.pendingTimersDebugString}',
+      ));
+});
 
 /// The ordinary-use scenarios. Each returns its metrics.
 /// With [only], runs just the named scenarios (a stress file runs them one

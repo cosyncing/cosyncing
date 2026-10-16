@@ -296,6 +296,49 @@ describe('a Codex history past its index ceilings', () => {
     expect(rowKey(rows.post[0])).toBe(rowKey(postLive.message));
   });
 
+  test('a tail adopted from an over-index capture continues the turn it attached inside', async () => {
+    // The tail's state at its boundary comes from the capture's watermark: a steer takes the turn's
+    // next ordinal, and a result for a call read before the boundary keeps that call's detail.
+    const turn = 'h1f-open-turn';
+    const big = writeRollout(broker.paths.home, {
+      sparseBytes: OVER_INDEX,
+      rows: [
+        codexTurnStarted(turn, '2026-08-01T00:59:00.000Z'),
+        codexUser('h1f opening prompt', '2026-08-01T00:59:01.000Z'),
+        {
+          timestamp: '2026-08-01T00:59:02.000Z',
+          type: 'response_item',
+          payload: { type: 'function_call', name: 'exec_command', call_id: 'h1f-call', arguments: '{"cmd":"ls h1f"}' },
+        },
+      ],
+    });
+    const { stream: live, frame } = await attach(big);
+    expect(frame.gap?.code).toBe('HISTORY_PAGE_RESOURCE_LIMIT');
+    big.append([
+      codexUser('h1f steer', '2026-08-01T01:00:00.000Z'),
+      { timestamp: '2026-08-01T01:00:01.000Z', type: 'event_msg', payload: { type: 'exec_command_end', call_id: 'h1f-call', exit_code: 3 } },
+      { timestamp: '2026-08-01T01:00:02.000Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'h1f-call', output: 'h1f failed' } },
+    ]);
+    const isSteer = (message: any) => message?.type === 'user-message' && message.text === 'h1f steer';
+    const isResult = (message: any) => message?.type === 'tool-result' && message.callId === 'h1f-call';
+    const steer = (await live.waitForFrame((candidate) => candidate.kind === 'message' && isSteer(candidate.message))).message;
+    const result = (await live.waitForFrame((candidate) => candidate.kind === 'message' && isResult(candidate.message))).message;
+    expect(steer.key).toBe(`codex:${turn}:u1`);
+    expect(result).toMatchObject({ toolName: 'exec_command', toolClass: 'execute', isError: true, exitCode: 3 });
+    expect(result.semantic).toMatchObject({ kind: 'command', command: 'ls h1f', state: 'failed' });
+
+    // A refresh reads both rows exactly as the tail delivered them.
+    const { stream: refreshed } = await attach(big);
+    const rows = await eventually(() => {
+      const window = windowAfterAttach(refreshed);
+      const steers = window.filter(isSteer);
+      const results = window.filter(isResult);
+      return steers.length > 0 && results.length > 0 && { steers, results };
+    }, { what: 'the tailed steer and result in the refreshed window' });
+    expect(rows.steers).toEqual([steer]);
+    expect(rows.results).toEqual([result]);
+  });
+
   // Last: it restarts the broker.
   test('after a restart the same refused history attaches the same way', async () => {
     for (const stream of streams.splice(0)) stream.close();

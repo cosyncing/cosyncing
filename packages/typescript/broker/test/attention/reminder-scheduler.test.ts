@@ -293,6 +293,40 @@ describe('passes', () => {
     await pass;
   });
 
+  test('a held dispatch delays only its own device: another device is reached at once, and the held one keeps its order', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered: string[] = [];
+    const h = new Harness({
+      dispatch: async (delivery) => {
+        entered.push(`${delivery.deviceId}:${delivery.eventId}`);
+        // The phone's first dispatch is held, as a coalesced trailing wake is for its window.
+        if (delivery.deviceId === 'phone' && entered.filter((item) => item.startsWith('phone:')).length === 1) await gate;
+      },
+    });
+    h.devices = ['phone', 'browser'];
+    const reached = async (key: string, what: string) => {
+      const deadline = Date.now() + 10_000;
+      while (!entered.includes(key)) {
+        assert.ok(Date.now() < deadline, what);
+        await nextMacrotask();
+      }
+    };
+    const first = await h.addEvent({ kind: 'permission-required', dedupeKey: 'held:1' });
+    const firstPass = h.scheduler.tick();
+    await reached(`phone:${first.id}`, 'the phone\'s first dispatch never started');
+    const second = await h.addEvent({ kind: 'permission-required', dedupeKey: 'held:2' });
+    const secondPass = h.scheduler.tick();
+    await reached(`browser:${second.id}`, 'the browser waited on the phone\'s held dispatch');
+    assert.ok(!entered.includes(`phone:${second.id}`), 'the phone\'s second dispatch overtook its held first');
+    release();
+    await Promise.all([firstPass, secondPass]);
+    assert.deepEqual(entered.filter((item) => item.startsWith('phone:')), [`phone:${first.id}`, `phone:${second.id}`]);
+    for (const event of [first, second]) {
+      for (const delivery of h.store.listDeliveriesFor(event.id, 'immediate')) assert.equal(delivery.state, 'delivered');
+    }
+  });
+
   test('requests made while a pass runs share one follow-up; requests before a pass share that pass', async () => {
     const h = new Harness();
     let passes = 0;

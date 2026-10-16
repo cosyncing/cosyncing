@@ -799,6 +799,47 @@ export async function diagnoseOmpBunRuntime(
         remediation: bunRuntimeRemediation(contract.minimumBunVersion),
       };
     }
+    if (!contract.version) {
+      // Same rule as readiness: a Bun launcher with no package metadata beside it is identified by
+      // its own bounded `--version` answer, which must be exactly the verified omp.
+      const launcherProbe = await boundedDoctorProbe(context, executable);
+      if (launcherProbe.status === 'timeout') {
+        return ompProbeTimedOutDiagnosis('launcher', context.displayPath(executable));
+      }
+      const launcherVersion = launcherProbe.status === 'ok'
+        ? ompIdentityVersion(`${launcherProbe.stdout}\n${launcherProbe.stderr}`)
+        : undefined;
+      if (!launcherVersion) {
+        return {
+          id: 'omp.bun-runtime',
+          status: 'fail',
+          detailCode: 'bun-runtime-launcher-identity-unverified',
+          summary: 'The omp Bun launcher has no omp package metadata beside it and did not answer a bounded version check as omp.',
+          evidence: { executable: context.displayPath(executable) },
+          remediation: {
+            kind: 'manual',
+            message: 'Point COSYNCING_OMP_BIN at the supported omp executable, then rerun doctor.',
+          },
+        };
+      }
+      const launcherComparison = compareSemanticVersions(launcherVersion, OMP_VERIFIED_VERSION);
+      if (launcherComparison === undefined || launcherComparison !== 0) {
+        const above = launcherComparison !== undefined && launcherComparison > 0;
+        return {
+          id: 'omp.bun-runtime',
+          status: 'fail',
+          detailCode: above ? 'bun-runtime-launcher-above-verified' : 'bun-runtime-launcher-below-minimum',
+          summary: above
+            ? `The omp Bun launcher is omp ${launcherVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
+            : `The omp Bun launcher is omp ${launcherVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required.`,
+          evidence: { installedVersion: launcherVersion, verifiedVersion: OMP_VERIFIED_VERSION },
+          remediation: above
+            ? { kind: 'manual', message: `Use omp ${OMP_VERIFIED_VERSION} or wait for a new protocol capture, then rerun doctor.` }
+            : { kind: 'command', message: 'Update omp to the verified version, then rerun doctor.', command: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERIFIED_VERSION}` },
+        };
+      }
+      contract = { ...contract, version: launcherVersion };
+    }
     const packageVersion = semanticVersionFromText(contract.version ?? '');
     const packageComparison = packageVersion
       ? compareSemanticVersions(packageVersion, OMP_VERIFIED_VERSION)
