@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.6.6 — 2026-10-17
+
 ### Security
 
 - The broker now opens, forks or renames only sessions that the agent's own
@@ -30,27 +32,27 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
-- Find generated files, including Chinese filenames, beside source files already
-  used by the session before searching the whole workspace. Downloads preserve
-  Unicode filenames and browser transfers show progress as chunks arrive.
+- Find generated files, including Chinese filenames, beside source files
+  already used by the session before searching the whole workspace.
+- Downloads preserve Unicode filenames, and browser transfers show progress as
+  chunks arrive.
 - File lists, previews, and transfers show readable KB/MB/GB sizes. Delivered
   file cards no longer display encoded artifact identifiers or content hashes.
-
 - A question Claude asks in a true-synced terminal reaches the app at once and
   stays answerable from either side until one answers, also when no device was
   watching when Claude asked and in a tab opened afterwards. In auto mode the
   app no longer fills with a read-only card for every tool call nobody was
   watching, or for every call after a plan approval: when the mode cannot be
   read, a note appears only once Claude's own permission dialog opens.
-
 - Long Claude sessions remain pageable beyond the former 32 MiB / 50,000-row
-  history cache limit. A persisted disk index reuses unchanged history and reads
-  appended records incrementally; large text/tool outputs retain their complete
-  body as a file beside a bounded preview. History errors distinguish server
-  limits from device decoding limits.
-
-- Kilo Observe keeps delivering live appends when another client reads or indexes history. Reasonix Observe catches writes made while its file watcher is being replaced. CI now fails tasks that leave child processes behind and stops queued work and retries on cancellation.
-
+  history cache limit. A persisted disk index reuses unchanged history and
+  reads appended records incrementally; large text/tool outputs retain their
+  complete body as a file beside a bounded preview. History errors distinguish
+  server limits from device decoding limits.
+- Kilo Observe keeps delivering live appends when another client reads or
+  indexes its history.
+- Reasonix Observe catches writes made while its file watcher is being
+  replaced.
 - A named pipe in an agent's session folder could freeze the server. Session
   lists and history reads now skip anything that is not a regular file, and
   opening such a session reports it as not found.
@@ -78,10 +80,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - A scheduled new OpenCode session now runs its first prompt on the model
   chosen when it was scheduled. Before, the prompt ran on OpenCode's default
   model while the schedule and the session showed the chosen one.
-- An OpenCode session created from the app on a chosen model now runs its
-  first prompt on that model even when cosyncing restarted before the prompt
-  was sent. Before, the prompt ran on OpenCode's default model while the
-  session showed the chosen one.
+- An OpenCode session created from the app on a chosen model now runs its first
+  prompt on that model even when cosyncing restarted before the prompt was
+  sent. Before, the prompt ran on OpenCode's default model while the session
+  showed the chosen one.
 - An OpenCode session opened in Observe is now read-only in that view. Before,
   a view opened to watch a session on OpenCode's shared server still sent
   prompts, Stop and approvals.
@@ -91,18 +93,18 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   ends the turn as interrupted. Before, the stopped turn was reported as
   failed.
 - An OpenCode session whose last turns were undone no longer shows as Working
-  in the session list when OpenCode's shared server is not running. Before,
-  the undone turn still counted as the session's latest activity.
+  in the session list when OpenCode's shared server is not running. Before, the
+  undone turn still counted as the session's latest activity.
 - Drive on a session whose earlier Drive connection had ended, for example
   after the agent's server was lost, now opens a new connection. Before, the
   app rejoined the ended connection and the session stayed read-only.
 - A phone whose notification is held back, for example while several alerts
   arrive within its 30-second window, no longer delays alerts to your other
   phones and browsers. Each device now waits only for its own earlier alerts.
-- A Codex session you are watching now stops showing Working when the
-  terminal running it exits mid-turn, even when Codex's shared app server
-  never had the session open. Before, it stayed Working for as long as the
-  session was open in the app.
+- A Codex session you are watching now stops showing Working when the terminal
+  running it exits mid-turn, even when Codex's shared app server never had the
+  session open. Before, it stayed Working for as long as the session was open
+  in the app.
 - Take over and Drive work again for a Codex session after Codex's shared app
   server crashed and left its control socket behind. Before, they failed with
   "ownership could not be verified" until the socket was removed by hand. On
@@ -119,20 +121,22 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   verified". A Codex terminal running the session still keeps the app in
   Observe. On Windows that check runs only when Drive is restored, and it finds
   a terminal started with the session's id, such as `codex resume <id>`.
-- With the system text size at twice the default, the session list, its
-  drawer on phones and the overview beside it now fit their width. Before,
-  the activity window label and the overview's links ran off the edge. A
-  background agent from an agent that reports no start time, such as
-  OpenCode, now keeps its place in the activity band when you reopen the
-  session, as it did while you watched.
+- With the system text size at twice the default, the session list, its drawer
+  on phones and the overview beside it now fit their width. Before, the
+  activity window label and the overview's links ran off the edge. A background
+  agent from an agent that reports no start time, such as OpenCode, now keeps
+  its place in the activity band when you reopen the session, as it did while
+  you watched.
 - A prompt the agent refuses just as you start typing the next one is now
-  offered back in the Recover kept version notice. Before, it was lost when
-  the new text was saved. The notice that the agent didn't receive every file now
-  stays until you send again or change the files, instead of disappearing a
-  moment after it appeared. The Scheduled sends page, left open before you
-  switched server, now lists the new server's schedules instead of none.
-- Tapping Retry after an earlier page of a session's history failed to load
-  no longer raises an error in the transcript when the page arrives.
+  offered back in the Recover kept version notice. Before, it was lost when the
+  new text was saved.
+- The notice that the agent didn't receive every file now stays until you send
+  again or change the files, instead of disappearing a moment after it
+  appeared.
+- The Scheduled sends page, left open before you switched server, now lists the
+  new server's schedules instead of none.
+- Tapping Retry after an earlier page of a session's history failed to load no
+  longer raises an error in the transcript when the page arrives.
 - Marking a notification read, dismissing it, or clearing the inbox now reaches
   the server at once. Before, the server heard of it only at its next sync up
   to two minutes later, so your other devices kept showing it until then.
@@ -149,14 +153,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   Pairing page now adds and selects its server, with its token when the link
   carries one. Before, it was refused as an invalid QR code.
 - Connecting to a server, and the sign-in check of a saved one, now give up
-  after 10 seconds when the server takes the connection but never answers.
-  The screen says the server didn't answer and offers Retry. Before, it kept
+  after 10 seconds when the server takes the connection but never answers. The
+  screen says the server didn't answer and offers Retry. Before, it kept
   checking forever. A server switch that this device cannot save now shows
   "Couldn't switch" instead of failing silently.
 - Changing a saved server's address keeps that server's open session tabs.
   Before, they were dropped and the app showed the overview.
-- Switching to another saved server, or changing the address of the one in
-  use, now loads its session list at once. Before, the list could stay on
+- Switching to another saved server, or changing the address of the one in use,
+  now loads its session list at once. Before, the list could stay on
   Connecting… for up to 15 seconds.
 - The age shown on a notification, such as "5m ago", now keeps up while the
   Notifications page stays open. Before, it stayed at the age it had when the
@@ -168,21 +172,20 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   of doing nothing, and Mark read on a server that is down says the read will
   sync once the server is reachable.
 - Stop on a Cline session now stops the turn and keeps Drive: the stopped
-  prompt is answered and the next prompt goes through. Before, Stop waited
-  5 seconds, reported "Stop failed closed" and left the session read-only.
-- A prompt sent to a Cline session while a turn is running now shows as
-  queued on every device at once, and leaves the queue as soon as Cline starts
-  it. Before, it appeared only when its turn started and stayed marked queued
-  until the turn ended.
+  prompt is answered and the next prompt goes through. Before, Stop waited 5
+  seconds, reported "Stop failed closed" and left the session read-only.
+- A prompt sent to a Cline session while a turn is running now shows as queued
+  on every device at once, and leaves the queue as soon as Cline starts it.
+  Before, it appeared only when its turn started and stayed marked queued until
+  the turn ended.
 - An open Cline session now updates when Cline replaces its transcript file,
   and shows the new history when earlier messages were rewritten. A Cline
   session driven from the app becomes read-only as soon as its transcript is
   rewritten or replaced outside the app. Before, an open view could keep the
   old messages, and Drive noticed only at the next prompt.
 - Creating a Kilo Code session while Kilo is not installed, or is older than
-  7.4.23, now says creation is temporarily unavailable and points to
-  `cosyncing doctor`, as other agents do. Before, it failed with a generic
-  server error.
+  7.4.23, now says creation is temporarily unavailable and points to `cosyncing
+  doctor`, as other agents do. Before, it failed with a generic server error.
 - A failed Kilo Code turn now shows its error once. Before, the same error
   appeared twice in an open session.
 - Stop and approvals on a Kilo Code session driven from the app are no longer
@@ -201,8 +204,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   action.
 - The session list no longer offers Drive for a Kilo Code session that another
   Kilo added messages to since the app last drove it, for example while
-  cosyncing was stopped. Before, the list offered Drive and opening the
-  session then refused it.
+  cosyncing was stopped. Before, the list offered Drive and opening the session
+  then refused it.
 - Renaming a Kilo Code session no longer offers Drive when another Kilo added
   messages to it since the app last drove it. Before, the renamed session was
   listed as drivable until the list refreshed.
@@ -219,22 +222,22 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   appeared only after the session was opened again.
 - Creating a Pi or OMP session is now refused when Pi or OMP answers with a
   session that is already stored, and nothing is written into that session.
-  Before, the app treated the existing session as one it had created and
-  wrote the new session's model and name into its file.
+  Before, the app treated the existing session as one it had created and wrote
+  the new session's model and name into its file.
 - A prompt sent while driving a Pi session now keeps one row in every view of
   it. Before, a second tab watching the session, or the session opened again,
   showed it under a different identity than the row the sender saw, so the
   prompt could appear twice.
 - Driving a Pi or OMP session from the app now ends in every open view as soon
-  as another program adds a prompt to its session file, rewrites it or
-  replaces it, and the next prompt is refused. Before, nothing noticed, and
-  the next prompt was still sent to Pi or OMP.
+  as another program adds a prompt to its session file, rewrites it or replaces
+  it, and the next prompt is refused. Before, nothing noticed, and the next
+  prompt was still sent to Pi or OMP.
 - `cosyncing doctor` and setup now agree with the app about OMP. An OMP newer
   than the verified version is reported as unverified rather than supported,
   and an OMP launcher with no package information beside it passes when it
   reports the verified version. Before, doctor called a newer OMP supported
-  while the app refused to drive it, and failed such a launcher even though
-  the app drove it.
+  while the app refused to drive it, and failed such a launcher even though the
+  app drove it.
 - A Pi or OMP session that was branched now shows only the branch Pi or OMP
   continues from. Before, the prompts and answers of abandoned branches showed
   too.
@@ -244,19 +247,19 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   without the malformed parts. Before, opening it failed. The summary of a turn
   that began with an empty prompt also no longer points at a message that is
   not shown.
-- An answer to a Pi or OMP question or permission that was already answered,
-  or never asked, is now refused. Before, the app reported it as delivered.
-  A Pi or OMP dialog that ends with its turn, or with Stop, now closes in
-  every open view. Before, its card stayed open.
+- An answer to a Pi or OMP question or permission that was already answered, or
+  never asked, is now refused. Before, the app reported it as delivered. A Pi
+  or OMP dialog that ends with its turn, or with Stop, now closes in every open
+  view. Before, its card stayed open.
 - A prompt sent on the model and thinking level a Pi or OMP session already
   uses no longer adds a model change to the session.
 - Creating a Codex session is now refused when Codex answers with a session
-  that is already stored, and nothing is written into that session. Before,
-  the app treated the existing session as one it had created and applied the
-  new session's name and settings to it.
-- Forking a Codex session is now refused when Codex answers with a session
-  that is already stored, and that session is not renamed. Before, the app
-  opened the existing session as the fork and gave it the fork's name.
+  that is already stored, and nothing is written into that session. Before, the
+  app treated the existing session as one it had created and applied the new
+  session's name and settings to it.
+- Forking a Codex session is now refused when Codex answers with a session that
+  is already stored, and that session is not renamed. Before, the app opened
+  the existing session as the fork and gave it the fork's name.
 - In a Codex session you are watching, a prompt added to a turn that was
   already running when you opened the session no longer replaces that turn's
   first prompt, a command's result shows the command it belongs to, and a
@@ -272,70 +275,67 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   stayed driven and the join command stayed offered until the daemon started
   again. Uninstall also no longer plans to stop a crashed daemon.
 - A prompt sent while driving a Grok session now leaves the queue on the
-  sending device when Grok finishes the turn quickly. Before, a turn that
-  ended before cosyncing first read Grok's log left the prompt marked queued
-  until the session was opened again.
+  sending device when Grok finishes the turn quickly. Before, a turn that ended
+  before cosyncing first read Grok's log left the prompt marked queued until
+  the session was opened again.
 - An open Grok session now reloads its history as soon as its log file is
   replaced, and a Grok session driven from the app becomes read-only at once
   when its log is replaced outside the app. Before, an open view kept the old
   messages, and Drive noticed only at the next prompt.
-- An open Grok session whose log is rewritten outside the app now reloads
-  once, with one notice. Before, it reloaded twice and showed the notice
-  twice.
+- An open Grok session whose log is rewritten outside the app now reloads once,
+  with one notice. Before, it reloaded twice and showed the notice twice.
 - An open Reasonix session now reloads its history as soon as its transcript
   file is replaced, and a Reasonix session driven from the app becomes
-  read-only at once when its transcript is replaced outside the app. Before,
-  an open view kept the old messages, and Drive noticed only at the next
-  prompt.
+  read-only at once when its transcript is replaced outside the app. Before, an
+  open view kept the old messages, and Drive noticed only at the next prompt.
 - A prompt sent to a Reasonix session with the approval mode Reasonix already
   uses keeps the session drivable. Before, when Reasonix had never stored a
   mode for the session, the session became read-only once the turn finished.
-- cosyncing no longer reads a Kimi Code session's messages while no app has
-  it open. Before, it went on polling for up to 15 seconds after the last app
-  closed the session, and for as long as a turn was running, and each poll
-  made Kimi load the session beside any terminal using it.
+- cosyncing no longer reads a Kimi Code session's messages while no app has it
+  open. Before, it went on polling for up to 15 seconds after the last app
+  closed the session, and for as long as a turn was running, and each poll made
+  Kimi load the session beside any terminal using it.
 - A Kimi Code session that opens read-only when the app asked to drive it,
   because cosyncing cannot prove nothing else is driving it, now says so.
   Before, it opened read-only with no reason given.
-- A subagent conversation of an Antigravity session is no longer offered
-  Drive, and Drive on it is refused before anything starts. Before, the
-  session list offered Drive for it, as for any conversation.
+- A subagent conversation of an Antigravity session is no longer offered Drive,
+  and Drive on it is refused before anything starts. Before, the session list
+  offered Drive for it, as for any conversation.
 - Creating an Antigravity session while `agy` is not installed now says
   creation is temporarily unavailable and points to `cosyncing doctor`, as
   other agents do. Before, it failed with a generic server error.
 - A prompt sent while driving an Antigravity session no longer shows as an
   empty message and now leaves the queue when Antigravity starts it. Before,
-  when Antigravity announced the prompt before writing it to its transcript,
-  an empty message appeared and the prompt stayed marked queued.
-- A prompt sent while driving an Antigravity session now keeps one row in
-  every view of it. Before, a second tab watching the session, or the
-  session opened again, showed it under a different identity than the row
-  the sender saw, so the prompt could appear twice.
-- An Antigravity turn now ends with its outcome, whether it finished or
-  failed, in an open session and when the session is opened again, so the
-  turn's summary and its finished or failed alert appear for Antigravity
-  too. Before, no Antigravity turn reported how it ended.
+  when Antigravity announced the prompt before writing it to its transcript, an
+  empty message appeared and the prompt stayed marked queued.
+- A prompt sent while driving an Antigravity session now keeps one row in every
+  view of it. Before, a second tab watching the session, or the session opened
+  again, showed it under a different identity than the row the sender saw, so
+  the prompt could appear twice.
+- An Antigravity turn now ends with its outcome, whether it finished or failed,
+  in an open session and when the session is opened again, so the turn's
+  summary and its finished or failed alert appear for Antigravity too. Before,
+  no Antigravity turn reported how it ended.
 - An open Antigravity session now reloads its history, once, as soon as its
   transcript is rewritten or replaced outside the app, and an Antigravity
   session driven from the app becomes read-only at once when that happens.
   Before, an open view kept the old messages, and Drive went on writing to a
   history it no longer matched.
-- The permission mode an Antigravity session was last driven with from the
-  app is still selected after cosyncing restarts. Before, the session came
-  back showing no mode.
+- The permission mode an Antigravity session was last driven with from the app
+  is still selected after cosyncing restarts. Before, the session came back
+  showing no mode.
 - Grok, Reasonix and Antigravity sessions now stay in the session list, and
-  open read-only, while the agent is not installed or cosyncing cannot find
-  it. Before, they disappeared until the agent was back. For these agents and
-  for Codex, Cline, Kilo Code, Pi and OMP, such a session offers no Drive or
-  Take over, its Status says the agent is not installed, and a Drive request
-  is refused before anything starts. A session already being driven keeps
-  running.
+  open read-only, while the agent is not installed or cosyncing cannot find it.
+  Before, they disappeared until the agent was back. For these agents and for
+  Codex, Cline, Kilo Code, Pi and OMP, such a session offers no Drive or Take
+  over, its Status says the agent is not installed, and a Drive request is
+  refused before anything starts. A session already being driven keeps running.
 - A session watched in Observe while another device or the terminal drives it
   now stays read-only in that view. Before, the next session-list refresh
   showed the watching view as driving, and a device that opened the session
   afterwards could be connected to the watching view instead of the driving
-  one, so its prompts failed. An open session also no longer receives the
-  same session update again each time the list refreshes without a change.
+  one, so its prompts failed. An open session also no longer receives the same
+  session update again each time the list refreshes without a change.
 - When an agent cannot resume a session for Drive or Take over, the app now
   names that agent. Before, it said Codex for every agent, though Grok,
   Reasonix, Cline and Antigravity refuse the same way.
@@ -347,24 +347,24 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   example one whose agent is not installed, its Status now says the session
   stays in Observe. Before, it said you could still choose Take over, which
   that session did not offer.
-- F5 and Ctrl+R (⌘R on macOS) refresh the session list again, as the
-  keyboard shortcuts page says. They had stopped doing anything.
+- F5 and Ctrl+R (⌘R on macOS) refresh the session list again, as the keyboard
+  shortcuts page says. They had stopped doing anything.
 - Dismissing a notification whose server cannot be reached now says the
-  dismissal is saved on this device and will sync once the server is
-  reachable, as Mark read already did. Before, the row disappeared and
-  nothing said the server had not heard of it yet.
-- On Windows, restoring Drive for a Codex session no longer starts a
-  PowerShell process to check whether a Codex terminal is running that
-  session. The broker now reads the process list directly, which takes about
-  20 ms instead of about 2 seconds.
+  dismissal is saved on this device and will sync once the server is reachable,
+  as Mark read already did. Before, the row disappeared and nothing said the
+  server had not heard of it yet.
+- On Windows, restoring Drive for a Codex session no longer starts a PowerShell
+  process to check whether a Codex terminal is running that session. The broker
+  now reads the process list directly, which takes about 20 ms instead of about
+  2 seconds.
 
 ### Changed
 
 - A long session stays smoother while a reply streams in or other sessions
   change. Each streamed chunk rebuilt every message on screen, with their
   buttons and links, and a status change of any other session in the list
-  rebuilt the open session's page and transcript too. Now only the message
-  that changed is rebuilt, and the open session ignores other sessions. In a
+  rebuilt the open session's page and transcript too. Now only the message that
+  changed is rebuilt, and the open session ignores other sessions. In a
   300-message session a streamed chunk rebuilds less than half as much as
   before.
 - New installs use Bun 1.3.14: the one-command installers place it unless the
@@ -395,13 +395,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - For contributors: `bun run check` runs the tests as feature suites (`policy`,
   `broker`, `adapters`, `packaging`, `client`, `web`, `windows`) in parallel,
   and the same command runs in CI. A failed test file is retried once; a pass
-  on retry is reported as flaky instead of failing the run. Pass suite names
-  to run a subset, or `--only` to run one feature. The verification graph and
-  its completeness anchor are removed. See `docs/development/testing.md`.
+  on retry is reported as flaky instead of failing the run. Pass suite names to
+  run a subset, or `--only` to run one feature. The verification graph and its
+  completeness anchor are removed. See `docs/development/testing.md`.
 - For contributors: an e2e test broker now exits with the test process that
   started it, even one killed with SIGKILL, and `bun run check` fails a task
-  that leaves a harness process running. Interrupting the run stops its
-  tasks.
+  that leaves a harness process running. Interrupting the run stops its tasks.
 
 ## 0.6.5 — 2026-10-13
 
