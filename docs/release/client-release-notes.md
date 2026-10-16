@@ -5,62 +5,107 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.6.5 opens files from the conversation. A filename or workspace link in a
-report, including one inside a table or inline code, opens the file, and
-selected text offers Find file in workspace. Delivered Markdown, HTML, source
-and other text files open beside the conversation, and on a wide landscape
-screen Status and Files sit as tabs in the right panel. Update the Server
-first: searching the workspace for a bare filename needs a 0.6.5 Server, while
-a link that carries the file's path still opens against an older one.
+0.6.6 is a stability release. A long session stays responsive while a reply
+streams in: every streamed chunk used to rebuild every message on screen, and
+now only the message that changed is rebuilt. Long Claude sessions stay
+pageable past the old history limit. Most of the app fixes are about ownership:
+a session driven from the app now goes read-only the moment a terminal or
+another program writes its transcript, a refused approval or question answer
+reads as refused instead of delivered, and an agent that is not installed no
+longer makes its sessions disappear from the list.
 
-The broker contract moves to revision 30, which adds that file search and
-nothing else, and the compatibility window stays one revision wide, so a 0.6.4
-native client can still drive a 0.6.5 Server. A native client from 0.5.13 or
-earlier can watch a 0.6.x Server but cannot drive it: it cannot answer a
-permission request or send a prompt. The web client needs nothing: it ships
-inside the broker package and always matches it. A 0.4.1 or older client also
-sits below the minimum accepted client contract, still revision 17, and stays
-read-only against current brokers.
+The broker now opens, forks or renames only sessions that the agent's own store
+or server lists, which closes a path where a crafted session id could read
+files outside that agent's session folder. It also stops reading a named pipe
+in a session folder, deletes a transcript export left behind by a broker that
+crashed, and keeps one unknown paired device from disconnecting the others.
+Update the Server to get those.
+
+The broker contract stays at revision 30 and the minimum accepted client
+revision stays 17, so a 0.6.4 or 0.6.5 native client still drives a 0.6.6
+Server. The web client ships with the broker and always matches it. Server-side
+fixes such as the Claude history index, the session id checks and readable file
+sizes need a 0.6.6 Server; the fixes listed below that are in the app need the
+app.
+
+This release is also a bridge for the Server's runtime. A new install gets Bun
+1.3.14 from the installer, which now places it in
+`~/.cosyncing/runtime/bun-<version>` instead of `~/.bun`, so re-running an
+installer no longer replaces the Bun a running broker is using. The minimum
+stays at Bun 1.3.8 in this release on purpose: a Server already running 1.3.8
+can `cosy update` onto 0.6.6 and so receive the updater that installs a later
+release's pinned Bun by itself, rolling the broker and the runtime back
+together if the new broker fails its health check. A Bun you chose with
+`COSYNCING_BUN_BIN` is never replaced, and `cosyncing uninstall` without
+`--purge-data` now removes only the runtimes the installer and `cosy update`
+placed.
 
 On a Server installed with the signed one-line installer, `cosy update` now
 updates the desktop client too, after asking you to quit it. On Windows and
 macOS, a client installed by 0.6.4 or earlier needs the new all-in-one
 installer once before `cosy update` can take it over.
 
-## What's new in 0.6.5
+## What's new in 0.6.6
 
-- Workspace file links and filenames in reports open the file. Ctrl/Cmd-click
-  and Find file in workspace use the same lookup, show a chooser when a name
-  matches more than one file, and say when the search stopped early.
-- Delivered Markdown, HTML, source code and other supported text files open
-  beside the conversation, with Download still available.
-- On wide landscape screens, Status and Files open as session tabs in the right
-  panel, with the Files explorer beside the opened previews. Portrait and
-  smaller layouts keep the main session view, and resizing a portrait Status or
-  Files view keeps that view open.
-- Right-click or long-press a session tab or roster row to rename the session.
-- The activity band counts what is running, paused, failed and done instead of
-  showing a bare "+N". Running work leads, oldest first; finished work follows,
-  newest first, and folds behind its count while anything still runs. Dismiss
-  one card from the expanded list, or every finished card with Clear finished.
-- Workspace dividers can use the whole window width, token counts use compact
-  k, M and B units, and the transcript filter is named Hide tool calls. Hiding
-  tool calls keeps delivered files and their Open and Download actions visible.
-- A Claude session whose background agents are still running reads Working in
-  the roster again, and the agents' rows say which ones are still working. The
-  app no longer offers Stop or queues a prompt behind a turn that has already
-  ended. A Claude session synced through the mod shows Working when you open it
-  mid-turn.
-- A Codex session you reopen keeps each reply under its own prompt after a
-  stopped turn, and its history shows each command's exit status. A terminal
-  can join a Codex session the app is running without interrupting it.
-- An agent card with nothing more to show no longer opens onto a "remains live"
-  placeholder, and delivered filenames stay readable in narrow conversations and
-  on phones.
+- Stop works on a Grok session driven from the app: the turn ends as stopped and
+  the session stays drivable. So far this is checked against a stand-in Grok,
+  not a real Grok turn.
+- A long session stays smoother while a reply streams and while other sessions
+  change status. In a 300-message session a streamed chunk rebuilds less than
+  half as much as before.
+- A long Claude session stays pageable past the former 32 MiB and 50,000-row
+  history limit through a persisted disk index, and a history failure now says
+  whether it hit a server limit or a decoding limit.
+- Generated files, Chinese filenames included, are found beside the files the
+  session already used before the whole workspace is searched. Downloads keep
+  Unicode filenames, browser transfers show progress as chunks arrive, and file
+  sizes read as KB, MB and GB instead of raw bytes.
+- A question Claude asks in a synced terminal reaches the app at once and stays
+  answerable from either side, also when no device was watching when it was
+  asked. In auto mode the transcript no longer fills with read-only cards for
+  tool calls nobody is watching.
+- A session driven from the app turns read-only in every open view as soon as
+  another program rewrites or replaces its transcript, for Pi, OMP, Cline, Kilo
+  Code, Grok, Reasonix and Antigravity, and an open view reloads the new history
+  once.
+- An approval for a request the agent never made, or an answer to a question
+  already answered elsewhere, is refused instead of reported as delivered, for
+  Codex, Claude, Pi, OMP and Kilo Code.
+- A prompt you send keeps one row in every view of a Pi, OMP or Antigravity
+  session and leaves the queue as soon as the agent starts it; a Cline prompt
+  queued during a turn shows on every device at once.
+- Sessions whose agent is not installed stay listed and open read-only with a
+  reason instead of vanishing, and when an agent cannot resume a session the app
+  names that agent rather than always saying Codex.
+- Interrupted sessions recover: Kilo Code and Cline sessions are drivable again
+  after their background server crashed, Take over works again after a Codex
+  daemon crash left its control socket behind, and a reopened Codex session
+  restores Drive on Windows and when terminal sync is off.
+- Notifications and the inbox: Review and Reply open the session and switch
+  server, Mark read, Dismiss and Clear reach the server at once, ages keep
+  counting while the page is open, a phone's held alert no longer delays your
+  other devices, and a Dismiss the server never heard of says it will sync.
+- A `cosyncing://pair?brokerUrl=` link now pairs the server it carries.
+  Switching saved servers loads the new session list at once and keeps its open
+  tabs, a server that never answers times out with Retry, and a refused token
+  brings up the sign-in screen.
+- After Detach the header reads Detached with Attach back in view, F5 and
+  Ctrl+R (Cmd+R on macOS) refresh the session list again, and at twice the
+  default text size the session list, its drawer and the overview fit their
+  width.
+- On Windows, restoring Drive for a Codex session reads the process list
+  directly, about 20 ms instead of starting PowerShell and taking about 2 s.
+- OpenCode: a scheduled or newly created first prompt runs on the model you
+  chose, an Observe view is read-only, a failed turn shows its error once, and
+  Stop ends the turn as interrupted.
+
+- When the Server runs a Bun that a newer release needs and cannot install by
+  itself, the app's settings page says **Needs newer Bun** and explains what to
+  do instead of the old "Not checked".
 
 The 0.6.0 features that need both ends of the wire, notifications with every
 browser tab closed, per-type notification settings and cross-device read and
-clear, still need a 0.6.0 or newer Server. 0.6.5 is one.
+clear, still need a 0.6.0 or newer Server. 0.6.6 is one.
 
 ## Downloads
 
