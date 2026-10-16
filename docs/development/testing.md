@@ -40,7 +40,10 @@ file is all it takes to add a test. Older script-style suites are listed in
 - Every task has a wall-clock bound (three minutes by default). On timeout
   the runner records the process tree, then kills the task's whole process
   group, so a hang cannot leave a broker or browser behind. Stopping the run
-  (Ctrl-C, SIGTERM) stops every running task's group first.
+  (Ctrl-C, SIGTERM) stops running tasks and prevents new tasks or retries from
+  starting. Windows cancellation terminates the task's process tree. A child
+  left in a supervised group after its task exits is reaped and fails that
+  attempt, even when the task itself exited successfully.
 - A broker the e2e harness starts exits when the test process that started it
   exits, however it ends: the harness gives it a stdin pipe it never writes,
   and a source-run broker with `COSYNCING_TEST_EXIT_ON_STDIN_EOF=1` shuts down

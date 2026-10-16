@@ -30,6 +30,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Kilo Observe keeps delivering live appends when another client reads or indexes history. Reasonix Observe catches writes made while its file watcher is being replaced. CI now fails tasks that leave child processes behind and stops queued work and retries on cancellation.
+
 - A named pipe in an agent's session folder could freeze the server. Session
   lists and history reads now skip anything that is not a regular file, and
   opening such a session reports it as not found.

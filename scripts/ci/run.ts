@@ -38,6 +38,7 @@ const ROOT = resolve(import.meta.dir, '..', '..');
 const OUTPUT = join(ROOT, 'output', 'check');
 const IN_CI = process.env.GITHUB_ACTIONS === 'true';
 const HOST = platform();
+let cancelling = false;
 
 // ---------------------------------------------------------------- arguments
 
@@ -282,6 +283,7 @@ async function attemptTask(planned: PlannedTask, attempt: number, env: NodeJS.Pr
     strays: result.strays,
     summary: leaked.length > 0
       ? `LEAK: ${leaked.length} harness process(es) outlived the task: ${leaked[0]}`.slice(0, 240)
+      : result.strays ? 'LEAK: task left processes in its supervised group'
       : result.success ? 'ok' : summarize(result),
     log,
     ledger,
@@ -289,7 +291,7 @@ async function attemptTask(planned: PlannedTask, attempt: number, env: NodeJS.Pr
   };
 }
 
-const passed = (attempt: Attempt): boolean => attempt.exitCode === 0 && !attempt.timedOut && !attempt.leaked;
+const passed = (attempt: Attempt): boolean => attempt.exitCode === 0 && !attempt.timedOut && !attempt.leaked && !attempt.strays;
 
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
@@ -312,7 +314,7 @@ function printFailureTail(result: TaskResult): void {
 async function runTask(planned: PlannedTask, retry: boolean, env: NodeJS.ProcessEnv): Promise<TaskResult> {
   const attempts: Attempt[] = [await attemptTask(planned, 1, env)];
   const mayRetry = retry && planned.task.retry !== false;
-  if (!passed(attempts[0]!) && mayRetry) attempts.push(await attemptTask(planned, 2, env));
+  if (!cancelling && !passed(attempts[0]!) && mayRetry) attempts.push(await attemptTask(planned, 2, env));
   const status: Status = passed(attempts[0]!)
     ? 'pass'
     : attempts.length > 1 && passed(attempts[1]!) ? 'flaky' : 'fail';
@@ -348,8 +350,8 @@ async function runPool(tasks: PlannedTask[], options: Options, env: NodeJS.Proce
   const pending = [...tasks];
   const running = new Set<Promise<void>>();
   let serialBusy = false;
-  while (pending.length > 0 || running.size > 0) {
-    while (running.size < options.concurrency) {
+  while ((!cancelling && pending.length > 0) || running.size > 0) {
+    while (!cancelling && running.size < options.concurrency) {
       const index = pending.findIndex((planned) => !(planned.task.serial && serialBusy));
       if (index < 0) break;
       const [planned] = pending.splice(index, 1);
@@ -463,6 +465,8 @@ if (options.list) {
 // stopping the run stops them first.
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
   process.on(signal, () => {
+    if (cancelling) return;
+    cancelling = true;
     const groups = signalSupervisedGroups('SIGTERM');
     console.error(`check: ${signal} — stopping ${groups} running task(s)`);
     setTimeout(() => {
@@ -505,6 +509,7 @@ const brokenSuites = new Set<SuiteId>();
 const results: TaskResult[] = [];
 const prepared = new Map<string, boolean>();
 for (const planned of prepare) {
+  if (cancelling) break;
   if (brokenSuites.has(planned.suite.id)) continue;
   const key = `${planned.task.cwd ?? '.'}\0${planned.task.run.join('\0')}`;
   const earlier = prepared.get(key);
@@ -537,6 +542,8 @@ try {
 } finally {
   for (const id of options.suites) suites.find((suite) => suite.id === id)!.cleanup?.();
 }
+
+if (cancelling) process.exit(130);
 
 // A process can escape a task late (a relaunch it scheduled, a host started on its way out). Look
 // once more under every root this run recorded; whatever is found fails the task that made the root.

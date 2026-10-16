@@ -283,6 +283,7 @@ export const suites: Suite[] = [
         'route-authorization', 'broker-update-contract', 'real-evidence-schema', 'claude-artifacts',
       ]),
       ...testFiles(
+        'e2e/policy/runner.test.ts',
         'e2e/broker/uploads.test.ts',
         'e2e/broker/artifact-limits.test.ts',
         'e2e/broker/diff-references.test.ts',

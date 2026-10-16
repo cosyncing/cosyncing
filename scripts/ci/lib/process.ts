@@ -58,8 +58,12 @@ export function insideSupervisedProcessGroup(): boolean {
 let setsidAvailable: boolean | undefined;
 function canIsolateGroup(): boolean {
   if (setsidAvailable === undefined) {
-    setsidAvailable = !IS_WINDOWS
-      && Bun.spawnSync(['setsid', 'true'], { stdout: 'ignore', stderr: 'ignore' }).success;
+    try {
+      setsidAvailable = !IS_WINDOWS
+        && Bun.spawnSync(['setsid', 'true'], { stdout: 'ignore', stderr: 'ignore' }).success;
+    } catch {
+      setsidAvailable = false;
+    }
   }
   return setsidAvailable;
 }
@@ -81,16 +85,15 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-/** Process groups this process started and has not yet seen the end of. */
-const liveGroups = new Set<number>();
+/** Active tasks and their platform-specific cancellation operations. */
+const liveGroups = new Map<number, (signal: NodeJS.Signals) => void>();
 
 /**
- * Signal every process group {@link runSupervised} started and still owns. For a supervisor that is
- * itself being stopped: its groups are their own sessions, so a Ctrl-C or a SIGTERM that ends it
- * never reaches them, and they would run on unsupervised.
+ * Stop every task the supervisor still owns, including Windows trees and non-isolated children.
+ * Isolated groups do not receive a signal sent to the supervisor itself.
  */
 export function signalSupervisedGroups(signal: NodeJS.Signals): number {
-  for (const pid of liveGroups) signalGroup(pid, signal);
+  for (const stop of liveGroups.values()) stop(signal);
   return liveGroups.size;
 }
 
@@ -131,7 +134,14 @@ export async function runSupervised(
     stdin: 'ignore',
   });
 
-  if (isolated) liveGroups.add(child.pid);
+  liveGroups.set(child.pid, (signal) => {
+    if (isolated) signalGroup(child.pid, signal);
+    else if (IS_WINDOWS && child.exitCode === null) {
+      Bun.spawnSync(['taskkill', '/PID', String(child.pid), '/T', '/F'], {
+        stdout: 'ignore', stderr: 'ignore',
+      });
+    } else if (child.exitCode === null) child.kill(signal);
+  });
   let timedOut = false;
   let treeAtTimeout: string | undefined;
   // Chained so kills never interleave, and awaited before returning so no
@@ -203,7 +213,7 @@ export async function runSupervised(
     }
   }
   await termination;
-  if (!groupAlive(child.pid)) liveGroups.delete(child.pid);
+  if (!isolated || !groupAlive(child.pid)) liveGroups.delete(child.pid);
   // A pipe can outlive every process we know about, so this wait is bounded.
   await Promise.race([pumps, Bun.sleep(grace)]);
 
@@ -212,7 +222,7 @@ export async function runSupervised(
     stderr,
     output,
     exitCode,
-    success: exitCode === 0 && !timedOut,
+    success: exitCode === 0 && !timedOut && !strays,
     timedOut,
     durationMs: Math.round(performance.now() - started),
     strays,

@@ -96,8 +96,9 @@ export class KiloObserveConnection implements SessionConnection {
     if (!snapshot) throw new Error('Kilo SQLite snapshot is unavailable or unsupported.');
     if (this.sourceReplaced(snapshot) || (this.primed && this.continuation(snapshot) === undefined)) {
       this.invalidatePaging();
+      this.setCursor(snapshot);
     }
-    this.setCursor(snapshot);
+    this.publishSnapshot(snapshot);
     return snapshot.messages;
   }
 
@@ -126,7 +127,7 @@ export class KiloObserveConnection implements SessionConnection {
       if (!message || !sink.accept(message, sink.acceptsLocations ? location : undefined)) return { refusal: 'resource-limit' };
       if (sink.acceptsLocations) retained.push(snapshot.encodings[location]!);
     }
-    this.setCursor(snapshot);
+    this.publishSnapshot(snapshot);
     const identity = this.identity(snapshot);
     return { identity, ...(sink.acceptsLocations ? { reader: new EncodedHistoryReader(identity, retained) } : {}) };
   }
@@ -261,6 +262,32 @@ export class KiloObserveConnection implements SessionConnection {
     }
   }
 
+  /** Any read that advances the cursor must first deliver its new rows to existing subscribers. */
+  private publishSnapshot(snapshot: KiloHistorySnapshot): void {
+    if (!this.primed) { this.setCursor(snapshot); return; }
+    const from = this.sourceReplaced(snapshot) ? undefined : this.continuation(snapshot);
+    if (from === undefined) {
+      this.invalidatePaging();
+      this.setCursor(snapshot);
+      return;
+    }
+    // Rows from `from` on belong to messages Kilo was still writing at the last read. Each one
+    // that is new or rewritten since reaches subscribers once, under the key it already had.
+    const unchanged = new Map<string, number>();
+    for (const encoding of this.encodings.slice(from)) unchanged.set(encoding, (unchanged.get(encoding) ?? 0) + 1);
+    for (let index = from; index < snapshot.messages.length; index += 1) {
+      const encoding = snapshot.encodings[index]!;
+      const remaining = unchanged.get(encoding) ?? 0;
+      if (remaining > 0) {
+        unchanged.set(encoding, remaining - 1);
+        continue;
+      }
+      const message = snapshot.messages[index];
+      if (message) this.emit(message);
+    }
+    this.setCursor(snapshot);
+  }
+
   private async drain(): Promise<void> {
     if (this.closed) return;
     if (this.draining) { this.drainAgain = true; return; }
@@ -280,28 +307,7 @@ export class KiloObserveConnection implements SessionConnection {
           break;
         }
         this.snapshotFailures = 0;
-        if (!this.primed) { this.setCursor(snapshot); continue; }
-        const from = this.sourceReplaced(snapshot) ? undefined : this.continuation(snapshot);
-        if (from === undefined) {
-          this.invalidatePaging();
-          this.setCursor(snapshot);
-          continue;
-        }
-        // Rows from `from` on belong to messages Kilo was still writing at the last read. Each one
-        // that is new or rewritten since reaches subscribers once, under the key it already had.
-        const unchanged = new Map<string, number>();
-        for (const encoding of this.encodings.slice(from)) unchanged.set(encoding, (unchanged.get(encoding) ?? 0) + 1);
-        for (let index = from; index < snapshot.messages.length; index += 1) {
-          const encoding = snapshot.encodings[index]!;
-          const remaining = unchanged.get(encoding) ?? 0;
-          if (remaining > 0) {
-            unchanged.set(encoding, remaining - 1);
-            continue;
-          }
-          const message = snapshot.messages[index];
-          if (message) this.emit(message);
-        }
-        this.setCursor(snapshot);
+        this.publishSnapshot(snapshot);
       } while (this.drainAgain && !this.closed);
     } finally {
       this.draining = false;

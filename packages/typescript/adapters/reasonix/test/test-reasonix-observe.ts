@@ -153,6 +153,34 @@ try {
     watcherCapped && watchConstructions === 9,
     JSON.stringify({ watchConstructions, watchTraces }));
   await failingWatcher.close();
+  // A filesystem write in the close/open gap has no watcher to report it.
+  const rearmMessages: AgentMessage[] = [];
+  let firstWatcher: EventEmitter | undefined;
+  let constructions = 0;
+  const rearming = new ReasonixObserveConnection({
+    session: stored, info,
+    watchFactory: (() => {
+      constructions += 1;
+      const first = constructions === 1;
+      const watcher = new EventEmitter() as EventEmitter & { close(): void };
+      watcher.close = () => {
+        if (!first) return;
+        appendFileSync(transcript, `${JSON.stringify({ role: 'user', content: 'during rearm', raw_content: 'during rearm' })}\n`);
+        updateSidecars(2);
+      };
+      if (first) firstWatcher = watcher;
+      return watcher;
+    }) as unknown as typeof import('node:fs').watch,
+  });
+  await rearming.getHistory();
+  rearming.subscribe(message => rearmMessages.push(message));
+  firstWatcher!.emit('error', new Error('rearm fixture'));
+  const caughtGap = await waitFor(() => rearmMessages.some(message => message.type === 'user-message' && message.text === 'during rearm'));
+  check('re-arming reconciles a write made while no watcher was installed', caughtGap, JSON.stringify(rearmMessages));
+  await rearming.close();
+  writeFileSync(transcript, `${initialRows.map(row => JSON.stringify(row)).join('\n')}\n`);
+  updateSidecars(1);
+
   const traces: string[] = [];
   const connection = new ReasonixObserveConnection({
     session: stored,

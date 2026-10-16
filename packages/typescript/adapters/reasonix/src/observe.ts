@@ -652,7 +652,11 @@ export class ReasonixObserveConnection implements SessionConnection {
     this.watcherRearmAttempts += 1;
     this.pendingWatcherRearm = setTimeout(() => {
       this.pendingWatcherRearm = undefined;
-      if (!this.closed && this.handlers.size > 0) this.startWatcher();
+      if (!this.closed && this.handlers.size > 0) {
+        this.startWatcher();
+        // Events between closing the old watcher and installing its replacement are otherwise lost.
+        this.scheduleDrain();
+      }
     }, WATCH_REARM_MS);
   }
 
