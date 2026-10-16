@@ -4187,9 +4187,10 @@
   "@sessionHistoryLoadGap": {
     "description": "Button that reloads one page at an evicted transcript gap."
   },
-  "sessionHistoryResourceLimit": "This history is too large to page safely on this device.",
+  "sessionHistoryResourceLimit": "This page is too large to load safely on this device.",
+  "sessionHistoryServerResourceLimit": "The server cannot load this history within its resource limits.",
   "@sessionHistoryResourceLimit": {
-    "description": "Terminal history paging state for a broker or client resource limit."
+    "description": "Terminal history paging state for a client page memory limit."
   },
   "sessionHistorySourceUnversioned": "This session's native history cannot be paged safely.",
   "@sessionHistorySourceUnversioned": {

@@ -242,7 +242,7 @@ function decodeCursor(raw: string | undefined): { cursor: CursorPayload | null; 
  * means the row is no longer the one a cursor was issued over. A run summary contributes only its
  * identity (see {@link isVolatileTailMessage}).
  */
-function stablePart(message: AgentMessage, index: number): string {
+export function stableHistoryPart(message: AgentMessage, index: number): string {
   switch (message.type) {
     case 'model-output':
     case 'thinking':
@@ -302,6 +302,8 @@ function stablePart(message: AgentMessage, index: number): string {
       return JSON.stringify(message) || String(index);
   }
 }
+
+const stablePart = stableHistoryPart;
 
 function prefixHash(messages: AgentMessage[], n: number): string {
   const h = createHash('sha256');

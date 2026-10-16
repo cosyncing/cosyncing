@@ -55,6 +55,7 @@ import {
   historyFitsEncodedPageCache,
   validHistorySourceIdentity,
 } from './history-page-cache.ts';
+import { storedHistoryIndex } from './stored-history-index.ts';
 import type { SessionControlTransition } from '../attention/attention-policy.ts';
 import type { LiveOverlayEntry } from '../roster/roster-overlay.ts';
 import {
@@ -1469,6 +1470,46 @@ export class ManagedConn {
       reachableBehindFrame: AgentMessage[];
     } | null = null;
     try {
+      if (this.conn.openHistorySnapshot) {
+        const snapshot = await this.conn.openHistorySnapshot().catch(() => undefined);
+        if (!snapshot || snapshot.count === 0) return;
+        const cache = await storedHistoryIndex(snapshot).catch(() => undefined);
+        if (!cache) return;
+        const egresses = [...this.clients].map((client) => client.historyEgress);
+        const measure = (message: AgentMessage): number => Math.max(estimatedClientDecodedBytes(message),
+          ...egresses.map((egress) => estimatedClientDecodedBytes(egress ? egress(message) : message)));
+        const attached = await cache.loadAttach(undefined, RESYNC_MAX_MESSAGES, undefined, RESYNC_MAX_DECODED_BYTES, measure, this.liveRunning).catch(() => undefined);
+        if (!attached || !('messages' in attached)) return;
+        // A keyless occurrence racing the scan cannot be identified from a
+        // bounded tail alone. Keep the already-delivered view and retry from
+        // the completed index instead of replaying/deduplicating by guesswork.
+        if (this.resyncReplayOverflow || this.resyncReplay.some((message) => liveOverlapKey(message) === undefined)) {
+          this.resyncResetPending = true;
+          this.resyncResetNotice = notice;
+          this.scheduleResyncRetry();
+          return;
+        }
+        this.observeHistory([...attached.messages, ...attached.derivedMessages]);
+        this.ring.length = 0; this.ringBytes = 0; this.historyEpoch += 1;
+        sent = { frame: attached.messages, derived: attached.derivedMessages, persistedAfterBaseline: [], reachableBehindFrame: [] };
+        for (const client of this.clients) {
+          client({ kind: 'history', messages: attached.messages, reset: true, cursor: attached.cursor,
+            ...(attached.truncated ? { truncated: attached.truncated } : {}),
+            ...(attached.olderCursor ? { olderCursor: attached.olderCursor } : {}),
+            ...(attached.hasEarlier ? { hasEarlier: true } : {}),
+            ...(client.historyPagingRefused?.() !== true ? { endCursor: attached.endCursor, newerHistory: true as const } : {}),
+          });
+          for (const message of attached.derivedMessages) client({ kind: 'message', seq: ++this.seq, message });
+          for (const artifact of this.artifacts) client({ kind: 'message', seq: ++this.seq, message: artifact });
+          if (notice) client({ kind: 'notice', message: notice });
+        }
+        this.resyncBaselineCursor = attached.cursor;
+        this.resyncBaselineLiveRows.clear(); this.resyncBaselineLiveRowCount = 0; this.resyncBaselineLiveRowBytes = 0;
+        this.resyncBaselineLiveRowsUsable = true; this.resyncResetPending = false; this.resyncResetNotice = undefined;
+        if (this.pendingResyncRetry) clearTimeout(this.pendingResyncRetry);
+        this.pendingResyncRetry = undefined;
+        return;
+      }
       let full = await this.conn.getHistory().catch(() => null);
       // An EMPTY snapshot here is almost always a transient read (the CLI mid-rewrite at a compaction
       // boundary, or a fork transcript not flushed yet) — pushing it would WIPE every client's thread

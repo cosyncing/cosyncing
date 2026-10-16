@@ -648,6 +648,14 @@ type CompactOverlap = {
   length: number;
 };
 
+/** A bounded disk-backed vector can serve the same paging algorithms without
+ * retaining one JS object per historical row. */
+export interface HistoryIndexVector<T> {
+  readonly length: number;
+  readonly [index: number]: T;
+  slice(start?: number, end?: number): ArrayLike<T>;
+}
+
 /**
  * Build cursor hashes and native locations without retaining normalized
  * payloads. The adapter owns the matching bounded random-access reader.
@@ -831,24 +839,26 @@ export class IndexedHistoryPageCache {
   readonly kind = 'indexed' as const;
   readonly sourceIdentity: Readonly<HistorySourceIdentity>;
   readonly encodedBytes: number;
-  private readonly hashes: readonly string[];
-  private readonly locations: Uint32Array;
-  private readonly pageable: Uint8Array;
+  private readonly hashes: HistoryIndexVector<string>;
+  private readonly locations: HistoryIndexVector<number>;
+  private readonly pageable: HistoryIndexVector<number>;
   private readonly projections: ReadonlyMap<string, CompactProjection>;
   private readonly derived: readonly number[];
   private readonly overlap: readonly CompactOverlap[];
   private readonly reader: HistorySnapshotPageReader;
   private readonly pendingSlotCursors: ReadonlyMap<number, string>;
   readonly hasPendingToolSlots: boolean;
+  private readonly pageDecodedBudget: number;
+  private readonly immutableRows: boolean;
   private _lastReadWork:
     | { recordsRead: number; bytesRead: number }
     | undefined;
 
   constructor(parts: {
     sourceIdentity: Readonly<HistorySourceIdentity>;
-    hashes: readonly string[];
-    locations: Uint32Array;
-    pageable: Uint8Array;
+    hashes: HistoryIndexVector<string>;
+    locations: HistoryIndexVector<number>;
+    pageable: HistoryIndexVector<number>;
     projections: ReadonlyMap<string, CompactProjection>;
     derived: readonly number[];
     overlap: readonly CompactOverlap[];
@@ -856,6 +866,9 @@ export class IndexedHistoryPageCache {
     reader: HistorySnapshotPageReader;
     pendingSlotCursors?: ReadonlyMap<number, string>;
     hasPendingToolSlots?: boolean;
+    pageDecodedBudget?: number;
+    /** Stored rows only append; running text cannot rewrite an earlier row. */
+    immutableRows?: boolean;
   }) {
     this.sourceIdentity = Object.freeze({ ...parts.sourceIdentity });
     this.hashes = parts.hashes;
@@ -868,6 +881,8 @@ export class IndexedHistoryPageCache {
     this.reader = parts.reader;
     this.pendingSlotCursors = parts.pendingSlotCursors ?? new Map();
     this.hasPendingToolSlots = parts.hasPendingToolSlots ?? false;
+    this.pageDecodedBudget = parts.pageDecodedBudget ?? Number.POSITIVE_INFINITY;
+    this.immutableRows = parts.immutableRows ?? false;
   }
 
   get stats(): HistoryPageCacheStats {
@@ -934,7 +949,7 @@ export class IndexedHistoryPageCache {
     locations: readonly number[],
     query?: HistoryQuery,
   ): Promise<AgentMessage[] | HistoryPageReadFailure> {
-    const result = await Promise.resolve(this.reader.read(locations, query))
+    const result = await Promise.resolve().then(() => this.reader.read(locations, query))
       .catch(() => undefined);
     if (!result) return { kind: 'source-changed' };
     if ('refusal' in result) return { kind: 'resource-limit' };
@@ -946,6 +961,29 @@ export class IndexedHistoryPageCache {
     }
     this._lastReadWork = result.work;
     return result.messages.map((row, index) => withToolSlotCursor(row, this.pendingSlotCursors.get(locations[index]!)));
+  }
+
+  private async resolvePage(locations: number[], newestFirst: boolean, query?: HistoryQuery): Promise<AgentMessage[] | HistoryPageReadFailure> {
+    if (!Number.isFinite(this.pageDecodedBudget)) return this.resolve(locations, query);
+    const ordered = newestFirst ? [...locations].reverse() : locations;
+    const kept: AgentMessage[] = [];
+    let bytes = 0, recordsRead = 0, bytesRead = 0;
+    for (let start = 0; start < ordered.length; start += 8) {
+      const rows = await this.resolve(ordered.slice(start, start + 8), query);
+      if (!Array.isArray(rows)) return rows;
+      recordsRead += this._lastReadWork?.recordsRead ?? rows.length;
+      bytesRead += this._lastReadWork?.bytesRead ?? 0;
+      for (const row of rows) {
+        const size = estimatedClientDecodedBytes(row);
+        if (kept.length && bytes + size > this.pageDecodedBudget) {
+          this._lastReadWork = { recordsRead, bytesRead };
+          return newestFirst ? kept.reverse() : kept;
+        }
+        kept.push(row); bytes += size;
+      }
+    }
+    this._lastReadWork = { recordsRead, bytesRead };
+    return newestFirst ? kept.reverse() : kept;
   }
 
   /**
@@ -963,6 +1001,7 @@ export class IndexedHistoryPageCache {
     query?: HistoryQuery,
     known?: ReadonlyMap<number, AgentMessage>,
   ): Promise<number | HistoryPageReadFailure> {
+    if (this.immutableRows) return end;
     const rows = new Map<number, AgentMessage>(known);
     for (;;) {
       let wanted = end;
@@ -1000,16 +1039,19 @@ export class IndexedHistoryPageCache {
       ),
     );
     const reverseLocations: number[] = [];
+    const reverseIndices: number[] = [];
     let boundary = resolvedBoundary;
     while (boundary > 0 && reverseLocations.length < pageLimit) {
       boundary -= 1;
       if (this.pageable[boundary] === 1) {
         reverseLocations.push(this.locations[boundary]!);
+        reverseIndices.push(boundary);
       }
     }
     const locations = reverseLocations.reverse();
-    const messages = await this.resolve(locations, query);
+    const messages = await this.resolvePage(locations, true, query);
     if (!Array.isArray(messages)) return messages;
+    if (messages.length < locations.length) boundary = reverseIndices[messages.length - 1]!;
     const hasMore = boundary > 0;
     return {
       messages,
@@ -1061,15 +1103,17 @@ export class IndexedHistoryPageCache {
       ),
     );
     const locations: number[] = [];
+    const indices: number[] = [];
     let boundary = start;
     while (boundary < stop && locations.length < pageLimit) {
-      if (this.pageable[boundary] === 1) locations.push(this.locations[boundary]!);
+      if (this.pageable[boundary] === 1) { locations.push(this.locations[boundary]!); indices.push(boundary); }
       boundary += 1;
     }
     // See forwardHistoryPage: a full page ends just before the next row a page carries.
     while (boundary < stop && this.pageable[boundary] !== 1) boundary += 1;
-    const messages = await this.resolve(locations, query);
+    const messages = await this.resolvePage(locations, false, query);
     if (!Array.isArray(messages)) return messages;
+    if (messages.length < locations.length) boundary = indices[messages.length]!;
     const hasMore = boundary < this.locations.length;
     return {
       messages,

@@ -3048,6 +3048,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                         cursorInFlight == gap.reloadCursor ||
                         cursorInFlight == gap.forwardCursor),
                 loadingNewer: !loadingUpward,
+                errorCode: widget.state.historyPageErrorCode,
                 failed:
                     widget.state.historyPageError != null ||
                     widget.state.historyGapRefused(gap),
@@ -3897,6 +3898,15 @@ Future<void> _editInlineSchedule(
   if (update != null) await controller.update(schedule.id, update);
 }
 
+String _historyPagingFailureMessage(AppLocalizations l10n, String? code) =>
+    switch (code) {
+      'HISTORY_PAGE_RESOURCE_LIMIT' => l10n.sessionHistoryServerResourceLimit,
+      'HISTORY_PAGE_CLIENT_RESOURCE_LIMIT' => l10n.sessionHistoryResourceLimit,
+      'HISTORY_PAGE_SOURCE_UNVERSIONED' => l10n.sessionHistorySourceUnversioned,
+      'HISTORY_PAGE_SOURCE_CHANGED' => l10n.sessionHistoryRetryable,
+      _ => l10n.sessionHistoryLoadFailed,
+    };
+
 class _HistoryDecodedGapRow extends StatelessWidget {
   const _HistoryDecodedGapRow({
     required this.gap,
@@ -3906,6 +3916,7 @@ class _HistoryDecodedGapRow extends StatelessWidget {
     required this.failed,
     required this.terminalFailure,
     required this.onRetry,
+    this.errorCode,
   });
 
   final TranscriptHistoryGapSegment gap;
@@ -3917,6 +3928,7 @@ class _HistoryDecodedGapRow extends StatelessWidget {
   final bool loadingNewer;
   final bool failed;
   final bool terminalFailure;
+  final String? errorCode;
   final VoidCallback? onRetry;
 
   @override
@@ -3961,7 +3973,7 @@ class _HistoryDecodedGapRow extends StatelessWidget {
                   !reloadable
                       ? label
                       : failed
-                      ? l10n.sessionHistoryLoadFailed
+                      ? _historyPagingFailureMessage(l10n, errorCode)
                       : loading
                       ? (loadingNewer
                             ? l10n.sessionHistoryLoadingNewer
@@ -4085,18 +4097,10 @@ class _HistoryScopeNoticeState extends State<_HistoryScopeNotice> {
         );
       }
       if (failure) {
-        final failureMessage = switch (pagingErrorCode) {
-          // "Too large" is reserved for measured resource overflow. A session
-          // that was mid-write while its history was indexed is a retry, and
-          // says so (H1b).
-          'HISTORY_PAGE_RESOURCE_LIMIT' ||
-          'HISTORY_PAGE_CLIENT_RESOURCE_LIMIT' =>
-            l10n.sessionHistoryResourceLimit,
-          'HISTORY_PAGE_SOURCE_UNVERSIONED' =>
-            l10n.sessionHistorySourceUnversioned,
-          'HISTORY_PAGE_SOURCE_CHANGED' => l10n.sessionHistoryRetryable,
-          _ => l10n.sessionHistoryLoadFailed,
-        };
+        final failureMessage = _historyPagingFailureMessage(
+          l10n,
+          pagingErrorCode,
+        );
         return Semantics(
           liveRegion: true,
           child: Row(

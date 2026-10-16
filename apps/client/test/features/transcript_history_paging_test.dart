@@ -389,7 +389,7 @@ void main() {
         if (code == 'HISTORY_PAGE_RESOURCE_LIMIT') {
           expect(
             find.text(
-              'This history is too large to page safely on this device.',
+              'The server cannot load this history within its resource limits.',
             ),
             findsOneWidget,
             reason: 'a refusal that can never pass says so, in plain words',

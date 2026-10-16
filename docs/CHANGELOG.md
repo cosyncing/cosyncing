@@ -30,6 +30,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Long Claude sessions remain pageable beyond the former 32 MiB / 50,000-row
+  history cache limit. A persisted disk index reuses unchanged history and reads
+  appended records incrementally; large text/tool outputs retain their complete
+  body as a file beside a bounded preview. History errors distinguish server
+  limits from device decoding limits.
+
 - Kilo Observe keeps delivering live appends when another client reads or indexes history. Reasonix Observe catches writes made while its file watcher is being replaced. CI now fails tasks that leave child processes behind and stops queued work and retries on cancellation.
 
 - A named pipe in an agent's session folder could freeze the server. Session
