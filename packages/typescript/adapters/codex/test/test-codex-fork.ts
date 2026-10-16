@@ -6,13 +6,36 @@
  * Codex, no model, no cost. Asserts the fork RPC response maps to a correct canonical SessionInfo,
  * and (CR4) that a user-initiated fork of an agent-owned SOURCE is refused before anything is created.
  *
+ * Isolated: the adapter fixes its session store (`$CODEX_HOME/sessions`) when its module loads and
+ * forks only rollouts inside it, so `CODEX_HOME` is a temporary home set BEFORE the adapter is
+ * imported, and every fixture rollout lives in it. The daemon control socket the join offer depends
+ * on is a socket this test binds in that home; the real `~/.codex` and its daemon are never read.
+ *
  *   bun run packages/typescript/adapters/codex/test/test-codex-fork.ts
  */
 export {};
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isAgentOwnedSessionError, isOwnershipConflictError } from '../../../adapter-api/src/index.ts';
-import { CodexAdapter } from '../src/index.ts';
+
+const HOME = mkdtempSync(join(tmpdir(), 'cosyncing-codex-fork-home-'));
+const SESSIONS = join(HOME, 'sessions');
+mkdirSync(SESSIONS, { recursive: true });
+process.env.CODEX_HOME = HOME;
+// A listening socket in the temporary home stands in for the managed daemon's control socket: a
+// normal fork's join command is offered only while one is there.
+const DAEMON_SOCKET = join(HOME, 'app-server-control.sock');
+process.env.COSYNCING_CODEX_APP_SERVER_SOCK = DAEMON_SOCKET;
+const daemonSocket = createServer();
+await new Promise<void>((resolve, reject) => {
+  daemonSocket.once('error', reject);
+  daemonSocket.listen(DAEMON_SOCKET, () => resolve());
+});
+process.on('exit', () => rmSync(HOME, { recursive: true, force: true }));
+const { CodexAdapter } = await import('../src/index.ts');
+type CodexAdapter = InstanceType<typeof CodexAdapter>;
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const rand = () => Math.random().toString(36).slice(2, 8);
@@ -74,7 +97,7 @@ for await (const chunk of Bun.stdin.stream()) {
 `;
 
 await test('forkSession maps thread/fork to a canonical forked SessionInfo', async () => {
-  const dir = `/tmp/cosyncingcodexfork${rand()}`;
+  const dir = mkdtempSync(join(SESSIONS, 'fork-'));
   const binDir = join(dir, 'bin');
   mkdirSync(binDir, { recursive: true });
   const sourceRollout = join(dir, 'rollout-2026-06-16T00-00-00-00000000-0000-4000-8000-000000000000.jsonl');
@@ -147,7 +170,7 @@ async function withForkFixture<T>(
     spawnMark: string;
   }) => Promise<T>,
 ): Promise<T> {
-  const dir = `/tmp/cosyncingcodexfork${rand()}`;
+  const dir = mkdtempSync(join(SESSIONS, 'fork-'));
   const binDir = join(dir, 'bin');
   mkdirSync(binDir, { recursive: true });
   const sourceRollout = join(dir, 'rollout-2026-06-16T00-00-00-00000000-0000-4000-8000-0000000000c1.jsonl');
@@ -323,6 +346,8 @@ await test('CR4 a fork of a NORMAL thread still advertises Drive and a copyable 
     `origin=${(info as any).origin} drive=${JSON.stringify(info.control?.drive)} sync=${JSON.stringify(sync)} hint=${info.terminalSyncHint?.command ?? '(none)'}`,
   ];
 });
+
+await new Promise<void>((resolve) => daemonSocket.close(() => resolve()));
 
 const failed = results.filter((r) => !r.ok);
 if (failed.length) {

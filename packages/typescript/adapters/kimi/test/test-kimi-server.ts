@@ -779,7 +779,9 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
         status: 200,
         text: async () => JSON.stringify({
           code: 0, msg: 'success',
-          data: boundMeta({ items: [], has_more: false }),
+          // `id` answers the attach's own `GET /api/v1/sessions/s-rotating`: the roster lists nothing,
+          // and an unlisted id attaches only when the host confirms it holds that session.
+          data: boundMeta({ id: 's-rotating', items: [], has_more: false }),
           request_id: 'r',
         }),
       };
@@ -850,8 +852,9 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
           status: 200,
           text: async () => JSON.stringify({
             code: 0, msg: 'success',
-            // A restart is a NEW API generation, so its meta id moves too.
-            data: boundMeta({ server_id: `api-generation-${generation}`, items: [], has_more: false }),
+            // A restart is a NEW API generation, so its meta id moves too. `id` confirms the unlisted
+            // session the attach asks the host for.
+            data: boundMeta({ server_id: `api-generation-${generation}`, id: 's-wiring', items: [], has_more: false }),
             request_id: 'r',
           }),
         };

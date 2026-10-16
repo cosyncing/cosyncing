@@ -27,11 +27,13 @@ import {
   type ConformanceExtra,
   installFakeExecutable,
   Ledger,
+  makeFifo,
   treeSnapshot,
   uuidV7,
   type ConformanceKit,
   type ConformanceProfile,
   type FakeController,
+  replacedLogResetsObserve,
   type SeededSession,
   type SeedOptions,
 } from './kit.ts';
@@ -70,6 +72,8 @@ export const grokProfile: ConformanceProfile = {
     models: ['xai/grok-4.6', 'xai/grok-4.5'],
     modes: ['default'],
     commands: ['compact'],
+    // Grok lists no stop command; the adapter offers the ACP `session/cancel` as a Stop action.
+    stopCommand: 'stop',
     switchModel: { providerID: 'xai', modelID: 'grok-4.5' },
     createModel: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'low' },
     createMode: 'default',
@@ -84,19 +88,8 @@ export const grokProfile: ConformanceProfile = {
   userRowDurable: 'turn-start',
   terminal: { resumeHint: "--resume '{id}'", syncAvailable: false },
   subagents: true,
-  missingBinaryRoster: 'hidden',
-  knownBugs: {
-    C09: 'a Grok turn that completes before the broker tails updates.jsonl never sends the sender its '
-      + 'queued:false row (only a fresh attach shows it reconciled)',
-    C15: 'an atomic replacement of the log is noticed only at the next prompt: Bun 1.3.14 fs.watch on Linux '
-      + 'names a rename-over by its temporary source file only, which the adapter watcher filters out',
-  },
-  scenarios: {
-    C12: {
-      refuse: 'Grok advertises no stop/abort action command, so the product offers no Stop: '
-        + 'GrokDriveConnection.cancel() (ACP session/cancel) is unreachable from a client.',
-    },
-  },
+  missingBinaryRoster: 'observe-only',
+  scenarios: {},
   hostileStore: [
     {
       name: 'a session directory that is not a canonical UUIDv7',
@@ -132,6 +125,16 @@ export const grokProfile: ConformanceProfile = {
       name: 'a subagent summary with no parent lineage',
       plant: (fake) => plantGrokSession(fake, { id: uuidV7(), kind: 'subagent' }),
     },
+    {
+      name: 'a FIFO in place of summary.json',
+      unsupportedOn: ['win32'],
+      plant: (fake) => plantGrokSession(fake, { id: uuidV7(), fifo: 'summary.json' }),
+    },
+    {
+      name: 'a FIFO in place of the updates log',
+      unsupportedOn: ['win32'],
+      plant: (fake) => plantGrokSession(fake, { id: uuidV7(), fifo: 'updates.jsonl' }),
+    },
   ],
 };
 
@@ -142,7 +145,14 @@ interface GrokFake extends FakeController {
 /** Write a Grok store entry directly, hostile or not. Returns its id. */
 function plantGrokSession(
   fake: FakeController,
-  options: { id: string; summaryCwd?: string; outside?: boolean; symlinkSummary?: boolean; kind?: string },
+  options: {
+    id: string;
+    summaryCwd?: string;
+    outside?: boolean;
+    symlinkSummary?: boolean;
+    kind?: string;
+    fifo?: 'summary.json' | 'updates.jsonl';
+  },
 ): string {
   const cwd = fake.workspace('hostile');
   const session = { id: options.id, cwd };
@@ -163,6 +173,12 @@ function plantGrokSession(
     return options.id;
   }
   mkdirSync(target, { recursive: true });
+  if (options.fifo) {
+    const other = options.fifo === 'summary.json' ? 'updates.jsonl' : 'summary.json';
+    writeFileSync(join(target, other), other === 'summary.json' ? summary : updates);
+    makeFifo(join(target, options.fifo));
+    return options.id;
+  }
   if (options.symlinkSummary) {
     const elsewhere = join(fake.workspace('outside'), 'summary.json');
     writeFileSync(elsewhere, summary);
@@ -175,6 +191,7 @@ function plantGrokSession(
 }
 
 const grokExtras: ConformanceExtra[] = [
+  replacedLogResetsObserve('grok'),
   {
     title: 'Create fails closed when the reusable cached-token login is gone',
     async run(context) {

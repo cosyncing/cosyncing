@@ -420,6 +420,9 @@ extension _SessionDetailSessionActions on SessionDetailController {
         'BAD_PARAM' => const LocalizedFailure.notice(
           FailureLead.exportBadParam,
         ),
+        'EXPORT_TOO_LARGE' => const LocalizedFailure.notice(
+          FailureLead.exportTooLarge,
+        ),
         _ when error.statusCode == 501 => const LocalizedFailure.notice(
           FailureLead.exportUnsupported,
         ),

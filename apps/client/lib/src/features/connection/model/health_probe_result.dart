@@ -13,6 +13,7 @@ class HealthProbeResult {
     this.error,
     this.detail,
     this.unhealthy = false,
+    this.noAnswer = false,
   });
 
   /// Creates a successful result.
@@ -20,13 +21,15 @@ class HealthProbeResult {
     : isSuccess = true,
       error = null,
       detail = null,
-      unhealthy = false;
+      unhealthy = false,
+      noAnswer = false;
 
   /// Creates a failure result.
   const HealthProbeResult.failure({
     required this.error,
     this.detail,
     this.unhealthy = false,
+    this.noAnswer = false,
   }) : isSuccess = false,
        machine = null;
 
@@ -48,6 +51,10 @@ class HealthProbeResult {
 
   /// Whether the broker answered but failed its own health check.
   final bool unhealthy;
+
+  /// Whether the server took the connection and then sent nothing back within
+  /// the probe's bounded wait (`brokerProbeTimeout`).
+  final bool noAnswer;
 
   @override
   String toString() => isSuccess

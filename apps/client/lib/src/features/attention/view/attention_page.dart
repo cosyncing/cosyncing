@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
@@ -17,6 +19,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_state.d
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
+import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -48,10 +51,54 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
   final _activityFocus = FocusNode();
   final Set<String> _hiddenSnapshots = {};
 
+  /// How often the "2m ago" labels are checked against the app clock.
+  static const _clockInterval = Duration(seconds: 30);
+  Timer? _clock;
+  bool _tickerEnabled = false;
+
+  /// The relative-time labels the last build showed, by timestamp, so a tick
+  /// rebuilds only when one of them would read differently.
+  final Map<int, String> _relativeTimeLabels = <int, String>{};
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Offstage (another destination in front) the labels are left as they
+    // are; the rebuild that brings the page back reads them afresh.
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (_tickerEnabled == enabled) return;
+    _tickerEnabled = enabled;
+    _clock?.cancel();
+    _clock = enabled ? Timer.periodic(_clockInterval, (_) => _tick()) : null;
+  }
+
   @override
   void dispose() {
+    _clock?.cancel();
     _activityFocus.dispose();
     super.dispose();
+  }
+
+  void _tick() {
+    if (!mounted) return;
+    final l10n = AppLocalizations.of(context);
+    final now = ref.read(appClockProvider)();
+    final changed = _relativeTimeLabels.entries.any(
+      (entry) =>
+          relativeTimeLabel(context, l10n, entry.key, now: now) != entry.value,
+    );
+    if (changed) setState(() {});
+  }
+
+  String _relativeTimeFor(int epochMs) {
+    final label = relativeTimeLabel(
+      context,
+      AppLocalizations.of(context),
+      epochMs,
+      now: ref.read(appClockProvider)(),
+    );
+    _relativeTimeLabels[epochMs] = label;
+    return label;
   }
 
   static const double _maxContentWidth = 960;
@@ -66,6 +113,7 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    _relativeTimeLabels.clear();
     final inbox = ref.watch(attentionInboxProvider);
     ref.watch(attentionInboxSeenRuntimeProvider);
     return Scaffold(
@@ -94,6 +142,11 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
         ],
       ),
       body: inbox.when(
+        // A read, a dismissal or a server change reloads the inbox. Showing
+        // the spinner for that reload unmounted every row, so a row's Review
+        // or Reply, which reads its event first, lost its context and opened
+        // nothing; the rows stay while the reload runs.
+        skipLoadingOnReload: true,
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) => _AttentionError(
           message: localizedFailureMessage(
@@ -192,6 +245,7 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
                   key: _cardKey(entries[index]),
                   entry: entries[index],
                   accent: accent,
+                  relativeTimeFor: _relativeTimeFor,
                 ),
               ),
               bottom: 24,
@@ -424,6 +478,7 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
                     key: _cardKey(activity[index]),
                     entry: activity[index],
                     accent: t.accent,
+                    relativeTimeFor: _relativeTimeFor,
                     activity: true,
                   ),
                 ),
@@ -565,6 +620,7 @@ class _AttentionEventCard extends ConsumerWidget {
   const _AttentionEventCard({
     required this.entry,
     required this.accent,
+    required this.relativeTimeFor,
     this.activity = false,
     super.key,
   });
@@ -572,6 +628,9 @@ class _AttentionEventCard extends ConsumerWidget {
   final AttentionInboxEntry entry;
   final Color accent;
   final bool activity;
+
+  /// "2m ago" for a timestamp, on the app clock; the page refreshes it.
+  final String Function(int epochMs) relativeTimeFor;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -628,7 +687,7 @@ class _AttentionEventCard extends ConsumerWidget {
                                 ),
                                 const SizedBox(width: 8),
                                 Text(
-                                  _relativeTime(context, event.updatedAt),
+                                  relativeTimeFor(event.updatedAt),
                                   style: Theme.of(context).textTheme.labelSmall
                                       ?.copyWith(color: tokens.textSecondary),
                                 ),
@@ -789,18 +848,31 @@ class _AttentionEventCard extends ConsumerWidget {
   }
 
   Future<void> _open(BuildContext context, WidgetRef ref) async {
+    // Looked up before the awaits: the row can be rebuilt away while they run.
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final switchFailed = AppLocalizations.of(
+      context,
+    ).brokerProfileActivateFailed;
+    final warn = _syncWarning(context);
     try {
       await ref.read(attentionInboxActionsProvider).acknowledge(entry);
     } on Object catch (_) {
-      if (context.mounted) _showSyncWarning(context);
+      warn();
     }
     if (!context.mounted) return;
-    await ref
-        .read(brokerProfileManagerControllerProvider)
-        .setActiveProfile(
-          entry.profile.id,
-          expectedProfile: entry.profile,
-        );
+    try {
+      await ref
+          .read(brokerProfileManagerControllerProvider)
+          .setActiveProfile(
+            entry.profile.id,
+            expectedProfile: entry.profile,
+          );
+    } on BrokerProfileManagerException {
+      // The same notice the server switcher shows. Nothing is opened: the
+      // event's session lives on a server this device could not switch to.
+      messenger?.showSnackBar(SnackBar(content: Text(switchFailed)));
+      return;
+    }
     if (!context.mounted) return;
     final action = entry.event.action;
     if (action.isOpenSession &&
@@ -822,29 +894,36 @@ class _AttentionEventCard extends ConsumerWidget {
   }
 
   Future<void> _markRead(BuildContext context, WidgetRef ref) async {
+    final warn = _syncWarning(context);
     try {
       await ref.read(attentionInboxActionsProvider).acknowledge(entry);
     } on Object {
-      if (context.mounted) _showSyncWarning(context);
+      warn();
     }
   }
 
   Future<void> _dismiss(BuildContext context, WidgetRef ref) async {
+    // Resolved before the await: a dismissed row leaves the inbox at once, so
+    // by the time the server's failure returns this row's context is gone.
+    final warn = _syncWarning(context);
     try {
       await ref.read(attentionInboxActionsProvider).dismiss(entry);
     } on Object catch (_) {
-      if (context.mounted) _showSyncWarning(context);
+      warn();
     }
   }
 
-  void _showSyncWarning(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          AppLocalizations.of(context).attentionSavedLocallySyncPending,
-        ),
-      ),
-    );
+  /// The "saved here, syncs later" notice, bound to the page's messenger
+  /// rather than to this row, which may be gone when it is needed.
+  VoidCallback _syncWarning(BuildContext context) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final message = AppLocalizations.of(
+      context,
+    ).attentionSavedLocallySyncPending;
+    return () {
+      if (messenger == null || !messenger.mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text(message)));
+    };
   }
 
   static String _fallbackTitle(BuildContext context, String kind) {
@@ -872,16 +951,6 @@ class _AttentionEventCard extends ConsumerWidget {
     return event.title.trim().isEmpty
         ? _fallbackTitle(context, event.kind)
         : event.title.trim();
-  }
-
-  static String _relativeTime(BuildContext context, int epochMs) {
-    final l10n = AppLocalizations.of(context);
-    return relativeTimeLabel(
-      context,
-      l10n,
-      epochMs,
-      now: DateTime.now(),
-    );
   }
 }
 

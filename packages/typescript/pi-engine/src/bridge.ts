@@ -32,6 +32,7 @@
  *           {kind:'answer', requestId, answers} | {kind:'reject-question', requestId}
  */
 import {
+  ControlRefusedError,
   PRODUCT_IDENTITY,
   type AgentMessage,
   type AgentMessageHandler,
@@ -304,6 +305,8 @@ export class PiBridgeConnection implements SessionConnection {
    *  unchanged (`history-page-cache.ts:142-146`), so a replacement that kept it let the cache go on
    *  serving rows the replacement had dropped. */
   private historySourceGeneration = randomUUID();
+  /** A hello has backfilled this connection: every later one is a re-hello, whatever the cache holds. */
+  private helloIngested = false;
   /** Outbound commands awaiting the extension's long-poll. */
   private queue: BridgeCommand[] = [];
   private waiter?: (cmds: BridgeCommand[]) => void;
@@ -321,6 +324,11 @@ export class PiBridgeConnection implements SessionConnection {
    *  The Hub keeps the live snapshot; this adapter-owned copy backs `getPending()` and is deduped by
    *  requestId during attach. Governing contract: docs/architecture/client-ui.md */
   private readonly pendingFrames = new Map<string, AgentMessage>();
+  /** The cards this connection showed and nobody has decided yet, by requestId: shown live or
+   *  backfilled by a hello, closed by their resolution or by the decision forwarded for them. A
+   *  decision for any other id (never shown, already decided, or of the other kind) is refused
+   *  rather than forwarded to the extension as if it were pending. */
+  private readonly openRequests = new Map<string, 'permission' | 'question'>();
   constructor(info: SessionInfo, private readonly dialect: PiDialect = PI_DIALECT) {
     this.info = info;
     this.lastSeen = 0;
@@ -337,8 +345,13 @@ export class PiBridgeConnection implements SessionConnection {
   }
 
   private emit(m: AgentMessage): void {
-    if (m.type === 'permission-request' || m.type === 'question-request') this.pendingFrames.set(m.requestId, m);
-    else if (m.type === 'permission-resolved' || m.type === 'question-resolved') this.pendingFrames.delete(m.requestId);
+    if (m.type === 'permission-request' || m.type === 'question-request') {
+      this.pendingFrames.set(m.requestId, m);
+      this.openRequests.set(m.requestId, m.type === 'permission-request' ? 'permission' : 'question');
+    } else if (m.type === 'permission-resolved' || m.type === 'question-resolved') {
+      this.pendingFrames.delete(m.requestId);
+      this.openRequests.delete(m.requestId);
+    }
     for (const h of this.handlers) {
       try {
         h(m);
@@ -474,13 +487,21 @@ export class PiBridgeConnection implements SessionConnection {
    *  not: an extension reload delivers an authoritative whole-session snapshot, so when it differs
    *  from the cache this REPLACES the rows, rotates `historySourceGeneration`, and emits
    *  `history-reset` to make attached clients replay. Duplication is prevented by comparing the
-   *  mapped snapshot to the current history, NOT by the cache merely being non-empty. */
+   *  mapped snapshot to the current history, NOT by the cache merely being non-empty: a re-hello
+   *  that recovers rows into a session announced empty reaches the clients already attached too. */
   ingestHistory(events: unknown): void {
+    const firstHello = !this.helloIngested;
+    this.helloIngested = true;
     if (!Array.isArray(events)) return;
     const next = events
       .map((ev) => this.historyMessage(ev))
       .filter((m): m is AgentMessage => m !== undefined);
-    if (!this.history.length) {
+    // A card the snapshot still carries is one the extension is waiting on.
+    for (const m of next) {
+      if (m.type === 'permission-request') this.openRequests.set(m.requestId, 'permission');
+      else if (m.type === 'question-request') this.openRequests.set(m.requestId, 'question');
+    }
+    if (firstHello) {
       for (const m of next) this.appendHistory(m);
       return;
     }
@@ -680,19 +701,34 @@ export class PiBridgeConnection implements SessionConnection {
     }
   }
 
+  /** Take the open card a decision answers, or refuse the decision: one decision per card, and only
+   *  for a card of that kind this connection showed. */
+  private takeOpenRequest(requestId: string, kind: 'permission' | 'question'): void {
+    if (this.openRequests.get(requestId) !== kind) {
+      throw new ControlRefusedError(
+        `${this.dialect.displayName} ${kind} ${requestId} is not pending.`,
+        'request-not-pending',
+      );
+    }
+    this.openRequests.delete(requestId);
+  }
+
   /** Queue the app's decision for the extension's long-poll so it can resolve a blocked `tool_call`. */
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
     if (decision === 'approve-rule') {
       throw new Error(`${this.dialect.displayName} does not support persistent approval rules through this connection`);
     }
+    this.takeOpenRequest(requestId, 'permission');
     this.enqueue({ kind: 'permission', requestId, decision });
   }
 
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
+    this.takeOpenRequest(requestId, 'question');
     this.enqueue({ kind: 'answer', requestId, answers });
   }
 
   async rejectQuestion(requestId: string): Promise<void> {
+    this.takeOpenRequest(requestId, 'question');
     this.enqueue({ kind: 'reject-question', requestId });
   }
 
@@ -724,6 +760,7 @@ export class PiBridgeConnection implements SessionConnection {
     }
     this.handlers.clear();
     this.pendingFrames.clear();
+    this.openRequests.clear();
   }
 }
 

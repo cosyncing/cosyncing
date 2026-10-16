@@ -6,6 +6,14 @@ installed on the server and visible in a new login shell before the
 Setup checks the executable, version, and runtime, then installs only
 cosyncing-owned integration files; it does not install the coding agent.
 
+If an agent's executable is later removed, or the broker can no longer find
+it, the sessions cosyncing reads from that agent's local store stay listed and
+open read-only. Their Status says the agent is not installed, and Drive and
+New Session are refused until the executable is back. Kimi Code sessions, and
+OpenCode sessions held only by its shared server, are read through that
+server, so they are listed only while it runs. Claude Code does not apply this
+check yet: its stored sessions keep offering Take over, which then fails.
+
 | Agent | Minimum version | Preferred installation for cosyncing | Integration |
 | --- | ---: | --- | --- |
 | [Codex](codex.md) | 0.144.5 | Official standalone installer | Managed app-server, Drive, and terminal sync |
@@ -36,7 +44,7 @@ shared `.cosyncing/outbox` path is still not supported. Codex writes through
 | [Antigravity](antigravity.md) | 1.1.22 | Registered by default; reads the `agy` CLI's own store and drives through a broker-owned `agy` child | Discovery, observe, Drive with cross-client join and terminal handback, create, prompts, model and reasoning-effort selection |
 | [omp](omp.md) | 17.4.2 | Registered by default; setup installs its packaged in-session bridge after the CLI passes preflight | Discovery, replay, Resume/live bridge, prompts, approvals, commands, models, file input, create/name |
 | [Reasonix](reasonix.md) | 1.25.2 | Registered by default; reads the local store and lazily starts a broker-owned `reasonix acp` child | Discovery, observe, ACP Resume, create, queued prompts, answer/reasoning stream, approvals, cross-client Drive |
-| [Grok Build](grok-build.md) | 1.0.13 floor; measured on 1.0.13 and 1.0.24 | Registered by default; Observe plus authenticated Create/Resume on 1.0.13 or newer | Discovery, history replay/tail, answer/reasoning/tool/task display, model/effort controls, permissions, context usage |
+| [Grok Build](grok-build.md) | 1.0.13 floor; measured on 1.0.13 and 1.0.24 | Registered by default; Observe plus authenticated Create/Resume on 1.0.13 or newer | Discovery, history replay/tail, answer/reasoning/tool/task display, model/effort controls, permissions, Stop, context usage |
 | [Cline](cline.md) | 3.0.61 Drive floor (Hub core 0.0.82) + 3.0.60 Observe | Registered by default; default-profile Observe plus an isolated broker-owned Hub on dedicated port 25464 | Parent/subagent discovery, replay/rewrite tail, managed Create/Resume, prompts, Stop, approvals, create-time model/mode, rename, token/cost/status display |
 | [Kilo Code](kilocode.md) | 7.4.23 floor; CLI/serve/store contract | Registered by default; Observe plus an authenticated broker-owned host on dedicated port 4097 | Discovery, replay/live Drive, create/rename, prompts, approvals, model selection, token/cost/status display; native tool display pending capture |
 

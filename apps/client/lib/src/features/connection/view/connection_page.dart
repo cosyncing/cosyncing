@@ -130,7 +130,10 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage>
                     onPressed: _onConnect,
                   ),
                   const SizedBox(height: 24),
-                  _ConnectionStatusCard(state: connState),
+                  _ConnectionStatusCard(
+                    state: connState,
+                    onRetry: () => unawaited(_onConnect()),
+                  ),
                   if (connState.status != ConnectionStatus.idle) ...[
                     const SizedBox(height: 8),
                     TextButton(
@@ -376,9 +379,13 @@ class _ConnectButton extends StatelessWidget {
 
 /// Card displaying the current connection state.
 class _ConnectionStatusCard extends StatelessWidget {
-  const _ConnectionStatusCard({required this.state});
+  const _ConnectionStatusCard({required this.state, required this.onRetry});
 
   final ConnectionStateModel state;
+
+  /// Asks the server again; offered when it took the connection but did not
+  /// answer in time.
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -423,11 +430,15 @@ class _ConnectionStatusCard extends StatelessWidget {
             ConnectionFailureKind.invalidAddress => l10n.connectionInvalidUrl,
             ConnectionFailureKind.brokerUnhealthy =>
               l10n.connectionBrokerUnhealthy,
+            ConnectionFailureKind.noAnswer => l10n.connectionBrokerNoAnswer,
             ConnectionFailureKind.unreachable ||
             null => l10n.connectionBrokerUnreachable,
           },
         ),
     };
+    final offerRetry =
+        state.status == ConnectionStatus.failure &&
+        state.failureKind == ConnectionFailureKind.noAnswer;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -435,6 +446,18 @@ class _ConnectionStatusCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             SelectionArea(child: status),
+            if (offerRetry) ...[
+              const SizedBox(height: 12),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: OutlinedButton.icon(
+                  key: const Key('connection-retry'),
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh),
+                  label: Text(l10n.retry),
+                ),
+              ),
+            ],
             if (detail != null && detail.trim().isNotEmpty)
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,

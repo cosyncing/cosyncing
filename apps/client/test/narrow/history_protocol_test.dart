@@ -33,8 +33,8 @@ void main() {
       'approvalsWhileMovingBothWays',
       'refusedRefreshesAndResyncs',
     ]) {
-      test('$scenario: nothing is lost and no gap needs a reconnect', () async {
-        final results = await runOrdinaryUseMatrix(
+      test('$scenario: nothing is lost and no gap needs a reconnect', () {
+        final results = runOrdinaryUseMatrixOnFakeClock(
           revision28: true,
           only: {scenario},
         );

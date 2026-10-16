@@ -45,6 +45,7 @@ import type {
   SlashCommand,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
+import { ControlRefusedError } from '@cosyncing/adapter-api';
 import type { DshDownlinkFrame, DshRpcClient } from './server.ts';
 import { DshAssistantStream } from './assistant-stream.ts';
 import { DshDriver, dshModelOptions, type DshImageLimits } from './drive.ts';
@@ -1070,7 +1071,7 @@ export class DshSessionConnection implements SessionConnection {
     }
     const entry = this.pending.get(requestId);
     if (!entry || entry.kind !== 'approval') {
-      throw new Error(`dsh approval ${requestId} is no longer pending`);
+      throw new ControlRefusedError(`dsh approval ${requestId} is no longer pending`, 'request-not-pending');
     }
     const receipt = await this.channel.respondApproval(entry, decision !== 'reject');
     // The receipt reason is one of exactly two (the decoder fails anything
@@ -1109,7 +1110,7 @@ export class DshSessionConnection implements SessionConnection {
     this.assertMutable('answer a question');
     const entry = this.pending.get(requestId);
     if (!entry || entry.kind !== 'question') {
-      throw new Error(`dsh question ${requestId} is no longer pending`);
+      throw new ControlRefusedError(`dsh question ${requestId} is no longer pending`, 'request-not-pending');
     }
     // Install suppression before awaiting: the host can claim and abandon this
     // reply before its receipt arrives. That late receipt must not hide the

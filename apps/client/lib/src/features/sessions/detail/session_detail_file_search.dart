@@ -1,14 +1,6 @@
 part of 'session_detail_page.dart';
 
 extension _SessionDetailFileSearch on _SessionDetailPageState {
-  void _onFindFileReference(SessionFileReference reference) {
-    unawaited(_findFileReference(reference));
-  }
-
-  void _onFindFileParentReference(SessionFileReference reference) {
-    unawaited(_findFileReference(reference, openParent: true));
-  }
-
   Future<void> _findFileReference(
     SessionFileReference reference, {
     bool openParent = false,

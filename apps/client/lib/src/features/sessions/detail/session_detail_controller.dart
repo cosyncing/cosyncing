@@ -29,6 +29,7 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_
 import 'package:cosyncing_client/src/features/sessions/transcript/session_outbox.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/created_session_attach_intents.dart';
+import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -1041,6 +1042,7 @@ class SessionDetailController
         connectionStatus: SessionDetailConnectionStatus.closed,
         driveRestorePhase: SessionDriveRestorePhase.idle,
         clearDriveRestoreConflict: true,
+        detachedByUser: true,
       );
       return;
     }
@@ -1050,6 +1052,7 @@ class SessionDetailController
       connectionStatus: SessionDetailConnectionStatus.closed,
       driveRestorePhase: SessionDriveRestorePhase.idle,
       clearDriveRestoreConflict: true,
+      detachedByUser: true,
     );
   }
 
@@ -1609,9 +1612,16 @@ class SessionDetailController
             ? SessionDriveRestorePhase.idle
             : state.driveRestorePhase,
         error: connectionError,
-        clearError: connectionError == null,
+        clearError: connectionError == null && !_attachmentDeliveryNoticeStands,
         clearSessionInfo: status != SessionDetailConnectionStatus.connected,
         clearTransientRetryStatus: true,
+        // A stream that is opening again is no longer the user's Detach.
+        detachedByUser:
+            status == SessionDetailConnectionStatus.connecting ||
+                status == SessionDetailConnectionStatus.connected ||
+                status == SessionDetailConnectionStatus.reconnecting
+            ? false
+            : null,
       );
       if (terminalAttachFailure) {
         _requestedDriveReason = null;
@@ -1996,9 +2006,10 @@ class SessionDetailController
         clearHistoryPageError: clearHistoryPageError,
         historyStartReached: historyStartReached,
         clearError:
-            event is! ErrorWireEvent ||
-            connection.state != SessionDetailConnectionStatus.closed ||
-            connection.lastConnectionErrorMessage == null,
+            !_attachmentDeliveryNoticeStands &&
+            (event is! ErrorWireEvent ||
+                connection.state != SessionDetailConnectionStatus.closed ||
+                connection.lastConnectionErrorMessage == null),
         forkSessionActionState: clearAgentOwnedForkRefusal
             ? const SessionActionState.idle()
             : null,
@@ -2441,6 +2452,17 @@ class SessionDetailController
         return;
     }
   }
+
+  /// Whether the error on screen explains files still marked undelivered.
+  ///
+  /// Such a notice is the only place that says why the chips read "Not
+  /// delivered", so it stays until the user acts on those files (sends again,
+  /// replaces, removes or adds one), never just until the next wire event.
+  bool get _attachmentDeliveryNoticeStands =>
+      state.error?.lead == FailureLead.attachmentDelivery &&
+      state.stagedAttachments.any(
+        (attachment) => attachment.phase == SessionAttachmentUploadPhase.error,
+      );
 
   /// Sends a user prompt through the active session connection.
   ///

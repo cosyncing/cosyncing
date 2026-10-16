@@ -326,6 +326,7 @@ class SessionDetailState {
     this.draftSurface,
     this.draftConflict,
     this.transientRetryStatus,
+    this.detachedByUser = false,
   });
 
   /// Broker tool id.
@@ -494,6 +495,15 @@ class SessionDetailState {
 
   /// Current live OpenCode retry, never reconstructed from replayed history.
   final SessionTransientRetryStatus? transientRetryStatus;
+
+  /// Whether the stream is closed because the user pressed Detach.
+  ///
+  /// A deliberate Detach never reopens on its own, so it must not read as a
+  /// reconnect. Set only by the explicit Detach action and cleared by the next
+  /// attach of any kind; every other path that closes the stream (a failed
+  /// bootstrap, a transport suspension, an unsupported Observe) leaves it
+  /// false.
+  final bool detachedByUser;
 
   /// Retry detail only while every admission qualifier still matches.
   ///
@@ -796,6 +806,7 @@ class SessionDetailState {
     SessionDraftSurface? draftSurface,
     SessionDraftConflict? draftConflict,
     SessionTransientRetryStatus? transientRetryStatus,
+    bool? detachedByUser,
     bool clearError = false,
     bool clearSessionInfo = false,
     bool clearConnectionAuthority = false,
@@ -876,6 +887,7 @@ class SessionDetailState {
       transientRetryStatus: clearTransientRetryStatus
           ? null
           : transientRetryStatus ?? this.transientRetryStatus,
+      detachedByUser: detachedByUser ?? this.detachedByUser,
     );
   }
 

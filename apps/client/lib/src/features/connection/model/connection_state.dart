@@ -25,6 +25,9 @@ enum ConnectionFailureKind {
 
   /// No usable broker response was received.
   unreachable,
+
+  /// The server took the connection but sent nothing back in time.
+  noAnswer,
 }
 
 /// Immutable state for the broker connection flow.

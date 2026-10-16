@@ -46,6 +46,8 @@ extension _SessionDetailBootstrap on SessionDetailController {
             hasCachedMessages: hasVisibleTranscript,
           )
           .copyWith(clearFailure: true),
+      // Any attach, the user's Attach above all, ends a deliberate Detach.
+      detachedByUser: false,
     );
 
     final profile = ref.read(activeBrokerProfileProvider);

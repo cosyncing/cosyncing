@@ -1,4 +1,5 @@
-import { open, stat, type FileHandle } from 'node:fs/promises';
+import { stat, type FileHandle } from 'node:fs/promises';
+import { openRegularFile } from '@cosyncing/adapter-api';
 import type { BigIntStats } from 'node:fs';
 
 const CHUNK_BYTES = 256 * 1024;
@@ -97,7 +98,8 @@ export class JsonlHistorySource {
   private async readSnapshot(path: string, parse: (raw: string, offset: number) => any) {
     this.lastRead = { bytes: 0, records: 0, reusedRecords: 0 };
     let file: FileHandle;
-    try { file = await open(path, 'r'); } catch (error) {
+    // Only a regular file, opened so a FIFO under the transcript's name cannot park the read.
+    try { file = await openRegularFile(path); } catch (error) {
       release(this);
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { lines: [], boundary: 0 };
       throw error;

@@ -1,10 +1,9 @@
 /** Bounded Cline Hub v1 client and discovery gate, floored at core 0.0.82. */
-import { constants } from 'node:fs';
 import { open, realpath, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
-import { compareSemanticVersions, type HistorySourceIdentity } from '@cosyncing/adapter-api';
+import { compareSemanticVersions, NO_FOLLOW_FLAG, STORE_READ_FLAGS, type HistorySourceIdentity } from '@cosyncing/adapter-api';
 import {
   CLINE_HUB_CORE_MINIMUM_VERSION,
   CLINE_MAX_BLOCKS_PER_MESSAGE,
@@ -161,7 +160,7 @@ async function openOwnerFile(root: string, path: string): Promise<FileHandle | u
   if (!pathContained(root, path)) return undefined;
   let handle: FileHandle | undefined;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(path, STORE_READ_FLAGS | NO_FOLLOW_FLAG); // a FIFO here must not park a worker
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size <= 0 || stat.size > CLINE_HUB_MAX_DISCOVERY_BYTES) return undefined;
     if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return undefined;
@@ -448,14 +447,19 @@ export class ClineHubClient {
     }
   }
 
+  /**
+   * `signal` stops waiting for the reply without telling the Hub anything: the request stays sent,
+   * and a reply that arrives later is ignored. It rejects with the signal's reason.
+   */
   async command(
     command: string,
     payload: Record<string, unknown> = {},
     sessionId?: string,
     timeoutMs: number | null = this.options.requestTimeoutMs ?? 30_000,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     await this.connect();
-    return this.commandOnOpen(command, payload, sessionId, timeoutMs);
+    return this.commandOnOpen(command, payload, sessionId, timeoutMs, signal);
   }
 
   private async commandOnOpen(
@@ -463,17 +467,40 @@ export class ClineHubClient {
     payload: Record<string, unknown>,
     sessionId?: string,
     timeoutMs: number | null = this.options.requestTimeoutMs ?? 30_000,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
+    const abandoned = (): Error => signal?.reason instanceof Error
+      ? signal.reason
+      : new Error(`Cline Hub ${command} was abandoned.`);
+    if (signal?.aborted) throw abandoned();
     const requestId = `cosyncing-cline-${Date.now().toString(36)}-${(++this.requestCounter).toString(36)}`;
     const reply = new Promise<ClineHubReply>((resolve, reject) => {
-      const pending: PendingReply = { command, resolve, reject };
+      const onAbort = () => {
+        const pending = this.pending.get(requestId);
+        if (!pending) return;
+        this.pending.delete(requestId);
+        if (pending.timer) clearTimeout(pending.timer);
+        reject(abandoned());
+      };
+      const pending: PendingReply = {
+        command,
+        resolve: (value) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        reject: (error) => {
+          signal?.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      };
       if (timeoutMs !== null) {
         pending.timer = setTimeout(() => {
           if (!this.pending.delete(requestId)) return;
-          reject(new Error(`Cline Hub ${command} timed out.`));
+          pending.reject(new Error(`Cline Hub ${command} timed out.`));
         }, timeoutMs);
       }
       this.pending.set(requestId, pending);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
     try {
       this.sendFrame({

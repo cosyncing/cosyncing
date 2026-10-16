@@ -4,11 +4,13 @@
  * `e2e/broker/artifacts.test.ts` and `artifact-limits.test.ts` drive the store
  * through a real broker. What stays here: reading an index written by a
  * release that keyed records by advertised URL (an upgrade and its rollback),
- * eviction when two records share one wall-clock millisecond, and the export
- * ingestion check that only a hostile caller inside the broker could trip.
+ * eviction when two records share one wall-clock millisecond, the export
+ * ingestion check that only a hostile caller inside the broker could trip, and
+ * which records the start sweep of export attachments may touch in a cache
+ * another broker also wrote.
  */
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@cosyncing/adapter-api';
@@ -100,5 +102,52 @@ describe('export ingestion', () => {
     mkdirSync(join(tempRoot, 'inside'));
     writeFileSync(join(tempRoot, 'inside', 'export.json'), '{}');
     expect(store.putExportAttachment(session, meta, join(tempRoot, 'inside', 'export.json'), tempRoot).deliveryClass).toBe('export-attachment');
+  });
+});
+
+describe('export attachments left by an earlier broker process', () => {
+  test('are never served and are swept with their files; other artifacts and other brokers\' exports stay', async () => {
+    const cache = join(root, 'export-restart');
+    const session = { tool: 'fake', id: 's1' };
+    const meta = { name: 'x', format: 'json' as const, retentionMs: 60_000 };
+    const exportFile = (text: string): [string, string] => {
+      const tempRoot = mkdtempSync(join(root, 'export-restart-temp-'));
+      writeFileSync(join(tempRoot, 'export.json'), text);
+      return [join(tempRoot, 'export.json'), tempRoot];
+    };
+    const blobOf = (artifactKey: unknown): string => {
+      const index = JSON.parse(readFileSync(join(cache, 'artifacts', 'index.json'), 'utf8'));
+      return index.records.find((record: { artifactKey: string }) => record.artifactKey === artifactKey).filePath;
+    };
+
+    // Another broker sharing the cache delivered an export first; this one loads its record.
+    new ArtifactStore('broker-instance:another_broker_sharing_the_cache_000', cache)
+      .putExportAttachment(session, meta, ...exportFile('{"another":"broker"}'));
+    const before = new ArtifactStore(STABLE, cache);
+    const delivered = before.putExportAttachment(session, meta, ...exportFile('{"earlier":"process"}'));
+    const kept = before.putBytes(session, file('kept.txt'), Buffer.from('not an export'), 'text/plain') as Artifact;
+    const deliveredBlob = blobOf(delivered.artifactKey);
+    const otherBlob = JSON.parse(readFileSync(join(cache, 'artifacts', 'index.json'), 'utf8')).records
+      .find((record: { brokerSource: string }) => record.brokerSource !== STABLE).filePath;
+    expect(await download(before, session, delivered)).toEqual({ status: 200, text: '{"earlier":"process"}' });
+
+    // The process ended without clearing it (a crash): the next one never serves it, even before its sweep.
+    const after = new ArtifactStore(STABLE, cache);
+    expect((await download(after, session, delivered)).status).toBe(404);
+    expect(after.refreshDownloadTicket(session, String(delivered.artifactKey), { principalId: 'owner', authGeneration: 0 })).toBeUndefined();
+
+    expect(after.sweepStaleExportAttachments()).toBe(1);
+    expect(existsSync(deliveredBlob)).toBe(false);
+    expect(await download(after, session, kept)).toEqual({ status: 200, text: 'not an export' });
+    expect(existsSync(otherBlob)).toBe(true);
+    const index = JSON.parse(readFileSync(join(cache, 'artifacts', 'index.json'), 'utf8'));
+    expect(index.records.filter((record: { brokerSource: string; deliveryClass?: string }) =>
+      record.brokerSource === STABLE && record.deliveryClass === 'export-attachment')).toEqual([]);
+    expect(after.sweepStaleExportAttachments()).toBe(0);
+
+    // This process's own export is current, and stays downloadable through its own sweep.
+    const fresh = after.putExportAttachment(session, meta, ...exportFile('{"this":"process"}'));
+    expect(after.sweepStaleExportAttachments()).toBe(0);
+    expect(await download(after, session, fresh)).toEqual({ status: 200, text: '{"this":"process"}' });
   });
 });

@@ -2,6 +2,7 @@
 // Take over, hand back, Drive restore, detach and reconnect.
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_drive_intent_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -154,14 +155,26 @@ void main() {
 
   group('take over', () {
     featureTest(
-      'Take over asks first; Cancel changes nothing, Confirm re-attaches '
-      'asking for Drive and the session becomes Driving',
+      'a resume row opens Observing and Drive is only ever asked for by Take '
+      'over; Take over asks first, Cancel changes nothing, Confirm '
+      're-attaches asking for Drive and the session becomes Driving',
       (f) async {
         final studio = studioWith(f, mode: AttachMode.resume);
         final owned = OwnedSession(studio, 's1');
         final app = await openSession(f, studio);
         expect(app.pill, 'observing');
         expect(owned.attaches, hasLength(1));
+        // `attachMode: resume` is the broker's best mode for the row, not an
+        // instruction: a resume attach without a provenance reason would be
+        // Drive with no provenance, so opening the row asks for nothing.
+        expect(owned.attaches.single['mode'], isNull);
+        expect(owned.attaches.single['reason'], isNull);
+        expect(app.composerIsReadOnly, isTrue);
+        expect(
+          find.byKey(const Key('session-detail-composer-take-over-button')),
+          findsOneWidget,
+          reason: 'the way to Drive is the explicit Take over',
+        );
 
         await app.takeOver(confirm: false);
         expect(owned.attaches, hasLength(1), reason: 'Cancel attaches nothing');
@@ -235,7 +248,11 @@ void main() {
         expect(app.pill, 'observing');
         expect(app.composerIsReadOnly, isTrue);
         expect(
-          refusalNote(en.sessionDriveTakeoverOwnershipConflictNote),
+          refusalNote(
+            en.sessionDriveTakeoverOwnershipConflictNote(
+              en.sessionRosterAgentCodex,
+            ),
+          ),
           findsWidgets,
         );
 
@@ -263,8 +280,12 @@ void main() {
       ),
       (
         'DRIVE_NATIVE_SESSION_UNRESUMABLE',
-        en.sessionDriveNativeTakeoverUnresumableNote,
-        zh.sessionDriveNativeTakeoverUnresumableNote,
+        en.sessionDriveNativeTakeoverUnresumableNote(
+          en.sessionRosterAgentCodex,
+        ),
+        zh.sessionDriveNativeTakeoverUnresumableNote(
+          zh.sessionRosterAgentCodex,
+        ),
       ),
       (
         'DRIVE_RESTORE_FAILED',
@@ -288,6 +309,76 @@ void main() {
           },
         );
       }
+    }
+
+    // The agent declining to resume its own session is not a Codex fact:
+    // Grok, Reasonix, Cline and Antigravity refuse the same way.
+    for (final locale in ['en', 'zh', 'ja', 'ko', 'es']) {
+      featureTest(
+        'a takeover the agent cannot resume names that agent, not Codex, in '
+        '$locale',
+        (f) async {
+          await f.storage.preferences.setLocaleTag(locale);
+          final l10n = lookupAppLocalizations(Locale(locale));
+          final studio = f.network.add('http://studio.test:7734')
+            ..addSession('s1', 'Fix login', tool: 'grok');
+          OwnedSession(studio, 's1').refuseWith =
+              'DRIVE_NATIVE_SESSION_UNRESUMABLE';
+          await f.storage.seedServer(studio);
+          final app = await f.launch();
+          await app.openFromRoster('s1', tool: 'grok', cwd: cwd);
+          await app.takeOver();
+          final refusal = find.byKey(
+            const Key('session-detail-take-over-refusal'),
+          );
+          expect(refusal, findsOneWidget);
+          final note = f.tester.widget<Text>(refusal).data!;
+          expect(
+            note,
+            l10n.sessionDriveNativeTakeoverUnresumableNote(
+              l10n.sessionRosterAgentGrok,
+            ),
+          );
+          expect(note, contains(l10n.sessionRosterAgentGrok));
+          expect(app.visibleText, isNot(contains('Codex')));
+          expect(app.pill, 'observing');
+        },
+      );
+    }
+
+    // Another writer holding the session is not a Codex fact either: Claude
+    // refuses while its terminal runs a turn or its mod already syncs it, Kimi
+    // while a terminal may still drive it, and the broker for any agent.
+    for (final locale in ['en', 'zh', 'ja', 'ko', 'es']) {
+      featureTest(
+        "a takeover another writer holds off names the session's agent, not "
+        'Codex, in $locale',
+        (f) async {
+          await f.storage.preferences.setLocaleTag(locale);
+          final l10n = lookupAppLocalizations(Locale(locale));
+          final studio = f.network.add('http://studio.test:7734')
+            ..addSession('s1', 'Fix login', tool: 'claude');
+          OwnedSession(studio, 's1').refuseWith = 'DRIVE_OWNERSHIP_CONFLICT';
+          await f.storage.seedServer(studio);
+          final app = await f.launch();
+          await app.openFromRoster('s1', tool: 'claude', cwd: cwd);
+          await app.takeOver();
+          final refusal = find.byKey(
+            const Key('session-detail-take-over-refusal'),
+          );
+          expect(refusal, findsOneWidget);
+          final note = f.tester.widget<Text>(refusal).data!;
+          expect(
+            note,
+            l10n.sessionDriveTakeoverOwnershipConflictNote(
+              l10n.sessionRosterAgentClaude,
+            ),
+          );
+          expect(note, contains(l10n.sessionRosterAgentClaude));
+          expect(app.visibleText, isNot(contains('Codex')));
+          expect(app.pill, 'observing');
+        },
+      );
     }
   });
 
@@ -504,7 +595,8 @@ void main() {
   group('Drive across a restart', () {
     featureTest(
       'a session the app took over is restored to Drive when it is reopened; '
-      'a session the app created is restored too',
+      'a session the app created is restored too; after 30 minutes away the '
+      'takeover lease has lapsed and only the created session is restored',
       (f) async {
         final studio = studioWith(f);
         final owned = OwnedSession(studio, 's1', alsoIds: ['created-1']);
@@ -548,6 +640,37 @@ void main() {
         );
         expect(again.pill, 'driving');
         expect(owned.drives('s1'), isTrue);
+
+        // The takeover lease slides from that restore and lasts 30 minutes;
+        // the app-created preference never expires. While the app is away the
+        // terminal holds the session again.
+        await f.quit();
+        owned.appDrives = false;
+        await f.tester.pump(sessionDriveIntentTtl + const Duration(minutes: 1));
+        final later = await f.launch();
+        await later.openFromRoster('s1', cwd: cwd);
+        await later.pumpUntil(
+          () => owned.attaches.last['reason'] == null,
+          reason: 'the lapsed lease opens the session Observe-first',
+        );
+        expect(owned.lastAttach['mode'], isNot('resume'));
+        expect(later.pill, 'observing');
+        expect(
+          find.byKey(const Key('session-detail-composer-take-over-button')),
+          findsOneWidget,
+          reason: 'Take over does not depend on the lease',
+        );
+
+        final created = studio.socketsFor('created-1').length;
+        await later.tap(later.tab('created-1'));
+        await later.pumpUntil(
+          () => studio.socketsFor('created-1').length > created,
+          reason: 'the created session reattaches',
+        );
+        expect(
+          studio.socketsFor('created-1').last.attachParams['reason'],
+          'app-restore',
+        );
       },
     );
 
@@ -578,8 +701,54 @@ void main() {
     );
 
     featureTest(
-      'Detach is an explicit exit: the stream closes, the transcript stays, '
-      'and the next launch does not restore Drive',
+      'a session created in the app whose Drive is refused, on a row that '
+      'offers no Take over, says it stays in Observe and never points to '
+      'Take over',
+      (f) async {
+        final studio = studioWith(f);
+        final owned = OwnedSession(
+          studio,
+          's1',
+          alsoIds: ['created-1'],
+          observingDrive: driveBlock(
+            'unavailable',
+            supported: false,
+            reason: 'Codex is not installed on this machine.',
+          ),
+        )..refuseWith = 'DRIVE_RESTORE_FAILED';
+        final app = await openSession(f, studio);
+        await app.openNewSession();
+        await app.submitNewSession();
+        await app.pumpUntil(
+          () => app.tab('created-1').evaluate().isNotEmpty,
+          reason: 'the created session opens in a tab',
+        );
+        expect(owned.lastAttach['reason'], 'create');
+        expect(
+          find.byKey(const Key('session-detail-composer-take-over-button')),
+          findsNothing,
+          reason: 'this row offers no Take over',
+        );
+        await app.openStatus();
+        final note = find.byKey(
+          const Key('session-detail-drive-restore-conflict'),
+        );
+        expect(note, findsOneWidget);
+        expect(
+          f.tester.widget<Text>(note).data,
+          en.sessionDriveRestoreFailureNoTakeoverNote,
+        );
+        expect(
+          f.tester.widget<Text>(note).data,
+          isNot(contains(en.sessionTakeOver)),
+        );
+      },
+    );
+
+    featureTest(
+      'Detach is an explicit exit: the stream closes, the page says Detached '
+      '(never Reconnecting) and keeps Attach in the control card, the '
+      'transcript stays, and the next launch does not restore Drive',
       (f) async {
         final studio = studioWith(f);
         studio.transcripts['s1'] = [modelOutput('Hello from the agent')];
@@ -588,9 +757,51 @@ void main() {
         await app.takeOver();
         expect(find.text('Hello from the agent'), findsOneWidget);
 
+        final card = find.byKey(const Key('session-detail-status-sheet'));
+        final cardAttach = find.byKey(
+          const Key('session-detail-status-attach'),
+        );
+        void expectDetached() {
+          expect(
+            app.pill,
+            'detached',
+            reason: 'a deliberate Detach is not a reconnect',
+          );
+          expect(find.text(en.sessionControlReconnecting), findsNothing);
+          expect(find.text(en.sessionControlDetached), findsWidgets);
+          expect(card, findsOneWidget, reason: 'the control card stays');
+          expect(
+            find.descendant(of: card, matching: cardAttach),
+            findsOneWidget,
+            reason: 'the control card offers the way back',
+          );
+          expect(
+            find.descendant(
+              of: cardAttach,
+              matching: find.text(en.sessionAttach),
+            ),
+            findsOneWidget,
+            reason: 'Attach, not "Retry attach": nothing failed',
+          );
+          expect(
+            find.text(en.sessionControlDetachedDescription),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const Key('session-detail-status-offline-hint')),
+            findsNothing,
+          );
+        }
+
         await app.openStatus();
         await app.tapKey('session-detail-detach-button');
         expect(studio.socketsFor('s1').last.closedByApp, isTrue);
+        expectDetached();
+        // Nothing reopens the stream on its own.
+        final sockets = studio.socketsFor('s1').length;
+        await app.elapse(const Duration(seconds: 30));
+        expect(studio.socketsFor('s1'), hasLength(sockets));
+        expect(app.pill, 'detached');
         expect(find.text('Hello from the agent'), findsOneWidget);
         expect(
           find.byKey(const Key('session-detail-composer-attach')),
@@ -600,11 +811,20 @@ void main() {
 
         await app.tapKey('session-detail-composer-attach');
         expect(studio.socketsFor('s1').last.closedByApp, isFalse);
+        expect(app.pill, isNot(anyOf('detached', 'reconnecting')));
         expect(
           find.text('Hello from the agent'),
           findsOneWidget,
           reason: 'one copy of the transcript, not two',
         );
+
+        // The control card's own Attach is a way back too.
+        await app.openStatus();
+        await app.tapKey('session-detail-detach-button');
+        expectDetached();
+        await app.tap(cardAttach);
+        expect(studio.socketsFor('s1').last.closedByApp, isFalse);
+        expect(app.pill, isNot(anyOf('detached', 'reconnecting')));
 
         await app.openStatus();
         await app.tapKey('session-detail-detach-button');

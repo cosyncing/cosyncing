@@ -22,7 +22,7 @@ import { Database, constants as sqliteConstants } from 'bun:sqlite';
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
-import type { ModeOption, ModelOption } from '@cosyncing/adapter-api';
+import { isRegularSqliteStoreSync, type ModeOption, type ModelOption } from '@cosyncing/adapter-api';
 import {
   AGY_METADATA_MAX_BYTES,
   AGY_SETTLEMENT_MAX_FILES,
@@ -298,6 +298,11 @@ export function readAgySummaries(roots: AgyRoots, query: AgySummaryQuery = {}): 
   const dbPath = join(roots.appData, 'conversation_summaries.db');
   if (!existsSync(dbPath)) {
     query.trace?.({ op: 'summaries-missing', detail: `no conversation_summaries.db at ${dbPath}` });
+    return [];
+  }
+  // SQLite's open blocks on a FIFO. The immutable open below reads no sidecar, so only the file itself.
+  if (!isRegularSqliteStoreSync(dbPath, { sidecars: false })) {
+    query.trace?.({ op: 'summaries-open-failed', detail: `${dbPath}: not a regular file` });
     return [];
   }
   const bounded = query.updatedAfter !== undefined || query.limit !== undefined;

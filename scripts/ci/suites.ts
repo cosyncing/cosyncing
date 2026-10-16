@@ -283,6 +283,7 @@ export const suites: Suite[] = [
         'route-authorization', 'broker-update-contract', 'real-evidence-schema', 'claude-artifacts',
       ]),
       ...testFiles(
+        'e2e/policy/runner.test.ts',
         'e2e/broker/uploads.test.ts',
         'e2e/broker/artifact-limits.test.ts',
         'e2e/broker/diff-references.test.ts',
@@ -303,6 +304,8 @@ export const suites: Suite[] = [
         'e2e/broker/status-truth.test.ts',
         'packages/typescript/broker/test/sessions/session-status-fold.test.ts',
         'packages/typescript/broker/test/sessions/session-truth-manifest.test.ts',
+        'packages/typescript/adapter-api/test/windows-process-table.test.ts',
+        'packages/typescript/adapters/codex/test/windows-presence.test.ts',
       ),
       { id: 'install-ps1', run: ['bun', 'run', 'scripts/broker/tests/release/test-install-ps1.ts'], serial: true, timeoutMs: 300_000 },
       ...e2eTasks('windows'),

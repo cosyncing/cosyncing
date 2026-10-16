@@ -5,11 +5,11 @@
   ],
   "live": [
     {"type":"status","status":"running"},
-    {"type":"run-summary","key":"codex:run:m-zero","turnId":"m-zero","status":"running","source":"codex-rollout"},
+    {"type":"run-summary","key":"codex:run:m-zero","turnId":"m-zero","userMessageKey":"c1","status":"running","source":"codex-rollout"},
     {"type":"tool-call","callId":"native-zero","toolName":"exec_command","toolClass":"execute","args":{"cmd":"printf native-exit-zero","yield_time_ms":1000,"max_output_tokens":200},"semantic":{"kind":"command","command":"printf native-exit-zero","state":"running"}},
     {"type":"tool-result","callId":"native-zero","toolName":"exec_command","toolClass":"execute","semantic":{"kind":"command","command":"printf native-exit-zero","state":"completed"},"isError":false,"result":"Chunk ID: c5168a\nWall time: 0.0001 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nnative-exit-zero","exitCode":0,"durationMs":0.1},
     {"type":"status","status":"idle"},
-    {"type":"run-summary","key":"codex:run:m-zero","turnId":"m-zero","status":"done","source":"codex-rollout"},
+    {"type":"run-summary","key":"codex:run:m-zero","turnId":"m-zero","userMessageKey":"c1","status":"done","source":"codex-rollout"},
     {"type":"status","status":"running"},
     {"type":"run-summary","key":"codex:run:m-seven","turnId":"m-seven","status":"running","source":"codex-rollout"},
     {"type":"tool-call","callId":"native-seven","toolName":"exec_command","toolClass":"execute","args":{"cmd":"printf native-exit-seven; exit 7","yield_time_ms":1000,"max_output_tokens":200},"semantic":{"kind":"command","command":"printf native-exit-seven; exit 7","state":"running"}},

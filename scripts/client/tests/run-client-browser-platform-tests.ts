@@ -14,7 +14,7 @@
  * headless shell is used (verified to drive `flutter test --platform
  * chrome`).
  */
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -53,8 +53,17 @@ function chromiumExecutable(): string {
   );
 }
 
+// `--no-pub`: in `bun run check` the web suite's prepare step has already resolved the client's
+// packages, and this lane runs beside other Flutter tasks that must not see a second resolution
+// rewrite them. A hand run on a fresh checkout resolves once here first.
+if (!existsSync(join(CLIENT_ROOT, '.dart_tool/package_config.json'))) {
+  const pub = Bun.spawn(['flutter', 'pub', 'get'], { cwd: CLIENT_ROOT, stdout: 'inherit', stderr: 'inherit' });
+  const code = await pub.exited;
+  if (code !== 0) process.exit(code);
+}
+
 const child = Bun.spawn(
-  ['flutter', 'test', '--platform', 'chrome', ...BROWSER_PLATFORM_TESTS],
+  ['flutter', 'test', '--no-pub', '--platform', 'chrome', ...BROWSER_PLATFORM_TESTS],
   {
     cwd: CLIENT_ROOT,
     env: { ...process.env, CHROME_EXECUTABLE: chromiumExecutable() },

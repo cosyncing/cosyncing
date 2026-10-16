@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_client/broker_client.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
@@ -49,6 +51,14 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
         );
       }
       return HealthProbeResult.success(machine: response.machine);
+    } on TimeoutException catch (e) {
+      // The server took the connection and sent nothing back in time: say so,
+      // rather than calling a busy or stuck server unreachable.
+      return HealthProbeResult.failure(
+        error: LocalizedFailure.from(e, lead: FailureLead.reachServer),
+        detail: failureDetail(e),
+        noAnswer: true,
+      );
     } on Object catch (e) {
       // Classified rather than dumped, matching the sibling
       // `RealBrokerAuthProbe`. A dropped connection used to surface here as

@@ -31,6 +31,7 @@
  * Every cap below is a measured maximum times a wide margin, so a real file never
  * trips one. The margins are stated at each constant.
  */
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   constants as fsConstants,
@@ -113,6 +114,20 @@ export interface AgyByteReadResult {
   bytesRead: number;
   /** The descriptor's reported size at read time. */
   size: number;
+  /** Which file the bytes came from (`dev:ino` of the opened descriptor). */
+  identity?: string;
+}
+
+/**
+ * A tail read that also proves the file still holds the bytes already consumed (see
+ * {@link readContainedTail}).
+ */
+export interface AgyTailReadResult extends AgyByteReadResult {
+  identity: string;
+  /** Digest of `[0, prefixLength)`, or undefined when the file no longer holds that many bytes. */
+  prefixDigest?: Buffer;
+  /** Digest of `[0, prefixLength + bytesRead)`: what the next tail read must find as its prefix. */
+  extendedDigest?: Buffer;
 }
 
 /** `\n`. Framing is done on this byte, never on a decoded character. */
@@ -126,6 +141,8 @@ export function isAgyReadRefusal(value: unknown): value is AgyReadRefusal {
 export interface AgyOpenFile {
   fd: number;
   size: number;
+  /** `dev:ino` of the descriptor: which file this is, whatever its path is called. */
+  identity: string;
 }
 
 /**
@@ -181,13 +198,14 @@ export function openContainedRegularFile(
   // Step 3: stat the DESCRIPTOR, never the path — the path could be swapped
   // between a check and an open, and only the descriptor is the thing we hold.
   try {
-    const stat = fstatSync(fd);
+    // BigInt: an inode number can exceed 2^53, and a rounded one could name two files alike.
+    const stat = fstatSync(fd, { bigint: true });
     if (!stat.isFile()) {
       closeSync(fd);
       trace?.({ op: 'read-refused-not-regular', detail: `${path} is not a regular file` });
       return 'not-regular-file';
     }
-    return { fd, size: stat.size };
+    return { fd, size: Number(stat.size), identity: `${stat.dev}:${stat.ino}` };
   } catch {
     closeSync(fd);
     return 'missing';
@@ -286,7 +304,7 @@ export function readContainedBytes(
     const available = Math.max(0, opened.size - from);
     const wanted = Math.min(available, maxBytes);
     if (wanted === 0) {
-      return { bytes: Buffer.alloc(0), truncated: false, bytesRead: 0, size: opened.size };
+      return { bytes: Buffer.alloc(0), truncated: false, bytesRead: 0, size: opened.size, identity: opened.identity };
     }
     // Allocation is bounded by the CAP, never by the file's reported size — that
     // is the whole point: a 40 GiB file must not become a 40 GiB Buffer.
@@ -299,7 +317,82 @@ export function readContainedBytes(
         detail: `${path}: read ${wanted} of ${available} bytes (cap ${maxBytes})`,
       });
     }
-    return { bytes: buffer.subarray(0, bytesRead), truncated, bytesRead, size: opened.size };
+    return { bytes: buffer.subarray(0, bytesRead), truncated, bytesRead, size: opened.size, identity: opened.identity };
+  } finally {
+    closeSync(opened.fd);
+  }
+}
+
+/** How much of an already-consumed prefix one hashing read holds at once. */
+const AGY_PREFIX_CHUNK_BYTES = 1024 * 1024;
+
+/** The digest the tail compares prefixes by. Content identity, not integrity: no key, no secret. */
+export function agyPrefixDigest(bytes: Buffer): Buffer {
+  return createHash('sha256').update(bytes).digest();
+}
+
+/**
+ * Read past `prefixLength`, bounded, AND prove what the file holds before it — on ONE descriptor.
+ *
+ * The live tail consumes an append-only file by offset, so a file rewritten in place (the same
+ * inode, other bytes) or replaced (another inode under the same name) leaves the offset pointing
+ * into a history the reader no longer holds. Size alone cannot tell: a rewrite can keep or grow
+ * it. So every tail read hashes the consumed prefix, in bounded chunks, and the caller compares it
+ * with the digest it kept; the identity says whether this is still the same file at all. Both come
+ * from the descriptor the new bytes are read from, so a replacement between two opens cannot pair
+ * one file's prefix with another's tail.
+ */
+export function readContainedTail(
+  rootDir: string,
+  path: string,
+  prefixLength: number,
+  maxBytes: number,
+  trace?: AgyTraceSink,
+): AgyTailReadResult | AgyReadRefusal {
+  const opened = openContainedRegularFile(rootDir, path, trace);
+  if (isAgyReadRefusal(opened)) return opened;
+  try {
+    const empty = Buffer.alloc(0);
+    const shorter = { bytes: empty, truncated: false, bytesRead: 0, size: opened.size, identity: opened.identity };
+    if (opened.size < prefixLength) return shorter;
+    const hash = createHash('sha256');
+    const chunk = Buffer.alloc(Math.max(1, Math.min(AGY_PREFIX_CHUNK_BYTES, prefixLength)));
+    let position = 0;
+    while (position < prefixLength) {
+      const read = readSync(opened.fd, chunk, 0, Math.min(chunk.length, prefixLength - position), position);
+      // The file shrank under the read: it no longer holds the prefix.
+      if (read <= 0) return shorter;
+      hash.update(chunk.subarray(0, read));
+      position += read;
+    }
+    const prefixDigest = hash.copy().digest();
+    const available = Math.max(0, opened.size - prefixLength);
+    const wanted = Math.min(available, maxBytes);
+    let bytes = empty;
+    let bytesRead = 0;
+    if (wanted > 0) {
+      // Allocation is bounded by the CAP, never by the file's reported size.
+      const buffer = Buffer.alloc(wanted);
+      bytesRead = readSync(opened.fd, buffer, 0, wanted, prefixLength);
+      bytes = buffer.subarray(0, bytesRead);
+      hash.update(bytes);
+    }
+    const truncated = available > wanted;
+    if (truncated) {
+      trace?.({
+        op: 'read-truncated',
+        detail: `${path}: read ${wanted} of ${available} bytes (cap ${maxBytes})`,
+      });
+    }
+    return {
+      bytes,
+      truncated,
+      bytesRead,
+      size: opened.size,
+      identity: opened.identity,
+      prefixDigest,
+      extendedDigest: hash.digest(),
+    };
   } finally {
     closeSync(opened.fd);
   }

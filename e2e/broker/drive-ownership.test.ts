@@ -10,16 +10,24 @@
  * is staged in a fake `/proc`, and an OpenCode serve is faked for the one
  * agent whose bare attach is already a mutable owner.
  *
- * Not here: a crashed Codex daemon whose socket was left behind (Take over
- * then fails with "ownership could not be verified"). Its expected behaviour
- * is an open owner decision.
+ * A second broker runs Codex with terminal sync on against a daemon that
+ * crashed and left its control socket behind: that socket is no daemon, so
+ * Take over starts a private owner, while a daemon that still listens but
+ * does not answer keeps Take over refused. A third runs with sync off and no
+ * daemon socket on disk at all: a restore still weighs the terminals it finds.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Broker, type BrokerClient, eventually, type Frame, type SessionStream, startBroker } from '../harness/index.ts';
-import { CodexDriveFake, type CodexRollout, installCodexDriveFake } from '../harness/fakes/codex-drive.ts';
+import {
+  CodexDriveFake,
+  type CodexRollout,
+  crashedDaemonSocket,
+  installCodexDriveFake,
+  unresponsiveDaemon,
+} from '../harness/fakes/codex-drive.ts';
 import { type FakeCommand, installFakeCommand } from '../harness/fakes/command.ts';
 import { type FakeOpenCodeServer, openCodeRows, startFakeOpenCode } from '../harness/fakes/opencode-server.ts';
 
@@ -327,6 +335,23 @@ describe('Drive ownership across clients, evictions and restarts', () => {
     watcher.close();
   });
 
+  test.skipIf(process.platform !== 'linux')('with terminal sync off, a control socket a crashed daemon left behind is no daemon to drive through', async () => {
+    // This broker names `<root>/codex-daemon.sock` and nothing was there; now a crash leaves a socket file.
+    const socket = join(broker.paths.root, 'codex-daemon.sock');
+    await crashedDaemonSocket(socket);
+    try {
+      const session = codex.rollout('sync-off-crashed');
+      const takeover = await client.attach('codex', session.id, { mode: 'resume', reason: 'takeover' });
+      expect((await driving(takeover)).info.attachMode).toBe('resume');
+      expect(codex.owners(session.threadId)).toHaveLength(1);
+      expect((await prompt(takeover, 'past the stale socket')).kind).toBe('ack');
+      expect(lstatSync(socket).isSocket()).toBe(true);
+      takeover.close();
+    } finally {
+      rmSync(socket, { force: true });
+    }
+  });
+
   // Last: it restarts the broker.
   test('after a broker restart a reason-tagged reopen restores one owner, and a second reopen joins it', async () => {
     const session: CodexRollout = codex.rollout('restart');
@@ -346,5 +371,170 @@ describe('Drive ownership across clients, evictions and restarts', () => {
     expect((await prompt(again, 'after restart')).kind).toBe('ack');
     expect(codex.prompts().at(-1)).toEqual({ pid: codex.owners(session.threadId).at(-1)!, text: 'after restart' });
     client.closeAll();
+  });
+});
+
+// Unix control sockets: Linux and macOS. Listener evidence for a plain socket file is Linux-only
+// (`/proc/net/unix`); an alias whose target is gone is proof on any host.
+describe.skipIf(process.platform === 'win32')('Take over after the Codex daemon crashed and left its control socket', () => {
+  const linux = process.platform === 'linux';
+  let broker: Broker;
+  let codex: CodexDriveFake;
+  let client: BrokerClient;
+  let control: string;
+  let runtime: string;
+
+  beforeAll(async () => {
+    broker = await startBroker({
+      name: 'drive-crashed-daemon',
+      token: true,
+      setup: (paths) => {
+        codex = installCodexDriveFake(paths);
+        control = join(paths.root, 'control', 'app-server-control.sock');
+        runtime = join(paths.root, 'runtime');
+        mkdirSync(join(paths.root, 'control'), { recursive: true });
+        mkdirSync(runtime, { recursive: true });
+      },
+      env: (paths) => CodexDriveFake.environment(paths, { sync: true, daemonSocket: control }),
+    });
+    client = broker.client();
+  });
+
+  afterAll(async () => {
+    client?.closeAll();
+    await broker?.stop();
+  });
+
+  /** Take over (and then a restore) both start the broker's own app-server, and the socket is left as it was. */
+  async function drivesWithoutTheDaemon(name: string): Promise<void> {
+    const before = lstatSync(control);
+    const session = codex.rollout(name);
+    const takeover = await client.attach('codex', session.id, { mode: 'resume', reason: 'takeover' });
+    const taken = await driving(takeover);
+    expect(takeover.ofKind('attach-conflict')).toEqual([]);
+    expect(taken.info.attachMode).toBe('resume');
+    expect(codex.owners(session.threadId)).toHaveLength(1);
+    expect((await prompt(takeover, `${name}: taken over`)).kind).toBe('ack');
+    expect(codex.prompts().at(-1)).toEqual({ pid: codex.owners(session.threadId)[0]!, text: `${name}: taken over` });
+    takeover.close();
+
+    const later = codex.rollout(`${name}-restore`);
+    const restored = await client.attach('codex', later.id, { mode: 'resume', reason: 'app-restore' });
+    await driving(restored);
+    expect(restored.ofKind('attach-conflict')).toEqual([]);
+    expect(codex.owners(later.threadId)).toHaveLength(1);
+    restored.close();
+
+    // Read-only: the socket a crash left behind is neither removed nor replaced.
+    const after = lstatSync(control);
+    expect({ ino: after.ino, link: after.isSymbolicLink(), socket: after.isSocket() })
+      .toEqual({ ino: before.ino, link: before.isSymbolicLink(), socket: before.isSocket() });
+  }
+
+  test.skipIf(!linux)('a socket file nothing listens on is no daemon', async () => {
+    await crashedDaemonSocket(control);
+    await drivesWithoutTheDaemon('crashed');
+  });
+
+  test.skipIf(!linux)('a symlinked control socket whose runtime socket nothing listens on is no daemon', async () => {
+    rmSync(control, { force: true });
+    await crashedDaemonSocket(join(runtime, 'crashed.sock'));
+    symlinkSync(join(runtime, 'crashed.sock'), control);
+    await drivesWithoutTheDaemon('crashed-alias');
+  });
+
+  test('a symlinked control socket whose runtime socket is gone is no daemon', async () => {
+    rmSync(control, { force: true });
+    symlinkSync(join(runtime, 'removed.sock'), control);
+    await drivesWithoutTheDaemon('dangling-alias');
+  });
+
+  test('a daemon that still listens but does not answer keeps Take over refused', async () => {
+    rmSync(control, { force: true });
+    const daemon = await unresponsiveDaemon(control);
+    try {
+      const session = codex.rollout('unresponsive');
+      const refused = await client.attach('codex', session.id, { mode: 'resume', reason: 'takeover' });
+      await refused.waitForKind('history');
+      expect(refused.ofKind('attach-conflict')).toHaveLength(1);
+      expect(refused.ofKind('attach-conflict')[0]).toMatchObject({ requestedMode: 'resume', reason: 'takeover', code: 'DRIVE_OWNERSHIP_UNKNOWN' });
+      expect(lastSession(refused)!.info.attachMode).toBe('observe');
+      expect(codex.owners(session.threadId)).toEqual([]);
+      refused.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+});
+
+// Terminal presence is read from the fake `/proc` on Linux; macOS would scan the host's real processes.
+describe.skipIf(process.platform !== 'linux')('Restoring Drive on a host with no Codex daemon socket', () => {
+  let broker: Broker;
+  let codex: CodexDriveFake;
+  let client: BrokerClient;
+
+  beforeAll(async () => {
+    broker = await startBroker({
+      name: 'drive-no-daemon-socket',
+      token: true,
+      setup: (paths) => {
+        codex = installCodexDriveFake(paths);
+      },
+      // Sync off, and no socket named: Codex's own control socket under the fixture CODEX_HOME is absent.
+      env: (paths) => ({ ...CodexDriveFake.environment(paths, { daemonSocket: null }), COSYNCING_TEST_HUB_EVICT_GRACE_MS: '300' }),
+    });
+    client = broker.client();
+  });
+
+  afterAll(async () => {
+    client?.closeAll();
+    await broker?.stop();
+  });
+
+  test('with no terminal running the session, the saved Drive preference is restored', async () => {
+    const session = codex.rollout('no-daemon-socket');
+    const restored = await client.attach('codex', session.id, { mode: 'resume', reason: 'app-restore' });
+    const frame = await driving(restored);
+    expect(restored.ofKind('attach-conflict')).toEqual([]);
+    expect(frame.info.control.terminalSync.presence).toBe('absent');
+    expect(codex.owners(session.threadId)).toHaveLength(1);
+    expect((await prompt(restored, 'restored without a daemon')).kind).toBe('ack');
+    restored.close();
+    await eventually(() => codex.exited(codex.owners(session.threadId)[0]!), { what: 'the restored owner to stop' });
+
+    // A lease restore of the same session is decided the same way.
+    const again = await client.attach('codex', session.id, { mode: 'resume', reason: 'lease-restore' });
+    await driving(again);
+    expect(codex.owners(session.threadId)).toHaveLength(2);
+    again.close();
+  });
+
+  test('a terminal running the session still refuses an automatic restore, and Take over still works', async () => {
+    const cases = [
+      { name: 'remote', remote: true, presence: 'private' },
+      { name: 'plain', remote: false, presence: 'unknown' },
+    ];
+    for (const [index, entry] of cases.entries()) {
+      const session = codex.rollout(`no-daemon-socket-${entry.name}`);
+      const removeTerminal = codex.competingTerminal(session, 5100 + index, { remote: entry.remote });
+      try {
+        const refused = await client.attach('codex', session.id, { mode: 'resume', reason: 'app-restore' });
+        await refused.waitForKind('history');
+        expect(refused.ofKind('attach-conflict')).toHaveLength(1);
+        expect(refused.ofKind('attach-conflict')[0]).toMatchObject({ requestedMode: 'resume', reason: 'app-restore', code: 'DRIVE_OWNERSHIP_CONFLICT' });
+        expect({ terminal: entry.name, presence: lastSession(refused)!.info.control.terminalSync.presence })
+          .toEqual({ terminal: entry.name, presence: entry.presence });
+        expect(lastSession(refused)!.info.attachMode).toBe('observe');
+        expect(codex.owners(session.threadId)).toEqual([]);
+        refused.close();
+
+        const takeover = await client.attach('codex', session.id, { mode: 'resume', reason: 'takeover' });
+        await driving(takeover);
+        expect(codex.owners(session.threadId)).toHaveLength(1);
+        takeover.close();
+      } finally {
+        removeTerminal();
+      }
+    }
   });
 });

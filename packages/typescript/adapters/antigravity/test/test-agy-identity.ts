@@ -202,13 +202,16 @@ const RUN_STREAM: Array<Record<string, unknown>> = [
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     // Drop the frames that belong to the SEND rather than to the run: the minted
-    // pending row, its status/metadata traffic and the turn's token accounting
-    // have no transcript counterpart by construction.
+    // pending row, its status/metadata traffic, the turn's token accounting and
+    // the turn's summary keyed by that row (this transcript holds no user line
+    // for the send to claim, so the summary has no step to be keyed by) have no
+    // transcript counterpart by construction.
     const liveKeys = keysOf(live.filter((message) =>
       message.type !== 'status'
       && message.type !== 'token-count'
       && message.type !== 'metadata-update'
-      && !(message.type === 'user-message' && String((message as { key?: string }).key).startsWith('queued:agy:')),
+      && !(message.type === 'user-message' && String((message as { key?: string }).key).startsWith('queued:agy:'))
+      && !(message.type === 'run-summary' && String((message as { key?: string }).key).startsWith('queued:agy:')),
     ));
 
     check('the live half produced messages', liveKeys.length > 0, liveKeys.join('|'));

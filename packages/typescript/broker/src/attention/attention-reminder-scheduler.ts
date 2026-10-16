@@ -206,6 +206,7 @@ function minNextAttemptAt(
   now: number,
   isActiveForDevice: (deviceId: string, eventId: string) => boolean,
   isDismissedForEvent: (deviceId: string, eventId: string) => boolean,
+  isInFlight: (key: string) => boolean,
 ): number | undefined {
   let next: number | undefined;
   for (const delivery of deliveries) {
@@ -214,6 +215,7 @@ function minNextAttemptAt(
       || delivery.stage !== stage
       || delivery.state !== 'reserved'
       || delivery.attempts >= MAX_RETRY_ATTEMPTS
+      || isInFlight(delivery.key)
     ) {
       continue;
     }
@@ -234,12 +236,14 @@ function hasReadyDeliveryNow(
   now: number,
   isActiveForDevice: (deviceId: string, eventId: string) => boolean,
   isDismissedForEvent: (deviceId: string, eventId: string) => boolean,
+  isInFlight: (key: string) => boolean,
 ): boolean {
   return deliveries.some((delivery) =>
     delivery.eventId === eventId
     && delivery.stage === stage
     && delivery.state === 'reserved'
     && delivery.attempts < MAX_RETRY_ATTEMPTS
+    && !isInFlight(delivery.key)
     && isActiveForDevice(delivery.deviceId, eventId)
     && !isDismissedForEvent(delivery.deviceId, eventId)
     && (delivery.nextAttemptAt === undefined || delivery.nextAttemptAt <= now),
@@ -249,6 +253,12 @@ function hasReadyDeliveryNow(
 /**
  * Reminder scheduler for durable attention delivery.
  * Transport-level coalescing remains outside this class (`DeviceWakeCoalescer` owns it).
+ *
+ * A dispatch can be held for a long time: a phone's coalesced trailing wake waits out its window, a
+ * push service can be slow to answer. Each device therefore has its own lane. A pass hands a device
+ * the deliveries due for it and moves on; the lane dispatches them once that device's earlier
+ * dispatches have settled. One device's held wake delays only that device, never a pass, and so
+ * never another device's alert.
  */
 export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> {
   private readonly now: () => number;
@@ -264,6 +274,10 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
   private stopped = true;
   private runQueue: Promise<void> = Promise.resolve();
   private pendingTick: Promise<void> | undefined;
+  /** Deliveries handed to a device lane that have not settled. A pass never hands one over twice. */
+  private readonly inFlight = new Set<string>();
+  /** Per device, settles once every dispatch handed to that device so far has settled. */
+  private readonly deviceLanes = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: AttentionStore,
@@ -299,18 +313,22 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
    * Requests a reconcile that starts after this call. Requests made while one is still waiting to
    * start share it: every store mutation asks for a tick, so a pass that reserved N deliveries used
    * to queue N further passes behind itself.
+   *
+   * Resolves once the dispatches that pass handed out have settled. The next pass does not wait for
+   * them: passes are serialized, dispatches are not.
    */
   async tick(): Promise<void> {
     if (this.pendingTick) return this.pendingTick;
-    const pending = this.queue(() => {
+    const pass = this.queue(() => {
       if (this.pendingTick === pending) this.pendingTick = undefined;
       return this.reconcile();
     });
+    const pending = pass.then(async (dispatches) => { await Promise.all(dispatches); });
     this.pendingTick = pending;
     await pending;
   }
 
-  private queue(task: () => Promise<void>): Promise<void> {
+  private queue<T>(task: () => Promise<T>): Promise<T> {
     const scheduled = this.runQueue.then(task, task);
     this.runQueue = scheduled.then(() => undefined, () => undefined);
     return scheduled;
@@ -341,14 +359,65 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
     unref.unref?.();
   }
 
-  private async reconcile(): Promise<void> {
+  /**
+   * Hands `deliveries` to the device's lane. They are dispatched together once the device's earlier
+   * dispatches have settled, so a device's alerts keep their order and a burst found in one pass
+   * still reaches its transport (and its wake coalescer) at once.
+   */
+  private handToDevice(deviceId: string, deliveries: AttentionDelivery[]): Promise<void> {
+    for (const delivery of deliveries) this.inFlight.add(delivery.key);
+    const previous = this.deviceLanes.get(deviceId) ?? Promise.resolve();
+    const run = async (): Promise<void> => {
+      await Promise.all(deliveries.map((delivery) => this.dispatch(delivery)));
+      // A settled batch may leave a retry to time; the timer must know about it.
+      try {
+        if (!this.stopped) this.schedule(this.computeDelayMs());
+      } catch (error) {
+        this.onError?.(error);
+      }
+    };
+    // Whatever the earlier batch came to, this one still runs: a lane never stalls its device.
+    const dispatched = previous.then(run, run);
+    const lane = dispatched.finally(() => {
+      if (this.deviceLanes.get(deviceId) === lane) this.deviceLanes.delete(deviceId);
+    });
+    this.deviceLanes.set(deviceId, lane);
+    return dispatched;
+  }
+
+  private async dispatch(delivery: AttentionDelivery): Promise<void> {
+    try {
+      // A lane may have waited on the device's earlier dispatches: what was due when the pass ran may
+      // have been answered, dismissed or superseded since.
+      const current = this.store.getDelivery(delivery.key);
+      if (!current || current.state !== 'reserved' || current.attempts >= MAX_RETRY_ATTEMPTS) return;
+      const event = this.store.getEvent(current.eventId);
+      if (!event || !this.isScheduledEvent(event)) return;
+      if (isDismissed(current.deviceId, current.eventId, this.store)) return;
+      try {
+        await Promise.resolve(this.dispatchReservation(current));
+        await this.store.completeDelivery(current.key);
+      } catch (error) {
+        const delay = nextRetryDelay(current.attempts);
+        const nextAttemptAt = delay === undefined ? undefined : this.now() + delay;
+        await this.store.recordDeliveryFailure(current.key, nextAttemptAt);
+        this.onError?.(error);
+      }
+    } catch (error) {
+      this.onError?.(error);
+    } finally {
+      this.inFlight.delete(delivery.key);
+    }
+  }
+
+  private async reconcile(): Promise<Promise<void>[]> {
     const now = this.now();
     const allDevices = normalizeList(await Promise.resolve(this.listDeviceIds()));
     const deviceSet = new Set(allDevices);
     const isActiveForDevice = (deviceId: string, _eventId: string): boolean =>
       deviceSet.has(deviceId);
     const alertsStartAt = allDevices.map((deviceId) => [deviceId, this.deviceAlertsStartAt(deviceId)] as const);
-    const dispatchTasks: Promise<void>[] = [];
+    const dueByDevice = new Map<string, AttentionDelivery[]>();
     let sliceStartedAt = performance.now();
 
     for (const event of this.scheduledEvents()) {
@@ -399,6 +468,7 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
       );
       for (const delivery of dueDeliveries) {
         if (!deviceSet.has(delivery.deviceId)) continue;
+        if (this.inFlight.has(delivery.key)) continue;
         const currentDelivery = this.store.getDelivery(delivery.key);
         if (!currentDelivery || currentDelivery.state !== 'reserved') continue;
         const dispatchEvent = this.store.getEvent(currentDelivery.eventId);
@@ -411,24 +481,15 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
         ) {
           continue;
         }
-
-        // Start every due reservation before awaiting provider/coalescer work.
-        // Otherwise a trailing coalesced wake blocks the loop for the full
-        // window and prevents later event reservations from joining its batch.
-        dispatchTasks.push((async () => {
-          try {
-            await Promise.resolve(this.dispatchReservation(currentDelivery));
-            await this.store.completeDelivery(currentDelivery.key);
-          } catch (error) {
-            const delay = nextRetryDelay(currentDelivery.attempts);
-            const nextAttemptAt = delay === undefined ? undefined : this.now() + delay;
-            await this.store.recordDeliveryFailure(currentDelivery.key, nextAttemptAt);
-            this.onError?.(error);
-          }
-        })());
+        const forDevice = dueByDevice.get(currentDelivery.deviceId);
+        if (forDevice) forDevice.push(currentDelivery);
+        else dueByDevice.set(currentDelivery.deviceId, [currentDelivery]);
       }
     }
-    await Promise.all(dispatchTasks);
+    // Every due reservation is handed out before any is awaited, and none is awaited here: a
+    // trailing coalesced wake would otherwise hold this pass, and every pass queued behind it, for
+    // the whole window.
+    return [...dueByDevice].map(([deviceId, deliveries]) => this.handToDevice(deviceId, deliveries));
   }
 
   private computeDelayMs(): number {
@@ -450,6 +511,8 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
 
     const isDismissedForEvent = (deviceId: string, eventId: string): boolean =>
       isDismissed(deviceId, eventId, this.store);
+    // A delivery in a device lane is not due again: its settling reschedules the timer.
+    const isInFlight = (key: string): boolean => this.inFlight.has(key);
 
     for (const event of active) {
       const elapsed = Math.max(0, now - event.createdAt);
@@ -484,6 +547,7 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
         now,
         isActiveForDevice,
         isDismissedForEvent,
+        isInFlight,
       );
       if (hasNow) {
         next = now;
@@ -497,6 +561,7 @@ export class AttentionReminderScheduler<TTimer = ReturnType<typeof setTimeout>> 
         now,
         isActiveForDevice,
         isDismissedForEvent,
+        isInFlight,
       );
       if (retryAt !== undefined && retryAt > now) {
         next = Math.min(next, retryAt);

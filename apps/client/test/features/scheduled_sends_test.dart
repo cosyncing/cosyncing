@@ -17,6 +17,7 @@ const poll = Duration(seconds: 15);
 
 Finder card(String id) => find.byKey(ValueKey('schedule-inline-card-$id'));
 Finder cardText(String id) => find.byKey(ValueKey('schedule-inline-text-$id'));
+ValueKey<String> managerRow(String id) => ValueKey('schedule-row-$id');
 
 /// The scheduled messages Chat is showing, by schedule id.
 List<String> cards() => [
@@ -53,6 +54,12 @@ Future<void> untilReads(AppDriver app, ScheduleDesk schedules, int reads) =>
       reason: 'the schedule list to be read $reads times',
       every: const Duration(milliseconds: 250),
     );
+
+/// Opens the scheduled sends manager page.
+Future<void> openManager(AppDriver app) async {
+  await app.go('/settings/scheduled-sends');
+  await app.settle();
+}
 
 /// The session's stream drops and the broker refuses new ones.
 Future<void> loseStream(AppDriver app, FakeBroker studio) async {
@@ -251,6 +258,31 @@ void main() {
     );
 
     featureTest(
+      'on a phone, while Status takes the place of Chat no schedule is read; '
+      'back in Chat the cards are read again',
+      (f) async {
+        final studio = f.network.add('http://studio.test:7734')
+          ..addSession('s1', 'Fix login');
+        ComposerDesk(studio);
+        final schedules = ScheduleDesk(studio)..addMessage('Keep me', id: 'a');
+        await f.storage.seedServer(studio);
+        final app = await f.launch(viewport: FeatureViewport.phone);
+        await app.tapKey('workspace-open-drawer');
+        await app.openFromRoster('s1', cwd: '/work/studio');
+        expect(schedules.listCalls, 1);
+
+        await app.openStatus();
+        await app.tick(poll);
+        await app.tick(poll);
+        expect(schedules.listCalls, 1, reason: 'no cards on screen to keep');
+
+        await app.tapKey('session-detail-view-back');
+        await untilReads(app, schedules, 2);
+        expect(cards(), ['a']);
+      },
+    );
+
+    featureTest(
       'opening the session while the stream is down makes no read at all',
       (f) async {
         late ScheduleDesk schedules;
@@ -417,7 +449,8 @@ void main() {
   group('servers keep their schedules apart', () {
     featureTest(
       "switching server shows none of the other server's cards and reads "
-      'nothing from the old one; coming back shows its own again',
+      'nothing from the old one, the manager page kept from before the '
+      'switch lists the new server; coming back shows its own again',
       (f) async {
         final studio = f.network.add('http://studio.test:7734')
           ..addSession('s1', 'Studio work', cwd: '/work/studio');
@@ -432,6 +465,10 @@ void main() {
         await f.storage.seedServer(studio);
         await f.storage.seedServer(lab, active: false);
         final app = await f.launch();
+        // The settings branch keeps the manager page alive from here on.
+        await openManager(app);
+        expect(find.byKey(managerRow('studio-a')), findsOneWidget);
+        await app.go('/sessions');
         await app.openFromRoster('s1', cwd: '/work/studio');
         expect(cards(), ['studio-a']);
 
@@ -445,6 +482,11 @@ void main() {
         expect(studioSchedules.listCalls, studioReads);
         expect(labSchedules.listCalls, greaterThan(1));
 
+        await openManager(app);
+        expect(find.byKey(managerRow('lab-a')), findsOneWidget);
+        expect(find.byKey(managerRow('studio-a')), findsNothing);
+        await app.go('/sessions');
+
         await app.switchServer('http://studio.test:7734');
         await app.openFromRoster('s1', cwd: '/work/studio');
         expect(cards(), ['studio-a']);
@@ -454,11 +496,6 @@ void main() {
   });
 
   group('manager page', () {
-    Future<void> openManager(AppDriver app) async {
-      await app.go('/settings/scheduled-sends');
-      await app.settle();
-    }
-
     featureTest(
       "lists the broker's schedules, pauses and resumes one with its "
       'revision, and cancels then removes another',

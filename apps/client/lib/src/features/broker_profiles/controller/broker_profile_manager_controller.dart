@@ -8,6 +8,8 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/url_normaliz
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/created_session_attach_intents.dart';
@@ -106,6 +108,16 @@ class BrokerProfileManagerController {
       throw const BrokerProfileManagerException(
         "Couldn't switch servers — that saved server was replaced while the "
         'selection was pending. Select the current server and try again.',
+      );
+    } on BrokerProfileManagerException {
+      rethrow;
+    } on Object catch (error) {
+      // A store that cannot read the profile or record the choice. Every
+      // caller already turns this type into its "Couldn't switch" notice; an
+      // untyped error reached none of them, so the switch failed silently.
+      throw BrokerProfileManagerException(
+        "Couldn't switch servers. ${recoveryAdviceEn(classifyFailure(error))}",
+        detail: failureDetail(error),
       );
     }
   }
@@ -218,6 +230,7 @@ class BrokerProfileManagerController {
 
     return _finishProfileEdit(
       profileId: profileId,
+      previous: existing,
       updated: saved,
       isBaseUriChanged: isBaseUriChanged,
     );
@@ -225,9 +238,31 @@ class BrokerProfileManagerController {
 
   Future<BrokerProfile> _finishProfileEdit({
     required String profileId,
+    required BrokerProfile previous,
     required BrokerProfile updated,
     required bool isBaseUriChanged,
   }) async {
+    final previousSourceKey = RosterSource.ofProfile(previous).storageKey;
+    final updatedSourceKey = RosterSource.ofProfile(updated).storageKey;
+    final openSessions = ref.read(openSessionsStoreProvider);
+    final carryTabs =
+        isBaseUriChanged &&
+        previousSourceKey != updatedSourceKey &&
+        openSessions is LosslessOpenSessionsStore;
+    if (carryTabs) {
+      // The open tabs belong to the saved server, not to the address it is
+      // reached at. They are copied before the edited server becomes active,
+      // so the working set it loads already has them, and the old address's
+      // copy is removed only after. Unlike the roster snapshot and Drive
+      // provenance, a tab carries no authority and no broker content beyond
+      // its label: what it opens is asked of the new address.
+      try {
+        await openSessions.copyMembers(previousSourceKey, updatedSourceKey);
+      } on Object {
+        // Best-effort: losing the tabs is the old behaviour, never a failure
+        // of the edit itself.
+      }
+    }
     if (isBaseUriChanged) {
       // N3: the roster identity snapshot belongs to the broker it was captured
       // from, not to the profile row. Repointing the profile makes those
@@ -255,6 +290,15 @@ class BrokerProfileManagerController {
     if (activeIncarnationMatches || needsHydrationRepair) {
       await activeStore.setActiveProfileId(updated.id);
       ref.read(activeBrokerProfileProvider.notifier).state = updated;
+    }
+
+    if (carryTabs) {
+      try {
+        await openSessions.clearMembers(previousSourceKey);
+      } on Object {
+        // Best-effort: nothing reads the old address's rows any more, and a
+        // delete of the server removes every row it ever owned.
+      }
     }
 
     return updated;

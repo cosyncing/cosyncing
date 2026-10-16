@@ -17,13 +17,15 @@
  *   codex.prompts()                   // [{ pid, text }]
  *   codex.holdStop(true)              // SIGTERM is acknowledged but the process stays up …
  *   codex.releaseStop()               // … until this
+ *   codex.answerForkWith(stored)      // thread/fork answers a rollout that already exists
  *
  * A competing terminal is staged in a fake `/proc` (the broker reads it
  * through `COSYNCING_CODEX_PROC_ROOT`), so presence arbitration sees exactly
  * what the test wrote and never the host's real processes.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { basename, dirname, join, sep } from 'node:path';
 import type { FixturePaths } from '../broker.ts';
 import { installFakeCommand } from './command.ts';
 
@@ -113,6 +115,15 @@ function answer(message) {
       return { turn: { id: turnId, status: 'inProgress', items: [] } };
     }
     case 'thread/fork': {
+      const staged = controlState().forkAnswer;
+      if (staged) {
+        // A test-staged answer naming a rollout that already exists: nothing is written.
+        const cwd = params.cwd || process.cwd();
+        return {
+          thread: { id: staged.threadId, forkedFromId: staged.forkedFromId || params.threadId, path: staged.path, cwd, name: 'Forked thread', turns: [] },
+          cwd,
+        };
+      }
       const forkId = '00000000-0000-4000-8000-' + (process.pid * 100 + (++forks)).toString(16).padStart(12, '0');
       const day = path.join(codexHome, 'sessions', '2026', '07', '29');
       fs.mkdirSync(day, { recursive: true });
@@ -170,12 +181,16 @@ export class CodexDriveFake {
     this.#release = join(paths.bin, 'codex.release');
   }
 
-  /** The broker environment this fake needs: sync-server off, presence read from the fake `/proc`. */
-  static environment(paths: FixturePaths): Record<string, string> {
+  /**
+   * The broker environment this fake needs: sync-server off (or on, with `sync`), presence read from the
+   * fake `/proc`, and the daemon control socket at `daemonSocket` (by default a path nothing listens on;
+   * `null` names none, so the broker looks for Codex's own socket under the fixture's `CODEX_HOME`).
+   */
+  static environment(paths: FixturePaths, options: { sync?: boolean; daemonSocket?: string | null } = {}): Record<string, string> {
+    const socket = options.daemonSocket === undefined ? join(paths.root, 'codex-daemon.sock') : options.daemonSocket;
     return {
-      COSYNCING_CODEX_SYNC_SERVER: '0',
-      // Presence arbitration scans only when a daemon socket is named; nothing listens on this one.
-      COSYNCING_CODEX_APP_SERVER_SOCK: join(paths.root, 'codex-daemon.sock'),
+      COSYNCING_CODEX_SYNC_SERVER: options.sync ? '1' : '0',
+      ...(socket ? { COSYNCING_CODEX_APP_SERVER_SOCK: socket } : {}),
       COSYNCING_CODEX_PROC_ROOT: fakeProcRoot(paths),
     };
   }
@@ -215,7 +230,26 @@ export class CodexDriveFake {
   /** While on, a Resume owner acknowledges SIGTERM but exits only on {@link releaseStop}. */
   holdStop(on: boolean): void {
     rmSync(this.#release, { force: true });
-    writeFileSync(this.#control, JSON.stringify({ holdStop: on }));
+    this.#setControl({ holdStop: on });
+  }
+
+  /**
+   * While set, `thread/fork` answers with this thread and rollout path (and, if given, this parent in
+   * place of the thread asked for) instead of writing a new one, as a Codex that answered a fork with a
+   * session already in its store would; `null` restores real forks.
+   */
+  answerForkWith(answer: { threadId: string; path: string; forkedFromId?: string } | null): void {
+    this.#setControl({ forkAnswer: answer });
+  }
+
+  #setControl(change: Record<string, unknown>): void {
+    let state: Record<string, unknown> = {};
+    try {
+      state = JSON.parse(readFileSync(this.#control, 'utf8'));
+    } catch {
+      /* none yet */
+    }
+    writeFileSync(this.#control, JSON.stringify({ ...state, ...change }));
   }
 
   releaseStop(): void {
@@ -227,9 +261,22 @@ export class CodexDriveFake {
     return this.#write(name, join(this.#paths.home, '.codex', 'sessions', '2026', '07', '28'), meta);
   }
 
-  /** A rollout outside the tree Codex discovery walks: attachable by id, never listed. */
+  /** A rollout outside the tree Codex discovery walks: never listed, and refused by id. */
   hiddenRollout(name: string, meta: Record<string, unknown> = {}): CodexRollout {
     return this.#write(name, join(this.#paths.root, 'elsewhere'), meta);
+  }
+
+  /**
+   * A stored rollout whose session id spells its path another way (through `..`): it resolves inside
+   * the store, so the adapter admits it, but no roster row carries that id.
+   */
+  unlistedSpelling(name: string, meta: Record<string, unknown> = {}): CodexRollout {
+    const rollout = this.rollout(name, meta);
+    const day = dirname(rollout.path); // …/sessions/2026/07/28
+    const month = dirname(day);
+    // …/sessions/2026/07/../07/28/rollout-….jsonl: the same file, a spelling discovery never produces.
+    const path = [month, '..', basename(month), basename(day), basename(rollout.path)].join(sep);
+    return { ...rollout, path, id: Buffer.from(path, 'utf8').toString('base64url') };
   }
 
   #write(name: string, directory: string, meta: Record<string, unknown>): CodexRollout {
@@ -247,19 +294,69 @@ export class CodexDriveFake {
   }
 
   /**
-   * Stage a Codex terminal resuming `rollout` against ANOTHER app-server: a
-   * competing owner the broker cannot share. Returns a function that removes it.
+   * Stage a Codex terminal resuming `rollout` against ANOTHER app-server (or, with `remote: false`, a
+   * plain `codex resume` that names none): a competing owner the broker cannot share. Returns a
+   * function that removes it.
    */
-  competingTerminal(rollout: CodexRollout, pid = 4242): () => void {
+  competingTerminal(rollout: CodexRollout, pid = 4242, options: { remote?: boolean } = {}): () => void {
     const proc = fakeProcRoot(this.#paths);
     const directory = join(proc, String(pid));
     mkdirSync(directory, { recursive: true });
-    const argv = ['codex', 'resume', '--remote', `unix://${join(this.#paths.root, 'other-daemon.sock')}`, rollout.threadId];
+    const remote = options.remote === false ? [] : ['--remote', `unix://${join(this.#paths.root, 'other-daemon.sock')}`];
+    const argv = ['codex', 'resume', ...remote, rollout.threadId];
     writeFileSync(join(directory, 'cmdline'), `${argv.join('\0')}\0`);
     symlinkSync(rollout.cwd, join(directory, 'cwd'));
     writeFileSync(join(directory, 'stat'), `${pid} (codex) S 1 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 ${(BOOT_UPTIME_S - 60) * 100} 0 0`);
     return () => rmSync(directory, { recursive: true, force: true });
   }
+}
+
+/**
+ * What a crashed Codex daemon leaves behind: a unix socket file at `path` that nothing listens on. A
+ * child this test starts binds it and is killed with SIGKILL, so nothing gets to remove the file.
+ */
+export async function crashedDaemonSocket(path: string): Promise<void> {
+  mkdirSync(dirname(path), { recursive: true });
+  const child = Bun.spawn([
+    process.execPath, '-e',
+    "require('node:net').createServer().listen(process.argv.at(-1), () => console.log('listening'))",
+    path,
+  ], { stdout: 'pipe', stderr: 'inherit' });
+  try {
+    const reader = child.stdout.getReader();
+    let output = '';
+    while (!output.includes('listening')) {
+      const next = await reader.read();
+      if (next.done) throw new Error(`the socket holder exited before listening on ${path}`);
+      output += new TextDecoder().decode(next.value);
+    }
+  } finally {
+    child.kill('SIGKILL');
+    await child.exited;
+  }
+  if (!lstatSync(path).isSocket()) throw new Error(`no socket file was left at ${path}`);
+}
+
+/**
+ * A daemon that is alive but will not talk: it accepts on `path` and refuses the WebSocket upgrade, so
+ * every RPC fails while the socket plainly has a listener.
+ */
+export async function unresponsiveDaemon(path: string): Promise<{ close(): Promise<void> }> {
+  mkdirSync(dirname(path), { recursive: true });
+  const server = createServer((socket) => {
+    socket.once('data', () => socket.end('HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n'));
+    socket.on('error', () => {});
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(path, () => resolve());
+  });
+  return {
+    close: () => new Promise<void>((resolve) => server.close(() => {
+      rmSync(path, { force: true });
+      resolve();
+    })),
+  };
 }
 
 const BOOT_UPTIME_S = 5_000;

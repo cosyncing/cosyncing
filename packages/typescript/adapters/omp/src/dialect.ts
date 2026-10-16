@@ -35,6 +35,10 @@ export const OMP_DIALECT: PiDialect = {
   // read last-write-wins. session_info stays readable for migrated/pi-shaped files.
   titleEntryTypes: ['session_info', 'title', 'title_change'],
   createTimeTitle: 'native',
+  // Measured on omp 17.4.2 (session-title-slot.ts, session-manager.ts): a 256-byte v1 title slot is
+  // overwritten in place; a title change on a file without one, or a load-time migration, rewrites
+  // the whole body atomically, slot first.
+  sessionFileRewrites: 'title-slot',
   eventKeyNamespace: 'omp:run:',
   eventSources: { rpc: 'omp-rpc', jsonl: 'omp-jsonl', bridge: 'omp-bridge' },
   parseModelChange: ompParseModelChange,

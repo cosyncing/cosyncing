@@ -1,0 +1,26 @@
+{
+  "history": [
+    {"type":"user-message","text":"research","key":"c1"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"agent-activity","key":"agent:kid-A","kind":"subagent","title":"Turing","subtitle":"explorer","status":"running","agentsTotal":1,"agentsDone":0},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ],
+  "live": [
+    {"type":"agent-activity","key":"agent:kid-A","kind":"subagent","title":"Turing","subtitle":"explorer","status":"done","agentsTotal":1,"agentsDone":1},
+    {"type":"tool-result","callId":"subagent:kid-A","toolName":"subagent","toolClass":"other","title":"Turing · explorer","result":"Found.","isError":false},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","status":"done","source":"codex-rollout"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"research","key":"c1"},
+    {"type":"status","status":"running"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","status":"running","source":"codex-rollout"},
+    {"type":"agent-activity","key":"agent:kid-A","kind":"subagent","title":"Turing","subtitle":"explorer","status":"running","agentsTotal":1,"agentsDone":0},
+    {"type":"agent-activity","key":"agent:kid-A","kind":"subagent","title":"Turing","subtitle":"explorer","status":"done","agentsTotal":1,"agentsDone":1},
+    {"type":"tool-result","callId":"subagent:kid-A","toolName":"subagent","toolClass":"other","title":"Turing · explorer","result":"Found.","isError":false},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","status":"done","source":"codex-rollout"},
+    {"type":"event","name":"codex.background-running-snapshot","payload":{"keys":[]}}
+  ]
+}

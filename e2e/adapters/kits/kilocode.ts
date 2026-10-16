@@ -33,6 +33,7 @@ import {
   type ConformanceProfile,
   type FakeController,
   installFakeExecutable,
+  makeFifo,
   leaseQuietPort,
   type LedgerEntry,
   type SeededSession,
@@ -95,23 +96,11 @@ export const kiloProfile: ConformanceProfile = {
   // The store keeps no app-send token: a reloaded history row carries the serve's own message key.
   historyClientKey: false,
   driveAttach: 'live',
+  // Kilo keeps one SQLite database and no log file to replace: C15 rewrites a stored prompt in place.
+  boundaryChanges: ['rewriteHistory'],
   terminal: { resumeHint: null, syncAvailable: false, handoff: false },
   subagents: true,
   missingBinaryRoster: 'observe-only',
-  knownBugs: {
-    'C20.roster': 'after a restart the roster still offers Drive for a session a terminal wrote to while the broker was '
-      + 'down (control.drive.supported stays true); only attaching refuses it',
-    'C16.create': 'Create on a build below the floor (or with no readable version) answers a plain 500 '
-      + '`Kilo Code Drive requires an authenticated 7.4.23-or-newer server` instead of the typed 503 '
-      + 'SESSION_CREATE_TEMPORARILY_UNAVAILABLE the other adapters give',
-    'C17.create': 'Create with the kilo binary missing answers a plain 500 `Kilo Code Drive requires an authenticated '
-      + '7.4.23-or-newer server` instead of the typed, retryable 503 SESSION_CREATE_TEMPORARILY_UNAVAILABLE',
-    'C11.lateDuplicate': 'a tab that joins while a permission card is open receives that card twice as live '
-      + 'messages (same requestId), outside its history frame (the OpenCode live connection Kilo shares)',
-    'C15.detect': 'Drive never notices a rewritten durable history, live or at any later prompt (the next prompt is '
-      + 'accepted and the session stays driving); managed-hosts-kilo has the failing test for the refusal. replaceLog '
-      + 'cannot be built in process against the serve\'s open WAL connection.',
-  },
   scenarios: {
     C07: {
       skip: 'Kilo creates a session with one POST /session on the managed serve and no child: the session/new and '
@@ -127,26 +116,12 @@ export const kiloProfile: ConformanceProfile = {
     },
   },
   hostileStore: [
-    {
-      name: 'a session whose directory is relative',
-      knownBug: { aspect: 'attach', bug: 'the live serve answers a bare attach to an id the roster withholds, with no directory validation' },
-      plant: (fake) => plantKilo(fake, { directory: 'relative/dir' }),
-    },
-    {
-      name: 'a session whose directory is the filesystem root',
-      knownBug: { aspect: 'attach', bug: 'the live serve answers a bare attach to an id the roster withholds, with no directory validation' },
-      plant: (fake) => plantKilo(fake, { directory: '/' }),
-    },
-    {
-      name: 'a session id with a control character',
-      knownBug: 'live serve rows are published without the store\'s id bounds: a control-character id reaches the roster and a bare attach',
-      plant: (fake) => plantKilo(fake, { id: 'ses_bad\u0001id' }),
-    },
-    {
-      name: 'a session id beyond the identity bound',
-      knownBug: 'live serve rows are published without the store\'s id bounds: a 300-scalar id reaches the roster and a bare attach',
-      plant: (fake) => plantKilo(fake, { id: `ses_${'x'.repeat(300)}` }),
-    },
+    { name: 'a session whose directory is relative', plant: (fake) => plantKilo(fake, { directory: 'relative/dir' }) },
+    { name: 'a session whose directory is the filesystem root', plant: (fake) => plantKilo(fake, { directory: '/' }) },
+    { name: 'a session id with a control character', plant: (fake) => plantKilo(fake, { id: 'ses_bad\u0001id' }) },
+    { name: 'a session id beyond the identity bound', plant: (fake) => plantKilo(fake, { id: `ses_${'x'.repeat(300)}` }) },
+    { name: 'a session id that climbs out of the session route', plant: (fake) => plantKilo(fake, { id: '../../etc/passwd' }) },
+    { name: 'a session id that is a dot-dot segment', plant: (fake) => plantKilo(fake, { id: '..' }) },
     {
       name: 'a second database in rollback-journal mode with a journal sidecar',
       plant: (fake) => plantKilo(fake, { database: 'kilo-journal.db', journal: true }),
@@ -156,6 +131,11 @@ export const kiloProfile: ConformanceProfile = {
       name: 'a symlinked database',
       unsupportedOn: ['win32'],
       plant: (fake) => plantKilo(fake, { database: 'kilo-link.db', symlink: true }),
+    },
+    {
+      name: 'a FIFO named like a second database',
+      unsupportedOn: ['win32'],
+      plant: (fake) => plantKilo(fake, { database: 'kilo-fifo.db', fifo: true }),
     },
   ],
 };
@@ -168,6 +148,8 @@ interface PlantOptions {
   journal?: boolean;
   wrongSchema?: boolean;
   symlink?: boolean;
+  /** The database file is a named pipe. */
+  fifo?: boolean;
 }
 
 /** One hostile session, written the way a terminal's Kilo would; returns the id that must stay unpublished. */
@@ -184,6 +166,10 @@ function plantKilo(fake: FakeController, options: PlantOptions): string {
     return id;
   }
   let target = join(kilo.dataDir, options.database);
+  if (options.fifo) {
+    makeFifo(target);
+    return id;
+  }
   if (options.symlink) {
     // The real file lives outside the data root, where nothing may follow a link to.
     const outside = join(kilo.paths.root, 'outside-kilo.db');
@@ -599,7 +585,15 @@ const kiloExtras: ConformanceExtra[] = [
       await stream.waitForMessage((message) => message.type === 'error' && String(message.message).includes('model exploded'));
       expect((await context.prompt(stream, 'after the failure')).kind).toBe('ack');
       await stream.waitForMessage((message) => message.type === 'model-output' && (message.text ?? message.delta) === 'answer: after the failure');
+      // The serve reports the failure twice (`session.error`, then the assistant message carrying the same
+      // error); the transcript shows it once, live and when the history is read again.
+      const exploded = (message: any) => message?.type === 'error' && String(message.message).includes('model exploded');
+      expect(stream.frames.slice(from).filter((frame) => frame.kind === 'message' && exploded(frame.message)).length).toBe(1);
       stream.close();
+      const reopened = await context.openDrive(session);
+      const history = await reopened.waitForKind('history');
+      expect((history.messages as any[]).filter(exploded).length).toBe(1);
+      reopened.close();
     },
   },
   {

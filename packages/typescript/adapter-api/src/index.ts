@@ -8,7 +8,10 @@ export * from './host-process.ts';
 export * from './windows-ffi.ts';
 export * from './tool-semantics.ts';
 export * from './terminal-summary-registry.ts';
-import { decodeSessionInfo, type AgentCapabilities, type AttachMode, type DriveAttachReason, type FileChange, type FileOperation, type ModeOption, type ModelOption, type PromptInput, type SessionConnection, type SessionInfo, type Unsubscribe } from '@cosyncing/protocol';
+export * from './session-identity.ts';
+export * from './store-file.ts';
+export * from './directory-watch.ts';
+import { decodeSessionInfo, PRODUCT_IDENTITY, type AgentCapabilities, type AttachMode, type DriveAttachReason, type FileChange, type FileOperation, type ModeOption, type ModelOption, type PromptInput, type SessionConnection, type SessionInfo, type Unsubscribe } from '@cosyncing/protocol';
 import type { AgentSetupDiagnosis, SetupDiagnosisContext } from './diagnosis.ts';
 
 /** Shared minimum interval for changing output on a still-running background command. */
@@ -147,6 +150,59 @@ export function isSessionCreateTemporarilyUnavailableError(
       && 'detailCode' in error);
 }
 
+/** Why {@link ControlRefusedError} refused a client control. */
+export type ControlRefusal =
+  /** A permission or question decision for a request this connection does not hold open: one it
+   *  never issued, one any client already settled, or one the agent withdrew. */
+  | 'request-not-pending'
+  /** A command this connection does not offer. */
+  | 'command-unsupported';
+
+/** A client control refused before anything reached the agent.
+ *
+ *  Throw it from `respondPermission`, `answerQuestion`, `rejectQuestion` or `runCommand` instead of
+ *  returning quietly: a quiet return is acked, so the sender is told a forged or late decision (or
+ *  an unknown command) was delivered when nothing was. The broker answers it with a typed `nack`
+ *  (`NOT_FOUND` for a request that is not pending, `NOT_SUPPORTED` for a command), never an ack. */
+export class ControlRefusedError extends Error {
+  constructor(
+    message: string,
+    public readonly refusal: ControlRefusal,
+  ) {
+    super(message);
+    this.name = 'ControlRefusedError';
+  }
+}
+
+/** Cross-realm-safe predicate for packaged/link-workspace adapter boundaries. */
+export function isControlRefusedError(error: unknown): error is ControlRefusedError {
+  return error instanceof ControlRefusedError
+    || (error instanceof Error && error.name === 'ControlRefusedError' && 'refusal' in error);
+}
+
+/** A transcript export stopped at the byte cap the broker passed to `exportTranscript`.
+ *
+ *  Throw it only when the adapter itself counted the bytes and stopped at `maxBytes` (a streamed
+ *  native export it killed at the cap, a source file whose size is over it) — never inferred from a
+ *  native error's text. The broker answers it with `413 EXPORT_TOO_LARGE`; every other throw is a
+ *  failed export (`502 EXPORT_FAILED`). */
+export class TranscriptExportTooLargeError extends Error {
+  constructor(
+    message: string,
+    /** The cap the export ran past. */
+    public readonly maxBytes: number,
+  ) {
+    super(message);
+    this.name = 'TranscriptExportTooLargeError';
+  }
+}
+
+/** Cross-realm-safe predicate for packaged/link-workspace adapter boundaries. */
+export function isTranscriptExportTooLargeError(error: unknown): error is TranscriptExportTooLargeError {
+  return error instanceof TranscriptExportTooLargeError
+    || (error instanceof Error && error.name === 'TranscriptExportTooLargeError' && 'maxBytes' in error);
+}
+
 export interface AgentBackend {
   readonly id: string;
   readonly displayName: string;
@@ -279,8 +335,28 @@ export interface AgentBackend {
    * did not exist, which is what an adapter with no such distinction should do.
    */
   managedHostReadinessFault?(options?: AvailabilityOptions): Promise<ManagedHostReadinessFault>;
-  /** Is the tool installed / its server reachable right now? */
+  /** Can discovery run right now: is the tool's store readable, the tool installed, or its server
+   *  reachable? A file-backed adapter answers true for its store alone, so a removed binary does not
+   *  hide sessions it can still read; {@link isInstalled} is the separate answer about the binary. */
   isAvailable(options?: AvailabilityOptions): Promise<boolean>;
+  /**
+   * Is the native CLI this adapter launches present right now?
+   *
+   * A RESOLVE, never a launch: the same PATH/override lookup the adapter does
+   * before it spawns anything, with no `--version` probe and no host contact.
+   * The registry asks once per discovery leg and the broker projects every
+   * outbound row from that one answer, so it is on the roster path.
+   *
+   * `false` is a policy input, not a diagnosis: the broker keeps the agent's
+   * stored sessions listed and readable, turns Drive off on every row that is
+   * not already driving or terminal-synced (with a "not installed" reason the
+   * client shows), refuses a new Drive writer, and answers Create with the
+   * typed retryable 503. A writer that is already running is left alone.
+   *
+   * Omit it when Drive does not depend on a local binary (a remote or shared
+   * host serves it) or when the adapter cannot tell; absence gates nothing.
+   */
+  isInstalled?(): boolean | Promise<boolean>;
   /** Read-only setup/doctor checks. This path must not call discovery or start/install any runtime. */
   diagnoseSetup?(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis>;
   /** Enumerate sessions for the roster.
@@ -340,7 +416,8 @@ export interface AgentBackend {
   cloneSession?(sessionId: string): Promise<SessionInfo | void>;
   /** Optional native transcript export for the gated R2 `transcriptExport` action. The adapter writes
    *  a native export into the BROKER-OWNED `opts.tempDir` (never a client-supplied path), enforces its
-   *  own size/timeout guard, and returns the produced file path + format. The broker then verifies
+   *  own size/timeout guard (throwing {@link TranscriptExportTooLargeError} when it stops at
+   *  `maxBytes`), and returns the produced file path + format. The broker then verifies
    *  path containment, runs the mandatory redaction pass, and delivers it as an `export-attachment`
    *  file-artifact. Presence of this hook (not the tool name) gates the app's export command. */
   exportTranscript?(sessionId: string, opts: { tempDir: string; maxBytes: number; timeoutMs: number }): Promise<{ path: string; format: 'json' | 'html' }>;
@@ -754,6 +831,58 @@ export type SessionDiscoveryWork =
       carriedRows: number;
     };
 
+// ── Native installation ──────────────────────────────────────────────────────
+
+/** Why Drive is off on a session of an agent whose native CLI is missing (see
+ *  {@link AgentBackend.isInstalled}). It rides the row's `control.drive.reason`
+ *  verbatim, which is the text the client shows for an unavailable Drive. */
+export function nativeNotInstalledReason(displayName: string): string {
+  return `${displayName} is not installed, or is not visible to ${PRODUCT_IDENTITY.productName}, so `
+    + `${PRODUCT_IDENTITY.productName} cannot Drive this session. Observe still reads its stored history.`;
+}
+
+/**
+ * The attach mode that opens a NEW native Drive writer for an agent: `resume`
+ * wherever the agent declares it, otherwise `live` (a host-backed agent whose
+ * only writer is its live attach, Kilo). On an agent that also resumes, `live`
+ * joins a terminal-synced session (a Codex daemon thread, a Pi bridge) whose
+ * writer is the terminal, so it needs no local binary and is not this mode.
+ */
+export function nativeDriveAttachMode(capabilities: AgentCapabilities): 'resume' | 'live' | undefined {
+  // Tolerant of a capabilities object without modes: a bare test double declares none.
+  const modes: readonly string[] = capabilities?.attachModes ?? [];
+  if (modes.includes('resume')) return 'resume';
+  return modes.includes('live') ? 'live' : undefined;
+}
+
+/**
+ * A row as an agent whose native CLI is missing must present it: listed and
+ * readable, with Drive off and the reason why.
+ *
+ * Untouched when a writer already exists for the session: a `driving` row (the
+ * child outlives the binary that started it) or an active terminal sync (the
+ * terminal is the writer). Everything else loses Drive and any takeover offer,
+ * and an attach mode that would open a new writer reads `observe`, so a client
+ * that follows the row opens Observe instead of an attach the broker refuses.
+ */
+export function withoutNativeInstallation(
+  info: SessionInfo,
+  displayName: string,
+  capabilities: AgentCapabilities,
+): SessionInfo {
+  const control = info.control;
+  if (!control || control.drive.state === 'driving' || control.terminalSync.active) return info;
+  const writerMode = nativeDriveAttachMode(capabilities);
+  return {
+    ...info,
+    ...(writerMode !== undefined && info.attachMode === writerMode ? { attachMode: 'observe' as const } : {}),
+    control: {
+      ...control,
+      drive: { state: 'unavailable', supported: false, reason: nativeNotInstalledReason(displayName) },
+    },
+  };
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 /** Holds the registered adapters. Adding a tool touches only registration. */
@@ -909,6 +1038,42 @@ export class AgentRegistry {
     for (const [key, run] of this.lastGoodCarries) {
       if (now - run.touchedAt > ABANDONED_LEG_LAST_GOOD_MS) this.lastGoodCarries.delete(key);
     }
+  }
+
+  /** The last {@link AgentBackend.isInstalled} answer per backend: written by every discovery leg
+   *  and every fresh {@link probeNativeInstalled}, read synchronously by {@link projectNativeInstallation}. */
+  private readonly nativeInstallation = new Map<string, boolean>();
+
+  /**
+   * Ask a backend whether its native CLI is present, now, and remember the answer.
+   *
+   * `undefined` when the backend makes no claim (no hook) or the hook threw: an
+   * answer nobody established gates nothing. For the paths that act on it once
+   * (opening a Drive writer, Create); the roster reads the leg's cached answer.
+   */
+  async probeNativeInstalled(id: string): Promise<boolean | undefined> {
+    const backend = this.backends.get(id);
+    if (!backend?.isInstalled) return undefined;
+    const installed = await nativeInstalledAnswer(backend);
+    this.recordNativeInstalled(id, installed);
+    return installed;
+  }
+
+  private recordNativeInstalled(id: string, installed: boolean | undefined): void {
+    if (installed === undefined) this.nativeInstallation.delete(id);
+    else this.nativeInstallation.set(id, installed);
+  }
+
+  /** The answer the latest discovery leg (or probe) recorded; `undefined` before the first one. */
+  nativeInstalled(id: string): boolean | undefined {
+    return this.nativeInstallation.get(id);
+  }
+
+  /** Project one outbound row through its agent's recorded installation (see {@link withoutNativeInstallation}). */
+  projectNativeInstallation(info: SessionInfo): SessionInfo {
+    if (this.nativeInstallation.get(info.tool) !== false) return info;
+    const backend = this.backends.get(info.tool);
+    return backend ? withoutNativeInstallation(info, backend.displayName, backend.capabilities) : info;
   }
 
   register(backend: AgentBackend): void {
@@ -1088,7 +1253,8 @@ export class AgentRegistry {
         ...options,
         onPartialRows: (rows) =>
           options?.onPartialRows?.(AgentRegistry.acceptPartialRows(backend, rows)),
-      }).finally(() => leaveLeg(unbudgetedLeg));
+      }, undefined, (installed) => this.recordNativeInstalled(backend.id, installed))
+        .finally(() => leaveLeg(unbudgetedLeg));
       // An unbudgeted leg cannot be abandoned, but it can still throw, and a
       // thrown local adapter empties its lane exactly as a thrown external one
       // does. Same cache, same carry, same report.
@@ -1193,6 +1359,7 @@ export class AgentRegistry {
         backend,
         { ...options, signal, onPartialRows: collect },
         () => options?.signal?.aborted === true,
+        (installed) => this.recordNativeInstalled(backend.id, installed),
       ).then((result) => {
         legSettled = true;
         return { ...result, fromLeg: true as const };
@@ -1460,6 +1627,17 @@ export class AgentRegistry {
   }
 }
 
+/** A backend's installation answer, or `undefined` when it has none: a throwing
+ *  or non-boolean hook establishes nothing, so it must not turn Drive off. */
+async function nativeInstalledAnswer(backend: AgentBackend): Promise<boolean | undefined> {
+  try {
+    const installed = await backend.isInstalled?.();
+    return typeof installed === 'boolean' ? installed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * One backend's whole discovery leg, isolated: it resolves, and never throws.
  *
@@ -1480,8 +1658,12 @@ async function discoveryLeg(
    *  own budget — and reporting a budget overrun as a cancellation suppresses
    *  the one message that names it. */
   callerAborted?: () => boolean,
+  /** Receives this leg's {@link AgentBackend.isInstalled} answer: one resolve per leg, which is
+   *  what every row of the sweep is then projected through. */
+  recordInstalled?: (installed: boolean | undefined) => void,
 ): Promise<{ rows: SessionInfo[]; failure?: string; cancelled?: boolean }> {
   try {
+    if (backend.isInstalled) recordInstalled?.(await nativeInstalledAnswer(backend));
     const available = await backend.isAvailable(
       options?.signal ? { signal: options.signal } : undefined,
     );

@@ -9,7 +9,7 @@
  */
 import { expect } from 'bun:test';
 import { BROKER_CONTRACT_REVISION } from '../../../packages/typescript/protocol/src/index.ts';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { eventually, type SessionStream } from '../../harness/index.ts';
 import type { ConformanceContext, ConformanceExtra } from './kit.ts';
@@ -83,6 +83,32 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       expect(JSON.stringify(entries)).toContain('Named at create');
       const row = await context.client.waitForSession((candidate) => candidate.id === id && candidate.title === 'Named at create');
       expect(row.currentModel).toMatchObject({ providerID: 'fake', modelID: 'pi-reason' });
+    },
+  });
+
+  extras.push({
+    title: 'a create the runtime answers with a session already in the store is refused, and nothing is written into that session',
+    async run(context) {
+      const fake = asFake(context);
+      const existing = fake.seedSession({ title: 'Already stored' });
+      await context.client.waitForSession((candidate) => candidate.id === existing.id);
+      const file = piFileOf(existing.id);
+      const before = readFileSync(file);
+      fake.prepareCreate(existing.id);
+      const mark = fake.ledger.mark();
+      const refused = await post(context, `/api/sessions/${agent}`, {
+        directory: existing.cwd,
+        title: 'Claimed by create',
+        model: { providerID: 'fake', modelID: 'pi-reason', reasoningEffort: 'high' },
+      });
+      expect(refused.ok, refused.text).toBe(false);
+      // Refused at the first state read: no model or name reached the runtime, and no byte reached the file.
+      const start = fake.ledger.spawns(mark).find((entry) => entry.cwd === existing.cwd && entry.session === null)!;
+      expect(commandsOf(fake, start.pid, mark).map((command) => command.type)).toEqual(['get_state']);
+      expect(readFileSync(file).equals(before)).toBe(true);
+      const row = await context.client.waitForSession((candidate) => candidate.id === existing.id);
+      expect(row.title).toBe('Already stored');
+      expect(row.control?.drive?.state).toBe('observing');
     },
   });
 
@@ -401,16 +427,55 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const own = history.filter((entry) => entry.type === 'user-message' && text(entry) === '[[tool]] list files');
       expect(own.length).toBe(1);
       const sent = live.find((message) => message.type === 'user-message' && message.clientKey === 'keys-client');
-      if (omp) {
-        // omp persists the sender's key and clientKey on the entry itself.
-        expect(own[0].key).toBe(sent.key);
-        expect(own[0].clientKey).toBe('keys-client');
-      }
+      // The fresh reader keys the sender's row as the sender held it. omp persists the key and clientKey on
+      // the entry itself; upstream Pi's entry carries neither, and the Drive prompt's echo correlation does.
+      expect(own[0].key).toBe(sent.key);
+      expect(own[0].clientKey).toBe('keys-client');
       // Every turn closed under one key, matching the summary a reload computes for it.
       const summaries = history.filter((entry) => entry.type === 'run-summary' && entry.userMessageKey === own[0].key);
       expect(summaries.length).toBe(1);
       expect(summaries[0].status).toBe('done');
       fresh.close();
+      owner.close();
+    },
+  });
+
+  extras.push({
+    title: 'an Observe tab on a driven session shows each Drive prompt under the sender\'s key, live and after a reload, repeated text included',
+    async run(context) {
+      const session = await context.drivableSession('watched');
+      const owner = await context.openDrive(session);
+      const watcher = await context.client.attach(agent, session.id);
+      await watcher.waitForKind('history');
+      const texts = ['watched prompt', 'same text', 'same text'];
+      const sent: any[] = [];
+      for (const [index, prompt] of texts.entries()) {
+        const clientMessageId = `watched-${index}`;
+        expect((await context.prompt(owner, prompt, { clientMessageId })).kind).toBe('ack');
+        sent.push(await owner.waitForMessage((message) => message.type === 'user-message' && message.clientKey === clientMessageId));
+        // The watcher's tail reads the entry the runtime wrote, one window per prompt.
+        await watcher.waitForMessage((message) => message.type === 'user-message' && message.key === sent[index].key);
+      }
+      const keys = sent.map((message) => message.key);
+      expect(new Set(keys).size).toBe(3);
+      const watched = watcher.messages().filter((message) => message.type === 'user-message' && texts.includes(text(message)));
+      expect(watched.map((message) => [message.key, text(message)])).toEqual(keys.map((key, index) => [key, texts[index]]));
+      // A tab that opens after those prompts goes on from them: the next same-text prompt takes its own key.
+      const late = await context.client.attach(agent, session.id);
+      await late.waitForKind('history');
+      expect((await context.prompt(owner, 'same text', { clientMessageId: 'watched-late' })).kind).toBe('ack');
+      const lastSent = await owner.waitForMessage((message) => message.type === 'user-message' && message.clientKey === 'watched-late');
+      keys.push(lastSent.key);
+      await late.waitForMessage((message) => message.type === 'user-message' && message.key === lastSent.key);
+      expect(late.messages().filter((message) => message.type === 'user-message' && text(message) === 'same text')
+        .map((message) => message.key)).toEqual(keys.slice(1));
+      const reload = await context.client.attach(agent, session.id);
+      const history = (await reload.waitForKind('history')).messages as any[];
+      expect(history.filter((message) => message.type === 'user-message' && [...texts, 'same text'].includes(text(message)))
+        .map((message) => message.key)).toEqual(keys);
+      reload.close();
+      late.close();
+      watcher.close();
       owner.close();
     },
   });
@@ -613,6 +678,161 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const outcome = await refused.waitForFrame((frame) => frame.kind === 'error' || frame.kind === 'attach-conflict' || frame.kind === 'session');
       if (outcome.kind === 'session') expect(outcome.authority?.canMutate).toBe(false);
       refused.close();
+    },
+  });
+
+  extras.push({
+    title: 'a prompt on the model and thinking level the session already runs switches nothing before it is sent',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('same model');
+      const owner = await context.openDrive(session);
+      const target = { providerID: 'fake', modelID: 'pi-reason', reasoningEffort: 'high' };
+      const switched = fake.ledger.mark();
+      expect((await context.prompt(owner, 'onto the reasoning model', { model: target })).kind).toBe('ack');
+      expect(fake.ledger.commands('set_model', switched)).toHaveLength(1);
+      expect(fake.ledger.commands('set_thinking_level', switched)).toHaveLength(1);
+      const same = fake.ledger.mark();
+      const entries = readEntries(piFileOf(session.id)).length;
+      expect((await context.prompt(owner, 'still on it', { model: target })).kind).toBe('ack');
+      expect(fake.ledger.commands('set_model', same)).toEqual([]);
+      expect(fake.ledger.commands('set_thinking_level', same)).toEqual([]);
+      expect(context.prompted(session, same)).toEqual(['still on it']);
+      // No model entry joins the file for a switch that changed nothing.
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('still on it'));
+      expect(readEntries(piFileOf(session.id)).slice(entries).filter((entry) => entry.type === 'model_change')).toEqual([]);
+      // A different level is still a switch.
+      const level = fake.ledger.mark();
+      expect((await context.prompt(owner, 'thinking less', { model: { ...target, reasoningEffort: 'low' } })).kind).toBe('ack');
+      expect(fake.ledger.commands('set_thinking_level', level).map((entry) => entry.frame?.level)).toEqual(['low']);
+      owner.close();
+    },
+  });
+
+  extras.push({
+    title: 'a dialog takes one decision, only of its own kind, and a stopped turn closes the dialogs it raised',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('dialog decisions');
+      const owner = await context.openDrive(session);
+      const mark = fake.ledger.mark();
+      const replies = (from: number) => fake.ledger.commands('extension_ui_response', from).map((entry) => entry.frame);
+      const asked = context.prompt(owner, '[[question]] pick once');
+      const card = await owner.waitForMessage((message) => message.type === 'question-request' && String(message.requestId).startsWith('question-'));
+      // An id the runtime never asked under is refused, and nothing reaches the runtime.
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: `${card.requestId}-forged`, answers: [['Left']] })).kind).toBe('nack');
+      expect((await owner.sendAndAwait({ kind: 'reject-question', requestId: `${card.requestId}-forged` })).kind).toBe('nack');
+      expect(replies(mark)).toEqual([]);
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Left']] })).kind).toBe('ack');
+      // Already answered: a second decision is refused, not delivered again.
+      expect((await owner.sendAndAwait({ kind: 'reject-question', requestId: card.requestId })).kind).toBe('nack');
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Right']] })).kind).toBe('nack');
+      expect((await asked).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('answered Left'));
+      expect(replies(mark)).toEqual([{ type: 'extension_ui_response', id: card.requestId, value: 'Left' }]);
+
+      // A confirm is a permission: answering it as a question is refused.
+      const stopMark = fake.ledger.mark();
+      const from = owner.frames.length;
+      const held = context.prompt(owner, '[[permission]] then stop');
+      const confirm = await owner.waitForMessage((message) => message.type === 'permission-request' && String(message.requestId).startsWith('permission-')
+        && !owner.messages().some((other) => other.type === 'permission-resolved' && other.requestId === message.requestId));
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: confirm.requestId, answers: [['yes']] })).kind).toBe('nack');
+      expect(replies(stopMark)).toEqual([]);
+      // Stop while the turn waits on it: the card closes, the runtime is told the dialog is cancelled
+      // (it would otherwise hold the stopped turn open), and the turn ends.
+      expect((await owner.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'permission-resolved' && message.requestId === confirm.requestId);
+      expect((await held).kind).toBe('ack');
+      await owner.waitForFrame((frame) => frame.kind === 'message' && frame.message?.type === 'run-summary'
+        && frame.message.status === 'cancelled', { after: from, what: 'the stopped turn' });
+      expect(replies(stopMark)).toEqual([{ type: 'extension_ui_response', id: confirm.requestId, cancelled: true }]);
+      // Nothing is pending any more: a tab that joins the Drive now holds no card, and a late decision
+      // is refused.
+      const after = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+      await after.waitForKind('history');
+      await Bun.sleep(200);
+      expect(after.messages().some((message) => message.type === 'permission-request' && message.requestId === confirm.requestId)).toBe(false);
+      expect((await owner.sendAndAwait({ kind: 'approve', requestId: confirm.requestId, decision: 'approve' })).kind).toBe('nack');
+      expect(replies(stopMark)).toHaveLength(1);
+
+      // A dialog the runtime settled by itself during the run (its timeout) closes when the run ends.
+      const expiring = context.prompt(owner, '[[expiringconfirm]] nobody answers');
+      const lapsed = await owner.waitForMessage((message) => message.type === 'permission-request' && String(message.requestId).endsWith('-expiring'));
+      expect((await expiring).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'permission-resolved' && message.requestId === lapsed.requestId
+        && message.decision === 'external');
+      const later = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+      await later.waitForKind('history');
+      await Bun.sleep(200);
+      expect(later.messages().some((message) => message.type === 'permission-request' && message.requestId === lapsed.requestId)).toBe(false);
+      expect((await owner.sendAndAwait({ kind: 'approve', requestId: lapsed.requestId, decision: 'approve' })).kind).toBe('nack');
+      later.close();
+      after.close();
+      owner.close();
+    },
+  });
+
+  extras.push({
+    title: omp
+      ? 'Drive keeps driving through what omp itself writes between turns: an extension entry, a touch, its own whole-body rewrite'
+      : 'Drive keeps driving through an extension entry and a touch between turns, and ends on a whole-body rewrite Pi never makes',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('own writes');
+      const owner = await context.openDrive(session);
+      const demoted = (frame: any) => frame.kind === 'session' && frame.info?.control?.drive?.state !== 'driving';
+      const turn = async (prompt: string): Promise<void> => {
+        const from = owner.frames.length;
+        expect((await context.prompt(owner, prompt)).kind).toBe('ack');
+        await owner.waitForFrame((frame) => frame.kind === 'message' && frame.message?.type === 'status'
+          && frame.message.status === 'idle', { after: from, what: `the end of "${prompt}"` });
+      };
+      await turn('before own writes');
+      const from = owner.frames.length;
+      // An extension's entry and a bare touch: no conversation row, nobody else's prompt.
+      fake.watcherNoise(session);
+      await Bun.sleep(1_000);
+      expect(owner.frames.slice(from).filter(demoted)).toEqual([]);
+      await turn('after an extension entry');
+      // What omp writes when it rewrites a session: a new file, renamed onto the path, that starts with
+      // its 256-byte title slot and holds every entry it had, as it loaded them (omp migrates and
+      // sanitizes entries at load, and the next write after that rewrites the whole file).
+      const file = piFileOf(session.id);
+      let sanitized = false;
+      const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean)
+        .filter((line) => JSON.parse(line).type !== 'title')
+        .map((line) => {
+          const entry = JSON.parse(line);
+          if (sanitized || entry.message?.role !== 'assistant') return line;
+          sanitized = true;
+          delete entry.message.api;
+          return JSON.stringify(entry);
+        });
+      expect(sanitized).toBe(true);
+      const slot = { type: 'title', v: 1, title: 'own writes', updatedAt: new Date().toISOString(), pad: '' };
+      slot.pad = ' '.repeat(255 - Buffer.byteLength(JSON.stringify(slot)));
+      writeFileSync(`${file}.rewrite`, `${JSON.stringify(slot)}\n${lines.join('\n')}\n`);
+      renameSync(`${file}.rewrite`, file);
+      const mark = fake.ledger.mark();
+      if (omp) {
+        await Bun.sleep(1_000);
+        expect(owner.frames.slice(from).filter(demoted)).toEqual([]);
+        await turn('after its own rewrite');
+        expect(context.prompted(session, mark)).toEqual(['after its own rewrite']);
+      } else {
+        await owner.waitForFrame(demoted, { after: from, what: 'Drive demoted after a rewrite Pi never makes' });
+        expect((await context.prompt(owner, 'after the rewrite')).kind).toBe('nack');
+        expect(context.prompted(session, mark)).toEqual([]);
+        // Taking over again drives a runtime that reads the file as it is now.
+        const again = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+        expect((await again.waitForKind('session')).authority?.canMutate).toBe(true);
+        expect((await context.prompt(again, 'after taking over again')).kind).toBe('ack');
+        await again.waitForMessage((message) => message.type === 'model-output' && text(message).includes('after taking over again'));
+        expect(context.prompted(session, mark)).toEqual(['after taking over again']);
+        again.close();
+      }
+      owner.close();
     },
   });
 

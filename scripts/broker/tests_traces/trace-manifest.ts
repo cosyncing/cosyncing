@@ -453,21 +453,6 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'packages/typescript/adapters/cline/test/test-cline-drive.ts',
-    title: 'Cline fixture-only ACP candidate and fail-closed ownership suite',
-    nativeVersion: '3.0.61',
-    coverage: [
-      { fn: 'F01', level: 'L0', agents: ['cline'], note: 'test-only create/load identity and restart provenance converge on one fixture session id; this is not shipped Drive evidence' },
-      { fn: 'F03', level: 'L0', agents: ['cline'], note: 'candidate prompts serialize and reject missing causal evidence; production never enables this ACP writer' },
-      { fn: 'F04', level: 'L0', agents: ['cline'], note: 'candidate semantic comparison fails closed when live and durable shapes diverge' },
-      { fn: 'F06', level: 'L0', agents: ['cline'], note: 'fixture ACP permissions settle on close or demotion; shipped Observe remains non-actionable' },
-      { fn: 'F08', level: 'L0', agents: ['cline'], note: 'fixture model and mode propagation tests do not advertise production controls' },
-      { fn: 'F14', level: 'L0', agents: ['cline'], note: 'fixture create/cancel plus independently measured native rename preserve lifecycle boundaries' },
-      { fn: 'F15', level: 'L0', agents: ['cline'], note: 'candidate live telemetry mapping remains unshipped; durable snapshot telemetry is covered separately' },
-      { fn: 'F16', level: 'L0', agents: ['cline'], note: 'missing delimiter, timeout, rewrite, permission, and foreign-writer cases fail read-only in the fixture-only candidate' },
-    ],
-  },
-  {
     file: 'packages/typescript/adapters/cline/test/test-cline-hub.ts',
     title: 'Cline shipped isolated Hub Drive, approval, replay, and ownership suite',
     nativeVersion: '3.0.61 / Hub core 0.0.82',

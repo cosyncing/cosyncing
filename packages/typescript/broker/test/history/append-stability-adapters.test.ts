@@ -729,7 +729,9 @@ async function codex(): Promise<void> {
   process.env.COSYNCING_CODEX_SYNC_SERVER = '0';
   const { CodexAdapter } = await import('../../../adapters/codex/src/index.ts');
   const { pathToFileURL } = await import('node:url');
-  const path = join(home, 'rollout-2026-09-14T00-00-00-00000000-0000-4000-8000-000000000999.jsonl');
+  // Inside the store (`$CODEX_HOME/sessions`): attach admits only a rollout discovery would publish.
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  const path = join(home, 'sessions', 'rollout-2026-09-14T00-00-00-00000000-0000-4000-8000-000000000999.jsonl');
   const line = (value: unknown) => `${JSON.stringify(value)}\n`;
   writeFileSync(path, [
     { type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000999', cwd: home } },

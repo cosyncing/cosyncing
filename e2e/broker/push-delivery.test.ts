@@ -586,11 +586,9 @@ describe('a phone wake held back by its window', () => {
   });
   afterAll(() => held?.stop());
 
-  // KNOWN DEFECT (reported, not fixed): a scheduler pass awaits every dispatch it starts, a phone's
-  // coalesced trailing wake included, and passes run one at a time. So once a phone's wake is held
-  // for its window (30 s in production), every later alert, to a browser or another phone, waits
-  // for that window. `test.failing` passes while the defect stands; make it `test` once fixed.
-  test.failing('a browser is alerted to a new event while a phone\'s wake is held back', async () => {
+  // A phone's coalesced trailing wake is held for its window (30 s in production). Only that phone
+  // waits on it: every other device's alert goes out at once.
+  test('a browser is alerted to a new event while a phone\'s wake is held back', async () => {
     const client = held.client();
     const browser = new WebPushSubscriber(service, 'held');
     expect((await register({ deviceId: 'held-phone', platform: 'fcm', token: 'fcm-held-0001' }, client)).status).toBe(201);

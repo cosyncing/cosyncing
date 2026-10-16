@@ -756,12 +756,6 @@ void main() {
       expect(sigs, ['1', '2']);
     });
 
-    // KNOWN PRODUCT BUG (reported, not fixed here): `_DiffRefViewState._load`
-    // calls `setState(() => _future = fresh)`, an arrow that returns the Future,
-    // which Flutter's debug assertion rejects ("setState() callback argument
-    // returned a Future"), so in debug and test builds the diff shows "Couldn't
-    // load" instead of the retried body. Release builds strip the assertion.
-    // Unskip when fixed (use a block body).
     featureTest('the retried body renders after a stale URL fails', (f) async {
       final studio = f.network.add('http://studio.test:7734');
       final body = '@@ -1,1 +1,1 @@\n-x\n+after retry\n${'+pad\n' * 40000}';
@@ -787,6 +781,6 @@ void main() {
         () => find.text('after retry').evaluate().isNotEmpty,
         reason: 'the retry with the fresher URL renders the body',
       );
-    }, skip: true);
+    });
   });
 }

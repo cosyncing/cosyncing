@@ -19,7 +19,8 @@
  * reader and envelope discipline rather than growing a second copy of them —
  * see {@link readBoundedBody} and {@link decodeKimiEnvelope}.
  */
-import { closeSync, constants, fstatSync, opendirSync, openSync, readSync } from 'node:fs';
+import { closeSync, opendirSync, readSync } from 'node:fs';
+import { openRegularFileSync as openStoreFileSync } from '@cosyncing/adapter-api';
 import { join } from 'node:path';
 
 // ── Home ────────────────────────────────────────────────────────────────────
@@ -239,18 +240,11 @@ export function boundedDirectoryListing(directory: string, maxEntries: number): 
  * wire-journal tail. So the hardening lives at the open, once, for all of them.
  */
 export function openRegularFileSync(path: string): number {
-  // O_NONBLOCK makes a FIFO open return instead of waiting for a writer, and
-  // O_NOFOLLOW refuses a symlinked path outright. The fstat then runs on the
-  // OPENED descriptor, so there is no gap between what was checked and what is
-  // read. O_NONBLOCK has no effect on regular-file reads.
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-  try {
-    if (!fstatSync(fd).isFile()) throw new Error('not a regular file');
-  } catch (error) {
-    closeSync(fd);
-    throw error;
-  }
-  return fd;
+  // The shared store open (adapter-api `store-file.ts`): non-blocking, so a
+  // FIFO returns instead of waiting for a writer; no-follow, so a symlinked
+  // path is refused outright; and the type is proven on the OPENED descriptor,
+  // so there is no gap between what was checked and what is read.
+  return openStoreFileSync(path, { noFollow: true });
 }
 
 /**

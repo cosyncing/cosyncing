@@ -22,6 +22,7 @@ import {
   type FakeController,
   installFakeExecutable,
   Ledger,
+  replacedLogResetsObserve,
   type SeededSession,
   type SeedOptions,
   treeSnapshot,
@@ -74,14 +75,10 @@ export const reasonixProfile: ConformanceProfile = {
   },
   createChildAdopted: true,
   userRowDurable: 'turn-end',
-  knownBugs: {
-    C15: 'an atomic replacement of the log is noticed only at the next prompt: Bun 1.3.14 fs.watch on Linux '
-      + 'names a rename-over by its temporary source file only, which the adapter watcher filters out',
-  },
   // No hint until `--resume` has an exact session-target form.
   terminal: { resumeHint: null, syncAvailable: false },
   subagents: false,
-  missingBinaryRoster: 'hidden',
+  missingBinaryRoster: 'observe-only',
   scenarios: {
     C18: {
       refuse: 'supportsModelSwitch is false: the v1.25.2 probe did not prove session/load + set_config_option, '
@@ -153,6 +150,7 @@ function plantWithEdit(fake: FakeController, suffix: string, edit: (value: Recor
 }
 
 const reasonixExtras: ConformanceExtra[] = [
+  replacedLogResetsObserve('reasonix'),
   {
     title: 'Resume is refused while the native status is not idle or unknown, with no writer started',
     async run(context) {

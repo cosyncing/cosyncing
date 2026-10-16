@@ -320,22 +320,6 @@ void main() {
     );
   });
 
-  test('active and non-idle sessions never retain ready markers', () {
-    final tracker = ReadyToReviewTracker();
-    final working = _session(
-      id: 'active',
-      title: 'Active',
-      status: SessionStatus.working,
-    );
-    final idle = _session(id: 'active', title: 'Active');
-    tracker.observe([working]);
-    expect(
-      tracker.observe([idle], activeKey: sessionRosterKey(idle)),
-      isEmpty,
-    );
-    expect(tracker.observe([working]), isEmpty);
-  });
-
   // R1c. Before this lane the projection resolved parent links but returned
   // rows in raw broker order with no depth and no rollup, so a newer or working
   // child could sort above its idle parent and the parent pill read only its
@@ -704,28 +688,6 @@ void main() {
         'p1',
         'c1',
       ]);
-    });
-
-    test('ready to review waits for the whole subtree to settle', () {
-      final tracker = ReadyToReviewTracker();
-      SessionStatus effective(
-        List<SessionInfo> sessions,
-        SessionInfo session,
-      ) => SessionRosterLineage.build(sessions).effectiveStatusFor(session);
-
-      Set<String> observe(List<SessionInfo> sessions) => tracker.observe(
-        sessions,
-        statusOf: (session) => effective(sessions, session),
-      );
-
-      final parent = root('p1');
-      final busy = [parent, child('c1', 'p1', status: SessionStatus.working)];
-      final settled = [parent, child('c1', 'p1')];
-
-      expect(observe(busy), isEmpty);
-      // The parent was idle the whole time; only the subtree settling makes it
-      // ready. A per-row tracker would never have fired here at all.
-      expect(observe(settled), contains(sessionCompositeRosterKey(parent)));
     });
 
     test('search keeps a matching descendant reachable under its parent', () {

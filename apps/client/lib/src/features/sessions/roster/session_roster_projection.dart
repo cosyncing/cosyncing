@@ -114,53 +114,6 @@ final class SessionRosterFilters {
   );
 }
 
-/// Tracks only observed Working -> Idle transitions; cold-start idle rows are
-/// seeded as known and never marked ready.
-final class ReadyToReviewTracker {
-  final Map<String, SessionStatus> _known = {};
-  final Set<String> _ready = {};
-
-  /// Observes a new authoritative roster and returns current review keys.
-  ///
-  /// [statusOf] supplies the status a row is judged by. The roster passes
-  /// [SessionRosterLineage.effectiveStatusFor] so a parent is not announced as
-  /// ready while a descendant is still working; it defaults to the row's own
-  /// canonical status.
-  Set<String> observe(
-    List<SessionInfo> sessions, {
-    String? activeKey,
-    SessionStatus Function(SessionInfo session)? statusOf,
-  }) {
-    final present = <String>{};
-    for (final session in sessions) {
-      final key = sessionCompositeRosterKey(session);
-      present.add(key);
-      final status = statusOf == null ? session.status : statusOf(session);
-      final before = _known[key];
-      if (before == SessionStatus.working &&
-          status == SessionStatus.idle &&
-          sessionRosterKey(session) != activeKey &&
-          key != activeKey) {
-        _ready.add(key);
-      }
-      if (status != SessionStatus.idle ||
-          sessionRosterKey(session) == activeKey ||
-          key == activeKey) {
-        _ready.remove(key);
-      }
-      _known[key] = status;
-    }
-    _known.removeWhere((key, _) => !present.contains(key));
-    _ready.removeWhere((key) => !present.contains(key));
-    return Set.unmodifiable(_ready);
-  }
-
-  /// Clears the marker for an explicitly opened session.
-  void markOpened(SessionInfo session) {
-    _ready.remove(sessionCompositeRosterKey(session));
-  }
-}
-
 /// Per-parent control over whether that parent's child subtree is displayed.
 ///
 /// Tri-state on purpose: [auto] has to stay distinct from [collapsed] so the

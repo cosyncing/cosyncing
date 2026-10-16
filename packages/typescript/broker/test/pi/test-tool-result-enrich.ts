@@ -25,7 +25,7 @@
 export {};
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { summarizeDiff, splitUnifiedDiffFiles, type AgentMessage } from '../../../adapter-api/src/index.ts';
 import { enrichPiToolResult, piToolDisplayClass } from '../../../adapters/pi/src/index.ts';
 import { PiBridgeConnection, PiBridgeRegistry } from '../../../adapters/pi/src/bridge.ts';
@@ -831,9 +831,10 @@ try {
   const root = join(brokerFixtureRoot, 'turn-attention');
   const cwd = join(root, 'work');
   const fakePi = join(root, 'pi');
-  const sessionFile = join(root, 'sessions', '2026-09-23T00-00-00-000Z_attention.jsonl');
+  // Inside the dialect's session store (PI_CODING_AGENT_DIR/sessions): attach refuses any other file.
+  const sessionFile = join(root, 'agent', 'sessions', '2026-09-23T00-00-00-000Z_attention.jsonl');
   mkdirSync(cwd, { recursive: true });
-  mkdirSync(join(root, 'sessions'), { recursive: true });
+  mkdirSync(dirname(sessionFile), { recursive: true });
   // One turn finished before any connection saw it.
   writeFileSync(sessionFile, [
     { type: 'session', version: 3, id: 'attention', timestamp: '2026-09-23T09:00:00.000Z', cwd },
@@ -1028,9 +1029,9 @@ process.stdin.resume();
   const root = join(brokerFixtureRoot, 'live-history-keys');
   const cwd = join(root, 'work');
   const fakePi = join(root, 'pi');
-  const sessionFile = join(root, 'sessions', '2026-09-26T00-00-00-000Z_keys.jsonl');
+  const sessionFile = join(root, 'agent', 'sessions', '2026-09-26T00-00-00-000Z_keys.jsonl');
   mkdirSync(cwd, { recursive: true });
-  mkdirSync(join(root, 'sessions'), { recursive: true });
+  mkdirSync(dirname(sessionFile), { recursive: true });
   writeFileSync(sessionFile, [
     { type: 'session', version: 3, id: 'keys', timestamp: '2026-09-26T09:00:00.000Z', cwd },
     { type: 'message', id: 'a1b2c3d4', parentId: null, timestamp: '2026-09-26T09:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'before attach' }], timestamp: Date.parse('2026-09-26T09:00:01.000Z') } },

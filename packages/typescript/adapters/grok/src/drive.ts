@@ -22,6 +22,7 @@ import type {
   SessionInfo,
   SlashCommand,
 } from '@cosyncing/adapter-api';
+import { ControlRefusedError } from '@cosyncing/adapter-api';
 import {
   grokEventId,
   grokMessageKey,
@@ -77,6 +78,9 @@ export interface GrokDriveOpenOptions extends Omit<GrokObserveOptions, 'session'
   onDemote?: (connection: GrokDriveConnection) => void;
   onClose?: (connection: GrokDriveConnection) => void;
   replayCorrelations?: GrokReplayCorrelations;
+  /** How long a stopped turn may take to answer `session/prompt` before Drive fails closed
+   *  (default {@link GROK_STOP_SETTLE_MS}). */
+  stopSettleMs?: number;
 }
 
 interface GrokLazyHooks {
@@ -135,6 +139,15 @@ const MAX_PUBLISHED_RUN_KEYS = 512;
 const MAX_MODE_CHARS = 128;
 const ACTIVE_TAIL_SETTLE_ATTEMPTS = 7;
 const ACTIVE_TAIL_SETTLE_MS = 40;
+/**
+ * How long Stop waits for the running `session/prompt` to answer after `session/cancel`.
+ *
+ * ACP has the agent end a cancelled turn by answering its prompt with `stopReason: cancelled`, and
+ * Grok's own hook documentation classifies a client `session/cancel` as a user interrupt. Until
+ * that answer arrives the turn still owns the writer, so a prompt that never answers cannot be
+ * left holding Drive: past this bound the connection is demoted, read-only, with a notice.
+ */
+export const GROK_STOP_SETTLE_MS = 10_000;
 
 export const GROK_PERMISSION_MODES: readonly ModeOption[] = Object.freeze([
   // The pinned 1.0.13 child does not echo its launch mode from session/load.
@@ -555,6 +568,13 @@ export class GrokDriveConnection extends GrokObserveConnection {
   private transportClosing?: Promise<void>;
   private readonly claimedEvents: GrokReplayCorrelations;
   private readonly durablePromptClaims = new Set<string>();
+  /**
+   * Prompts this connection admitted whose delivered (`queued: false`) row no subscriber holds yet.
+   * The tail drain publishes that row when it reads the durable echo first; a snapshot read (the
+   * turn's settle read, a prompt admission check, a replay) that gets there first moves the tail
+   * past the line, so the row is restated live from the snapshot instead.
+   */
+  private readonly undeliveredPromptRows = new Set<string>();
   private readonly onDemoteHook?: (connection: GrokDriveConnection) => void;
   private readonly onCloseHook?: (connection: GrokDriveConnection) => void;
   private readonly onConfigurationHook?: GrokDriveOpenOptions['onConfiguration'];
@@ -573,6 +593,10 @@ export class GrokDriveConnection extends GrokObserveConnection {
   /** Run-summary keys already published live, so none is ever reopened by a later `running`. */
   private readonly publishedRunKeys = new Set<string>();
   private cancelGeneration = 0;
+  /** `session/prompt` calls that have answered (or failed), so a Stop can tell whether ITS turn did. */
+  private nativePromptAnswers = 0;
+  private stopDeadline: ReturnType<typeof setTimeout> | undefined;
+  private readonly stopSettleMs: number;
   private closedDrive = false;
   private demoted = false;
   private correlationInvalidated = false;
@@ -608,6 +632,9 @@ export class GrokDriveConnection extends GrokObserveConnection {
     if (options.onConfiguration) this.onConfigurationHook = options.onConfiguration;
     if (options.onHistoryBoundary) this.onHistoryBoundaryHook = options.onHistoryBoundary;
     if (options.expectedHistoryBoundary) this.expectedHistoryBoundary = options.expectedHistoryBoundary;
+    this.stopSettleMs = Number.isFinite(options.stopSettleMs) && (options.stopSettleMs ?? 0) > 0
+      ? options.stopSettleMs!
+      : GROK_STOP_SETTLE_MS;
   }
 
   static async open(
@@ -682,11 +709,18 @@ export class GrokDriveConnection extends GrokObserveConnection {
     return GROK_PERMISSION_MODES.map((mode) => ({ ...mode }));
   }
 
+  /** Grok's ACP catalog, behind the Stop action every ACP agent has (`session/cancel`): Grok lists
+   *  no stop command of its own, so without this the app offered no Stop for Grok at all. */
   async listCommands(): Promise<SlashCommand[]> {
     try {
       const commands = await this.transport.listCommands?.() ?? [];
       if (commands.length > 0) this.commands = commands;
-      return this.commands.map((command) => ({ ...command }));
+      return [
+        { name: 'stop', description: 'Stop the running turn', kind: 'action' },
+        ...this.commands
+          .filter((command) => command.name !== 'stop' && command.name !== 'abort')
+          .map((command) => ({ ...command })),
+      ];
     } catch (error) {
       this.demote(`Grok ACP command discovery failed: ${error instanceof Error ? error.message : String(error)}.`);
       throw error;
@@ -694,6 +728,11 @@ export class GrokDriveConnection extends GrokObserveConnection {
   }
 
   async runCommand(name: string, args?: string, input: CommandInput = {}): Promise<CommandResult | void> {
+    if (name === 'stop' || name === 'abort') {
+      this.assertWritable('Stop');
+      this.stop();
+      return { notice: 'Stop requested.' };
+    }
     const command = this.commands.find((entry) => entry.name === name);
     if (!command) throw new Error(`Grok command /${name} is not in the current ACP command catalog.`);
     const suffix = args?.trim();
@@ -729,6 +768,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
       ...(input.clientMessageId ? { clientKey: input.clientMessageId } : {}),
     };
     this.pendingPrompts.push(pending);
+    this.undeliveredPromptRows.add(key);
     this.emitLive(row);
     const admissionCancelGeneration = this.cancelGeneration;
     const run = async () => {
@@ -774,15 +814,22 @@ export class GrokDriveConnection extends GrokObserveConnection {
             ...(this.info.model ? { model: this.info.model } : {}),
           });
         }
+        // The model catalog read above awaits: a Stop that landed during it is for this prompt too.
+        if (admissionCancelGeneration !== this.cancelGeneration) throw new GrokPromptCancelledBeforeDelivery();
         this.activeTurns += 1;
         nativeStarted = true;
         ownedTurn = { pendingKey: key, held: [] };
         this.ownedTurn = ownedTurn;
         this.emitLive({ type: 'status', status: 'running' });
-        const result = await this.transport.sessionPrompt({
-          sessionId: this.session.id,
-          prompt: [{ type: 'text', text: input.text }],
-        });
+        let result: AcpSessionPromptResult;
+        try {
+          result = await this.transport.sessionPrompt({
+            sessionId: this.session.id,
+            prompt: [{ type: 'text', text: input.text }],
+          });
+        } finally {
+          this.nativePromptAnswers += 1;
+        }
         // `rate_limit` belongs here with the other terminal reasons. Grok emits it
         // when the account's quota runs out mid-turn -- the installed v79 transcript
         // has `retry_state` exhausted on a 429 and then `stop_reason: "rate_limit"`.
@@ -807,12 +854,14 @@ export class GrokDriveConnection extends GrokObserveConnection {
         if (error instanceof GrokPromptCancelledBeforeDelivery && !this.demoted && !this.closedDrive) {
           const index = this.pendingPrompts.findIndex((entry) => entry.key === key);
           if (index >= 0) this.pendingPrompts.splice(index, 1);
+          this.undeliveredPromptRows.delete(key);
           this.emitHistoryReset();
           return;
         }
         if (!nativeStarted) {
           const index = this.pendingPrompts.findIndex((entry) => entry.key === key);
           if (index >= 0) this.pendingPrompts.splice(index, 1);
+          this.undeliveredPromptRows.delete(key);
           this.emitHistoryReset();
         }
         if (nativeStarted
@@ -850,7 +899,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
   override async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
     this.assertWritable('permission response');
     const pending = this.pendingPermissions.get(requestId);
-    if (!pending) throw new Error(`Grok permission ${requestId} is not pending.`);
+    if (!pending) throw new ControlRefusedError(`Grok permission ${requestId} is not pending.`, 'request-not-pending');
     const selected = pending.optionIds.get(decision);
     if (!selected) throw new Error(`Grok permission decision ${decision} was not advertised for ${requestId}.`);
     this.pendingPermissions.delete(requestId);
@@ -862,6 +911,27 @@ export class GrokDriveConnection extends GrokObserveConnection {
     this.cancelGeneration += 1;
     try { if (this.transport.alive) this.transport.sessionCancel(this.session.id); } catch { /* resolver cleanup below */ }
     this.settlePermissions('external');
+  }
+
+  /**
+   * The user's Stop: cancel natively, drop every prompt not yet delivered, and keep Drive. The
+   * running turn then settles through its own `session/prompt` answer (`stopReason: cancelled`
+   * closes it as a cancelled run). An answer that never comes fails closed: after
+   * `stopSettleMs` the connection is demoted, read-only, with a notice that says why.
+   */
+  private stop(): void {
+    const awaitingAnswer = this.activeTurns > 0;
+    const answersAtStop = this.nativePromptAnswers;
+    this.cancel();
+    if (!awaitingAnswer) return;
+    if (this.stopDeadline) clearTimeout(this.stopDeadline);
+    const seconds = Math.max(1, Math.round(this.stopSettleMs / 1000));
+    this.stopDeadline = setTimeout(() => {
+      this.stopDeadline = undefined;
+      if (this.closedDrive || this.demoted || this.nativePromptAnswers !== answersAtStop) return;
+      this.demote(`Grok did not end the turn within ${seconds} second${seconds === 1 ? '' : 's'} of Stop.`);
+    }, this.stopSettleMs);
+    (this.stopDeadline as { unref?: () => void }).unref?.();
   }
 
   demote(reason = 'Grok updates log received a detectable foreign user write.'): void {
@@ -888,6 +958,8 @@ export class GrokDriveConnection extends GrokObserveConnection {
   override async close(): Promise<void> {
     if (this.closedDrive) return;
     this.closedDrive = true;
+    if (this.stopDeadline) clearTimeout(this.stopDeadline);
+    this.stopDeadline = undefined;
     this.cancelGeneration += 1;
     this.settlePermissions('external');
     try {
@@ -898,6 +970,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
         await this.transportClosing;
       } finally {
         this.liveStreams.clear();
+        this.undeliveredPromptRows.clear();
         this.liveHandlers.clear();
         this.onCloseHook?.(this);
       }
@@ -922,6 +995,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
   protected override publishTailMessage(message: AgentMessage): void {
     if (this.holdOwnedTerminal(message, false)) return;
     this.notePublishedRun(message);
+    this.notePromptRowDelivered(message);
     super.publishTailMessage(message);
   }
 
@@ -948,6 +1022,27 @@ export class GrokDriveConnection extends GrokObserveConnection {
       if (!wasDemoted && this.demoted) return;
     }
     if (this.pendingPrompts.length === 0) this.ownershipFence = Math.max(this.ownershipFence, byteLength);
+    this.restateDeliveredPromptRows(messages);
+  }
+
+  /**
+   * Every snapshot read moves the tail cursor past what it read, so a durable echo it claimed
+   * first (a turn that finished before the tail drained, read by its own settle) is never tailed.
+   * Restate the sender's row as delivered, once, or it stays queued until a fresh attach.
+   */
+  private restateDeliveredPromptRows(messages: readonly AgentMessage[]): void {
+    if (this.undeliveredPromptRows.size === 0 || this.closedDrive) return;
+    for (const message of messages) {
+      if (message.type !== 'user-message' || message.queued !== false
+        || message.key === undefined || !this.undeliveredPromptRows.has(message.key)) continue;
+      this.emitLive({ ...message });
+    }
+  }
+
+  private notePromptRowDelivered(message: AgentMessage): void {
+    if (message.type === 'user-message' && message.queued === false && message.key !== undefined) {
+      this.undeliveredPromptRows.delete(message.key);
+    }
   }
 
   protected override onHistoryRewrite(): void {
@@ -1481,6 +1576,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
     const publish = this.settleLiveDelta(message);
     if (publish === undefined) return;
     this.notePublishedRun(publish);
+    this.notePromptRowDelivered(publish);
     for (const handler of this.liveHandlers) {
       try { handler(publish); } catch (error) {
         this.trace?.({ op: 'observe', detail: `live subscriber threw: ${error instanceof Error ? error.message : String(error)}` });

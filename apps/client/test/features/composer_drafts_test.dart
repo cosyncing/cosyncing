@@ -237,10 +237,11 @@ void main() {
   });
 
   group('both sides changed', () {
-    /// Types a synced draft, loses the stream, edits it offline, quits, and
-    /// relaunches after the other client rewrote the shared draft: the
-    /// controller of the new launch has no recent edit, so this is the
-    /// independent-edits case, not a live typing race.
+    /// Types a synced draft, loses the stream, edits it offline, and comes
+    /// back after the other client rewrote the shared draft. The last
+    /// keystroke is two seconds old by then (fake time, the clock the
+    /// recently-typed guard reads), so this is the independent-edits case,
+    /// not a live typing race.
     Future<(AppDriver, FakeBroker, ComposerDesk)> divergedDrafts(
       FeatureContext f,
     ) async {
@@ -250,18 +251,15 @@ void main() {
       await disconnect(app, studio);
       await app.type('device edit');
       await app.tick(debounce);
-      desk
-        ..draftText = 'shared edit'
-        ..draftRevision += 1;
-      final again = await f.restart();
-      studio.socketsAccepted = true;
-      await again.openFromRoster('s1', cwd: '/work/studio');
-      await again.pumpUntil(
+      desk.writeFromElsewhere('shared edit');
+      await app.elapse(const Duration(seconds: 2));
+      await reconnect(app, studio, desk);
+      await app.pumpUntil(
         () => find.byKey(keepLocal).evaluate().isNotEmpty,
         reason: 'the conflict banner',
         every: const Duration(seconds: 1),
       );
-      return (again, studio, desk);
+      return (app, studio, desk);
     }
 
     featureTest(
@@ -430,10 +428,6 @@ void main() {
       'a refusal that lands inside the debounce of newer typing still '
       'offers the refused prompt back',
       (f) async {
-        // KNOWN PRODUCT GAP: at that instant the durable row is still the
-        // refused prompt's, so the restore (into an empty composer only) is
-        // dropped, the debounce then overwrites the row with the newer text,
-        // and the refused prompt is gone with no banner.
         final (app, _, desk) = await openComposer(
           f,
           setup: (_, desk) => desk.answer = PromptAnswer.hold,
@@ -444,8 +438,10 @@ void main() {
         await app.settle();
         await app.tick(debounce);
         expect(find.text('Recover kept version'), findsOneWidget);
+        expect(app.composerText, 'newer thought');
+        await app.tap(find.text('Use kept version'));
+        expect(app.composerText, 'the first attempt');
       },
-      skip: true,
     );
   });
 

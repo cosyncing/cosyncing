@@ -168,22 +168,30 @@ export function sameCodexInstallation(executable: string, cli: string, home?: st
   return packageBinary(cli, 'standalone') && packageBinary(executable, 'app-server-daemon');
 }
 
-function inspectProcess(pid: number, home: string, cli: string, receiptStart?: string): CodexDaemonProcessRead {
+/** How the receipt's start time is checked against the process: `ps -o lstart`. */
+export type CodexDaemonStartTimeReader = (pid: number) => string | undefined;
+
+function inspectProcess(
+  pid: number, home: string, cli: string, receiptStart?: string,
+  readStartTime: CodexDaemonStartTimeReader = (target) => psField(target, 'lstart'),
+): CodexDaemonProcessRead {
   if (pid === process.pid || !Number.isSafeInteger(pid) || pid <= 0) return unknown('Invalid Codex daemon PID.');
   const live = processes.liveProcess(pid, { fresh: true });
   if (live.state !== 'running') return live.state === 'absent' ? live : unknown('Codex process identity is unreadable.');
+  // The provider reads a zombie as absent, so an exited daemon its parent has not reaped is gone
+  // already. Any later failed read is weighed against that: the daemon can exit and be reaped
+  // mid-inspection, and a daemon that exited then is gone, not unverifiable.
+  const exited = (): boolean => processes.liveProcess(pid, { fresh: true }).state === 'absent';
   try {
     if (receiptStart !== undefined) {
-      const start = psField(pid, 'lstart');
-      if (!start) return unknown('Codex daemon process start time could not be read.');
+      const start = readStartTime(pid);
+      if (!start) return exited() ? { state: 'absent' } : unknown('Codex daemon process start time could not be read.');
       // A reused PID does not make an old receipt authoritative for the replacement process.
       if (normalizeStart(start) !== receiptStart) return { state: 'absent' };
     }
     let executable: string;
     let argv: string[];
     if (process.platform === 'linux') {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8').split(')').at(-1)!.trim().split(/\s+/);
-      if (stat[0] === 'Z') return { state: 'absent' }; // exited; a parent may not have reaped it yet
       if (lstatSync(`/proc/${pid}`).uid !== process.getuid?.()) return unknown('Codex daemon belongs to another user.');
       executable = realpathSync(`/proc/${pid}/exe`);
       argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
@@ -206,18 +214,23 @@ function inspectProcess(pid: number, home: string, cli: string, receiptStart?: s
     if (!sameCodexInstallation(executable, resolvedCli, home)) return unknown('Codex daemon executable does not match this installation.');
     const argumentsRead = parseManagedCodexDaemonArguments(argv.slice(1));
     if (!argumentsRead.valid) return unknown(argumentsRead.detail);
+    // It may have exited while it was read (gone, or a zombie).
     const after = processes.liveProcess(pid, { fresh: true });
+    if (after.state === 'absent') return { state: 'absent' };
     if (after.state !== 'running' || after.identity.start !== live.identity.start || after.identity.boot !== live.identity.boot) {
       return unknown('Codex daemon identity changed during inspection.');
     }
     return { state: 'running', process: { ...live.identity, executable, argv, home, cli: resolvedCli, unknownFlags: argumentsRead.unknownFlags } };
   } catch {
-    return unknown('Codex daemon executable or launch identity could not be read.');
+    return exited() ? { state: 'absent' } : unknown('Codex daemon executable or launch identity could not be read.');
   }
 }
 
 /** The native PID receipt survives a lost control socket. Never infer process exit from an RPC failure. */
-export function readCodexDaemonProcess(home: string, cli: string): CodexDaemonProcessRead {
+export function readCodexDaemonProcess(home: string, cli: string, dependencies: {
+  /** Test seam: the receipt start-time read, where a reap can land mid-inspection. */
+  readStartTime?: CodexDaemonStartTimeReader;
+} = {}): CodexDaemonProcessRead {
   const records: { layout: CodexDaemonReceiptLayout; pid: number; processStartTime: string }[] = [];
   for (const layout of ['app-server.pid', 'daemon.pid'] as const) {
     const path = join(home, 'app-server-daemon', layout);
@@ -239,7 +252,7 @@ export function readCodexDaemonProcess(home: string, cli: string): CodexDaemonPr
   }
   const verified: { layout: CodexDaemonReceiptLayout; process: CodexDaemonProcess }[] = [];
   for (const record of records) {
-    const inspected = inspectProcess(record.pid, home, cli, record.processStartTime);
+    const inspected = inspectProcess(record.pid, home, cli, record.processStartTime, dependencies.readStartTime);
     if (inspected.state === 'absent') continue;
     if (inspected.state === 'unknown') return inspected;
     verified.push({ layout: record.layout, process: inspected.process });

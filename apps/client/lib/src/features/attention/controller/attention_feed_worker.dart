@@ -93,7 +93,7 @@ class AttentionFeedWorker implements AttentionFeedRunner {
     this.unauthorizedRetryDelay = defaultAttentionFeedUnauthorizedRetryDelay,
     this.onUnauthorized,
     this.now,
-    this.sleep = Future<void>.delayed,
+    AttentionFeedDelay? sleep,
     this.focusMatcher = _noForegroundFocus,
     this.resolveSetting,
     this.onDelivery,
@@ -108,6 +108,7 @@ class AttentionFeedWorker implements AttentionFeedRunner {
          'pageSize must not exceed attention endpoint cap',
        ),
        brokerScopeKey = brokerScopeKey ?? brokerProfileId,
+       _injectedSleep = sleep,
        _profileSyncGate = profileSyncGate ?? sharedAttentionProfileSyncGate {
     _deliveryProcessor = AttentionFeedDeliveryProcessor(
       repository: repository,
@@ -179,8 +180,36 @@ class AttentionFeedWorker implements AttentionFeedRunner {
   /// Optional deterministic clock for metadata.
   final DateTime Function()? now;
 
-  /// Deterministic delay function for tests.
-  final AttentionFeedDelay sleep;
+  /// Delay injected by tests; null waits on timers that [stop] cancels.
+  final AttentionFeedDelay? _injectedSleep;
+
+  /// Waits [duration]: the injected delay, or a timer [stop] cancels.
+  ///
+  /// A plain `Future.delayed` outlived the worker: after a refused credential
+  /// the loop parks for [unauthorizedRetryDelay] (30 minutes), and stopping
+  /// the worker only stopped waiting for it, leaving the timer scheduled.
+  Future<void> sleep(Duration duration) {
+    final injected = _injectedSleep;
+    if (injected != null) return injected(duration);
+    final done = Completer<void>();
+    late final Timer timer;
+    timer = Timer(duration, () {
+      _pendingSleeps.remove(timer);
+      if (!done.isCompleted) done.complete();
+    });
+    _pendingSleeps[timer] = done;
+    return done.future;
+  }
+
+  final Map<Timer, Completer<void>> _pendingSleeps = {};
+
+  void _cancelSleeps() {
+    for (final MapEntry(key: timer, value: done) in _pendingSleeps.entries) {
+      timer.cancel();
+      if (!done.isCompleted) done.complete();
+    }
+    _pendingSleeps.clear();
+  }
 
   /// Maps foreground UI state to affected run-failed event scope.
   final AttentionFeedRunFailureFocusMatcher focusMatcher;
@@ -241,6 +270,7 @@ class AttentionFeedWorker implements AttentionFeedRunner {
     if (!_stopSignal.isCompleted) {
       _stopSignal.complete();
     }
+    _cancelSleeps();
     await _loopFuture;
   }
 

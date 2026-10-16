@@ -24,3 +24,21 @@ Dio? brokerTransportDio(BrokerHttpTransport? transport) {
   if (transport == null) return null;
   return Dio()..httpClientAdapter = transport();
 }
+
+/// A [Dio] on [transport] (the platform default when null) that calls
+/// [onUnauthorized] for every response the broker refuses with HTTP 401.
+///
+/// The refusal still reaches the caller unchanged; this only lets the app
+/// notice that the credential it sent stopped working.
+Dio brokerTransportDioReportingUnauthorized(
+  BrokerHttpTransport? transport, {
+  required void Function() onUnauthorized,
+}) => (brokerTransportDio(transport) ?? Dio())
+  ..interceptors.add(
+    InterceptorsWrapper(
+      onError: (error, handler) {
+        if (error.response?.statusCode == 401) onUnauthorized();
+        handler.next(error);
+      },
+    ),
+  );

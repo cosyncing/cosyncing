@@ -247,7 +247,7 @@
         "unsupported": {
           "contextUsage": "The durable snapshot and Hub usage events expose no trustworthy context-window maximum."
         },
-        "reason": "Cline 3.0.61 store/Observe plus isolated Hub Drive, native rename, approval, model/mode, telemetry, and registration suites pin these cross-agent surface answers; ACP Drive remains fixture-only."
+        "reason": "Cline 3.0.61 store/Observe plus isolated Hub Drive, native rename, approval, model/mode, telemetry, and registration suites pin these cross-agent surface answers."
       }
     },
     "kilo": {

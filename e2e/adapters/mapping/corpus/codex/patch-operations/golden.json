@@ -25,7 +25,7 @@
     {"type":"tool-call","callId":"mf1","toolName":"apply_patch","toolClass":"edit","args":"*** Begin Patch\n*** Update File: src/one.ts\n@@ a\n keep\n-x\n+y\n*** Add File: src/two.ts\n+brand new\n*** End Patch"},
     {"type":"tool-result","callId":"mf1","toolName":"apply_patch","toolClass":"edit","isError":false,"result":"Success","path":"src/one.ts","diff":"diff --git a/src/one.ts b/src/one.ts\n--- a/src/one.ts\n+++ b/src/one.ts\n@@ a\n keep\n-x\n+y\ndiff --git a/src/two.ts b/src/two.ts\nnew file\n--- /dev/null\n+++ b/src/two.ts\n+brand new","fileChanges":[{"path":"src/one.ts","operation":"edit","diff":"diff --git a/src/one.ts b/src/one.ts\n--- a/src/one.ts\n+++ b/src/one.ts\n@@ a\n keep\n-x\n+y","additions":1,"deletions":1},{"path":"src/two.ts","operation":"create","diff":"diff --git a/src/two.ts b/src/two.ts\nnew file\n--- /dev/null\n+++ b/src/two.ts\n+brand new","additions":1,"deletions":0}],"additions":2,"deletions":1,"title":"Changed 2 files"},
     {"type":"status","status":"idle"},
-    {"type":"run-summary","key":"codex:run:tp","turnId":"tp","status":"done","source":"codex-rollout"}
+    {"type":"run-summary","key":"codex:run:tp","turnId":"tp","userMessageKey":"c1","status":"done","source":"codex-rollout"}
   ],
   "replay": [
     {"type":"user-message","text":"edit files","key":"c1"},

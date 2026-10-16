@@ -310,12 +310,9 @@ describe('a Pi session through one broker', () => {
       ]);
     });
 
-    // PRODUCT BUG (reported, not fixed): the bridge treats a re-hello that finds its transcript
-    // cache empty as the session's first hello (`PiBridgeConnection.ingestHistory` appends without a
-    // `history-reset`). A session announced empty, whose first prompt's live event was lost, is
-    // recovered on the next re-hello for a new client only: the client already attached never sees
-    // the recovered row until it reattaches.
-    test.failing('a re-hello that recovers rows into an empty session reaches the clients already attached', async () => {
+    // A session announced empty, whose first prompt's live event was lost, is recovered on the next
+    // re-hello: the client already attached gets it too, not only a client that attaches later.
+    test('a re-hello that recovers rows into an empty session reaches the clients already attached', async () => {
       const { pi, driver } = await liveSession('recover-into-empty');
       await pi.rehello([{ t: 'user', key: 'u:remote:recovered-first', clientKey: 'ca.pi.first', text: 'persisted before crash' }]);
       await pi.events([{ t: 'user', key: 'after-recovery', text: 'sentinel' }]);

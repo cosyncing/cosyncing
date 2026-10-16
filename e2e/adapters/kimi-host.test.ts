@@ -226,6 +226,37 @@ describe('the closed write surface', () => {
   });
 });
 
+describe('a session no client is watching', () => {
+  test('the hub reads nothing that loads the session into Kimi while no client is attached, and polls again for the next one', async () => {
+    const stored = fake.seedSession({ title: 'nobody watching' });
+    await client.waitForSession((row) => row.id === stored.id);
+    // Every read under the session's own path (messages, approvals, questions, status) makes Kimi load it; the
+    // session row itself and the roster list do not.
+    const loads = (from: number) => fake.ledger.paths(from).filter((path) => path.startsWith(`GET /api/v1/sessions/${stored.id}/`));
+    const first = await client.attach('kimi', stored.id);
+    await first.waitForKind('history');
+    const watched = fake.ledger.mark();
+    await eventually(() => loads(watched).length >= 2, { what: 'the poll while a client watches' });
+
+    first.close();
+    // The hub keeps the connection through its reconnect grace (15 s here). Let the close, and any walk already in
+    // flight, land before counting.
+    await Bun.sleep(500);
+    const alone = fake.ledger.mark();
+    fake.appendForeignUser(stored, 'written while nobody watched');
+    await Bun.sleep(1_200); // eight poll ticks
+    expect(loads(alone)).toEqual([]);
+
+    // The next client is caught up and polled for again on the same connection: a write the host announces to
+    // nobody reaches it only through the poll.
+    const second = await client.attach('kimi', stored.id);
+    await second.waitForMessage((message) => message.type === 'user-message' && message.text === 'written while nobody watched');
+    fake.appendForeignUser(stored, 'written after the return');
+    await second.waitForMessage((message) => message.type === 'user-message' && message.text === 'written after the return');
+    second.close();
+  });
+});
+
 describe('the WebSocket protocol', () => {
   test('the handshake registers interest only, a ping is answered with the same nonce, and nothing mutating is sent', async () => {
     const stored = fake.seedSession({ title: 'ws handshake' });

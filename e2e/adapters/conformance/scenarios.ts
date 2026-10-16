@@ -24,13 +24,16 @@ import {
   type BrokerClient,
   eventually,
   type Frame,
+  scaled,
   type SessionStream,
+  SOON_MS,
   startBroker,
 } from '../../harness/index.ts';
 import {
   type ConformanceContext,
   type ConformanceKit,
   type DriveSession,
+  expectOneResetSince,
   type HostileStoreCase,
   type FakeController,
   type ScenarioId,
@@ -164,11 +167,14 @@ export function conformanceSuite(kit: ConformanceKit): void {
 
     /**
      * A Drive attach the product refuses: Observe with an attach conflict and no authority, or (an agent whose
-     * Drive is a live attach, with no Observe twin to fall back to) an error and no writer.
+     * Drive is a live attach, with no Observe twin to fall back to) an error and no writer. A live attach that
+     * falls back to Observe is told why in the same conflict frame, naming the live attach it was.
      */
     async function expectDriveRefused(refused: SessionStream, label: string): Promise<void> {
       if (profile.driveAttach === 'live' && profile.liveRefusal === 'observe') {
         await refused.waitForKind('history');
+        expect(refused.ofKind('attach-conflict').length, label).toBe(1);
+        expect(refused.ofKind('attach-conflict')[0]?.requestedMode, label).toBe('live');
         expect(lastSessionFrame(refused)?.authority?.canMutate, label).toBe(false);
         return;
       }
@@ -215,8 +221,7 @@ export function conformanceSuite(kit: ConformanceKit): void {
      * change is judged against a log the broker has seen: Grok creates its log
      * on the first prompt, and a log replaced before the first read is
      * indistinguishable from that creation. A turn-start agent's turn is held
-     * until then, because a turn that ends first can skip the transition
-     * (knownBugs C09 on Grok).
+     * until then, so the change lands after a turn that has fully settled.
      */
     let tailedTurns = 0;
     async function tailedPrompt(stream: SessionStream, text: string): Promise<void> {
@@ -481,6 +486,8 @@ export function conformanceSuite(kit: ConformanceKit): void {
         .toEqual(['rewritten first prompt', seeded.texts[2]]);
       expect(shown(stream, 'user-message', 'rewritten first prompt')).toBe(1);
       expect(shown(stream, 'user-message', seeded.texts[0]!)).toBe(0);
+      // One rewrite, one reset: never a second reload with its own notice.
+      await expectOneResetSince(stream, fake, seeded, from);
       stream.close();
     });
 
@@ -1011,8 +1018,16 @@ export function conformanceSuite(kit: ConformanceKit): void {
           },
           () => 'refused',
         );
-        // An id the roster withholds is not attachable either.
-        if (assertsFixed('C21')) expect(attach).not.toBe('history');
+        // An id the roster withholds is not attachable either, and the refusal is prompt: an error frame,
+        // or a socket refused outright. No answer at all is a hang.
+        if (assertsFixed('C21')) expect(['error', 'refused']).toContain(String(attach));
+        // An attach that opened a FIFO without O_NONBLOCK would have frozen the broker's event loop.
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        const answered = await Promise.race([
+          client.sessions({ refresh: true }).then((all) => all.some((row) => row.id === survivor.id)),
+          new Promise<'no answer'>((resolve) => { deadline = setTimeout(() => resolve('no answer'), scaled(SOON_MS)); }),
+        ]).finally(() => clearTimeout(deadline));
+        expect(answered, 'the roster still answers after the attach').toBe(true);
       });
     });
 
@@ -1163,6 +1178,10 @@ export function conformanceSuite(kit: ConformanceKit): void {
     scenario('C17', async () => {
       const stored = fake.seedSession({ title: 'stored without a binary' });
       await client.waitForSession((row) => row.id === stored.id);
+      // A session Drive could open while the binary is there; with it gone, nothing may start a writer.
+      const drivable = profile.missingBinaryRoster === 'observe-only'
+        ? await drivableSession('drive without a binary')
+        : undefined;
       fake.setInstalled(false);
       try {
         if (profile.version.cachedByBroker) {
@@ -1180,12 +1199,34 @@ export function conformanceSuite(kit: ConformanceKit): void {
           expect(created.ok).toBe(false);
         }
         if (profile.missingBinaryRoster === 'observe-only') {
-          const row = await client.waitForSession((candidate) => candidate.id === stored.id);
-          if (assertsFixed('C17')) expect(row.control?.drive?.supported).toBe(false);
+          // Listed, Observe-only, and saying why: the reason is the text the client shows for it.
+          const row = await client.waitForSession((candidate) => candidate.id === stored.id
+            && (candidate.control?.drive?.supported === false || !assertsFixed('C17')));
+          if (assertsFixed('C17')) {
+            // Create's refusal names the missing binary, as the row does.
+            expect(created.body.detailCode).toBe(`${agent}-binary-missing`);
+            expect(row.control?.drive?.supported).toBe(false);
+            expect(row.control?.drive?.takeoverAvailable).toBeUndefined();
+            expect(String(row.control?.drive?.reason)).toMatch(/not installed/i);
+            expect(row.attachMode).not.toBe('resume');
+          }
           const observer = await client.attach(agent, stored.id);
           const history = await observer.waitForKind('history');
           expect((history.messages as any[]).some((message) => isUser(message, stored.texts[0]!))).toBe(true);
+          if (assertsFixed('C17')) {
+            // The Session Detail frame carries the same projection as the roster row.
+            const detail = (await observer.waitForKind('session')).info;
+            expect(detail?.control?.drive?.supported).toBe(false);
+            expect(String(detail?.control?.drive?.reason)).toMatch(/not installed/i);
+          }
           observer.close();
+          if (assertsFixed('C17')) {
+            const mark = fake.ledger.mark();
+            const refused = await client.attach(agent, drivable!.id, driveOptions(drivable!));
+            await expectDriveRefused(refused, 'Drive without a binary');
+            refused.close();
+            expect(fake.ledger.spawns(mark)).toEqual([]);
+          }
         } else {
           // The registry skips an unavailable backend's discovery leg, so a
           // stored session nobody holds open leaves the roster until the

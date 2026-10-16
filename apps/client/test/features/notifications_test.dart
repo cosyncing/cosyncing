@@ -10,7 +10,9 @@ import 'package:cosyncing_client/src/features/attention/controller/attention_fee
 import 'package:cosyncing_client/src/features/attention/controller/notification_system_controller.dart';
 import 'package:cosyncing_client/src/features/attention/data/attention_notification_type_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
+import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/feature/app_driver.dart';
@@ -19,6 +21,7 @@ import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/fake_os_notifications.dart';
 import '../support/feature/fake_push.dart';
+import '../support/feature/store_faults.dart';
 import '../support/notification_test_support.dart';
 
 final AppLocalizations en = lookupAppLocalizations(const Locale('en'));
@@ -48,9 +51,13 @@ class Device {
   Future<AppDriver> launch({
     FeatureViewport viewport = FeatureViewport.desktop,
     bool seed = true,
+    List<Override> overrides = const [],
   }) async {
     if (seed) await f.storage.seedServer(studio);
-    return f.launch(viewport: viewport, overrides: os.overrides(lifecycle));
+    return f.launch(
+      viewport: viewport,
+      overrides: [...os.overrides(lifecycle), ...overrides],
+    );
   }
 }
 
@@ -345,7 +352,8 @@ void main() {
   group('the inbox', () {
     featureTest(
       'the inbox holds every server, counts what is unseen, and reading and '
-      'dismissing reach only the server the event came from',
+      'dismissing reach only the server the event came from; opening the '
+      "other server's row switches to it, or says it couldn't",
       (f) async {
         final device = Device(f);
         final (:desk, :studio) = (desk: device.desk, studio: device.studio);
@@ -353,6 +361,7 @@ void main() {
           ..addSession('s2', 'Lab session');
         final labDesk = AttentionDesk(lab);
         await f.storage.seedServer(lab, active: false);
+        final active = FaultyActiveServerStore(f.storage.activeServer);
 
         // What happened while the app was closed.
         final ask = desk.publish(
@@ -371,6 +380,9 @@ void main() {
         );
         final app = await device.launch(
           viewport: FeatureViewport.desktopTall,
+          overrides: [
+            activeBrokerProfileStoreProvider.overrideWithValue(active),
+          ],
         );
         await app.tapKey('notification-onboarding-enable');
         await app.pumpUntil(
@@ -427,6 +439,8 @@ void main() {
           ),
         );
         expect(app.rowUnread(paired['id']!), isFalse);
+        // The row stays where it was and says its read waits for its server.
+        await app.waitFor(find.text(en.attentionSavedLocallySyncPending));
         await app.dismissRow(failed['id']!);
         await app.dismissRow(labDone['id']!);
         expect(app.inboxRow(failed['id']!), findsNothing);
@@ -469,6 +483,7 @@ void main() {
           await app.tapKey('attention-clear-all');
         }
 
+        await app.waitForAbsent(find.byType(SnackBar));
         await clearActivity();
         expect(app.inboxRow(paired['id']!), findsNothing);
         await app.tap(find.text(en.inboxEnhancementUndo));
@@ -496,6 +511,22 @@ void main() {
         expect(cleared, isNot(contains(ask['id'])));
         expect(app.inboxRow(ask['id']!), findsOneWidget);
 
+        // A row's age reads on the app's clock and moves on with it, with
+        // nothing new from the broker.
+        String age(Map<String, Object?> event) {
+          final at = DateTime.fromMillisecondsSinceEpoch(
+            event['updatedAt']! as int,
+          );
+          return en.sessionRosterMinutesAgo(f.now().difference(at).inMinutes);
+        }
+
+        await app.elapse(const Duration(minutes: 3));
+        final threeLater = age(ask);
+        expect(app.rowText(ask['id']!), contains(threeLater));
+        await app.elapse(const Duration(minutes: 2));
+        expect(age(ask), isNot(threeLater));
+        expect(app.rowText(ask['id']!), contains(age(ask)));
+
         // Clear all takes requests too, one bulk dismissal per server, each
         // carrying the revision that was shown.
         final batchesBefore = desk.batches.length;
@@ -514,6 +545,34 @@ void main() {
         );
         expect(desk.batches.last, contains((ask['id']! as String, 1)));
         expect(app.inboxRow(ask['id']!), findsNothing);
+
+        // Opening the other server's row switches to that server first. A
+        // switch this device cannot save says so, as the server switcher
+        // does, and opens nothing; trying again switches and opens it.
+        final labAgain = labDesk.publish(
+          sessionId: 's2',
+          sessionTitle: 'Lab session',
+        );
+        await app.waitFor(app.inboxRow(labAgain['id']!));
+        await app.waitForAbsent(find.byType(SnackBar));
+        Finder review() => find.descendant(
+          of: app.inboxRow(labAgain['id']!),
+          matching: find.text(en.inboxEnhancementReview),
+        );
+        active.sets.failNext = true;
+        await app.tap(review());
+        expect(find.text(en.brokerProfileActivateFailed), findsOneWidget);
+        expect(app.activeServer?.id, studio.baseUri.toString());
+        expect(app.inboxRow(labAgain['id']!), findsOneWidget);
+        expect(lab.socketsFor('s2'), isEmpty, reason: 'nothing was opened');
+        await app.waitForAbsent(find.byType(SnackBar));
+        await app.tap(review());
+        await app.pumpUntil(
+          () =>
+              app.activeServer?.id == lab.baseUri.toString() &&
+              lab.socketsFor('s2').isNotEmpty,
+          reason: 'the second try switches and opens the session',
+        );
       },
     );
   });
@@ -562,22 +621,36 @@ void main() {
   });
 
   group('inbox actions', () {
-    // PRODUCT BUG: marking read or dismissing from an inbox row posts to a
-    // broker client that its autoDispose provider has already closed
-    // ("HTTP client used after close"), so the broker only hears of it at the
-    // next two-minute drain. The journey above asserts the drain; this is
-    // the behaviour the user is owed.
     featureTest(
-      'Mark read and Dismiss in the inbox reach the broker at once',
-      skip: true,
+      'Mark read, Dismiss and Clear all in the inbox reach the broker at '
+      'once, not at the next drain',
       (f) async {
         final device = Device(f);
         final desk = device.desk;
         final done = desk.publish(sessionId: 's1', sessionTitle: 'Fix login');
+        final rest = desk.publish(sessionId: 's2', sessionTitle: 'Tune it');
         final app = await device.launch();
         await app.tapKey('notification-onboarding-enable');
         await app.pumpUntil(() => desk.polls >= 2, reason: 'first sync');
+        // Arriving after the first sync, it is unread activity.
+        final paired = desk.publish(
+          kind: 'device-paired',
+          agent: 'cosyncing',
+          title: 'Phone paired',
+        );
         await app.openInbox();
+        await app.waitFor(app.inboxRow(paired['id']!));
+
+        await app.tap(
+          find.descendant(
+            of: app.inboxRow(paired['id']!),
+            matching: find.text('Mark read'),
+          ),
+        );
+        await app.pumpUntil(
+          () => desk.acknowledged.contains(paired['id']),
+          reason: 'the read reaches the broker without waiting for the drain',
+        );
         await app.dismissRow(done['id']!);
         await app.pumpUntil(
           () => desk.dismissedSingly.contains(done['id']),
@@ -585,6 +658,56 @@ void main() {
               'the dismissal reaches the broker without waiting for the '
               'drain',
         );
+        // Clear all posts once its Undo window closes.
+        await app.tapKey('attention-clear-inbox');
+        await app.pumpUntil(
+          () => desk.batches.expand((b) => b).any((i) => i.$1 == rest['id']),
+          reason: 'Clear all reaches the broker without waiting for the drain',
+        );
+      },
+    );
+
+    featureTest(
+      'a Dismiss the server fails to take says it is saved here and will '
+      'sync, as Mark read does, though the row is already gone',
+      (f) async {
+        final device = Device(f);
+        final (:desk, :studio) = (desk: device.desk, studio: device.studio);
+        final done = desk.publish(sessionId: 's1', sessionTitle: 'Fix login');
+        final app = await device.launch();
+        await app.tapKey('notification-onboarding-enable');
+        await app.pumpUntil(() => desk.polls >= 2, reason: 'first sync');
+        await app.openInbox();
+        await app.waitFor(app.inboxRow(done['id']!));
+
+        // A server that is going away answers late: the row leaves the inbox
+        // at once, and only then does the dismissal fail.
+        final late = studio.holdWhere(
+          (request) =>
+              request.method == 'POST' &&
+              request.path.endsWith('/${done['id']}/dismiss'),
+        );
+        await app.dismissRow(done['id']!);
+        await app.pumpUntil(
+          () => late.arrivals == 1,
+          reason: 'the dismissal is in flight',
+        );
+        expect(app.inboxRow(done['id']!), findsNothing);
+        expect(find.text(en.attentionSavedLocallySyncPending), findsNothing);
+        late.release(
+          FakeBrokerResponse.error(503, 'UNAVAILABLE', 'Going away.'),
+        );
+        await app.waitFor(find.text(en.attentionSavedLocallySyncPending));
+        expect(desk.dismissedSingly, isEmpty);
+
+        // The dismissal was kept, and reaches the server on the next drain.
+        await app.pumpUntil(
+          () => desk.dismissedSingly.contains(done['id']),
+          every: _drainTick,
+          steps: 6,
+          reason: 'the saved dismissal syncs once the server answers',
+        );
+        expect(app.inboxRow(done['id']!), findsNothing);
       },
     );
   });

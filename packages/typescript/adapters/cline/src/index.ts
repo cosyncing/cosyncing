@@ -1,6 +1,5 @@
 export * from './diagnostics.ts';
 export * from './auth.ts';
-export * from './drive.ts';
 export * from './hub.ts';
 export * from './hub-drive.ts';
 export * from './implementation.ts';

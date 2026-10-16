@@ -14,7 +14,8 @@
     {"type":"model-output","text":"Done.","final":true,"key":"codex:t1:msg_done:t"},
     {"type":"token-count","input":10,"output":5,"cacheRead":2},
     {"type":"status","status":"idle"},
-    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","assistantMessageKey":"codex:t1:msg_done:t","status":"done","completedAt":1781776810000,"source":"codex-rollout"}
+    {"type":"run-summary","key":"codex:run:t1","turnId":"t1","userMessageKey":"c1","assistantMessageKey":"codex:t1:msg_done:t","status":"done","startedAt":1781776802000,"completedAt":1781776810000,"totalRuntimeMs":8000,"source":"codex-rollout"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":8000,"turnCount":1,"updatedAt":1781776810000,"source":"codex-rollout"}}
   ],
   "replay": [
     {"type":"user-message","text":"hello","key":"c1","sentAt":1781776800000},

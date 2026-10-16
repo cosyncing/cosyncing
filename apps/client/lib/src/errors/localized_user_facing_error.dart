@@ -141,6 +141,7 @@ String localizedFailureLead(AppLocalizations l10n, FailureLead lead) {
     FailureLead.exportRateLimited => l10n.sessionExportRateLimited,
     FailureLead.exportDisabled => l10n.sessionExportDisabled,
     FailureLead.exportBadParam => l10n.sessionExportBadParam,
+    FailureLead.exportTooLarge => l10n.sessionExportTooLarge,
     FailureLead.exportUnsupported => l10n.sessionExportDisabledUnsupported,
     FailureLead.historyPageTimeout => l10n.failureNoticeHistoryPageTimeout,
     FailureLead.historyPageOffline => l10n.failureNoticeHistoryPageOffline,

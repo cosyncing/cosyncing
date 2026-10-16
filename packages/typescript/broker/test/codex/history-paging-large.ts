@@ -4,7 +4,12 @@
  * The synthetic fixture deterministically normalizes past 32 MiB and exposes
  * more than 200 consecutive 100-message pages, and always runs. The real-host
  * half is opt-in and never discovered: see resolveRealRollout below.
+ *
+ * The adapter's store is a temporary `CODEX_HOME` (imported first, before the
+ * adapter loads), and every capture runs without its wall-clock budget: what
+ * is measured here is read work and page bounds, never how fast the host is.
  */
+import { CODEX_TEST_HOME } from '../helpers/codex-test-home.ts';
 import { strict as assert } from 'node:assert';
 import {
   appendFileSync,
@@ -80,6 +85,8 @@ function resolveRealRollout(): string | undefined {
 }
 
 const REAL_FIXTURE = resolveRealRollout();
+/** A capture's time budget, lifted: the bounds asserted below are work, not time. */
+const NO_TIME_BUDGET = Number.MAX_SAFE_INTEGER / 2;
 
 type CaptureMeasurement = {
   cache: IndexedHistoryPageCache;
@@ -99,7 +106,7 @@ async function captureIndexed(
       return builder.accept(message, location);
     },
   };
-  const captured = await captureFileHistoryInto(path, sink, undefined, hooks);
+  const captured = await captureFileHistoryInto(path, sink, undefined, { maxElapsedMs: NO_TIME_BUDGET, ...hooks });
   assert(captured && !('refusal' in captured), 'native index capture must succeed');
   assert(captured.reader, 'location capture must return its random-access reader');
   const cache = builder.finish(captured.identity, captured.reader);
@@ -143,7 +150,7 @@ async function pageToStart(
   return { pages, messages, maxRecords, maxBytes };
 }
 
-const temp = mkdtempSync('/tmp/cosyncing-h1b-large-');
+const temp = mkdtempSync(join(CODEX_TEST_HOME, 'h1b-large-'));
 const synthetic = join(temp, 'rollout-large.jsonl');
 try {
   const fd = openSync(synthetic, 'w');

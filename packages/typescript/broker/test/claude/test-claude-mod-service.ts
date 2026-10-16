@@ -233,19 +233,33 @@ try {
     String(viaWrapper),
   );
 
+  // Proved by what a scan could not have answered, not by how long it took. A registration whose
+  // cwd moved is found only by listing the projects roots. Once no root can be listed (a stat of a
+  // known path still works), only the cached location can answer.
+  const movedCwd = join(root, 'somewhere-else');
+  const listedRoots = [projectsRoot, join(wrapperConfig, 'projects')];
+  const unlisted = <T>(run: () => T): T => {
+    for (const listed of listedRoots) chmodSync(listed, 0o300);
+    try {
+      return run();
+    } finally {
+      for (const listed of listedRoots) chmodSync(listed, 0o755);
+    }
+  };
   clearClaudeTranscriptCache();
-  const scanStart = Date.now();
-  findClaudeTranscript(sessionId, workDir);
-  const firstMs = Date.now() - scanStart;
-  const cachedStart = Date.now();
-  const repeats: (string | undefined)[] = [];
-  for (let i = 0; i < 24; i += 1) repeats.push(findClaudeTranscript(sessionId, workDir));
-  const repeatMs = Date.now() - cachedStart;
+  // Root ignores permission bits, so there the premise cannot be arranged and is not asserted.
+  const scanBlocked = process.getuid?.() === 0 || unlisted(() => findClaudeTranscript(sessionId, movedCwd)) === undefined;
+  clearClaudeTranscriptCache();
+  const scanned = findClaudeTranscript(sessionId, movedCwd);
+  const repeats = unlisted(() => Array.from({ length: 24 }, () => findClaudeTranscript(sessionId, movedCwd)));
   check(
     'a located transcript is cached, so a hold does not re-scan the projects tree',
-    repeats.every((found) => !!found && sameTranscriptPath(found!, transcript)) && repeatMs <= Math.max(firstMs, 5),
-    `first=${firstMs}ms 24-cached=${repeatMs}ms`,
+    scanBlocked
+      && !!scanned && sameTranscriptPath(scanned, transcript)
+      && repeats.every((found) => !!found && sameTranscriptPath(found, transcript)),
+    `scan blocked while unlisted=${scanBlocked} first=${scanned} cached=${repeats.filter(Boolean).length}/24`,
   );
+  clearClaudeTranscriptCache();
   check('a pinned root is not answered from the cache',
     findClaudeTranscript(sessionId, workDir, { projectsRoot: join(root, 'nowhere') }) === undefined);
 

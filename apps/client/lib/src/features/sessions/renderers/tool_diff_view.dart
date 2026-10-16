@@ -532,7 +532,13 @@ class _DiffRefViewState extends ConsumerState<_DiffRefView> {
       // the current URL instead of surfacing "unavailable".
       if (mounted && widget.reference.fetchUrl != url) {
         final fresh = _load();
-        if (mounted) setState(() => _future = fresh);
+        // A block body: an arrow would hand setState the Future it assigns,
+        // which setState rejects, failing this load instead of retrying it.
+        if (mounted) {
+          setState(() {
+            _future = fresh;
+          });
+        }
         return fresh;
       }
       rethrow;

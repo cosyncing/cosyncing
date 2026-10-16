@@ -7,6 +7,12 @@ class _LookupToolGroup extends StatelessWidget {
     required this.expansionRevision,
   });
 
+  /// The group's theme: the ambient one without divider lines (see
+  /// [DerivedTheme]).
+  static final DerivedTheme<void> _dividerless = DerivedTheme(
+    (base, _) => base.copyWith(dividerColor: Colors.transparent),
+  );
+
   final List<ToolTranscriptDisplayEntry> tools;
   final bool toolsExpanded;
   final int expansionRevision;
@@ -24,7 +30,7 @@ class _LookupToolGroup extends StatelessWidget {
     // tool row's low-chrome treatment.
     return Theme(
       key: ValueKey('lookup-group-${tools.first.callId ?? tools.length}'),
-      data: theme.copyWith(dividerColor: Colors.transparent),
+      data: _dividerless.of(theme, null),
       child: ExpansionTile(
         key: ValueKey('lookup-group-details-$expansionRevision'),
         shape: const Border(),

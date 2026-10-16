@@ -24,6 +24,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_sideb
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -445,7 +446,20 @@ class _WorkspaceFrameState extends ConsumerState<WorkspaceFrame>
       specs: appShortcutsForScope(AppShortcutScope.sessionList),
       handlers: {AppShortcutId.focusRosterSearch: _focusSearch},
     ),
+    // AppShortcutId.refreshSessions and refreshSessionsChord: the same
+    // explicit Refresh the roster's status slot offers. Neither fits a guarded
+    // registry family, so they are bound here, unconditionally: F5 and
+    // Ctrl/Cmd+R type nothing in a text field, and on web consuming them is
+    // what keeps the browser from reloading the app instead.
+    for (final activator in _refreshActivators)
+      activator: appShortcutAlways(() => unawaited(_refreshRequested())),
   };
+
+  static const _refreshActivators = [
+    SingleActivator(LogicalKeyboardKey.f5),
+    SingleActivator(LogicalKeyboardKey.keyR, control: true),
+    SingleActivator(LogicalKeyboardKey.keyR, meta: true),
+  ];
 
   @override
   Widget build(BuildContext context) {

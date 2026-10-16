@@ -17,7 +17,7 @@ import type {
   SessionInfo,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
-import { TerminalSummaryRegistry } from '@cosyncing/adapter-api';
+import { classifyDirectoryWatchEvent, TerminalSummaryRegistry } from '@cosyncing/adapter-api';
 import {
   clinePendingToolUse,
   clineSessionUsage,
@@ -154,6 +154,8 @@ export class ClineObserveConnection implements SessionConnection {
   private readonly onTerminalSummaryBoundaryInvalid?: () => void;
   private readonly emittedUncorrelatedUserIds = new Set<string>();
   private suppressPromptCorrelationReset = false;
+  /** This connection is clearing the summary registry for a rewrite it resets for itself. */
+  private clearingForRewrite = false;
 
   constructor(options: ClineObserveOptions) {
     this.session = options.session;
@@ -176,7 +178,7 @@ export class ClineObserveConnection implements SessionConnection {
     this.onTerminalSummaryBoundaryInvalid = options.onTerminalSummaryBoundaryInvalid;
     if (options.notifyTerminalSummaryChanges !== false) {
       this.terminalSummaryUnsubscribe = this.terminalSummaryRegistry.subscribe(() => {
-        if (this.closed) return;
+        if (this.closed || this.clearingForRewrite) return;
         this.emit({
           type: 'history-reset',
           notice: 'A durable Cline terminal summary changed; reloading the stable transcript.',
@@ -445,7 +447,13 @@ export class ClineObserveConnection implements SessionConnection {
 
   private invalidatePagingAndReset(): void {
     this.pagingInvalidated = true;
-    this.terminalSummaryRegistry.clear();
+    // The rewrite reset below covers the summaries this drops: no second reload for them.
+    this.clearingForRewrite = true;
+    try {
+      this.terminalSummaryRegistry.clear();
+    } finally {
+      this.clearingForRewrite = false;
+    }
     this.invalidatePromptCorrelations(
       'The Cline transcript was compacted or rewritten after its durable ownership boundary.',
     );
@@ -506,7 +514,9 @@ export class ClineObserveConnection implements SessionConnection {
       const messagesName = basename(this.session.messagesPath);
       const watcher = this.watchFactory(dirname(this.session.messagesPath), { persistent: false }, (eventType, filename) => {
         const changed = filename === null || filename === undefined ? undefined : String(filename);
-        if (changed !== undefined && !names.has(changed)) return;
+        // A snapshot replaced whole (written aside, then renamed over it) is reported by Bun under
+        // the name it was renamed FROM, never ours: every rename here may have replaced it.
+        if (classifyDirectoryWatchEvent(eventType, filename, names) === 'unrelated') return;
         if (!this.pendingDrain && !this.closed) {
           this.pendingDrain = setTimeout(() => {
             this.pendingDrain = undefined;

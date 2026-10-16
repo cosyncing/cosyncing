@@ -25,7 +25,7 @@
  *   bun run packages/typescript/adapters/antigravity/test/test-agy-drive.ts   (exit 0 = all pass)
  */
 export {};
-import { appendFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
 import {
@@ -403,6 +403,46 @@ function newDrive(
     const afterClose = await h.connection.getHistory();
     check('only close() drops the pending rows',
       !afterClose.some((m) => m.type === 'user-message' && (m as { key?: string }).key === minted.key));
+  } finally {
+    h.cleanup();
+  }
+}
+
+// ── 7b. A transcript rewritten under the drive demotes it at once ───────────
+{
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'ours' });
+    appendFileSync(h.transcriptPath, jsonl([userInputStep(70, 'ours')]));
+    await tailed(h);
+    check('our own delivered prompt leaves the drive driving', h.connection.driving === true);
+
+    const before = h.messages.length;
+    // Another program rewrites a line already read, keeping the file the same size.
+    const original = readFileSync(h.transcriptPath, 'utf8');
+    const rewritten = original.replace('ours', 'OURS');
+    writeFileSync(h.transcriptPath, rewritten);
+    await waitFor(() => h.connection.driving === false);
+    check('an in-place rewrite of read bytes demotes the drive at once', h.connection.driving === false);
+    const after = h.messages.slice(before);
+    check('the demotion broadcasts the observing posture',
+      after.some((m) => m.type === 'metadata-update' && JSON.stringify((m as { value: unknown }).value).includes('observing')));
+    const resets = after.filter((m) => m.type === 'history-reset');
+    check('the view reloads once, saying why', resets.length === 1
+      && String((resets[0] as { notice?: string }).notice).includes('changed outside the app'),
+      JSON.stringify(resets));
+    check('no second notice beside the reload\'s', !after.some((m) => m.type === 'notice'),
+      after.filter((m) => m.type === 'notice').map((m) => JSON.stringify(m)).join(','));
+    check('the rewrite is named in the trace',
+      h.traces.some((trace) => trace.op === 'drive-demoted' && trace.detail.includes('changed outside the app')));
+    let refused = false;
+    try {
+      await h.connection.sendPrompt({ text: 'after the rewrite' });
+    } catch {
+      refused = true;
+    }
+    check('the next prompt is refused before the child', refused);
   } finally {
     h.cleanup();
   }

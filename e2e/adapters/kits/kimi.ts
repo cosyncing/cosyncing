@@ -24,6 +24,7 @@ import {
   type ConformanceProfile,
   type FakeController,
   installFakeExecutable,
+  makeFifo,
   type InstalledFake,
   Ledger,
   type LedgerEntry,
@@ -35,7 +36,6 @@ import {
 export const KIMI_VERSION = '0.35.0';
 export const KIMI_PROVIDER = 'test-provider';
 
-const HOSTILE_ATTACH_BUG = 'a bare attach to an id the roster withholds yields an empty observe history instead of an error: the adapter synthesizes a placeholder session for any id';
 
 export const kimiProfile: ConformanceProfile = {
   agent: 'kimi',
@@ -127,13 +127,23 @@ export const kimiProfile: ConformanceProfile = {
   hostileStore: [
     {
       name: 'a roster row without an id',
-      knownBug: { aspect: 'attach', bug: HOSTILE_ATTACH_BUG },
       plant: (fake) => plantRoster(fake, { workspace: { id: 'wd_x', cwd: '/x' }, meta: { title: 'no id' } }, 'session_record_without_id'),
     },
     {
       name: 'a roster row whose id is not a string',
-      knownBug: { aspect: 'attach', bug: HOSTILE_ATTACH_BUG },
       plant: (fake) => plantRoster(fake, { id: 42, workspace: { id: 'wd_x', cwd: '/x' }, meta: { title: 'numeric id' } }, '42'),
+    },
+    {
+      name: 'a roster row whose id climbs out of the sessions route',
+      plant: (fake) => plantRoster(fake, { id: '../meta', workspace: { id: 'wd_x', cwd: '/x' }, meta: { title: 'traversal' } }, '../meta'),
+    },
+    {
+      name: 'a subagent whose wire journal is a FIFO',
+      unsupportedOn: ['win32'],
+      plant: (fake) => {
+        const kimi = fake as KimiFake;
+        return kimi.seedChild(kimi.seedSession({ title: 'hostile parent' }), { fifo: true }).id;
+      },
     },
   ],
 };
@@ -214,8 +224,8 @@ export interface KimiFake extends FakeController {
   readonly cli: InstalledFake;
   readonly paths: FixturePaths;
   readonly home: string;
-  /** Subagent children written under a parent session's tree. */
-  seedChild(parent: SeededSession, options?: { title?: string }): SeededSession;
+  /** Subagent children written under a parent session's tree; `fifo` makes the child's wire journal a pipe. */
+  seedChild(parent: SeededSession, options?: { title?: string; fifo?: boolean }): SeededSession;
 }
 
 export const kimiKit: ConformanceKit = {
@@ -298,6 +308,10 @@ export function installKimi(paths: FixturePaths, options: { version?: string } =
       const title = options.title ?? `Child ${agentDir}`;
       const created = Date.now() - 3_000_000;
       const path = join(directory, 'wire.jsonl');
+      if (options.fifo) {
+        makeFifo(path);
+        return { id: `kimi-subagent:${parent.id}/${agentDir}`, cwd: parent.cwd, title, texts: [] };
+      }
       writeFileSync(path, [
         { type: 'metadata', protocol_version: '1.5', created_at: created },
         { type: 'config.update', cwd: parent.cwd, modelAlias: 'model-a', thinkingEffort: 'high', time: created },
@@ -437,6 +451,14 @@ const kimiExtras: ConformanceExtra[] = [
       const direct = await context.client.attach('kimi', existing.id, { mode: 'live' });
       await direct.waitForKind('history');
       expect(direct.frames.some((frame) => frame.kind === 'session' && frame.authority?.canMutate === true)).toBe(false);
+      // The client is told why, in the frame a refused Drive attach always gets: the live attach it sent, no reason,
+      // and the ownership conflict, ahead of the Observe session that replaces it.
+      const conflicts = direct.ofKind('attach-conflict');
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]).toMatchObject({ requestedMode: 'live', reason: '', code: 'DRIVE_OWNERSHIP_CONFLICT' });
+      expect(conflicts[0]!.message).toContain('read-only');
+      const kinds = direct.frames.map((frame) => frame.kind);
+      expect(kinds.indexOf('attach-conflict')).toBeLessThan(kinds.indexOf('session'));
       direct.close();
     },
   },

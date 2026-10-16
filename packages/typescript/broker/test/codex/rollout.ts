@@ -10,9 +10,10 @@
  *   bun run packages/typescript/broker/test/codex/rollout.ts     (exit 0 = all pass)
  */
 export {};
+// First: the adapter fixes its session store when it loads, and admits only rollouts inside it.
+import { CODEX_TEST_SESSIONS, codexTestRolloutDir } from '../helpers/codex-test-home.ts';
 import { strict as assert } from 'node:assert';
-import { appendFileSync, chmodSync, closeSync, existsSync, ftruncateSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { appendFileSync, chmodSync, closeSync, existsSync, ftruncateSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { isolatedBrokerFixtureEnvironment } from '../helpers/isolated-broker-fixture.ts';
@@ -38,7 +39,7 @@ async function capture(conn: any): Promise<{ sink: CollectingSink; outcome: unkn
   const sink = new CollectingSink();
   return { sink, outcome: await conn.captureHistorySnapshot?.(sink) };
 }
-import { CodexAdapter, captureFileHistoryInto, codexAttachMode, codexRolloutToolItem, inferRolloutStatus, inferRolloutStatusResult, codexSessionOrigin, mapRollout, rolloutHasExactTerminalTurn } from '../../../adapters/codex/src/index.ts';
+import { ASSISTANT_PAIR_WAIT_MS, CodexAdapter, captureFileHistoryInto, codexAttachMode, codexRolloutToolItem, inferRolloutStatus, inferRolloutStatusResult, codexSessionOrigin, mapRollout, rolloutHasExactTerminalTurn } from '../../../adapters/codex/src/index.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 // Mirrors codexLiveSyncEnabled(): sync is ON BY DEFAULT (issues-part2) — an unset env means enabled;
@@ -48,6 +49,52 @@ const syncServerEnabled = syncEnv === '' ? true : /^(1|true|yes|on)$/i.test(sync
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+}
+
+// A rollout scan's time budget is read through its `now` seam, so no check here depends on how fast
+// the host is: a frozen clock leaves only the source budget to bound a scan, and a stepping one runs
+// the time budget out after a fixed number of chunks.
+const frozenClock = (): number => 0;
+function steppingClock(): () => number {
+  let now = 0;
+  return () => ++now;
+}
+/**
+ * The clock an Observe history read waits for a trailing answer's pair on, recording every reading.
+ * Each reading advances it by `step` from `base`, so how long a read waits on it is a count of what
+ * the read did, not of how fast the host is; `step` 0 freezes it, so only the pair landing (or the
+ * file going quiet) can end the wait.
+ */
+function historyClock(base: number, step: number): { now: () => number; readings: number[]; waited: () => number } {
+  const readings: number[] = [];
+  return {
+    readings,
+    now: () => {
+      const value = base + step * readings.length;
+      readings.push(value);
+      return value;
+    },
+    // From the reading that set the read's deadline to its last one.
+    waited: () => (readings.length === 0 ? 0 : readings.at(-1)! - readings[0]!),
+  };
+}
+
+/** Run `work`, counting event-loop turns that pass meanwhile: any at all prove it yielded. */
+async function countingTurns<T>(work: () => Promise<T>): Promise<{ result: T; turns: number }> {
+  let turns = 0;
+  let running = true;
+  const spin = (): void => {
+    if (!running) return;
+    turns += 1;
+    setImmediate(spin);
+  };
+  setImmediate(spin);
+  try {
+    const result = await work();
+    return { result, turns };
+  } finally {
+    running = false;
+  }
 }
 
 {
@@ -151,7 +198,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   // The indexed attach and native pages rebuild each row from its own record: the same keys and
   // text as the full read, and every older cursor issued before reasoning rows existed fails
   // closed once it names a boundary past one (a changed prefix), never a shifted page.
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-reasoning-'));
+  const dir = codexTestRolloutDir('cosyncing-reasoning-');
   const path = join(dir, 'rollout-reasoning.jsonl');
   const filler = Array.from({ length: 30 }, (_, index) => [
     { type: 'event_msg', payload: { type: 'agent_message', message: `filler ${index}` } },
@@ -231,7 +278,7 @@ function check(name: string, ok: boolean, detail = ''): void {
 // later history read of the settled file gives it — including an item with an id but no turn
 // metadata, whose turn opened BEFORE the attach.
 await (async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-reasoning-tail-'));
+  const dir = codexTestRolloutDir('cosyncing-reasoning-tail-');
   const path = join(dir, 'rollout-2026-09-01T00-00-00-00000000-0000-4000-8000-0000000000r1.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
   writeFileSync(
@@ -481,7 +528,7 @@ const APP_SERVER_TOOL_ITEMS: Array<[any, any, any]> = [
 
   // The indexed attach and native pages rebuild each row from its record alone: the same rows as a
   // full read. A cursor issued before these rows existed is refused past the first one.
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-tool-items-'));
+  const dir = codexTestRolloutDir('cosyncing-tool-items-');
   const path = join(dir, 'rollout-tool-items.jsonl');
   const filler = Array.from({ length: 20 }, (_, index) => [
     { type: 'event_msg', payload: { type: 'agent_message', message: `filler ${index}` } },
@@ -553,7 +600,7 @@ const APP_SERVER_TOOL_ITEMS: Array<[any, any, any]> = [
 // Observe tails the rollout live: a nested call tailed after the attach carries the rows a later
 // history read of the settled file gives it.
 await (async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-tool-items-tail-'));
+  const dir = codexTestRolloutDir('cosyncing-tool-items-tail-');
   const path = join(dir, 'rollout-2026-09-26T00-00-00-00000000-0000-4000-8000-0000000000e1.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
   writeFileSync(
@@ -593,7 +640,7 @@ await (async () => {
 // stamped the socket permanently unpageable. A captured prefix removes the ambiguity — later bytes
 // simply are not in the snapshot — while a rewrite still fails closed.
 {
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-h1b-'));
+  const dir = codexTestRolloutDir('cosyncing-h1b-');
   const path = join(dir, 'rollout-h1b.jsonl');
   const line = (index: number) =>
     JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: `row ${index}` } });
@@ -726,7 +773,7 @@ await (async () => {
 // could grow to the whole source on a newline-less record, and enrichment retained unbounded
 // entries and diff bodies before the first message ever reached the sink.
 {
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-h1b-hardening-'));
+  const dir = codexTestRolloutDir('cosyncing-h1b-hardening-');
   const line = (index: number) =>
     JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: `row ${index}` } });
   try {
@@ -1373,7 +1420,7 @@ await (async () => {
   check('blank/malformed slots preserve line-index keys (history/live alignment)', user?.key === 'c0' && model?.key === 'c3', `user=${user?.key} model=${model?.key}`);
 }
 {
-  const dir = `/tmp/cosyncingcodexrollout${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncingcodexrollout${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-06-16T00-00-00-019ed00e-aac3-78f1-b373-cd365cf6a9b2.jsonl');
   const base = [
@@ -1478,7 +1525,7 @@ await (async () => {
   }
 }
 {
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-codex-observe-authority-'));
+  const dir = codexTestRolloutDir('cosyncing-codex-observe-authority-');
   try {
     const fixtures = [
       { label: 'main', id: '33333333-3333-4333-8333-333333333333', source: 'cli' },
@@ -1511,7 +1558,7 @@ await (async () => {
   }
 }
 {
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-codex-authority-bound-'));
+  const dir = codexTestRolloutDir('cosyncing-codex-authority-bound-');
   const markerFree = join(dir, 'rollout-marker-free.jsonl');
   const sourceBytes = 256 * 1024 * 1024;
   let fd: number | undefined;
@@ -1525,31 +1572,28 @@ await (async () => {
     closeSync(fd);
     fd = undefined;
 
-    let ticks = 0;
-    const heartbeat = setInterval(() => { ticks += 1; }, 10);
-    const started = performance.now();
-    const bounded = await inferRolloutStatusResult(markerFree);
-    const elapsedMs = performance.now() - started;
-    clearInterval(heartbeat);
+    const { result: bounded, turns } = await countingTurns(() => inferRolloutStatusResult(markerFree, { now: frozenClock }));
     check(
       'cold marker-free 256 MiB recovery yields and returns a typed admission fallback',
       bounded.kind === 'fallback'
-        && (bounded.reason === 'source-limit' || bounded.reason === 'time-limit')
-        && bounded.scannedBytes <= 64 * 1024 * 1024
-        && ticks > 0,
-      JSON.stringify({ bounded, ticks, elapsedMs: Math.round(elapsedMs) }),
+        && bounded.reason === 'source-limit'
+        && bounded.scannedBytes === 64 * 1024 * 1024
+        && turns > 0,
+      JSON.stringify({ bounded, turns }),
     );
 
     const timeLimited = join(dir, 'rollout-marker-free-time-limit.jsonl');
     linkSync(markerFree, timeLimited);
     const timed = await inferRolloutStatusResult(timeLimited, {
       maxSourceBytes: sourceBytes,
-      maxElapsedMs: 1,
+      maxElapsedMs: 4,
+      now: steppingClock(),
     });
     check(
       'cold Codex recovery has a distinct typed wall-clock fallback',
       timed.kind === 'fallback'
         && timed.reason === 'time-limit'
+        && timed.scannedBytes > 0
         && timed.scannedBytes < sourceBytes,
       JSON.stringify(timed),
     );
@@ -1579,7 +1623,7 @@ await (async () => {
   }
 }
 {
-  const dir = mkdtempSync(join(tmpdir(), 'cosyncing-codex-authority-warm-bound-'));
+  const dir = codexTestRolloutDir('cosyncing-codex-authority-warm-bound-');
   const path = join(dir, 'rollout-warm-large-append.jsonl');
   const taskStarted = JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'warm-large' } }) + '\n';
   const appendBytes = 512 * 1024 * 1024;
@@ -1601,29 +1645,22 @@ await (async () => {
     closeSync(fd);
     fd = undefined;
 
-    let ticks = 0;
-    const heartbeat = setInterval(() => { ticks += 1; }, 10);
-    const startedAt = performance.now();
-    const bounded = await inferRolloutStatusResult(path, { maxElapsedMs: 1000 });
-    const elapsedMs = performance.now() - startedAt;
-    clearInterval(heartbeat);
+    const { result: bounded, turns } = await countingTurns(() => inferRolloutStatusResult(path, { now: frozenClock }));
     check(
       'warm Codex 512 MiB incomplete append yields and reports bounded source work',
       bounded.kind === 'fallback'
         && bounded.status === 'working'
-        // A loaded host can reach the 1 s budget before the 64 MiB one; both are bounded work.
-        && (bounded.reason === 'source-limit' || bounded.reason === 'time-limit')
-        && bounded.scannedBytes > 0
-        && bounded.scannedBytes <= 64 * 1024 * 1024
-        && ticks > 0,
-      JSON.stringify({ bounded, ticks, elapsedMs: Math.round(elapsedMs) }),
+        && bounded.reason === 'source-limit'
+        && bounded.scannedBytes === 64 * 1024 * 1024
+        && turns > 0,
+      JSON.stringify({ bounded, turns }),
     );
 
     let caughtUpBytes = bounded.scannedBytes;
     let catchupPasses = 1;
     let catchup = bounded;
     while (caughtUpBytes < appendBytes && catchupPasses < 16) {
-      catchup = await inferRolloutStatusResult(path, { maxElapsedMs: 1000 });
+      catchup = await inferRolloutStatusResult(path, { now: frozenClock });
       caughtUpBytes += catchup.scannedBytes;
       catchupPasses += 1;
       if (catchup.scannedBytes === 0) break;
@@ -1681,8 +1718,8 @@ await (async () => {
     closeSync(fd);
     fd = undefined;
 
-    const firstBudget = await inferRolloutStatusResult(beyondBudget, { maxElapsedMs: 1000 });
-    const secondBudget = await inferRolloutStatusResult(beyondBudget, { maxElapsedMs: 1000 });
+    const firstBudget = await inferRolloutStatusResult(beyondBudget, { now: frozenClock });
+    const secondBudget = await inferRolloutStatusResult(beyondBudget, { now: frozenClock });
     check(
       'warm Codex scan resumes beyond 64 MiB and publishes an already-present exact completion',
       firstBudget.kind === 'fallback'
@@ -1705,7 +1742,7 @@ await (async () => {
     ftruncateSync(fd, recordSeedSize + 2 * 1024 * 1024);
     closeSync(fd);
     fd = undefined;
-    const recordBounded = await inferRolloutStatusResult(recordLimited);
+    const recordBounded = await inferRolloutStatusResult(recordLimited, { now: frozenClock });
     check(
       'warm Codex oversized record has a distinct typed record fallback',
       recordBounded.kind === 'fallback'
@@ -1726,7 +1763,8 @@ await (async () => {
     fd = undefined;
     const timeBounded = await inferRolloutStatusResult(timeLimited, {
       maxSourceBytes: 256 * 1024 * 1024,
-      maxElapsedMs: 1,
+      maxElapsedMs: 4,
+      now: steppingClock(),
     });
     check(
       'warm Codex append has a distinct typed wall-clock fallback',
@@ -1866,7 +1904,7 @@ await (async () => {
   check('daemon-loaded Codex threads advertise live sync when detected', codexAttachMode(true, 'working', true) === 'live', codexAttachMode(true, 'working', true));
 }
 {
-  const dir = `/tmp/cosyncingcodexdefault${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncingcodexdefault${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-06-16T00-00-00-019ed00e-aac3-78f1-b373-cd365cf6a9b2.jsonl');
   const fakeCodex = join(dir, 'codex');
@@ -1903,7 +1941,7 @@ await (async () => {
   }
 }
 {
-  const dir = `/tmp/cosyncingcodexsurface${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncingcodexsurface${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-06-16T00-00-00-019ed00e-aac3-78f1-b373-cd365cf6a9b2.jsonl');
   try {
@@ -1948,7 +1986,7 @@ await (async () => {
   }
 }
 {
-  const dir = `/tmp/cosyncingcodexnofake${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncingcodexnofake${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-06-16T00-00-00-019ed00e-aac3-78f1-b373-cd365cf6a9b2.jsonl');
   try {
@@ -1986,7 +2024,7 @@ await (async () => {
 // reaches the event. Emitting immediately would key the same line differently here than getHistory()
 // does for anyone attaching later — the two would then be two messages in one client's transcript.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-tail-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-tail-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-07-25T00-00-00-00000000-0000-4000-8000-00000000000a.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
@@ -2074,7 +2112,7 @@ await (async () => {
 // null slot would key that answer by line index while the app-server delivers it natively — the same
 // duplicate, reached by a different route.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-tail-blank-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-tail-blank-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-07-25T00-00-00-00000000-0000-4000-8000-000000000010.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
@@ -2120,7 +2158,7 @@ await (async () => {
 // arrives afterwards belongs to no turn the app-server is delivering under, so keying it by the
 // completed turn would mint an identity no live frame ever used.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-tail-done-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-tail-done-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-07-25T00-00-00-00000000-0000-4000-8000-00000000000b.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
@@ -2170,7 +2208,7 @@ await (async () => {
 // then hold the SAME answer twice — once under `c<n>` and once under the native key the live
 // app-server is still delivering it with. History waits out that gap while the file is being written.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-history-race-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-history-race-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-07-25T00-00-00-00000000-0000-4000-8000-00000000000c.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
@@ -2180,12 +2218,18 @@ await (async () => {
       line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't-race' } }),
   );
 
-  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
+  // Frozen: the read's own deadline never passes, so the only way out of its wait is the pair.
+  const clock = historyClock(Date.now(), 0);
+  const conn = await new CodexAdapter({ historySettleClock: clock.now }).attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
   try {
     // The turn's answer is persisted; the record carrying its native id has not been appended yet.
     appendFileSync(path, line({ type: 'event_msg', payload: { type: 'agent_message', message: 'Raced.', phase: 'final_answer' } }));
     const pending = conn.getHistory(); // a client attaches INSIDE the gap
-    await new Promise((r) => setTimeout(r, 60)); // comfortably inside the wait, which is sized to the append itself
+    // The read has read the file (its deadline is set) and checked it again in its wait loop: it is
+    // waiting on the half-written pair, not about to read past it.
+    const waitingBy = Date.now() + 10_000;
+    while (clock.readings.length < 2 && Date.now() < waitingBy) await new Promise((r) => setTimeout(r, 5));
+    check('the history read is waiting inside the pair gap before the paired record lands', clock.readings.length >= 2, `readings=${clock.readings.length}`);
     appendFileSync(path, line({ type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_race', phase: 'final_answer', content: [{ type: 'output_text', text: 'Raced.' }] } }));
 
     const answers = ((await pending) as any[]).filter((m) => m.type === 'model-output');
@@ -2205,7 +2249,7 @@ await (async () => {
 // anywhere) end 21 of 117 real sessions. Attaching to a settled one must map immediately, so the wait
 // is gated on the file still being written rather than on the record's shape alone.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-history-idle-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-history-idle-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-07-25T00-00-00-00000000-0000-4000-8000-00000000000d.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
@@ -2218,15 +2262,15 @@ await (async () => {
   const stale = new Date(Date.now() - 60_000);
   utimesSync(path, stale, stale);
 
-  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
+  const clock = historyClock(Date.now(), 10);
+  const conn = await new CodexAdapter({ historySettleClock: clock.now }).attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
   try {
-    const started = Date.now();
     const answers = ((await conn.getHistory()) as any[]).filter((m) => m.type === 'model-output');
-    const elapsed = Date.now() - started;
+    // Its deadline, the loop's check and the quiet-file check: three readings, and no poll after.
     check(
       'a settled rollout ending on a never-paired record maps immediately, on the fallback key',
-      answers.length === 1 && answers[0].key === 'c2' && elapsed < 250,
-      `key=${answers[0]?.key} elapsedMs=${elapsed}`,
+      answers.length === 1 && answers[0].key === 'c2' && clock.readings.length === 3,
+      `key=${answers[0]?.key} readings=${clock.readings.length} waitedMs=${clock.waited()}`,
     );
   } finally {
     await conn.close();
@@ -2240,7 +2284,7 @@ await (async () => {
 // attach AND every older-page prepend on a live session pays (handleHistoryPage re-reads history), so
 // the bound has to be measured here, not only on the stale-mtime path that returns immediately.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-history-live-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-history-live-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-07-25T00-00-00-00000000-0000-4000-8000-00000000000e.jsonl');
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
@@ -2252,15 +2296,18 @@ await (async () => {
   );
   // mtime is NOW, so nothing short-circuits the poll — this is the full-cost path.
 
-  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
+  const step = 10;
+  // Started at the file's own write time, so to this clock the file is written right now.
+  const clock = historyClock(statSync(path).mtimeMs, step);
+  const conn = await new CodexAdapter({ historySettleClock: clock.now }).attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
   try {
-    const started = Date.now();
     const answers = ((await conn.getHistory()) as any[]).filter((m) => m.type === 'model-output');
-    const elapsed = Date.now() - started;
+    // The read polled the file until its own clock passed the pair bound, and stopped there.
     check(
       'an actively-written rollout ending on a never-paired record still maps within the bound',
-      answers.length === 1 && answers[0].key === 'c2' && elapsed < 400,
-      `key=${answers[0]?.key} elapsedMs=${elapsed}`,
+      answers.length === 1 && answers[0].key === 'c2'
+        && clock.waited() >= ASSISTANT_PAIR_WAIT_MS && clock.waited() <= ASSISTANT_PAIR_WAIT_MS + step,
+      `key=${answers[0]?.key} readings=${clock.readings.length} waitedMs=${clock.waited()}`,
     );
   } finally {
     await conn.close();
@@ -2274,7 +2321,7 @@ await (async () => {
 // getHistory() of the now-settled file would resolve the native key. That is one answer under two
 // identities in ONE client's transcript. Whichever surface published first has to bind the other.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-split-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-split-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'rollout-2026-07-25T00-00-00-00000000-0000-4000-8000-00000000000f.jsonl');
   const id = Buffer.from(path, 'utf8').toString('base64url');
@@ -2352,7 +2399,7 @@ await (async () => {
 // level regardless of the filter — so the boundary is Drive itself. Tag-not-drop is unchanged: the
 // session stays listed and fully readable.
 await (async () => {
-  const dir = join('/tmp', `cosyncing-codex-subagent-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(CODEX_TEST_SESSIONS, `cosyncing-codex-subagent-${Math.random().toString(36).slice(2, 8)}`);
   const sessionsDir = join(dir, 'sessions', '2026', '07', '25');
   const binDir = join(dir, 'bin');
   mkdirSync(sessionsDir, { recursive: true });

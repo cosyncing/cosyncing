@@ -912,10 +912,16 @@ void main() {
       live
         ..sessions = [session(title: 'A row')]
         ..revision = 1;
+      // The switch loads B's roster at once; B never answers here, so the
+      // only thing that could write is A's late delta.
+      final brokerB = _HeldSessionListRepository()..gate = Completer<void>();
       final container = ProviderContainer(
         overrides: [
           sessionRosterWindowProvider.overrideWith(_FixedRosterWindow.new),
-          sessionListRepositoryProvider.overrideWith((ref) async => live),
+          sessionListRepositoryProvider.overrideWith((ref) async {
+            final id = ref.watch(activeBrokerProfileProvider)?.id;
+            return id == 'profile-b' ? brokerB : live;
+          }),
           rosterSnapshotRepositoryProvider.overrideWithValue(snapshots),
           activeBrokerProfileHydrationProvider.overrideWith((ref) async {}),
         ],
@@ -948,6 +954,7 @@ void main() {
       );
       await pumpEventQueue();
 
+      expect(brokerB.fetchCount, 1, reason: 'the switch asked B at once');
       expect(
         snapshots.saves.length,
         savesForA,

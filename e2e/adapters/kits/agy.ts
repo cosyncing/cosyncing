@@ -35,6 +35,8 @@ import {
   type FakeController,
   installFakeExecutable,
   Ledger,
+  makeFifo,
+  replacedLogResetsObserve,
   type SeededSession,
   type SeedOptions,
   treeSnapshot,
@@ -96,27 +98,9 @@ export const agyProfile: ConformanceProfile = {
   // An idle send is delivered at once; only a send behind a running turn waits queued.
   idleSendQueued: false,
   commandsFrame: false,
-  // agy tails a path and a byte offset: a replacement with identical bytes leaves every offset valid.
-  boundaryChanges: ['rewriteHistory'],
-  observeRunSummaries: false,
   terminal: { resumeHint: 'agy --conversation {id}', syncAvailable: false },
   subagents: true,
-  missingBinaryRoster: 'hidden',
-  knownBugs: {
-    'C02.childDrive': 'a subagent child row is offered Drive (control.drive.supported is true): the adapter drives any stored conversation, '
-      + 'child or not',
-    'C09.clientKey': 'a sent prompt\'s row carries no clientKey, live or on a reloaded history: agy mints its own queued key',
-    'C09.summary': 'a Drive turn never closes with a run-summary: the adapter emits none, live or in history, so the app has no per-turn outcome row',
-    'C09.replayKey': 'a fresh reader\'s history keys the delivered prompt by its transcript step (agy:<id>:<n>), not by the queued key the '
-      + 'sender\'s live row carried',
-    'C13.clientKey': 'the owner\'s prompt row replayed to a joined client carries no clientKey',
-    'C12.crafted': 'a crafted `stop` command is acked and silently dropped (nothing reaches the child) instead of refused',
-    'C17.create': 'Create without the agy binary answers 500 (a plain Error) instead of the 503 SESSION_CREATE_TEMPORARILY_UNAVAILABLE every other agent gives',
-    'C20.mode': 'a permission mode chosen for a drive does not survive a broker restart: agy records no per-conversation mode, so the row reads none',
-    'C15.detect': 'a transcript rewritten in place under a Drive child is never noticed: the writer keeps its offset and goes on '
-      + 'appending to a history it no longer matches',
-    'C06.live': 'a transcript rewritten in place is not noticed by an open Observe reader: it keeps the old rows and never resets',
-  },
+  missingBinaryRoster: 'observe-only',
   scenarios: {
     C07: {
       skip: 'agy has no native create: the broker mints the conversation id and the CLI materialises it on the '
@@ -132,8 +116,8 @@ export const agyProfile: ConformanceProfile = {
         + 'refuses a crafted one before the child.',
     },
     C16: {
-      skip: 'agy has no runtime version gate: availability is "binary on PATH and the store exists", and the '
-        + 'version floor is only a doctor verdict (C22 asserts it per version).',
+      skip: 'agy has no runtime version gate: Drive needs only the binary on PATH (C17), and the version floor is '
+        + 'only a doctor verdict (C22 asserts it per version).',
     },
     C19: {
       skip: 'agy offers no slash commands under stream-json (upstream: `/x` is unavailable with '
@@ -157,6 +141,37 @@ export const agyProfile: ConformanceProfile = {
         return id;
       },
     },
+    {
+      // The brain scan lists a directory the summaries table does not know only when it holds a transcript.
+      name: 'a brain directory whose transcript is a FIFO',
+      unsupportedOn: ['win32'],
+      plant: (fake) => {
+        const id = crypto.randomUUID();
+        makeFifo(transcriptPath((fake as AgyFake).appData, id));
+        return id;
+      },
+    },
+    {
+      name: 'a subagent whose transcript is a FIFO',
+      unsupportedOn: ['win32'],
+      plant: (fake) => {
+        const appData = (fake as AgyFake).appData;
+        const parent = fake.seedSession({ title: 'hostile parent' });
+        const child = crypto.randomUUID();
+        makeFifo(transcriptPath(appData, child));
+        writeSettlement(appData, parent.id, child);
+        return child;
+      },
+    },
+    {
+      name: 'a FIFO in place of a settlement message',
+      unsupportedOn: ['win32'],
+      plant: (fake) => {
+        const parent = fake.seedSession({ title: 'hostile parent' });
+        makeFifo(join(settlementInbox((fake as AgyFake).appData, parent.id), `${crypto.randomUUID()}.json`));
+        return crypto.randomUUID();
+      },
+    },
   ],
 };
 
@@ -164,6 +179,27 @@ interface AgyFake extends FakeController {
   readonly appData: string;
   readonly installRoot: string;
   putSummary(row: { id: string; preview: string; cwd?: string; stepCount: number; ide?: boolean }): void;
+}
+
+/** The inbox where a parent conversation receives its subagents' settlements. */
+function settlementInbox(appData: string, parentId: string): string {
+  return join(appData, 'brain', parentId, '.system_generated', 'messages');
+}
+
+/** The settlement that names `childId` as `parentId`'s subagent: the only record of the lineage. */
+function writeSettlement(appData: string, parentId: string, childId: string): void {
+  const inbox = settlementInbox(appData, parentId);
+  mkdirSync(inbox, { recursive: true });
+  writeFileSync(join(inbox, `${crypto.randomUUID()}.json`), JSON.stringify({
+    id: crypto.randomUUID(),
+    recipient: parentId,
+    sender: childId,
+    priority: 'MESSAGE_PRIORITY_HIGH',
+    timestamp: new Date().toISOString(),
+    renderDetails: { messageTitle: 'Subagent finished' },
+    content: 'ok\n',
+    sourceMetadata: { tool: { conversationId: parentId, stepIndex: 1, toolCall: { id: 'toolu_fixture_sub', name: 'invoke_subagent' } } },
+  }));
 }
 
 /** A brain directory nobody should list: its name, not its content, is the hostility. */
@@ -192,12 +228,14 @@ const idleAfter = (stream: SessionStream, from: number) =>
 
 const modelsRuns = (ledger: Ledger): number => ledger.entries().filter((entry) => entry.kind === 'models').length;
 
-const STREAM_USER_STEP_BUG: string | undefined = 'the drive stream\'s text-less user_input step is flushed as an empty user row under the '
-  + 'transcript step\'s key, which also swallows the transcript\'s real row: the sender sees a blank prompt and its queued row never clears';
-const STREAM_USER_STEP_NOTE = STREAM_USER_STEP_BUG !== undefined && process.env.COSYNCING_E2E_KNOWN_BUGS !== '1'
-  ? ` — known bug not asserted: ${STREAM_USER_STEP_BUG}` : '';
+/** The statuses of the turn summaries a stream received after frame `from`, in order. */
+const summariesAfter = (stream: SessionStream, from: number): string[] =>
+  stream.frames.slice(from)
+    .filter((frame) => frame.kind === 'message' && frame.message?.type === 'run-summary')
+    .map((frame) => String(frame.message.status));
 
 const agyExtras: ConformanceExtra[] = [
+  replacedLogResetsObserve('agy'),
   {
     title: 'the child argv: never --print or --effort, the effort variant is the sibling id, and a mode rides --mode',
     async run(context) {
@@ -257,6 +295,8 @@ const agyExtras: ConformanceExtra[] = [
       const errors = errorsAfter(stream, from);
       expect(errors.length).toBe(1);
       expect(errors[0]).toContain('stopped without reporting the result');
+      // The turn the child owed is closed as failed, not left running.
+      expect(summariesAfter(stream, from)).toEqual(['error']);
       // The session is still driven: the next prompt starts a replacement child and is answered.
       const next = stream.frames.length;
       expect((await context.prompt(stream, 'after the silence')).kind).toBe('ack');
@@ -275,6 +315,9 @@ const agyExtras: ConformanceExtra[] = [
       expect((await context.prompt(stream, '[[fail]] break it')).kind).toBe('ack');
       await idleAfter(stream, from);
       expect(errorsAfter(stream, from)).toEqual(['Antigravity reported ERROR: fixture failure']);
+      // The turn closes with its outcome.
+      await eventually(() => summariesAfter(stream, from).length === 1, { what: 'the failed turn\'s summary' });
+      expect(summariesAfter(stream, from)).toEqual(['error']);
       stream.close();
     },
   },
@@ -378,7 +421,7 @@ const agyExtras: ConformanceExtra[] = [
     },
   },
   {
-    title: `a text-less stream user_input step is not shown as an empty prompt and does not leave the sender's row queued${STREAM_USER_STEP_NOTE}`,
+    title: 'a text-less stream user_input step is not shown as an empty prompt and does not leave the sender\'s row queued',
     async run(context) {
       const session = await context.drivableSession('stream user step');
       const stream = await context.openDrive(session);
@@ -388,16 +431,53 @@ const agyExtras: ConformanceExtra[] = [
       await idleAfter(stream, from);
       const live = stream.frames.slice(from).filter((frame) => frame.kind === 'message').map((frame) => frame.message)
         .filter((message) => message.type === 'user-message');
-      if (STREAM_USER_STEP_BUG === undefined || process.env.COSYNCING_E2E_KNOWN_BUGS === '1') {
-        expect(live.filter((message) => message.text === '')).toEqual([]);
-        expect(live.at(-1)?.text).toBe('[[userstep]] swallow me');
-        expect(live.at(-1)?.queued === true).toBe(false);
-      }
+      expect(live.filter((message) => message.text === '')).toEqual([]);
+      expect(live.at(-1)?.text).toBe('[[userstep]] swallow me');
+      expect(live.at(-1)?.queued === true).toBe(false);
       // A fresh reader always has the prompt exactly once: the transcript is the durable truth.
       const fresh = await context.client.attach('agy', session.id);
       const history = (await fresh.waitForKind('history')).messages as any[];
       expect(history.filter((message) => message.type === 'user-message' && message.text === '[[userstep]] swallow me').length).toBe(1);
       fresh.close();
+      stream.close();
+    },
+  },
+  {
+    title: 'a watching tab, a tab opened later and a reload key a Drive prompt as its sender did, with the sender\'s clientKey',
+    async run(context) {
+      const session = await context.drivableSession('echo keys');
+      // A tab already watching before the Drive connection existed.
+      const watching = await context.client.attach('agy', session.id);
+      await watching.waitForKind('history');
+      const stream = await context.openDrive(session);
+      const sent: Array<{ text: string; clientMessageId: string; key?: string }> = [];
+      // The same words twice: each delivery keeps its own sender's key.
+      for (const [index, text] of ['repeat me', 'repeat me', 'once more'].entries()) {
+        const clientMessageId = `echo-${index}`;
+        const from = stream.frames.length;
+        expect((await context.prompt(stream, text, { clientMessageId })).kind).toBe('ack');
+        await stream.waitForMessage((message) => message.type === 'model-output' && message.text === `answer: ${text}`);
+        const own = stream.frames.slice(from).filter((frame) => frame.kind === 'message').map((frame) => frame.message)
+          .filter((message) => message.type === 'user-message' && message.clientKey === clientMessageId);
+        expect(own.length).toBeGreaterThan(0);
+        expect(new Set(own.map((message) => message.key)).size).toBe(1);
+        expect(own.at(-1)?.queued === true).toBe(false);
+        sent.push({ text, clientMessageId, key: own[0]!.key });
+      }
+      expect(new Set(sent.map((entry) => entry.key)).size).toBe(sent.length);
+      const keyed = (messages: any[]) => sent.map((entry) =>
+        messages.filter((message) => message.type === 'user-message' && message.text === entry.text && message.key === entry.key
+          && message.clientKey === entry.clientMessageId).length);
+      // The tab that was watching all along saw each delivered prompt under its sender's key.
+      await eventually(() => keyed(watching.messages()).every((count) => count >= 1), { what: 'the watching tab to key every prompt' });
+      // A tab opened now, and a reload, read the same keys from the transcript.
+      for (const label of ['a tab opened later', 'a reload']) {
+        const fresh = await context.client.attach('agy', session.id);
+        const history = (await fresh.waitForKind('history')).messages as any[];
+        expect(keyed(history), label).toEqual([1, 1, 1]);
+        fresh.close();
+      }
+      watching.close();
       stream.close();
     },
   },
@@ -470,7 +550,7 @@ const agyExtras: ConformanceExtra[] = [
         const refused = await context.client.attach('agy', seeded.id, { mode: 'resume', reason: 'takeover' });
         const conflict = await refused.waitForKind('attach-conflict');
         expect(conflict.code).toBe('DRIVE_RESTORE_FAILED');
-        expect(String(conflict.message)).toContain('`agy` command is not on PATH');
+        expect(String(conflict.message)).toContain('Antigravity is not installed');
         await refused.waitForKind('history');
         expect(refused.frames.some((frame) => frame.kind === 'session' && frame.authority?.canMutate === true)).toBe(false);
         refused.close();
@@ -562,18 +642,7 @@ export const agyKit: ConformanceKit = {
         if (options.childOf) {
           // A child is a brain directory with its own transcript and NO summaries row; only the settlement in the
           // parent's inbox names it (the parent's invoke_subagent step never does).
-          const inbox = join(appData, 'brain', options.childOf.id, '.system_generated', 'messages');
-          mkdirSync(inbox, { recursive: true });
-          writeFileSync(join(inbox, `${crypto.randomUUID()}.json`), JSON.stringify({
-            id: crypto.randomUUID(),
-            recipient: options.childOf.id,
-            sender: id,
-            priority: 'MESSAGE_PRIORITY_HIGH',
-            timestamp: new Date().toISOString(),
-            renderDetails: { messageTitle: 'Subagent finished' },
-            content: 'ok\n',
-            sourceMetadata: { tool: { conversationId: options.childOf.id, stepIndex: 1, toolCall: { id: 'toolu_fixture_sub', name: 'invoke_subagent' } } },
-          }));
+          writeSettlement(appData, options.childOf.id, id);
         } else {
           putSummaryRow(summaries, { id, preview: title, cwd, stepCount: steps.length });
         }

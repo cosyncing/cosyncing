@@ -74,6 +74,8 @@ import { AgyObserveConnection, type AgyObserveOptions } from './observe.ts';
 import {
   AGY_CANCELED_STATUS,
   AGY_PENDING_SEND_LIMIT,
+  agyStepKey,
+  agyTurnSummaryKey,
   agySourceForStepType,
   createAgyMapState,
   createAgyQueuedSends,
@@ -127,6 +129,8 @@ interface AgyPendingRow {
   key: string;
   text: string;
   sentAt: number;
+  /** The sender's `clientMessageId`, stamped as `clientKey` on this row and on its delivery. */
+  clientKey?: string;
 }
 
 /** A step being assembled from `step_update` deltas. */
@@ -163,15 +167,23 @@ export class AgyDriveConnection extends AgyObserveConnection {
   private readonly onCloseHook?: (connection: AgyDriveConnection) => void;
 
   /**
-   * Per-CONNECTION queued-send state, which is what makes Q14 sound.
+   * The conversation's queued-send state, which is what makes Q14 sound.
    *
    * Two sockets sharing this connection share this table, so a peer socket's
    * prompt is written by the same writer, keyed from the same map, and read back
    * by the same replay. It can never look like a foreign write, because it is
-   * not one.
+   * not one. The adapter holds it per conversation and hands the same object to
+   * every Observe reader, so a fresh reader keys a delivered prompt as its sender
+   * did; only this connection's own pending links are dropped when it closes.
    */
-  private readonly queuedSends: AgyQueuedSends = createAgyQueuedSends();
+  private readonly queuedSends: AgyQueuedSends;
   private readonly pendingRows: AgyPendingRow[] = [];
+  /**
+   * The prompts written to the current child, oldest first, still owed a `result`. agy answers its
+   * stdin in order, so each `result` ends the oldest one: its summary is keyed by the transcript
+   * step the prompt's delivering line claimed, as a replay of the same turn keys it.
+   */
+  private turnSends: AgyPendingRow[] = [];
   private readonly connNonce = randomUUID().slice(0, 8);
   private drivenSendSeq = 0;
 
@@ -183,11 +195,14 @@ export class AgyDriveConnection extends AgyObserveConnection {
   /** Submitted turns still awaiting their `result`. A child that dies owing one is a surfaced failure. */
   private awaitingResult = 0;
   private demoted = false;
+  /** What ended this connection's Drive, once it ended. */
+  private demotedBy?: 'foreign-prompt' | 'rewritten';
   private launchModel?: string;
   private launchMode?: string;
 
   constructor(options: AgyDriveOptions) {
     super(options);
+    this.queuedSends = options.queuedSends?.() ?? createAgyQueuedSends();
     this.binary = options.binary;
     if (options.onClose) this.onCloseHook = options.onClose;
     if (options.model) this.launchModel = options.model;
@@ -248,6 +263,7 @@ export class AgyDriveConnection extends AgyObserveConnection {
       type: 'user-message' as const,
       text: row.text,
       key: row.key,
+      ...(row.clientKey ? { clientKey: row.clientKey } : {}),
       queued: true,
       sentAt: row.sentAt,
     }));
@@ -306,6 +322,22 @@ export class AgyDriveConnection extends AgyObserveConnection {
     this.demote(`a prompt this connection did not send appeared in the transcript at step ${step.step_index}`);
   }
 
+  /**
+   * The transcript was rewritten or replaced outside this connection: the child would go on
+   * appending to a history it no longer matches, so this connection stops writing at once — every
+   * tab learns before anyone writes — and the view reloads from the file as it is now.
+   */
+  protected override onTranscriptRewritten(detail: string): void {
+    this.demote(`the transcript was changed outside the app: ${detail}`, 'rewritten');
+    super.onTranscriptRewritten(detail);
+  }
+
+  protected override rewriteNotice(): string {
+    return this.demotedBy === 'rewritten'
+      ? 'This conversation\'s Antigravity transcript was changed outside the app, so the app switched to watching it.'
+      : super.rewriteNotice();
+  }
+
   private pendingKeyPrefix(): string {
     return `queued:agy:${this.connNonce}.`;
   }
@@ -320,7 +352,9 @@ export class AgyDriveConnection extends AgyObserveConnection {
         supported: driving,
         ...(this.demoted
           ? {
-            reason: 'Another writer took this conversation in a terminal, so the app released it.',
+            reason: this.demotedBy === 'rewritten'
+              ? 'This conversation\'s transcript was changed outside the app, so the app released it.'
+              : 'Another writer took this conversation in a terminal, so the app released it.',
             takeoverAvailable: true,
           }
           : {}),
@@ -354,9 +388,10 @@ export class AgyDriveConnection extends AgyObserveConnection {
   }
 
   /** Give up write authority without giving up the session. */
-  private demote(reason: string): void {
+  private demote(reason: string, cause: 'foreign-prompt' | 'rewritten' = 'foreign-prompt'): void {
     if (this.demoted) return;
     this.demoted = true;
+    this.demotedBy = cause;
     this.trace?.({ op: 'drive-demoted', detail: reason });
     // Stop being a writer: a second stdin against a conversation a terminal now
     // owns is the two-writer collision the single-owner rule exists to prevent.
@@ -366,20 +401,26 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // about what it buffered — clearing the rows would lose the user's words on
     // reload if the line never lands, and re-key them if it lands late
     // (reflection §6, a decision a third review reversed).
-    this.emit({
-      type: 'notice',
-      message: 'This conversation was taken over in a terminal, so the app switched to watching it.',
-    });
+    // A rewrite says so in the reload that follows it (see `rewriteNotice`): one notice, not two.
+    if (cause === 'foreign-prompt') {
+      this.emit({
+        type: 'notice',
+        message: 'This conversation was taken over in a terminal, so the app switched to watching it.',
+      });
+    }
     // The child we just killed may have owed a `result`. Nothing else will settle
     // that turn — see settleGeneration — so a demotion that skipped this left the
     // session Running forever, under an observing posture, with no writer left to
     // finish it.
     this.settleGeneration({
       op: 'drive-turn-abandoned-by-demotion',
+      status: 'cancelled',
       detail: reason,
-      message:
-        'That turn was still running when the conversation was taken over, so Antigravity never reported its '
-        + 'result. Whatever it did is in the terminal session.',
+      message: cause === 'rewritten'
+        ? 'That turn was still running when the transcript was changed outside the app, so the app stopped it '
+          + 'before Antigravity reported its result.'
+        : 'That turn was still running when the conversation was taken over, so Antigravity never reported its '
+          + 'result. Whatever it did is in the terminal session.',
     });
     this.broadcastPosture();
   }
@@ -405,13 +446,24 @@ export class AgyDriveConnection extends AgyObserveConnection {
    * A no-op when nothing was in flight, which is why the cold-start path can call
    * it unconditionally.
    */
-  private settleGeneration(reason: { op: string; detail: string; message: string }): void {
+  private settleGeneration(reason: {
+    op: string;
+    detail: string;
+    message: string;
+    status: 'error' | 'cancelled';
+  }): void {
     if (this.awaitingResult > 0) {
       const owed = this.awaitingResult;
       this.awaitingResult = 0;
       this.trace?.({ op: reason.op, detail: `${reason.detail}; ${owed} turn(s) never reported a result` });
       this.emit({ type: 'error', message: reason.message });
     }
+    // Every turn this child owed ends here, under the key a replay gives it, so none stays running
+    // and the next child's first `result` cannot be taken for one of them.
+    const owedTurns = this.turnSends;
+    this.turnSends = [];
+    if (owedTurns.length > 0) this.drainNow();
+    for (const send of owedTurns) this.emitTurnSummary(send, reason.status);
     if (this.running) {
       this.running = false;
       this.emit({ type: 'status', status: 'idle' });
@@ -473,7 +525,7 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // Mint BEFORE the write. The pending row's key is the only thing that will
     // exonerate this prompt's own echo, and the echo can land before this call
     // returns — so the claim has to exist first.
-    this.mintPendingRow(text, wasRunning);
+    this.mintPendingRow(text, wasRunning, input.clientMessageId);
     this.writeLine({ event: 'user', message: { role: 'user', content: text } });
   }
 
@@ -509,23 +561,34 @@ export class AgyDriveConnection extends AgyObserveConnection {
    * repeated prompts recur verbatim and a timestamp comparison would let an
    * older identical line take a newer send's key.
    */
-  private mintPendingRow(text: string, queued: boolean): void {
+  private mintPendingRow(text: string, queued: boolean, clientMessageId: string | undefined): void {
     const key = `${this.pendingKeyPrefix()}${++this.drivenSendSeq}`;
     const sentAt = Date.now();
     const notBeforeOffset = existsSync(this.path) ? (statSync(this.path).size ?? 0) : 0;
+    // The app's own correlation token: this connection writes the row it echoes, so it can stamp it
+    // exactly, and the delivering line inherits it through the claim.
+    const clientKey = clientMessageId?.trim() || undefined;
 
     // The row and its correlation link are bounded TOGETHER: an evicted row must
     // never leave a link behind whose only remaining power is to lend its key to
     // a later repeat of the same words.
-    const evicted = pushAgyQueuedSend(this.queuedSends, { text, key, notBeforeOffset });
+    const evicted = pushAgyQueuedSend(this.queuedSends, { text, key, ...(clientKey ? { clientKey } : {}), notBeforeOffset });
     for (const goneKey of evicted) this.dropPendingRow(goneKey);
-    this.pendingRows.push({ key, text, sentAt });
+    this.pendingRows.push({ key, text, sentAt, ...(clientKey ? { clientKey } : {}) });
+    this.turnSends.push({ key, text, sentAt, ...(clientKey ? { clientKey } : {}) });
     while (this.pendingRows.length > AGY_PENDING_SEND_LIMIT) {
       const gone = this.pendingRows.shift()!;
       retireAgyQueuedSend(this.queuedSends, gone.key);
     }
 
-    this.emit({ type: 'user-message', text, key, ...(queued ? { queued: true } : {}), sentAt });
+    this.emit({
+      type: 'user-message',
+      text,
+      key,
+      ...(clientKey ? { clientKey } : {}),
+      ...(queued ? { queued: true } : {}),
+      sentAt,
+    });
   }
 
   /** The transcript line arrived: the row is durable upstream now, so stop replaying ours. */
@@ -581,6 +644,7 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // A cold start settles nothing, because nothing is in flight.
     this.settleGeneration({
       op: 'drive-turn-abandoned-by-relaunch',
+      status: 'cancelled',
       detail: `relaunching for model=${model ?? 'default'} mode=${mode ?? 'default'}`,
       message:
         'Antigravity was restarted to change the model or mode while a turn was running, so that turn was '
@@ -650,6 +714,7 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // never ends and no error anywhere.
     this.settleGeneration({
       op: 'drive-stream-closed-without-result',
+      status: 'error',
       detail: `the child exited owing a result; exit code ${String(code)}`,
       message: 'Antigravity stopped without reporting the result of that turn, so it may not have run. Send it again.',
     });
@@ -895,6 +960,15 @@ export class AgyDriveConnection extends AgyObserveConnection {
     const open = this.openSteps.get(stepIndex);
     if (!open) return;
     this.openSteps.delete(stepIndex);
+    // A stream `user_input` step is never a row. It carries no text, and the transcript line the
+    // child writes for the same step is both the durable record and the only copy with the byte
+    // offset that lets it claim the sender's pending row. Admitting the stream copy showed an empty
+    // prompt and marked the step seen, so the tail skipped the real line and the sender's row
+    // stayed queued. The tail admits that line, under the sender's key, whenever it lands.
+    if (open.type === 'USER_INPUT') {
+      this.trace?.({ op: 'drive-stream-user-step-deferred', detail: `step ${stepIndex} is left to the transcript` });
+      return;
+    }
     // The transcript tail will ALSO see this step when agy writes it to the file.
     // `seenSteps` is shared fold state, so whichever path reaches it first admits
     // it and the other skips it — the exactly-once guarantee spans both.
@@ -916,7 +990,51 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // The fold reports a live child, so a RUNNING row reads as running here — the
     // same row replayed later with no child reads as interrupted.
     this.state.liveChild = true;
-    for (const message of mapAgyStep(step, this.state)) this.emit(message);
+    // A stream step carries no tool calls, so it cannot prove a turn ended: the `result` does.
+    const closesTurns = this.state.closesTurns;
+    this.state.closesTurns = false;
+    try {
+      for (const message of mapAgyStep(step, this.state)) this.emit(message);
+    } finally {
+      this.state.closesTurns = closesTurns;
+    }
+  }
+
+  /** A live child's `result` ends its turns; the tail only closes a turn nobody is running. */
+  protected override tailClosesTurns(): boolean {
+    return this.proc === undefined;
+  }
+
+  /**
+   * Close one prompt's turn with its `run-summary`.
+   *
+   * Keyed by the transcript step whose line delivered the prompt (the claim the line took), so a
+   * replay that closes the same turn from the transcript keys it identically. A prompt whose line
+   * never landed is keyed by its own row, the only identity it has.
+   */
+  private emitTurnSummary(
+    send: AgyPendingRow,
+    status: 'done' | 'error' | 'cancelled',
+    tokens?: { input?: number; output?: number; cacheRead?: number },
+  ): void {
+    let stepIndex: number | undefined;
+    for (const [index, claim] of this.queuedSends.byStep) {
+      if (claim.key === send.key) stepIndex = index;
+    }
+    const turnId = stepIndex === undefined ? send.key : agyStepKey(this.conversationId, stepIndex);
+    const turn = this.state.turn?.turnId === turnId ? this.state.turn : undefined;
+    if (turn) turn.closed = true;
+    this.emit({
+      type: 'run-summary',
+      key: agyTurnSummaryKey(turnId),
+      turnId,
+      userMessageKey: send.key,
+      ...(turn?.assistantMessageKey ? { assistantMessageKey: turn.assistantMessageKey } : {}),
+      status,
+      startedAt: send.sentAt,
+      completedAt: Date.now(),
+      ...(tokens && Object.keys(tokens).length > 0 ? { tokens } : {}),
+    });
   }
 
   /**
@@ -934,6 +1052,11 @@ export class AgyDriveConnection extends AgyObserveConnection {
     const input = numberOrUndefined(usage.input_tokens) ?? numberOrUndefined(usage.input);
     const output = numberOrUndefined(usage.output_tokens) ?? numberOrUndefined(usage.output);
     const cacheRead = numberOrUndefined(usage.cache_read_tokens) ?? numberOrUndefined(usage.cache_read);
+    const turnTokens = {
+      ...(input !== undefined ? { input } : {}),
+      ...(output !== undefined ? { output } : {}),
+      ...(cacheRead !== undefined ? { cacheRead } : {}),
+    };
     if (input !== undefined || output !== undefined || cacheRead !== undefined) {
       // `thinking_tokens` is a fourth bucket agy reports and the protocol has no
       // field for, and `total_tokens` is agy's own sum across all four. Neither is
@@ -951,9 +1074,17 @@ export class AgyDriveConnection extends AgyObserveConnection {
     this.awaitingResult = Math.max(0, this.awaitingResult - 1);
     const status = typeof event.status === 'string' ? event.status : '';
     // Outcome from the RESULT EVENT, never from an exit code.
-    if (status && !/^success$/i.test(status)) {
+    const failed = Boolean(status) && !/^success$/i.test(status);
+    if (failed) {
       const detail = typeof event.error === 'string' && event.error ? `: ${event.error}` : '';
       this.emit({ type: 'error', message: `Antigravity reported ${status}${detail}` });
+    }
+    // The oldest prompt's turn is over. Its lines are read first, so the summary names the step the
+    // prompt's delivering line claimed and lands after the turn's rows.
+    const send = this.turnSends.shift();
+    if (send) {
+      this.drainNow();
+      this.emitTurnSummary(send, failed ? 'error' : 'done', turnTokens);
     }
     if (this.awaitingResult === 0 && this.running) {
       this.running = false;
@@ -979,8 +1110,13 @@ export class AgyDriveConnection extends AgyObserveConnection {
   override async close(): Promise<void> {
     this.killChild();
     this.pendingRows.length = 0;
-    this.queuedSends.pending.length = 0;
-    this.queuedSends.byStep.clear();
+    this.turnSends = [];
+    // Only THIS connection's undelivered links go: the table is the conversation's, and the claims
+    // its delivered lines took stay so a later reader keys them as their sender did.
+    const prefix = this.pendingKeyPrefix();
+    for (let index = this.queuedSends.pending.length - 1; index >= 0; index -= 1) {
+      if (this.queuedSends.pending[index]!.key.startsWith(prefix)) this.queuedSends.pending.splice(index, 1);
+    }
     await super.close();
     this.onCloseHook?.(this);
   }

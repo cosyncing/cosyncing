@@ -270,12 +270,9 @@ void main() {
       );
     });
 
-    // Product defect, found by this lane: tapping Retry and letting the page
-    // land trips a SelectionArea assertion ("RenderBox was not laid out" for
-    // the zero-width placeholder of the idle slot, then "The selectable is not
-    // in this registrar") on the frames after the tap. The old paging fake
-    // hid it: its test ended on the frame of the tap. Unskip when the Retry
-    // row and the idle slot stop trading selectables mid-frame.
+    // A tap on Retry leaves the transcript's selection in the notice row,
+    // whose Retry button, loading line and blank slot then swap as the page
+    // lands: the frames after the tap must not trip the selection registrar.
     featureTest('Retry asks again, and the page lands', (f) async {
       final (app, broker) = await openPaging(
         f,
@@ -287,7 +284,18 @@ void main() {
       await f.tester.tap(find.byKey(const Key('session-history-load-earlier')));
       await app.frames(3);
       expect(broker.requests.map((r) => r.cursor), ['b200', 'b200']);
-    }, skip: true);
+      await app.pumpFor(const Duration(seconds: 1));
+      expect(
+        find.byKey(const Key('session-history-load-earlier')),
+        findsNothing,
+        reason: 'the page landed',
+      );
+      expect(
+        broker.requests,
+        hasLength(2),
+        reason: 'asked once more, not twice',
+      );
+    });
 
     featureTest('a page that failed for a passing reason is asked for again '
         'after a doubling backoff', (f) async {

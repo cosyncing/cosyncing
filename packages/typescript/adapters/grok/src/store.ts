@@ -1,9 +1,14 @@
 /** Read-only, bounded Grok Build store discovery and update-log reads. */
-import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { compareSemanticVersions, lowestSemanticVersion, type HistorySourceIdentity } from '@cosyncing/adapter-api';
+import {
+  compareSemanticVersions,
+  lowestSemanticVersion,
+  NO_FOLLOW_FLAG,
+  STORE_READ_FLAGS,
+  type HistorySourceIdentity,
+} from '@cosyncing/adapter-api';
 import type { GrokUpdateEntry, GrokUpdateRecord } from './mapping.ts';
 
 /**
@@ -180,7 +185,8 @@ async function openRegularInside(root: string, path: string): Promise<FileHandle
       const info = await lstat(parent);
       if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
     }
-    handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Non-blocking: a FIFO in place of a session file must not park a worker waiting for a writer.
+    handle = await open(absolutePath, STORE_READ_FLAGS | NO_FOLLOW_FLAG);
     const info = await handle.stat();
     if (!info.isFile()) throw new Error('not a regular file');
     const rootAfter = await realpath(absoluteRoot);
@@ -461,13 +467,26 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
   // ambiguous across cwd groups) now has its summary read and discarded. Those
   // are refusal paths, and a read whose result is dropped changes no output.
   const summaries = new Map<string, unknown>();
+  // Sessions whose `updates.jsonl` exists but is not one plain regular file (a FIFO, socket,
+  // directory or symlink): the history read refuses it, so the session is not listed either. An
+  // absent log is fine — Grok writes it lazily on the first prompt. Probed in the same batches.
+  const unsafeUpdates = new Set<string>();
   const summaryReadBatch = 16;
   for (let index = 0; index < candidates.length; index += summaryReadBatch) {
     const batch = candidates.slice(index, index + summaryReadBatch);
-    const values = await Promise.all(batch.map(
-      (candidate) => readBoundedJson(root, join(candidate.sessionDir, 'summary.json'), GROK_MAX_SUMMARY_BYTES),
-    ));
-    batch.forEach((candidate, offset) => summaries.set(candidate.sessionDir, values[offset]));
+    const [values, updates] = await Promise.all([
+      Promise.all(batch.map(
+        (candidate) => readBoundedJson(root, join(candidate.sessionDir, 'summary.json'), GROK_MAX_SUMMARY_BYTES),
+      )),
+      Promise.all(batch.map((candidate) => lstat(join(candidate.sessionDir, 'updates.jsonl')).then(
+        (info) => !info.isFile() || info.isSymbolicLink(),
+        () => false,
+      ))),
+    ]);
+    batch.forEach((candidate, offset) => {
+      summaries.set(candidate.sessionDir, values[offset]);
+      if (updates[offset]) unsafeUpdates.add(candidate.sessionDir);
+    });
   }
   const parsed: GrokParsedCandidate[] = [];
   for (const candidate of candidates) {
@@ -494,6 +513,10 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
     const cwd = boundedString(info?.cwd, MAX_CWD_CHARS);
     if (!summary || info?.id !== id || !cwd || !isAbsolute(cwd) || resolve(cwd) !== candidate.groupCwd) {
       options.trace?.({ op: 'schema-refused', path: summaryPath, detail: 'summary id/cwd does not match its native directory identity' });
+      continue;
+    }
+    if (unsafeUpdates.has(candidate.sessionDir)) {
+      options.trace?.({ op: 'path-refused', path: join(candidate.sessionDir, 'updates.jsonl'), detail: 'updates log is not a regular file' });
       continue;
     }
     const updatedAt = parseTimestamp(summary.last_active_at ?? summary.updated_at);

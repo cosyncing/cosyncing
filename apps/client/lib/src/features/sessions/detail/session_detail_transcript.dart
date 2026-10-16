@@ -958,6 +958,23 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// Row identities of the last build, in order.
   List<String> _rowIdentities = const [];
 
+  /// The built widget of each kept row (see [_rowSignature]), by the row's
+  /// registry key.
+  ///
+  /// A page rebuild — every streamed chunk, every status tick — rebuilds this
+  /// surface and so asks the list for every mounted row again, and a changed
+  /// page re-projects its rows as new objects even where nothing in them
+  /// changed. A row whose signature and [_rowWidgetInputs] are unchanged gets
+  /// back the very widget it was built from, and the framework skips its whole
+  /// subtree; without this, one streamed word rebuilt every row on screen.
+  /// Rows read everything else they show (theme, locale, read-aloud state) in
+  /// their own builds, so those still reach a kept row.
+  Expando<_KeptTranscriptRow> _keptRows = Expando('kept transcript rows');
+
+  /// What every kept row was built with besides its own item; a change
+  /// drops them all.
+  _TranscriptRowInputs? _rowWidgetInputs;
+
   /// The row the scroll view is centered on (scroll offset 0 is its top).
   ///
   /// Rows added or released above it grow the list upward and rows below it
@@ -1024,6 +1041,45 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     _tickerMode?.removeListener(_reportHostVisible);
     _tickerMode = next..addListener(_reportHostVisible);
   }
+
+  /// The passive right-edge reading indicator. Built once: it follows its
+  /// listenables, and rebuilding it with every streamed chunk only redrew the
+  /// same thing.
+  late final Widget _readingScrollbar = Positioned(
+    top: 0,
+    bottom: 0,
+    right: 0,
+    width: 8,
+    child: _TranscriptReadingScrollbar(
+      progress: _progressValue,
+      viewportFraction: _progressViewportFraction,
+      active: _progressActive,
+    ),
+  );
+
+  /// The jump-to-latest button, built once for the same reason as
+  /// [_readingScrollbar]; it reads its tooltip in its own build.
+  late final Widget _jumpLatestButton = Positioned(
+    right: 16,
+    bottom: 16,
+    child: ValueListenableBuilder<bool>(
+      valueListenable: _showJumpLatest,
+      builder: (context, visible, _) => Offstage(
+        offstage: !visible,
+        child: IconButton.filledTonal(
+          key: const Key('session-history-jump-latest'),
+          onPressed: _jumpToLatest,
+          tooltip: AppLocalizations.of(context).sessionHistoryJumpLatest,
+          icon: const Icon(Icons.arrow_downward),
+        ),
+      ),
+    ),
+  );
+
+  /// The fork callback rows hold. A method, so it is the same function on
+  /// every build however the page passes its own (see [_keptRows]).
+  void _forkFromMessage(String messageId) =>
+      widget.onForkFromMessage(messageId);
 
   void _reportHostVisible() {
     if (!mounted) return;
@@ -2867,7 +2923,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
             return _MessageContextRegion(
               message: message,
               canFork: widget.isConnected && widget.canFork,
-              onForkFromMessage: widget.onForkFromMessage,
+              onForkFromMessage: _forkFromMessage,
               child: TranscriptMessageMetadataScope(
                 timestamp: message.timestamp,
                 child: child,
@@ -2921,7 +2977,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                 _MessageContextRegion(
                   message: primaryMessage,
                   canFork: widget.isConnected && widget.canFork,
-                  onForkFromMessage: widget.onForkFromMessage,
+                  onForkFromMessage: _forkFromMessage,
                   child: TranscriptMessageMetadataScope(
                     timestamp: primaryMessage.timestamp,
                     child: buildToolTranscriptRenderer(
@@ -2936,7 +2992,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                 _MessageContextRegion(
                   message: tools.first.primaryMessage,
                   canFork: widget.isConnected && widget.canFork,
-                  onForkFromMessage: widget.onForkFromMessage,
+                  onForkFromMessage: _forkFromMessage,
                   child: buildLookupGroupRenderer(
                     scopedContext,
                     entry,
@@ -3115,6 +3171,16 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
           final display =
               ref.watch(conversationDisplayControllerProvider).valueOrNull ??
               const ConversationDisplayPreferences();
+          final rowInputs = (
+            canFork: widget.isConnected && widget.canFork,
+            toolsExpanded: widget.toolsExpanded,
+            expansionRevision: widget.toolExpansionRevision,
+            messageSpacing: display.messageSpacing,
+          );
+          if (rowInputs != _rowWidgetInputs) {
+            _rowWidgetInputs = rowInputs;
+            _keptRows = Expando('kept transcript rows');
+          }
 
           // Every row registers its laid-out geometry under its stable key so
           // the logical progress reading walks only mounted rows.
@@ -3168,13 +3234,22 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
             final messageIndex = index - messageOffset;
             if (messageIndex >= 0 && messageIndex < messageCount) {
               final item = chatItems[messageIndex];
-              return rowShell(
+              Widget build() => rowShell(
                 key,
                 Padding(
                   padding: EdgeInsets.only(bottom: display.messageSpacing),
                   child: buildChatItem(item),
                 ),
               );
+              final signature = _rowSignature(item);
+              if (signature == null) return build();
+              final kept = _keptRows[key];
+              if (kept != null && kept.signature.matches(signature)) {
+                return kept.widget;
+              }
+              final row = build();
+              _keptRows[key] = (signature: signature, widget: row);
+              return row;
             }
 
             if (showEmptyTranscript && index == emptyOffset) {
@@ -3434,37 +3509,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                                 ),
                               ),
                             ),
-                            Positioned(
-                              top: 0,
-                              bottom: 0,
-                              right: 0,
-                              width: 8,
-                              child: _TranscriptReadingScrollbar(
-                                progress: _progressValue,
-                                viewportFraction: _progressViewportFraction,
-                                active: _progressActive,
-                              ),
-                            ),
-                            Positioned(
-                              right: 16,
-                              bottom: 16,
-                              child: ValueListenableBuilder<bool>(
-                                valueListenable: _showJumpLatest,
-                                builder: (context, visible, _) => Offstage(
-                                  offstage: !visible,
-                                  child: IconButton.filledTonal(
-                                    key: const Key(
-                                      'session-history-jump-latest',
-                                    ),
-                                    onPressed: _jumpToLatest,
-                                    tooltip: AppLocalizations.of(
-                                      context,
-                                    ).sessionHistoryJumpLatest,
-                                    icon: const Icon(Icons.arrow_downward),
-                                  ),
-                                ),
-                              ),
-                            ),
+                            _readingScrollbar,
+                            _jumpLatestButton,
                           ],
                         ),
                       ),
@@ -3505,6 +3551,77 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     );
   }
 }
+
+/// What a kept transcript row is built from besides its own chat item (see
+/// `_TranscriptSurfaceState._keptRows`).
+typedef _TranscriptRowInputs = ({
+  bool canFork,
+  bool toolsExpanded,
+  int expansionRevision,
+  double messageSpacing,
+});
+
+/// One kept row: what it was built from, and the widget.
+typedef _KeptTranscriptRow = ({_RowSignature signature, Widget widget});
+
+/// What one kept row's widget was built from, besides the
+/// [_TranscriptRowInputs]: the messages it renders, compared by identity (a
+/// message is immutable, so a changed one is a new object), and for a turn
+/// footer the turn's derived text and counts, compared by value.
+final class _RowSignature {
+  const _RowSignature(this.kind, this.parts);
+
+  /// Which row builder the parts feed, so two kinds never match.
+  final int kind;
+  final List<Object?> parts;
+
+  bool matches(_RowSignature other) {
+    if (kind != other.kind || parts.length != other.parts.length) return false;
+    for (var index = 0; index < parts.length; index++) {
+      final a = parts[index];
+      final b = other.parts[index];
+      if (identical(a, b) || (a is String && b is String && a == b)) continue;
+      return false;
+    }
+    return true;
+  }
+}
+
+/// [item]'s signature when its row is built from the item and the
+/// [_TranscriptRowInputs] alone, so its widget can be kept across builds;
+/// null when it is not.
+///
+/// A request, artifact or other dedicated row, a prompt carrying attachments
+/// and a history gap all read per-build state (resolved requests, transfer
+/// phases, paging), so they are always built afresh.
+_RowSignature? _rowSignature(_ChatItem item) => switch (item) {
+  _ChatUserItem(:final message, :final attachments) =>
+    attachments.isEmpty ? _RowSignature(0, [message]) : null,
+  _ChatEntryItem(:final entry) => switch (entry) {
+    MessageTranscriptDisplayEntry(:final message) => switch (message.type) {
+      AgentMessageType.modelOutput ||
+      AgentMessageType.thinking ||
+      AgentMessageType.userMessage => _RowSignature(1, [message]),
+      _ => null,
+    },
+    ToolTranscriptDisplayEntry(:final call, :final result) => _RowSignature(
+      2,
+      [call, result],
+    ),
+    LookupGroupTranscriptDisplayEntry(:final tools) => _RowSignature(3, [
+      for (final tool in tools) ...[tool.call, tool.result],
+    ]),
+  },
+  // Everything the footer reads from its turn.
+  _ChatFooterItem(:final turn) => _RowSignature(4, [
+    turn.turnKey,
+    turn.modelText,
+    turn.openReason,
+    turn.distinctToolCallCount,
+    turn.runSummary,
+  ]),
+  _ChatHistoryGapItem() => null,
+};
 
 SessionArtifactActionState _artifactActionStateForMessage(
   SessionDetailState state,
@@ -3874,7 +3991,7 @@ class _HistoryDecodedGapRow extends StatelessWidget {
   }
 }
 
-class _HistoryScopeNotice extends StatelessWidget {
+class _HistoryScopeNotice extends StatefulWidget {
   const _HistoryScopeNotice({
     required this.gap,
     required this.hasEarlier,
@@ -3896,7 +4013,28 @@ class _HistoryScopeNotice extends StatelessWidget {
   final VoidCallback? onLoadEarlier;
 
   @override
+  State<_HistoryScopeNotice> createState() => _HistoryScopeNoticeState();
+}
+
+class _HistoryScopeNoticeState extends State<_HistoryScopeNotice> {
+  final _statusSelection = StaticSelectionContainerDelegate();
+
+  @override
+  void dispose() {
+    _statusSelection.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final gap = widget.gap;
+    final hasEarlier = widget.hasEarlier;
+    final startReached = widget.startReached;
+    final connected = widget.connected;
+    final loading = widget.loading;
+    final pagingError = widget.pagingError;
+    final pagingErrorCode = widget.pagingErrorCode;
+    final onLoadEarlier = widget.onLoadEarlier;
     final theme = Theme.of(context);
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
@@ -4065,7 +4203,14 @@ class _HistoryScopeNotice extends StatelessWidget {
                 ),
               ),
           ],
-          statusRow(),
+          // Its own selection container. The slot trades its Retry button,
+          // its loading line and its placeholder as a page is asked for and
+          // lands. A tap on Retry leaves a selection here, which keeps the
+          // notice alive above the landed page without layout; a line that
+          // registered with the transcript then had to be ordered against
+          // laid-out rows and tripped the registrar. Inside this container
+          // it is ordered against this slot alone.
+          SelectionContainer(delegate: _statusSelection, child: statusRow()),
         ],
       ),
     );

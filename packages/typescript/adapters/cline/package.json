@@ -6,7 +6,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@cosyncing/acp-client": "workspace:*",
     "@cosyncing/adapter-api": "workspace:*",
     "@cosyncing/protocol": "workspace:*"
   }

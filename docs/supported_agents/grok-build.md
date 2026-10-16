@@ -53,6 +53,13 @@ deliberate nonstandard executable.
 - Prompt queue, allow-once/reject permission, commands, model/mode relaunch, and
   cross-client writer sharing are covered by deterministic regressions. Foreign
   writes or transcript rewrites terminate and revoke the broker writer.
+- Stop is offered as an action while driving. It sends ACP `session/cancel`,
+  drops prompts not yet delivered, and keeps Drive; the turn closes as
+  cancelled when Grok answers the prompt with `stopReason: cancelled`. If the
+  prompt has not answered 10 seconds after Stop, the writer is stopped and the
+  session becomes read-only with a notice. Grok lists no stop command of its
+  own; its bundled hook documentation counts a client `session/cancel` as a user
+  interrupt.
 - The terminal hint uses `grok --cwd <workspace> --resume <uuid>`. It is a
   handoff to a separate process, not live synchronization with the ACP child.
 
@@ -60,6 +67,13 @@ deliberate nonstandard executable.
 
 - Drive is fail-closed below 1.0.13, without reusable cached-token auth, or for a
   session that lacks durable app-created provenance.
+- Stop is verified against the conformance fake only. A capability probe of
+  Grok Build 1.0.41 (ACP `initialize` alone, in a throwaway home) answered
+  protocol version 1 with `loadSession` and session `list`/`resume`/`close`,
+  listed no stop command, and reported `_meta.cancelRewind: true`, whose effect
+  on the stored log is unmeasured. Measuring a real mid-turn Stop needs a model
+  call, so how Grok records a stopped turn, and how quickly it answers, are not
+  yet measured.
 - True terminal synchronization, files, images, artifact delivery, question
   dialogs, rename, fork, clone, export, and child-session identity are not
   exposed by this adapter.

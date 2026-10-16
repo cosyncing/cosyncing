@@ -2466,35 +2466,35 @@ try {
   hub.setAbortRepliesToRun(false);
   const lostReplyLive: AgentMessage[] = [];
   lostReplyConnection.subscribe((message) => lostReplyLive.push(message));
-  await assert.rejects(
-    lostReplyConnection.runCommand!('stop'),
-    /prior native request did not settle/u,
-  );
-  check('Stop is bounded and demotes when native idle is proved but the original run reply is lost',
-    lostReplyConnection.info.attachMode === 'observe');
-  // "Lost" and "late" reach the identical demotion, and only one of them is a
-  // reason to size the bound differently. Measured on the installed managed
-  // Cline, every Stop leg demotes here with nothing to say which it was.
+  // The measured Hub never answers the `run.start` of a run it aborted. Once Stop has proved the
+  // session idle with a stable transcript, the run is over: Stop acks, the stopped prompt is
+  // answered, and Drive stays with this connection.
+  const lostReplyStop = await lostReplyConnection.runCommand!('stop');
+  await lostReplyTurn;
+  check('Stop that proves native idle answers the stopped prompt and keeps Drive when the Hub never replies to the aborted run',
+    lostReplyStop?.notice === 'Stop requested.'
+      && lostReplyConnection.info.attachMode === 'resume'
+      && lostReplyConnection.info.control?.drive.state === 'driving'
+      && hub.frames.filter((frame) => frame.envelope?.command === 'run.abort').length > 0
+      && lostReplyLive.some((message) => message.type === 'permission-resolved' && message.decision === 'reject')
+      && !lostReplyLive.some((message) => message.type === 'error'),
+    JSON.stringify(lostReplyLive.filter((message) => message.type === 'error' || message.type === 'permission-resolved')));
+  // The reply the Hub never sends, delivered anyway after Stop let go of it, changes nothing.
   hub.deliverDeferredRunReply();
-  await waitWhile(async () => !lostReplyLive.some((message) => message.type === 'notice' && /authority settle bound/u.test(message.message)));
-  const lateSettleNotice = lostReplyLive.find((message): message is Extract<AgentMessage, { type: 'notice' }> =>
-    message.type === 'notice' && /authority settle bound/u.test(message.message));
-  // This fixture DELIVERS the deferred reply, so it models a genuinely late
-  // native reply and has to say that, not "never arrived". The report tells the
-  // two apart by HOW the chain settles -- resolved means Cline answered late,
-  // rejected means demoting the connection released it -- because `demoted`
-  // cannot: the caller demotes on the microtask right after the settle wait
-  // gives up, so it is always true by the time the chain moves and a check on
-  // it can only ever print one of its two messages.
-  //
-  // Getting this backwards has a cost on record: reading "past the 5000ms
-  // bound" as a bound 55ms too tight led to raising it to 15_000, which only
-  // moved the reported settle with it -- 5055ms at 5000, 15050ms at 15000.
-  check('a run reply that really does arrive after the bound is reported as its own arrival',
-    !!lateSettleNotice && /settled \d+ms into the settle wait/u.test(lateSettleNotice.message)
-      && /by replying on its own/u.test(lateSettleNotice.message)
-      && !/never arrived/u.test(lateSettleNotice.message),
-    JSON.stringify(lateSettleNotice));
+  const afterLostReply = lostReplyConnection.sendPrompt({
+    text: 'prompt after a lost run reply',
+    clientMessageId: 'client-after-lost-reply',
+  });
+  await waitWhile(async () => !(await lostReplyConnection.getPending!()).some((row) => row.type === 'permission-request'));
+  const afterLostReplyPermission = (await lostReplyConnection.getPending!()).find((row) => row.type === 'permission-request');
+  await lostReplyConnection.respondPermission(afterLostReplyPermission!.requestId, 'approve');
+  await afterLostReply;
+  check('a run reply delivered after Stop released it is ignored and the next prompt drives',
+    lostReplyConnection.info.control?.drive.state === 'driving'
+      && (await lostReplyConnection.getHistory()).some((row) => row.type === 'user-message'
+        && row.text === 'prompt after a lost run reply' && row.clientKey === 'client-after-lost-reply')
+      && !lostReplyLive.some((message) => message.type === 'error'),
+    JSON.stringify(lostReplyLive.filter((message) => message.type === 'error')));
   await lostReplyConnection.close();
   await lostReplyTurn.catch(() => undefined);
 

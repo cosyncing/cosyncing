@@ -484,18 +484,38 @@ export const AGY_PENDING_SEND_LIMIT = 32;
 export interface AgyQueuedSend {
   text: string;
   key: string;
+  /** The sender's `clientMessageId`: the delivering line carries it as `clientKey`, as the sent row did. */
+  clientKey?: string;
   /** Transcript byte size at the moment the prompt was written to the child's stdin. */
   notBeforeOffset: number;
 }
 
-/** Per-CONNECTION queued-send state. Per-connection is what makes the drive shareable
- *  across two sockets: a peer socket's prompt travels through this same object, so it
- *  is our own writer and never reads as a foreign one (Q14). */
+/** The key a delivering transcript line took, and the text it took it for. */
+export interface AgyQueuedSendClaim {
+  key: string;
+  clientKey?: string;
+  /** The stripped user text of the line that claimed it: a rewritten line no longer holds the claim. */
+  text: string;
+}
+
+/**
+ * One conversation's queued-send state, held by the ADAPTER and shared by every connection to it.
+ *
+ * The Drive connection registers its sends here, so a peer socket's prompt travels through the
+ * same object and is never a foreign writer (Q14). Observe connections read it too: the line that
+ * delivers a Drive prompt takes the sender's key (and `clientKey`) in a fresh reader's history,
+ * a second tab and a reload alike, never its own step key. Claims are idempotent per step, so
+ * whichever connection admits the delivering line first claims it and every other one reads the
+ * same answer.
+ */
 export interface AgyQueuedSends {
   pending: AgyQueuedSend[];
-  /** step_index → key already assigned, so re-keying a line is idempotent across a re-read. */
-  byStep: Map<number, string>;
+  /** step_index → the claim it took, so re-keying a line is idempotent across a re-read. Bounded. */
+  byStep: Map<number, AgyQueuedSendClaim>;
 }
+
+/** How many delivered-line claims one conversation keeps. Older lines fall back to their step key. */
+export const AGY_QUEUED_SEND_CLAIM_LIMIT = 256;
 
 export function createAgyQueuedSends(): AgyQueuedSends {
   return { pending: [], byStep: new Map() };
@@ -535,24 +555,34 @@ export function takeAgyQueuedSendKey(
   stepIndex: number,
   text: string,
   lineOffset: number | undefined,
-): string | undefined {
+): AgyQueuedSendClaim | undefined {
   if (!state) return undefined;
+  const trimmed = text.trim();
   const already = state.byStep.get(stepIndex);
   if (already !== undefined) {
-    // A link still standing under that key is stale: this line already claimed it.
-    retireAgyQueuedSend(state, already);
-    return already;
+    if (already.text === trimmed) {
+      // A link still standing under that key is stale: this line already claimed it.
+      retireAgyQueuedSend(state, already.key);
+      return already;
+    }
+    // The step now holds other words (the transcript was rewritten): the old claim is not its.
+    state.byStep.delete(stepIndex);
   }
-  const trimmed = text.trim();
   const index = state.pending.findIndex(
     (entry) => entry.text === trimmed
       && lineOffset !== undefined
       && lineOffset >= entry.notBeforeOffset,
   );
   if (index < 0) return undefined;
-  const key = state.pending.splice(index, 1)[0]!.key;
-  state.byStep.set(stepIndex, key);
-  return key;
+  const entry = state.pending.splice(index, 1)[0]!;
+  const claim: AgyQueuedSendClaim = { key: entry.key, ...(entry.clientKey ? { clientKey: entry.clientKey } : {}), text: trimmed };
+  state.byStep.set(stepIndex, claim);
+  while (state.byStep.size > AGY_QUEUED_SEND_CLAIM_LIMIT) {
+    const oldest = state.byStep.keys().next().value;
+    if (oldest === undefined) break;
+    state.byStep.delete(oldest);
+  }
+  return claim;
 }
 
 // ── Fold state ───────────────────────────────────────────────────────────────
@@ -586,7 +616,37 @@ export interface AgyMapState {
    * second later, which is precisely claude's P1b.
    */
   queuedSends?: AgyQueuedSends;
+  /**
+   * The turn the fold is inside: opened by a `USER_INPUT` step, closed by the turn's end evidence.
+   * Advanced on every path, so a later turn-end on another path names the same user row.
+   */
+  turn?: AgyFoldTurn;
+  /**
+   * Whether a final answer may close the open turn with a `run-summary` (default true). The
+   * transcript carries no turn-end record, so its evidence is the step that hands control back: a
+   * settled planner answer with text and no tool call. A Drive child's stream folds steps WITHOUT
+   * their tool calls, so it never closes a turn this way; its `result` event does.
+   */
+  closesTurns?: boolean;
   trace?: AgyTraceSink;
+}
+
+/** One turn as the fold sees it (see {@link AgyMapState.turn}). */
+export interface AgyFoldTurn {
+  /** The opening user step's own key: stable across readers, whatever key the user row took. */
+  turnId: string;
+  /** The key the user row was shown under (a Drive prompt's queued key, else the step key). */
+  userMessageKey: string;
+  startedAt?: number;
+  /** The newest answer row this turn produced. */
+  assistantMessageKey?: string;
+  /** A summary already closed this turn. */
+  closed: boolean;
+}
+
+/** The run-summary key of the turn `turnId` opens: one per turn, the same on every path. */
+export function agyTurnSummaryKey(turnId: string): string {
+  return `${turnId}:run`;
 }
 
 export function createAgyMapState(
@@ -621,10 +681,39 @@ export function mapAgyStep(step: AgyStep, state: AgyMapState): AgentMessage[] {
   const truncated = (step.truncated_fields ?? []).length > 0;
 
   switch (category) {
-    case 'user-message':
-      return mapUserStep(step, state, key, truncated);
-    case 'assistant-turn':
-      return mapAssistantStep(step, state, key, truncated);
+    case 'user-message': {
+      const out = mapUserStep(step, state, key, truncated);
+      const row = out[0];
+      const sentAt = Date.parse(step.created_at);
+      state.turn = {
+        turnId: key,
+        userMessageKey: row?.type === 'user-message' && row.key ? row.key : key,
+        ...(Number.isFinite(sentAt) ? { startedAt: sentAt } : {}),
+        closed: false,
+      };
+      return out;
+    }
+    case 'assistant-turn': {
+      const out = mapAssistantStep(step, state, key, truncated);
+      const answer = out.find((message) => message.type === 'model-output');
+      const turn = state.turn;
+      if (turn && answer?.type === 'model-output' && answer.key) turn.assistantMessageKey = answer.key;
+      if (turn && !turn.closed && state.closesTurns !== false && agyIsFinalAnswer(step)) {
+        turn.closed = true;
+        const completedAt = Date.parse(step.created_at);
+        out.push({
+          type: 'run-summary',
+          key: agyTurnSummaryKey(turn.turnId),
+          turnId: turn.turnId,
+          userMessageKey: turn.userMessageKey,
+          ...(turn.assistantMessageKey ? { assistantMessageKey: turn.assistantMessageKey } : {}),
+          status: 'done',
+          ...(turn.startedAt !== undefined ? { startedAt: turn.startedAt } : {}),
+          ...(Number.isFinite(completedAt) ? { completedAt } : {}),
+        });
+      }
+      return out;
+    }
     case 'tool':
       return mapToolStep(step, state, key, truncated);
     case 'question':
@@ -693,7 +782,8 @@ function mapUserStep(step: AgyStep, state: AgyMapState, key: string, truncated: 
     {
       type: 'user-message',
       text: truncated ? `${stripped.text}\n\n${AGY_TRUNCATION_NOTE}` : stripped.text,
-      key: claimed ?? key,
+      key: claimed?.key ?? key,
+      ...(claimed?.clientKey ? { clientKey: claimed.clientKey } : {}),
       ...(Number.isFinite(sentAt) ? { sentAt } : {}),
     },
   ];
@@ -723,6 +813,18 @@ function mapUserStep(step: AgyStep, state: AgyMapState, key: string, truncated: 
     }
   }
   return out;
+}
+
+/**
+ * The transcript's only turn-end evidence: a SETTLED planner answer with text and no tool call.
+ *
+ * agy writes no turn-end record (MEASURED: the sixteen pairs carry none). A planner step that calls
+ * a tool goes on to the tool's result and another planner step; one that answers in text and calls
+ * nothing hands control back to the user, which is the end of the turn. A RUNNING or failed row
+ * is not an end, and neither is a step with no text.
+ */
+function agyIsFinalAnswer(step: AgyStep): boolean {
+  return step.status === 'DONE' && (step.tool_calls ?? []).length === 0 && Boolean(step.content?.trim());
 }
 
 function mapAssistantStep(step: AgyStep, state: AgyMapState, key: string, truncated: boolean): AgentMessage[] {

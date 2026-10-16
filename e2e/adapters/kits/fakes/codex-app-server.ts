@@ -556,6 +556,15 @@ function runFakeCodex(): void {
       case 'thread/loaded/list':
         reply({ data: [...threads.keys()], nextCursor: null });
         return;
+      case 'thread/unsubscribe': {
+        // The connection stops receiving the thread's events; the last subscriber leaving unloads it.
+        const thread = threadOf();
+        if (!thread) return reply({ status: 'notLoaded' });
+        if (!thread.subscribers.delete(conn)) return reply({ status: 'notSubscribed' });
+        if (thread.subscribers.size === 0) threads.delete(thread.id);
+        reply({ status: 'unsubscribed' });
+        return;
+      }
       case 'thread/read': {
         const thread = threadOf();
         if (!thread) return fail(`thread not loaded: ${String(params.threadId)}`);

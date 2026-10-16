@@ -242,10 +242,6 @@ const _reviewedLiteralByLocation = <String>{
       r'$count',
   'lib/src/features/sessions/list/session_list_pane.dart::'
       r'$childCount',
-  'lib/src/features/sessions/list/sessions_page.dart::'
-      r'${machineState.machines.length}',
-  'lib/src/features/sessions/list/sessions_page.dart::'
-      r'${session.tool} ·',
   'lib/src/features/transfers/view/transfer_manager_page.dart::'
       r'${l10n.fileNameLabel}: ${transfer.fileName}',
   'lib/src/features/transfers/view/transfer_manager_page.dart::'

@@ -7,7 +7,7 @@
  *
  *  1. Provider/model strings come from session metadata; no family table or
  *     unmeasured display catalog is invented.
- *  2. Native act/plan plus auto-approval mapping is retained for writer tests.
+ *  2. Native act/plan plus auto-approval mapping travels in Hub session.create.
  *  3. Shipped Create/Resume uses only the isolated broker-owned Hub/profile.
  *  4. The directory, metadata, message document, and --id resume share one id.
  *  5. Subagent documents publish child nativeId plus the parent's nativeId.
@@ -23,13 +23,12 @@
  *     only through the broker and fenced by durable app-created ownership.
  * 15. Store/mapping/Observe/registration suites are root-gate wired.
  * 16. Registration spans runtime, doctor/setup/service, client copy, and evidence.
- * 17. The fixture-only ACP writer remains test-only. Production uses Hub v1's
- *     direct run reply followed by an exact durable transcript reread.
+ * 17. Drive uses Hub v1's direct run reply followed by an exact durable
+ *     transcript reread; there is no ACP writer.
  */
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
-import { AcpClient } from '@cosyncing/acp-client';
 import {
   CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
   DISCOVERY_ROW_BATCH,
@@ -56,8 +55,6 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { diagnoseClineSetup } from './diagnostics.ts';
-import { resolveClineAcpEnvironment } from './auth.ts';
-import { ClineDriveConnection } from './drive.ts';
 import {
   ClineHubCreateBoundaryUnprovenError,
   ClineHubDriveConnection,
@@ -86,7 +83,6 @@ import {
   CLINE_MINIMUM_SUPPORTED_VERSION,
   clineDataRoot,
   clineHistorySourceIdentity,
-  clineStoreRoot,
   clineTerminalSummaryBoundaryFromNative,
   ClinePromptCorrelationRegistry,
   discoverClineStore,
@@ -96,7 +92,7 @@ import {
   type ClineStoredSession,
   type ClineStoreTrace,
 } from './store.ts';
-import { clineBinaryMatchesVerifiedVersion, clineVerifiedInvocation } from './version.ts';
+import { clineVerifiedInvocation } from './version.ts';
 
 export const CLINE_CAPABILITIES: AgentCapabilities = Object.freeze({
   integrationKind: 'http-websocket',
@@ -108,19 +104,6 @@ export const CLINE_CAPABILITIES: AgentCapabilities = Object.freeze({
   supportsNativeArtifact: false,
   supportsNativeFileInput: false,
   supportsModelSwitch: false,
-  permissionGranularity: 'per-tool',
-});
-
-const CLINE_TEST_DRIVE_CAPABILITIES: AgentCapabilities = Object.freeze({
-  integrationKind: 'acp-stdio',
-  attachModes: ['observe', 'resume'] as AttachMode[],
-  supportsObserve: true,
-  supportsResume: true,
-  supportsLiveAttach: false,
-  supportsCrossClientDriveSharing: true,
-  supportsNativeArtifact: false,
-  supportsNativeFileInput: false,
-  supportsModelSwitch: true,
   permissionGranularity: 'per-tool',
 });
 
@@ -149,8 +132,6 @@ export interface ClineAdapterOptions {
   trace?: (event: ClineStoreTrace | ClineMapTrace | { op: 'observe'; detail: string }) => void;
   observe?: Omit<ClineObserveOptions, 'session' | 'info' | 'trace'>;
   requestTimeoutMs?: number;
-  promptTimeoutMs?: number;
-  authMethodId?: string;
   fetcher?: typeof globalThis.fetch;
   hubSocketFactory?: ClineHubSocketFactory;
   hubClientFactory?: (options: ClineHubClientOptions) => ClineHubClient;
@@ -182,24 +163,16 @@ export interface ClineAdapterOptions {
     nativeId?: string;
     correlation: ClinePromptCorrelation;
   }) => void;
-  /** Enables the unshipped ACP writer only in deterministic adapter fixtures. */
-  testOnlyEnableUnverifiedDrive?: boolean;
-  /** Extra deterministic-fixture models; native secure provider config remains authoritative. */
-  testOnlyModels?: ModelOption[];
-  /** Bounded lease for the exact ACP child that answered session/new. */
+  /** Bounded lease for the exact Hub writer that answered session.create. */
   pendingCreateTimeoutMs?: number;
   /** Deterministic fixture override for Hub requests and durable proof polling. */
   renameTimeoutMs?: number;
   /** Deterministic fixture override for the measured native history-update child. */
   nativeRenameTimeoutMs?: number;
-  /** Deterministic fixture gate immediately before ACP Create publication. */
-  testOnlyBeforeCandidateCreatePublication?: () => Promise<void>;
 }
 
-type ClineWriterConnection = ClineDriveConnection | ClineHubDriveConnection;
-
 interface PendingCreatedOwner {
-  connection: ClineWriterConnection;
+  connection: ClineHubDriveConnection;
   claimed: boolean;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -235,7 +208,7 @@ function responseSessionId(value: Record<string, unknown>): string | undefined {
   );
 }
 
-function isDriving(connection: ClineWriterConnection | undefined): boolean {
+function isDriving(connection: ClineHubDriveConnection | undefined): boolean {
   return connection?.info.control?.drive.state === 'driving';
 }
 
@@ -320,38 +293,32 @@ export class ClineAdapter implements AgentBackend {
   private readonly trace?: ClineAdapterOptions['trace'];
   private readonly observe?: ClineAdapterOptions['observe'];
   private readonly requestTimeoutMs?: number;
-  private readonly promptTimeoutMs?: number;
-  private readonly authMethodId?: string;
   private readonly fetcher: typeof globalThis.fetch;
   private readonly hubSocketFactory?: ClineHubSocketFactory;
   private readonly hubClientFactory: (options: ClineHubClientOptions) => ClineHubClient;
   private readonly isManagedHostOwned?: ClineAdapterOptions['isManagedHostOwned'];
   private readonly onUnsafeManagedAuthority?: ClineAdapterOptions['onUnsafeManagedAuthority'];
   private readonly authoritySettleTimeoutMs?: number;
-  private readonly candidateDrive: boolean;
-  private readonly candidateModels: ModelOption[];
   private readonly driveEligible = new Set<string>();
   private readonly driveModes = new Map<string, string>();
   private readonly driveModels = new Map<string, SessionInfo['currentModel']>();
-  private readonly driveTitles = new Map<string, string>();
   private readonly ambiguousSessionIds = new Set<string>();
-  private readonly driven = new Map<string, ClineWriterConnection>();
+  private readonly driven = new Map<string, ClineHubDriveConnection>();
   private readonly opening = new Map<string, symbol>();
   private readonly nativeMutations = new Set<string>();
   private readonly pendingCreatedOwners = new Map<string, PendingCreatedOwner>();
   private readonly pendingCreateTimeoutMs: number;
   private readonly renameTimeoutMs: number;
   private readonly nativeRenameTimeoutMs: number;
-  private readonly beforeCandidateCreatePublication?: () => Promise<void>;
   private readonly resolveStoredDriveState?: ClineAdapterOptions['resolveStoredDriveState'];
   private readonly revokeStoredDriveEligibility?: ClineAdapterOptions['revokeStoredDriveEligibility'];
   private readonly recordStoredDriveBoundary?: ClineAdapterOptions['recordStoredDriveBoundary'];
   private readonly recordStoredPromptCorrelation?: ClineAdapterOptions['recordStoredPromptCorrelation'];
   private readonly promptCorrelations = new Map<string, ClinePromptCorrelationRegistry>();
   private readonly terminalSummaries = new Map<string, TerminalSummaryRegistry<ClineTerminalSummary>>();
-  declare readonly listModels?: () => Promise<ModelOption[]>;
-  declare readonly listModes?: () => Promise<ModeOption[]>;
-  declare readonly createSession?: (options?: {
+  readonly listModels: () => Promise<ModelOption[]>;
+  readonly listModes: () => Promise<ModeOption[]>;
+  readonly createSession: (options?: {
     directory?: string;
     title?: string;
     model?: PromptInput['model'];
@@ -359,8 +326,7 @@ export class ClineAdapter implements AgentBackend {
   }) => Promise<SessionInfo>;
 
   constructor(options: ClineAdapterOptions = {}) {
-    this.candidateDrive = options.testOnlyEnableUnverifiedDrive === true;
-    this.capabilities = this.candidateDrive ? CLINE_TEST_DRIVE_CAPABILITIES : CLINE_CAPABILITIES;
+    this.capabilities = CLINE_CAPABILITIES;
     this.env = options.env ?? process.env;
     this.command = options.command ?? (this.env.COSYNCING_CLINE_BIN?.trim() || 'cline');
     if (options.homeDir) this.homeDir = options.homeDir;
@@ -368,8 +334,6 @@ export class ClineAdapter implements AgentBackend {
     if (options.trace) this.trace = options.trace;
     if (options.observe) this.observe = options.observe;
     if (options.requestTimeoutMs !== undefined) this.requestTimeoutMs = options.requestTimeoutMs;
-    if (options.promptTimeoutMs !== undefined) this.promptTimeoutMs = options.promptTimeoutMs;
-    if (options.authMethodId) this.authMethodId = options.authMethodId;
     this.fetcher = options.fetcher ?? globalThis.fetch;
     if (options.hubSocketFactory) this.hubSocketFactory = options.hubSocketFactory;
     this.hubClientFactory = options.hubClientFactory ?? ((clientOptions) => new ClineHubClient(clientOptions));
@@ -396,23 +360,21 @@ export class ClineAdapter implements AgentBackend {
       && (options.nativeRenameTimeoutMs ?? 0) > 0
       ? options.nativeRenameTimeoutMs!
       : CLINE_NATIVE_RENAME_TIMEOUT_MS;
-    this.beforeCandidateCreatePublication = options.testOnlyBeforeCandidateCreatePublication;
-    this.candidateModels = options.testOnlyModels?.map((model) => ({ ...model })) ?? [];
-    if (this.candidateDrive) {
-      this.listModels = () => this.listCandidateModels();
-      this.listModes = () => this.listCandidateModes();
-      this.createSession = (value = {}) => this.createCandidateSession(value);
-    } else {
-      this.listModels = () => this.listHubModels();
-      this.listModes = () => this.listCandidateModes();
-      this.createSession = (value = {}) => this.createHubSession(value);
-    }
+    this.listModels = () => this.listHubModels();
+    this.listModes = () => this.listCreationModes();
+    this.createSession = (value = {}) => this.createHubSession(value);
   }
 
   async isAvailable(): Promise<boolean> {
-    if (resolveInvocation(this.command, { env: this.env })) return true;
+    if (this.isInstalled()) return true;
     const root = clineDataRoot(this.env, this.homeDir);
     return stat(root).then((value) => value.isDirectory(), () => false);
+  }
+
+  /** The resolve the managed Hub and every Cline spawn start from; never a launch. Without it the
+   *  broker lists stored snapshots Observe-only and refuses a new writer. */
+  isInstalled(): boolean {
+    return resolveInvocation(this.command, { env: this.env }) !== undefined;
   }
 
   async isManagedHostReady(options?: { signal?: AbortSignal }): Promise<boolean> {
@@ -481,17 +443,12 @@ export class ClineAdapter implements AgentBackend {
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
     const sessions = await this.storedSessions(options);
-    const descriptor = this.candidateDrive ? undefined : await this.describeManagedHost();
-    const writerAvailable = this.candidateDrive
-      ? await clineBinaryMatchesVerifiedVersion(this.command, this.env)
-      : !!this.configuredHubModel()
-        && await clineVerifiedInvocation(this.command, this.env) !== undefined
-        && descriptor !== undefined
-        && await this.isManagedHostOwned?.(descriptor.identityKey) === true
-        && await this.isManagedHostReady({ ...(options?.signal ? { signal: options.signal } : {}) });
-    const modelCatalog = writerAvailable
-      ? (this.candidateDrive ? await this.listCandidateModels() : await this.listHubModels())
-      : [];
+    const descriptor = await this.describeManagedHost();
+    const writerAvailable = !!this.configuredHubModel()
+      && await clineVerifiedInvocation(this.command, this.env) !== undefined
+      && await this.isManagedHostOwned?.(descriptor.identityKey) === true
+      && await this.isManagedHostReady({ ...(options?.signal ? { signal: options.signal } : {}) });
+    const modelCatalog = writerAvailable ? await this.listHubModels() : [];
     // ONE Hub probe for the whole pass. Created lazily and NOT awaited here: a
     // sweep with no managed session must not pay for a probe nobody reads, and
     // the sessions below share this promise rather than each issuing their own.
@@ -510,8 +467,8 @@ export class ClineAdapter implements AgentBackend {
     // for the number lives — a narrow one starves this leg against its budget.
     return mapInBatches(sessions, DISCOVERY_ROW_BATCH, async (session) => {
       const isSubagent = session.origin === 'subagent';
-      const managed = !this.candidateDrive && this.isManagedSession(session);
-      const stored = isSubagent || (!this.candidateDrive && !managed) ? undefined : this.resolveStoredDriveState?.({
+      const managed = this.isManagedSession(session);
+      const stored = isSubagent || !managed ? undefined : this.resolveStoredDriveState?.({
         tool: this.id,
         id: session.id,
         nativeId: session.nativeId,
@@ -542,16 +499,15 @@ export class ClineAdapter implements AgentBackend {
         } else if (reconciliation.status === 'invalid') storedBoundaryInvalid = true;
       }
       if (stored?.historyBoundary && currentBoundary !== undefined && !storedBoundaryValid
-        && (!managed || storedBoundaryInvalid)) {
+        && storedBoundaryInvalid) {
         this.invalidateDriveEligibility(session.id);
       }
-      const eligible = (writerAvailable || activeDriving) && !isSubagent
-        && (this.candidateDrive || managed)
+      const eligible = (writerAvailable || activeDriving) && !isSubagent && managed
         && (this.driveEligible.has(session.id) || storedBoundaryValid);
       const info = sessionInfo(
         session,
         this.command,
-        this.candidateDrive || managed,
+        managed,
         eligible,
         isDriving(this.driven.get(session.id)),
         this.driveModes.get(session.id) ?? session.currentMode ?? stored?.currentMode,
@@ -561,9 +517,7 @@ export class ClineAdapter implements AgentBackend {
       const catalogModel = nativeModel ? modelCatalog.find((candidate) =>
         candidate.providerID === nativeModel.providerID && candidate.modelID === nativeModel.modelID) : undefined;
       const model = preserveModelLabel(nativeModel, catalogModel);
-      const title = this.candidateDrive ? this.driveTitles.get(session.id) : undefined;
       if (model) info.currentModel = { ...model };
-      if (title) info.title = title;
       // This row is final. Report it now so a leg abandoned at its budget keeps
       // it: measured, this adapter's own work is about a second, and the elapsed
       // time that actually trips the budget is contention with the other legs
@@ -575,11 +529,6 @@ export class ClineAdapter implements AgentBackend {
   }
 
   async canCreateSession(): Promise<boolean> {
-    if (this.candidateDrive) {
-      if (!await clineBinaryMatchesVerifiedVersion(this.command, this.env)) return false;
-      if (this.authMethodId) return true;
-      return (await resolveClineAcpEnvironment({ env: this.env })) !== undefined;
-    }
     if (!await clineVerifiedInvocation(this.command, this.env) || !this.configuredHubModel()) return false;
     const descriptor = await this.describeManagedHost();
     return await this.isManagedHostOwned?.(descriptor.identityKey) === true
@@ -622,22 +571,7 @@ export class ClineAdapter implements AgentBackend {
     return this.newHubClient(discovery, cwd);
   }
 
-  private async listCandidateModels(): Promise<ModelOption[]> {
-    if (!await clineBinaryMatchesVerifiedVersion(this.command, this.env)) {
-      throw new Error(`Cline model catalog requires a ${CLINE_MINIMUM_SUPPORTED_VERSION}-or-newer binary.`);
-    }
-    const configured = await resolveClineAcpEnvironment({
-      env: this.env,
-    });
-    const models = this.candidateModels.map((model) => ({ ...model }));
-    if (configured && !models.some((model) =>
-      model.providerID === configured.provider && model.modelID === configured.model)) {
-      models.push({ providerID: configured.provider, modelID: configured.model, label: configured.model });
-    }
-    return models;
-  }
-
-  private async listCandidateModes(): Promise<ModeOption[]> {
+  private async listCreationModes(): Promise<ModeOption[]> {
     return CLINE_CREATION_MODES.map((mode) => ({ ...mode }));
   }
 
@@ -807,163 +741,6 @@ export class ClineAdapter implements AgentBackend {
     }
   }
 
-  private async createCandidateSession(options: {
-    directory?: string;
-    title?: string;
-    model?: PromptInput['model'];
-    permissionMode?: string;
-  } = {}): Promise<SessionInfo> {
-    if (!await this.canCreateSession()) {
-      throw new NativeSessionUnresumableError(
-        `Cline create requires ${CLINE_MINIMUM_SUPPORTED_VERSION} or newer and a secure ACP account or API-key authentication path.`);
-    }
-    const cwd = options.directory ?? process.cwd();
-    if (!isAbsolute(cwd) || !await stat(cwd).then((value) => value.isDirectory(), () => false)) {
-      throw new NativeSessionUnresumableError('Cline create requires an existing absolute workspace directory.');
-    }
-    const requestedMode = options.permissionMode ?? 'ask';
-    if (!CLINE_CREATION_MODES.some((candidate) => candidate.value === requestedMode)) {
-      throw new NativeSessionUnresumableError(`Cline permission mode ${requestedMode} is not in the measured candidate catalog.`);
-    }
-    const mode = requestedMode as NonNullable<ClineStoredSession['currentMode']>;
-    const apiKeyAuth = this.authMethodId ? undefined : await resolveClineAcpEnvironment({
-      env: this.env,
-      model: options.model,
-    });
-    if (!this.authMethodId && !apiKeyAuth) {
-      throw new NativeSessionUnresumableError('Cline ACP has no secure OpenAI-compatible API-key environment available.');
-    }
-    const effectiveModel = options.model ?? (apiKeyAuth
-      ? { providerID: apiKeyAuth.provider, modelID: apiKeyAuth.model }
-      : undefined);
-    let createdId = '';
-    let connection: ClineDriveConnection | undefined;
-    let provisionalSession: ClineStoredSession | undefined;
-    const openingToken = Symbol('Cline ACP create');
-    try {
-      const existingIds = new Set((await this.storedSessions()).map((session) => session.id));
-      const catalogModel = effectiveModel
-        ? (await this.listCandidateModels()).find((candidate) => candidate.providerID === effectiveModel.providerID
-          && candidate.modelID === effectiveModel.modelID)
-        : undefined;
-      const selectedModel = effectiveModel
-        ? { ...effectiveModel, ...(catalogModel?.label ? { label: catalogModel.label } : {}) }
-        : undefined;
-      connection = await ClineDriveConnection.createPending(cwd, (sessionId) => {
-        createdId = sessionId;
-        if (existingIds.has(sessionId) || this.driven.has(sessionId)
-          || this.pendingCreatedOwners.has(sessionId) || this.opening.has(sessionId)) {
-          throw new Error(`Cline session/new returned pre-existing or active id ${sessionId}; preserving it.`);
-        }
-        this.opening.set(sessionId, openingToken);
-        const dataRoot = clineDataRoot(this.env, this.homeDir);
-        const sessionDir = join(dataRoot, 'sessions', sessionId);
-        const session: ClineStoredSession = {
-          id: sessionId,
-          nativeId: sessionId,
-          title: options.title?.trim() || sessionId,
-          cwd,
-          ...(selectedModel ? { model: selectedModel.modelID, currentModel: { ...selectedModel } } : {}),
-          currentMode: mode,
-          status: 'idle',
-          interrupted: false,
-          storeRoot: clineStoreRoot(this.env, this.homeDir),
-          dataRoot,
-          sessionDir,
-          metadataPath: join(sessionDir, `${sessionId}.json`),
-          messagesPath: join(sessionDir, `${sessionId}.messages.json`),
-        };
-        provisionalSession = session;
-        return { session, info: sessionInfo(session, this.command, true, true, true, mode) };
-      }, {
-        command: this.command,
-        args: this.acpArgs(cwd, effectiveModel, mode),
-        env: { ...clineChildEnvWithoutHubLaunch(apiKeyAuth?.env ?? this.env), CLINE_NO_AUTO_UPDATE: '1' },
-        authMethodId: this.authMethodId,
-        requestTimeoutMs: this.requestTimeoutMs,
-        promptTimeoutMs: this.promptTimeoutMs,
-        ...(effectiveModel ? { model: effectiveModel } : {}),
-        permissionMode: mode,
-        models: (await this.listCandidateModels()).filter((candidate) => candidate.providerID === effectiveModel?.providerID),
-        modes: CLINE_CREATION_MODES,
-        ...(this.trace ? { trace: this.trace } : {}),
-        ...(this.observe ? { observe: this.observe } : {}),
-        pendingCreate: {
-          discover: async () => {
-            for (let attempt = 0; attempt < 80; attempt += 1) {
-              const session = (await this.storedSessions()).find((candidate) => candidate.id === createdId);
-              if (session) return session;
-              await new Promise((resolve) => setTimeout(resolve, 25));
-            }
-            return undefined;
-          },
-          onMaterialized: (materializedConnection, session) => {
-            const materializedModel = preserveModelLabel(session.currentModel, this.driveModels.get(createdId));
-            if (materializedModel) this.driveModels.set(createdId, materializedModel);
-            if (session.currentMode) this.driveModes.set(createdId, session.currentMode);
-            this.releasePendingCreatedOwner(createdId, materializedConnection);
-          },
-        },
-        onDemote: (demoting) => {
-          if (this.driven.get(createdId) === demoting
-            || this.opening.get(createdId) === openingToken) {
-            this.invalidateDriveEligibility(createdId, demoting);
-          }
-        },
-        onHistoryBoundary: (historyBoundary) => {
-          this.recordStoredDriveBoundary?.({
-            tool: this.id,
-            id: createdId,
-            nativeId: createdId,
-            historyBoundary,
-          });
-        },
-        onClose: (closing) => {
-          if (this.driven.get(createdId) === closing) this.driven.delete(createdId);
-          this.releasePendingCreatedOwner(createdId, closing);
-        },
-      });
-      if (!connection.driving || !createdId || !provisionalSession
-        || this.opening.get(createdId) !== openingToken) {
-        throw new Error('Cline pending create lost its ACP child before ownership registration.');
-      }
-      if (existingIds.has(createdId)
-        || (await this.storedSessions()).some((candidate) => candidate.id === createdId)) {
-        throw new Error(`Cline session/new reused existing durable session ${createdId}.`);
-      }
-      await this.beforeCandidateCreatePublication?.();
-      if (!connection.driving || this.opening.get(createdId) !== openingToken) {
-        throw new Error('Cline pending create lost its ACP child before ownership publication.');
-      }
-      if (this.driven.has(createdId) || this.pendingCreatedOwners.has(createdId)) {
-        throw new Error(`Cline session/new returned duplicate active id ${createdId}.`);
-      }
-      this.driveEligible.add(createdId);
-      this.driveModes.set(createdId, mode);
-      if (selectedModel) this.driveModels.set(createdId, selectedModel);
-      if (options.title?.trim()) this.driveTitles.set(createdId, options.title.trim());
-      this.driven.set(createdId, connection);
-      const timer = setTimeout(() => {
-        const pending = this.pendingCreatedOwners.get(createdId);
-        if (!pending || pending.connection !== connection || pending.claimed) return;
-        this.pendingCreatedOwners.delete(createdId);
-        this.invalidateDriveEligibility(createdId, connection);
-        void connection?.close();
-      }, this.pendingCreateTimeoutMs);
-      timer.unref?.();
-      this.pendingCreatedOwners.set(createdId, { connection, claimed: false, timer });
-      const info = sessionInfo(provisionalSession, this.command, true, true, false, mode);
-      if (selectedModel) info.currentModel = { ...selectedModel };
-      if (options.title?.trim()) info.title = options.title.trim();
-      return info;
-    } catch (error) {
-      await connection?.close().catch(() => undefined);
-      throw error;
-    } finally {
-      if (createdId && this.opening.get(createdId) === openingToken) this.opening.delete(createdId);
-    }
-  }
-
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo | void> {
     // Clearing an app override is broker-side. Cline has no native "restore
     // generated title" command, so null deliberately performs no native write.
@@ -982,137 +759,124 @@ export class ClineAdapter implements AgentBackend {
       nativeId: session.nativeId,
     });
     const eligible = session.origin !== 'subagent'
-      && (this.candidateDrive || this.isManagedSession(session))
+      && this.isManagedSession(session)
       && (this.driveEligible.has(sessionId) || storedDrive?.historyBoundary !== undefined);
     if (!eligible) {
       throw new NativeSessionRenameUnsupportedError(
         'Cline native rename is limited to app-created sessions in the broker-managed profile.',
       );
     }
-    if (!this.candidateDrive && this.isManagedSession(session)) {
-      let client: ClineHubClient | undefined;
-      let durable: ClineStoredSession | undefined;
-      let invalidateManagedEligibility = false;
-      let nativeMutationAttempted = false;
-      let nativeMutationProved = false;
-      let nativeMutationReserved = false;
-      const verifyDurableTitle = async (): Promise<boolean> => {
-        const deadline = Date.now() + this.renameTimeoutMs;
-        do {
-          durable = await this.rediscoverExactManagedSession(session);
-          if (durable?.title === normalized) return true;
-          durable = undefined;
-          await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-        } while (Date.now() < deadline);
-        return false;
-      };
-      try {
-        const active = this.driven.get(sessionId);
-        if (this.opening.has(sessionId) || this.nativeMutations.has(sessionId)
-          || (active !== undefined
-            && !(active instanceof ClineHubDriveConnection && isDriving(active)))) {
-          throw new Error('Cline session already has a writer or native metadata mutation in progress.');
-        }
-        this.nativeMutations.add(sessionId);
-        nativeMutationReserved = true;
-        if (active instanceof ClineHubDriveConnection && isDriving(active)) {
-          // The connection performs finer-grained preflight checks. The
-          // adapter reserves this session before awaiting it so close() cannot
-          // admit Resume or another metadata child while the CLI is in flight.
-          let renamed = false;
-          try {
-            renamed = await active.renameNativeTitle(normalized, verifyDurableTitle);
-          } finally {
-            // The connection itself demotes every unproved exit after it
-            // invokes the CLI. A local admission/preflight refusal leaves the
-            // same writer driving and must not abort its legitimate turn.
-            if (this.driven.get(sessionId) !== active || !isDriving(active)) {
-              invalidateManagedEligibility = true;
-            }
-          }
-          if (!renamed || invalidateManagedEligibility) {
-            throw new Error('Cline Hub active Drive ownership changed during native rename.');
-          }
-        } else {
-          const expectedBoundary = storedDrive?.historyBoundary;
-          const before = expectedBoundary ? await this.currentHistoryBoundary(session) : undefined;
-          if (!expectedBoundary || !before || !sameHistoryBoundary(expectedBoundary, before)) {
-            throw new Error('Cline Hub stored Drive ownership is stale for native rename.');
-          }
-          client = await this.newOwnedManagementClient(session.cwd);
-          let foreignOwnershipSeen = false;
-          const unsubscribe = client.subscribe((event) => {
-            if (event.sessionId === session.nativeId
-              && (event.event === 'run.enqueued' || event.event === 'run.started')) {
-              foreignOwnershipSeen = true;
-              invalidateManagedEligibility = true;
-            }
-          });
-          await client.connect();
-          try {
-            const beforeStatus = await client.command('session.get', {
-              sessionId: session.nativeId,
-            }, session.nativeId, this.renameTimeoutMs);
-            const beforeNativeStatus = recordOf(beforeStatus.session)?.status;
-            if (beforeNativeStatus !== 'idle') {
-              invalidateManagedEligibility = true;
-              throw new Error('Cline Hub did not authoritatively report idle before native rename.');
-            }
-            nativeMutationAttempted = true;
-            await this.runNativeHistoryRename(session, normalized);
-            const afterStatus = await client.command('session.get', {
-              sessionId: session.nativeId,
-            }, session.nativeId, this.renameTimeoutMs);
-            const afterNativeStatus = recordOf(afterStatus.session)?.status;
-            if (afterNativeStatus !== 'idle') invalidateManagedEligibility = true;
-            if (foreignOwnershipSeen || afterNativeStatus !== 'idle' || !await verifyDurableTitle()) {
-              throw new Error('Cline Hub did not remain idle across durable native rename.');
-            }
-            const after = await this.currentHistoryBoundary(session);
-            if (foreignOwnershipSeen || !after || !sameHistoryBoundary(expectedBoundary, after)) {
-              invalidateManagedEligibility = true;
-              throw new Error('Cline Hub transcript ownership changed during native rename.');
-            }
-            nativeMutationProved = true;
-          } finally {
-            unsubscribe();
-          }
-        }
-        if (!durable) throw new Error('Cline Hub rename was not visible in durable rediscovery.');
-        return sessionInfo(
-          durable,
-          this.command,
-          true,
-          eligible,
-          isDriving(this.driven.get(sessionId)),
-          this.driveModes.get(sessionId) ?? durable.currentMode,
-        );
-      } catch {
-        if (nativeMutationAttempted && !nativeMutationProved) invalidateManagedEligibility = true;
-        if (invalidateManagedEligibility) this.invalidateDriveEligibility(sessionId);
-        this.trace?.({
-          op: 'observe',
-          detail: 'Cline managed-Hub native rename was not confirmed; using the broker display alias.',
-        });
-        throw new NativeSessionRenameUnsupportedError(
-          'Cline managed-Hub native rename was not confirmed; use the broker display alias.',
-        );
-      } finally {
-        await client?.close().catch(() => undefined);
-        if (nativeMutationReserved) this.nativeMutations.delete(sessionId);
+    let client: ClineHubClient | undefined;
+    let durable: ClineStoredSession | undefined;
+    let invalidateManagedEligibility = false;
+    let nativeMutationAttempted = false;
+    let nativeMutationProved = false;
+    let nativeMutationReserved = false;
+    const verifyDurableTitle = async (): Promise<boolean> => {
+      const deadline = Date.now() + this.renameTimeoutMs;
+      do {
+        durable = await this.rediscoverExactManagedSession(session);
+        if (durable?.title === normalized) return true;
+        durable = undefined;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+      } while (Date.now() < deadline);
+      return false;
+    };
+    try {
+      const active = this.driven.get(sessionId);
+      if (this.opening.has(sessionId) || this.nativeMutations.has(sessionId)
+        || (active !== undefined
+          && !(active instanceof ClineHubDriveConnection && isDriving(active)))) {
+        throw new Error('Cline session already has a writer or native metadata mutation in progress.');
       }
+      this.nativeMutations.add(sessionId);
+      nativeMutationReserved = true;
+      if (active instanceof ClineHubDriveConnection && isDriving(active)) {
+        // The connection performs finer-grained preflight checks. The
+        // adapter reserves this session before awaiting it so close() cannot
+        // admit Resume or another metadata child while the CLI is in flight.
+        let renamed = false;
+        try {
+          renamed = await active.renameNativeTitle(normalized, verifyDurableTitle);
+        } finally {
+          // The connection itself demotes every unproved exit after it
+          // invokes the CLI. A local admission/preflight refusal leaves the
+          // same writer driving and must not abort its legitimate turn.
+          if (this.driven.get(sessionId) !== active || !isDriving(active)) {
+            invalidateManagedEligibility = true;
+          }
+        }
+        if (!renamed || invalidateManagedEligibility) {
+          throw new Error('Cline Hub active Drive ownership changed during native rename.');
+        }
+      } else {
+        const expectedBoundary = storedDrive?.historyBoundary;
+        const before = expectedBoundary ? await this.currentHistoryBoundary(session) : undefined;
+        if (!expectedBoundary || !before || !sameHistoryBoundary(expectedBoundary, before)) {
+          throw new Error('Cline Hub stored Drive ownership is stale for native rename.');
+        }
+        client = await this.newOwnedManagementClient(session.cwd);
+        let foreignOwnershipSeen = false;
+        const unsubscribe = client.subscribe((event) => {
+          if (event.sessionId === session.nativeId
+            && (event.event === 'run.enqueued' || event.event === 'run.started')) {
+            foreignOwnershipSeen = true;
+            invalidateManagedEligibility = true;
+          }
+        });
+        await client.connect();
+        try {
+          const beforeStatus = await client.command('session.get', {
+            sessionId: session.nativeId,
+          }, session.nativeId, this.renameTimeoutMs);
+          const beforeNativeStatus = recordOf(beforeStatus.session)?.status;
+          if (beforeNativeStatus !== 'idle') {
+            invalidateManagedEligibility = true;
+            throw new Error('Cline Hub did not authoritatively report idle before native rename.');
+          }
+          nativeMutationAttempted = true;
+          await this.runNativeHistoryRename(session, normalized);
+          const afterStatus = await client.command('session.get', {
+            sessionId: session.nativeId,
+          }, session.nativeId, this.renameTimeoutMs);
+          const afterNativeStatus = recordOf(afterStatus.session)?.status;
+          if (afterNativeStatus !== 'idle') invalidateManagedEligibility = true;
+          if (foreignOwnershipSeen || afterNativeStatus !== 'idle' || !await verifyDurableTitle()) {
+            throw new Error('Cline Hub did not remain idle across durable native rename.');
+          }
+          const after = await this.currentHistoryBoundary(session);
+          if (foreignOwnershipSeen || !after || !sameHistoryBoundary(expectedBoundary, after)) {
+            invalidateManagedEligibility = true;
+            throw new Error('Cline Hub transcript ownership changed during native rename.');
+          }
+          nativeMutationProved = true;
+        } finally {
+          unsubscribe();
+        }
+      }
+      if (!durable) throw new Error('Cline Hub rename was not visible in durable rediscovery.');
+      return sessionInfo(
+        durable,
+        this.command,
+        true,
+        eligible,
+        isDriving(this.driven.get(sessionId)),
+        this.driveModes.get(sessionId) ?? durable.currentMode,
+      );
+    } catch {
+      if (nativeMutationAttempted && !nativeMutationProved) invalidateManagedEligibility = true;
+      if (invalidateManagedEligibility) this.invalidateDriveEligibility(sessionId);
+      this.trace?.({
+        op: 'observe',
+        detail: 'Cline managed-Hub native rename was not confirmed; using the broker display alias.',
+      });
+      throw new NativeSessionRenameUnsupportedError(
+        'Cline managed-Hub native rename was not confirmed; use the broker display alias.',
+      );
+    } finally {
+      await client?.close().catch(() => undefined);
+      if (nativeMutationReserved) this.nativeMutations.delete(sessionId);
     }
-    await this.runNativeHistoryRename(session, normalized);
-    this.driveTitles.set(sessionId, normalized);
-    session.title = normalized;
-    return sessionInfo(
-      session,
-      this.command,
-      true,
-      eligible,
-      isDriving(this.driven.get(sessionId)),
-      this.driveModes.get(sessionId) ?? session.currentMode,
-    );
   }
 
   private async runNativeHistoryRename(session: ClineStoredSession, title: string): Promise<boolean> {
@@ -1194,15 +958,13 @@ export class ClineAdapter implements AgentBackend {
       // A claimed managed-Hub create already has an owner and an empty durable
       // snapshot. Let a reload build a separate read-only Observe wrapper from
       // that snapshot; never return or consume the provisional writer here.
-      // The fixture-only ACP candidate has no snapshot until its first prompt,
-      // so the normal stored-session lookup below continues to fail closed.
     }
     const effectiveMode = mode ?? 'observe';
     const session = (await this.storedSessions()).find((candidate) => candidate.id === sessionId);
     if (!session) throw new Error('Cline session is missing or its snapshot identity is unsupported.');
     const isSubagent = session.origin === 'subagent';
-    const managed = !this.candidateDrive && this.isManagedSession(session);
-    const stored = isSubagent || (!this.candidateDrive && !managed) ? undefined : this.resolveStoredDriveState?.({
+    const managed = this.isManagedSession(session);
+    const stored = isSubagent || !managed ? undefined : this.resolveStoredDriveState?.({
       tool: this.id,
       id: session.id,
       nativeId: session.nativeId,
@@ -1224,17 +986,14 @@ export class ClineAdapter implements AgentBackend {
       } else if (reconciliation.status === 'invalid') storedBoundaryInvalid = true;
     }
     if (stored?.historyBoundary && currentBoundary !== undefined && !storedBoundaryValid
-      && (!managed || storedBoundaryInvalid)) {
+      && storedBoundaryInvalid) {
       this.invalidateDriveEligibility(sessionId);
     }
-    const descriptor = this.candidateDrive ? undefined : await this.describeManagedHost();
-    const writerReady = this.candidateDrive
-      ? await clineBinaryMatchesVerifiedVersion(this.command, this.env)
-      : managed && !!this.configuredHubModel()
-        && await clineVerifiedInvocation(this.command, this.env) !== undefined
-        && descriptor !== undefined
-        && await this.isManagedHostOwned?.(descriptor.identityKey) === true
-        && await this.isManagedHostReady();
+    const descriptor = await this.describeManagedHost();
+    const writerReady = managed && !!this.configuredHubModel()
+      && await clineVerifiedInvocation(this.command, this.env) !== undefined
+      && await this.isManagedHostOwned?.(descriptor.identityKey) === true
+      && await this.isManagedHostReady();
     const eligible = (writerReady || activeDriving)
       && !isSubagent && (this.driveEligible.has(sessionId) || storedBoundaryValid);
     if (effectiveMode === 'resume') {
@@ -1253,112 +1012,38 @@ export class ClineAdapter implements AgentBackend {
       const openingToken = Symbol('Cline Resume');
       this.opening.set(sessionId, openingToken);
       try {
-        if (!this.candidateDrive) {
-          const configuredModel = this.configuredHubModel()!;
-          const nativeModel = preserveModelLabel(session.currentModel, stored?.currentModel);
-          if (!nativeModel || nativeModel.providerID !== configuredModel.providerID
-            || nativeModel.modelID !== configuredModel.modelID) {
-            throw new NativeSessionUnresumableError(
-              'Cline Resume requires the managed session model to match the configured isolated profile.',
-            );
-          }
-          const selectedMode = this.driveModes.get(sessionId) ?? session.currentMode ?? stored?.currentMode ?? 'ask';
-          this.driveModels.set(sessionId, { ...nativeModel, label: nativeModel.label ?? configuredModel.label });
-          this.driveModes.set(sessionId, selectedMode);
-          const discovery = await probeClineHub({
-            env: this.env,
-            ...(this.homeDir ? { homeDir: this.homeDir } : {}),
-            fetcher: this.fetcher,
-          });
-          if (!discovery) throw new NativeSessionUnresumableError('Cline managed Hub is not ready.');
-          const info = sessionInfo(session, this.command, true, true, true, selectedMode);
-          info.currentModel = { ...this.driveModels.get(sessionId)! };
-          const connection = this.hubConnection(
-            session,
-            info,
-            this.newHubClient(discovery, session.cwd),
-            storedBoundaryValid ? stored?.historyBoundary : undefined,
-            this.sessionPromptCorrelations(
-              sessionId,
-              storedBoundaryValid ? stored?.promptCorrelations : undefined,
-            ),
-            openingToken,
-            false,
-            storedBoundaryValid ? stored?.terminalSummaries : undefined,
+        const configuredModel = this.configuredHubModel()!;
+        const nativeModel = preserveModelLabel(session.currentModel, stored?.currentModel);
+        if (!nativeModel || nativeModel.providerID !== configuredModel.providerID
+          || nativeModel.modelID !== configuredModel.modelID) {
+          throw new NativeSessionUnresumableError(
+            'Cline Resume requires the managed session model to match the configured isolated profile.',
           );
-          try {
-            await connection.initialize();
-            if (!isDriving(connection)) {
-              this.invalidateDriveEligibility(sessionId, connection);
-              throw new NativeSessionUnresumableError(
-                'Cline Resume lost Drive ownership during initialization.',
-              );
-            }
-            this.driven.set(sessionId, connection);
-            return connection;
-          } catch (error) {
-            await connection.close().catch(() => undefined);
-            throw error;
-          }
         }
-        const nativeModel = this.driveModels.get(sessionId)
-          ?? preserveModelLabel(session.currentModel, stored?.currentModel);
         const selectedMode = this.driveModes.get(sessionId) ?? session.currentMode ?? stored?.currentMode ?? 'ask';
-        const modelCatalog = (await this.listCandidateModels())
-          .filter((candidate) => candidate.providerID === nativeModel?.providerID);
-        const selectedModel = preserveModelLabel(nativeModel, modelCatalog.find((candidate) =>
-          candidate.modelID === nativeModel?.modelID));
-        const apiKeyAuth = this.authMethodId ? undefined : await resolveClineAcpEnvironment({
+        this.driveModels.set(sessionId, { ...nativeModel, label: nativeModel.label ?? configuredModel.label });
+        this.driveModes.set(sessionId, selectedMode);
+        const discovery = await probeClineHub({
           env: this.env,
-          model: selectedModel,
+          ...(this.homeDir ? { homeDir: this.homeDir } : {}),
+          fetcher: this.fetcher,
         });
-        if (!this.authMethodId && !apiKeyAuth) {
-          throw new NativeSessionUnresumableError('Cline Resume lost its secure OpenAI-compatible API-key environment.');
-        }
+        if (!discovery) throw new NativeSessionUnresumableError('Cline managed Hub is not ready.');
         const info = sessionInfo(session, this.command, true, true, true, selectedMode);
-        if (selectedModel) info.currentModel = { ...selectedModel };
-        const title = this.driveTitles.get(sessionId);
-        if (title) info.title = title;
-        const connection = new ClineDriveConnection({
+        info.currentModel = { ...this.driveModels.get(sessionId)! };
+        const connection = this.hubConnection(
           session,
           info,
-          command: this.command,
-          args: this.acpArgs(session.cwd, selectedModel, selectedMode),
-          env: { ...clineChildEnvWithoutHubLaunch(apiKeyAuth?.env ?? this.env), CLINE_NO_AUTO_UPDATE: '1' },
-          authMethodId: this.authMethodId,
-          requestTimeoutMs: this.requestTimeoutMs,
-          promptTimeoutMs: this.promptTimeoutMs,
-          ...(selectedModel ? { model: selectedModel } : {}),
-          permissionMode: selectedMode,
-          models: modelCatalog,
-          modes: CLINE_CREATION_MODES,
-          ...(storedBoundaryValid && stored?.historyBoundary
-            ? { expectedHistoryBoundary: stored.historyBoundary }
-            : {}),
-          ...(this.trace ? { trace: this.trace } : {}),
-          ...(this.observe ? { observe: this.observe } : {}),
-          onDemote: (demoting) => {
-            if (this.driven.get(sessionId) === demoting
-              || this.opening.get(sessionId) === openingToken) {
-              this.invalidateDriveEligibility(sessionId, demoting);
-            }
-          },
-          onHistoryBoundary: (historyBoundary) => {
-            this.recordStoredDriveBoundary?.({
-              tool: this.id,
-              id: sessionId,
-              nativeId: session.nativeId,
-              historyBoundary,
-            });
-          },
-          onClose: (closing) => {
-            if (this.driven.get(sessionId) === closing) this.driven.delete(sessionId);
-          },
-          onConfiguration: (configured) => {
-            if (configured.info.currentModel) this.driveModels.set(sessionId, { ...configured.info.currentModel });
-            if (configured.info.currentMode) this.driveModes.set(sessionId, configured.info.currentMode);
-          },
-        });
+          this.newHubClient(discovery, session.cwd),
+          storedBoundaryValid ? stored?.historyBoundary : undefined,
+          this.sessionPromptCorrelations(
+            sessionId,
+            storedBoundaryValid ? stored?.promptCorrelations : undefined,
+          ),
+          openingToken,
+          false,
+          storedBoundaryValid ? stored?.terminalSummaries : undefined,
+        );
         try {
           await connection.initialize();
           if (!isDriving(connection)) {
@@ -1378,14 +1063,14 @@ export class ClineAdapter implements AgentBackend {
       }
     }
     if (effectiveMode !== 'observe') throw new Error(`Cline does not support ${effectiveMode} attach.`);
-    const sharedPromptCorrelations = !this.candidateDrive && managed
+    const sharedPromptCorrelations = managed
       && (activeDriving || storedBoundaryValid)
       ? this.sessionPromptCorrelations(
           sessionId,
           storedBoundaryValid ? stored?.promptCorrelations : undefined,
         )
       : undefined;
-    const sharedTerminalSummaries = !this.candidateDrive && managed
+    const sharedTerminalSummaries = managed
       && (activeDriving || storedBoundaryValid)
       ? this.sessionTerminalSummaries(sessionId)
       : undefined;
@@ -1394,7 +1079,7 @@ export class ClineAdapter implements AgentBackend {
       info: sessionInfo(
         session,
         this.command,
-        this.candidateDrive || managed,
+        managed,
         eligible,
         false,
         this.driveModes.get(sessionId) ?? session.currentMode ?? stored?.currentMode,
@@ -1455,7 +1140,6 @@ export class ClineAdapter implements AgentBackend {
 
   private async storedSessions(options?: SessionDiscoveryOptions): Promise<ClineStoredSession[]> {
     const ordinary = await discoverClineStore(this.storeOptions(this.env, options));
-    if (this.candidateDrive) return ordinary;
     const managed = await discoverClineStore(this.managedStoreOptions(options));
     this.ambiguousSessionIds.clear();
     const merged = new Map(ordinary.map((session) => [session.id, session]));
@@ -1509,7 +1193,7 @@ export class ClineAdapter implements AgentBackend {
     session: ClineStoredSession,
     sharedHubProbe?: Promise<ClineHubDiscovery | undefined>,
   ): Promise<HistorySourceIdentity | undefined> {
-    if (this.candidateDrive || !this.isManagedSession(session)) return clineHistorySourceIdentity(session);
+    if (!this.isManagedSession(session)) return clineHistorySourceIdentity(session);
     const [snapshot, discovery] = await Promise.all([
       readClineMessages(session),
       sharedHubProbe ?? probeClineHub({
@@ -1627,6 +1311,7 @@ export class ClineAdapter implements AgentBackend {
       terminalSummaryRegistry,
       ...(terminalSummaries ? { terminalSummaries } : {}),
       ...(requireEmptyIdleBoundary ? { requireEmptyIdleBoundary: true } : {}),
+      transcript: session,
       ...(this.trace ? { trace: this.trace } : {}),
       createManagementClient: () => this.newOwnedManagementClient(session.cwd),
       renameNativeTitle: (title) => this.runNativeHistoryRename(session, title),
@@ -1672,19 +1357,7 @@ export class ClineAdapter implements AgentBackend {
     });
   }
 
-  private acpArgs(cwd: string, model: PromptInput['model'] | SessionInfo['currentModel'] | undefined, mode: string): string[] {
-    return [
-      '--acp', '--cwd', cwd,
-      '--config', clineStoreRoot(this.env, this.homeDir),
-      '--data-dir', clineDataRoot(this.env, this.homeDir),
-      ...(mode === 'plan' ? ['--plan'] : []),
-      '--auto-approve', mode === 'auto' ? 'true' : 'false',
-      ...(model ? ['--provider', model.providerID, '--model', model.modelID] : []),
-      ...(model?.reasoningEffort ? ['--thinking', model.reasoningEffort] : []),
-    ];
-  }
-
-  private invalidateDriveEligibility(sessionId: string, connection?: ClineWriterConnection): void {
+  private invalidateDriveEligibility(sessionId: string, connection?: ClineHubDriveConnection): void {
     const summaries = this.terminalSummaries.get(sessionId);
     this.terminalSummaries.delete(sessionId);
     summaries?.clear();
@@ -1697,7 +1370,6 @@ export class ClineAdapter implements AgentBackend {
     this.driveEligible.delete(sessionId);
     this.driveModes.delete(sessionId);
     this.driveModels.delete(sessionId);
-    this.driveTitles.delete(sessionId);
     const correlations = this.promptCorrelations.get(sessionId);
     this.promptCorrelations.delete(sessionId);
     correlations?.clear();
@@ -1729,7 +1401,7 @@ export class ClineAdapter implements AgentBackend {
     return created;
   }
 
-  private releasePendingCreatedOwner(sessionId: string, connection: ClineWriterConnection): void {
+  private releasePendingCreatedOwner(sessionId: string, connection: ClineHubDriveConnection): void {
     const pending = this.pendingCreatedOwners.get(sessionId);
     if (!pending || pending.connection !== connection) return;
     clearTimeout(pending.timer);

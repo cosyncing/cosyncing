@@ -182,6 +182,35 @@ try {
     'a package-less POSIX Bun launcher must prove it is omp before Bun qualification');
   assert.equal(unverifiedOverride.detailCode, 'omp-posix-identity-unverified');
 
+  // Doctor identifies a package-less Bun launcher exactly as readiness does: by its own bounded
+  // `--version` answer, which must be the verified omp. It used to fail every such launcher as
+  // `bun-runtime-package-version-unverified` while readiness drove the same omp.
+  for (const [answer, ready, status, detailCode] of [
+    ['17.4.2\n', true, 'pass', 'bun-runtime-supported'],
+    ['17.4.3\n', false, 'fail', 'bun-runtime-launcher-above-verified'],
+    ['17.4.1\n', false, 'fail', 'bun-runtime-launcher-below-minimum'],
+    ['unrelated Bun tool\n', false, 'fail', 'bun-runtime-launcher-identity-unverified'],
+  ] as const) {
+    const readiness = inspectOmpRuntimeReadiness({
+      PATH: '/usr/bin:/bin',
+      COSYNCING_OMP_BIN: override,
+    }, {
+      probeVersionOutput: (invocation) => ({ output: invocation.originalPath === override ? answer : '1.4.0' }),
+    });
+    assert.equal(readiness.ready, ready, `readiness for a launcher answering ${JSON.stringify(answer)}`);
+    const doctor = await diagnoseOmpBunRuntime({
+      ...doctorContext,
+      env: { PATH: '/usr/bin:/bin', COSYNCING_OMP_BIN: override },
+      resolveExecutable: (command) => command === newerBun ? newerBun : undefined,
+      readTextPrefix: (path, maxBytes) => ({ ok: true, text: readFileSync(path).subarray(0, maxBytes).toString('utf8') }),
+      runReadOnly: async (executable) => ({
+        status: 'ok', exitCode: 0, stdout: executable === override ? answer : '1.4.0\n', stderr: '',
+      }),
+    }, override);
+    assert.deepEqual({ status: doctor.status, detailCode: doctor.detailCode }, { status, detailCode },
+      `doctor for a launcher answering ${JSON.stringify(answer)}`);
+  }
+
   const missing = inspectOmpRuntimeReadiness({ PATH: join(root, 'empty') });
   assert.equal(missing.ready, false);
   assert.equal(missing.detailCode, 'omp-binary-missing');

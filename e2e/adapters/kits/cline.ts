@@ -27,6 +27,7 @@ import {
   type ConformanceProfile,
   type FakeController,
   installFakeExecutable,
+  makeFifo,
   leaseQuietPort,
   Ledger,
   type LedgerEntry,
@@ -95,19 +96,6 @@ export const clineProfile: ConformanceProfile = {
   terminal: { resumeHint: null, syncAvailable: false, handoff: false },
   subagents: true,
   missingBinaryRoster: 'observe-only',
-  knownBugs: {
-    C09: 'the sender\'s row stays queued in the live stream (only a history frame after the turn settles shows it '
-      + 'reconciled): no live message restates it with queued:false',
-    'C06.live': 'a live Observe stream gets no reset when the snapshot is rewritten in place (a fresh reader replays it '
-      + 'on retry; its first read after the rewrite is answered with an empty HISTORY_PAGE_SOURCE_CHANGED gap)',
-    'C15.detect': 'Drive reads the transcript through the Hub, not the file: a rewrite is noticed only by the next prompt '
-      + '(the "a Hub rewrite refuses the next prompt" extra asserts that), and a replaced file changes nothing it reads',
-    C12: 'Stop proves the Hub idle, then waits 5 s for the reply to the aborted run.start that the measured Hub never sends, '
-      + 'answers nack "Stop failed closed" and leaves the session read-only (an extra asserts that with a Hub that does reply, '
-      + 'Stop keeps Drive)',
-    'C10.queuedRow': 'a prompt sent while a turn runs is announced (as a queued row to every tab) only once its own turn '
-      + 'starts, not when it is admitted',
-  },
   scenarios: {
     C07: {
       skip: 'Cline creates through one Hub session.create and has no native child to adopt: the session/new and '
@@ -130,6 +118,8 @@ export const clineProfile: ConformanceProfile = {
     { name: 'a snapshot that is not JSON', plant: (fake) => plantCline(fake, { malformed: true }) },
     { name: 'a symlinked session directory', unsupportedOn: ['win32'], plant: (fake) => plantCline(fake, { linkDirectory: true }) },
     { name: 'a symlinked messages snapshot', unsupportedOn: ['win32'], plant: (fake) => plantCline(fake, { linkMessages: true }) },
+    { name: 'a FIFO in place of the messages snapshot', unsupportedOn: ['win32'], plant: (fake) => plantCline(fake, { fifo: 'messages' }) },
+    { name: 'a FIFO in place of the session metadata', unsupportedOn: ['win32'], plant: (fake) => plantCline(fake, { fifo: 'metadata' }) },
   ],
 };
 
@@ -143,6 +133,8 @@ interface PlantOptions {
   malformed?: boolean;
   linkDirectory?: boolean;
   linkMessages?: boolean;
+  /** Which of the session's two files is a named pipe instead. */
+  fifo?: 'metadata' | 'messages';
 }
 
 /** One hostile session in the owner's data directory; returns the id that must stay unpublished. */
@@ -153,7 +145,8 @@ function plantCline(fake: FakeController, options: PlantOptions): string {
   const real = join(cline.paths.root, 'outside-sessions', id);
   const dir = options.linkDirectory ? real : join(cline.dataDir, 'sessions', id);
   const cwd = options.cwd ?? cline.workspace('hostile');
-  writeJson(join(dir, `${id}.json`), {
+  if (options.fifo === 'metadata') makeFifo(join(dir, `${id}.json`));
+  else writeJson(join(dir, `${id}.json`), {
     session_id: options.metadataId ?? id, cwd, provider: CLINE_PROVIDER, model: CLINE_MODEL,
     started_at: new Date(at).toISOString(), ended_at: new Date(at + 1).toISOString(), status: 'completed', metadata: { title: 'hostile', mode: 'act' },
   });
@@ -169,7 +162,8 @@ function plantCline(fake: FakeController, options: PlantOptions): string {
       { id: `msg-${id}-a`, role: 'assistant', ts: at + 1, modelInfo: { provider: CLINE_PROVIDER, id: CLINE_MODEL }, content: [{ type: 'text', text: 'hostile' }], metrics: {} },
     ],
   };
-  if (options.malformed) writeFileSync(messagesPath, '{ not json');
+  if (options.fifo === 'messages') makeFifo(messagesPath);
+  else if (options.malformed) writeFileSync(messagesPath, '{ not json');
   else if (options.linkMessages) {
     const outside = join(cline.paths.root, 'outside-messages', `${id}.json`);
     writeJson(outside, document);

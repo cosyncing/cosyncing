@@ -90,12 +90,15 @@
  *   outside them is dropped before launch with a trace, because the host silently
  *   ignores an unrecognized value and the row would then advertise a posture the
  *   child is not in.
- *   STILL UNSUPPORTED: a DISCOVERY row carries no `currentMode`. C2 is SETTLED
- *   and the answer is that no record exists — `--mode=accept-edits` leaves no
- *   trace anywhere in the store, `--mode=plan` shows only as a `/plan` prefix on
- *   user rows, and the default writes nothing. An unattached row therefore cannot
- *   know its mode, and inventing one would preselect a posture the session may not
- *   be in.
+ *   A DISCOVERY row carries no `currentMode` from agy. C2 is SETTLED and the
+ *   answer is that no record exists — `--mode=accept-edits` leaves no trace
+ *   anywhere in the store, `--mode=plan` shows only as a `/plan` prefix on user
+ *   rows, and the default writes nothing. So the only record is the BROKER's own:
+ *   the mode the app last drove the conversation with, which the broker keeps
+ *   with its record of the app's sends and hands back through
+ *   `resolveStoredCurrentMode`. A row carries that, and the next Drive child
+ *   launches in it; a conversation the app never drove with a mode carries none,
+ *   because inventing one would preselect a posture the session may not be in.
  *
  * Q3 — DOES CREATE ACCEPT A MODEL, AND HOW DOES ATTACH RE-DERIVE IT?
  *   Yes: `agy --model <id> --conversation <newId>` sets it at launch. P3 is that
@@ -248,7 +251,7 @@
  *   | capability                  | answer            | reason |
  *   |-----------------------------|-------------------|--------|
  *   | `origin`/`parentThreadId`   | SUPPORTED (P2d)   | from the settlement sender, not the schema — see Q5. The columns are still empty on every row |
- *   | `currentMode` on a ROW      | unsupported       | C2 SETTLED: no per-conversation mode record exists to read. A DRIVE connection publishes the mode it LAUNCHED with — never from `init`, which answers a different axis (Q2) |
+ *   | `currentMode` on a ROW      | broker record     | C2 SETTLED: agy keeps no per-conversation mode. A DRIVE connection publishes the mode it LAUNCHED with — never from `init`, which answers a different axis (Q2) — and a row carries the mode the app last drove it with, from the broker's own record |
  *   | `token-count` in REPLAY     | unsupported       | counts live in the protobuf store and in the live `result` event, never in the JSONL. Drive emits it; a replay cannot |
  *   | `usage.thinking`            | unsupported       | agy reports a fourth token bucket the protocol has no field for. NOT folded into `output` — inventing a sum is the exact error `token-count` warns about |
  *   | `respondPermission`         | unsupported       | agy publishes no permission channel over stream-json, and answering by writing a prompt would put words in the conversation the user never typed |
@@ -353,11 +356,12 @@ import type {
   SessionInfo,
   SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
+import { SessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
 import { cachedAgyCliCatalog, ensureAgyCliCatalog } from './cli-catalog.ts';
 import { diagnoseAgySetup } from './diagnostics.ts';
 import { AgyObserveConnection } from './observe.ts';
 import { AgyDriveConnection } from './drive.ts';
-import { stripAgyUserWrappers } from './mapping.ts';
+import { createAgyQueuedSends, stripAgyUserWrappers, type AgyQueuedSends } from './mapping.ts';
 import {
   AGY_MAX_LINE_BYTES,
   AGY_TRANSCRIPT_MAX_BYTES,
@@ -375,6 +379,7 @@ import {
   readAgyModelCatalog,
   readAgySettingsModelLabel,
   readAgySummaries,
+  isAgyMode,
   resolveAgyModel,
   scanAgyBrainDirs,
   scanAgySubagentLinks,
@@ -400,6 +405,9 @@ interface AgyDiscoveryCandidate {
   summary?: AgySummaryRow;
   brain?: AgyBrainRow;
 }
+
+/** How many driven conversations keep their queued-send state (see `AgyAdapter.queuedSends`). */
+const AGY_QUEUED_SEND_SESSIONS = 64;
 
 /** Backend id. `agy` is the command; `Antigravity` is the product (spec D6). */
 export const AGY_BACKEND_ID = 'agy';
@@ -455,6 +463,12 @@ export interface AgyAdapterOptions {
   trace?: AgyTraceSink;
   /** Ceiling on rows decoded per sweep. */
   discoveryLimit?: number;
+  /**
+   * The `--mode` the app last drove this conversation with, from the BROKER's own record of the
+   * app's sends. agy records no per-conversation mode anywhere (C2), so without it a broker restart
+   * forgets the posture the user chose. Never written to agy's store.
+   */
+  resolveStoredCurrentMode?: (info: { tool: string; id: string; nativeId?: string }) => string | undefined;
 }
 
 export class AgyAdapter implements AgentBackend {
@@ -470,6 +484,7 @@ export class AgyAdapter implements AgentBackend {
   private readonly env: NodeJS.ProcessEnv;
   private readonly trace: AgyTraceSink;
   private readonly discoveryLimit: number;
+  private readonly resolveStoredCurrentMode?: AgyAdapterOptions['resolveStoredCurrentMode'];
 
   /**
    * Q9's registry: session id → the connection currently driving it.
@@ -486,6 +501,15 @@ export class AgyAdapter implements AgentBackend {
    * read "observing". Only the registered owner may remove its own entry.
    */
   private readonly drivenSessions = new Map<string, AgyDriveConnection>();
+  /**
+   * Each driven conversation's queued-send state: the Drive connection's pending prompt links and
+   * the claims their delivering transcript lines took. Created by a Drive attach, read by every
+   * Observe attach (never created there), so a reload or a second tab keys a Drive prompt by the
+   * key and `clientKey` its sender held. Bounded: the least recently driven conversation's prompts
+   * fall back to their transcript step keys on its next read.
+   */
+  private readonly queuedSends = new Map<string, AgyQueuedSends>();
+
   /**
    * Sessions created from the app that no store has seen yet (P3).
    *
@@ -510,20 +534,43 @@ export class AgyAdapter implements AgentBackend {
     this.env = options.env ?? process.env;
     this.trace = options.trace ?? defaultAgyTraceSink;
     this.discoveryLimit = options.discoveryLimit ?? 500;
+    if (options.resolveStoredCurrentMode) this.resolveStoredCurrentMode = options.resolveStoredCurrentMode;
   }
 
   /**
-   * Installed and usable: the binary is on PATH AND the CLI app-data root exists.
+   * The mode the app last drove `sessionId` with, when the broker recorded one agy accepts.
+   * A value outside the three `--mode` values is never published: the host would drop it.
+   */
+  private storedCurrentMode(sessionId: string): string | undefined {
+    let mode: string | undefined;
+    try {
+      mode = this.resolveStoredCurrentMode?.({ tool: this.id, id: sessionId, nativeId: sessionId });
+    } catch (error) {
+      this.trace({ op: 'stored-mode-unreadable', detail: `${sessionId}: ${String(error)}` });
+      return undefined;
+    }
+    return isAgyMode(mode) ? mode : undefined;
+  }
+
+  /**
+   * Discoverable: the CLI app-data root exists.
    *
-   * Both halves are needed. The binary alone proves nothing — the IDE can be
-   * installed with the CLI never having run, and there would be no store to
-   * read. The directory alone proves nothing either — a removed binary leaves
-   * its state behind, and every row would carry a resume command that cannot
-   * run. The binary is never EXECUTED here: a `--version` spawn per availability
-   * probe would pay a process launch on every roster sweep.
+   * The binary alone proves nothing — the IDE can be installed with the CLI
+   * never having run, and there would be no store to read. The directory alone
+   * IS enough to read: a removed binary leaves its state behind, and those
+   * conversations stay listed and readable, Observe-only, with Drive off and the
+   * reason on every row (the broker's projection of {@link isInstalled}).
    */
   async isAvailable(): Promise<boolean> {
-    return findAgyBinary(this.env) !== undefined && existsSync(this.roots.appData);
+    return existsSync(this.roots.appData);
+  }
+
+  /**
+   * Whether `agy` is on PATH. The binary is never EXECUTED here: a `--version`
+   * spawn per probe would pay a process launch on every roster sweep.
+   */
+  isInstalled(): boolean {
+    return findAgyBinary(this.env) !== undefined;
   }
 
   /**
@@ -736,6 +783,7 @@ export class AgyAdapter implements AgentBackend {
       // Q1: the label rides the DISCOVERY row, and an unresolvable model is an
       // explicit `undefined` rather than an omitted key (reflection §2).
       currentModel,
+      ...this.storedModeField(row.conversationId),
       // Q9: the posture comes from the ADAPTER's registry, so a client that is
       // merely observing still sees that this session is being driven — and can
       // therefore be offered the join. Read here for EVERY row, not just the
@@ -785,7 +833,20 @@ export class AgyAdapter implements AgentBackend {
       if (!parentId) continue;
       row.origin = 'subagent';
       row.parentThreadId = parentId;
+      // A child is never offered Drive: `attach` refuses it, so the row must not promise it.
+      row.control = agySubagentControlState(row.id);
     }
+  }
+
+  /** `currentMode` for a row, from the broker's record of the app's sends (see {@link storedCurrentMode}). */
+  private storedModeField(sessionId: string): { currentMode?: string } {
+    const mode = this.storedCurrentMode(sessionId);
+    return mode ? { currentMode: mode } : {};
+  }
+
+  /** The parent conversation the settlement inboxes name for `sessionId`, when it is a subagent. */
+  private subagentParentOf(sessionId: string): string | undefined {
+    return scanAgySubagentLinks(this.roots, this.lineageUniverse(), { trace: this.trace }).get(sessionId);
   }
 
   /**
@@ -822,6 +883,7 @@ export class AgyAdapter implements AgentBackend {
       attachMode: 'observe',
       updatedAt: row.updatedAt,
       currentModel,
+      ...this.storedModeField(row.conversationId),
       control: agyControlState(this.isDriving(row.conversationId), row.conversationId),
       terminalSyncHint: {
         label: 'Resume in terminal',
@@ -858,7 +920,13 @@ export class AgyAdapter implements AgentBackend {
     model?: PromptInput['model'];
   } = {}): Promise<SessionInfo> {
     if (!findAgyBinary(this.env)) {
-      throw new Error('The `agy` command is not on PATH, so a new Antigravity session cannot be created from the app.');
+      // The typed, retryable refusal every adapter gives when it cannot create right now: installing
+      // agy is how the user recovers, so the broker answers 503 SESSION_CREATE_TEMPORARILY_UNAVAILABLE.
+      throw new SessionCreateTemporarilyUnavailableError(
+        'The `agy` command is not on PATH, so a new Antigravity session cannot be created from the app. '
+          + 'Run `cosyncing doctor` for setup guidance.',
+        'agy-binary-missing',
+      );
     }
     const cwd = opts.directory?.trim() || homedir();
     if (!existsSync(cwd)) throw new Error(`agy createSession directory does not exist: ${cwd}`);
@@ -904,6 +972,7 @@ export class AgyAdapter implements AgentBackend {
       createdAt: pending.createdAt,
       updatedAt: pending.createdAt,
       ...(pending.currentModel ? { currentModel: pending.currentModel } : {}),
+      ...this.storedModeField(sessionId),
       control: agyControlState(this.isDriving(sessionId), sessionId),
       terminalSyncHint: {
         label: 'Resume in terminal',
@@ -924,6 +993,12 @@ export class AgyAdapter implements AgentBackend {
     // rejects a non-UUID, but a crafted id must not be able to address a path.
     if (!isAgyConversationId(sessionId)) {
       throw new Error(`agy: not a conversation id: ${sessionId}`);
+    }
+    // A subagent's conversation belongs to the conversation that started it: Drive is refused
+    // before anything is read or spawned, as the roster row (no Drive offered) already says.
+    const subagentParent = this.subagentParentOf(sessionId);
+    if (subagentParent !== undefined && mode === 'resume') {
+      throw new Error(AGY_SUBAGENT_DRIVE_REFUSAL);
     }
 
     const summaries = readAgySummaries(this.roots, { trace: this.trace });
@@ -957,6 +1032,7 @@ export class AgyAdapter implements AgentBackend {
         attachMode: mode === 'resume' ? 'resume' : 'observe',
         ...(row.updatedAt !== undefined ? { updatedAt: row.updatedAt } : {}),
         currentModel,
+        ...this.storedModeField(sessionId),
         // Omitting control here left every observe attach with
         // `control: undefined` — the client fails closed on that and pinned
         // the whole session to "Session control status is unavailable" (the
@@ -984,7 +1060,7 @@ export class AgyAdapter implements AgentBackend {
         info.attachMode = mode === 'resume' ? 'resume' : 'observe';
         // The connection's own state — see the row branch above.
         info.control = agyControlState(false, sessionId);
-        return this.openConnection(sessionId, mode, info);
+        return this.openConnection(sessionId, mode, info, subagentParent);
       }
       const cwd = readAgyLastConversations(this.roots, this.trace).get(sessionId) ?? meta?.workspaceDirs[0];
       info = {
@@ -997,6 +1073,7 @@ export class AgyAdapter implements AgentBackend {
         attachMode: mode === 'resume' ? 'resume' : 'observe',
         updatedAt: scanned.updatedAt,
         currentModel,
+        ...this.storedModeField(sessionId),
         // The connection's own state — see the row branch above.
         control: agyControlState(false, sessionId),
         terminalSyncHint: {
@@ -1007,11 +1084,22 @@ export class AgyAdapter implements AgentBackend {
       };
     }
 
-    return this.openConnection(sessionId, mode, info);
+    return this.openConnection(sessionId, mode, info, subagentParent);
   }
 
   /** The one connection builder attach's three info branches share. */
-  private openConnection(sessionId: string, mode: AttachMode | undefined, info: SessionInfo): SessionConnection {
+  private openConnection(
+    sessionId: string,
+    mode: AttachMode | undefined,
+    info: SessionInfo,
+    subagentParent?: string,
+  ): SessionConnection {
+    if (subagentParent !== undefined) {
+      // The lineage the roster row carries, so an attach never contradicts it.
+      info.origin = 'subagent';
+      info.parentThreadId = subagentParent;
+      info.control = agySubagentControlState(sessionId);
+    }
     if (mode === 'resume') {
       const binary = findAgyBinary(this.env);
       if (!binary) {
@@ -1019,12 +1107,17 @@ export class AgyAdapter implements AgentBackend {
         // prompt would fail, and the client would have been told it was driving.
         throw new Error('The `agy` command is not on PATH, so this session cannot be driven from the app.');
       }
+      const queuedSends = this.drivenQueuedSends(sessionId);
       const connection = new AgyDriveConnection({
         roots: this.roots,
         conversationId: sessionId,
         info,
         binary,
         trace: this.trace,
+        queuedSends: () => queuedSends,
+        // The mode the app last drove this conversation with: the row already says so, and the
+        // first child launches in it unless a prompt chooses another.
+        ...(info.currentMode ? { mode: info.currentMode } : {}),
         // Compare-and-swap: only the REGISTERED owner may deregister itself, so a
         // stale close cannot evict the replacement that already took over.
         onClose: (closing) => {
@@ -1045,7 +1138,26 @@ export class AgyAdapter implements AgentBackend {
       trace: this.trace,
       // For the picker's live `agy models` read; absent on a binary-less host.
       ...(observeBinary ? { binary: observeBinary } : {}),
+      // Looked up per read, never created: a Drive opened after this reader still keys its prompts.
+      queuedSends: () => this.queuedSends.get(sessionId),
     });
+  }
+
+  /** The conversation's queued-send state for a Drive connection, created on first use. */
+  private drivenQueuedSends(sessionId: string): AgyQueuedSends {
+    let held = this.queuedSends.get(sessionId);
+    if (held) {
+      this.queuedSends.delete(sessionId);
+    } else {
+      held = createAgyQueuedSends();
+      while (this.queuedSends.size >= AGY_QUEUED_SEND_SESSIONS) {
+        const oldest = this.queuedSends.keys().next().value;
+        if (oldest === undefined) break;
+        this.queuedSends.delete(oldest);
+      }
+    }
+    this.queuedSends.set(sessionId, held);
+    return held;
   }
 
   /**
@@ -1207,6 +1319,23 @@ export function agyControlState(driving: boolean, conversationId: string): Sessi
       label: 'Resume in terminal',
       command: `agy --conversation ${conversationId}`,
     },
+  };
+}
+
+/** Why a subagent conversation cannot be driven from the app. */
+export const AGY_SUBAGENT_DRIVE_REFUSAL =
+  'This is a subagent conversation, run by the Antigravity conversation that started it, so it cannot be driven '
+  + 'from the app. Open the parent conversation to drive it.';
+
+/**
+ * A subagent row's posture: observable, never drivable. The parent conversation owns the
+ * child, and `attach` refuses Drive on it before anything runs.
+ */
+export function agySubagentControlState(conversationId: string): SessionControlState {
+  const base = agyControlState(false, conversationId);
+  return {
+    ...base,
+    drive: { state: 'unavailable', supported: false, handoffAvailable: false, reason: AGY_SUBAGENT_DRIVE_REFUSAL },
   };
 }
 

@@ -331,13 +331,10 @@ describe('the session roster', () => {
     expect(feed.of(first, from)).toEqual([]);
   });
 
-  // KNOWN DEFECT, reported rather than fixed here: `/pi/bridge/hello` adopts a
-  // live session without journalling it, so the delta feed (and a client
-  // polling with its ETag, which is answered 304) learns of a freshly bridged
-  // terminal session only at its first frame, or when some other client makes
-  // a full roster request. The Pi extension sends no frame until the user acts.
-  // Turn this into a plain `test` once hello publishes the row.
-  test.failing('a freshly bridged session reaches the delta feed before its first frame', async () => {
+  // The Pi extension sends no frame until the user acts, so the hello itself
+  // must journal the row: otherwise the delta feed (and a client polling with
+  // its ETag, answered 304) learns of the session only at its first frame.
+  test('a freshly bridged session reaches the delta feed before its first frame', async () => {
     const feed = new RosterFeed(client);
     await feed.start();
     const hello = await client.post('/pi/bridge/hello', {

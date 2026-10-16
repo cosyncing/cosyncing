@@ -384,6 +384,19 @@ try {
       JSON.stringify({ outcome, records: records.size }));
   }
   {
+    // A child that exits before its identity is read is a zombie until it is
+    // reaped, and a zombie reads as gone. That is an exit, reported with the
+    // child's output, not an identity that could not be read.
+    const spawnPid = 5155;
+    const { effects, signals } = fakeEffects({ spawnPid, missingProcess: PROCESS_ABSENT, outputScript: ['stderr:\nbad flag\n'] });
+    const { store, records } = memoryStore();
+    const outcome = await startManagedHost(plan({ ready: async () => false }), effects, store);
+    check('a child that exited before its identity was read fails as an exit, with its output',
+      outcome.action === 'start-failed' && outcome.detailCode === 'host-exited-during-start'
+        && outcome.capturedOutput === 'stderr:\nbad flag\n' && records.size === 0 && signals.length === 0,
+      JSON.stringify({ outcome, records: records.size, signals }));
+  }
+  {
     const spawnPid = 5153;
     const identity = { pid: spawnPid, start: '1', boot: BOOT, comm: 'host' };
     const table = new Map([[spawnPid, identity]]);

@@ -6,6 +6,9 @@
 // broker and time are fake. Waits are bounded pumps of fake time.
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_page.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_rename_region.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
@@ -128,25 +131,57 @@ void main() {
     );
 
     featureTest(
-      "a row says which agent and how long ago, from the broker's own clock",
+      'at twice the text size the roster pane, the phone drawer and the '
+      'overview beside it fit their width',
+      (f) async {
+        final studio = f.network.add('http://studio.test:7734')
+          ..addSession('a1', 'Fix login');
+        await f.storage.seedServer(studio);
+        final device = f.tester.platformDispatcher
+          ..textScaleFactorTestValue = 2;
+        addTearDown(device.clearTextScaleFactorTestValue);
+        var app = await f.launch();
+        await app.expandProject('/work/studio');
+        expect(find.text('Fix login'), findsOneWidget);
+        expect(f.tester.takeException(), isNull, reason: 'desktop pane');
+
+        await f.quit();
+        app = await f.launch(viewport: FeatureViewport.narrowPhone);
+        expect(f.tester.takeException(), isNull, reason: 'phone overview');
+        await app.tapKey('workspace-open-drawer');
+        await app.expandProject('/work/studio');
+        expect(find.text('Fix login'), findsOneWidget);
+        expect(f.tester.takeException(), isNull, reason: 'phone drawer');
+      },
+    );
+
+    featureTest(
+      "a row says which agent and how long ago, from the broker's own clock, "
+      'and the age moves on with the clock',
       (f) async {
         final studio = f.network.add('http://studio.test:7734')
           ..addSession(
             's1',
             'Tune the cache',
-            updatedAt: DateTime.now().subtract(const Duration(minutes: 5)),
+            updatedAt: f.now().subtract(const Duration(minutes: 5)),
           );
         await f.storage.seedServer(studio);
         final app = await f.launch();
         await app.expandProject('/work/studio');
         expect(tooltipContaining('Codex'), findsOneWidget);
         expect(tooltipContaining('5m ago'), findsOneWidget);
+
+        // Nothing changes on the broker; only the app's clock moves.
+        await app.elapse(const Duration(minutes: 10));
+        expect(tooltipContaining('Codex · 15m ago'), findsOneWidget);
+        expect(tooltipContaining('Codex · 5m ago'), findsNothing);
       },
     );
 
     featureTest(
-      'renaming a project sends the directory and shows the alias; an answer '
-      'that lands after switching servers changes nothing',
+      'renaming a project sends the directory and shows the alias; switching '
+      "servers loads the new server's roster at once, and an answer that "
+      'lands after the switch changes nothing',
       (f) async {
         final studio = f.network.add('http://studio.test:7734')
           ..addSession('a1', 'Fix login', cwd: '/work/app');
@@ -165,9 +200,12 @@ void main() {
         await app.renameProject('/work/app', 'Shop');
         expect(hold.pending, 1);
         await app.switchServer('http://lab.test:7734');
+        // 3 s of fake time, well inside the workspace's 15 s roster poll: the
+        // switch itself loads the new server's roster.
         await app.pumpUntil(
           () => lab.requestsTo('/api/sessions').isNotEmpty,
-          reason: 'the second server roster loads',
+          reason: 'the second server roster loads at once, not on the poll',
+          steps: 60,
         );
         hold.release();
         // The answer crosses the client's request pipeline in under a second
@@ -240,6 +278,54 @@ void main() {
     });
 
     featureTest(
+      'F5, Ctrl+R and Cmd+R refresh the roster, from the search field too',
+      (f) async {
+        final studio = f.network.add('http://studio.test:7734')
+          ..addSession('a1', 'Fix login');
+        await f.storage.seedServer(studio);
+        final app = await f.launch();
+        // Keys go to whatever has focus: the user has just used the roster.
+        await app.expandProject('/work/studio');
+
+        Future<void> chord(LogicalKeyboardKey modifier) async {
+          await app.tester.sendKeyDownEvent(modifier);
+          await app.tester.sendKeyEvent(LogicalKeyboardKey.keyR);
+          await app.tester.sendKeyUpEvent(modifier);
+        }
+
+        // Each press is followed by well under a second of fake time; the
+        // workspace's own roster poll is 15 s away, so every read counted
+        // here is the shortcut's.
+        final presses = <String, Future<void> Function()>{
+          'F5': () => app.tester.sendKeyEvent(LogicalKeyboardKey.f5),
+          'Ctrl+R': () => chord(LogicalKeyboardKey.controlLeft),
+          'Cmd+R': () => chord(LogicalKeyboardKey.metaLeft),
+        };
+        for (final MapEntry(key: name, value: press) in presses.entries) {
+          final before = app.rosterReads(studio).length;
+          await press();
+          await app.settle();
+          expect(
+            app.rosterReads(studio).length,
+            greaterThan(before),
+            reason: '$name refreshes the roster',
+          );
+        }
+
+        await app.tester.sendKeyEvent(LogicalKeyboardKey.slash);
+        await app.settle();
+        final before = app.rosterReads(studio).length;
+        await app.tester.sendKeyEvent(LogicalKeyboardKey.f5);
+        await app.settle();
+        expect(
+          app.rosterReads(studio).length,
+          greaterThan(before),
+          reason: 'F5 types nothing, so it refreshes from the search field',
+        );
+      },
+    );
+
+    featureTest(
       'a finished run marks its session ready to review until it is opened; '
       'other sessions stay unmarked',
       (f) async {
@@ -299,6 +385,76 @@ void main() {
   });
 
   group('live changes and races', () {
+    featureTest(
+      'a session changing rebuilds its own roster row and no other',
+      (f) async {
+        final studio = f.network.add('http://studio.test:7734')
+          ..addSession('a1', 'Fix login')
+          ..addSession('a2', 'Tidy styles')
+          ..addSession('a3', 'Write docs');
+        await f.storage.seedServer(studio);
+        final app = await f.launch();
+        await app.expandProject('/work/studio');
+        final rebuilt = <String>[];
+        debugOnRebuildDirtyWidget = (element, _) {
+          if (element.widget case SessionRenameRegion(:final sessionId)) {
+            rebuilt.add(sessionId);
+          }
+        };
+        addTearDown(() => debugOnRebuildDirtyWidget = null);
+
+        studio.updateSession('a2', {'status': 'working'});
+        await app.pumpUntil(
+          () => app.container
+              .read(sessionListControllerProvider)
+              .sessions
+              .any((s) => s.id == 'a2' && s.status == SessionStatus.working),
+          reason: 'the roster takes the new status',
+        );
+
+        expect(rebuilt, isNotEmpty, reason: 'the changed row shows it');
+        expect(
+          rebuilt.toSet(),
+          {'a2'},
+          reason: 'rows whose session did not change are kept as they were',
+        );
+      },
+    );
+
+    featureTest(
+      'another session changing leaves the open session page, and its '
+      'transcript, alone',
+      (f) async {
+        final studio = f.network.add('http://studio.test:7734')
+          ..addSession('s1', 'Fix login')
+          ..addSession('s2', 'Tidy styles');
+        await f.storage.seedServer(studio);
+        final app = await f.launch();
+        await app.openFromRoster('s1', cwd: '/work/studio');
+        await app.settle();
+        var pageBuilds = 0;
+        debugOnRebuildDirtyWidget = (element, _) {
+          if (element.widget is SessionDetailPage) pageBuilds++;
+        };
+        addTearDown(() => debugOnRebuildDirtyWidget = null);
+
+        studio.updateSession('s2', {'status': 'working'});
+        await app.pumpUntil(
+          () => app.container
+              .read(sessionListControllerProvider)
+              .sessions
+              .any((s) => s.id == 's2' && s.status == SessionStatus.working),
+          reason: "the roster takes the other session's new status",
+        );
+
+        expect(
+          pageBuilds,
+          0,
+          reason: 'the open page shows nothing of another session',
+        );
+      },
+    );
+
     featureTest(
       'the delta feed adds, renames and removes rows without another roster '
       'fetch, and the fallback poll stays quiet while it is healthy',
@@ -770,33 +926,6 @@ void main() {
         expect(inList('Parent work'), findsOneWidget);
         expect(inList('Child one'), findsNothing, reason: 'not on the path');
       },
-    );
-  });
-
-  group('known product defects', () {
-    featureTest(
-      'BUG: switching server loads the new roster at once, not on the next '
-      '15 s poll',
-      (f) async {
-        // Today the roster of the server just switched to stays on
-        // "Connecting…" until the workspace's 15 s poll timer fires: nothing
-        // loads it on a switch (the broker-client listener only reloads when
-        // there was no client before). Remove `skip` once a switch loads.
-        final studio = f.network.add('http://studio.test:7734')
-          ..addSession('s1', 'Fix login');
-        final lab = f.network.add('http://lab.test:7734', machine: 'lab')
-          ..addSession('l1', 'Lab run');
-        await f.storage.seedServer(studio);
-        await f.storage.seedServer(lab, active: false);
-        final app = await f.launch();
-        await app.switchServer('http://lab.test:7734');
-        await app.pumpUntil(
-          () => app.rosterReads(lab).isNotEmpty,
-          reason: 'the new server roster is requested',
-          steps: 60,
-        );
-      },
-      skip: true,
     );
   });
 }

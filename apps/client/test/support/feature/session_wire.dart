@@ -102,6 +102,7 @@ class OwnedSession {
     this.handoffAvailable,
     this.alsoIds = const [],
     this.drivingTerminalSync,
+    this.observingDrive,
   }) {
     for (final each in [id, ...alsoIds]) {
       _drives[each] = !terminalOwns;
@@ -132,6 +133,11 @@ class OwnedSession {
 
   /// `handoffAvailable` published while the app is driving.
   final bool? handoffAvailable;
+
+  /// The drive block published while the app is not driving, when it is not
+  /// the ordinary takeable Observe (a session whose agent is not installed
+  /// offers no Take over, say).
+  final Map<String, Object?>? observingDrive;
 
   /// More sessions of the broker arbitrated the same way.
   final List<String> alsoIds;
@@ -170,7 +176,9 @@ class OwnedSession {
           terminalSync: drivingTerminalSync ?? syncBlock(supported: false),
         )
       : controlBlock(
-          drive: driveBlock('observing', takeoverMode: takeoverMode),
+          drive:
+              observingDrive ??
+              driveBlock('observing', takeoverMode: takeoverMode),
           terminalSync: terminalSync ?? syncBlock(supported: false),
         );
 

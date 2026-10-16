@@ -559,7 +559,25 @@ TransportQrPayload? _tryParseTransportQr(String input) {
 
 bool _looksLikeTransportQr(String input) {
   final uri = Uri.tryParse(input.trim());
-  return uri != null && uri.scheme == 'cosyncing' && uri.host == 'pair';
+  return uri != null &&
+      uri.scheme == 'cosyncing' &&
+      uri.host == 'pair' &&
+      !_isServerPairingLink(uri);
+}
+
+/// Whether [uri] is the `cosyncing://pair?brokerUrl=…&token=…` link, which
+/// names its server in the query string, rather than a transport QR code
+/// (`cosyncing://pair?payload=…`).
+///
+/// Every `cosyncing://pair` link used to be read as a QR code, so this one,
+/// which [PairingPayload.parse] has always understood, was refused as an
+/// invalid QR code wherever it was pasted or scanned.
+bool _isServerPairingLink(Uri uri) {
+  final query = uri.queryParameters;
+  return !query.containsKey('payload') &&
+      (query.containsKey('brokerUrl') ||
+          query.containsKey('baseUrl') ||
+          query.containsKey('url'));
 }
 
 PairingNotice _transportPairingNotice(String? code) {

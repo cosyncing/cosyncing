@@ -6,6 +6,7 @@
  * docs/architecture/monorepo.md).
  */
 import { lstatSync, readFileSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { basename, extname, relative, dirname, resolve, isAbsolute } from 'node:path';
 import type {
   AgentMessage,
@@ -26,7 +27,12 @@ import type {
   SlashCommand,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
-import { decodeSessionInfo, OwnershipConflictError } from '@cosyncing/adapter-api';
+import {
+  decodeSessionInfo,
+  nativeDriveAttachMode,
+  nativeNotInstalledReason,
+  OwnershipConflictError,
+} from '@cosyncing/adapter-api';
 import {
   artifactKeyFor,
   DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT,
@@ -343,6 +349,42 @@ const SESSION_OPTIONAL_KEYS = [
   'control',
   'sessionOwner',
 ] as const;
+
+/**
+ * What a discovery snapshot may change on an open connection.
+ *
+ * Discovery describes the session's BEST available owner; an open connection is one specific owner.
+ * A daemon-held Codex thread reads `live` and `driving` in discovery, and an Observe tail opened
+ * beside that owner is still a read-only tail. Copying the snapshot whole handed that tail the
+ * live owner's class and Drive state: its socket published `driving`, the owner registry counted it
+ * as a writer, and a later mode-less or Drive attach joined it instead of the real owner.
+ *
+ * The connection's class (`attachMode`) changes only by reattach, and its run state only through
+ * its own frames (`status` is the managed one the caller passes). When discovery describes the SAME
+ * class, its control describes this connection and is adopted as before (OpenCode's serve gaining
+ * or losing a terminal, a Codex daemon conn's Drive giving way to an attached terminal). When it
+ * describes a different class, its Drive state is another owner's authority: the connection keeps
+ * its own, and takes only what discovery observes about terminals (presence, the join offer).
+ * Everything else discovery owns (title, model, timestamps, hints) flows in as before.
+ */
+function discoveryRefresh(current: SessionInfo, discovered: SessionInfo, status: SessionInfo['status']): SessionInfo {
+  const next: SessionInfo = { ...discovered, status, attachMode: current.attachMode };
+  if (discovered.attachMode === current.attachMode) return next;
+  if (current.control) {
+    next.control = {
+      drive: current.control.drive,
+      terminalSync: discovered.control?.terminalSync ?? current.control.terminalSync,
+    };
+  } else {
+    delete next.control;
+  }
+  return next;
+}
+
+/** Two SessionInfos that would put the same `session` frame on the wire. */
+function sameWireInfo(a: SessionInfo, b: SessionInfo): boolean {
+  return isDeepStrictEqual(JSON.parse(JSON.stringify(a)), JSON.parse(JSON.stringify(b)));
+}
 
 function replaceInfo(target: SessionInfo, source: SessionInfo): boolean {
   const decoded = decodeSessionInfo(source);
@@ -1907,6 +1949,13 @@ export class Hub {
    *  point is that the incumbent stays serving until the replacement exists. */
   private readonly takeovers = new Map<string, Promise<ManagedConn>>();
 
+  /** Drive-keyed wrappers whose connection was a writer when it was admitted
+   *  (`live` or `resume`). Only such a wrapper can END: one that later reports
+   *  Observe has given up writing (see {@link ensure}). A wrapper the adapter
+   *  answered as Observe from the start never was a writer, and replacing it on
+   *  every attach would only churn connections the adapter keeps refusing. */
+  private readonly admittedWriters = new WeakSet<ManagedConn>();
+
   /** Monotone per-key attach generation, bumped whenever this session's
    *  ownership changes under attaches that are already in flight — terminal
    *  handoff retiring the mutable keys, or an adapter's Drive eligibility being
@@ -2041,7 +2090,8 @@ export class Hub {
 
   /**
    * Replace a non-driving registered wrapper with a freshly promoted one, for a
-   * user-confirmed takeover.
+   * user-confirmed takeover — or with a fresh connection, for any attach that
+   * finds the registered drive wrapper has ended (see {@link ensure}).
    *
    * TRANSACTIONAL, and in this order for one reason: the incumbent is the
    * clients' current connection, so it may not be retired until a replacement
@@ -2059,7 +2109,7 @@ export class Hub {
     id: string,
     key: string,
     mode: string | undefined,
-    reason: DriveAttachReason,
+    reason: DriveAttachReason | undefined,
     stale: ManagedConn,
   ): Promise<ManagedConn> {
     // Concurrent takeovers of one key coalesce onto the first. Without this the
@@ -2072,7 +2122,8 @@ export class Hub {
     const attempt = (async (): Promise<ManagedConn> => {
       const backend = this.registry.get(tool);
       if (!backend) throw new Error(`unknown tool: ${tool}`);
-      const conn = await backend.attach(id, mode as AttachMode | undefined, { reason });
+      await this.requireNativeForWriter(tool, mode);
+      const conn = await backend.attach(id, mode as AttachMode | undefined, reason ? { reason } : undefined);
       // ADMISSION, as a real compare-and-swap. The generation alone is not
       // enough: it moves only when ownership is deliberately RETIRED, while an
       // eviction, a fold, another replacement, or an incumbent that BECAME
@@ -2129,7 +2180,9 @@ export class Hub {
       if (!committed) {
         await replacement.dispose().catch(() => { /* never served */ });
         throw new OwnershipConflictError(
-          'This session gained another writer while the takeover was opening, so control was not transferred.',
+          reason === 'takeover'
+            ? 'This session gained another writer while the takeover was opening, so control was not transferred.'
+            : 'This session gained another writer while Drive was reopening, so control was not transferred.',
           'driver-changed',
         );
       }
@@ -2138,6 +2191,7 @@ export class Hub {
       // wrapper gone and the replacement not yet in place.
       this.unregisterWrapper(key, stale);
       this.conns.set(key, replacement);
+      this.noteAdmittedWriter(replacement);
       const moved = stale.moveClientsTo(replacement);
       // `detachLocal`, NOT `notifyEnded`: the session did not end, its owner was
       // replaced. Clients that just migrated must not be told otherwise.
@@ -2159,6 +2213,11 @@ export class Hub {
     } finally {
       if (this.takeovers.get(key) === attempt) this.takeovers.delete(key);
     }
+  }
+
+  private noteAdmittedWriter(managed: ManagedConn): void {
+    const attachMode = managed.conn.info.attachMode;
+    if (attachMode === 'live' || attachMode === 'resume') this.admittedWriters.add(managed);
   }
 
   private keyForManaged(target: ManagedConn): string | undefined {
@@ -2281,7 +2340,27 @@ export class Hub {
   /** Current session-level owner truth for roster and Session Detail publication. */
   projectSessionInfo(info: SessionInfo): SessionInfo {
     const resolution = this.reconcileSessionOwner(info.tool, info.id, info);
-    return this.withOwnerProjection(info, resolution.projection);
+    // After owner resolution, which reads the adapter's own control: an agent whose native CLI is
+    // missing keeps every row listed and readable, Observe-only (AgentBackend.isInstalled). Every
+    // outbound row passes here -- roster sweeps, watcher publication and Session Detail frames --
+    // so this one projection is the whole policy, after any live owner was overlaid.
+    return this.withOwnerProjection(this.registry.projectNativeInstallation(info), resolution.projection);
+  }
+
+  /**
+   * A NEW native Drive writer needs the agent's CLI. Refused before the adapter is asked, with the
+   * row's own reason: a reason-tagged attach gets its `attach-conflict` and stays Observe. Only the
+   * mode that starts a writer (see `nativeDriveAttachMode`); joining a writer that already runs never
+   * reaches this, and a `live` join of a terminal-synced session needs no local binary.
+   *
+   * A plain error, so the conflict code is the generic `DRIVE_RESTORE_FAILED`: nothing native
+   * declined the session (`DRIVE_NATIVE_SESSION_UNRESUMABLE`), there is no native side to ask.
+   */
+  private async requireNativeForWriter(tool: string, mode: string | undefined): Promise<void> {
+    const backend = this.registry.get(tool);
+    if (!backend?.isInstalled || mode === undefined || mode !== nativeDriveAttachMode(backend.capabilities)) return;
+    if (await this.registry.probeNativeInstalled(tool) !== false) return;
+    throw new Error(nativeNotInstalledReason(backend.displayName));
   }
 
   /** Socket-local Session Detail envelope. Owner truth never grants this socket authority. */
@@ -2902,8 +2981,13 @@ export class Hub {
     // a scan that may still be catching up. Same rule as the roster overlay: the managed status
     // owns ALL run states — an inferred needs-input is not adopted either; real permission/question
     // frames on the owned connection are the route to exact Needs input. Evaluated here — after
-    // every await — so it cannot go stale against a newer owner frame.
-    mc.updateInfo({ ...info, status: mc.status });
+    // every await — so it cannot go stale against a newer owner frame. The connection's own class
+    // and Drive state are not discovery's either ({@link discoveryRefresh}), and a pass that changes
+    // nothing about this connection sends no frame: discovery re-derives a row on every input edge,
+    // and re-sending an identical session frame each time is noise every client has to absorb.
+    const next = discoveryRefresh(mc.conn.info, info, mc.status);
+    if (sameWireInfo(mc.conn.info, next)) return;
+    mc.updateInfo(next);
     this.emitControlTransitions(before, mc.conn.info, 'runtime-unreachable');
   }
 
@@ -3066,6 +3150,25 @@ export class Hub {
         && existing.conn.info.control?.drive?.state !== 'driving') {
         return await this.replaceForTakeover(tool, id, key, mode, reason, existing);
       }
+      // AN ENDED OWNER IS NOT AN OWNER either. A drive wrapper admitted as a
+      // writer whose connection has since given up writing (it reports Observe
+      // under the drive key: demoted, revoked, or its native side went away)
+      // stays registered until its last client leaves and the grace eviction
+      // runs. Handing it to a fresh attach meant a user who reopened Drive got
+      // that dead, read-only connection back — and kept getting it for as long
+      // as any tab stayed open — while the adapter itself would have opened a
+      // new writer. The next attach replaces it instead, through the same
+      // transaction a takeover uses: the adapter decides afresh (and may
+      // refuse, leaving the ended wrapper as it was), and the clients still on
+      // the ended wrapper move to the new one.
+      // A wrapper that is only withheld (still reporting its drive mode) is a
+      // live owner waiting to prove itself again, and is joined as before.
+      if ((mode === 'live' || mode === 'resume')
+        && this.admittedWriters.has(existing)
+        && existing.conn.info.attachMode === 'observe'
+        && existing.conn.info.control?.drive?.state !== 'driving') {
+        return await this.replaceForTakeover(tool, id, key, mode, reason, existing);
+      }
       this.attentionLeases.delete(existing);
       this.attentionLeaseDenied.delete(existing);
       this.reportEnsureBranch('reuse', existing);
@@ -3087,6 +3190,7 @@ export class Hub {
     entry.promise = (async () => {
       const backend = this.registry.get(tool);
       if (!backend) throw new Error(`unknown tool: ${tool}`);
+      await this.requireNativeForWriter(tool, mode);
       const conn = await backend.attach(id, mode as AttachMode | undefined, reason ? { reason } : undefined);
       // Checked at ADMISSION, not at call time: the adapter snapshots what it
       // may do when the attach starts, and the whole window between that
@@ -3139,6 +3243,7 @@ export class Hub {
         );
       }
       this.conns.set(key, mc);
+      if (mode === 'live' || mode === 'resume') this.noteAdmittedWriter(mc);
       this.clearPending(key, entry);
       this.reconcileSessionOwner(tool, id, mc.conn.info);
       this.reportEnsureBranch('create', mc);

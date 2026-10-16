@@ -9,7 +9,9 @@
 // the installer pairing inbox (a file under the user's home in production),
 // the public update-manifest host (routed into the fake network, where nothing
 // answers), and time (flutter_test's fake clock; nothing waits on the wall
-// clock).
+// clock). The app's clock reads the wall time the scenario started at, moved
+// on by fake time ([FeatureContext.now]), so a row the fake broker stamped
+// with the wall clock reads as older as fake time passes.
 //
 // Usage:
 //
@@ -34,6 +36,7 @@ import 'package:cosyncing_client/src/features/pairing/controller/installer_pairi
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_connection.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
+import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:cosyncing_client/src/platform/update/stable_release_manifest.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:dio/dio.dart';
@@ -157,10 +160,24 @@ class FeatureStorage {
 
 /// One scenario's world: a fake network, device storage, and the App.
 class FeatureContext {
-  FeatureContext._(this.tester);
+  FeatureContext._(this.tester)
+    : _wallStart = DateTime.now(),
+      _fakeStart = tester.binding.clock.now();
 
   /// The widget tester.
   final WidgetTester tester;
+
+  final DateTime _wallStart;
+  final DateTime _fakeStart;
+
+  /// The app's clock ([appClockProvider]): the wall time this scenario started
+  /// at, moved on by the fake time elapsed since. It survives [restart].
+  ///
+  /// The fake broker stamps rows with the wall clock, which barely moves while
+  /// a scenario runs, so stamp a row's time from here to place it relative to
+  /// what the app will read.
+  DateTime now() =>
+      _wallStart.add(tester.binding.clock.now().difference(_fakeStart));
 
   /// Brokers this scenario can reach. Unregistered hosts refuse connections.
   final FakeBrokerNetwork network = FakeBrokerNetwork();
@@ -220,6 +237,7 @@ class FeatureContext {
         installerPairingClockProvider.overrideWithValue(
           () => tester.binding.clock.now(),
         ),
+        appClockProvider.overrideWithValue(now),
         ...overrides,
       ],
     );
@@ -263,11 +281,12 @@ class FeatureContext {
 
   Future<void> _close() async {
     await quit();
-    // A disposed worker may leave a one-shot `Future.delayed` behind (it
-    // stops on a signal, not by cancelling its sleep). With the App gone
-    // those timers can only no-op; let them run out so flutter_test's leak
-    // check sees only what is genuinely still scheduled.
-    await tester.pump(const Duration(hours: 1));
+    // Let what disposal itself scheduled run out (Drift closes a cancelled
+    // stream query on a timer). One minute, not more: a stopped worker must
+    // cancel its own waits, so a longer timer still pending here (the
+    // attention feed's 30-minute wait after a refused credential once was)
+    // fails flutter_test's leak check instead of being drained away.
+    await tester.pump(const Duration(minutes: 1));
     await storage.database.close();
     tester.view.reset();
     final realCamera = _realCamera;

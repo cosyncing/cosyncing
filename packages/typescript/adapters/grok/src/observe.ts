@@ -18,7 +18,7 @@ import type {
   SessionInfo,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
-import { TerminalSummaryRegistry } from '@cosyncing/adapter-api';
+import { classifyDirectoryWatchEvent, TerminalSummaryRegistry } from '@cosyncing/adapter-api';
 import {
   grokContextUsage,
   grokMessageKey,
@@ -223,6 +223,8 @@ export class GrokObserveConnection implements SessionConnection {
   private draining = false;
   private drainAgain = false;
   private closed = false;
+  /** This connection is clearing the summary registry for a rewrite it resets for itself. */
+  private clearingForRewrite = false;
   private primed = false;
   private entryCount = 0;
   private tailTurnUserKey: string | undefined;
@@ -251,7 +253,7 @@ export class GrokObserveConnection implements SessionConnection {
     this.onTerminalSummaryBoundaryInvalid = options.onTerminalSummaryBoundaryInvalid;
     if (options.notifyTerminalSummaryChanges !== false) {
       this.terminalSummaryUnsubscribe = this.terminalSummaryRegistry.subscribe(() => {
-        if (!this.closed) this.emitHistoryReset();
+        if (!this.closed && !this.clearingForRewrite) this.emitHistoryReset();
       });
     }
     this.replayCorrelationUnsubscribe = this.replayCorrelations?.subscribe?.((nativeKey) => {
@@ -503,7 +505,9 @@ export class GrokObserveConnection implements SessionConnection {
       const updatesName = basename(this.session.updatesPath);
       const watcher = this.watchFactory(dirname(this.session.updatesPath), { persistent: false }, (eventType, filename) => {
         const changed = filename === null || filename === undefined ? undefined : String(filename);
-        if (changed !== undefined && !watched.has(changed)) return;
+        // A rename of any name may have replaced the log (Bun names a rename-over by its source):
+        // the drain decides from the log's identity and content. The directory is this session's.
+        if (classifyDirectoryWatchEvent(eventType, filename, watched) === 'unrelated') return;
         if (!this.pendingDrain && !this.closed) {
           this.pendingDrain = setTimeout(() => {
             this.pendingDrain = undefined;
@@ -644,7 +648,13 @@ export class GrokObserveConnection implements SessionConnection {
 
   private handleHistoryRewrite(): void {
     this.replayCorrelations?.clear();
-    this.terminalSummaryRegistry.clear();
+    // Every caller announces this rewrite with its own reset: the summaries it drops are not news.
+    this.clearingForRewrite = true;
+    try {
+      this.terminalSummaryRegistry.clear();
+    } finally {
+      this.clearingForRewrite = false;
+    }
     this.emittedUncorrelatedUserKeys.clear();
     this.onHistoryRewrite();
   }

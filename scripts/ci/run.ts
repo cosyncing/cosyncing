@@ -16,7 +16,15 @@
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, platform } from 'node:os';
 import { join, resolve } from 'node:path';
-import { runSupervised, testEnvironment, type SupervisedResult } from './lib/process.ts';
+import {
+  describeHarnessProcesses,
+  findHarnessProcesses,
+  HARNESS_LEDGER_ENV,
+  readHarnessLedger,
+  reapHarnessProcesses,
+  staleHarnessProcesses,
+} from './lib/harness-leaks.ts';
+import { runSupervised, signalSupervisedGroups, testEnvironment, type SupervisedResult } from './lib/process.ts';
 import {
   DEFAULT_TIMEOUT_MS,
   suiteRunsOn,
@@ -30,6 +38,7 @@ const ROOT = resolve(import.meta.dir, '..', '..');
 const OUTPUT = join(ROOT, 'output', 'check');
 const IN_CI = process.env.GITHUB_ACTIONS === 'true';
 const HOST = platform();
+let cancelling = false;
 
 // ---------------------------------------------------------------- arguments
 
@@ -179,6 +188,10 @@ interface Attempt {
   strays: boolean;
   summary: string;
   log: string;
+  /** Where the e2e harness recorded the roots it created (see lib/harness-leaks.ts). */
+  ledger: string;
+  /** Harness processes that outlived the attempt, each stopped when found. A leak fails the attempt. */
+  leaked?: string[];
 }
 
 interface TaskResult {
@@ -205,24 +218,48 @@ function summarize(result: SupervisedResult): string {
   return pick.replaceAll(ROOT, '<repo>').slice(0, 240);
 }
 
-function logPath(planned: PlannedTask, attempt: number): string {
+function attemptName(planned: PlannedTask, attempt: number): string {
   const suffix = [
     planned.iteration > 1 ? `.run${planned.iteration}` : '',
     attempt > 1 ? `.retry${attempt - 1}` : '',
   ].join('');
-  return join('logs', planned.suite.id, `${planned.task.id.replaceAll('/', '__')}${suffix}.log`);
+  return `${planned.task.id.replaceAll('/', '__')}${suffix}`;
+}
+
+function logPath(planned: PlannedTask, attempt: number): string {
+  return join('logs', planned.suite.id, `${attemptName(planned, attempt)}.log`);
+}
+
+function ledgerPath(planned: PlannedTask, attempt: number): string {
+  return join(OUTPUT, 'harness', planned.suite.id, `${attemptName(planned, attempt)}.roots`);
+}
+
+/**
+ * Stop and describe what the attempt's harness left running. The task's process group is already
+ * gone (runSupervised reaps it), so anything found here escaped it: a leak.
+ */
+async function sweepLeaks(ledger: string): Promise<string[]> {
+  const found = findHarnessProcesses(readHarnessLedger(ledger));
+  if (found.length === 0) return [];
+  const lines = describeHarnessProcesses(found);
+  const survivors = await reapHarnessProcesses(found);
+  if (survivors.length > 0) lines.push(`still running after SIGKILL: ${survivors.join(', ')}`);
+  return lines;
 }
 
 async function attemptTask(planned: PlannedTask, attempt: number, env: NodeJS.ProcessEnv): Promise<Attempt> {
   const { task } = planned;
   const timeoutMs = task.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const cwd = resolve(ROOT, task.cwd ?? '.');
+  const ledger = ledgerPath(planned, attempt);
+  mkdirSync(join(OUTPUT, 'harness', planned.suite.id), { recursive: true });
   const result = await runSupervised(task.run, {
     cwd,
-    env: { ...env, ...planned.suite.env?.(task) },
+    env: { ...env, ...planned.suite.env?.(task), [HARNESS_LEDGER_ENV]: ledger },
     timeoutMs,
     strayGraceMs: 2_000,
   });
+  const leaked = await sweepLeaks(ledger);
   const log = logPath(planned, attempt);
   mkdirSync(join(OUTPUT, 'logs', planned.suite.id), { recursive: true });
   writeFileSync(
@@ -233,6 +270,7 @@ async function attemptTask(planned: PlannedTask, attempt: number, env: NodeJS.Pr
       `timeout: ${timeoutMs}ms  duration: ${result.durationMs}ms  exit: ${result.exitCode}`
         + `${result.timedOut ? '  TIMED OUT' : ''}${result.strays ? '  (leaked processes reaped)' : ''}`,
       ...(result.treeAtTimeout ? ['', '--- process tree when the timeout fired ---', result.treeAtTimeout] : []),
+      ...(leaked.length > 0 ? ['', '--- LEAK: harness processes that outlived the task (stopped) ---', ...leaked] : []),
       ...(result.truncated ? ['(output truncated)'] : []),
       '',
       result.output,
@@ -243,10 +281,17 @@ async function attemptTask(planned: PlannedTask, attempt: number, env: NodeJS.Pr
     durationMs: result.durationMs,
     timedOut: result.timedOut,
     strays: result.strays,
-    summary: result.success ? 'ok' : summarize(result),
+    summary: leaked.length > 0
+      ? `LEAK: ${leaked.length} harness process(es) outlived the task: ${leaked[0]}`.slice(0, 240)
+      : result.strays ? 'LEAK: task left processes in its supervised group'
+      : result.success ? 'ok' : summarize(result),
     log,
+    ledger,
+    ...(leaked.length > 0 ? { leaked } : {}),
   };
 }
+
+const passed = (attempt: Attempt): boolean => attempt.exitCode === 0 && !attempt.timedOut && !attempt.leaked && !attempt.strays;
 
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
@@ -269,10 +314,7 @@ function printFailureTail(result: TaskResult): void {
 async function runTask(planned: PlannedTask, retry: boolean, env: NodeJS.ProcessEnv): Promise<TaskResult> {
   const attempts: Attempt[] = [await attemptTask(planned, 1, env)];
   const mayRetry = retry && planned.task.retry !== false;
-  if (attempts[0]!.exitCode !== 0 || attempts[0]!.timedOut) {
-    if (mayRetry) attempts.push(await attemptTask(planned, 2, env));
-  }
-  const passed = (attempt: Attempt): boolean => attempt.exitCode === 0 && !attempt.timedOut;
+  if (!cancelling && !passed(attempts[0]!) && mayRetry) attempts.push(await attemptTask(planned, 2, env));
   const status: Status = passed(attempts[0]!)
     ? 'pass'
     : attempts.length > 1 && passed(attempts[1]!) ? 'flaky' : 'fail';
@@ -308,8 +350,8 @@ async function runPool(tasks: PlannedTask[], options: Options, env: NodeJS.Proce
   const pending = [...tasks];
   const running = new Set<Promise<void>>();
   let serialBusy = false;
-  while (pending.length > 0 || running.size > 0) {
-    while (running.size < options.concurrency) {
+  while ((!cancelling && pending.length > 0) || running.size > 0) {
+    while (!cancelling && running.size < options.concurrency) {
       const index = pending.findIndex((planned) => !(planned.task.serial && serialBusy));
       if (index < 0) break;
       const [planned] = pending.splice(index, 1);
@@ -419,10 +461,35 @@ if (options.list) {
   process.exit(0);
 }
 
+// Every task runs in its own session, out of reach of a Ctrl-C or a SIGTERM meant for this run:
+// stopping the run stops them first.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  process.on(signal, () => {
+    if (cancelling) return;
+    cancelling = true;
+    const groups = signalSupervisedGroups('SIGTERM');
+    console.error(`check: ${signal} — stopping ${groups} running task(s)`);
+    setTimeout(() => {
+      signalSupervisedGroups('SIGKILL');
+      process.exit(130);
+    }, 3_000);
+  });
+}
+
 const startedAt = new Date();
 const started = performance.now();
 rmSync(OUTPUT, { recursive: true, force: true });
 mkdirSync(OUTPUT, { recursive: true });
+// An earlier run's harness processes (its runner killed before it could stop them) are reported,
+// never signalled: nothing proves they belong to this run.
+const stale = staleHarnessProcesses();
+if (stale.length > 0) {
+  console.warn(
+    `check: WARNING — ${stale.length} e2e harness process(es) from an earlier run are still running`
+      + ' (not signalled; stop them yourself):',
+  );
+  for (const line of describeHarnessProcesses(stale)) console.warn(`  ${line}`);
+}
 const env = taskEnvironment();
 // Bun 1.3.8 intermittently livelocks while loading a module graph or bundling: one pool thread spins,
 // nothing prints, and the task hangs until its timeout. CI runs a newer Bun for that reason.
@@ -442,6 +509,7 @@ const brokenSuites = new Set<SuiteId>();
 const results: TaskResult[] = [];
 const prepared = new Map<string, boolean>();
 for (const planned of prepare) {
+  if (cancelling) break;
   if (brokenSuites.has(planned.suite.id)) continue;
   const key = `${planned.task.cwd ?? '.'}\0${planned.task.run.join('\0')}`;
   const earlier = prepared.get(key);
@@ -473,6 +541,22 @@ try {
   results.push(...await runPool(runnable, options, env));
 } finally {
   for (const id of options.suites) suites.find((suite) => suite.id === id)!.cleanup?.();
+}
+
+if (cancelling) process.exit(130);
+
+// A process can escape a task late (a relaunch it scheduled, a host started on its way out). Look
+// once more under every root this run recorded; whatever is found fails the task that made the root.
+for (const result of results) {
+  for (const attempt of result.attempts) {
+    const leaked = await sweepLeaks(attempt.ledger);
+    if (leaked.length === 0) continue;
+    attempt.leaked = [...attempt.leaked ?? [], ...leaked];
+    attempt.summary = `LEAK: ${attempt.leaked.length} harness process(es) outlived the task: ${attempt.leaked[0]}`.slice(0, 240);
+    appendFileSync(join(OUTPUT, attempt.log), ['', '--- LEAK found after the run (stopped) ---', ...leaked, ''].join('\n'));
+    result.status = 'fail';
+    console.log(`LEAK  ${result.suite}/${result.id}${result.iteration > 1 ? ` #${result.iteration}` : ''} — ${leaked[0]}`);
+  }
 }
 
 const order = new Map(tasks.map((planned, index) => [`${planned.suite.id}/${planned.task.id}/${planned.iteration}`, index]));

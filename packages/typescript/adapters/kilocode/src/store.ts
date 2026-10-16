@@ -15,7 +15,13 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import type { HistorySourceIdentity, SessionDiscoveryWork } from '@cosyncing/adapter-api';
+import {
+  isOpaqueSessionId,
+  NO_FOLLOW_FLAG,
+  STORE_READ_FLAGS,
+  type HistorySourceIdentity,
+  type SessionDiscoveryWork,
+} from '@cosyncing/adapter-api';
 import {
   readOpenCodeSqliteHistory,
   readOpenCodeSqliteMessageIds,
@@ -80,7 +86,6 @@ export const KILO_MAX_RAW_RECORD_BYTES = 1024 * 1024;
 export const KILO_MAX_RAW_HISTORY_BYTES = 32 * 1024 * 1024;
 export const KILO_MAX_SESSION_METADATA_BYTES = 8 * 1024 * 1024;
 export const KILO_MAX_IDENTITY_BYTES = 1024;
-const KILO_MAX_ID_SCALARS = 256;
 const KILO_MAX_TITLE_SCALARS = 2_048;
 const KILO_MAX_CWD_SCALARS = 4_096;
 const KILO_MAX_MODEL_SCALARS = 512;
@@ -113,6 +118,11 @@ export interface KiloStoredSession {
   parentThreadId?: string;
   databasePath: string;
   dataRoot: string;
+  /**
+   * The store no longer holds what a broker-owned Drive last proved (see
+   * {@link KiloDiscoveryOptions.ownedBoundary}): a Drive attach would refuse this session.
+   */
+  ownedHistoryChanged?: true;
 }
 
 export interface KiloHistorySnapshot extends KiloHistoryMark {
@@ -121,6 +131,8 @@ export interface KiloHistorySnapshot extends KiloHistoryMark {
   messageIds: string[];
   revision: string;
   sourceIdentity: string;
+  /** The stored text of each user text part, by part id (a prompt's text never changes once written). */
+  userTextParts: ReadonlyMap<string, string>;
 }
 
 /**
@@ -231,6 +243,13 @@ export interface KiloDiscoveryOptions {
   includeUnverifiedChildren?: boolean;
   /** Live overlay: bounded active-session directory inventory, independent of the idle cutoff. */
   collectDirectories?: Set<string>;
+  /**
+   * The durable boundary a broker-owned Drive last proved for a session, if any. Such a row is
+   * checked against it cheaply, from the store this pass already reads (its message count and the
+   * database's identity), and marked {@link KiloStoredSession.ownedHistoryChanged} when they differ:
+   * the evidence a Drive attach would refuse on, short of reading and mapping the whole history.
+   */
+  ownedBoundary?: (session: { id: string; nativeId: string }) => HistorySourceIdentity | undefined;
 }
 
 interface Signature {
@@ -363,9 +382,28 @@ export function kiloDatabasePaths(dataRoot: string): string[] {
   } finally { closeSync(opened.fd); }
 }
 
+/** The database, its WAL, its WAL index (`-shm`) and a rollback journal, in that order. */
 function snapshotStates(databasePath: string): SignatureState[] {
   return [databasePath, `${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`].map(signatureState);
 }
+
+/**
+ * Whether a snapshot copy is torn: the database or its WAL changed, or a journal appeared.
+ *
+ * The WAL index is not compared, and not copied. It is shared memory every connection writes to as
+ * it reads (a reader records the WAL frame it reads up to), so a Kilo serve answering a request, or
+ * any other reader, changes it while the store's content stays the same. Compared, every read the
+ * serve made during a copy read as a torn snapshot: three in a row refused the snapshot outright,
+ * and a Drive mutation with it. SQLite rebuilds the index from the copied WAL when the copy is
+ * opened, so the copy is exactly the committed content of the database and WAL that were copied.
+ */
+function snapshotTorn(before: readonly SignatureState[], after: readonly SignatureState[]): boolean {
+  return [0, 1, 3].some((index) => !sameSignatureState(before[index]!, after[index]!));
+}
+
+/** The first retry after three failed attempts waits this long; each further one twice as long, up to the cap. */
+const SNAPSHOT_BACKOFF_MS = 10;
+const SNAPSHOT_BACKOFF_MAX_MS = 160;
 
 function schemaMatches(database: Database): boolean {
   const journalMode = database.query('pragma journal_mode').get() as { journal_mode?: unknown } | null;
@@ -422,7 +460,8 @@ function sessionMetadataWithinBounds(database: Database, sessionId?: string, upd
 }
 
 async function copyStableFile(signature: Signature, destination: string, signal?: AbortSignal): Promise<void> {
-  const source = await openFile(signature.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  // Non-blocking: a FIFO swapped in after the signature stat must not park a worker waiting for a writer.
+  const source = await openFile(signature.path, STORE_READ_FLAGS | NO_FOLLOW_FLAG);
   let target: Awaited<ReturnType<typeof openFile>> | undefined;
   try {
     const opened = await source.stat({ bigint: true });
@@ -481,8 +520,18 @@ async function withKiloSnapshot<T>(
   trace: KiloDiscoveryOptions['trace'],
   read: (database: Database, revision: string, sourceIdentity: string) => T,
   copyBudget?: { remaining: bigint },
+  stableWithinMs = 0,
 ): Promise<T | undefined> {
-  for (let attempt = 0; attempt < SNAPSHOT_ATTEMPTS; attempt += 1) {
+  // Three immediate attempts, then (when the caller can wait) further ones spaced out until the
+  // deadline: a store the serve is writing through a turn settles between its writes.
+  const deadline = stableWithinMs > 0 ? Date.now() + stableWithinMs : undefined;
+  for (let attempt = 0; ; attempt += 1) {
+    if (attempt >= SNAPSHOT_ATTEMPTS) {
+      const remaining = deadline === undefined ? 0 : deadline - Date.now();
+      if (remaining <= 0) break;
+      const backoff = Math.min(SNAPSHOT_BACKOFF_MAX_MS, SNAPSHOT_BACKOFF_MS * 2 ** (attempt - SNAPSHOT_ATTEMPTS));
+      await new Promise((resolve) => setTimeout(resolve, Math.min(backoff, remaining)));
+    }
     throwIfAborted(signal);
     const before = snapshotStates(databasePath);
     if (before[3]?.status !== 'missing') {
@@ -496,7 +545,9 @@ async function withKiloSnapshot<T>(
       trace?.({ op: 'path-refused', path: displayPath, detail: 'Kilo SQLite database or sidecar has an unsafe type, size, or metadata state' });
       return undefined;
     }
-    const stableBefore = before.flatMap((state) => state.status === 'valid' ? [state.signature] : []);
+    // The database and its WAL are the store's content; the WAL index is rebuilt from the copied WAL
+    // when the copy is opened (see snapshotTorn).
+    const stableBefore = [before[0], before[1]].flatMap((state) => state?.status === 'valid' ? [state.signature] : []);
     const total = stableBefore.reduce((sum, signature) => sum + signature.size, 0n);
     if (total > BigInt(KILO_MAX_SNAPSHOT_BYTES)) {
       trace?.({ op: 'discovery-bound', path: displayPath, detail: `Kilo SQLite snapshot exceeds ${KILO_MAX_SNAPSHOT_BYTES} bytes` });
@@ -516,8 +567,7 @@ async function withKiloSnapshot<T>(
         throwIfAborted(signal);
         await copyStableFile(signature, join(temp, basename(signature.path)), signal);
       }
-      const after = snapshotStates(databasePath);
-      if (!before.every((state, index) => sameSignatureState(state, after[index]!))) {
+      if (snapshotTorn(before, snapshotStates(databasePath))) {
         trace?.({ op: 'snapshot-retry', path: displayPath, detail: `Kilo SQLite source changed during snapshot attempt ${attempt + 1}` });
         continue;
       }
@@ -562,8 +612,22 @@ function modelOf(session: OpenCodeSqliteSession): KiloStoredSession['currentMode
     : { providerID, modelID };
 }
 
+/**
+ * The store's session identity rule, which the live serve's rows face too: a bounded, control-free,
+ * single opaque segment (no separator, no dot segment), because every id is spliced into serve URLs.
+ */
+export function kiloSessionIdAdmissible(value: unknown): value is string {
+  return isOpaqueSessionId(value);
+}
+
+/** The store's session directory rule, which the live serve's rows face too. */
+export function kiloSessionDirectoryAdmissible(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && isAbsolute(value) && value !== '/'
+    && [...value].length <= KILO_MAX_CWD_SCALARS;
+}
+
 function boundedIdentity(value: string): boolean {
-  return value.length > 0 && [...value].length <= KILO_MAX_ID_SCALARS && !/[\u0000-\u001f\u007f]/u.test(value);
+  return kiloSessionIdAdmissible(value);
 }
 
 function anchoredSessionDatabase(
@@ -612,7 +676,7 @@ export async function discoverKiloStore(options: KiloDiscoveryOptions = {}): Pro
       throwIfAborted(options.signal);
       options.onWork?.({ kind: 'sqlite-query', source: databasePath.display, bounded: options.updatedAfter !== undefined,
         ...(options.updatedAfter === undefined ? {} : { cutoff: options.updatedAfter }) });
-      const result = await withKiloSnapshot(databasePath.internal, databasePath.display, options.signal, options.trace, (database) => {
+      const result = await withKiloSnapshot(databasePath.internal, databasePath.display, options.signal, options.trace, (database, _revision, sourceIdentity) => {
         const cutoffClause = options.updatedAfter === undefined
           ? 'time_archived is null'
           : 'time_archived is null and coalesce(time_updated, time_created) >= ?';
@@ -672,12 +736,23 @@ export async function discoverKiloStore(options: KiloDiscoveryOptions = {}): Pro
           }
           sessionIds.add(session.id);
         }
+        const messageCount = options.ownedBoundary
+          ? database.query('select count(*) as count from message where session_id = ?')
+          : undefined;
+        // One indexed count per session a Drive owns, against the boundary it last proved: a
+        // terminal's turn, a deleted message or a different database. (An in-place edit keeps the
+        // count; the attach still finds it, by reading the whole history.)
+        const ownedHistoryChanged = (session: { id: string }): boolean => {
+          const boundary = options.ownedBoundary?.({ id: session.id, nativeId: session.id });
+          if (!boundary || !messageCount) return false;
+          const count = Number((messageCount.get(session.id) as { count?: number | bigint } | null)?.count ?? -1);
+          return count !== boundary.appendPosition
+            || boundary.sourceId !== `${databasePath.display}:${sourceIdentity}:${session.id}`;
+        };
         const discovered = sessions.flatMap((session): KiloStoredSession[] => {
           if (!boundedIdentity(session.id)
             || (session.parentID !== undefined && !boundedIdentity(session.parentID))
-            || !session.directory
-            || !isAbsolute(session.directory) || session.directory === '/'
-            || [...session.directory].length > KILO_MAX_CWD_SCALARS) return [];
+            || !kiloSessionDirectoryAdmissible(session.directory)) return [];
           if (session.parentID && !options.includeUnverifiedChildren) return [];
           const updatedAt = session.time?.updated ?? session.time?.created;
           const currentModel = modelOf(session);
@@ -698,6 +773,7 @@ export async function discoverKiloStore(options: KiloDiscoveryOptions = {}): Pro
             ...(session.parentID ? { origin: 'subagent' as const, parentThreadId: session.parentID } : {}),
             databasePath: databasePath.display,
             dataRoot,
+            ...(!session.parentID && ownedHistoryChanged(session) ? { ownedHistoryChanged: true as const } : {}),
           }];
         });
         const directoryRows = options.collectDirectories
@@ -713,8 +789,7 @@ export async function discoverKiloStore(options: KiloDiscoveryOptions = {}): Pro
         }
         const directories: string[] = [];
         for (const row of directoryRows) {
-          if (typeof row.directory !== 'string' || !isAbsolute(row.directory)
-            || row.directory === '/' || [...row.directory].length > KILO_MAX_CWD_SCALARS) continue;
+          if (!kiloSessionDirectoryAdmissible(row.directory)) continue;
           directories.push(resolve(row.directory));
         }
         return { sessions: discovered, directories };
@@ -744,9 +819,18 @@ export async function discoverKiloStore(options: KiloDiscoveryOptions = {}): Pro
   } finally { closeSync(openedRoot.fd); }
 }
 
+export interface KiloHistoryReadOptions extends Pick<KiloDiscoveryOptions, 'signal' | 'trace'> {
+  /**
+   * Keep retrying a snapshot the store keeps changing under, spaced out, for up to this long.
+   * Default 0: three immediate attempts. Drive ownership reads wait, because they gate a mutation
+   * the user is waiting on, often while the serve is writing the turn it belongs to.
+   */
+  stableWithinMs?: number;
+}
+
 export async function readKiloHistory(
   session: KiloStoredSession,
-  options: Pick<KiloDiscoveryOptions, 'signal' | 'trace'> = {},
+  options: KiloHistoryReadOptions = {},
 ): Promise<KiloHistorySnapshot | undefined> {
   const openedRoot = openDataRoot(session.dataRoot);
   if (!openedRoot) return undefined;
@@ -785,16 +869,17 @@ export async function readKiloHistory(
       options.trace?.({ op: 'discovery-bound', path: session.databasePath, detail: 'Kilo raw or canonical history exceeds its decode bound' });
       return undefined;
     }
-    const { messages, settledRows } = history;
+    const { messages, settledRows, userTextParts } = history;
     return {
       messages,
       encodings: messages.map((message) => JSON.stringify(message)),
       settledRows,
+      userTextParts,
       messageIds: readOpenCodeSqliteMessageIds(database, session.id),
       revision,
       sourceIdentity,
     };
-    });
+    }, undefined, options.stableWithinMs);
   } finally { closeSync(openedRoot.fd); }
 }
 

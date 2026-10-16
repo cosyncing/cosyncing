@@ -52,7 +52,6 @@ import {
   realpathSync,
   statSync,
   fstatSync,
-  openSync,
   readSync,
   closeSync,
   mkdirSync,
@@ -70,6 +69,7 @@ import { join, basename, dirname, resolve, relative, sep, extname, isAbsolute } 
 import {
   PRODUCT_IDENTITY,
   BACKGROUND_REEMIT_MIN_MS,
+  ControlRefusedError,
   HostProcessProvider,
   terminateHostProcessTree,
   summarizeDiff,
@@ -111,6 +111,12 @@ import {
   searchSemantic,
   webSemantic,
   OwnershipConflictError,
+  SessionNotFoundError,
+  TranscriptExportTooLargeError,
+  canonicalPath,
+  containedStorePath,
+  openRegularFileSync,
+  readRegularFileSync,
   resolveInvocation,
   spawnResolvedInvocation,
   STEERING_MESSAGE_EVENT,
@@ -315,28 +321,7 @@ export function claudeStores(): ClaudeStore[] {
  *  directory that points anywhere. Canonicalize the nearest EXISTING ancestor and rejoin the missing
  *  tail, so a path that has not been written yet is still spoken of in the real namespace. */
 function realOrResolve(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    /* the path itself is missing — canonicalize what of it does exist */
-  }
-  const absolute = resolve(p);
-  let base = absolute;
-  const missing: string[] = [];
-  for (;;) {
-    const parent = dirname(base);
-    if (parent === base) return absolute; // nothing on this volume exists; nothing to canonicalize
-    const name = basename(base);
-    if (name) missing.unshift(name);
-    base = parent;
-    let real: string;
-    try {
-      real = realpathSync(base);
-    } catch {
-      continue;
-    }
-    return missing.length ? join(real, ...missing) : real;
-  }
+  return canonicalPath(p);
 }
 
 /** Path equality as the platform means it. The output reader compares a freshly taken realpath against
@@ -414,7 +399,7 @@ export function bridgedUuids(store: ClaudeStore): Set<string> {
   for (const n of names) {
     if (!n.endsWith('.json')) continue;
     try {
-      const j = JSON.parse(readFileSync(join(dir, n), 'utf8')) as {
+      const j = JSON.parse(readRegularFileSync(join(dir, n), 'utf8')) as {
         sessionId?: unknown;
         bridgeSessionId?: unknown;
         pid?: unknown;
@@ -491,7 +476,7 @@ function readNativeSelectors(store: ClaudeStore): Map<string, ClaudeNativeIncarn
   try {
     const st = statSync(path);
     if (!st.isFile() || st.size > CLAUDE_NATIVE_SELECTOR_FILE_MAX_BYTES) return out;
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { version?: unknown; entries?: unknown };
+    const parsed = JSON.parse(readRegularFileSync(path, 'utf8')) as { version?: unknown; entries?: unknown };
     if (parsed.version !== 1 || !Array.isArray(parsed.entries) || parsed.entries.length > CLAUDE_NATIVE_REGISTRY_LIMIT) return out;
     for (const raw of parsed.entries) {
       const entry = raw as Partial<ClaudeNativeIncarnation>;
@@ -603,7 +588,7 @@ function nativeIncarnations(store: ClaudeStore): ClaudeNativeIncarnations {
     try {
       const st = statSync(path);
       if (!st.isFile() || st.size > CLAUDE_NATIVE_REGISTRY_FILE_MAX_BYTES) continue;
-      const record = JSON.parse(readFileSync(path, 'utf8')) as {
+      const record = JSON.parse(readRegularFileSync(path, 'utf8')) as {
         sessionId?: unknown;
         bridgeSessionId?: unknown;
         startedAt?: unknown;
@@ -676,7 +661,7 @@ function liveOwnerMap(store: ClaudeStore, fresh = false): Map<string, number> {
   for (const n of names) {
     if (!n.endsWith('.json')) continue;
     try {
-      const j = JSON.parse(readFileSync(join(dir, n), 'utf8')) as { sessionId?: unknown; pid?: unknown };
+      const j = JSON.parse(readRegularFileSync(join(dir, n), 'utf8')) as { sessionId?: unknown; pid?: unknown };
       if (typeof j.sessionId === 'string' && pidAlive(j.pid)) map.set(j.sessionId, j.pid as number);
     } catch {
       /* skip malformed pid-file */
@@ -1066,22 +1051,22 @@ const enc = (s: string): string => Buffer.from(s, 'utf8').toString('base64url');
 const dec = (s: string): string => Buffer.from(s, 'base64url').toString('utf8');
 
 /**
- * Resolve a decoded Claude session path to its REAL (symlink-free) location and require it to sit inside a
- * known store's `projectsRoot`, returning that resolved path. A pure `resolve()` string check + `statSync`
- * (which FOLLOWS symlinks) would let a planted symlink — `projects/<slug>/x.jsonl → ~/.ssh/id_rsa` — pass
- * every guard and be read/exported (Fable review 2026-07-08, finding #1). `realpathSync` on the source AND
- * the roots closes that. When the file is MISSING (a legitimate not-yet-written session, e.g. a freshly
- * `--session-id`-created transcript before its first turn) there is no symlink to resolve, so fall back to
- * a string-resolve containment — a nonexistent path cannot exfiltrate anything. Throws if it resolves
- * outside every root. Callers that require existence (export) check that separately.
+ * Resolve a decoded Claude session path to its REAL (symlink-free) location and require it to be a `.jsonl`
+ * inside a known store's `projectsRoot`, returning that resolved path. A pure `resolve()` string check +
+ * `statSync` (which FOLLOWS symlinks) would let a planted symlink — `projects/<slug>/x.jsonl → ~/.ssh/id_rsa`
+ * — pass every guard and be read/exported (Fable review 2026-07-08, finding #1). `realpathSync` on the source
+ * AND the roots closes that. When the file is MISSING (a legitimate not-yet-written session, e.g. a freshly
+ * `--session-id`-created transcript before its first turn) it is canonicalized through its nearest existing
+ * ancestor — a nonexistent path cannot exfiltrate anything. A dangling symlink is not missing: it names
+ * nothing and is refused, and a FIFO, socket, device or directory under a transcript name is no transcript
+ * (opening a FIFO would block the broker). Throws {@link SessionNotFoundError} otherwise. Callers that require existence
+ * (export) check that separately.
  */
 function containedClaudePath(rawPath: string): string {
-  const resolved = realOrResolve(rawPath);
-  const inside = claudeStores().some((s) => {
-    const root = realOrResolve(s.projectsRoot);
-    return resolved === root || resolved.startsWith(root + sep);
-  });
-  if (!inside) throw new Error('Claude session id resolves outside the known projects roots.');
+  const resolved = rawPath.endsWith('.jsonl')
+    ? containedStorePath(claudeStores().map((s) => s.projectsRoot), rawPath, { allowMissing: true, regularFile: true })
+    : undefined;
+  if (!resolved) throw new SessionNotFoundError('Claude session id resolves outside the known projects roots.');
   return resolved;
 }
 
@@ -1401,7 +1386,7 @@ export class ClaudeAdapter implements AgentBackend {
     if (!r.endsWith('.jsonl') || !existsSync(r)) throw new Error('Claude transcript file not found.');
     const st = statSync(r);
     if (!st.isFile()) throw new Error('Claude transcript path is not a regular file.');
-    if (st.size > opts.maxBytes) throw new Error('Claude transcript exceeds the export size cap.');
+    if (st.size > opts.maxBytes) throw new TranscriptExportTooLargeError('Claude transcript exceeds the export size cap.', opts.maxBytes);
     // The `.json` artifact carries newline-delimited JSON (JSONL) — Claude's native transcript format;
     // it is a text download, not a single JSON document (Fable review #4, accepted as-is with this note).
     const outPath = join(opts.tempDir, 'export.json');
@@ -1592,6 +1577,9 @@ export class ClaudeAdapter implements AgentBackend {
       }
       for (const slug of slugs) {
         const slugDir = join(store.projectsRoot, slug);
+        // A project directory that is a symlink resolving outside this store is not part of it: attach
+        // refuses every transcript under it, so the roster must not list them either.
+        if (!containedStorePath([store.projectsRoot], slugDir)) continue;
         let entries: import('node:fs').Dirent[];
         try {
           entries = readdirSync(slugDir, { withFileTypes: true });
@@ -3056,9 +3044,13 @@ export class ClaudeResumeConnection implements SessionConnection {
   private runtime?: ClaudeRuntimeTracker;
   /** Same incremental TaskCreate/TaskUpdate ledger as Observe: seeded from replay, advanced by stream-json. */
   private taskLedger = new ClaudeTaskLedger();
-  private pendingPermId?: string; // last control_request id awaiting respondPermission
-  private pendingPermCard?: AgentMessage & { type: 'permission-request' }; // full card for getPending replay
-  private pendingPermInput?: unknown; // the gated tool's input — echoed as updatedInput on allow
+  /** Open control_request permission asks by request id: the card (replayed by getPending) and the
+   *  gated tool's input (echoed as updatedInput on allow). An id leaves when it is answered or the
+   *  child that asked exits; a decision for any id not here is refused, never written to the child. */
+  private readonly pendingPerms = new Map<string, {
+    card: AgentMessage & { type: 'permission-request' };
+    input: unknown;
+  }>();
   private pendingQuestionId?: string; // open AskUserQuestion tool_use id awaiting answerQuestion
   private pendingQuestionCard?: QuestionCard; // the full card, replayed by getPending() for a late tab
   /** With --permission-prompt-tool stdio the CLI routes AskUserQuestion through can_use_tool too
@@ -3715,9 +3707,10 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
     this.pendingQuestionControlId = undefined;
     this.pendingQuestionControlInput = undefined;
-    this.pendingPermId = undefined;
-    this.pendingPermCard = undefined;
-    this.pendingPermInput = undefined;
+    for (const requestId of this.pendingPerms.keys()) {
+      this.emit({ type: 'permission-resolved', requestId, decision: 'external' });
+    }
+    this.pendingPerms.clear();
     this.finishLiveAbnormally('error');
     if (this.running) {
       // A dying child's trailing transcript writes are its own — give them the same post-turn grace
@@ -3878,8 +3871,6 @@ export class ClaudeResumeConnection implements SessionConnection {
           return;
         }
         if (id && (req.subtype === 'can_use_tool' || req.subtype === 'permission')) {
-          this.pendingPermId = id;
-          this.pendingPermInput = req.input; // echoed back as updatedInput on allow (verified shape, 2.1.207)
           // Real payload (probed): tool_name, description ("Run sudo -n whoami"), input.command,
           // decision_reason — show the user WHAT they are approving, not a bare tool name.
           const detailParts = [
@@ -3887,13 +3878,15 @@ export class ClaudeResumeConnection implements SessionConnection {
             typeof req.input?.command === 'string' && req.input.command !== req.description?.replace(/^Run /, '') ? `$ ${req.input.command}` : undefined,
             typeof req.decision_reason === 'string' ? req.decision_reason : typeof req.explanation === 'string' ? req.explanation : undefined,
           ].filter(Boolean);
-          this.pendingPermCard = {
+          const card: AgentMessage & { type: 'permission-request' } = {
             type: 'permission-request',
             requestId: id,
             title: String(req.tool_name ?? req.toolName ?? 'Permission request'),
             detail: detailParts.length ? detailParts.join('\n') : undefined,
           };
-          this.emit(this.pendingPermCard);
+          // The input is echoed back as updatedInput on allow (verified shape, 2.1.207).
+          this.pendingPerms.set(id, { card, input: req.input });
+          this.emit(card);
         }
         return;
       }
@@ -4079,14 +4072,17 @@ export class ClaudeResumeConnection implements SessionConnection {
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
-    if (!requestId) return;
     if (decision === 'approve-rule') {
       throw new Error('Claude does not support persistent approval rules through this connection');
     }
+    const pending = this.pendingPerms.get(requestId);
+    // Never asked, already answered by any client, or died with its child: the CLI waits on nothing.
+    if (!pending) throw new ControlRefusedError(`Claude permission ${requestId} is not pending.`, 'request-not-pending');
+    this.pendingPerms.delete(requestId);
     // Verified reply shapes (2.1.207 probe): allow echoes the tool input back as updatedInput and the
     // gated tool RUNS; deny carries a message the model reads as the refusal reason.
     const isDeny = decision === 'reject';
-    const updatedInput = this.pendingPermId === requestId ? this.pendingPermInput : undefined;
+    const updatedInput = pending.input;
     this.writeLine({
       type: 'control_response',
       response: {
@@ -4098,11 +4094,6 @@ export class ClaudeResumeConnection implements SessionConnection {
       },
     });
     this.emit({ type: 'permission-resolved', requestId, decision });
-    if (this.pendingPermId === requestId) {
-      this.pendingPermId = undefined;
-      this.pendingPermCard = undefined;
-      this.pendingPermInput = undefined;
-    }
   }
 
   /** Answer an AskUserQuestion through its NATIVE channel — a user-turn tool_result keyed to the
@@ -4199,7 +4190,7 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   getPending(): AgentMessage[] {
     const out: AgentMessage[] = [];
-    if (this.pendingPermId) out.push(this.pendingPermCard ?? { type: 'permission-request', requestId: this.pendingPermId, title: 'Permission request' });
+    for (const { card } of this.pendingPerms.values()) out.push(card);
     if (this.pendingQuestionCard) out.push(this.pendingQuestionCard);
     return out;
   }
@@ -6052,6 +6043,9 @@ export function claudeSubagentTranscripts(transcriptPath: string): ClaudeSubagen
     const path = join(subDir, agent + '.jsonl');
     const st = statSafe(path);
     if (!st?.isFile()) continue;
+    // A child transcript (or a directory above it) that is a symlink resolving outside every store is
+    // not a child of this session: attach refuses it, so it is neither listed nor read for cards.
+    if (!containedStorePath(claudeStores().map((store) => store.projectsRoot), path)) continue;
     out.push({ path, agent, meta, mtimeMs: st.mtimeMs });
   }
   return out;
@@ -6697,7 +6691,7 @@ function safeReaddir(dir: string): string[] {
 }
 function readTextSafe(path: string): string {
   try {
-    return readFileSync(path, 'utf8');
+    return readRegularFileSync(path, 'utf8');
   } catch {
     return '';
   }
@@ -7665,7 +7659,7 @@ async function scanClaudeAuthorityCold(
     return continuationResolved;
   };
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const opened = fstatSync(fd);
     if (!claudeAuthorityStatMatches(st, opened)) {
       return { kind: 'fallback', authority: 'unknown', reason: 'source-changed', scannedThrough: st.size, scannedBytes };
@@ -7825,7 +7819,7 @@ async function scanClaudeAuthorityRange(
   let scannedBytes = 0;
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const opened = fstatSync(fd);
     if (!claudeAuthorityStatMatches(st, opened)) {
       return {
@@ -8752,7 +8746,7 @@ function computeLatestPermissionMode(path: string): string | undefined {
 function readBytesFrom(path: string, offset: number, length: number): Buffer {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const buf = Buffer.alloc(Math.max(0, length));
     const n = readSync(fd, buf, 0, Math.max(0, length), offset);
     return buf.subarray(0, n);
@@ -8770,7 +8764,7 @@ function readBytesFrom(path: string, offset: number, length: number): Buffer {
 function readFileBuffer(path: string): Buffer {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
+    fd = openRegularFileSync(path);
     const size = statSync(path).size;
     const buf = Buffer.alloc(size);
     const n = readSync(fd, buf, 0, size, 0);
@@ -8820,7 +8814,7 @@ function fileHistorySourceIdentity(path: string): HistorySourceIdentity | undefi
   );
   let prefixBytes = 0;
   try {
-    const fd = openSync(path, 'r');
+    const fd = openRegularFileSync(path);
     try {
       prefixBytes = readSync(fd, prefix, 0, prefix.length, 0);
     } finally {

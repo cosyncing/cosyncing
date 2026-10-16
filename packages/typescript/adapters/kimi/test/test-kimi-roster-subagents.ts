@@ -24,7 +24,7 @@
  *   bun run packages/typescript/adapters/kimi/test/test-kimi-roster-subagents.ts   (exit 0 = pass)
  */
 export {};
-import { mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -68,8 +68,9 @@ async function threw(run: () => Promise<unknown>): Promise<Error | undefined> {
 
 // ── Fixture tree ────────────────────────────────────────────────────────────
 
-const ROOT = join(tmpdir(), 'ca-kimi-roster-subagents');
-rmSync(ROOT, { recursive: true, force: true });
+// A fresh root per run: the check runner's --repeat runs copies of this suite at once, and a shared fixed root
+// let one copy delete the tree another was reading.
+const ROOT = mkdtempSync(join(tmpdir(), 'ca-kimi-roster-subagents-'));
 const HOME = join(ROOT, 'kimi-home');
 const SESSIONS = join(HOME, 'sessions');
 const WORKSPACE_DIR = 'wd_fixture_0000000000';

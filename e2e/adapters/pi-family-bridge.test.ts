@@ -286,6 +286,42 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
       await pi.bye('quit');
     });
 
+    test('a decision reaches the extension once, and only for a card of its kind the extension raised', async () => {
+      const pi = await openBridge('decisions', {
+        history: [{ t: 'permission-request', requestId: 'p0', title: 'Still waiting from before the hello', toolName: 'bash' }],
+      });
+      const stream = await attach(pi);
+      await stream.waitForKind('history');
+      await pi.events(
+        { t: 'permission-request', requestId: 'p1', title: 'Run rm -fr build', toolName: 'bash' },
+        { t: 'question-request', requestId: 'q1', questions: [{ question: 'Deploy now?', options: [{ label: 'yes' }, { label: 'no' }] }] },
+      );
+      await stream.waitForMessage((message) => message?.type === 'question-request' && message.requestId === 'q1');
+      // Never raised, or raised as the other kind: refused, and nothing is queued for the extension.
+      for (const forged of [
+        { kind: 'approve', requestId: 'p-forged', decision: 'approve' },
+        { kind: 'answer', requestId: 'q-forged', answers: [['yes']] },
+        { kind: 'reject-question', requestId: 'q-forged' },
+        { kind: 'answer', requestId: 'p1', answers: [['yes']] },
+        { kind: 'approve', requestId: 'q1', decision: 'approve' },
+      ]) expect((await stream.sendAndAwait(forged)).kind, JSON.stringify(forged)).toBe('nack');
+      // The card the hello carried, and the two raised live, each take one decision.
+      expect((await stream.sendAndAwait({ kind: 'approve', requestId: 'p0', decision: 'reject' })).kind).toBe('ack');
+      expect((await stream.sendAndAwait({ kind: 'approve', requestId: 'p1', decision: 'approve' })).kind).toBe('ack');
+      expect((await stream.sendAndAwait({ kind: 'answer', requestId: 'q1', answers: [['no']] })).kind).toBe('ack');
+      expect((await stream.sendAndAwait({ kind: 'approve', requestId: 'p1', decision: 'reject' })).kind).toBe('nack');
+      expect((await stream.sendAndAwait({ kind: 'reject-question', requestId: 'q1' })).kind).toBe('nack');
+      await pi.nextCommand((command) => command.kind === 'answer' && command.requestId === 'q1', { what: 'the answer' });
+      expect(pi.commands.filter((command) => ['permission', 'answer', 'reject-question'].includes(command.kind))
+        .map((command) => [command.kind, command.requestId])).toEqual([['permission', 'p0'], ['permission', 'p1'], ['answer', 'q1']]);
+      // A card the extension settled is gone for good.
+      await pi.events({ t: 'question-request', requestId: 'q2', questions: [{ question: 'Again?', options: [] }] });
+      await pi.events({ t: 'question-resolved', requestId: 'q2' });
+      await stream.waitForMessage((message) => message?.type === 'question-resolved' && message.requestId === 'q2');
+      expect((await stream.sendAndAwait({ kind: 'answer', requestId: 'q2', answers: [['late']] })).kind).toBe('nack');
+      await pi.bye('quit');
+    });
+
     test('a question maps to a question request, and the answer reaches the extension', async () => {
       const pi = await openBridge('question');
       const stream = await attach(pi);

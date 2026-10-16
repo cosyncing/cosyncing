@@ -23,6 +23,7 @@ import { spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { isSessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
 import {
   cachedAgyCliCatalog,
   ensureAgyCliCatalog,
@@ -617,16 +618,20 @@ const IDS = FIXTURE.conversationIds;
 {
   const tree = buildAgyFixtureTree();
   try {
+    // A removed binary leaves a readable store: still discoverable, and the broker lists its
+    // conversations Observe-only because `isInstalled` says the binary is gone.
     const withoutBinary = new AgyAdapter({ roots: tree.roots, env: { PATH: '' }, trace: () => {} });
-    check('unavailable when no agy binary is on PATH', (await withoutBinary.isAvailable()) === false);
+    check('discoverable from the store alone when no agy binary is on PATH', (await withoutBinary.isAvailable()) === true);
+    check('not installed when no agy binary is on PATH', withoutBinary.isInstalled() === false);
 
-    // A fake binary on a fake PATH: availability must need BOTH halves.
+    // A fake binary on a fake PATH.
     const binDir = join(tree.dir, 'bin');
     const { mkdirSync, writeFileSync } = await import('node:fs');
     mkdirSync(binDir, { recursive: true });
     writeFileSync(join(binDir, 'agy'), '#!/bin/sh\nexit 0\n');
     const withBinary = new AgyAdapter({ roots: tree.roots, env: { PATH: binDir }, trace: () => {} });
     check('available when the binary and the app-data root both exist', (await withBinary.isAvailable()) === true);
+    check('installed when an agy binary is on PATH', withBinary.isInstalled() === true);
 
     const noStore = new AgyAdapter({
       roots: { appData: join(tree.dir, 'absent'), cockpitCache: tree.roots.cockpitCache },
@@ -876,6 +881,27 @@ const IDS = FIXTURE.conversationIds;
     check('an ordinary row is NOT marked as somebody\'s child',
       rows.filter((row) => row.origin === 'subagent').length === 1,
       rows.filter((row) => row.origin === 'subagent').map((row) => row.id).join(','));
+    // A child belongs to the conversation that started it: never offered Drive, and Drive is refused.
+    check('a child row is never offered Drive',
+      childRow.control?.drive?.supported === false && childRow.control?.drive?.state === 'unavailable',
+      JSON.stringify(childRow.control?.drive));
+    check('the parent row is still offered Drive',
+      rows.find((row) => row.id === FIXTURE.conversationIds.withTranscript)?.control?.drive?.supported === true);
+    let childDrive = '';
+    try {
+      const refused = await adapter.attach(child, 'resume');
+      await refused.close();
+    } catch (error) {
+      childDrive = String(error);
+    }
+    check('a Drive attach on a child is refused', /subagent conversation/.test(childDrive), childDrive);
+    const childObserve = await adapter.attach(child, 'observe');
+    check('an Observe attach on a child carries its lineage and offers no Drive',
+      childObserve.info.origin === 'subagent'
+        && childObserve.info.parentThreadId === FIXTURE.conversationIds.withTranscript
+        && childObserve.info.control?.drive?.supported === false,
+      JSON.stringify({ origin: childObserve.info.origin, drive: childObserve.info.control?.drive }));
+    await childObserve.close();
 
     const suppRow = rows.find((row) => row.id === supplementary)!;
     check('a supplementary row takes its cwd from last_conversations, which DOES still update',
@@ -1212,13 +1238,20 @@ const IDS = FIXTURE.conversationIds;
     check('a create into a missing directory refuses', /does not exist/.test(badDir), badDir);
     const noBinary = new AgyAdapter({ roots: tree.roots, env: { PATH: '' }, trace: () => {} });
     let noBin = '';
+    let noBinError: unknown;
     try {
       await noBinary.createSession({ directory: tree.dir });
     } catch (error) {
       noBin = String(error);
+      noBinError = error;
     }
     check('a create with no agy on PATH refuses rather than minting an unopenable session',
       /not on PATH/.test(noBin), noBin);
+    // The broker answers this typed refusal with the retryable 503 every other agent gives.
+    check('that refusal is the typed, retryable create-unavailable error',
+      isSessionCreateTemporarilyUnavailableError(noBinError)
+        && (noBinError as { detailCode?: string }).detailCode === 'agy-binary-missing',
+      noBin);
   } finally {
     tree.cleanup();
   }
@@ -1319,6 +1352,60 @@ const IDS = FIXTURE.conversationIds;
       JSON.stringify(fallbackRow?.currentModel));
   } finally {
     resetAgyCliCatalogForTests();
+    tree.cleanup();
+  }
+}
+
+// ── 17. A mode the app drove with comes back from the broker's record ───────
+//
+// agy writes no per-conversation mode, so after a broker restart the only record of the mode a
+// conversation was driven with is the broker's own. Rows and attaches carry it; a value agy's
+// `--mode` would not accept, or a resolver that throws, publishes nothing.
+{
+  const tree = buildAgyFixtureTree();
+  try {
+    const stored = new Map<string, string>([[IDS.withTranscript, 'plan']]);
+    const asked: Array<{ tool: string; id: string; nativeId?: string }> = [];
+    const adapter = new AgyAdapter({
+      roots: tree.roots,
+      env: { PATH: '' },
+      trace: () => {},
+      resolveStoredCurrentMode: (info) => {
+        asked.push(info);
+        return stored.get(info.id);
+      },
+    });
+    const rows = await adapter.discoverSessions();
+    const row = rows.find((session) => session.id === IDS.withTranscript);
+    check('a row carries the mode the broker recorded for it', row?.currentMode === 'plan', String(row?.currentMode));
+    check('the resolver is asked by the agy id, native id and conversation id alike',
+      asked.some((info) => info.tool === 'agy' && info.id === IDS.withTranscript && info.nativeId === IDS.withTranscript),
+      JSON.stringify(asked[0]));
+    check('a row with no record carries no mode',
+      rows.filter((session) => session.id !== IDS.withTranscript).every((session) => session.currentMode === undefined));
+    const connection = await adapter.attach(IDS.withTranscript, 'observe');
+    check('an attach seeds the composer with the recorded mode',
+      connection.info.currentMode === 'plan', String(connection.info.currentMode));
+    await connection.close();
+
+    stored.set(IDS.withTranscript, 'yolo');
+    const invalid = (await adapter.discoverSessions()).find((session) => session.id === IDS.withTranscript);
+    check('a recorded value agy does not accept is never published',
+      invalid !== undefined && invalid.currentMode === undefined, String(invalid?.currentMode));
+
+    const traces: Array<{ op: string }> = [];
+    const throwing = new AgyAdapter({
+      roots: tree.roots,
+      env: { PATH: '' },
+      trace: (event) => traces.push(event),
+      resolveStoredCurrentMode: () => { throw new Error('metadata store unreadable'); },
+    });
+    const survived = (await throwing.discoverSessions()).find((session) => session.id === IDS.withTranscript);
+    check('a resolver that throws costs the mode, never the row',
+      survived !== undefined && survived.currentMode === undefined
+        && traces.some((event) => event.op === 'stored-mode-unreadable'),
+      String(survived?.currentMode));
+  } finally {
     tree.cleanup();
   }
 }

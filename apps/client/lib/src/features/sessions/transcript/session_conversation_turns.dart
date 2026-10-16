@@ -104,9 +104,8 @@ final class ConversationTurnRunSummary {
     this.children = const [],
   });
 
-  /// Decodes a `run-summary` message, returning `null` for another type.
-  static ConversationTurnRunSummary? fromMessage(AgentMessage message) {
-    if (message.type != AgentMessageType.runSummary) return null;
+  /// Decodes [message], a `run-summary` message (see [fromMessage]).
+  factory ConversationTurnRunSummary._decode(AgentMessage message) {
     final tokens = _asMap(message.raw['tokens']);
     return ConversationTurnRunSummary(
       status: ConversationRunStatus.fromWire(
@@ -126,6 +125,22 @@ final class ConversationTurnRunSummary {
           _positiveDouble(message.raw['cost']),
       children: _parseChildren(message.raw['children']),
     );
+  }
+
+  /// Each run-summary message's decoded summary.
+  ///
+  /// A message is immutable, so its summary never changes, and keeping it
+  /// keeps one summary object per message: every re-projection of a page then
+  /// hands a turn's footer the identical summary, which is how the transcript
+  /// knows the footer is unchanged.
+  static final Expando<ConversationTurnRunSummary> _decoded = Expando(
+    'run summary',
+  );
+
+  /// Decodes a `run-summary` message, returning `null` for another type.
+  static ConversationTurnRunSummary? fromMessage(AgentMessage message) {
+    if (message.type != AgentMessageType.runSummary) return null;
+    return _decoded[message] ??= ConversationTurnRunSummary._decode(message);
   }
 
   /// Canonical completion status.

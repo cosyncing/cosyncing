@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/derived_theme.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
@@ -48,6 +49,8 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_contro
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_freshness.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart'
+    show sessionToolLabel;
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_model_preference_store.dart';
@@ -83,6 +86,7 @@ import 'package:cosyncing_client/src/features/voice/controller/voice_input_contr
 import 'package:cosyncing_client/src/features/voice/model/voice_transcript_insertion.dart';
 import 'package:cosyncing_client/src/features/voice/view/read_aloud_action.dart';
 import 'package:cosyncing_client/src/features/voice/view/voice_input_panel.dart';
+import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input_state.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_output_state.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_hold.dart';
@@ -233,6 +237,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// now would produce a value nothing has saved.
   String? _handoffLockedText;
   int _lastLocalDraftEditAt = 0;
+
+  /// Now, in epoch milliseconds, on the app clock: the recently-typed guard
+  /// must follow the same clock as every other timer, or fake time cannot
+  /// cross it.
+  int _nowMs() => ref.read(appClockProvider)().millisecondsSinceEpoch;
   int _lastAppliedRemoteDraftAt = -1;
   String? _lastAppliedRemoteDraftText;
   int _scheduledRemoteDraftAt = -1;
@@ -697,7 +706,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     ref
         .read(sessionDetailControllerProvider(_key).notifier)
         .stageLocalDraft(_promptController.text);
-    _lastLocalDraftEditAt = DateTime.now().millisecondsSinceEpoch;
+    _lastLocalDraftEditAt = _nowMs();
     _scheduleLocalDraftSync();
   }
 
@@ -887,10 +896,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       case SessionDraftSurfaceKind.restoreIfEmpty:
         if (current.isNotEmpty) return;
       case SessionDraftSurfaceKind.replace:
-        final now = DateTime.now().millisecondsSinceEpoch;
         if (current.isNotEmpty &&
             _promptFocusNode.hasFocus &&
-            now - _lastLocalDraftEditAt < 1500) {
+            _nowMs() - _lastLocalDraftEditAt < 1500) {
           return;
         }
       case SessionDraftSurfaceKind.forceReplace:
@@ -991,10 +999,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       }
       return;
     }
-    final now = DateTime.now().millisecondsSinceEpoch;
     if (!stagedDuringComposition &&
         _promptFocusNode.hasFocus &&
-        now - _lastLocalDraftEditAt < 1500) {
+        _nowMs() - _lastLocalDraftEditAt < 1500) {
       return;
     }
     _lastAppliedRemoteDraftAt = draft.at;
@@ -1456,6 +1463,18 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// Stable identity so the link scope only notifies on a real gate change.
   void _onOpenFileReference(SessionFileReference reference) {
     unawaited(_openFileReference(reference));
+  }
+
+  // Class methods, like [_onOpenFileReference], and never extension members:
+  // an extension method's tear-off is a new closure on every read, which the
+  // link scope's `==` reads as a change, so every page build told each
+  // transcript row with a file mention to rebuild.
+  void _onFindFileReference(SessionFileReference reference) {
+    unawaited(_findFileReference(reference));
+  }
+
+  void _onFindFileParentReference(SessionFileReference reference) {
+    unawaited(_findFileReference(reference, openParent: true));
   }
 
   /// Opens one transcript file mention in this session's Files surface.
@@ -2561,12 +2580,23 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         (state.sessionInfo == null
             ? l10n.sessionDetailTitleOpening
             : l10n.sessionDetailTitleUntitled);
-    final roster = ref.watch(sessionListControllerProvider);
     final info = state.sessionInfo;
     final source = RosterSource.of(ref.watch(activeBrokerProfileProvider));
-    final parent = info != null && roster.source == source
-        ? SessionRosterLineage.build(roster.sessions).parentFor(info)
-        : null;
+    // Once the session frame is here, the roster matters to this page only
+    // for the parent row: watching all of it rebuilt the page, and with it
+    // the transcript, whenever any other session changed. Before the frame
+    // the title may still come from the roster (see [_knownSessionTitle]), so
+    // until then every roster change is still followed.
+    final (:parent, pendingTitleSource: _) = ref.watch(
+      sessionListControllerProvider.select(
+        (roster) => (
+          parent: info != null && roster.source == source
+              ? SessionRosterLineage.build(roster.sessions).parentFor(info)
+              : null,
+          pendingTitleSource: info == null ? roster : null,
+        ),
+      ),
+    );
     final project = info?.projectName?.trim();
     final cwdParts = info?.cwd
         ?.split(RegExp(r'[/\\]'))

@@ -1,5 +1,13 @@
 import 'package:cosyncing_client/src/features/connection/model/health_probe_result.dart';
 
+/// How long a connection probe (the Connect health check, the gate's
+/// authenticated check) waits for the server's answer.
+///
+/// A server that accepts the connection and never answers used to leave the
+/// probe, and the screen showing it, waiting forever. Past this the probe
+/// reports that the server did not answer, and the screen offers Retry.
+const Duration brokerProbeTimeout = Duration(seconds: 10);
+
 /// Interface for probing a broker's health endpoint.
 ///
 /// Implementations can be fake (for tests) or real (via

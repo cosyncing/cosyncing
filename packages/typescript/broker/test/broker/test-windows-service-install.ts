@@ -811,13 +811,37 @@ function check(name: string, ok: boolean, detail?: string): void {
     const follower = Bun.spawn(['bun', bootstrap, '--service-logs', '--lines', '1', '--follow'], {
       stdout: 'pipe', stderr: 'pipe', stdin: 'ignore',
     });
-    await Bun.sleep(350);
-    renameSync(log, `${log}.1`);
-    writeFileSync(log, 'after-rotation\n');
-    await Bun.sleep(500);
-    follower.kill('SIGTERM');
-    const followed = await new Response(follower.stdout).text();
-    await follower.exited;
+    let followed = '';
+    const output = (async () => {
+      const decoder = new TextDecoder();
+      const reader = follower.stdout.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          followed += decoder.decode(value, { stream: true });
+        }
+      } finally { reader.releaseLock(); }
+    })();
+    const waitForOutput = async (text: string): Promise<void> => {
+      const deadline = Date.now() + 20_000;
+      while (!followed.includes(text)) {
+        if (follower.exitCode !== null || Date.now() >= deadline) {
+          throw new Error(`log follower did not emit ${JSON.stringify(text)}: ${JSON.stringify(followed)}`);
+        }
+        await Bun.sleep(10);
+      }
+    };
+    try {
+      await waitForOutput('three\n');
+      renameSync(log, `${log}.1`);
+      writeFileSync(log, 'after-rotation\n');
+      await waitForOutput('after-rotation\n');
+    } finally {
+      follower.kill('SIGTERM');
+      await follower.exited;
+      await output;
+    }
     check('Windows bootstrap log follow reopens after rotation',
       followed.includes('three\n') && followed.includes('after-rotation\n'), JSON.stringify(followed));
   } finally {

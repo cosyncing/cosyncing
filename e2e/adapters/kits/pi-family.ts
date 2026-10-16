@@ -29,7 +29,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, relative, sep } from 'node:path';
 import { CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY } from '../../../packages/typescript/protocol/src/index.ts';
 import { eventually, fixturePath, type FixturePaths, type Frame, type SessionStream } from '../../harness/index.ts';
 import {
@@ -56,6 +56,7 @@ import {
   type FakeController,
   installFakeExecutable,
   Ledger,
+  makeFifo,
   type LedgerEntry,
   type SeededSession,
   type SeedOptions,
@@ -387,7 +388,10 @@ export function piFamilyProfile(dialect: PiFamilyDialect): ConformanceProfile {
       doctor: {
         current: { check: 'version', status: 'pass', detailCode: 'version-supported' },
         below: { check: 'version', status: 'fail', detailCode: 'version-below-minimum' },
-        newer: { check: 'version', status: 'pass', detailCode: 'version-supported' },
+        // omp drives exactly its verified build, so doctor does not call a newer one supported.
+        newer: omp
+          ? { check: 'version', status: 'fail', detailCode: 'version-unverified' }
+          : { check: 'version', status: 'pass', detailCode: 'version-supported' },
         missing: { check: 'binary', status: 'warn', detailCode: 'binary-missing' },
       },
     },
@@ -415,23 +419,64 @@ export function piFamilyProfile(dialect: PiFamilyDialect): ConformanceProfile {
     subagents: true,
     missingBinaryRoster: 'observe-only',
     permission: { approveReply: { confirmed: true }, answerMentions: 'permission allow' },
-    knownBugs: {
-      ...(omp ? {} : {
-        'C09.replayKey': 'a fresh Observe reader keys the delivered Pi prompt by its session entry id, not by the key '
-          + 'the sender held live (only the Drive connection\'s history takes the echo key)',
-      }),
-      C07: 'Create trusts the session file get_state answers: one naming a session already in the store is accepted '
-        + 'and the existing file gets a model_change entry appended',
-      C11: 'a forged request id and a second decision on a settled card are both acked (respondPermission ignores '
-        + 'ids it does not hold)',
-      C14: 'Pi Drive never reads the session file back, so a user row another process appends is not noticed: the '
-        + 'joined sockets stay driving and the next prompt is still delivered to the runtime',
-      'C15.detect': 'Pi Drive never notices a replaced or rewritten session file, so the next prompt is still '
-        + 'delivered to the runtime',
-    },
     scenarios: {},
-    hostileStore: [],
+    hostileStore: [
+      {
+        name: 'an id naming a session file outside the store',
+        plant: (fake) => piRowId(plantOutsideSession(dialect, fake, 'outside')),
+      },
+      {
+        name: 'an id that climbs out of the store through ..',
+        plant: (fake) => {
+          const outside = plantOutsideSession(dialect, fake, 'climb');
+          // Spelled from inside the store, so only resolving `..` shows where it lands.
+          return piRowId(`${fake.storeRoot}${sep}..${sep}${relative(dirname(fake.storeRoot), outside)}`);
+        },
+      },
+      {
+        name: 'a symlink named like a session file that resolves to one outside the store',
+        unsupportedOn: ['win32'],
+        plant: (fake) => {
+          const outside = plantOutsideSession(dialect, fake, 'linked');
+          const path = piSessionFilePath(fake.storeRoot, fake.workspace('linked-cwd'), crypto.randomUUID());
+          mkdirSync(dirname(path), { recursive: true });
+          symlinkSync(outside, path);
+          return piRowId(path);
+        },
+      },
+      {
+        name: 'a FIFO named like a session file',
+        unsupportedOn: ['win32'],
+        plant: (fake) => {
+          const file = piSessionFilePath(fake.storeRoot, fake.workspace('hostile'), crypto.randomUUID());
+          makeFifo(file);
+          return piRowId(file);
+        },
+      },
+      {
+        name: 'a FIFO named like a subagent session file',
+        unsupportedOn: ['win32'],
+        plant: (fake) => {
+          const parent = fake.seedSession({ title: 'hostile parent' });
+          const file = join(piFileOf(parent.id).replace(/\.jsonl$/, ''), `${crypto.randomUUID()}.jsonl`);
+          makeFifo(file);
+          return piRowId(file);
+        },
+      },
+    ],
   };
+}
+
+/** A well-formed session file outside the store, for an id that must still name nothing. */
+function plantOutsideSession(dialect: PiFamilyDialect, fake: FakeController, label: string): string {
+  const id = crypto.randomUUID();
+  const cwd = fake.workspace(label);
+  const file = piSessionFilePath(join(cwd, 'not-the-store'), cwd, id);
+  appendLines(file, [
+    ...piHeader(dialect.name, id, cwd, Date.now(), `outside ${label}`),
+    ...piTurnEntries(null, 'a row from outside the store', 'an answer from outside the store', Date.now(), MODELS[0]!),
+  ]);
+  return file;
 }
 
 export function piFamilyKit(dialect: PiFamilyDialect, extras: ConformanceExtra[] = []): ConformanceKit {

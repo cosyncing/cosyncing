@@ -1,0 +1,15 @@
+{
+  "history": [
+    {"type":"user-message","text":"before","key":"gb1","turnId":"gb1","sentAt":1781913600000},
+    {"type":"model-output","text":"after the bad blocks","final":true,"key":"gb2:t:0"},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"gb1","assistantMessageKey":"gb2:t:0","status":"running","startedAt":1781913600000,"source":"pi-jsonl"}
+  ],
+  "live": [
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"gb1","assistantMessageKey":"gb2:t:0","status":"running","startedAt":1781913600000,"source":"pi-jsonl"}
+  ],
+  "replay": [
+    {"type":"user-message","text":"before","key":"gb1","turnId":"gb1","sentAt":1781913600000},
+    {"type":"model-output","text":"after the bad blocks","final":true,"key":"gb2:t:0"},
+    {"type":"run-summary","key":"pi:run:u0","turnId":"u0","userMessageKey":"gb1","assistantMessageKey":"gb2:t:0","status":"running","startedAt":1781913600000,"source":"pi-jsonl"}
+  ]
+}

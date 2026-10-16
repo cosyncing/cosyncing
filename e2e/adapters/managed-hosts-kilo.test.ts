@@ -10,16 +10,28 @@
  * ownership proof (pid, start time, command) runs against real process identity.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { existsSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Broker, type BrokerClient, eventually, never, startBroker } from '../harness/index.ts';
 import { KILO_PROVIDER, type KiloFake, installKilo, kilocodeKit } from './kits/kilocode.ts';
 import { KiloDb } from './kits/fakes/kilo-store.ts';
+import { PRODUCT_IDENTITY } from '../../packages/typescript/protocol/src/index.ts';
 
 const posix = process.platform === 'win32' ? describe.skip : describe;
 
 const MODEL = { providerID: KILO_PROVIDER, modelID: 'model-a' };
 const started = (broker: Broker) => (broker.output().match(/started a managed kilo host|restarted the managed kilo host/g) ?? []).length;
+
+/** The durable boundary the broker recorded for an app-created session (what a fresh attach must find). */
+function storedBoundary(broker: Broker, id: string): { appendPosition?: number } | undefined {
+  const file = join(broker.paths.home, '.cache', PRODUCT_IDENTITY.cacheDirectoryName, 'session-metadata.json');
+  if (!existsSync(file)) return undefined;
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')).provenance?.[`kilo\0${id}`]?.historyBoundary;
+  } catch {
+    return undefined;
+  }
+}
 
 async function createSession(client: BrokerClient, fake: KiloFake, title: string, extra: Record<string, unknown> = {}) {
   return client.post('/api/sessions/kilo', { directory: fake.workspace('create'), title, ...extra });
@@ -138,10 +150,9 @@ posix('the serve the broker launches and owns', () => {
     expect(fake.db.sessionIds().length).toBe(sessionsBefore);
   });
 
-  // Not asserted here: an offline rewrite of the SQLite history is refused at the next prompt only once a settle
-  // snapshot has recorded the rewritten row as settled, so the verdict depends on whether the turn's own settle read
-  // ran first. The settled case is pinned deterministically by the adapter's drive suite; the unsettled case is the
-  // known bug recorded as conformance C15.detect for Kilo.
+  // Not asserted here: a rewrite of the SQLite history while a session is driven. Conformance C15 asserts it against
+  // this serve, and the adapter's drive suite pins each path deterministically (seen by the store watch when it
+  // lands, and by the settle read when it lands during the Drive's own turn).
 
   test('a model catalogue body beyond the bound is refused as an unavailable catalogue, never read as empty', async () => {
     const { fake, client } = running;
@@ -193,13 +204,17 @@ posix('a serve that crashes is replaced and its sessions re-attached', () => {
     expect((await createSession(client, fake, 'Created after the crash')).status).toBe(200);
   });
 
-  test.failing('a session that was open when the serve crashed can be driven again once the serve is replaced', async () => {
+  test('a session that was open when the serve crashed can be driven again once the serve is replaced', async () => {
     const { fake, client } = running;
     const created = await createSession(client, fake, 'Open during the crash');
     const id = created.body.session.id as string;
     const open = await client.attach('kilo', id, { mode: 'live' });
     await open.waitForKind('options');
     expect((await open.sendAndAwait({ kind: 'prompt', text: 'while open' })).kind).toBe('ack');
+    // Settled before the crash: a serve lost mid-turn leaves the turn's outcome unknown, and that ends Drive.
+    // The answer arrives before the serve's idle; the settle's recorded boundary is what says the turn is over.
+    await open.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: while open');
+    await eventually(() => storedBoundary(running.broker, id)?.appendPosition === 2, { what: 'the turn while open to be recorded' });
     open.close();
     await crash();
     const row = await eventually(async () => {
@@ -207,6 +222,77 @@ posix('a serve that crashes is replaced and its sessions re-attached', () => {
       return found?.control?.drive?.supported === true ? found : undefined;
     }, { what: 'the session to be drivable again', timeoutMs: 8_000 });
     expect(row.control.drive.supported).toBe(true);
+    // And it drives: the connection the Hub still holds proved itself again on the replacement.
+    const again = await client.attach('kilo', id, { mode: 'live' });
+    // (A loaded machine may attach before the replacement has proved the session: Drive arrives once it has.)
+    const driving = (frame: { kind: string; authority?: { canMutate?: boolean } }) => frame.kind === 'session' && frame.authority?.canMutate === true;
+    await again.waitForFrame(driving, { what: 'Drive on the replacement serve' });
+    expect((await again.sendAndAwait({ kind: 'prompt', text: 'on the replacement' })).kind).toBe('ack');
+    await again.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: on the replacement');
+    // The turn on the replacement settled as this Drive's own: the next attach starts from it.
+    await eventually(() => storedBoundary(running.broker, id)?.appendPosition === 4, { what: 'the replacement turn to be recorded' });
+    expect(again.frames.slice(again.frames.findIndex(driving))
+      .some((frame) => frame.kind === 'session' && frame.authority?.canMutate === false)).toBe(false);
+    again.close();
+  });
+
+  test('a client attached through the crash sees Drive withheld, then back on the replacement serve', async () => {
+    const { fake, client } = running;
+    const created = await createSession(client, fake, 'Attached through the crash');
+    const id = created.body.session.id as string;
+    const stream = await client.attach('kilo', id, { mode: 'live' });
+    await stream.waitForKind('options');
+    expect((await stream.sendAndAwait({ kind: 'prompt', text: 'before the crash' })).kind).toBe('ack');
+    await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: before the crash');
+    // Settled before the crash, and recorded: Drive waits through a crash only between turns (a serve lost
+    // mid-turn leaves the turn's outcome unknown and ends Drive). The answer arrives before the serve's idle,
+    // so the answer alone does not say the turn is over; the settle's recorded boundary does.
+    await eventually(() => storedBoundary(running.broker, id)?.appendPosition === 2, { what: 'the turn before the crash to be recorded' });
+    const from = stream.frames.length;
+    await crash();
+    const withheld = await stream.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === false, { after: from, what: 'Drive withheld while the serve is away' });
+    // Back AFTER it was withheld: a driving frame from before the crash is not Drive on the replacement.
+    const back = await stream.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === true, {
+      after: stream.frames.indexOf(withheld) + 1, what: 'Drive back on the replacement',
+    });
+    expect(back.info.control.drive.state).toBe('driving');
+    expect((await stream.sendAndAwait({ kind: 'prompt', text: 'after the crash' })).kind).toBe('ack');
+    await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: after the crash');
+    await eventually(() => storedBoundary(running.broker, id)?.appendPosition === 4, { what: 'the turn after the crash to be recorded' });
+    stream.close();
+  });
+
+  test('a session a terminal wrote to before the serve crashed is not driven again on the replacement', async () => {
+    const { fake, client } = running;
+    const created = await createSession(client, fake, 'Written before the crash');
+    const id = created.body.session.id as string;
+    const stream = await client.attach('kilo', id, { mode: 'live' });
+    await stream.waitForKind('options');
+    expect((await stream.sendAndAwait({ kind: 'prompt', text: 'mine' })).kind).toBe('ack');
+    await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: mine');
+    // The turn's settle recorded what this Drive proved; only then does the terminal write.
+    await eventually(() => storedBoundary(running.broker, id)?.appendPosition === 2, { what: 'the settled turn to be recorded' });
+    const from = stream.frames.length;
+    // A terminal's Kilo writes the store directly; the managed serve never announces it. The Drive's watch of the
+    // store may see it before the crash, or the replacement's proof after it: either way Drive does not come back.
+    const at = Date.now();
+    fake.db.putRow(id, {
+      info: { id: `msg_terminal_${at}`, role: 'user', time: { created: at }, model: MODEL },
+      parts: [{ id: `prt_terminal_${at}`, type: 'text', text: 'from the terminal', time: { start: at, end: at } }],
+    });
+    fake.db.touch(id, at);
+    await crash();
+    await stream.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === false, { after: from, what: 'Drive withheld' });
+    await never(() => stream.frames.slice(from).some((frame) => frame.kind === 'session' && frame.authority?.canMutate === true),
+      3_000, 'Drive back on a session written while the serve was away');
+    stream.close();
+    const refused = await client.attach('kilo', id, { mode: 'live', reason: 'takeover' });
+    const conflict = await refused.waitForKind('attach-conflict');
+    expect(conflict.code).toBe('DRIVE_RESTORE_FAILED');
+    const observed = await refused.waitForKind('session');
+    expect(observed.authority?.canMutate).toBe(false);
+    expect(observed.info.attachMode).toBe('observe');
+    refused.close();
   });
 });
 

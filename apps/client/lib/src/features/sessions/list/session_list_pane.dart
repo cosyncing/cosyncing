@@ -20,6 +20,7 @@ import 'package:cosyncing_client/src/features/sessions/roster/session_roster_pro
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_reveal_request.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/session_visibility_controller.dart';
+import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -152,7 +153,7 @@ class SessionListPane extends ConsumerStatefulWidget {
     this.onQueryWindowChanged,
     this.searchFocusNode,
     this.now,
-    this.unreadCompletionKeys,
+    this.unreadCompletionKeys = const <String>{},
     this.revealRequest,
     this.disclosure,
     super.key,
@@ -163,10 +164,8 @@ class SessionListPane extends ConsumerStatefulWidget {
 
   /// Durable unread completions, source-qualified by the owner. Empty means
   /// every completion is read, including acknowledgements on another client.
-  /// Only legacy embeddings without an inbox feed may pass null to use local
-  /// Working -> Idle tracking. Loading/error states of a supported feed must
-  /// pass its current set (or empty), never opt into the legacy fallback.
-  final Set<String>? unreadCompletionKeys;
+  /// Loading/error states of the feed pass its current set (or empty).
+  final Set<String> unreadCompletionKeys;
 
   /// Current roster fetch lifecycle.
   final SessionListStatus status;
@@ -237,7 +236,8 @@ class SessionListPane extends ConsumerStatefulWidget {
   /// binds no chord passes nothing and the field manages its own focus.
   final FocusNode? searchFocusNode;
 
-  /// Clock override for deterministic relative-time tests.
+  /// Clock override for deterministic relative-time tests; the app clock
+  /// ([appClockProvider]) otherwise.
   final DateTime Function()? now;
 
   @override
@@ -256,6 +256,16 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
 
   final SessionRosterDisclosure _ownDisclosure = SessionRosterDisclosure();
 
+  /// The built widget of each leaf row, by the session it shows (see
+  /// [_leafRow]).
+  ///
+  /// Every roster change rebuilds this pane, and with it every row on screen:
+  /// one session going to working rebuilt the title, logo, tooltip and rename
+  /// region of every other. A leaf row whose session and display inputs are
+  /// unchanged gets back the very widget it was built from, so the framework
+  /// skips it. Rows read their theme and locale in their own builds.
+  final Expando<_KeptRosterRow> _keptRows = Expando('kept roster rows');
+
   SessionRosterDisclosure get _disclosure =>
       widget.disclosure ?? _ownDisclosure;
 
@@ -271,7 +281,6 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
   /// mid-search never rewrites the saved state.
   final Map<String, SessionChildExpansion> _revealChildExpansion = {};
 
-  ReadyToReviewTracker? _reviewTracker;
   final TextEditingController _searchController = TextEditingController();
   SessionRosterFilters _filters = _kDefaultRosterFilters;
   Set<String> _readyToReviewKeys = const {};
@@ -291,7 +300,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
   final Set<String> _revealedActivePath = {};
   final Set<String> _navigationRevealKeys = {};
 
-  DateTime get _now => widget.now?.call() ?? DateTime.now();
+  DateTime get _now => widget.now?.call() ?? ref.read(appClockProvider)();
 
   @override
   void initState() {
@@ -369,24 +378,11 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
     // One forest per rebuild for navigation reveal and projection.
     final lineage = SessionRosterLineage.build(widget.sessions);
     final unread = widget.unreadCompletionKeys;
-    if (unread == null) {
-      // Judged by display status, so a parent is not announced ready while a
-      // descendant is still working.
-      _readyToReviewKeys = (_reviewTracker ??= ReadyToReviewTracker()).observe(
-        widget.sessions,
-        activeKey: widget.activeKey,
-        statusOf: lineage.effectiveStatusFor,
-      );
-    } else {
-      // Discard fallback history when a feed is attached; it must not resurrect
-      // an already acknowledged completion if the embedding later changes.
-      _reviewTracker = null;
-      _readyToReviewKeys = {
-        for (final session in widget.sessions)
-          if (unread.contains(sessionRosterKey(session)))
-            sessionCompositeRosterKey(session),
-      };
-    }
+    _readyToReviewKeys = {
+      for (final session in widget.sessions)
+        if (unread.contains(sessionRosterKey(session)))
+          sessionCompositeRosterKey(session),
+    };
     final revealActiveProject = _revealActiveAncestry(lineage);
     if (widget.sessions.isEmpty) {
       // Cached identity outranks both the spinner and the error pane, but only
@@ -431,6 +427,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
       readyToReviewKeys: _readyToReviewKeys,
       navigationRevealKeys: _navigationRevealKeys,
       ungroupedLabel: l10n.sessionRosterOtherSessions,
+      now: _relativeTimeNow ?? _now,
       lineage: lineage,
     );
     if (revealActiveProject) {
@@ -505,19 +502,24 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
             ? null
             : () => widget.onRenameProject!(group),
       ),
-      _RowEntry(:final group, :final index) => _SessionRow(
-        key: entryKey(entry),
-        row: group.rows[index],
-        lineage: projection.lineage,
-        liveStatus: liveStatus,
-        readyKeys: _readyToReviewKeys,
-        readyToReview: _readyToReviewKeys.contains(group.rows[index].key),
-        selected:
-            sessionRosterKey(group.rows[index].session) == widget.activeKey,
+      _RowEntry(:final group, :final index) => _leafRow(
+        group.rows[index],
         parent: projection.parentFor(group.rows[index].session),
-        onTap: () => _markOpened(group.rows[index].session),
-        onToggleChildren: _toggleChildren,
-        relativeTimeFor: _relativeTimeFor,
+        liveStatus: liveStatus,
+        build: () => _SessionRow(
+          key: entryKey(entry),
+          row: group.rows[index],
+          lineage: projection.lineage,
+          liveStatus: liveStatus,
+          readyKeys: _readyToReviewKeys,
+          readyToReview: _readyToReviewKeys.contains(group.rows[index].key),
+          selected:
+              sessionRosterKey(group.rows[index].session) == widget.activeKey,
+          parent: projection.parentFor(group.rows[index].session),
+          onTap: () => widget.onOpen(group.rows[index].session),
+          onToggleChildren: _toggleChildren,
+          relativeTimeFor: _relativeTimeFor,
+        ),
       ),
     };
     // A failed refresh over retained rows is stated ONCE, by the shared roster
@@ -584,10 +586,38 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
         : RefreshIndicator(onRefresh: onRefresh, child: list);
   }
 
-  void _markOpened(SessionInfo session) {
-    _reviewTracker?.markOpened(session);
-    setState(() {});
-    widget.onOpen(session);
+  /// [row]'s widget from [build], or the one kept from an earlier build
+  /// when nothing it shows has changed (see [_keptRows]).
+  ///
+  /// Only a leaf row is kept: a row with children reads its subtree's
+  /// statuses through the lineage. A leaf row shows its session (the same
+  /// object until the broker changes that session), its depth and display
+  /// status, whether the roster is live, its ready-to-review dot, whether it
+  /// is selected, its parent's title and how long ago it was updated; the
+  /// last is read here, as the row would, so the clock tick still sees it.
+  Widget _leafRow(
+    SessionRosterRow row, {
+    required SessionInfo? parent,
+    required bool liveStatus,
+    required Widget Function() build,
+  }) {
+    if (row.childCount > 0) return build();
+    final session = row.session;
+    final updatedAt = session.updatedAt;
+    final signature = (
+      depth: row.depth,
+      status: row.effectiveStatus,
+      liveStatus: liveStatus,
+      readyToReview: _readyToReviewKeys.contains(row.key),
+      selected: sessionRosterKey(session) == widget.activeKey,
+      parent: row.depth > 0 ? parent : null,
+      updated: updatedAt == null ? null : _relativeTimeFor(updatedAt),
+    );
+    final kept = _keptRows[session];
+    if (kept != null && kept.signature == signature) return kept.row;
+    final built = build();
+    _keptRows[session] = (signature: signature, row: built);
+    return built;
   }
 
   /// Reveal once per selected child/path, including ancestors arriving during
@@ -682,6 +712,22 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
     });
   }
 }
+
+/// One kept roster row: what it was built from (see
+/// `_SessionListPaneState._leafRow`), and the widget.
+typedef _KeptRosterRow = ({
+  ({
+    int depth,
+    SessionStatus status,
+    bool liveStatus,
+    bool readyToReview,
+    bool selected,
+    SessionInfo? parent,
+    String? updated,
+  })
+  signature,
+  Widget row,
+});
 
 class _RosterLoading extends StatelessWidget {
   const _RosterLoading();
@@ -1097,11 +1143,16 @@ class _RosterSectionLabel extends StatelessWidget {
       SessionActivityWindow.older30Days =>
         l10n.sessionRosterActivityOlder30Days,
     };
+    // A wrap, not a row: at a large text size the window moves under the
+    // caption instead of overflowing the pane.
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 20, 12, 8),
-      child: Row(
+      child: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        spacing: 8,
+        runSpacing: 4,
         children: [
-          Expanded(child: Text(l10n.sessionRosterProjectsLabel, style: style)),
+          Text(l10n.sessionRosterProjectsLabel, style: style),
           Text(
             window,
             key: const Key('session-roster-window-label'),

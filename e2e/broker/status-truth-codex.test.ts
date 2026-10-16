@@ -19,7 +19,8 @@
  * Codex sync); terminal presence through `/proc` is Linux only.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { closeSync, openSync, statSync, utimesSync, writeSync } from 'node:fs';
+import { closeSync, openSync, statSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   type Broker,
   type BrokerClient,
@@ -47,8 +48,18 @@ let serial = 0;
 const thread = (): string => `019fc900-0000-7000-8000-${(++serial).toString(16).padStart(12, '0')}`;
 const at = (second: number): string => `2026-08-03T00:00:${String(second).padStart(2, '0')}.000Z`;
 
+/**
+ * The run states a stream was shown, in order, a repeat of the current one collapsed. A `session`
+ * frame carries the whole SessionInfo and is re-sent whenever any of it moves, not only the status:
+ * the roster reconcile re-publishes an attached session's title and control state on its own
+ * schedule (every discovery pass), and when that lands during the attach it is queued behind
+ * `history`. A repeated status is no transition, and when it arrives is not this file's claim.
+ */
 const sessionStatuses = (stream: SessionStream): string[] =>
-  stream.frames.filter((frame) => frame.kind === 'session').map((frame) => String(frame.info?.status));
+  stream.frames
+    .filter((frame) => frame.kind === 'session')
+    .map((frame) => String(frame.info?.status))
+    .filter((status, index, all) => index === 0 || status !== all[index - 1]);
 const liveMessages = (stream: SessionStream): any[] =>
   stream.frames.filter((frame) => frame.kind === 'message').map((frame) => frame.message);
 const footers = (stream: SessionStream, turnId: string, terminal: boolean): any[] =>
@@ -57,6 +68,17 @@ const footers = (stream: SessionStream, turnId: string, terminal: boolean): any[
 
 function settlesTo(stream: SessionStream, status: string, what?: string): Promise<Frame> {
   return stream.waitForFrame(() => sessionStatuses(stream).at(-1) === status, { what: what ?? `the session to settle on ${status}` });
+}
+
+/**
+ * Wait for a turn's footer (`terminal`: its closing one, else its opening one). A footer is its own
+ * frame and follows the session frame that moves the run state, so a settled status does not mean
+ * the footer has arrived yet.
+ */
+function footerArrives(stream: SessionStream, turnId: string, terminal: boolean): Promise<any[]> {
+  return eventually(() => footers(stream, turnId, terminal).length > 0 && footers(stream, turnId, terminal), {
+    what: `the ${terminal ? 'closing' : 'opening'} footer of ${turnId}`,
+  });
 }
 
 describe.skipIf(!posix)('Codex run state', () => {
@@ -118,7 +140,7 @@ describe.skipIf(!posix)('Codex run state', () => {
     return (await client.sessions({ refresh: true })).find((row) => row.nativeId === threadId);
   }
 
-  async function open(rollout: CodexRollout, options: { readOnly?: boolean } = {}): Promise<SessionStream> {
+  async function open(rollout: CodexRollout, options: { readOnly?: boolean; mode?: string } = {}): Promise<SessionStream> {
     const stream = await client.attach('codex', rollout.id, options);
     await stream.waitForKind('history');
     return stream;
@@ -228,6 +250,7 @@ describe.skipIf(!posix)('Codex run state', () => {
     await feed.waitFor((delta) => delta.sessionId === rollout.id && delta.session?.status === 'working');
     expect((await rosterRow(id))?.status).toBe('working');
     // A repaired start is a real turn boundary: it opens the turn's footer.
+    await footerArrives(stream, 'turn-missed', false);
     expect(footers(stream, 'turn-missed', false)).toHaveLength(1);
     stream.close();
   });
@@ -289,6 +312,7 @@ describe.skipIf(!posix)('Codex run state', () => {
         : { data: Array.from({ length: 100 }, (_, index) => ({ id: `older-${index}`, status: 'completed' })), nextCursor: 'page-2' },
     });
     await settlesTo(stream, 'idle');
+    await footerArrives(stream, 'turn-paged', true);
     expect(footers(stream, 'turn-paged', true).map((footer) => footer.status)).toEqual(['error']);
     expect(liveMessages(stream).some((message) => message.type === 'error' && message.message === 'paged native failure')).toBe(true);
 
@@ -298,6 +322,7 @@ describe.skipIf(!posix)('Codex run state', () => {
     await settlesTo(stream, 'working');
     rollout.append(codexStart('turn-rollout'), codexComplete('turn-rollout'));
     await settlesTo(stream, 'idle');
+    await footerArrives(stream, 'turn-rollout', true);
     expect(footers(stream, 'turn-rollout', true)).toHaveLength(1);
 
     // A repair holding a page while a newer turn starts live must not retire that newer turn.
@@ -321,6 +346,9 @@ describe.skipIf(!posix)('Codex run state', () => {
     await repairRounds(id, 3);
     expect(sessionStatuses(stream).at(-1)).toBe('working');
     expect(footers(stream, 'turn-race-old', true)).toEqual([]);
+    // Every repair since closed nothing a second time.
+    expect(footers(stream, 'turn-paged', true)).toHaveLength(1);
+    expect(footers(stream, 'turn-rollout', true)).toHaveLength(1);
     codex.thread(id, { turnsList: undefined, turns: [{ id: 'turn-race-new', status: 'completed', completedAt: at(30) }] });
     await settlesTo(stream, 'idle');
     stream.close();
@@ -436,11 +464,10 @@ describe.skipIf(!posix)('Codex run state', () => {
     stream.close();
   });
 
-  // Product defect: an Observe owner is re-derived only when the watcher hands it a contradiction,
-  // and the watcher speaks only for daemon-held threads. A turn whose private terminal died
-  // mid-turn on a thread the daemon never held is never retired while a client stays attached
-  // (the rule that would retire it, owner absence, never runs).
-  test.failing.skipIf(!linux)('an Observe owner of a thread the daemon does not hold retires a turn whose terminal died', async () => {
+  // The daemon speaks only for threads it holds. For any other thread the watcher's own terminal
+  // scan is the evidence: once no terminal names the thread, the attached Observe owner is asked to
+  // re-derive, and owner absence retires the turn while the client stays attached.
+  test.skipIf(!linux)('an Observe owner of a thread the daemon does not hold retires a turn whose terminal died', async () => {
     const id = thread();
     const rollout = codex.writeRollout(id, [codexStart('turn-orphaned')]);
     const exit = codex.terminal(id, { private: true });
@@ -474,6 +501,71 @@ describe.skipIf(!posix)('Codex run state', () => {
     expect(new Set(sessionStatuses(stream))).toEqual(new Set(['idle']));
     exit();
     stream.close();
+  });
+
+  // Discovery describes the session's BEST owner: a daemon-held thread with no terminal reads
+  // `live` and `driving`. An Observe connection opened beside that owner is still a read-only tail;
+  // a discovery pass may refresh what discovery knows (title, presence), never the connection's own
+  // class or Drive state, and a pass that changes nothing about the connection sends nothing.
+  test('an Observe owner beside a live owner keeps its own authority, and a discovery pass that changes nothing sends nothing', async () => {
+    const id = thread();
+    const rollout = codex.writeRollout(id);
+    await hold(id, { status: 'idle' });
+    const observer = await open(rollout, { mode: 'observe' });
+    const driver = await open(rollout, { mode: 'live' });
+    await driver.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === true, {
+      what: 'the live owner to be Driving',
+    });
+
+    // Three discovery passes re-derive the row, and each is reconciled onto the open owners of the
+    // session, one after another. The first (a turn starts on the daemon) carries discovery's own
+    // title for the row, which the Observe tail did not have: seeing it is seeing that pass arrive.
+    const attachedTitle = observer.ofKind('session')[0]!.info.title;
+    codex.thread(id, { status: 'active', turns: [{ id: 'turn-beside', status: 'inProgress', startedAt: at(1) }] });
+    const discovered = await observer.waitForFrame((frame) => frame.kind === 'session' && frame.info.title !== attachedTitle, {
+      what: 'the first discovery pass to reach the Observe owner',
+    });
+    expect(discovered.info.title).toBe((await rosterRow(id))?.title);
+    // The second (the turn ends) changes nothing the Observe owner holds: its run state is its own.
+    codex.thread(id, { status: 'idle', turns: [{ id: 'turn-beside', status: 'completed', startedAt: at(1), completedAt: at(2) }] });
+    await watcherPolls(4);
+    // The third renames the thread; reconciles are serialized per session, so its title arriving
+    // means the second pass has been reconciled too.
+    writeFileSync(join(codex.codexHome, 'session_index.jsonl'), `${JSON.stringify({ id, thread_name: 'renamed beside' })}\n`);
+    codex.thread(id, { status: 'active', turns: [{ id: 'turn-beside-2', status: 'inProgress', startedAt: at(3) }] });
+    await observer.waitForFrame((frame) => frame.kind === 'session' && frame.info.title === 'renamed beside', {
+      what: 'the third discovery pass to reach the Observe owner',
+    });
+    expect((await rosterRow(id))?.control?.drive?.state).toBe('driving');
+
+    // The Observe owner's own Drive state is whatever it was opened with (this fixture has no Codex
+    // CLI, so it cannot offer Drive); it is never the live owner's `driving`.
+    const sessions = observer.ofKind('session');
+    const own = sessions[0]!.info.control?.drive?.state;
+    expect(own).not.toBe('driving');
+    expect(sessions.map((frame) => ({
+      attachMode: frame.info.attachMode,
+      drive: frame.info.control?.drive?.state,
+      canMutate: frame.authority?.canMutate,
+    }))).toEqual(sessions.map(() => ({ attachMode: 'observe', drive: own, canMutate: false })));
+    const repeats = sessions.filter((frame, index) => index > 0 && JSON.stringify(frame) === JSON.stringify(sessions[index - 1]));
+    expect(repeats).toEqual([]);
+
+    // A mode-less attach joins the live owner, not the Observe tail, and its prompt reaches the daemon
+    // (once the live owner has closed the daemon's turn, so the prompt is not queued behind it).
+    await footerArrives(driver, 'turn-beside-2', false);
+    codex.thread(id, { status: 'idle', turns: [{ id: 'turn-beside-2', status: 'completed', startedAt: at(3), completedAt: at(4) }] });
+    await footerArrives(driver, 'turn-beside-2', true);
+    await settlesTo(driver, 'idle');
+    const mark = codex.mark;
+    const joined = await open(rollout);
+    expect(joined.ofKind('session').at(-1)?.authority).toEqual({ canMutate: true, prompt: 'full' });
+    expect((await joined.sendAndAwait({ kind: 'prompt', text: 'beside an observer' })).kind).toBe('ack');
+    const started = await eventually(() => codex.calls('turn/start', mark).length > 0 && codex.calls('turn/start', mark), {
+      what: 'the prompt to reach the daemon',
+    });
+    expect(started.map((call) => call.params?.threadId)).toEqual([id]);
+    for (const stream of [joined, driver, observer]) stream.close();
   });
 
   test('after a broker restart, sessions mid-turn come back Working (main and subagent) and a finished one stays Idle', async () => {
