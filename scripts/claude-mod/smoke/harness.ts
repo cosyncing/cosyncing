@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSy
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ClaudeModService, type ModHubConnection, type ModHubRow } from '../../../packages/typescript/broker/src/sessions/claude-mod-service.ts';
-import { ClaudeModConnection, claudeSessionId } from '../../../packages/typescript/adapters/claude/src/index.ts';
+import { ClaudeModConnection, claudePermissionDialogOpen, claudeSessionId } from '../../../packages/typescript/adapters/claude/src/index.ts';
 import type { AgentMessage, SessionInfo } from '../../../packages/typescript/protocol/src/index.ts';
 import type { ModAuditRow } from '../../../packages/typescript/broker/src/sessions/mod-audit.ts';
 import type { ModSocketEvent } from '../../../packages/typescript/broker/src/sessions/mod-socket-server.ts';
@@ -221,6 +221,13 @@ export async function startHarness(options: { transcriptPath?: string; root?: st
     hub: row,
     transcriptPath: (sessionId) => readTarget(sessionId),
     killSwitch: () => state.killSwitch,
+    // Claude's own word on its dialog, read from the live session's real store whatever the mode pin
+    // points the gate at: the pin is the harness's, and the dialog is the terminal's.
+    permissionDialogOpen: (sessionId) => {
+      const transcript = realTranscript?.(sessionId);
+      const pid = registers.findLast((registration) => registration.sessionId === sessionId)?.peerPid;
+      return transcript && pid !== undefined ? claudePermissionDialogOpen(transcript, pid, sessionId) : undefined;
+    },
     sessionTitle: () => 'smoke',
     onEvent: (event) => events.push({ ...event, at: Date.now() }),
     onRegister: (sessionId, info) => registers.push({ sessionId, peerPid: info.peerPid, cwd: info.cwd, claudeVersion: info.claudeVersion, surface: info.surface }),
@@ -256,10 +263,13 @@ export async function startHarness(options: { transcriptPath?: string; root?: st
         send: (command) => service.send(sessionId, command as never),
         steeringEnabled: () => true,
         turnRunning: () => service.currentTurn(sessionId) !== '',
-        // The runtime's two lookups: what the service noted about a card the transcript cannot
-        // say (open in the terminal, who closed it), and when the mod last said a turn ended.
+        // The runtime's lookups: what the service noted about a card the transcript cannot say
+        // (open in the terminal, who closed it), when the mod last said a turn ended, and the cards
+        // still open -- a question is offered before any seat exists, so a seat opening while
+        // Claude's picker waits is handed it the way the runtime hands it.
         cardNote: (requestId) => service.cardNote(sessionId, requestId),
         turnEndedAt: () => service.turnEndedAt(sessionId),
+        openCards: () => service.openCards(sessionId),
       });
       conn.subscribe((message) => {
         frames.push({ at: Date.now(), sessionId, message });

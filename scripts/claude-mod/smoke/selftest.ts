@@ -4,7 +4,8 @@
  * The real smoke spends the run's model turns, so everything that can be proven for free
  * is proven here: that the harness binds a socket the mod's own request shape can reach,
  * that the peer credential it reports is this process, that a hold is answered within the
- * poll budget, and that zero viewers releases rather than parks the call. A smoke that
+ * poll budget, that zero viewers releases rather than parks an approval and draws nothing for it,
+ * and that a question is offered with nobody watching and closed by Claude's own picker. A smoke that
  * fails for the wrong reason costs a turn to discover and a turn to re-run.
  *
  * The requests are the recorded bytes from the spike's capture of Claude's own fetch, so
@@ -34,7 +35,8 @@ import {
   oneQuestionCard,
   planApprovalOptions,
   questionClosedBy,
-  questionKeptInTerminal,
+  questionClosedUnanswered,
+  questionOpenOnBothSides,
   questionResolvedWith,
   questionSettledInTerminal,
   seatMode,
@@ -184,6 +186,54 @@ try {
     decision: 'ask',
   });
   check('no viewer releases at once', nobody.json.release?.why === 'viewer:none', JSON.stringify(nobody.json));
+  // Nobody could have seen a note about it, so none is drawn: one read-only card per call made while
+  // nobody watched is what a seat opening later used to find.
+  check('and draws no card for nobody to see', !harness.cards.some((entry) => entry.requestId.startsWith('self-2@')),
+    JSON.stringify(harness.cards.map((entry) => entry.requestId)));
+
+  // The mode is read before the viewers, so an auto-mode call nobody watches is released for its mode.
+  harness.setMode('auto');
+  const unwatchedAuto = await request(harness.socketPath, `/claude/mod/hold?sid=${sid}&wait=20000`, {
+    sessionId: sid,
+    requestId: 'self-2a',
+    tool: 'Bash',
+    decision: 'ask',
+  });
+  check('an auto-mode call nobody watches is released for its mode, not its viewers', unwatchedAuto.json.release?.why === 'mode:auto', JSON.stringify(unwatchedAuto.json));
+  check('and draws no card either', !harness.cards.some((entry) => entry.requestId.startsWith('self-2a@')));
+
+  // A question needs nobody watching. The mod races Claude's own picker against the hold, so a seat
+  // that opens while the picker waits can still answer it, and the picker settling first closes it.
+  const raced = 'toolu_selftest_race';
+  const offered = await request(harness.socketPath, holdUrl, {
+    sessionId: sid,
+    requestId: 'self-2q',
+    tool: 'AskUserQuestion',
+    toolUseId: raced,
+    decision: 'ask',
+    input: '',
+    questions: [{ question: 'Which shape?', header: 'Shape', multiSelect: false, options: [{ label: 'Circle' }, { label: 'Square' }] }],
+  });
+  check('an auto-mode question nobody watches is held for the app', offered.status === 200 && offered.json.held === true, JSON.stringify(offered.json));
+  check('its card is drawn under Claude\u2019s call id, and can be answered',
+    harness.cards.some((entry) => entry.requestId === raced && entry.kind === 'question' && entry.readOnly !== true),
+    JSON.stringify(harness.cards.filter((entry) => entry.kind === 'question').map((entry) => [entry.requestId, entry.readOnly ?? null])));
+  check('a seat opening now is handed it', harness.service.openCards(sid)?.cards.some((card) => card.requestId === raced) === true,
+    JSON.stringify(harness.service.openCards(sid)?.cards.map((card) => card.requestId) ?? null));
+  const pickerSettled = await request(harness.socketPath, `/claude/mod/event?sid=${sid}`, {
+    sessionId: sid,
+    kind: 'question.settled',
+    requestId: 'self-2q',
+    detail: { toolUseId: raced, answers: { 'Which shape?': 'Circle' } },
+  });
+  check('the picker settling it is taken over the event leg', pickerSettled.status === 200 && pickerSettled.json.ok === true, JSON.stringify(pickerSettled.json));
+  check('and closes the hold, so an app answer after it is refused',
+    !harness.service.isHeld(sid, raced) && harness.service.answerQuestion({ sessionId: sid, requestId: raced, answers: [['Square']] }) === false);
+  check('the audit names the terminal as the one who answered',
+    harness.audit().some((row) => row.requestId === 'self-2q' && row.answeredBy === 'band'),
+    JSON.stringify(harness.audit().filter((row) => row.requestId === 'self-2q')));
+  check('and a seat opening after it is not handed it', !harness.service.openCards(sid)?.cards.some((card) => card.requestId === raced));
+  harness.setMode('default');
 
   harness.setViewers(1);
   harness.setKillSwitch(true);
@@ -510,30 +560,47 @@ let raw = ''; s.on('data', (c) => { raw += c; if (raw.includes('\\r\\n\\r\\n')) 
   check('the next prompt after an approved plan names the mode again',
     transcriptMode([promptRow('plan'), planCall('toolu_p3'), planApproved('toolu_p3'), promptRow('acceptEdits')]) === 'acceptEdits');
 
-  // R5-A: band 1 on a held question keeps the card, read-only and open in the terminal.
-  const qid = 'toolu_band';
+  // The race: a question is open in Claude's picker and on an answerable card at once, and whichever
+  // answers first closes it. R5-A's band 1 restated the card read-only; that shape now fails.
+  const qid = 'toolu_race';
   const asked = frame(1, { type: 'question-request', requestId: qid });
   const restated = frame(2, { type: 'question-request', requestId: qid, readOnly: true, answerInTerminal: true });
   check('the Hub replay counts a card with no blocking field as blocking', seatPendingInput([asked]).needsInput);
   check('and a blocking:false card as not', !seatPendingInput([frame(1, { type: 'question-request', requestId: qid, blocking: false })]).needsInput);
-  check('a card restated read-only and open in the terminal, still pending, keeps the seat at Needs input',
-    questionKeptInTerminal([asked, restated], qid).ok, questionKeptInTerminal([asked, restated], qid).detail);
-  check('a card closed at band 1 with nothing picked fails (R5-A)',
-    !questionKeptInTerminal([asked, frame(2, { type: 'question-resolved', requestId: qid })], qid).ok);
-  check('a restatement drawn blocking:false does not keep the seat at Needs input, which fails',
-    !questionKeptInTerminal([asked, frame(2, { type: 'question-request', requestId: qid, readOnly: true, answerInTerminal: true, blocking: false })], qid).ok);
-  check('a card never restated is still answerable in the app, which fails', !questionKeptInTerminal([asked], qid).ok);
-  check('a second card under another id fails', !questionKeptInTerminal([asked, restated, frame(3, { type: 'question-request', requestId: 'cm-2@ab' })], qid).ok);
-  const picked = (at: number, answers?: unknown) => frame(at, { type: 'question-resolved', requestId: qid, ...(answers !== undefined ? { answers } : {}) });
-  check('one resolution carrying the pick closes the card and the seat leaves Needs input',
-    questionSettledInTerminal([asked, restated, picked(4, [['Circle']])], qid, [['Circle']]).ok,
-    questionSettledInTerminal([asked, restated, picked(4, [['Circle']])], qid, [['Circle']]).detail);
-  check('two resolutions for the one card fail, even when both carry the pick',
-    !questionSettledInTerminal([asked, restated, picked(4, [['Circle']]), picked(5, [['Circle']])], qid, [['Circle']]).ok);
-  check('a resolution with no pick fails', !questionSettledInTerminal([asked, restated, picked(4)], qid, [['Circle']]).ok);
-  check('a resolution with another pick fails', !questionSettledInTerminal([asked, restated, picked(4, [['Square']])], qid, [['Circle']]).ok);
+  check('an answerable card, pending while the picker waits, is open on both sides',
+    questionOpenOnBothSides([asked], qid).ok, questionOpenOnBothSides([asked], qid).detail);
+  check('a card restated read-only while the picker waits fails: the app could not answer it', !questionOpenOnBothSides([asked, restated], qid).ok);
+  check('a card closed while the picker waits fails', !questionOpenOnBothSides([asked, frame(2, { type: 'question-resolved', requestId: qid })], qid).ok);
+  check('a card drawn blocking:false does not keep the seat at Needs input, which fails',
+    !questionOpenOnBothSides([frame(1, { type: 'question-request', requestId: qid, blocking: false })], qid).ok);
+  check('a second card under another id fails', !questionOpenOnBothSides([asked, frame(3, { type: 'question-request', requestId: 'cm-2@ab' })], qid).ok);
+  const picked = (at: number, extra: Record<string, unknown>) => frame(at, { type: 'question-resolved', requestId: qid, ...extra } as SeatFrame['message']);
+  const byTerminal = picked(4, { decidedBy: 'band', answers: [['Circle']] });
+  check('the pick, said to be the terminal\u2019s, closes the card and the seat leaves Needs input',
+    questionSettledInTerminal([asked, byTerminal], qid, [['Circle']]).ok,
+    questionSettledInTerminal([asked, byTerminal], qid, [['Circle']]).detail);
+  check('the transcript\u2019s copy closing it too, before or after, is still the terminal\u2019s settle',
+    questionSettledInTerminal([asked, picked(3, { answers: [['Circle']] }), byTerminal], qid, [['Circle']]).ok
+      && questionSettledInTerminal([asked, byTerminal, picked(5, {})], qid, [['Circle']]).ok);
+  check('closes that never say the terminal answered it fail: the app reads another client',
+    !questionSettledInTerminal([asked, picked(4, { answers: [['Circle']] })], qid, [['Circle']]).ok);
+  check('a close saying the app answered it fails',
+    !questionSettledInTerminal([asked, byTerminal, picked(5, { decidedBy: 'app', answers: [['Circle']] })], qid, [['Circle']]).ok);
+  check('a close saying it closed unanswered fails', !questionSettledInTerminal([asked, byTerminal, picked(5, { releaseReason: 'band' })], qid, [['Circle']]).ok);
+  check('a resolution with no pick fails', !questionSettledInTerminal([asked, picked(4, { decidedBy: 'band' })], qid, [['Circle']]).ok);
+  check('a resolution with another pick fails', !questionSettledInTerminal([asked, picked(4, { decidedBy: 'band', answers: [['Square']] })], qid, [['Circle']]).ok);
+  check('a card restated read-only before the pick fails', !questionSettledInTerminal([asked, restated, byTerminal], qid, [['Circle']]).ok);
   check('another card still waiting keeps Needs input, which fails',
-    !questionSettledInTerminal([asked, restated, frame(3, { type: 'permission-request', requestId: 'cm-9@ff' }), picked(4, [['Circle']])], qid, [['Circle']]).ok);
+    !questionSettledInTerminal([asked, frame(3, { type: 'permission-request', requestId: 'cm-9@ff' }), byTerminal], qid, [['Circle']]).ok);
+  // Escape in the picker: closed in the terminal, with nothing picked.
+  const escaped = picked(4, { releaseReason: 'band' });
+  check('a close said to be the terminal\u2019s, with no answer, is the picker closed unanswered',
+    questionClosedUnanswered([asked, escaped], qid).ok, questionClosedUnanswered([asked, escaped], qid).detail);
+  check('beside a bare transcript copy too', questionClosedUnanswered([asked, picked(3, {}), escaped], qid).ok);
+  check('a bare close alone fails: the app reads another client', !questionClosedUnanswered([asked, picked(4, {})], qid).ok);
+  check('a close carrying an answer fails', !questionClosedUnanswered([asked, escaped, picked(5, { answers: [['Circle']] })], qid).ok);
+  check('a close saying somebody answered it fails', !questionClosedUnanswered([asked, picked(4, { decidedBy: 'band', releaseReason: 'band' })], qid).ok);
+  check('no close at all fails', !questionClosedUnanswered([asked], qid).ok);
 
   // P-8(a): a question the app answered closes saying so, on every copy.
   const closedQ = (extra: Record<string, unknown>) => frame(7, { type: 'question-resolved', requestId: 'toolu_q', ...extra } as SeatFrame['message']);

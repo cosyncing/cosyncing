@@ -30,6 +30,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- A question Claude asks in a true-synced terminal reaches the app at once and
+  stays answerable from either side until one answers, also when no device was
+  watching when Claude asked and in a tab opened afterwards. In auto mode the
+  app no longer fills with a read-only card for every tool call nobody was
+  watching, or for every call after a plan approval: when the mode cannot be
+  read, a note appears only once Claude's own permission dialog opens.
+
 - Long Claude sessions remain pageable beyond the former 32 MiB / 50,000-row
   history cache limit. A persisted disk index reuses unchanged history and reads
   appended records incrementally; large text/tool outputs retain their complete

@@ -1309,9 +1309,9 @@ export class ClaudeAdapter implements AgentBackend {
    */
   private restateModAttachments(readings?: ReadonlyMap<string, ClaudeModStatus | undefined>): void {
     if (this.modSessions.size === 0) return;
-    for (const [uuid, conn] of this.modSessions) {
+    for (const [uuid, conns] of this.modSessions) {
       const status = readings?.has(uuid) ? readings.get(uuid) : this.modStatus(uuid);
-      conn.noteModLive(status?.live === true);
+      for (const conn of conns) conn.noteModLive(status?.live === true);
     }
   }
 
@@ -1348,7 +1348,8 @@ export class ClaudeAdapter implements AgentBackend {
    *  is sufficient: a broker restart drops every live connection with it. */
   private readonly drivenSessions = new Map<string, ClaudeResumeConnection>();
   /**
-   * Live mod attaches, by Claude's own session id.
+   * Live mod attaches, by Claude's own session id. A session can have more than one: the tab the
+   * app opened as a co-writer and a plain tab of the same session are separate seats.
    *
    * The drive registry above exists so every client's row shows a drive; this exists because a
    * true-sync attach has the opposite failure mode. A terminal that closes, or whose poll chain
@@ -1358,7 +1359,7 @@ export class ClaudeAdapter implements AgentBackend {
    * the registration for every row it publishes, so it is the tick; this map is what lets that
    * reading reach the connection that is still attached.
    */
-  private readonly modSessions = new Map<string, ClaudeModConnection>();
+  private readonly modSessions = new Map<string, Set<ClaudeModConnection>>();
 
   async isAvailable(): Promise<boolean> {
     return claudeStores().some((s) => existsSync(s.projectsRoot)) || resolveBin('claude') !== null;
@@ -1850,44 +1851,15 @@ export class ClaudeAdapter implements AgentBackend {
       // this one has to say what it actually is, or the row the client gets reads observe while
       // the connection behind it writes, and the app gate closes on the frame it was handed.
       info.attachMode = 'live';
-      const liveRow = (await liveStatusByStore(store)).get(uuid);
-      info.status = await claudeSessionStatus(path, liveRow?.status, Date.now());
-      // A mod turn can start before Claude flushes its prompt or updates agents --json.
-      // Pending cards keep their needs-input precedence in the Hub.
-      if (this.options.modBridge?.turnRunning?.(uuid) && info.status !== 'needs-input') {
-        info.status = 'working';
-      }
-      const modControl = () => this.modSyncedControl();
-      const conn = new ClaudeModConnection({
-        info,
-        transcriptPath: path,
-        nativeSessionId: uuid,
-        send: (command) => this.modSend(uuid, command),
-        steeringEnabled: () => this.modSteeringEnabled(uuid),
-        ...(this.options.modBridge?.turnRunning
-          ? { turnRunning: () => this.options.modBridge!.turnRunning!(uuid) }
-          : {}),
-        ...(this.options.modBridge?.cardNote
-          ? { cardNote: (requestId: string) => this.options.modBridge!.cardNote!(uuid, requestId) }
-          : {}),
-        ...(this.options.modBridge?.turnEndedAt
-          ? { turnEndedAt: () => this.options.modBridge!.turnEndedAt!(uuid) }
-          : {}),
-        // Both control shapes are the adapter's readings, handed over as closures so the row that
-        // comes back after a mod returns is the same reading that made the attach legitimate.
-        syncedControl: modControl,
-        lostControl: () => claudeModLostControl({
-          reason: 'The cosyncing mod in this session\u2019s terminal stopped reporting, so the '
-            + 'transcript is mirrored read-only. Open Claude in that terminal to resume the sync, '
-            + 'or take over to drive it from here.',
-          resumeCommand: claudeResumeTerminalCommand(uuid, cwd),
-        }),
-        onClosed: () => {
-          if (this.modSessions.get(uuid) === conn) this.modSessions.delete(uuid);
-        },
-      });
-      this.modSessions.set(uuid, conn);
-      return conn;
+      return this.modSeat({ info, path, uuid, cwd, store, seat: 'live' });
+    }
+    // A plain attach -- the app asked for no mode -- of a session whose mod is live is a seat in the
+    // sync too. It used to be a read-only Observe connection that nevertheless carried the synced
+    // control: the app drew a composer whose prompts the connection refused, and no card the mod
+    // raised could reach it, so a question asked while the only tab open was this one was never
+    // answerable from the app at all. Its attach mode stays `observe`: see the connection's `seat`.
+    if (mode === undefined && !subagent && modNow()?.live) {
+      return this.modSeat({ info, path, uuid, cwd, store, seat: 'plain' });
     }
     if (mode === 'resume') {
       // A live mod registration IS an ownership fact: the terminal is writing this session and is
@@ -1961,6 +1933,61 @@ export class ClaudeAdapter implements AgentBackend {
    * and when the last one ended. Without it, an attach made after a Stop from the app replayed the
    * stopped turn as running. A session no mod registered reads no end, and its replay is unchanged.
    */
+  /**
+   * A seat in a mod-synced session: the app's side of a session whose terminal is the writer. `live`
+   * is a tab opened as a co-writer and `plain` a tab opened without asking for a mode; see
+   * {@link ClaudeModConnection}'s `seat` for what tells them apart.
+   */
+  private async modSeat(opts: {
+    info: SessionInfo;
+    path: string;
+    uuid: string;
+    cwd: string | undefined;
+    store: ClaudeStore;
+    seat: 'live' | 'plain';
+  }): Promise<ClaudeModConnection> {
+    const { info, path, uuid, cwd, store, seat } = opts;
+    const liveRow = (await liveStatusByStore(store)).get(uuid);
+    info.status = await claudeSessionStatus(path, liveRow?.status, Date.now());
+    // A mod turn can start before Claude flushes its prompt or updates agents --json.
+    // Pending cards keep their needs-input precedence in the Hub.
+    if (this.options.modBridge?.turnRunning?.(uuid) && info.status !== 'needs-input') {
+      info.status = 'working';
+    }
+    const bridge = this.options.modBridge;
+    const modControl = () => this.modSyncedControl();
+    const conn = new ClaudeModConnection({
+      info,
+      transcriptPath: path,
+      nativeSessionId: uuid,
+      seat,
+      send: (command) => this.modSend(uuid, command),
+      steeringEnabled: () => this.modSteeringEnabled(uuid),
+      ...(bridge?.turnRunning ? { turnRunning: () => bridge.turnRunning!(uuid) } : {}),
+      ...(bridge?.cardNote ? { cardNote: (requestId: string) => bridge.cardNote!(uuid, requestId) } : {}),
+      ...(bridge?.turnEndedAt ? { turnEndedAt: () => bridge.turnEndedAt!(uuid) } : {}),
+      ...(bridge?.openCards ? { openCards: () => bridge.openCards!(uuid) } : {}),
+      // Both control shapes are the adapter's readings, handed over as closures so the row that
+      // comes back after a mod returns is the same reading that made the attach legitimate.
+      syncedControl: modControl,
+      lostControl: () => claudeModLostControl({
+        reason: 'The cosyncing mod in this session\u2019s terminal stopped reporting, so the '
+          + 'transcript is mirrored read-only. Open Claude in that terminal to resume the sync, '
+          + 'or take over to drive it from here.',
+        resumeCommand: claudeResumeTerminalCommand(uuid, cwd),
+      }),
+      onClosed: () => {
+        const conns = this.modSessions.get(uuid);
+        conns?.delete(conn);
+        if (conns && conns.size === 0) this.modSessions.delete(uuid);
+      },
+    });
+    const conns = this.modSessions.get(uuid) ?? new Set<ClaudeModConnection>();
+    conns.add(conn);
+    this.modSessions.set(uuid, conns);
+    return conn;
+  }
+
   private observeModTurn(uuid: string): { modTurn?: { turnRunning: () => boolean; turnEndedAt: () => number | undefined } } {
     const bridge = this.options.modBridge;
     if (!bridge?.turnRunning || !bridge.turnEndedAt) return {};
@@ -9051,6 +9078,39 @@ function computeLatestPermissionMode(path: string): string | undefined {
     if (win >= st.size) break; // whole file already read; a bigger window cannot help
   }
   return undefined;
+}
+
+/** The most a Claude process status record is read up to: one is a few hundred bytes. */
+const CLAUDE_PROCESS_RECORD_MAX_BYTES = 64 * 1024;
+
+/**
+ * Whether Claude's own permission dialog is open in the terminal running this session, as that
+ * process says in its status record: `<configDir>/sessions/<pid>.json`, the record behind
+ * `claude agents --json`, which reads `waitingFor: "permission prompt"` while the dialog waits on a
+ * person. Measured on 2.1.299: written about a second after the dialog opens, and never while auto
+ * mode's classifier settles an `ask` by itself. So it tells the two apart where the transcript cannot:
+ * after a plan approval, which records no mode until the turn ends.
+ *
+ * The config dir is the one the session's own transcript is under, so a wrapper store is read where
+ * its Claude writes. `undefined` when there is no record to read, or it is not this session's
+ * process -- a record left by a pid since reused names another session -- so "could not tell" is
+ * never read as "no dialog".
+ */
+export function claudePermissionDialogOpen(transcriptPath: string, pid: number, sessionId: string): boolean | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  const projects = dirname(dirname(transcriptPath));
+  if (basename(projects) !== 'projects') return undefined;
+  const path = join(dirname(projects), 'sessions', `${pid}.json`);
+  const st = statSafe(path);
+  if (!st || !st.isFile() || st.size > CLAUDE_PROCESS_RECORD_MAX_BYTES) return undefined;
+  let record: { pid?: unknown; sessionId?: unknown; waitingFor?: unknown };
+  try {
+    record = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (!record || typeof record !== 'object' || record.pid !== pid || record.sessionId !== sessionId) return undefined;
+  return typeof record.waitingFor === 'string' && /\bpermission\b/i.test(record.waitingFor);
 }
 
 // ── filesystem primitives ─────────────────────────────────────────────────────

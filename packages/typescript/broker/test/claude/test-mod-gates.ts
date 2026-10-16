@@ -6,7 +6,8 @@
  * time fell from ~300 ms to ~25 ms and the classifier's log lines vanished), while the same engine
  * refuses a user's own dangerous allow rule for exactly that privilege. The design's answer is not
  * to argue with that but to never be in the room: hold only in `default` and `acceptEdits`, and
- * treat every unknown as "do not hold".
+ * treat every unknown as "do not hold". A question is the exception: the mod races Claude's own
+ * picker against the hold, so it is offered in every mode but `dontAsk`, watched or not.
  *
  * The registry half is checked too, because the gate is only half the rule. A headless `-p` run
  * and a hosted (non-terminal) surface register happily and must never hold, since a held `ask`
@@ -16,7 +17,7 @@
  */
 export {};
 import { decideModHold } from '../../src/sessions/mod-holds.ts';
-import { HOLDABLE_PERMISSION_MODES, HOLDABLE_QUESTION_MODES } from '../../src/sessions/mod-protocol.ts';
+import { HOLDABLE_PERMISSION_MODES, QUESTION_REFUSED_MODES, UNCARDED_RELEASE_REASONS } from '../../src/sessions/mod-protocol.ts';
 import { ModRegistry } from '../../src/sessions/mod-registry.ts';
 import type { ModRegisterMessage } from '../../src/sessions/mod-protocol.ts';
 
@@ -29,26 +30,31 @@ function check(name: string, ok: boolean, detail = ''): void {
 const HOLDABLE = ['default', 'acceptEdits', 'plan'];
 /** Every mode string the engine can put in a `permission-mode` row, plus the never-hold list. */
 const NON_HOLDABLE = ['auto', 'dontAsk', 'bypassPermissions', 'unknown', '', 'something-new-in-a-future-build'];
-/** A question is held wherever Claude opens its picker for a person: auto mode included. */
-const QUESTION_HOLDABLE = ['default', 'acceptEdits', 'plan', 'auto'];
+/**
+ * A question races Claude's own picker, so it is offered in every mode but the one that refuses it,
+ * an unreadable one included: the picker is open in the terminal whatever the app does.
+ */
+const QUESTION_OFFERED = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', undefined];
 
 try {
   check('PM1: the holdable set is default, acceptEdits and plan', JSON.stringify(HOLDABLE_PERMISSION_MODES) === JSON.stringify(HOLDABLE), JSON.stringify(HOLDABLE_PERMISSION_MODES));
   check('PM1: a plan-mode ask is held like a default-mode one', decideModHold({ mode: 'plan', viewers: 1, killSwitch: false }).hold === true);
   // AM1: auto mode answers tool calls with its classifier, which runs after tool.check; a person
   // answers its questions. dontAsk refuses both, measured on 2.1.292.
-  check('AM1: the question set adds auto mode and nothing else', JSON.stringify(HOLDABLE_QUESTION_MODES) === JSON.stringify(QUESTION_HOLDABLE), JSON.stringify(HOLDABLE_QUESTION_MODES));
-  for (const mode of QUESTION_HOLDABLE) {
-    check(`AM1: a question is held in ${mode}`, decideModHold({ mode, viewers: 1, killSwitch: false }, 'question').hold === true);
+  check('AM1: dontAsk is the only mode a question is refused in', JSON.stringify(QUESTION_REFUSED_MODES) === JSON.stringify(['dontAsk']), JSON.stringify(QUESTION_REFUSED_MODES));
+  for (const mode of QUESTION_OFFERED) {
+    check(`AM1: a question is held in ${String(mode)}`, decideModHold({ mode, viewers: 1, killSwitch: false }, 'question').hold === true);
   }
   check('AM1: an auto-mode permission is still not held', decideModHold({ mode: 'auto', viewers: 1, killSwitch: false }, 'permission').hold === false);
-  for (const [mode, why] of [['dontAsk', 'mode:dontAsk'], ['bypassPermissions', 'mode:bypassPermissions'], [undefined, 'mode:unknown']] as const) {
-    const decided = decideModHold({ mode, viewers: 1, killSwitch: false }, 'question');
-    check(`AM1: a question in ${String(mode)} is left to the terminal as ${why}`, !decided.hold && decided.why === why, JSON.stringify(decided));
+  const refused = decideModHold({ mode: 'dontAsk', viewers: 1, killSwitch: false }, 'question');
+  check('AM1: a question in dontAsk is left to the terminal as mode:dontAsk', !refused.hold && refused.why === 'mode:dontAsk', JSON.stringify(refused));
+  // QR1: the mod races the picker against the hold, so a question needs no viewer: one that opens
+  // the session while the picker is still open answers it. Only the switch turns it off.
+  for (const mode of QUESTION_OFFERED) {
+    check(`QR1: a question in ${String(mode)} is held with nobody watching`, decideModHold({ mode, viewers: 0, killSwitch: false }, 'question').hold === true);
   }
-  check('AM1: a question still needs a viewer and the switch on',
-    decideModHold({ mode: 'auto', viewers: 0, killSwitch: false }, 'question').hold === false
-      && decideModHold({ mode: 'auto', viewers: 1, killSwitch: true }, 'question').hold === false);
+  const switchedOff = decideModHold({ mode: 'auto', viewers: 1, killSwitch: true }, 'question');
+  check('QR1: a question still needs the switch on', !switchedOff.hold && switchedOff.why === 'killSwitch', JSON.stringify(switchedOff));
 
   // The two modes that may hold, and only with a viewer and the kill switch off.
   for (const mode of HOLDABLE) {
@@ -93,8 +99,18 @@ try {
   // Reason precedence, because the read-only card in the app names one reason and one only.
   const killFirst = decideModHold({ mode: 'auto', viewers: 0, killSwitch: true });
   check('the kill switch outranks every other reason', !killFirst.hold && killFirst.why === 'killSwitch', JSON.stringify(killFirst));
-  const viewerBeforeMode = decideModHold({ mode: 'auto', viewers: 0, killSwitch: false });
-  check('no viewer outranks the mode reason', !viewerBeforeMode.hold && viewerBeforeMode.why === 'viewer:none', JSON.stringify(viewerBeforeMode));
+  // CF1: the mode outranks the viewers. Read the other way round, every auto-mode ask nobody was
+  // watching was released as viewer:none, which drew a card for nearly every tool call of a turn.
+  const modeBeforeViewer = decideModHold({ mode: 'auto', viewers: 0, killSwitch: false });
+  check('CF1 the mode reason outranks no viewer', !modeBeforeViewer.hold && modeBeforeViewer.why === 'mode:auto', JSON.stringify(modeBeforeViewer));
+  const unknownBeforeViewer = decideModHold({ mode: undefined, viewers: 0, killSwitch: false });
+  check('CF1 an unreadable mode outranks no viewer too', !unknownBeforeViewer.hold && unknownBeforeViewer.why === 'mode:unknown', JSON.stringify(unknownBeforeViewer));
+  const nobody = decideModHold({ mode: 'default', viewers: 0, killSwitch: false });
+  check('CF1 a holdable mode with nobody watching releases as viewer:none', !nobody.hold && nobody.why === 'viewer:none', JSON.stringify(nobody));
+  check('CF1 auto and dontAsk releases draw no card', UNCARDED_RELEASE_REASONS.includes('mode:auto') && UNCARDED_RELEASE_REASONS.includes('mode:dontAsk'));
+  check('CF1 nor does a release nobody was watching', UNCARDED_RELEASE_REASONS.includes('viewer:none'));
+  check('CF1 a mode the app should name still draws its card',
+    !UNCARDED_RELEASE_REASONS.includes('mode:bypassPermissions') && !UNCARDED_RELEASE_REASONS.includes('mode:unknown') && !UNCARDED_RELEASE_REASONS.includes('killSwitch'));
   check('zero viewers is fail-open, not an error', decideModHold({ mode: 'default', viewers: 0, killSwitch: false }).hold === false);
   check('a negative viewer count is treated as nobody watching', decideModHold({ mode: 'default', viewers: -1, killSwitch: false }).hold === false);
 

@@ -20,6 +20,10 @@
  * - A hold's card is not this connection's to answer. The broker's hold store owns the verdict
  *   and the socket reply carries it, so `respondPermission` here only closes a card the app
  *   already decided. It never invents a verdict.
+ *
+ * Two kinds of seat use this class: the tab the app opened as a live co-writer, and a plain tab of
+ * the same session (see `seat`). Both draw every card the mod raises, including the ones raised
+ * before they opened, so a question is answerable from whichever tab happens to be open.
  */
 
 import type {
@@ -75,12 +79,6 @@ export interface ModConnectionRequest {
    * it needs. The card shows it read-only and says where to answer it.
    */
   answerInTerminal?: boolean;
-  /**
-   * Replace the card already drawn under this id, rather than keep it. Honoured only on a read-only
-   * card: a restatement takes a card's controls away when its call moved to the terminal, and
-   * nothing may hand them back.
-   */
-  restate?: boolean;
 }
 
 /** Claude's structured question, as the mod relays it. */
@@ -145,6 +143,21 @@ export interface ClaudeModConnectionOptions {
   /** The control of a live sync, as a closure so a re-promotion publishes the adapter's own
    *  reading rather than a copy this file kept. */
   syncedControl?: () => SessionControlState;
+  /**
+   * Which seat this is. `live` is a tab the app opened as a co-writer, and the only seat a
+   * permission is held for. `plain` is a tab opened without asking for one -- a resident or
+   * background view, or a foreground tab whose roster row did not say live yet -- of a session whose
+   * mod is live. It draws and answers every card and sends prompts like a live seat, and keeps
+   * `observe` as its attach mode, so the Hub keeps it apart from a live seat and never joins one to
+   * it. Default `live`.
+   */
+  seat?: 'live' | 'plain';
+  /**
+   * The cards the broker is holding open for this session right now, and the registration they
+   * belong to. A question is offered before any seat exists to draw it, so a seat that opens later
+   * has to be handed the ones still open.
+   */
+  openCards?: () => { generation: number; cards: ModConnectionRequest[] } | undefined;
 }
 
 /** The turn-stop action, spelled the way the app looks it up (`stop` preferred over `abort`). */
@@ -163,8 +176,8 @@ export class ClaudeModConnection implements SessionConnection {
   /** Request ids already answered here, so a late replay does not re-open a closed card. */
   private readonly resolved = new Set<string>();
   /**
-   * The transcript's resolution of each question it closed, as it went out, so a cancel from the
-   * band that reaches the broker after it can still say where the question was answered.
+   * The transcript's resolution of each question it closed, as it went out, so the broker's word that
+   * Claude's own picker settled it can still say where the question was answered when it lands after.
    */
   private readonly transcriptResolutions = new Map<string, Extract<AgentMessage, { type: 'question-resolved' }>>();
   /**
@@ -411,9 +424,13 @@ export class ClaudeModConnection implements SessionConnection {
     answers: string[][],
     info?: { decidedBy?: PermissionDecidedBy; releaseReason?: PermissionReleaseReason },
   ): Promise<void> {
-    if (!this.stillOpen(requestId)) return;
-    // Answered in the terminal, and only there: see `respondPermission`.
-    if (this.isReadOnly(requestId)) return;
+    if (!this.stillOpen(requestId)) {
+      this.correctLateTerminalAnswer(requestId, info);
+      return;
+    }
+    // Answered in the terminal, and only there: see `respondPermission`. The broker saying that the
+    // terminal did answer it is the one answer a read-only card takes.
+    if (this.isReadOnly(requestId) && info?.decidedBy !== 'band') return;
     this.pending.delete(requestId);
     this.markResolved(requestId);
     // The rows the hold was answered with, read back from the map Claude was given. Every seat,
@@ -431,7 +448,10 @@ export class ClaudeModConnection implements SessionConnection {
     requestId: string,
     info?: { decidedBy?: PermissionDecidedBy; releaseReason?: PermissionReleaseReason },
   ): Promise<void> {
-    if (!this.stillOpen(requestId)) return;
+    if (!this.stillOpen(requestId)) {
+      this.correctLateTerminalAnswer(requestId, info);
+      return;
+    }
     this.pending.delete(requestId);
     this.markResolved(requestId);
     this.fan({
@@ -469,17 +489,8 @@ export class ClaudeModConnection implements SessionConnection {
    * is already closed is a lie the user can act on.
    */
   ingestRequest(request: ModConnectionRequest): void {
-    if (this.resolved.has(request.requestId)) {
-      if (request.kind === 'question' && request.restate === true && request.answerInTerminal === true) {
-        this.correctLateTerminalAnswer(request.requestId);
-      }
-      return;
-    }
-    // A held card restated read-only replaces itself, in place and still open: the Hub replaces a
-    // pending entry by its id, so every seat, and every socket that joins later, is drawn the card
-    // as it is now. It is not answered, so it is not marked resolved.
-    const restating = request.restate === true && request.readOnly === true;
-    if (this.pending.has(request.requestId) && !restating) return;
+    if (this.resolved.has(request.requestId)) return;
+    if (this.pending.has(request.requestId)) return;
     if (request.kind === 'question') {
       this.remember(request.requestId, {
         type: 'question-request',
@@ -538,7 +549,27 @@ export class ClaudeModConnection implements SessionConnection {
    * ceiling as the pending set, and emptied by whatever answers the card.
    */
   getPending(): AgentMessage[] {
+    this.adoptOpenCards();
     return [...this.pending.values()];
+  }
+
+  /**
+   * Take the cards the broker is holding open that this seat has not drawn yet.
+   *
+   * A question is offered whether or not a seat is open, and Claude's picker waits in the terminal
+   * meanwhile, so the seat that answers it is often one that opened after it was asked. Each one is
+   * drawn the way a card arriving now would be, so the Hub sees the session waiting on it.
+   */
+  private adoptOpenCards(): void {
+    let open: { generation: number; cards: ModConnectionRequest[] } | undefined;
+    try {
+      open = this.options.openCards?.();
+    } catch {
+      return;
+    }
+    if (!open) return;
+    this.noteModGeneration(open.generation);
+    for (const card of open.cards) this.ingestRequest(card);
   }
 
   async runCommand(name: string): Promise<CommandResult | void> {
@@ -612,7 +643,8 @@ export class ClaudeModConnection implements SessionConnection {
     if (!live && !this.options.lostControl) return;
     if (live && !this.options.syncedControl) return;
     this.modGone = !live;
-    this.info.attachMode = live ? 'live' : 'observe';
+    // A plain seat stays `observe` either way: see `seat`.
+    this.info.attachMode = live && this.options.seat !== 'plain' ? 'live' : 'observe';
     this.info.control = live ? this.options.syncedControl!() : this.options.lostControl!();
     // The hub applies this patch to `conn.info` and broadcasts it, which is what reaches every
     // seat holding the row -- and there may be several -- without waiting for a roster poll.
@@ -632,6 +664,11 @@ export class ClaudeModConnection implements SessionConnection {
     return this.modGone;
   }
 
+  /** Whether a permission is held for this seat: only for one the app opened as a co-writer. */
+  get takesHolds(): boolean {
+    return this.options.seat !== 'plain';
+  }
+
   /**
    * Note which registration the session's holds now belong to.
    *
@@ -647,15 +684,23 @@ export class ClaudeModConnection implements SessionConnection {
   }
 
   /**
-   * The band handed this question to Claude's picker, but the picker's answer reached the transcript
-   * first, so the card already closed with nothing to say who answered it: "settled in your terminal
-   * or another app", while a reload said "your terminal". The broker's own word arrives now, and the
-   * card is closed again under the same id with it, keeping the answer it closed with.
+   * Claude's own picker settled this question, but its answer reached the transcript before the mod's
+   * word reached the broker, so the card already closed with nothing to say who answered it: "settled
+   * in your terminal or another app", while a reload said "your terminal". The broker's word arrives
+   * now, and the card is closed again under the same id with it, keeping the answer it closed with.
+   * Only the terminal's own word corrects a card: anything else that arrives late is a slower seat.
    */
-  private correctLateTerminalAnswer(requestId: string): void {
+  private correctLateTerminalAnswer(
+    requestId: string,
+    info: { decidedBy?: PermissionDecidedBy; releaseReason?: PermissionReleaseReason } | undefined,
+  ): void {
+    const fromTerminal = info?.decidedBy === 'band' || (!info?.decidedBy && info?.releaseReason === 'band');
+    if (!fromTerminal) return;
     const settled = this.transcriptResolutions.get(requestId);
     if (!settled || settled.decidedBy || settled.releaseReason) return;
-    const corrected: Extract<AgentMessage, { type: 'question-resolved' }> = { ...settled, releaseReason: 'band' };
+    const corrected: Extract<AgentMessage, { type: 'question-resolved' }> = info?.decidedBy === 'band' && settled.answers?.length
+      ? { ...settled, decidedBy: 'band' }
+      : { ...settled, releaseReason: 'band' };
     this.transcriptResolutions.set(requestId, corrected);
     this.fan(corrected);
   }

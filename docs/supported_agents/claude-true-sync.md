@@ -17,8 +17,10 @@ the general Claude Code setup steps, see [Claude Code](claude-code.md).
   integration at all, and the session keeps the Observe and Take over behaviour.
 - A cosyncing broker on Linux, including WSL, or macOS. A broker on native
   Windows does not offer true sync; those sessions keep Observe and Take over.
-- A cosyncing client connected to that broker. Prompts and approvals are only
-  offered to a device that is actually watching the session.
+- A cosyncing client connected to that broker. Approvals are only offered to a
+  device that is actually watching the session. A question Claude asks reaches
+  any device that has the session open, including one that opens it after
+  Claude asked.
 - An interactive session you started yourself in a terminal. A `claude -p` run
   is mirrored read-only, and sessions cosyncing creates are driven by cosyncing
   already and do not use this path.
@@ -89,8 +91,21 @@ asks:
 - at least one cosyncing client is viewing that session;
 - cosyncing's own true-sync switch is on.
 
-A question Claude asks you with its picker reaches the app under the same rules,
-and in auto mode too, because auto mode decides tool calls, not your answers.
+cosyncing reads the mode before it looks for a viewer, so in a mode it leaves
+alone, such as auto mode, an approval stays with Claude however many devices
+are watching. An approval nobody is watching stays in your terminal and shows
+nothing in the app.
+
+A question Claude asks you with its picker follows a simpler rule, because
+auto mode and the other permission modes decide tool calls, not your answers.
+It reaches the app whenever cosyncing's own switch is on and the session is not
+in `dontAsk` mode, whether or not a device is watching when Claude asks. Claude's
+picker opens in your terminal at the same moment, and both stay open together:
+answer on either side, and the first answer wins. An answer from the app closes
+the picker in your terminal. An answer in the terminal, or a cancel there,
+closes the app's card, which then says the question was answered or closed in
+your terminal. A device that opens the session while the question is still open
+gets the card too.
 
 The app answers each kind of question the picker asks: one choice, which also
 takes your own words the way the picker's "Other" does; several choices; typed
@@ -102,11 +117,13 @@ answer the way the picker would, such as a number with no range or a label that
 begins or ends with a space, is shown read-only and answered in your terminal.
 A preview Claude draws beside a choice is shown only in the terminal.
 
-Otherwise the broker answers the request immediately with a reason and Claude's
-own dialog stays on your screen. The app shows a short read-only note with that
-reason instead of buttons, so you can tell the difference between "nobody
-answered this" and "this was never offered". The note names the mode it read,
-because "not held" is not information and "you were bypassing permissions" is.
+An approval that is not held is answered by the broker immediately with a reason,
+and Claude's own dialog stays on your screen. A device watching the session shows
+a short read-only note with that reason instead of buttons, so you can tell the
+difference between "nobody answered this" and "this was never offered". The note
+names the mode it read, because "not held" is not information and "you were
+bypassing permissions" is. Auto and `dontAsk` modes, where Claude decides without
+asking, show no note.
 
 An approval card shows what the call would do, such as the command or the file
 path, shortened, and opens to the whole call under **Show details**: every
@@ -134,7 +151,10 @@ The other modes are left alone:
 - in `bypassPermissions` mode, a prompt Claude still shows stays in your
   terminal, with a read-only note in the app;
 - a mode cosyncing cannot read, including a mode name it does not know, is left
-  alone too, with the same kind of note.
+  alone too. Because the mode is unknown, the note waits until Claude says its
+  own permission dialog is open, which Claude records about a second after the
+  dialog appears. A call that auto mode settles without asking you shows
+  nothing.
 
 If you switch a session between modes, the rule follows, with no restart needed
 on either side. cosyncing reads the mode from the session's transcript, the only
@@ -148,13 +168,18 @@ you answer it yourself; cosyncing never answers on your behalf.
 Approving a plan moves Claude out of plan mode into the mode you chose in its
 dialog, but it may not record that mode. Some Claude versions record it as soon
 as you approve, and cosyncing reads it from there. When none is recorded,
-cosyncing treats the mode as unread from then until your next prompt: approvals
-stay in your terminal with a read-only note, and the app shows no mode.
+cosyncing treats the mode as unread from then until Claude records it again, at
+your next prompt at the latest: approvals stay in your terminal, and the app
+shows no mode. A read-only note appears only for a call whose dialog Claude
+actually opens, so a plan approved into auto mode does not fill the app with a
+note for every call its classifier settles.
 
-The on-screen buttons in your terminal appear only after the broker has said
-this one is worth holding, so a call in a mode cosyncing leaves alone, a plan, a
-session nobody is watching, and a session whose broker is down never show
-buttons that were never going to be answered.
+The on-screen buttons in your terminal belong to approvals. They appear only
+after the broker has said this one is worth holding, so a call in a mode
+cosyncing leaves alone, a plan, a session nobody is watching, and a session
+whose broker is down never show buttons that were never going to be answered. A
+question draws no cosyncing buttons: Claude's own picker is the terminal's side
+of it.
 
 To press one of those buttons from the keyboard, press Ctrl+X, then Tab, to move
 to them, then the button's number. A number typed while your prompt has the
@@ -163,12 +188,13 @@ keyboard goes into your message instead.
 Two more rules govern a held request:
 
 - it has no deadline. Like Claude's own dialog, it waits for as long as you
-  take, because either side can answer the whole time. It goes back to Claude's
-  dialog in your terminal when you choose that dialog from the on-screen
-  buttons, when the turn ends or you interrupt it, or when the broker stops
-  answering. If the terminal itself goes away, the card in the app closes within
-  about 15 seconds. A late answer from either side is dropped rather than
-  applied to the next tool call;
+  take, because either side can answer the whole time. A held approval goes
+  back to Claude's dialog in your terminal when you choose that dialog from the
+  on-screen buttons, when the turn ends or you interrupt it, or when the broker
+  stops answering; a question stays in Claude's picker in those cases. If the
+  terminal itself goes away, the card in the app closes within about 15
+  seconds. A late answer from either side is dropped rather than applied to the
+  next tool call;
 - you can always answer in the terminal instead, including by cancelling the
   request. Whoever answers first wins, and the other side's card closes.
 
@@ -307,7 +333,9 @@ change, but a change made without a restart reaches only the approvals:
 
 - switched off, the broker stops holding at once. A permission prompt goes
   straight to Claude's dialog, and an app viewing the session shows a read-only
-  note that true sync is switched off. The mod learns of it on its next poll,
+  note that true sync is switched off. In auto and `dontAsk` modes, where
+  Claude settles tool calls without asking, there is no note. The mod learns of
+  it on its next poll,
   within about twenty seconds, and stops asking, so the terminal draws no
   buttons. Prompts, steering and stop keep reaching the session until the next
   restart, which closes the socket as above;
@@ -337,16 +365,16 @@ and never breaks your session. Every failure path ends in ordinary Claude:
 | Claude Code is older than 2.1.288 | No mod and no sync claim. Setup names the version floor as its reason, and `claude update` plus a rerun of setup gets the offer back. |
 | Claude's policy blocks the install, or a managed settings file cannot be read | Setup skips the mod with a reason that names the managed setting it found, or says the file could not be read, and completes. |
 | Claude's own install or refresh command fails anyway, times out, or answers unreadably | Setup and `cosy update` still complete. The mod step is put back as it was, the output names Claude's answer and the command to finish, `cosy doctor` repeats it, and the next setup tries again. |
-| No client is watching the session | The prompt stays in your terminal, with a read-only note in the app. |
+| No client is watching the session | An approval stays in your terminal, with nothing in the app. A question is offered to the app anyway: a device that opens the session while it is still open can answer it. |
 | The session is not an interactive terminal, such as a `claude -p` run | The broker keeps it in Observe: the app mirrors it read-only, sends it no prompts, and nothing is held. |
-| The permission mode cannot be read yet, or a plan was approved since the last prompt | Approvals are never held; everything else still syncs. |
+| The permission mode cannot be read yet, or a plan was approved since the last prompt | Approvals are never held; everything else still syncs. A read-only note appears only once Claude's own dialog for a call opens. |
 | The session is in plan mode and Claude presents its plan | The plan as a read-only card in the app, and Claude's plan dialog in your terminal, where you approve it. |
 | The session is in auto mode | Tool calls are left to Claude's classifier, with nothing in the app. Questions are still answered from either side. |
 | The session is in `dontAsk` mode | Nothing is held and nothing is shown: Claude refuses what would need asking. |
 | The session is in `bypassPermissions` mode | A prompt Claude still shows stays in your terminal, with a read-only note in the app naming the mode. |
 | A tool call is denied by a Claude rule or by auto mode | The denial stands and is surfaced in the app. cosyncing does not re-ask. |
 | cosyncing's own switch was off when the broker started | No mod socket, so no terminal syncs: Observe and Take over, Claude's own dialog for every prompt, and no card or note in the app. |
-| cosyncing's own switch is turned off while the broker runs | No holds and, from the mod's next poll, no on-screen buttons. A prompt released by the switch shows a read-only note that true sync is off. Prompts, steering and stop still sync until the broker restarts. |
+| cosyncing's own switch is turned off while the broker runs | No holds and, from the mod's next poll, no on-screen buttons. A prompt released by the switch shows a read-only note that true sync is off, except in auto and `dontAsk` modes, where Claude asks nobody. Prompts, steering and stop still sync until the broker restarts. |
 | cosyncing's `config.json` cannot be read or parsed while the broker runs | Counted as the switch being off: nothing is held. |
 | The terminal runs Claude with `COSYNCING_CLAUDE_DISABLE=1` | Plain Claude in that terminal: no registration, no holds, no buttons. The app mirrors the session read-only. |
 | Claude recorded a session detail this version of cosyncing does not recognize | The rest of the session shows normally. You get one inbox note per session for each kind of detail, naming it, never one per occurrence, and it does not come back once you have read it. |

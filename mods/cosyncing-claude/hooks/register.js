@@ -558,33 +558,7 @@ function bandTree($, e, band) {
     log($, 'band tap ' + behavior);
     void answerBand($, band, behavior);
   };
-  const asking = band.questions && band.questions.length;
-  const title = asking
-    ? 'cosyncing: Claude is asking a question'
-    : 'cosyncing: Claude wants to run ' + band.tool;
-  if (asking) {
-    // One button, because it is the only answer this band can give. A survey is not
-    // settled by `allow`: its answer is a set of choices, and the choices are on the
-    // app's card or in Claude's own dialog. Offered Allow and Deny anyway, both
-    // buttons did the same thing as the third -- hand the call back, which drops the
-    // app's card and reopens the picker -- so a user tapping what looked like an
-    // approval got a picker instead, twice.
-    // The face names the chord, as the permission band's does: a bare 1 reaches this button only
-    // while the band holds the keyboard, and typed into the composer it is a 1 in the next prompt.
-    return Box({
-      flexDirection: 'column',
-      children: [
-        Text({ children: title }),
-        Box({
-          flexDirection: 'row',
-          children: [
-            Button({ key: 'cosyncing-dialog', label: "Answer in Claude's dialog", hotkey: '1', plain: true, autoFocus: true, onPress: tap('dialog') }),
-          ],
-        }),
-        Text({ dimColor: true, children: 'cosyncing: answer it in the cosyncing app, or ctrl+x then tab, then 1, to have Claude ask here' }),
-      ],
-    });
-  }
+  const title = 'cosyncing: Claude wants to run ' + band.tool;
   // Measured on 2.1.289: a Button hotkey arms only while this band holds the keyboard, and a
   // bare digit typed in the composer answers a survey's rows rather than a plugin's band. So the
   // band says the chord on its own face and starts its ring on Allow, which is the answer a
@@ -695,8 +669,20 @@ async function hold($, request) {
     dropped: false,
     /** Set while the hold waits on the broker, so a decision made here ends the wait. */
     wake: null,
+    /** Set once the broker has said it holds the call, so the waits from then on are long-polls. */
+    held: false,
   };
   state.bands.push(band);
+  // A question's hold races Claude's own picker, and the picker answering first has to be able to end
+  // it: see the `tool.call` hook.
+  if (request.offer) {
+    request.offer.requestId = band.requestId;
+    request.offer.end = (why) => {
+      if (band.broken || band.outcome) return;
+      band.broken = why;
+      wakeBand(band);
+    };
+  }
   // The engine aborts a hook it has given up on -- an interrupted turn -- and drops its answer a few
   // seconds later. A hold with no deadline must end there too, or it would go on asking the broker
   // about a call nobody is running and keep the app's card open for it.
@@ -717,7 +703,7 @@ async function hold($, request) {
       if (band.broken) return null;
       if (band.outcome) return band.outcome;
       // Until the broker has said it holds the call, the wait is for an answer it gives at once.
-      const ms = band.shown ? TIMING.holdPollMs : TIMING.ackMs;
+      const ms = band.held ? TIMING.holdPollMs : TIMING.ackMs;
       const sentAt = Date.now();
       let reply = null;
       try {
@@ -773,11 +759,13 @@ async function hold($, request) {
         return band.outcome;
       }
       if (reply.held === true) {
+        band.held = true;
         // The broker has the call and is waiting on somebody. That is the cue to put the band
         // up: not the arrival of the ask, which painted one over every prompt the broker
         // released in the same round trip -- in auto mode, with nobody watching, and whenever
-        // the row could not answer at all.
-        showBand($, band);
+        // the row could not answer at all. A question has no band: Claude's own picker is already
+        // open for it, and the app's card races it.
+        if (!band.questions) showBand($, band);
         continue;
       }
       if (reply.verdict) {
@@ -1272,6 +1260,43 @@ export function briefInput(input) {
   return '';
 }
 
+/**
+ * Claude's own picker settled the question: say so, and hand back what it settled with.
+ *
+ * The broker closes the app's card from this, with the picker's answers when it took some, so every
+ * seat shows what the terminal answered rather than a card still waiting on a question that is over.
+ */
+function settledInTerminal($, offer, toolUseId, settled) {
+  if (offer.requestId) {
+    const answers = settled.error ? undefined : terminalAnswers(settled.result);
+    log($, 'question settled in the terminal' + (answers ? '' : ' with no answer'));
+    report($, 'question.settled', offer.requestId, { toolUseId, ...(answers ? { answers } : {}) });
+  }
+  if (settled.error) throw settled.error;
+  return settled.result;
+}
+
+/**
+ * The answers in what Claude's picker returned, or undefined for none: an error, a refusal, or a
+ * picker closed unanswered. Bounded like an app answer; the picker may leave a question out.
+ */
+export function terminalAnswers(result) {
+  if (!result || typeof result !== 'object' || result.isError === true || result.deny) return undefined;
+  const record = result.result;
+  const answers = record && typeof record === 'object' ? record.answers : undefined;
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return undefined;
+  const out = {};
+  let count = 0;
+  for (const question of Object.keys(answers)) {
+    const answer = answers[question];
+    if (typeof answer !== 'string' || answer.length > ANSWER_MAX_CHARS) continue;
+    out[question] = answer;
+    count += 1;
+    if (count === 4) break;
+  }
+  return count > 0 ? out : undefined;
+}
+
 export function register(on) {
   on('session.start', async ($, e, next) => {
     state.endedSessionId = '';
@@ -1404,9 +1429,17 @@ export function register(on) {
     return { decision: outcome.behavior, reason: 'cosyncing answered this call from ' + outcome.source };
   });
 
-  // The question hold lives here because this is the one place a returned `{result}` becomes the
-  // tool's result. `tool.call`'s envelope spreads the tool's arguments beside `tool`, so the
-  // questions are `e.questions`, not a nested `e.input.questions`.
+  // A question is offered to the app here because this is the one place a returned `{result}`
+  // becomes the tool's result. `tool.call`'s envelope spreads the tool's arguments beside `tool`, so
+  // the questions are `e.questions`, not a nested `e.input.questions`.
+  //
+  // Claude's own picker opens at once, every time, and the app's card races it. Measured on 2.1.299:
+  // while `next(e)` has the picker open, a `{result}` returned from this hook closes the picker and is
+  // the answer the model reads; and when the picker is answered first, `next(e)` resolves with its
+  // answers. So neither side waits on the other, nobody has to be watching for the app to be offered
+  // the question, and whichever side answers first is the answer. The hold used to come first and
+  // the picker only after it gave up, which is what left a question that no seat could answer
+  // waiting behind a band.
   on('tool.call', { tool: QUESTION_TOOL }, async ($, e, next) => {
     const questions = Array.isArray(e.questions) && e.questions.length > 0 ? e.questions : null;
     if (!questions) return next(e);
@@ -1414,7 +1447,7 @@ export function register(on) {
       + ' call=' + String(e.tool_use_id || '(none)'));
     if (!canHold()) return next(e);
     // The same rule as `tool.check`: a call with no id is not one this terminal is running, and the
-    // id is what makes the hold stand for this call rather than for a counter in this process.
+    // id is what makes the offer stand for this call rather than for a counter in this process.
     const toolUseId = typeof e.tool_use_id === 'string' ? e.tool_use_id : '';
     if (!toolUseId) {
       log($, 'question tool.call has no tool_use_id: not a call this terminal runs; leaving it alone');
@@ -1424,16 +1457,31 @@ export function register(on) {
       log($, 'question tool.call between turns with no agent: not this conversation\'s call; leaving it alone');
       return next(e);
     }
-    const outcome = await hold($, { tool: QUESTION_TOOL, input: '', questions: withoutPreviews(questions), toolUseId, signal: next.signal });
-    if (!outcome || outcome.kind !== 'answer') {
-      log($, 'question not answered here: outcome=' + String(outcome && outcome.kind));
-      return next(e);
+    // The picker first. Its dispatch is left to settle on its own when the app wins: the engine then
+    // abandons it, and what it settles with is nobody's answer.
+    const terminal = next(e).then((result) => ({ result }), (error) => ({ error }));
+    const offer = { requestId: '', end: null };
+    const fromApp = hold($, { tool: QUESTION_TOOL, input: '', questions: withoutPreviews(questions), toolUseId, signal: next.signal, offer })
+      .then((outcome) => ({ app: true, outcome }), () => ({ app: true, outcome: null }));
+    const first = await Promise.race([terminal, fromApp]);
+    if (first.app) {
+      const outcome = first.outcome;
+      if (outcome && outcome.kind === 'answer') {
+        if (validateAnswers(questions, outcome.answers)) {
+          log($, 'question answered from the app: Claude\'s picker closes');
+          return { result: { questions, answers: outcome.answers } };
+        }
+        log($, 'answer shape refused: the picker stays the answer');
+      } else {
+        log($, 'question not answered from the app: outcome=' + String(outcome && outcome.kind));
+      }
+      // Released, broken by a turn event, or a shape the tool would refuse: the picker is still
+      // open, and its answer is the answer.
+      return settledInTerminal($, offer, toolUseId, await terminal);
     }
-    if (!validateAnswers(questions, outcome.answers)) {
-      log($, 'answer shape refused: the human gets the picker');
-      return next(e);
-    }
-    return { result: { questions, answers: outcome.answers } };
+    // The picker answered, or closed, before the app did.
+    if (offer.end) offer.end('terminal');
+    return settledInTerminal($, offer, toolUseId, first);
   });
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

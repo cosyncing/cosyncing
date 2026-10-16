@@ -4,7 +4,8 @@
  * A gate of its own, excluded from `bun run check`, because it spends model turns. It
  * proves the two halves agree: the pid the broker reads is the Claude process, a held call
  * is answered within the poll budget from either end, a release puts Claude's own dialog
- * back on screen, and a question is answered only in the shape the tool validates.
+ * back on screen, and a question is answered by whichever of the app and Claude's own picker
+ * answers first, and from the app only in the shape the tool validates.
  *
  * Real-Claude rules this file exists to obey, each one learned the expensive way:
  *   the operator's real `~/.claude` config, so no second process can rotate the token;
@@ -46,7 +47,8 @@ import {
   oneQuestionCard,
   planApprovalOptions,
   questionClosedBy,
-  questionKeptInTerminal,
+  questionClosedUnanswered,
+  questionOpenOnBothSides,
   questionResolvedWith,
   questionSettledInTerminal,
   seatMode,
@@ -469,8 +471,8 @@ async function pressBandKey(requestId: string | undefined, digit: string, expect
   // Button 3 answers nothing by design: it hands the call to Claude's own dialog. Its press is
   // therefore proved by the user-cancel the mod reports for this hold, not by a band answer that
   // never comes -- and not by the band text leaving the pane, which a redraw can do on its own.
-  // A question's step knows its hold by Claude's call id, not the mod's, so it passes no id: with
-  // one hold open, any user-cancel after the press is that hold's.
+  // Without an id, any user-cancel after the press counts, which is right only with one hold open.
+  // A question has no band at all: Claude's own picker is the terminal's side of it.
   const eventsFrom = harness.events.length;
   const armed = async () => {
     for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -773,7 +775,9 @@ try {
     `${socketPath} exists=${String(existsSync(socketPath))}`);
 
   const transcript = findClaudeTranscript(registration!.sessionId, registration!.cwd);
-  harness.useTranscript(transcript);
+  // A new session has no transcript until its first prompt. Resolve it lazily so the permission
+  // dialog reader can find the real process record even while the gate's mode is pinned below.
+  harness.useTranscript(transcriptOf);
   emit('transcript', { path: transcript ?? null });
 
   const usage = await submit('/usage');
@@ -851,8 +855,14 @@ try {
   if (step('release-unknown')) {
     harness.setViewers(1);
     harness.setMode(undefined);
+    const notesFrom = harness.cards.length;
     const hold = await probe('cmts-unknown-mode', writePrompt('cmts-unknown-mode'));
     check('an unreadable mode releases with mode:unknown', hold?.released === 'mode:unknown', JSON.stringify(hold ?? null));
+    // UM1: with no mode to read, the note waits for Claude to say its own dialog is open, which it is
+    // now, in a session that asks.
+    const noted = await waitFor(() => harness.cards.slice(notesFrom).some((card) => card.readOnly === true && card.releaseReason === 'mode:unknown'), 8_000);
+    check('with Claude\u2019s own dialog open, the app is shown a read-only note', noted,
+      JSON.stringify(harness.cards.slice(notesFrom).map((card) => [card.toolName, card.releaseReason ?? null])));
     const row = hold ? auditOf(hold) : undefined;
     check('a release is recorded as a release, not a decision', row?.released === 'mode:unknown', JSON.stringify(row ?? null));
     check('a released call is not answered, so the audit names nobody', !row?.answeredBy || row.answeredBy === 'cancel', String(row?.answeredBy));
@@ -865,6 +875,9 @@ try {
     emit('mode-observed', { real: harness.observedMode() ?? null, note: 'the gate is pinned; the real session mode is recorded beside it' });
     const hold = await probe('cmts-no-viewer', writePrompt('cmts-no-viewer'));
     check('no viewer releases with viewer:none', hold?.released === 'viewer:none', JSON.stringify(hold ?? null));
+    // Nobody could see a note about it, and one drawn anyway was what a seat opening later found:
+    // one more read-only card for every call made while nobody was watching.
+    check('and draws no card for nobody to see', !hold?.cardId, JSON.stringify(hold ?? null));
     await dismissDialog();
   }
 
@@ -1169,35 +1182,33 @@ try {
     await dismissDialog();
   }
 
-  if (step('question-band-dialog')) {
-    // R5-A on a real Claude: band 1 on a held question hands it to Claude's own picker. The app keeps
-    // the card, read-only and open in the terminal, and the session Needs input until the picker is
-    // answered there. Then the picker's answer closes that one card. Before the fix the card closed at
-    // once with nothing picked, and the session read Working while the picker waited on a person.
+  if (step('question-picker')) {
+    // The race on a real Claude: a question opens Claude's own picker at once and is offered to the
+    // app beside it, with no band. While the picker waits, the app's card is answerable and the
+    // session Needs input; answered in the picker, the card closes with the pick, said to be the
+    // terminal's. The mod used to hold the question first, and the picker opened only once the hold
+    // gave up -- or once band 1 restated the card read-only -- so a question no seat could answer sat
+    // behind a band, and the session read Working while the terminal was asking.
     await settle();
     harness.setViewers(1);
     harness.setMode('default');
     const seat = await liveSeat();
     const framesFrom = harness.frames.length;
     const question = 'Which shape?';
-    const hold = await probe('cmts-question-band', 'Call the AskUserQuestion tool exactly once with one question and nothing else: '
+    const hold = await probe('cmts-question-picker', 'Call the AskUserQuestion tool exactly once with one question and nothing else: '
       + `question "${question}", header "Shape", multiSelect false, option labels "Circle" and "Square". Do not answer it yourself.`,
     { timeoutMs: 90_000, tool: 'AskUserQuestion' });
-    if (check('the band step\u2019s question is held for the app', !!hold?.card && !!seat,
+    if (check('the picker step\u2019s question is offered to the app', !!hold?.card && !!seat,
       `${JSON.stringify(hold ?? null)}${seat ? '' : ' (no synced seat: the transcript did not exist yet)'}`)) {
       const toolUseId = hold!.cardId ?? hold!.requestId;
       const modSession = modSessionOf(hold!.sessionId);
       const eventsFrom = harness.events.length;
-      const route = await pressBandKey(undefined, '1', false);
-      emit('band-route', { button: 'question-dialog', route });
-      const cancel = harness.events.slice(eventsFrom).find((event) => event.kind === 'user-cancel' && event.sessionId === modSession);
-      check('band 1 handed the question to Claude\u2019s picker over the event leg', cancel?.detail?.via === 'dialog',
-        JSON.stringify(cancel ?? harness.events.slice(eventsFrom).map((event) => event.kind)));
-      await waitFor(() => questionKeptInTerminal(seatFrames(seat!, framesFrom), toolUseId).ok, 10_000);
-      // Long enough for anything that would close the card early to have done it.
+      await waitFor(() => questionOpenOnBothSides(seatFrames(seat!, framesFrom), toolUseId).ok, 10_000);
+      // Long enough for anything that would close the card or take its controls early to have done it.
       await sleep(3000);
-      const kept = questionKeptInTerminal(seatFrames(seat!, framesFrom), toolUseId);
-      check('after band 1 the seat still Needs input, with one read-only card open in the terminal under the call\u2019s id', kept.ok, kept.detail);
+      const open = questionOpenOnBothSides(seatFrames(seat!, framesFrom), toolUseId);
+      check('while the picker waits, the app\u2019s card is answerable and the seat Needs input', open.ok, open.detail);
+      check('and the broker still holds it for the app', harness.service.isHeld(modSession, toolUseId), toolUseId);
       check('and the call has no result yet: the picker is waiting on the person',
         !toolOutcomes(currentTranscript()).some((entry) => entry.id === toolUseId), toolUseId);
       // Answer Claude's own picker in the terminal, with its first option. A digit picks a row; the
@@ -1214,14 +1225,70 @@ try {
       emit('picker-keys', { keys: pickerKeys, answered: answered() });
       const recorded = questionAnswers(transcriptRows(currentTranscript()), question);
       check('the picker\u2019s answer came back as the tool\u2019s result', recorded !== undefined, JSON.stringify(recorded ?? null));
-      const rows = recorded ? [[recorded[question]!]] : [];
+      const pick = recorded?.[question];
+      await waitFor(() => harness.events.slice(eventsFrom).some((event) => event.kind === 'question.settled' && event.sessionId === modSession), 10_000);
+      const settledEvent = harness.events.slice(eventsFrom).find((event) => event.kind === 'question.settled' && event.sessionId === modSession);
+      const settledAnswers = settledEvent?.detail?.answers as Record<string, string> | undefined;
+      check('the mod said the picker settled it, with the pick, over the event leg',
+        settledEvent?.detail?.toolUseId === toolUseId && pick !== undefined && settledAnswers?.[question] === pick,
+        JSON.stringify(settledEvent ?? harness.events.slice(eventsFrom).map((event) => event.kind)));
+      check('and reported no cancel for it: nothing was handed back from a band',
+        !harness.events.slice(eventsFrom).some((event) => event.kind === 'user-cancel' && event.sessionId === modSession),
+        JSON.stringify(harness.events.slice(eventsFrom).map((event) => event.kind)));
+      const rows = pick !== undefined ? [[pick]] : [];
       await waitFor(() => questionSettledInTerminal(seatFrames(seat!, framesFrom), toolUseId, rows).ok, 15_000);
       await sleep(2000);
       const settled = questionSettledInTerminal(seatFrames(seat!, framesFrom), toolUseId, rows);
-      check('the picker\u2019s answer closed that one card with the pick, and the seat no longer Needs input', settled.ok, settled.detail);
+      check('the picker\u2019s answer closed the card with the pick, as the terminal\u2019s, and the seat no longer Needs input', settled.ok, settled.detail);
+      const row = auditOf(hold!);
+      check('the broker recorded the terminal as the one who answered', row?.answeredBy === 'band', JSON.stringify(row ?? null).slice(0, 200));
+      check('an app answer arriving after the picker\u2019s is refused, not applied',
+        harness.service.answerQuestion({ sessionId: modSession, requestId: toolUseId, answers: [['Square']] }) === false
+          && !harness.service.isHeld(modSession, toolUseId));
     }
     // Escape only when something is still up: after a recorded answer it would interrupt the reply.
     if (questionAnswers(transcriptRows(currentTranscript()), question) === undefined) await dismissDialog();
+    await settle();
+  }
+
+  if (step('question-picker-escape')) {
+    // The other way the picker wins: Escape closes it with nothing picked, and the app's card closes
+    // with it, said to be the terminal's and unanswered -- not left open for an answer Claude will
+    // never read, and not drawn as answered.
+    await settle();
+    harness.setViewers(1);
+    harness.setMode('default');
+    const seat = await liveSeat();
+    const framesFrom = harness.frames.length;
+    const question = 'Which fruit?';
+    const hold = await probe('cmts-question-escape', 'Call the AskUserQuestion tool exactly once with one question and nothing else: '
+      + `question "${question}", header "Fruit", multiSelect false, option labels "Apple" and "Pear". Do not answer it yourself.`,
+    { timeoutMs: 90_000, tool: 'AskUserQuestion' });
+    if (check('the Escape step\u2019s question is offered to the app', !!hold?.card && !!seat,
+      `${JSON.stringify(hold ?? null)}${seat ? '' : ' (no synced seat: the transcript did not exist yet)'}`)) {
+      const toolUseId = hold!.cardId ?? hold!.requestId;
+      const modSession = modSessionOf(hold!.sessionId);
+      await waitFor(() => questionOpenOnBothSides(seatFrames(seat!, framesFrom), toolUseId).ok, 10_000);
+      const eventsFrom = harness.events.length;
+      keys('Escape');
+      // Which leg reached the broker first is the race's to decide: the picker's own close
+      // (`question.settled`, no answers) or the interrupt that comes with it (`user-cancel`).
+      await waitFor(() => !harness.service.isHeld(modSession, toolUseId), 15_000);
+      const told = harness.events.slice(eventsFrom)
+        .filter((event) => event.sessionId === modSession && (event.kind === 'question.settled' || event.kind === 'user-cancel'))
+        .map((event) => ({ kind: event.kind, via: event.detail?.via ?? null, answers: event.detail?.answers ?? null }));
+      emit('question-escape', { told });
+      check('Escape closed the hold', !harness.service.isHeld(modSession, toolUseId), JSON.stringify(told));
+      check('and the mod reported no answer for it', told.length > 0 && told.every((entry) => entry.answers === null), JSON.stringify(told));
+      await waitFor(() => questionClosedUnanswered(seatFrames(seat!, framesFrom), toolUseId).ok, 15_000);
+      const closed = questionClosedUnanswered(seatFrames(seat!, framesFrom), toolUseId);
+      check('the card closed unanswered, as the terminal\u2019s (releaseReason band)', closed.ok, closed.detail);
+      check('and Claude recorded no answer', questionAnswers(transcriptRows(currentTranscript()), question) === undefined);
+      const row = auditOf(hold!);
+      check('the broker recorded nobody as having answered it', row?.answeredBy === 'cancel', JSON.stringify(row ?? null).slice(0, 200));
+    } else {
+      await dismissDialog();
+    }
     await settle();
   }
 
@@ -1557,7 +1624,12 @@ try {
     await refuseTrustPrompt('the auto-mode launch');
     const drawnBeforeTurn = await paneReady();
     emit('pane-ready', { step: 'auto-never-hold', drawn: drawnBeforeTurn });
-    harness.setViewers(1);
+    // Nobody watching, which is the harder case for both halves of this step. The gate read the
+    // viewers before the mode, so every auto-mode call made while nobody watched was released as
+    // `viewer:none` -- a reason that drew a read-only card, one per tool call, which a seat opening
+    // later found waiting. And a question needs nobody watching to be offered: it races Claude's
+    // picker, so the app that opens the session while the picker waits can still answer it.
+    harness.setViewers(0);
     // Nothing in this step may read a mode the harness set. `setMode(undefined)` empties the
     // harness's own file first, so a session with no transcript reads as unknown -- the same thing
     // the gate would say -- rather than as whatever an earlier step left pinned. Skipping steps
@@ -1629,11 +1701,12 @@ try {
       check('auto mode never raises an approval card', !hold?.card,
         JSON.stringify(hold ?? null) + ` indicator=${String(indicator)}`);
       // Auto mode is Claude's classifier's seat, and a note in the app would report a decision
-      // nobody there can make, so a released call draws nothing at all.
+      // nobody there can make, so a released call draws nothing at all -- and is released for its
+      // mode, not for the viewers nobody had.
       const drawn = harness.cards.slice(autoCardsFrom);
       check('auto mode draws nothing in the app for a tool call, not even a note', drawn.length === 0,
         JSON.stringify(drawn.map((card) => [card.toolName, card.releaseReason ?? null])));
-      check('an auto session is released by name, never held', releaseOk,
+      check('an auto session nobody watches is released by its mode, never held and never as viewer:none', releaseOk,
         hold === undefined ? 'the engine never asked the mod: its classifier answered' : `${hold.released ?? 'held'} (transcript mode: ${seen ?? 'no row'})`);
     } else {
       emit('auto-rule-not-exercised', {
@@ -1657,7 +1730,9 @@ try {
         hold?.card ? `cosyncing held ${hold.requestId} instead` : `${settled.how}: ${settled.detail}`);
 
       // Questions stay the person's in auto mode: the classifier decides tool calls, not answers.
-      // The second question asks for a number where the tool takes one. The number kind sits
+      // Still nobody watching: the question is offered anyway, and the app answers it here as the
+      // seat that opened after it was asked would. The second question asks for a number where the
+      // tool takes one. The number kind sits
       // behind a Claude feature switch, so the step records whether it arrived and answers
       // whichever kind did.
       await settle();
@@ -1667,7 +1742,7 @@ try {
         + 'make it kind "number" with min 1, max 8 and no options; otherwise give it the option labels "2" and "4". Do not answer it yourself.',
       { tool: 'AskUserQuestion', timeoutMs: 120_000 });
       const askedCard = asked?.cardId ? harness.cards.find((card) => card.requestId === asked.cardId) : undefined;
-      if (check('a question in auto mode is held for the app', !!askedCard && askedCard.readOnly !== true, JSON.stringify(asked ?? null))) {
+      if (check('a question in auto mode is held for the app, with nobody watching', !!askedCard && askedCard.readOnly !== true, JSON.stringify(asked ?? null))) {
         const questions = (askedCard!.questions ?? []) as { question: string; kind?: string; min?: number; max?: number; options?: { label: string }[] }[];
         const numberQuestion = questions.find((question) => question.kind === 'number');
         const numberAnswer = numberQuestion ? String(Math.min(numberQuestion.max ?? 5, Math.max(numberQuestion.min ?? 5, 5))) : undefined;
@@ -1692,6 +1767,7 @@ try {
       }
       await dismissDialog();
     }
+    harness.setViewers(1);
   }
 
   if (step('plan-into-auto')) {
@@ -1747,6 +1823,11 @@ try {
         asked: asked.map((row) => ({ tool: row.tool, modeSeen: row.modeSeen, released: row.released ?? null, answeredBy: row.answeredBy ?? null })),
       });
       check('after a plan approved into auto mode, nothing is held for the rest of that turn', none.ok, none.detail);
+      // UM1: the approval recorded no mode, so every call was released unread. Auto mode's classifier
+      // settled them with no dialog, and a note for each is what filled the app.
+      const notes = drawn.filter((card) => card.readOnly === true && card.releaseReason === 'mode:unknown');
+      check('and draws no note for the calls auto mode settled by itself', notes.length === 0,
+        JSON.stringify(notes.map((card) => [card.toolName, card.inputPreview ?? null])));
       // A hold here is the break the check above names; it is refused so it cannot decide a later step.
       for (const card of drawn) {
         if (card.readOnly !== true && harness.service.isHeld(modSessionOf(card.sessionId), card.requestId)) {

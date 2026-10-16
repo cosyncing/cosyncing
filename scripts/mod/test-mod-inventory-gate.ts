@@ -128,6 +128,18 @@ try {
 
   // ---- the gate's Claude ----
 
+  const uncheckedAnswer = runGate(['--register-js', rewrite('unchecked-answer', [[
+    'if (validateAnswers(questions, outcome.answers)) {', 'if (true) {',
+  ]])]);
+  check('the gate refuses an app answer that bypasses question validation', uncheckedAnswer.status === 1
+    && uncheckedAnswer.out.includes('FAIL  AskUserQuestion validates app answers'));
+
+  const repeatedPicker = runGate(['--register-js', rewrite('repeated-picker', [[
+    'return settledInTerminal($, offer, toolUseId, await terminal);', 'return next(e);',
+  ]])]);
+  check('the gate refuses a fallback that opens the question picker twice', repeatedPicker.status === 1
+    && repeatedPicker.out.includes('FAIL  AskUserQuestion validates app answers'));
+
   // What the build prints for the tracked mod, from the scan's own reading of it: the gate checks
   // the scan against the intended lists, so a fake that prints the scan's lists is a build that
   // agrees, and the run can only go red for the reason under test.

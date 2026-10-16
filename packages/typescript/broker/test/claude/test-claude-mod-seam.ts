@@ -370,7 +370,16 @@ try {
     { question: 'Which report?', header: 'Report', multiSelect: false, options: [{ label: 'Weekly' }, { label: 'Monthly' }] },
     { question: 'Which sections?', header: 'Sections', multiSelect: true, options: [{ label: 'Revenue' }, { label: 'Churn' }] },
   ];
-  engine.toolResult = { ranItself: true };
+  // Claude's own picker opens beneath the hook at once and stays open until somebody answers it there;
+  // the mod races it against the app's card. A picker that answered at once would win every race.
+  const openPicker = (): ((result: unknown) => void) => {
+    let pick!: (result: unknown) => void;
+    engine.toolResult = new Promise((resolve) => {
+      pick = resolve;
+    });
+    return pick;
+  };
+  openPicker();
   const questionCall = fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-3', questions });
   check('a question draws a question card', await until(() => cards().some((c) => c.type === 'question-request')));
   const questionCard = cards().find((c) => c.type === 'question-request')!;
@@ -383,12 +392,19 @@ try {
     && toolResult?.answers?.['Which sections?'] === 'Revenue, Churn', JSON.stringify(questionResult));
   check('and the question card closes', await until(() => !cards().some((c) => c.requestId === questionCard.requestId)));
 
-  // A reject on the phone hands the question back to the terminal rather than parking the hold.
+  // A reject on the phone leaves the question to the terminal, in the picker open beside the card.
+  const pickInTerminal = openPicker();
   const secondAsk = fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-4', questions });
   await until(() => cards().some((c) => c.type === 'question-request'));
   const secondCard = cards().find((c) => c.type === 'question-request')!;
   check('a dismissed question is routed to the hold', routeModRejectQuestion(frameDeps, { requestId: secondCard.requestId }));
-  check('and the tool falls back to the human', JSON.stringify(await secondAsk) === JSON.stringify(engine.toolResult), JSON.stringify(await secondAsk));
+  const stillPicking = await Promise.race([secondAsk.then(() => false), until(() => false, 300).then(() => true)]);
+  check('and the call is still Claude\'s picker\'s to answer', stillPicking
+    && await until(() => !cards().some((c) => c.requestId === secondCard.requestId)), JSON.stringify(cards()));
+  const picked = { result: { questions, answers: { 'Which report?': 'Weekly', 'Which sections?': 'Churn' } } };
+  pickInTerminal(picked);
+  check('whose answer the tool takes', (await secondAsk) === picked, JSON.stringify(await secondAsk));
+  engine.toolResult = { ranItself: true };
 
   // ── no deadline: an unanswered call waits, and the terminal can still take it back ──
   mod.bands.length = 0;

@@ -514,44 +514,85 @@ export function seatPendingInput(frames: readonly SeatFrame[]): { pending: Map<s
 }
 
 /**
- * Band 1 on a held question handed it to Claude's own picker, and the app kept it as waiting.
+ * A question is open on both sides at once: Claude's own picker in the terminal, and an answerable
+ * card in the app.
  *
- * Checked while the picker is open: one card, under the call's `tool_use` id, restated read-only and
- * open in the terminal, still pending, and the session still Needs input. A resolution for the card
- * before the picker is answered is the defect this rule exists for (R5-A): the card closed with
- * nothing picked, and the session read Working while a person was being asked.
+ * Checked while the picker is open: one card, under the call's `tool_use` id, never drawn read-only,
+ * never closed, still pending, and the session Needs input. The mod used to hold a question before
+ * the picker opened, and handing it to the picker from the band restated the card read-only and open
+ * in the terminal. The two now race, so a read-only card while the picker waits is the defect: a
+ * person looking at the app could not answer a question the terminal was still asking.
  */
-export function questionKeptInTerminal(frames: readonly SeatFrame[], toolUseId: string): StepVerdict {
+export function questionOpenOnBothSides(frames: readonly SeatFrame[], toolUseId: string): StepVerdict {
   const one = oneQuestionCard(frames, toolUseId);
   if (!one.ok) return one;
-  const restated = frames.some((frame) => frame.message.type === 'question-request' && frame.message.requestId === toolUseId
-    && frame.message.readOnly === true && frame.message.answerInTerminal === true);
-  if (!restated) return { ok: false, detail: `the card ${toolUseId} was never restated read-only and open in the terminal` };
+  const readOnly = frames.some((frame) => frame.message.type === 'question-request' && frame.message.requestId === toolUseId
+    && (frame.message.readOnly === true || frame.message.answerInTerminal === true));
+  if (readOnly) return { ok: false, detail: `the card ${toolUseId} was drawn read-only while the picker was open` };
   const closes = frames.filter((frame) => frame.message.type === 'question-resolved' && frame.message.requestId === toolUseId).length;
   if (closes > 0) return { ok: false, detail: `the card closed ${closes} time(s) while the picker was open` };
   const { pending, needsInput } = seatPendingInput(frames);
-  const card = pending.get(toolUseId);
-  if (!card) return { ok: false, detail: `nothing is pending under ${toolUseId}` };
-  if (card.readOnly !== true || card.answerInTerminal !== true) return { ok: false, detail: 'the pending card can still be answered from the app' };
+  if (!pending.has(toolUseId)) return { ok: false, detail: `nothing is pending under ${toolUseId}` };
   if (!needsInput) return { ok: false, detail: 'the seat does not read Needs input' };
-  return { ok: true, detail: `one read-only card open in the terminal under ${toolUseId}, and Needs input` };
+  return { ok: true, detail: `one answerable card under ${toolUseId}, and Needs input` };
 }
 
 /**
- * The picker's answer closed the card that band 1 kept: one resolution, carrying the rows the
- * transcript recorded, no second card, and the session no longer Needs input.
+ * Claude's own picker answered the question first, and that closed the app's card with the pick.
+ *
+ * At least one resolution; every one that carries answers carries the rows the transcript recorded,
+ * and one does; at least one says the terminal answered it (`decidedBy: band`, which the app draws as
+ * "Answered in your terminal"), and none says the app did or that it closed unanswered. More than one
+ * is allowed: the broker closes the card when the mod reports the picker settled, and the
+ * transcript's answer closes its copy under the same id, in whichever order the two land. The card
+ * was never drawn read-only, and the session no longer Needs input.
  */
 export function questionSettledInTerminal(frames: readonly SeatFrame[], toolUseId: string, rows: readonly (readonly string[])[]): StepVerdict {
   const closes = frames.filter((frame) => frame.message.type === 'question-resolved' && frame.message.requestId === toolUseId);
-  if (closes.length !== 1) return { ok: false, detail: `${closes.length} resolution(s) for ${toolUseId}` };
-  const said = JSON.stringify(closes[0]!.message.answers ?? null);
-  if (said !== JSON.stringify(rows)) return { ok: false, detail: `closed with ${said}, the picker recorded ${JSON.stringify(rows)}` };
+  if (closes.length === 0) return { ok: false, detail: `no question-resolved for ${toolUseId}` };
+  const want = JSON.stringify(rows);
+  const said = closes.filter((frame) => frame.message.answers !== undefined).map((frame) => JSON.stringify(frame.message.answers));
+  if (said.length === 0) return { ok: false, detail: `${closes.length} resolution(s), none carrying the pick ${want}` };
+  const wrong = said.find((answers) => answers !== want);
+  if (wrong !== undefined) return { ok: false, detail: `closed with ${wrong}, the picker recorded ${want}` };
+  if (!closes.some((frame) => frame.message.decidedBy === 'band')) {
+    return { ok: false, detail: `no close said the terminal answered it: ${JSON.stringify(closes.map((frame) => frame.message.decidedBy ?? null))}` };
+  }
+  const other = closes.find((frame) => (frame.message.decidedBy !== undefined && frame.message.decidedBy !== 'band') || frame.message.releaseReason !== undefined);
+  if (other) {
+    return { ok: false, detail: `a close said ${JSON.stringify({ decidedBy: other.message.decidedBy ?? null, releaseReason: other.message.releaseReason ?? null })}` };
+  }
+  const readOnly = frames.some((frame) => frame.message.type === 'question-request' && frame.message.requestId === toolUseId && frame.message.readOnly === true);
+  if (readOnly) return { ok: false, detail: `the card ${toolUseId} was restated read-only before it closed` };
   const one = oneQuestionCard(frames, toolUseId);
   if (!one.ok) return one;
   const { pending, needsInput } = seatPendingInput(frames);
   if (pending.has(toolUseId)) return { ok: false, detail: `${toolUseId} is still pending` };
   if (needsInput) return { ok: false, detail: `the seat still reads Needs input on ${[...pending.keys()].join(', ')}` };
-  return { ok: true, detail: `one resolution carrying ${said}; nothing pending` };
+  return { ok: true, detail: `${closes.length} resolution(s), ${said.length} carrying ${want}; nothing pending` };
+}
+
+/**
+ * Claude's own picker closed with nothing picked -- Escape -- and that closed the app's card the
+ * same way: at least one resolution, none carrying an answer or saying the app answered it, at least
+ * one saying the terminal closed it (`releaseReason: band`, drawn as "Closed in your terminal without
+ * an answer"), and the session no longer Needs input.
+ */
+export function questionClosedUnanswered(frames: readonly SeatFrame[], toolUseId: string): StepVerdict {
+  const closes = frames.filter((frame) => frame.message.type === 'question-resolved' && frame.message.requestId === toolUseId);
+  if (closes.length === 0) return { ok: false, detail: `no question-resolved for ${toolUseId}` };
+  const answered = closes.find((frame) => Array.isArray(frame.message.answers) && frame.message.answers.some((row) => Array.isArray(row) && row.length > 0));
+  if (answered) return { ok: false, detail: `a close carried ${JSON.stringify(answered.message.answers)}` };
+  if (closes.some((frame) => frame.message.decidedBy !== undefined)) {
+    return { ok: false, detail: `a close said decidedBy ${closes.find((frame) => frame.message.decidedBy !== undefined)!.message.decidedBy}` };
+  }
+  if (!closes.some((frame) => frame.message.releaseReason === 'band')) {
+    return { ok: false, detail: `no close said the terminal closed it: ${JSON.stringify(closes.map((frame) => frame.message.releaseReason ?? null))}` };
+  }
+  const { pending, needsInput } = seatPendingInput(frames);
+  if (pending.has(toolUseId)) return { ok: false, detail: `${toolUseId} is still pending` };
+  if (needsInput) return { ok: false, detail: `the seat still reads Needs input on ${[...pending.keys()].join(', ')}` };
+  return { ok: true, detail: `${closes.length} resolution(s), none answered, closed in the terminal` };
 }
 
 /**

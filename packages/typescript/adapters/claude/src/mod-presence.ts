@@ -27,6 +27,8 @@ import type {
   PermissionReleaseReason,
   SessionControlState,
 } from '@cosyncing/adapter-api';
+// Types only, so the two files that already import each other do not make a value cycle.
+import type { ModConnectionRequest } from './mod-connection.ts';
 
 /** The mod's report on one Claude session, as the broker's registry holds it. */
 export interface ClaudeModStatus {
@@ -81,6 +83,11 @@ export interface ClaudeModBridge {
    * rest of what the card showed.
    */
   cardNote?: (sessionId: string, requestId: string) => ClaudeModCardNote | undefined;
+  /**
+   * The cards the broker is holding open for this session, and the registration they belong to.
+   * A question is offered before any app seat exists, so a seat that attaches later is handed these.
+   */
+  openCards?: (sessionId: string) => { generation: number; cards: ModConnectionRequest[] } | undefined;
 }
 
 /** The part of a mod card's story that only the broker saw. */

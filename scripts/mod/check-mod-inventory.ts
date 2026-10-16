@@ -376,8 +376,11 @@ try {
   check('the band refuses a broker-spawned session', /state\.spawned/.test(source) && /COSYNCING_SPAWNED/.test(source));
   check('the mod re-reads the session id in the loop', /currentSessionId\(\$/.test(source) && /id !== state\.sessionId/.test(source));
   check('an answer is allowed only from a human press', /onPress: tap\('allow'\)/.test(source));
-  check('AskUserQuestion returns next(e) on a shape doubt', /return next\(e\)/.test(
-    source.slice(source.indexOf('if (!validateAnswers'), source.indexOf('if (!validateAnswers') + 300)));
+  // The picker is already open while an app answer races it. A doubtful answer must fall back to
+  // that same dispatch, rather than call next(e) a second time and open another picker.
+  check('AskUserQuestion validates app answers and retains the original picker on a shape doubt',
+    /if \(validateAnswers\(questions, outcome\.answers\)\)\s*\{[^}]*return \{ result: \{ questions, answers: outcome\.answers \}/.test(source)
+      && source.includes('return settledInTerminal($, offer, toolUseId, await terminal);'));
   check('the poll wait is the ceiling the broker answers', topLevelConst(source, 'POLL_WAIT_MS') === String(INTENDED_POLL_WAIT_MS),
     String(topLevelConst(source, 'POLL_WAIT_MS')));
   // A hold has no deadline and no poll budget: it lasts as long as the person takes. What keeps the
