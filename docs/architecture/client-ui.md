@@ -29,6 +29,10 @@ mutating controls stay disabled with an explanation.
 
 ## Transcript rendering
 
+History uses bounded client windows with backward and forward cursors. The
+[Claude history index](history-paging.md) keeps large native transcripts
+pageable without requiring the broker or client to retain the complete session.
+
 Markdown is rendered by an in-repo parser rather than a package, so the subset
 and its escaping rules stay reviewable alongside the renderers that depend on
 them. Two rules exist because breaking them corrupts ordinary prose:

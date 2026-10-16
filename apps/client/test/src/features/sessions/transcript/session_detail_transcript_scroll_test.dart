@@ -461,6 +461,70 @@ void main() {
       },
     );
 
+    for (final refusal in const {
+      'HISTORY_PAGE_RESOURCE_LIMIT':
+          'The server cannot load this history within its resource limits.',
+      'HISTORY_PAGE_CLIENT_RESOURCE_LIMIT':
+          'This page is too large to load safely on this device.',
+    }.entries) {
+      testWidgets(
+        'resource refusal is terminal, localized, and has no retry affordance: ${refusal.key}',
+        (tester) async {
+          useRoomyTestViewport(tester);
+          final connection = _HistoryCapableScriptedConnection(
+            events: [
+              HistoryWireEvent(
+                messages: _agentMessages(100, startSeq: 101),
+                reset: true,
+                cursor: 'tail',
+                olderCursor: 'older',
+                hasEarlier: true,
+              ),
+            ],
+          );
+          await tester.pumpWidget(
+            buildSessionDetailTestPage(
+              events: const [],
+              connection: connection,
+            ),
+          );
+          await tester.pumpAndSettle();
+          _jumpToStart(tester);
+          await tester.pump();
+
+          await tester.drag(
+            find.byKey(const Key('session-detail-chat-scroll')),
+            const Offset(0, 80),
+          );
+          await tester.pump();
+          expect(connection.historyPageRequestCount, 1);
+          connection.emitEvent(
+            NackWireEvent(
+              code: refusal.key,
+              message: 'The bounded snapshot is too large.',
+              clientMessageId: connection.lastHistoryPageClientMessageId,
+            ),
+          );
+          await tester.pump();
+
+          expect(
+            find.text(refusal.value),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const Key('session-history-load-earlier')),
+            findsNothing,
+          );
+          await tester.drag(
+            find.byKey(const Key('session-detail-chat-scroll')),
+            const Offset(0, 80),
+          );
+          await tester.pump();
+          expect(connection.historyPageRequestCount, 1);
+        },
+      );
+    }
+
     testWidgets(
       'healthy Compact dark history is chrome-free and loading is localized',
       (tester) async {

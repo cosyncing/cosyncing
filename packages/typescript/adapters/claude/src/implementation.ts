@@ -85,6 +85,7 @@ import {
   type CommandResult,
   type FileInput,
   type HistorySourceIdentity,
+  type StoredHistorySnapshot,
   type ModeOption,
   type ModelOption,
   type PermissionDecision,
@@ -125,6 +126,7 @@ import {
 import { ClaudeModConnection } from './mod-connection.ts';
 import { diagnoseClaudeSetup } from './diagnostics.ts';
 import { JsonlHistorySource } from './history-source.ts';
+import { ClaudeHistoryStore, acquireClaudeHistoryStore, historyRecords, historyGuards } from './history-store.ts';
 import { claudeAnswerRows } from './question-answers.ts';
 import {
   CLAUDE_MOD_LIVE_CONFLICT,
@@ -1984,6 +1986,17 @@ export class ClaudeAdapter implements AgentBackend {
  * tail once its newline lands), and (c) the old double full-read (the constructor no longer slurps).
  */
 export class ClaudeObserveConnection implements SessionConnection {
+  private storedHistory?: ClaudeHistoryStore;
+  private storedFlight?: Promise<StoredHistorySnapshot | undefined>;
+  private storedTailFlight?: Promise<void>;
+  private storedTailPending = false;
+  private storedLivePosition?: number;
+  private storedLiveGeneration?: string;
+  /** Content-free counters for direct acceptance tests and local profiling. */
+  get historyReadWork(): Readonly<ClaudeHistoryStore['lastWork']> | undefined { return this.storedHistory && { ...this.storedHistory.lastWork }; }
+  get storedActivityState(): { resolved: Set<string>; parent: ParentActivityState } | undefined {
+    return this.storedHistory && { resolved: this.storedHistory.setOf('activityResolved'), parent: storedParentActivity(this.storedHistory) };
+  }
   /** {@link getPending} holds at most the card captured at construction; question cards the tail
    *  streams later are not in it. */
   readonly pendingListMayOmitOpenRequests = true;
@@ -2051,6 +2064,10 @@ export class ClaudeObserveConnection implements SessionConnection {
        * running: it never saw the live end that `settledRunKeys` remembers.
        */
       modTurn?: { turnRunning: () => boolean; turnEndedAt: () => number | undefined };
+      /** Drive-owned prompt identities are correlated before a native row is
+       * committed to the disk index, just as in full replay. */
+      replayQueued?: () => ClaudeQueuedSendEntry[];
+      onReplayQueued?: (line: any, key: string) => void;
     } = {},
   ) {
     // No HISTORY read here — getHistory() does the single read and baselines the tail (see class doc). The
@@ -2141,6 +2158,107 @@ export class ClaudeObserveConnection implements SessionConnection {
     return operation;
   }
 
+  openHistorySnapshot(): Promise<StoredHistorySnapshot | undefined> {
+    if (this.storedFlight) return this.storedFlight;
+    this.storedFlight = this.openStoredHistory().finally(() => { this.storedFlight = undefined; });
+    return this.storedFlight;
+  }
+
+  private async openStoredHistory(): Promise<StoredHistorySnapshot | undefined> {
+    const identity = fileHistorySourceIdentity(this.path);
+    if (!identity) return undefined;
+    const store = this.storedHistory ??= acquireClaudeHistoryStore(this.path);
+    await store.update(async () => {
+      store.lastWork = { sourceBytes: 0, sourceRecords: 0, mappedRecords: 0, pageRows: 0 };
+      const previous = store.get<HistorySourceIdentity>('source');
+      if (previous?.revision === identity.revision && previous.sourceId === identity.sourceId) return;
+      const savedBoundary = store.get<number>('boundary') ?? 0;
+      const savedGuards = store.get<{ head: string; edge: string }>('guards');
+      const size = statSync(this.path).size;
+      const append = previous && previous.sourceId === identity.sourceId && size > (previous.appendPosition ?? 0)
+        && savedBoundary <= size && savedGuards
+        && JSON.stringify(historyGuards(this.path, savedBoundary)) === JSON.stringify(savedGuards);
+      const previousVersion = store.get<string>('version');
+      const previousCount = store.get<number>('count') ?? 0;
+      let start = append ? savedBoundary : 0;
+      let rebuild = !append;
+      let boundary = start;
+      store.db.exec('BEGIN IMMEDIATE');
+      try {
+        if (rebuild) { store.map('calls').clear(); store.resetMapping(); store.newGeneration(); }
+        const calls = store.map<ClaudeCall>('calls');
+        // Preserve the existing two-pass enrichment semantics. Only a late or
+        // revised definition referenced by old rows requires replaying a prefix.
+        for await (const record of historyRecords(this.path, start, size)) {
+          boundary = record.end;
+          store.lastWork.sourceBytes += record.bytes; store.lastWork.sourceRecords += 1;
+          const line = record.line;
+          if (line?.type !== 'assistant' || !Array.isArray(line.message?.content)) continue;
+          for (const block of line.message.content) {
+            if (block?.type !== 'tool_use' || block.id == null) continue;
+            const key = String(block.id), value = { name: String(block.name ?? 'tool'), input: block.input };
+            if (append && JSON.stringify(calls.get(key)) !== JSON.stringify(value)
+              && store.db.query('SELECT 1 FROM dependencies WHERE call=? LIMIT 1').get(key)) rebuild = true;
+            calls.set(key, value);
+          }
+        }
+        if (rebuild && append) { store.resetMapping(); store.newGeneration(); start = 0; }
+        const replay = new StoredClaudeReplay(store, basename(this.path).replace(/\.jsonl$/, ''), this.options.replayQueued?.());
+        for await (const record of historyRecords(this.path, start, boundary)) {
+          store.lastWork.sourceBytes += record.bytes; store.lastWork.sourceRecords += 1;
+          if (!record.line) continue;
+          record.line[CLAUDE_LINE_OFFSET] = record.offset;
+          store.lastWork.mappedRecords += 1;
+          for (const block of Array.isArray(record.line.message?.content) ? record.line.message.content : []) {
+            if (block?.type === 'tool_result' && block.tool_use_id != null) {
+              store.db.query('INSERT OR IGNORE INTO dependencies VALUES (?,?)').run(String(block.tool_use_id), record.offset);
+            }
+          }
+          for (const message of replay.feed(record.line)) {
+            store.append(message);
+            if (message.type === 'user-message' && message.key) this.options.onReplayQueued?.(record.line, message.key);
+          }
+          const activity = storedParentActivity(store);
+          collectParentActivity(record.line, store.setOf('activityResolved'), activity.backgroundToolUseIds,
+            activity.notifiedToolUseIds, activity.backgroundSpawnMs!, activity, Boolean(append && this.primed));
+          if (append && this.primed) this.noteSessionFacts(record.line);
+        }
+        replay.checkpoint();
+        const after = fileHistorySourceIdentity(this.path);
+        if (!after || after.sourceId !== identity.sourceId || (after.appendPosition ?? 0) < size
+          || ((after.appendPosition ?? 0) === size && after.revision !== identity.revision)) throw new Error('History source changed during indexing');
+        store.set('source', identity); store.set('boundary', boundary);
+        store.set('guards', historyGuards(this.path, boundary));
+        store.set('previousVersion', previousVersion);
+        store.set('unchangedPrefix', rebuild ? 0 : previousCount);
+        store.set('version', randomUUID());
+        store.db.exec('COMMIT');
+      } catch (error) { store.db.exec('ROLLBACK'); throw error; }
+    });
+    // The live reader continues from the same persisted mapping checkpoint.
+    // It never seeds itself by retaining the entire native transcript.
+    this.offset = store.get<number>('boundary') ?? 0;
+    this.tailBuf = '';
+    this.primed = true;
+    const firstStoredAttach = this.storedLivePosition === undefined;
+    this.storedLivePosition ??= store.get<number>('count') ?? 0;
+    this.storedLiveGeneration ??= store.get<string>('generation');
+    this.runtime = new ClaudeRuntimeTracker(basename(this.path).replace(/\.jsonl$/, ''), 'claude-transcript', store);
+    const source = store.get<HistorySourceIdentity>('source')!;
+    if (firstStoredAttach && this.activity) {
+      this.activity.close();
+      this.activity = new ClaudeActivityWatcher(claudeActivityDir(this.path), (message) => this.emit(message),
+        () => this.handlers.size > 0, store.setOf('activityResolved'), storedParentActivity(store));
+      this.activity.start();
+    }
+    const activity = buildActivitySnapshot(claudeActivityDir(this.path), store.setOf('activityResolved'), Date.now(), storedParentActivity(store)).map((frame) => frame.msg);
+    const openKey = this.runtime.openRunKey();
+    const settled = openKey && (this.settledRunKeys.has(openKey) || this.openRunEndedOnModWord())
+      ? new ClaudeRuntimeTracker(basename(this.path).replace(/\.jsonl$/, ''), 'claude-transcript', store).cancelOpen() : [];
+    if (this.watcher && firstStoredAttach) setTimeout(() => this.drainTail(), 0);
+    return store.snapshot(source, [...settled, ...activity]);
+  }
+
   private async readHistory(): Promise<AgentMessage[]> {
     // ONE read. Map only COMPLETE lines (up to the last newline B); a partial trailing line being
     // written right now is excluded — the tail re-reads it whole once its newline lands.
@@ -2217,8 +2335,8 @@ export class ClaudeObserveConnection implements SessionConnection {
         claudeActivityDir(this.path),
         (m) => this.emit(m),
         () => this.handlers.size > 0,
-        this.resolvedToolUseIds,
-        this.parentActivity(),
+        this.storedActivityState?.resolved ?? this.resolvedToolUseIds,
+        this.storedActivityState?.parent ?? this.parentActivity(),
       );
       this.activity.start();
     }
@@ -2228,6 +2346,21 @@ export class ClaudeObserveConnection implements SessionConnection {
    *  has baselined the offset/seeds, so the tail never overlaps the history it partitions with. */
   private drainTail(): void {
     if (!this.primed || this.historyFlight) return;
+    if (this.storedHistory) {
+      this.storedTailPending = true;
+      if (!this.storedTailFlight) {
+        this.storedTailFlight = (async () => {
+          // A file notification can arrive while the captured prefix is being
+          // indexed. Remember it so the final append needs no later write to
+          // become visible, without running concurrent index/tail readers.
+          do {
+            this.storedTailPending = false;
+            await this.drainStoredTail();
+          } while (this.storedTailPending && this.primed);
+        })().catch(() => {}).finally(() => { this.storedTailFlight = undefined; });
+      }
+      return;
+    }
     let bytes: Buffer;
     try {
       const st = statSafe(this.path);
@@ -2273,6 +2406,30 @@ export class ClaudeObserveConnection implements SessionConnection {
     }
   }
 
+  private async drainStoredTail(): Promise<void> {
+    const store = this.storedHistory!;
+    const before = this.storedLivePosition ?? 0;
+    await this.openHistorySnapshot();
+    const count = store.get<number>('count') ?? 0;
+    const generation = store.get<string>('generation');
+    if (generation !== this.storedLiveGeneration) {
+      this.storedLiveGeneration = generation; this.storedLivePosition = count;
+      this.emit({ type: 'history-reset' });
+      return;
+    }
+    for (let start = before; start < count; start += 100) {
+      for (const message of store.read(start, Math.min(count, start + 100))) {
+        if (message.type === 'run-summary') {
+          if (message.status === 'running') this.emit({ type: 'status', status: 'running' });
+          else if (message.status !== 'cancelled' || message.completedAt !== undefined) this.emit({ type: 'status', status: 'idle' });
+        }
+        this.emit(message);
+      }
+      await new Promise<void>((done) => setImmediate(done));
+    }
+    this.storedLivePosition = count;
+  }
+
   /**
    * Keep the mode and model chips on what the session is doing now.
    *
@@ -2285,7 +2442,7 @@ export class ClaudeObserveConnection implements SessionConnection {
    * sidechain row is a subagent's, and neither its mode nor its model is the session's.
    */
   private noteSessionFacts(ln: any): void {
-    const mode = claudePermissionModeReading(ln, (id) => this.callMeta.get(id)?.name === CLAUDE_PLAN_APPROVAL_TOOL);
+    const mode = claudePermissionModeReading(ln, (id) => (this.storedHistory?.map<ClaudeCall>('calls') ?? this.callMeta).get(id)?.name === CLAUDE_PLAN_APPROVAL_TOOL);
     if (mode === null) {
       if (this.info.currentMode === undefined) return;
       // No mode, rather than the plan mode the approval just ended: the hub drops the field and the
@@ -2337,6 +2494,15 @@ export class ClaudeObserveConnection implements SessionConnection {
       return;
     }
     this.drainTail();
+    if (this.storedTailFlight) {
+      void this.storedTailFlight.then(() => this.applyModTurnEnded(ended), () => undefined);
+      return;
+    }
+    this.applyModTurnEnded(ended);
+  }
+
+  private applyModTurnEnded(ended: { turnId?: string; aborted: boolean; endedAt?: number }): void {
+    if (!this.primed || !this.runtime) return;
     const key = this.runtime.openRunKey();
     if (!key) return;
     if (ended.endedAt !== undefined) {
@@ -2363,7 +2529,8 @@ export class ClaudeObserveConnection implements SessionConnection {
         return;
       }
       this.drainTail();
-      this.settleOpenRun(key);
+      if (this.storedTailFlight) void this.storedTailFlight.then(() => { if (this.primed) this.settleOpenRun(key); }, () => undefined);
+      else this.settleOpenRun(key);
     };
     const timer = setTimeout(() => {
       if (this.turnEndTimer === timer) this.turnEndTimer = undefined;
@@ -2416,6 +2583,12 @@ export class ClaudeObserveConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
+    this.primed = false;
+    await this.storedFlight?.catch(() => {});
+    await this.storedTailFlight?.catch(() => {});
+    this.primed = false;
+    this.storedHistory?.close();
+    this.storedHistory = undefined;
     this.historySource.close();
     if (this.turnEndTimer) clearTimeout(this.turnEndTimer);
     this.turnEndTimer = undefined;
@@ -2514,6 +2687,7 @@ export class ClaudeLiveConnection implements SessionConnection {
   getHistory(): Promise<AgentMessage[]> {
     return this.observe.getHistory();
   }
+  openHistorySnapshot(): Promise<StoredHistorySnapshot | undefined> { return this.observe.openHistorySnapshot(); }
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {
     return this.observe.getHistorySourceIdentity();
   }
@@ -3009,6 +3183,7 @@ function collectMdCommands(base: string, dir: string, out: Map<string, SlashComm
  */
 let resumeConnSeq = 0; // process-monotonic; seeds each ClaudeResumeConnection.connNonce so live-turn run-summary keys are globally unique across grace-eviction reconnect rebuilds
 export class ClaudeResumeConnection implements SessionConnection {
+  private storedObserver?: { path: string; connection: ClaudeObserveConnection; activityAttached?: boolean };
   private readonly handlers = new Set<AgentMessageHandler>();
   private proc?: ChildProcessWithoutNullStreams;
   private stdoutBuf = '';
@@ -3492,6 +3667,55 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {
     return fileHistorySourceIdentity(this.liveTranscriptPath());
+  }
+
+  async openHistorySnapshot(): Promise<StoredHistorySnapshot | undefined> {
+    const path = this.liveTranscriptPath();
+    if (!existsSync(path)) return undefined;
+    if (this.storedObserver?.path !== path) {
+      await this.storedObserver?.connection.close();
+      const connection = new ClaudeObserveConnection(path, this.info, undefined, {
+        replayQueued: () => this.queuedSends.pending.flatMap((entry): ClaudeQueuedSendEntry[] => {
+          if (!entry.driven) return [];
+          const driven = this.pendingDriven.find((row) => row.key === entry.key);
+          return driven ? [{ ...entry, seeded: true, notBefore: driven.sentAt,
+            ...(driven.sentAtPath === path ? { notBeforeOffset: driven.sentAtOffset } : {}) }] : [];
+        }),
+        onReplayQueued: (line, key) => {
+          if (typeof line.uuid === 'string' && key.startsWith('queued:app:')) this.queuedSends.byUuid.set(line.uuid, key);
+        },
+      });
+      this.storedObserver = { path, connection };
+    }
+    const snapshot = await this.storedObserver.connection.openHistorySnapshot();
+    if (!snapshot) return undefined;
+    if (!this.storedObserver.activityAttached) {
+      this.storedObserver.activityAttached = true;
+      this.activity?.close();
+      this.activity = undefined;
+      // Keep the persisted parent state current while Drive streams through
+      // stdout. Only activity is forwarded; transcript/stdout rows retain the
+      // existing Drive correlation and delivery path.
+      this.storedObserver.connection.subscribe((message) => {
+        if (message.type === 'agent-activity') this.emit(message);
+      });
+    }
+    const delivered = new Set(this.queuedSends.byUuid.values());
+    for (let i = this.queuedSends.pending.length - 1; i >= 0; i--) if (delivered.has(this.queuedSends.pending[i]!.key)) this.queuedSends.pending.splice(i, 1);
+    for (let i = this.pendingDriven.length - 1; i >= 0; i--) if (delivered.has(this.pendingDriven[i]!.key)) this.pendingDriven.splice(i, 1);
+    const pending = this.pendingDrivenRows();
+    return { ...snapshot, count: snapshot.count + pending.length, reader: {
+      retainedBytes: snapshot.reader.retainedBytes + pending.reduce((bytes, message) => bytes + 2 * Buffer.byteLength(JSON.stringify(message)) + 256, 0),
+      read: async (locations, query) => {
+        const native = locations.filter((location) => location < snapshot.count);
+        const read = await snapshot.reader.read(native, query);
+        if (!read || 'refusal' in read) return read;
+        let index = 0;
+        const messages = locations.map((location) => location < snapshot.count ? read.messages[index++]! : pending[location - snapshot.count]!);
+        if (messages.some((message) => !message)) return undefined;
+        return { ...read, messages };
+      },
+    } };
   }
 
   private liveTranscriptPath(): string {
@@ -4260,6 +4484,8 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   async close(): Promise<void> {
     this.killProc();
+    await this.storedObserver?.connection.close();
+    this.storedObserver = undefined;
     if (this.echoTailTimer) {
       this.drainUserEcho(); // flush the final delivery echo (the child's last write can precede close by <1s)
       clearInterval(this.echoTailTimer);
@@ -4835,10 +5061,18 @@ function taskResultText(content: unknown): string {
  * transcript line (history pass and live tail alike) and returns the refreshed panel on each change.
  */
 export class ClaudeTaskLedger {
-  private readonly tasks = new Map<string, { id: string; title: string; status: 'open' | 'in-progress' | 'done' }>();
-  private readonly pendingCreates = new Map<string, { subject: string }>();
-  private readonly pendingUpdates = new Map<string, { taskId: string; status?: string; subject?: string }>();
+  private readonly tasks: Map<string, { id: string; title: string; status: 'open' | 'in-progress' | 'done' }>;
+  private readonly pendingCreates: Map<string, { subject: string }>;
+  private readonly pendingUpdates: Map<string, { taskId: string; status?: string; subject?: string }>;
   private fallbackId = 0;
+
+  constructor(private readonly store?: ClaudeHistoryStore) {
+    this.tasks = store?.map('tasks') ?? new Map();
+    this.pendingCreates = store?.map('taskCreates') ?? new Map();
+    this.pendingUpdates = store?.map('taskUpdates') ?? new Map();
+    this.fallbackId = store?.get<number>('taskFallback') ?? 0;
+  }
+  checkpoint(): void { this.store?.set('taskFallback', this.fallbackId); }
 
   feed(ln: any): AgentMessage[] {
     const content = ln?.message?.content;
@@ -4881,6 +5115,7 @@ export class ClaudeTaskLedger {
           else if (update.status === 'in_progress') t.status = 'in-progress';
           else if (update.status === 'completed') t.status = 'done';
           if (typeof update.subject === 'string' && update.subject.trim()) t.title = update.subject.trim();
+          this.tasks.set(t.id, t);
         }
         changed = true;
       }
@@ -5614,11 +5849,21 @@ interface ClaudeClosedRun {
 export class ClaudeRuntimeTracker {
   private current?: ClaudeRun;
   private lastClosed?: ClaudeClosedRun;
-  private readonly tokenSeen = new Set<string>();
+  private readonly tokenSeen: Set<string>;
   private totalRuntimeMs = 0;
   private turnCount = 0;
   private updatedAt?: number;
-  constructor(private readonly sessionId: string, private readonly source: string) {}
+  constructor(private readonly sessionId: string, private readonly source: string, private readonly store?: ClaudeHistoryStore) {
+    this.tokenSeen = store?.setOf('runtimeTokens') ?? new Set();
+    const state = store?.get<{ current?: ClaudeRun; lastClosed?: ClaudeClosedRun; totalRuntimeMs: number; turnCount: number; updatedAt?: number }>('runtime');
+    if (state) {
+      this.current = state.current; this.lastClosed = state.lastClosed;
+      this.totalRuntimeMs = state.totalRuntimeMs; this.turnCount = state.turnCount; this.updatedAt = state.updatedAt;
+    }
+  }
+  checkpoint(): void {
+    this.store?.set('runtime', { current: this.current, lastClosed: this.lastClosed, totalRuntimeMs: this.totalRuntimeMs, turnCount: this.turnCount, updatedAt: this.updatedAt });
+  }
 
   feed(ln: any, mapped: AgentMessage[]): AgentMessage[] {
     // CONTRACT: a turn boundary is "mapUser emitted a user-message", so boundary detection stays in lockstep
@@ -5853,6 +6098,43 @@ export function mapTranscript(
   for (;;) {
     const step = replay.next();
     if (step.done) return step.value;
+  }
+}
+
+/** The same line mapper as full replay, with growing correlation sets on disk
+ * and only the current run/queue/context scalars retained between batches. */
+function storedParentActivity(store: ClaudeHistoryStore): ParentActivityState {
+  return {
+    backgroundToolUseIds: store.setOf('activityBackground'), notifiedToolUseIds: store.setOf('activityNotified'),
+    backgroundSpawnMs: store.map('activitySpawn'), killedAgentIds: store.setOf('activityKilled'),
+    agentIdToToolUseId: store.map('activityAgents'), stopRequests: store.map('activityStops'),
+    backgroundCommands: store.map('activityCommands'),
+  };
+}
+
+class StoredClaudeReplay {
+  readonly runtime: ClaudeRuntimeTracker;
+  private readonly tasks: ClaudeTaskLedger;
+  private readonly blocks: ClaudeBlockOrdinals;
+  private readonly queued: ClaudeQueuedSends;
+  private readonly context: ClaudeContextWindowState;
+  constructor(private readonly store: ClaudeHistoryStore, id: string, driven?: ClaudeQueuedSendEntry[]) {
+    this.runtime = new ClaudeRuntimeTracker(id, 'claude-transcript', store);
+    this.tasks = new ClaudeTaskLedger(store);
+    this.blocks = { next: store.map('blockNext'), byUuid: store.map('blockUuid') };
+    const saved = store.get<{ pending: ClaudeQueuedSendEntry[]; context: Omit<ClaudeContextWindowState, 'oneMillionModels'> }>('mapper');
+    this.queued = { pending: saved?.pending ?? [], byUuid: store.map('queuedUuid') };
+    if (driven) this.queued.pending = [...this.queued.pending.filter((entry) => !entry.driven), ...driven];
+    this.context = { ...saved?.context, oneMillionModels: store.setOf('millionModels') };
+  }
+  feed(line: any): AgentMessage[] {
+    const mapped = mapLine(line, this.store.map<ClaudeCall>('calls'), this.store.setOf('seenTokens'), this.queued, this.blocks, this.context);
+    return [...mapped, ...this.tasks.feed(line), ...this.runtime.feed(line, mapped)];
+  }
+  checkpoint(): void {
+    this.runtime.checkpoint(); this.tasks.checkpoint();
+    const { oneMillionModels: _, ...context } = this.context;
+    this.store.set('mapper', { pending: this.queued.pending, context });
   }
 }
 

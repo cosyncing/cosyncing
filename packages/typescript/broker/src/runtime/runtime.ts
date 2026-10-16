@@ -153,6 +153,7 @@ import {
   sameHistorySourceIdentity,
   validHistorySourceIdentity,
 } from '../sessions/history-page-cache.ts';
+import { storedHistoryIndex } from '../sessions/stored-history-index.ts';
 import { refreshSessionOptions } from '../sessions/session-options.ts';
 import { SessionMetadataStore } from '../sessions/session-metadata-store.ts';
 import {
@@ -3208,6 +3209,17 @@ async function readHistoryPagePrefixUnrecorded(
   connection: SessionConnection,
   artifactMode: 'inline' | 'reference' | undefined,
 ): Promise<HistoryPageCacheOutcome> {
+  if (connection.openHistorySnapshot) {
+    try {
+      const snapshot = await connection.openHistorySnapshot();
+      if (!snapshot) return { kind: 'source-changed' };
+      if (!historySourceStillContainsSnapshot(snapshot.identity, source)
+        && !historySourceStillContainsSnapshot(source, snapshot.identity)) return { kind: 'source-changed' };
+      return { kind: 'cache', cache: await storedHistoryIndex(snapshot) };
+    } catch (error) {
+      return { kind: ['HISTORY_RECORD_RESOURCE_LIMIT', 'SQLITE_FULL', 'SQLITE_NOMEM', 'ENOSPC', 'ENOMEM'].includes((error as { code?: string })?.code ?? '') ? 'resource-limit' : 'source-changed' };
+    }
+  }
   if (typeof connection.captureHistorySnapshot === 'function') {
     noteHistoryRead('page-cache-miss', connection);
     const indexedBuilder = new IndexedHistoryPageCacheBuilder();
@@ -4257,7 +4269,7 @@ async function answerHistoryRefresh(
   }
   const scope = historyPageCacheScope(ws.data.tool, ws.data.id, ws.data.artifactMode);
   let refreshed: HistoryRefresh | HistoryRefreshRefusal;
-  if (typeof mc.conn.captureHistorySnapshot === 'function') {
+  if (mc.conn.openHistorySnapshot || typeof mc.conn.captureHistorySnapshot === 'function') {
     const built = await buildCurrentHistoryPageCache({
       scope,
       source,
@@ -8305,7 +8317,7 @@ server = Bun.serve<WsData>({
         // complete normalized rollout.
         if (
           historySourceBefore
-          && typeof mc.conn.captureHistorySnapshot === 'function'
+          && (mc.conn.openHistorySnapshot || typeof mc.conn.captureHistorySnapshot === 'function')
         ) {
           const source = historySourceBefore;
           const acceptCompactAttach = (

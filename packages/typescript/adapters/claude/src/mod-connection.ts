@@ -27,6 +27,7 @@ import type {
   AgentMessageHandler,
   CommandResult,
   HistorySourceIdentity,
+  StoredHistorySnapshot,
   ModeOption,
   ModelOption,
   PermissionDecidedBy,
@@ -185,7 +186,12 @@ export class ClaudeModConnection implements SessionConnection {
       options.transcriptPath,
       options.info,
       undefined,
-      options.turnEndGraceMs !== undefined ? { turnEndGraceMs: options.turnEndGraceMs } : {},
+      {
+        ...(options.turnEndGraceMs !== undefined ? { turnEndGraceMs: options.turnEndGraceMs } : {}),
+        ...(options.turnRunning && options.turnEndedAt ? {
+          modTurn: { turnRunning: options.turnRunning, turnEndedAt: options.turnEndedAt },
+        } : {}),
+      },
     );
   }
 
@@ -283,6 +289,18 @@ export class ClaudeModConnection implements SessionConnection {
     if (typeof newest.startedAt === 'number' && newest.startedAt >= endedAt) return history;
     // A running summary carries no completion time or runtime, so the restatement invents neither.
     return [...history, { ...newest, status: 'cancelled' }];
+  }
+
+  async openHistorySnapshot(): Promise<StoredHistorySnapshot | undefined> {
+    const snapshot = await this.content.openHistorySnapshot();
+    if (!snapshot) return undefined;
+    return { ...snapshot, reader: {
+      retainedBytes: snapshot.reader.retainedBytes,
+      read: async (locations, query) => {
+        const result = await snapshot.reader.read(locations, query);
+        return result && !('refusal' in result) ? { ...result, messages: this.withCardNotes(result.messages) } : result;
+      },
+    } };
   }
 
   /**
