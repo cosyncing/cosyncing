@@ -468,7 +468,8 @@ void main() {
           'This page is too large to load safely on this device.',
     }.entries) {
       testWidgets(
-        'resource refusal is terminal, localized, and has no retry affordance: ${refusal.key}',
+        'resource refusal is terminal, localized, and has no retry affordance: '
+        '${refusal.key}',
         (tester) async {
           useRoomyTestViewport(tester);
           final connection = _HistoryCapableScriptedConnection(
