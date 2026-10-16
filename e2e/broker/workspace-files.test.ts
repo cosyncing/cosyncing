@@ -153,6 +153,27 @@ describe('with workspace browsing enabled in the broker configuration', () => {
     }
   });
 
+  test('Chinese filenames round-trip through lookup and whole or ranged downloads', async () => {
+    const name = 'report_长图_2160px.jpg';
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    writeFileSync(join(cwd, name), bytes);
+    const found = await owner.get(route('/fs/search', { query: name }));
+    expect(found.status).toBe(200);
+    expect(found.body.matches.map((file: any) => file.path)).toEqual([name]);
+    expect((await owner.get(route('/fs', { path: name }))).body.stat.size).toBe(bytes.length);
+    const url = `${installed.broker.url}${route('/fs/download', { path: name })}`;
+    for (const ranged of [false, true]) {
+      const image = await fetch(url, {
+        headers: { ...owner.credentialHeaders(), ...(ranged ? { range: 'bytes=1-2' } : {}) },
+      });
+      expect(image.status).toBe(ranged ? 206 : 200);
+      expect(image.headers.get('content-type')).toBe('image/jpeg');
+      const disposition = image.headers.get('content-disposition')!;
+      expect(decodeURIComponent(disposition.split("filename*=UTF-8''")[1]!)).toBe(name);
+      expect(new Uint8Array(await image.arrayBuffer())).toEqual(ranged ? bytes.slice(1, 3) : bytes);
+    }
+  });
+
   test('escapes, symlinks and non-files are refused with stable codes', async () => {
     const escaped = await owner.get(route('/fs', { path: '../outside' }));
     expect([escaped.status, escaped.body.code]).toEqual([400, 'PATH_ESCAPE']);

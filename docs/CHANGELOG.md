@@ -30,6 +30,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Find generated files, including Chinese filenames, beside source files already
+  used by the session before searching the whole workspace. Downloads preserve
+  Unicode filenames and browser transfers show progress as chunks arrive.
+- File lists, previews, and transfers show readable KB/MB/GB sizes. Delivered
+  file cards no longer display encoded artifact identifiers or content hashes.
+
 - A question Claude asks in a true-synced terminal reaches the app at once and
   stays answerable from either side until one answers, also when no device was
   watching when Claude asked and in a tab opened afterwards. In auto mode the

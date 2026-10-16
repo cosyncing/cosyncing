@@ -638,7 +638,12 @@ final class BrowserSessionArtifactFileService
     }
     final fetched = descriptor.isInlineDataUrl
         ? DefaultSessionArtifactFileService.decodeDataUrl(source)
-        : await _fetchReference(descriptor, source);
+        : await _fetchReference(
+            descriptor,
+            source,
+            cancellationToken: cancellationToken,
+            onProgress: onProgress,
+          );
     cancellationToken?.throwIfCanceled();
     final contentType = fetched.contentType ?? descriptor.mimeType;
     final fileName = DefaultSessionArtifactFileService.resolveSafeFileName(
@@ -680,6 +685,8 @@ final class BrowserSessionArtifactFileService
       tool: tool,
       sessionId: sessionId,
       path: path,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
     );
     cancellationToken?.throwIfCanceled();
     final contentType = download.contentType ?? mimeType;
@@ -725,8 +732,10 @@ final class BrowserSessionArtifactFileService
 
   Future<SessionArtifactFetchData> _fetchReference(
     SessionArtifactDescriptor descriptor,
-    String source,
-  ) async {
+    String source, {
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
+  }) async {
     final backend = _downloadBackend;
     if (backend == null) {
       throw StateError('Connect to an active server before downloading.');
@@ -754,6 +763,8 @@ final class BrowserSessionArtifactFileService
                   maxBytes: maxBytes,
                   ifRange: ifRange,
                 ),
+            cancellationToken: cancellationToken,
+            onProgress: onProgress,
           )
         : await boundedBackend.fetchArtifactUrlBounded(
             source,
@@ -784,6 +795,8 @@ final class BrowserSessionArtifactFileService
     required String tool,
     required String sessionId,
     required String path,
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
   }) async {
     if (backend is! BoundedResumableArtifactDownloadBackend) {
       throw StateError(
@@ -803,6 +816,8 @@ final class BrowserSessionArtifactFileService
             maxBytes: maxBytes,
             ifRange: ifRange,
           ),
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
     );
   }
 
@@ -819,8 +834,10 @@ final class BrowserSessionArtifactFileService
       required int maxBytes,
       String? ifRange,
     })
-    fetchRange,
-  ) async {
+    fetchRange, {
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
+  }) async {
     final bytes = BytesBuilder(copy: false);
     var offset = 0;
     int? totalBytes;
@@ -829,7 +846,9 @@ final class BrowserSessionArtifactFileService
     String? contentType;
     String? artifactKey;
     String? contentHash;
+    onProgress?.call(bytesTransferred: 0);
     while (totalBytes == null || offset < totalBytes) {
+      cancellationToken?.throwIfCanceled();
       final remaining = _browserArtifactCacheMaxBytes - offset;
       if (remaining <= 0) {
         throw ArtifactTooLargeException(
@@ -847,6 +866,7 @@ final class BrowserSessionArtifactFileService
         maxBytes: requestBytes,
         ifRange: offset == 0 ? null : validator,
       );
+      cancellationToken?.throwIfCanceled();
       contentType = download.contentType ?? contentType;
       artifactKey = download.artifactKey ?? artifactKey;
       contentHash = download.contentHash ?? contentHash;
@@ -873,6 +893,7 @@ final class BrowserSessionArtifactFileService
         bytes.add(download.bytes);
         offset = download.bytes.length;
         totalBytes = offset;
+        onProgress?.call(bytesTransferred: offset, totalBytes: totalBytes);
         break;
       }
       if (download.statusCode != 206 ||
@@ -917,6 +938,7 @@ final class BrowserSessionArtifactFileService
       totalBytes = range.total;
       etag = download.etag ?? etag;
       lastModified = download.lastModified ?? lastModified;
+      onProgress?.call(bytesTransferred: offset, totalBytes: totalBytes);
     }
     if (offset != totalBytes) {
       throw const BrokerException(
@@ -943,7 +965,6 @@ final class BrowserSessionArtifactFileService
     if (bytes.length > _browserArtifactCacheMaxBytes) {
       throw StateError('Artifact exceeds the browser cache limit.');
     }
-    onProgress?.call(bytesTransferred: 0, totalBytes: bytes.length);
     while (_cache.isNotEmpty &&
         (_cache.length >= _browserArtifactCacheMaxEntries ||
             _cacheBytes + bytes.length > _browserArtifactCacheMaxBytes)) {

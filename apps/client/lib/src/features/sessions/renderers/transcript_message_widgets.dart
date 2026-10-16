@@ -415,7 +415,7 @@ class _TranscriptArtifactRow extends StatelessWidget {
                               ),
                             if (size != null)
                               Text(
-                                l10n.bytesCount(size),
+                                formatFileSize(l10n, size),
                                 style: theme.textTheme.labelSmall?.copyWith(
                                   color: tokens.textTertiary,
                                 ),
@@ -468,7 +468,7 @@ class _TranscriptArtifactRow extends StatelessWidget {
                     if (size != null) ...[
                       const SizedBox(width: 8),
                       Text(
-                        l10n.bytesCount(size),
+                        formatFileSize(l10n, size),
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: tokens.textTertiary,
                         ),

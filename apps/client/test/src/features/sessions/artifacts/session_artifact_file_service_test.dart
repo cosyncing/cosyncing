@@ -139,14 +139,23 @@ void main() {
       );
       final service = BrowserSessionArtifactFileService(backend);
 
+      final progress = <int>[];
       final cached = await service.cacheSessionFile(
         tool: 'pi',
         sessionId: 'owner',
         path: 'results.bin',
         fileName: 'results.bin',
+        onProgress: ({required bytesTransferred, totalBytes}) {
+          progress.add(bytesTransferred);
+          if (bytesTransferred == 1024 * 1024) {
+            expect(backend.boundedRangeCalls, 1);
+            expect(totalBytes, fileBytes.length);
+          }
+        },
       );
 
       expect(cached.byteLength, fileBytes.length);
+      expect(progress, [0, 1024 * 1024, fileBytes.length, fileBytes.length]);
       expect(backend.fullSessionCalls, 0);
       expect(backend.unboundedRangeCalls, 0);
       expect(backend.boundedRangeCalls, 2);
@@ -154,6 +163,28 @@ void main() {
         backend.rangeLimits.every((limit) => limit <= 1024 * 1024),
         isTrue,
       );
+    });
+
+    test('canceling a browser download stops before the next range', () async {
+      final backend = _FakeBrowserBoundedDownloadBackend(
+        sessionBytes: List<int>.filled(1024 * 1024 + 17, 1),
+      );
+      final service = BrowserSessionArtifactFileService(backend);
+      final token = SessionArtifactCancellationToken();
+      await expectLater(
+        service.cacheSessionFile(
+          tool: 'pi',
+          sessionId: 'owner',
+          path: '长图.jpg',
+          fileName: '长图.jpg',
+          cancellationToken: token,
+          onProgress: ({required bytesTransferred, totalBytes}) {
+            if (bytesTransferred > 0) token.cancel();
+          },
+        ),
+        throwsA(isA<SessionArtifactCanceledException>()),
+      );
+      expect(backend.boundedRangeCalls, 1);
     });
 
     test('workspace total wins over misleading small content-length', () async {

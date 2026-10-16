@@ -6,6 +6,7 @@ import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
+import 'package:cosyncing_client/src/formatting/file_size.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1599,20 +1600,11 @@ String _transferStatusLabel(
 String _transferProgressLabel(
   AppLocalizations l10n,
   SessionArtifactTransfer transfer,
-) {
-  final transferred = transfer.bytesTransferred;
-  final total = transfer.totalBytes;
-  if (transferred == null && total == null) {
-    return '';
-  }
-  if (transferred != null && total != null) {
-    return l10n.transferProgressBytes(transferred, total);
-  }
-  if (transferred != null) {
-    return l10n.transferProgressTransferredBytes(transferred);
-  }
-  return l10n.transferProgressBytes(0, total!);
-}
+) => formatFileProgress(
+  l10n,
+  transferred: transfer.bytesTransferred,
+  total: transfer.totalBytes,
+);
 
 String _transferDetailLabel(
   AppLocalizations l10n,
@@ -1640,8 +1632,8 @@ String _transferDetailLabel(
   final bytes = transfer.bytesTransferred ?? transfer.totalBytes;
   if (bytes != null) {
     return transfer.direction == SessionArtifactTransferDirection.upload
-        ? l10n.transferUploadedBytes(bytes)
-        : l10n.transferDownloadedBytes(bytes);
+        ? l10n.transferUploadedSize(formatFileSize(l10n, bytes))
+        : l10n.transferDownloadedSize(formatFileSize(l10n, bytes));
   }
   return _transferStatusLabel(l10n, transfer.status);
 }

@@ -2537,14 +2537,14 @@
   "sessionFileTypeFile": "file",
   "sessionFileTypeSymlink": "symlink (cannot open)",
   "sessionFileTypeOther": "other",
-  "sessionFileMetadata": "{type} · {count} bytes",
+  "sessionFileMetadata": "{type} · {size}",
   "@sessionFileMetadata": {
     "placeholders": {
       "type": {
         "type": "String"
       },
-      "count": {
-        "type": "int"
+      "size": {
+        "type": "String"
       }
     }
   },
@@ -2584,6 +2584,14 @@
   "artifactKeyLabel": "Artifact",
   "hashLabel": "Hash",
   "sizeLabel": "Size",
+  "sessionArtifactSize": "Size: {size}",
+  "@sessionArtifactSize": {
+    "placeholders": {
+      "size": {
+        "type": "String"
+      }
+    }
+  },
   "copyLocalPath": "Copy local path",
   "preview": "Preview",
   "sessionArtifactNoActions": "No file actions are available.",
@@ -4725,19 +4733,19 @@
   "toolDisplayCollapsedBody": "Start every tool card collapsed.",
   "toolDisplayFinalTitle": "Final messages only",
   "toolDisplayFinalBody": "Show user turns, final assistant messages, and safety or action surfaces.",
-  "transferUploadedBytes": "Uploaded {count} bytes",
-  "@transferUploadedBytes": {
+  "transferUploadedSize": "Uploaded {size}",
+  "@transferUploadedSize": {
     "placeholders": {
-      "count": {
-        "type": "int"
+      "size": {
+        "type": "String"
       }
     }
   },
-  "transferDownloadedBytes": "Downloaded {count} bytes",
-  "@transferDownloadedBytes": {
+  "transferDownloadedSize": "Downloaded {size}",
+  "@transferDownloadedSize": {
     "placeholders": {
-      "count": {
-        "type": "int"
+      "size": {
+        "type": "String"
       }
     }
   },
@@ -6298,5 +6306,48 @@
   "sessionFileSearchLoading": "Finding matching files…",
   "sessionFileSearchNoMatches": "No matching files found.",
   "sessionFileSearchChoose": "Choose a file to open.",
-  "sessionFileSearchPartial": "Search reached its limit. More matches may exist; use a more specific path to narrow the search."
+  "sessionFileSearchPartial": "Search reached its limit. More matches may exist; use a more specific path to narrow the search.",
+  "fileSizeKilobytes": "{value} KB",
+  "@fileSizeKilobytes": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "fileSizeMegabytes": "{value} MB",
+  "@fileSizeMegabytes": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "fileSizeGigabytes": "{value} GB",
+  "@fileSizeGigabytes": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "fileSizeTerabytes": "{value} TB",
+  "@fileSizeTerabytes": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "transferProgressSize": "{transferred} / {total}",
+  "@transferProgressSize": {
+    "placeholders": {
+      "transferred": {
+        "type": "String"
+      },
+      "total": {
+        "type": "String"
+      }
+    }
+  }
 }

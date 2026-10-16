@@ -87,8 +87,8 @@ SessionFileReference? transcriptFileReference(
   return reference;
 }
 
-/// Exact path first, then paths already published by the session, then a
-/// bounded broker search. A partial search does not claim a match is unique.
+/// Exact path first, then published paths and their directories, then a bounded
+/// broker search. A partial search does not claim a match is unique.
 Future<FsSearchResult> resolveTranscriptFile({
   required SessionFileReference reference,
   required Iterable<SessionFileReference> knownReferences,
@@ -146,6 +146,50 @@ Future<FsSearchResult> resolveTranscriptFile({
         matches: matches.values.toList(),
         truncated: true,
       );
+    }
+  }
+  if (matches.isNotEmpty) {
+    return FsSearchResult(query: query, matches: matches.values.toList());
+  }
+  // Generated files may only appear in a command's output, while their source
+  // files have structured paths. Try those directories before walking a large
+  // workspace (including a session rooted at the user's home directory).
+  final directories = <String>{};
+  examined = 0;
+  for (final known in knownReferences) {
+    final directory = known.kind == SessionFileReferenceKind.directory
+        ? known.rawPath
+        : known.parent.rawPath;
+    final parent = directory.replaceAll(r'\', '/');
+    if (parent.isEmpty || !directories.add(parent)) continue;
+    if (++examined > 64) {
+      return FsSearchResult(
+        query: query,
+        matches: matches.values.toList(),
+        truncated: true,
+      );
+    }
+    final candidate =
+        '${parent.endsWith('/') ? parent : '$parent/'}$normalized';
+    try {
+      final found = (await stat(candidate)).stat;
+      if (found.isRegularFile) matches[found.path] = found;
+      if (matches.length >= 50) {
+        return FsSearchResult(
+          query: query,
+          matches: matches.values.toList(),
+          truncated: true,
+        );
+      }
+    } on BrokerException catch (error) {
+      if (!const [
+        'NOT_FOUND',
+        'NOT_DIRECTORY',
+        'PATH_ESCAPE',
+        'PATH_SYMLINK',
+      ].contains(error.error?.code)) {
+        rethrow;
+      }
     }
   }
   if (matches.isNotEmpty) {

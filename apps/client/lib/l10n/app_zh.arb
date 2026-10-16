@@ -738,7 +738,7 @@
   "sessionFileTypeFile": "文件",
   "sessionFileTypeSymlink": "符号链接（无法打开）",
   "sessionFileTypeOther": "其他",
-  "sessionFileMetadata": "{type} · {count} 字节",
+  "sessionFileMetadata": "{type} · {size}",
   "sessionTransfersCount": "传输（{count}）",
   "showingLatestEarlier": "显示最新 {visible} 项；另有 {hidden} 项较早记录",
   "mimeTypeLabel": "MIME",
@@ -748,6 +748,7 @@
   "artifactKeyLabel": "产物",
   "hashLabel": "哈希",
   "sizeLabel": "大小",
+  "sessionArtifactSize": "大小：{size}",
   "copyLocalPath": "复制本地路径",
   "preview": "预览",
   "sessionArtifactNoActions": "没有可用的文件操作。",
@@ -1462,19 +1463,19 @@
   "toolDisplayCollapsedBody": "所有工具卡片默认折叠。",
   "toolDisplayFinalTitle": "仅显示最终消息",
   "toolDisplayFinalBody": "显示用户轮次、助手最终消息，以及安全或需要操作的界面。",
-  "transferUploadedBytes": "已上传 {count} 字节",
-  "@transferUploadedBytes": {
+  "transferUploadedSize": "已上传 {size}",
+  "@transferUploadedSize": {
     "placeholders": {
-      "count": {
-        "type": "int"
+      "size": {
+        "type": "String"
       }
     }
   },
-  "transferDownloadedBytes": "已下载 {count} 字节",
-  "@transferDownloadedBytes": {
+  "transferDownloadedSize": "已下载 {size}",
+  "@transferDownloadedSize": {
     "placeholders": {
-      "count": {
-        "type": "int"
+      "size": {
+        "type": "String"
       }
     }
   },
@@ -2660,5 +2661,10 @@
   "sessionFileSearchLoading": "正在查找匹配文件…",
   "sessionFileSearchNoMatches": "未找到匹配文件。",
   "sessionFileSearchChoose": "选择要打开的文件。",
-  "sessionFileSearchPartial": "搜索已达到上限，可能还有其他匹配项。请使用更具体的路径缩小搜索范围。"
+  "sessionFileSearchPartial": "搜索已达到上限，可能还有其他匹配项。请使用更具体的路径缩小搜索范围。",
+  "fileSizeKilobytes": "{value} KB",
+  "fileSizeMegabytes": "{value} MB",
+  "fileSizeGigabytes": "{value} GB",
+  "fileSizeTerabytes": "{value} TB",
+  "transferProgressSize": "{transferred} / {total}"
 }
