@@ -7,7 +7,8 @@
  * cards, and `routeModApprove` / `routeModAnswer` / `routeModRejectQuestion` taking the app's
  * frames. Everything on the mod side is the shipped `register.js`, loaded fresh per terminal,
  * behind a `$` whose `http.fetch` is a real fetch over that socket. What a test cannot have is
- * faked: the engine beneath `next(e)`, the TUI that draws the band, and the host timer.
+ * faked: the engine beneath `next(e)`, the TUI that draws the band, the person at Claude's own
+ * question picker, which stays open until a section answers or escapes it, and the host timer.
  *
  *   bun run packages/typescript/broker/test/claude/test-claude-mod-hold-seam.ts   (exit 0 = all pass)
  */
@@ -87,6 +88,8 @@ interface StackOptions {
   timing?: Record<string, unknown>;
   mod?: Partial<LoadModOptions>;
   mode?: string;
+  /** App clients on the session's one seat. Default one; zero is a session nobody has open. */
+  viewers?: number;
 }
 
 /** One broker, one app connection and one terminal, all on a fresh temp root. */
@@ -110,7 +113,7 @@ async function stack(label: string, options: StackOptions = {}): Promise<Stack> 
     send: (command: unknown): { ok: boolean; code?: string } => service.send(sessionId, command as never),
     steeringEnabled: () => true,
   });
-  const hubRow = { clientCount: 1, conn: connection as unknown };
+  const hubRow = { clientCount: options.viewers ?? 1, conn: connection as unknown };
   service = new ClaudeModService({
     socketPath: join(temp.root, 'claude-mod.sock'),
     hub: () => hubRow,
@@ -140,6 +143,8 @@ async function stack(label: string, options: StackOptions = {}): Promise<Stack> 
   const replyStalls: { when: (request: SentRequest, text: string) => boolean; until: Promise<void> }[] = [];
   const mod = await loadMod(label, {
     sessionId,
+    // Claude's picker opens beneath every question and races the app's card, as it does in Claude.
+    openPicker: true,
     ...options.mod,
     env: { ...env, ...options.mod?.env },
     beforeFetch: async (request) => {
@@ -378,7 +383,7 @@ async function appIdSection(): Promise<void> {
   // It dies, and `claude --resume` brings the same session back in a new process, whose count
   // starts again: its first two calls are cm-1 and cm-2 as well.
   s.mod.kill();
-  const resumed = await loadMod('app-ids-resumed', { env: s.env, sessionId: s.sessionId });
+  const resumed = await loadMod('app-ids-resumed', { env: s.env, sessionId: s.sessionId, openPicker: true });
   onCleanup(resumed.kill);
   (resumed.exports.tuneForTest as (o: Record<string, unknown>) => void)({ backoffMs: [100, 200, 300], pollWaitMs: 300 });
   await resumed.fire('session.start', { cwd: '/work', surface: 'terminal', isInteractive: true });
@@ -435,16 +440,10 @@ async function questionEndsSection(): Promise<void> {
     { label: 'its terminal stopped asking', options: { holdLeaseMs: 800, sweepIntervalMs: 100 }, end: async (s) => s.mod.kill() },
     { label: 'the app dismissed it', end: async (s, card) => void routeModRejectQuestion(s.frameDeps, { requestId: card.requestId }) },
     { label: 'its turn ended', end: async (s) => void await s.mod.fire('turn.complete', { turnId: 'turn-q' }) },
-    {
-      // Band 1 hands the question to Claude's own picker, which is open until it is answered or the
-      // turn ends. The card stays for that long (R5-A, below); here the turn ends.
-      label: 'the person chose Claude\'s dialog, and the turn ended',
-      end: async (s) => {
-        s.mod.tapBand("Answer in Claude's dialog");
-        await until(() => s.cards().some((c) => c.type === 'question-request' && c.answerInTerminal === true));
-        await s.mod.fire('turn.complete', { turnId: 'turn-q' });
-      },
-    },
+    // QR2: Claude's own picker is open beside the card the whole time, and the person settling it
+    // first is an ordinary ending, answered or not.
+    { label: 'the person answered in Claude\'s picker', end: async (s) => void s.mod.pickers[s.mod.pickers.length - 1]?.answer({ 'Which build?': 'Release' }) },
+    { label: 'the person escaped Claude\'s picker', end: async (s) => void s.mod.pickers[s.mod.pickers.length - 1]?.escape() },
     {
       label: 'a resumed process took the session over',
       end: async (s) => {
@@ -462,7 +461,6 @@ async function questionEndsSection(): Promise<void> {
     void s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: `tu-q-${index}`, questions: QUESTIONS }).catch(() => undefined);
     await until(() => questionCards(s).length === 1);
     const card = questionCards(s)[0]!;
-    await until(() => s.mod.record.bands.length > 0);
     await until(() => items(s).some((e) => e.requestId === card.requestId && e.state === 'active'));
     await end(s, card);
     check(`MB5a (${label}): the question card closes`, await until(() => questionCards(s).length === 0, 3000), JSON.stringify(questionCards(s)));
@@ -475,43 +473,191 @@ async function questionEndsSection(): Promise<void> {
       JSON.stringify(items(s).map((e) => [e.requestId, e.state])));
     s.close();
   }
-
-  // R5-A: the picker is open, so the question is not over. Its card stays, read-only and open in the
-  // terminal, and the session still waits on a person.
-  const s = await stack('question-end-dialog');
-  await s.mod.fire('turn.start', { turnId: 'turn-q' });
-  void s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-q-dialog', questions: QUESTIONS }).catch(() => undefined);
-  await until(() => questionCards(s).length === 1 && s.mod.record.bands.length > 0);
-  const card = questionCards(s)[0]!;
-  await until(() => items(s).some((e) => e.requestId === card.requestId && e.state === 'active'));
-  s.mod.tapBand("Answer in Claude's dialog");
-  const restated = await until(() => s.cards().some((c) => c.type === 'question-request' && c.requestId === card.requestId && c.answerInTerminal === true), 3000);
-  await until(() => false, 200);
-  const open = s.cards().filter((c) => c.type === 'question-request');
-  check('MB5a (the person chose Claude\'s dialog): the card stays, read-only and open in the terminal, under the same id',
-    restated && open.length === 1 && open[0]?.requestId === card.requestId && open[0]?.readOnly === true && open[0]?.blocking !== false,
-    JSON.stringify(open));
-  check('MB5a (the person chose Claude\'s dialog): nothing has closed it yet', !s.frames.some((f) => f.type === 'question-resolved' && f.requestId === card.requestId),
-    JSON.stringify(s.frames.filter((f) => f.requestId === card.requestId).map((f) => f.type)));
-  check('MB5a (the person chose Claude\'s dialog): and its inbox item is still open: the session still waits on a person',
-    items(s).some((e) => e.requestId === card.requestId && e.state === 'active'), JSON.stringify(items(s).map((e) => [e.requestId, e.state])));
-  s.close();
 }
 
 // ── MB5(d): a question is held only for a real call, and the hold says which call ────────────
 async function questionCallSection(): Promise<void> {
   const s = await stack('question-call');
   const before = s.mod.record.requests.length;
-  const query = await s.mod.fire('tool.call', { tool: 'AskUserQuestion', questions: QUESTIONS });
-  check('MB5d: a question tool.call with no tool_use_id is not held', (query as { ranItself?: boolean })?.ranItself === true
-    && s.sent(before, 'hold').length === 0, JSON.stringify(s.sent(before, 'hold').map((r) => r.body.requestId)));
+  const querying = s.mod.fire('tool.call', { tool: 'AskUserQuestion', questions: QUESTIONS });
+  await until(() => s.mod.pickers.length === 1);
+  const picked = s.mod.pickers[0]?.answer({ 'Which build?': 'Debug' });
+  const query = await querying;
+  check('MB5d: a question tool.call with no tool_use_id is not offered: it is Claude\'s picker alone',
+    picked !== undefined && query === picked && s.sent(before, 'hold').length === 0,
+    JSON.stringify(s.sent(before, 'hold').map((r) => r.body.requestId)));
   const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-q-real', questions: QUESTIONS });
   await until(() => questionCards(s).length === 1);
   check('MB5d: a held question carries its tool_use_id to the broker', s.sent(before, 'hold').some((r) => r.body.toolUseId === 'tu-q-real'),
     JSON.stringify(s.sent(before, 'hold').map((r) => r.body.toolUseId)));
+  // Dismissed in the app: the card goes, and the question is still the terminal's, in the picker
+  // that has been open beside the card all along.
   routeModRejectQuestion(s.frameDeps, { requestId: questionCards(s)[0]!.requestId });
-  await call;
+  const stillOpen = await Promise.race([call.then(() => false), until(() => false, 300).then(() => true)]);
+  const picker = s.mod.picker('tu-q-real');
+  check('QR2 seam: a question dismissed in the app is still open in Claude\'s picker',
+    stillOpen && picker?.settled === false && picker.closedByHook === false && questionCards(s).length === 0,
+    JSON.stringify({ stillOpen, settled: picker?.settled, closedByHook: picker?.closedByHook }));
+  const answered = picker?.answer({ 'Which build?': 'Release' });
+  check('QR2 seam: and the picker\'s answer is the call\'s', answered !== undefined && (await call) === answered);
   s.close();
+}
+
+// ── QR1/QR2: a question races Claude's own picker ─────────────────────────────────────────────
+// The picker opens at once, every time, and the app's card is offered beside it: neither waits on
+// the other. Whichever side answers first is the answer, and the other side closes.
+type ResolvedFrame = { type?: string; requestId?: string; answers?: string[][]; decidedBy?: string; releaseReason?: string };
+const resolvedFrame = (s: Stack, requestId: string): ResolvedFrame | undefined =>
+  (s.frames as ResolvedFrame[]).find((f) => f.type === 'question-resolved' && f.requestId === requestId);
+/** The mod's `question.settled` reports since request index `from`. */
+const settledReports = (s: Stack, from = 0) => s.sent(from, 'event').filter((r) => r.body.kind === 'question.settled');
+const settledDetail = (request: SentRequest | undefined) => request?.body.detail as { toolUseId?: string; answers?: Record<string, string> } | undefined;
+const questionItems = (s: Stack) => s.attention.listEvents().filter((e) => e.kind === 'question-required');
+
+async function questionRaceSection(): Promise<void> {
+  // The picker does not wait for the broker: it is open while the offer is still on its way.
+  {
+    const s = await stack('race-picker-first');
+    const release = s.stallNext('hold');
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-race-open', questions: QUESTIONS });
+    check('QR1 seam: Claude\'s picker opens at once, before the broker has the offer',
+      await until(() => s.mod.picker('tu-race-open') !== undefined) && questionCards(s).length === 0, JSON.stringify(s.cards()));
+    release();
+    check('QR1 seam: and the app is offered the question beside it', await until(() => questionCards(s).length === 1), JSON.stringify(s.cards()));
+    await until(() => false, 200);
+    check('QR1 seam: with no band in the terminal: the picker is the terminal\'s side of a question',
+      s.mod.record.bands.length === 0 && s.mod.record.renders.length === 0, JSON.stringify(s.mod.record.bands.map((b) => b.label)));
+    routeModAnswer(s.frameDeps, { requestId: questionCards(s)[0]!.requestId, answers: [['Debug']] });
+    await call;
+    s.close();
+  }
+
+  // The app answers first: its answer is the tool's result, and the engine closes the picker.
+  {
+    const s = await stack('race-app-first');
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-race-app', questions: QUESTIONS });
+    await until(() => questionCards(s).length === 1);
+    const card = questionCards(s)[0]!;
+    const from = s.mod.record.requests.length;
+    routeModAnswer(s.frameDeps, { requestId: card.requestId, answers: [['Release']] });
+    const result = await call as { result?: { questions?: unknown; answers?: Record<string, string> } };
+    check('QR2 seam (the app first): the app\'s answer is the tool\'s result', result?.result?.questions === QUESTIONS
+      && JSON.stringify(result?.result?.answers) === JSON.stringify({ 'Which build?': 'Release' }), JSON.stringify(result));
+    const picker = s.mod.picker('tu-race-app');
+    check('QR2 seam (the app first): and Claude\'s picker is closed by it, unanswered', picker?.closedByHook === true && picker.settled === false,
+      JSON.stringify({ closedByHook: picker?.closedByHook, settled: picker?.settled }));
+    await until(() => false, 200);
+    check('QR2 seam (the app first): the terminal reports no answer of its own', settledReports(s, from).length === 0,
+      JSON.stringify(settledReports(s, from).map((r) => r.body)));
+    check('QR2 seam (the app first): every card closes with the app\'s answer, said to be the app\'s',
+      await until(() => resolvedFrame(s, card.requestId) !== undefined)
+        && JSON.stringify(resolvedFrame(s, card.requestId)?.answers) === JSON.stringify([['Release']])
+        && resolvedFrame(s, card.requestId)?.decidedBy === 'app', JSON.stringify(resolvedFrame(s, card.requestId)));
+    s.close();
+  }
+
+  // The person answers in the terminal first: the picker's answer stands, and every card closes with it.
+  {
+    const s = await stack('race-terminal-first');
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-race-term', questions: QUESTIONS });
+    await until(() => questionCards(s).length === 1);
+    const card = questionCards(s)[0]!;
+    await until(() => questionItems(s).some((e) => e.requestId === card.requestId && e.state === 'active'));
+    const from = s.mod.record.requests.length;
+    const picked = s.mod.picker('tu-race-term')?.answer({ 'Which build?': 'Debug' });
+    const result = await call;
+    check('QR2 seam (the terminal first): the picker\'s own result is the call\'s, untouched', picked !== undefined && result === picked,
+      JSON.stringify(result));
+    const reported = await until(() => settledReports(s, from).length === 1) ? settledReports(s, from)[0] : undefined;
+    // The card carries Claude's call id; the offer, the mod's own.
+    const offered = s.sent(0, 'hold').find((r) => r.body.toolUseId === 'tu-race-term')?.body.requestId;
+    check('QR2 seam (the terminal first): the mod says the picker settled the offer it made, and with what',
+      typeof offered === 'string' && reported?.body.requestId === offered && card.requestId === 'tu-race-term'
+        && settledDetail(reported)?.toolUseId === 'tu-race-term'
+        && JSON.stringify(settledDetail(reported)?.answers) === JSON.stringify({ 'Which build?': 'Debug' }),
+      JSON.stringify(reported?.body));
+    check('QR2 seam (the terminal first): the hold closes', await until(() => !s.service.isHeld(s.sessionId, card.requestId)));
+    check('QR2 seam (the terminal first): and every card with the picker\'s answer, as answered in the terminal',
+      await until(() => resolvedFrame(s, card.requestId) !== undefined)
+        && JSON.stringify(resolvedFrame(s, card.requestId)?.answers) === JSON.stringify([['Debug']])
+        && resolvedFrame(s, card.requestId)?.decidedBy === 'band', JSON.stringify(resolvedFrame(s, card.requestId)));
+    check('QR2 seam (the terminal first): its inbox item is resolved',
+      await until(() => questionItems(s).some((e) => e.requestId === card.requestId && e.state === 'resolved')),
+      JSON.stringify(questionItems(s).map((e) => [e.requestId, e.state])));
+    check('QR2 seam (the terminal first): the audit names the terminal as the one who answered',
+      s.service.auditTrail(s.sessionId).some((row) => row.answeredBy === 'band'),
+      JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => [row.answeredBy, row.released])));
+    const toldAt = s.mod.record.requests.length;
+    await until(() => false, 300);
+    check('QR2 seam (the terminal first): the mod stops offering the call', s.sent(toldAt, 'hold').length === 0,
+      JSON.stringify(s.sent(toldAt, 'hold').map((r) => r.body.requestId)));
+    // A tap that was on its way when the picker answered.
+    const noticesBefore = s.notices.length;
+    routeModAnswer(s.frameDeps, { requestId: card.requestId, answers: [['Release']] });
+    await until(() => false, 100);
+    check('QR2 seam (the terminal first): a late app answer decides nothing, and says so', s.notices.length === noticesBefore + 1
+      && (s.frames as ResolvedFrame[]).filter((f) => f.type === 'question-resolved' && f.requestId === card.requestId).length === 1,
+      JSON.stringify(s.notices.slice(noticesBefore)));
+    s.close();
+  }
+
+  // The person escapes the picker: the call ends as the picker ended it, and so does its card.
+  {
+    const s = await stack('race-terminal-escape');
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-race-esc', questions: QUESTIONS });
+    await until(() => questionCards(s).length === 1);
+    const card = questionCards(s)[0]!;
+    const from = s.mod.record.requests.length;
+    const escaped = s.mod.picker('tu-race-esc')?.escape();
+    const result = await call;
+    check('QR2 seam (escaped in the terminal): the call ends as the picker ended it', escaped !== undefined && result === escaped, JSON.stringify(result));
+    const reported = await until(() => settledReports(s, from).length === 1) ? settledReports(s, from)[0] : undefined;
+    check('QR2 seam (escaped in the terminal): the mod says the picker settled it, with no answer',
+      settledDetail(reported)?.toolUseId === 'tu-race-esc' && settledDetail(reported)?.answers === undefined, JSON.stringify(reported?.body));
+    check('QR2 seam (escaped in the terminal): every card closes with nothing picked, closed in the terminal',
+      await until(() => resolvedFrame(s, card.requestId) !== undefined) && resolvedFrame(s, card.requestId)?.answers === undefined
+        && resolvedFrame(s, card.requestId)?.decidedBy === undefined && resolvedFrame(s, card.requestId)?.releaseReason === 'band',
+      JSON.stringify(resolvedFrame(s, card.requestId)));
+    s.close();
+  }
+
+  // The picker's dispatch throws: the error is the call's, and the card still closes.
+  {
+    const s = await stack('race-terminal-fail');
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-race-fail', questions: QUESTIONS });
+    await until(() => questionCards(s).length === 1);
+    const card = questionCards(s)[0]!;
+    const failure = new Error('the picker could not be drawn');
+    s.mod.picker('tu-race-fail')?.fail(failure);
+    const thrown = await call.then(() => undefined, (error: unknown) => error);
+    check('QR2 seam (the picker failed): the call throws what the picker threw', thrown === failure, String(thrown));
+    check('QR2 seam (the picker failed): and the card closes, unanswered',
+      await until(() => resolvedFrame(s, card.requestId) !== undefined) && resolvedFrame(s, card.requestId)?.answers === undefined,
+      JSON.stringify(resolvedFrame(s, card.requestId)));
+    s.close();
+  }
+
+  // QR1 with CF1: in auto mode, with nobody watching yet, a tool call is the classifier's and draws
+  // nothing; a question is still offered, and a seat that opens later answers it.
+  {
+    const s = await stack('race-auto-unwatched', { mode: 'auto', viewers: 0 });
+    const tool = s.mod.fire('tool.check', { tool: 'Bash', tool_use_id: 'tu-unwatched-bash', input: { command: 'make' } });
+    check('CF1 seam: an auto-mode tool call nobody is watching goes straight back to Claude', decisionOf(await tool) === 'ask');
+    check('CF1 seam: released for its mode, not for its viewers',
+      s.service.auditTrail(s.sessionId).some((row) => row.released === 'mode:auto') && !s.service.auditTrail(s.sessionId).some((row) => row.released === 'viewer:none'),
+      JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => row.released)));
+    check('CF1 seam: and with no card for a seat that opens later', s.cards().length === 0, JSON.stringify(s.cards()));
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-unwatched-q', questions: QUESTIONS });
+    check('QR1 seam: an auto-mode question nobody is watching is still offered', await until(() => questionCards(s).length === 1), JSON.stringify(s.cards()));
+    const card = questionCards(s)[0]!;
+    check('QR1 seam: and held for the app, not released for want of a viewer', s.service.isHeld(s.sessionId, card.requestId),
+      JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => row.released)));
+    check('QR1 seam: a seat that opens now is handed it', s.service.openCards(s.sessionId)?.cards.some((c) => c.requestId === card.requestId) === true,
+      JSON.stringify(s.service.openCards(s.sessionId)?.cards.map((c) => c.requestId)));
+    check('QR1 seam: whose answer is the tool\'s', routeModAnswer(s.frameDeps, { requestId: card.requestId, answers: [['Debug']] })
+      && JSON.stringify((await call as { result?: { answers?: unknown } })?.result?.answers) === JSON.stringify({ 'Which build?': 'Debug' }));
+    s.close();
+  }
 }
 
 // ── MB5(b), (c): one rule for what a question takes, and the questions the app cannot answer ──
@@ -635,7 +781,8 @@ async function questionRuleSection(): Promise<void> {
     check('MB5b: and said for what it is, not as a question that had gone', /does not fit/.test(s.notices[s.notices.length - 1] ?? '')
       && s.notices.length === noticesBefore + 1, JSON.stringify(s.notices.slice(noticesBefore)));
     const stillWaiting = await Promise.race([call.then(() => false), until(() => false, 200).then(() => true)]);
-    check('MB5b: the terminal is still waiting on the app, not handed a picker after the app said Sent', stillWaiting);
+    check('MB5b: the call is still open, on the card and in Claude\'s picker, not settled after the app said Sent',
+      stillWaiting && s.mod.picker('tu-rule-1')?.settled === false && s.mod.picker('tu-rule-1')?.closedByHook === false);
     routeModAnswer(s.frameDeps, { requestId: card.requestId, answers: [['Lint', 'Test']] });
     const result = await call as { result?: { answers?: Record<string, string> } };
     check('MB5b: a fitting answer still answers it', result?.result?.answers?.['Which checks?'] === 'Lint, Test', JSON.stringify(result));
@@ -679,7 +826,7 @@ async function questionRuleSection(): Promise<void> {
     s.close();
   }
 
-  // The questions the app cannot answer the tool's way: shown, read-only, and asked in the terminal.
+  // The questions the app cannot answer the tool's way: shown, read-only, and answered in the picker.
   const readOnlyCases: { id: string; title: string; questions: unknown[] }[] = [
     { id: 'MB5b', title: 'a multi-select with space around a label', questions: [PADDED_MULTI] },
     { id: 'MB5c', title: 'a number question with no range', questions: [NUMBER_NO_RANGE] },
@@ -689,26 +836,36 @@ async function questionRuleSection(): Promise<void> {
     const s = await stack(`question-terminal-${index}`);
     await s.mod.fire('turn.start', { turnId: 'turn-ro' });
     const before = s.mod.record.requests.length;
-    // Bounded: a hold has no deadline, so a question wrongly held here would wait forever.
-    const result = await Promise.race([
-      s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: `tu-ro-${index}`, questions }),
-      until(() => false, 3000).then(() => ({ heldInstead: true })),
-    ]);
-    check(`${id}: ${title} is not held: Claude's own picker asks it`, (result as { ranItself?: boolean })?.ranItself === true
-      && s.mod.record.bands.length === 0, `${JSON.stringify(result)} after ${s.sent(before, 'hold').length} hold requests`);
+    const toolUseId = `tu-ro-${index}`;
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions });
     const card = await until(() => s.cards().some((c) => c.type === 'question-request')) ? s.cards().find((c) => c.type === 'question-request') : undefined;
     // Blocking (R5-A): Claude's picker is open in the terminal, and the session is waiting on a person.
     check(`${id}: ${title} is shown read-only, to be answered in the terminal`, card?.readOnly === true && card?.answerInTerminal === true
       && card?.blocking !== false && !s.cards().some((c) => c.type === 'permission-request'), JSON.stringify(s.cards()));
+    check(`${id}: ${title} is not held: Claude's own picker, open since it was asked, is where it is answered`,
+      s.mod.picker(toolUseId)?.settled === false && !s.service.isHeld(s.sessionId, String(card?.requestId)) && s.mod.record.bands.length === 0,
+      `${s.sent(before, 'hold').length} hold requests`);
     await until(() => false, 150);
     check(`${id}: ${title} raises no inbox item asking the app for an answer`,
       !s.attention.listEvents().some((e) => e.kind === 'question-required' || e.kind === 'permission-required'),
       JSON.stringify(s.attention.listEvents().map((e) => e.kind)));
+    if (index === 1) {
+      // QR2: answered in the picker, the read-only card closes with that answer, not at the turn's end.
+      const picked = s.mod.picker(toolUseId)?.answer({ 'How many?': '3' });
+      check(`QR2 seam: ${title}, answered in Claude's picker, is answered with the picker's result`, picked !== undefined && (await call) === picked);
+      const closed = await until(() => resolvedFrame(s, String(card?.requestId)) !== undefined) ? resolvedFrame(s, String(card?.requestId)) : undefined;
+      check(`QR2 seam: and its read-only card closes with that answer, as answered in the terminal`,
+        JSON.stringify(closed?.answers) === JSON.stringify([['3']]) && closed?.decidedBy === 'band', JSON.stringify(closed));
+      s.close();
+      continue;
+    }
     await s.mod.fire('turn.complete', { turnId: 'turn-ro' });
     check(`${id}: ${title} retires as a question when its turn ends`,
       await until(() => s.frames.some((f) => f.type === 'question-resolved' && f.requestId === card?.requestId))
         && !s.frames.some((f) => f.type === 'permission-resolved' && f.requestId === card?.requestId),
       JSON.stringify(s.frames.filter((f) => f.requestId === card?.requestId).map((f) => f.type)));
+    s.mod.picker(toolUseId)?.escape();
+    await call;
     s.close();
   }
 
@@ -1067,15 +1224,20 @@ async function refusedHoldSection(): Promise<void> {
   const questions = ['a', 'b', 'c'].map((letter) => ({
     question: long(letter), header: letter.toUpperCase(), multiSelect: false, options: [{ label: 'Yes' }, { label: 'No' }],
   }));
-  const asked = await Promise.race([
-    s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-too-large', questions }),
-    until(() => false, 5000).then(() => 'still waiting'),
-  ]);
-  const refusedHolds = s.mod.record.replies.filter((reply) => reply.request.route === 'hold' && /body_too_large/.test(reply.text));
-  check('R4-10 seam: the refused question goes to Claude\'s own picker', (asked as { ranItself?: boolean })?.ranItself === true,
-    `${JSON.stringify(asked)} after ${refusedHolds.length} refused offers`);
+  const asking = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-too-large', questions });
+  const refusedReplies = () => s.mod.record.replies.filter((reply) => reply.request.route === 'hold' && /body_too_large/.test(reply.text));
+  await until(() => refusedReplies().length > 0, 5000);
+  // Long enough for a retry that should not happen to have gone out.
+  await until(() => false, 500);
+  const refusedHolds = refusedReplies();
+  const picker = s.mod.picker('tu-too-large');
+  const stillPicking = await Promise.race([asking.then(() => false), until(() => false, 50).then(() => true)]);
+  check('R4-10 seam: the refused question is left to Claude\'s own picker', stillPicking && picker?.settled === false && picker.closedByHook === false,
+    `after ${refusedHolds.length} refused offers`);
   check('R4-10 seam: offered once, not again: a refusal about its body will not change on a retry',
     refusedHolds.length === 1, `${refusedHolds.length} refused offers`);
+  const picked = picker?.answer({ [questions[0]!.question]: 'Yes' });
+  check('R4-10 seam: and the picker\'s answer is the call\'s', picked !== undefined && (await asking) === picked);
   check('R4-10 seam: the healthy call is still held, its band and card up',
     permissionCards(s).length === 1 && !s.mod.record.logs.some((line) => /band cleared: transport/.test(line.text)),
     JSON.stringify({ cards: permissionCards(s).length, logs: s.mod.record.logs.map((line) => line.text).filter((text) => /band|hold refused/.test(text)) }));
@@ -1150,7 +1312,8 @@ async function unsendableDecisionSection(): Promise<void> {
 
 // ── CX3: a read-only card is never resolved by a client ─────────────────────────────────────
 async function readOnlyCardSection(): Promise<void> {
-  // Bypass mode, the one mode that still draws a read-only card for both kinds of call.
+  // Bypass mode, which still draws a read-only card for a permission. A question is held in it like
+  // anywhere else; one the app cannot answer the tool's way is read-only in every mode.
   const s = await stack('read-only-card', { mode: 'bypassPermissions' });
   void s.mod.fire('tool.check', { tool: 'Bash', tool_use_id: 'tu-ro-1', input: { command: 'make' } });
   const card = await until(() => s.cards().some((c) => c.readOnly === true))
@@ -1169,12 +1332,12 @@ async function readOnlyCardSection(): Promise<void> {
     approvedFrames().length === 0 && s.cards().some((c) => c.requestId === card), JSON.stringify(approvedFrames()));
   // The same for a question the terminal is asking.
   void s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-ro-2', questions: [
-    { question: 'Which target?', header: 'Target', multiSelect: false, options: [{ label: 'debug' }, { label: 'release' }] },
-  ] });
+    { question: 'How many targets?', header: 'Targets', kind: 'number' },
+  ] }).catch(() => undefined);
   const question = await until(() => s.cards().some((c) => c.type === 'question-request' && c.readOnly === true))
     ? s.cards().find((c) => c.type === 'question-request' && c.readOnly === true)!.requestId
     : '';
-  await s.connection.answerQuestion(question, [['release']]);
+  await s.connection.answerQuestion(question, [['2']]);
   check('CX3: an answer that reaches a read-only question card does not resolve it',
     question !== '' && !s.frames.some((f) => f.type === 'question-resolved' && f.requestId === question)
       && s.cards().some((c) => c.requestId === question), question);
@@ -1230,6 +1393,18 @@ async function modeSection(): Promise<void> {
     const qCard = questionCards(s)[0]!;
     check('AM1 seam: and the app\'s answer becomes the tool\'s result', routeModAnswer(s.frameDeps, { requestId: qCard.requestId, answers: [['Release']] })
       && JSON.stringify((await question as { result?: { answers?: unknown } })?.result?.answers) === JSON.stringify({ 'Which build?': 'Release' }));
+    check('AM1 seam: closing Claude\'s picker, which was open beside the card', s.mod.picker('tu-auto-q')?.closedByHook === true);
+    s.close();
+  }
+  // QR1: bypassPermissions leaves tool calls to the terminal, but Claude's picker still opens for a
+  // question there, so the app is offered it like anywhere else.
+  {
+    const s = await stack('bypass-question', { mode: 'bypassPermissions' });
+    const question = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-bypass-q', questions: QUESTIONS });
+    check('QR1 seam: a question in bypassPermissions mode is held for the app', await until(() => questionCards(s).length === 1), JSON.stringify(s.cards()));
+    check('QR1 seam: and the app\'s answer becomes the tool\'s result',
+      routeModAnswer(s.frameDeps, { requestId: questionCards(s)[0]!.requestId, answers: [['Debug']] })
+        && JSON.stringify((await question as { result?: { answers?: unknown } })?.result?.answers) === JSON.stringify({ 'Which build?': 'Debug' }));
     s.close();
   }
   // AM2: dontAsk refuses an ask after the hooks run; nothing is shown for it.
@@ -1237,9 +1412,16 @@ async function modeSection(): Promise<void> {
     const s = await stack('dont-ask', { mode: 'dontAsk' });
     const call = s.mod.fire('tool.check', { tool: 'Write', tool_use_id: 'tu-dont', input: { file_path: '/work/x', content: 'hi' } });
     check('AM2 seam: a dontAsk call goes straight back to Claude', decisionOf(await call) === 'ask');
-    void s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-dont-q', questions: QUESTIONS }).catch(() => undefined);
+    const question = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'tu-dont-q', questions: QUESTIONS });
     await until(() => s.service.auditTrail(s.sessionId).length >= 2, 2000);
     check('AM2 seam: neither it nor a dontAsk question draws a card', s.cards().length === 0, JSON.stringify(s.cards()));
+    check('QR1 seam: the dontAsk question is released for its mode, not held',
+      s.service.auditTrail(s.sessionId).filter((row) => row.released === 'mode:dontAsk').length === 2,
+      JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => row.released)));
+    // Whatever Claude does with it in dontAsk is Claude's: the mod hands back what `next(e)` gave.
+    const own = s.mod.picker('tu-dont-q')?.escape();
+    check('QR1 seam: and the call is Claude\'s own, whatever it resolves with, with no band drawn',
+      own !== undefined && (await question) === own && s.mod.record.bands.length === 0, JSON.stringify(s.mod.record.bands.map((b) => b.label)));
     s.close();
   }
 }
@@ -1301,6 +1483,7 @@ try {
   await appIdSection();
   await questionEndsSection();
   await questionCallSection();
+  await questionRaceSection();
   await questionRuleSection();
   await oldClientDetailSection();
   await fullDetailSection();

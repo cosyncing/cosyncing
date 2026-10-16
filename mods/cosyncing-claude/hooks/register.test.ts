@@ -3,10 +3,11 @@
 // The harness gives a real `$` and the plugin's real hooks, but no network: `$.http`
 // is absent there. So this file covers the decisions the mod can get wrong on its own,
 // the ones no broker-side suite can see: the answer shape it may return for
-// AskUserQuestion, the input summary it puts on a card, and how it finds the socket.
+// AskUserQuestion, what it reports when Claude's own picker answers first, the input
+// summary it puts on a card, and how it finds the socket.
 
 import { expect, test } from 'claude-code/testing';
-import { briefInput, fullInput, resolveSocketPath, splitLabels, steerRoute, validateAnswers, withoutPreviews } from './register.js';
+import { briefInput, fullInput, resolveSocketPath, splitLabels, steerRoute, terminalAnswers, validateAnswers, withoutPreviews } from './register.js';
 
 const ONE = {
   question: 'Which report should I send?',
@@ -178,4 +179,41 @@ test('steering off queues instead, and never drops the message', () => {
   // The off switch belongs to the terminal, so the fallback is the route that still delivers.
   expect(steerRoute(false)).toBe('prompt');
   expect(steerRoute(undefined)).toBe('prompt');
+});
+
+// QR2: Claude's own picker races the app's card, and when the picker answers first the mod tells
+// the broker what it was answered with, so every seat's card closes with the terminal's answer. The
+// result is the one `next(e)` resolves with: `{ result: { questions, answers } }`, or `isError` when
+// the picker was escaped or the turn interrupted.
+test("the picker's answers are read from the tool's own result", () => {
+  const picked = { result: { questions: [ONE], answers: { [ONE.question]: 'Monthly' } }, text: 'answered', ref: 3 };
+  expect(terminalAnswers(picked)).toEqual({ [ONE.question]: 'Monthly' });
+});
+
+test('a picker that left a question out still reports the ones it took', () => {
+  const two = { ...ONE, question: 'And the format?' };
+  const picked = { result: { questions: [ONE, two], answers: { [two.question]: 'PDF' } } };
+  expect(terminalAnswers(picked)).toEqual({ [two.question]: 'PDF' });
+});
+
+test('an escaped or refused picker reports no answer', () => {
+  expect(terminalAnswers({ isError: true, result: 'The user doesn\'t want to proceed with this tool use.' })).toBe(undefined);
+  expect(terminalAnswers({ isError: true, result: { answers: { [ONE.question]: 'Weekly' } } })).toBe(undefined);
+  expect(terminalAnswers({ deny: 'a plugin refused it' })).toBe(undefined);
+  expect(terminalAnswers({ result: { questions: [ONE], answers: {} } })).toBe(undefined);
+});
+
+test("a result that is not the picker's shape reports no answer rather than throwing", () => {
+  for (const shape of [undefined, null, 'Weekly', 7, {}, { result: null }, { result: 'Weekly' },
+    { result: { answers: 'Weekly' } }, { result: { answers: ['Weekly'] } }]) {
+    expect(terminalAnswers(shape)).toBe(undefined);
+  }
+});
+
+test('the reported answers are bounded the way an app answer is', () => {
+  const picked = { result: { answers: {
+    'One?': 'a', 'Two?': 7, 'Three?': 'x'.repeat(8193), 'Four?': 'x'.repeat(8192), 'Five?': 'e', 'Six?': 'f', 'Seven?': 'g',
+  } } };
+  // A non-string answer and one past Claude's own limit are left out; four questions at most.
+  expect(terminalAnswers(picked)).toEqual({ 'One?': 'a', 'Four?': 'x'.repeat(8192), 'Five?': 'e', 'Six?': 'f' });
 });

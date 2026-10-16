@@ -76,11 +76,13 @@ interface FakeConn {
   clientCount: number;
   ingestRequest: (request: Record<string, unknown>) => void;
   respondPermission: (requestId: string, decision: string, info?: { decidedBy?: string; releaseReason?: string }) => void;
-  answerQuestion: (requestId: string, answers: string[][]) => void;
+  answerQuestion: (requestId: string, answers: string[][], info?: { decidedBy?: string }) => void;
   noteModNotice: (message: string) => void;
   published: Record<string, unknown>[];
   resolved: { requestId: string; decision: string; releaseReason?: string }[];
-  answered: { requestId: string; answers: string[][] }[];
+  answered: { requestId: string; answers: string[][]; decidedBy?: string }[];
+  rejectQuestion: (requestId: string, info?: { decidedBy?: string; releaseReason?: string }) => void;
+  closedQuestions: { requestId: string; decidedBy?: string; releaseReason?: string }[];
   notices: string[];
 }
 function fakeConn(viewers = 1): FakeConn {
@@ -89,6 +91,7 @@ function fakeConn(viewers = 1): FakeConn {
     published: [],
     resolved: [],
     answered: [],
+    closedQuestions: [],
     notices: [],
     ingestRequest(request) {
       conn.published.push(request);
@@ -96,8 +99,11 @@ function fakeConn(viewers = 1): FakeConn {
     respondPermission(requestId, decision, info) {
       conn.resolved.push({ requestId, decision, ...(info?.releaseReason ? { releaseReason: info.releaseReason } : {}) });
     },
-    answerQuestion(requestId, answers) {
-      conn.answered.push({ requestId, answers });
+    answerQuestion(requestId, answers, info) {
+      conn.answered.push({ requestId, answers, ...(info?.decidedBy ? { decidedBy: info.decidedBy } : {}) });
+    },
+    rejectQuestion(requestId, info) {
+      conn.closedQuestions.push({ requestId, ...info });
     },
     noteModNotice(message) {
       conn.notices.push(message);
@@ -116,6 +122,8 @@ function cardId(modId: string, from: { published: Record<string, unknown>[] } = 
   return typeof drawn === 'string' ? drawn : `${modId}@never-drawn`;
 }
 let killSwitch = false;
+/** What the terminal's Claude says of its own permission dialog: open, shut, or nothing to read. */
+let dialogOpen: boolean | undefined;
 /** Every id the service asked the Hub for. A stub that ignores its argument is what let a
  *  native-uuid lookup against a row-id-keyed Hub pass this suite and fail the app. */
 const hubKeys: string[] = [];
@@ -131,6 +139,9 @@ const service = new ClaudeModService({
   transcriptPath: (id) => findClaudeTranscript(id, workDir),
   killSwitch: () => killSwitch,
   sessionTitle: () => 'scratch work',
+  permissionDialogOpen: () => dialogOpen,
+  dialogPollMs: 20,
+  dialogWaitMs: 300,
   holdPollWaitMs: 1_000,
   log: { warn: () => {} },
 });
@@ -376,7 +387,7 @@ try {
 
   // A prompt is the person moving on, which retires the explanation just as a turn boundary does.
   const svcRo = await post('hold', { sessionId, requestId: 'svc-ro2', tool: 'Bash', decision: 'ask' }, sessionId);
-  check('a second declined ask draws a second explanation', releaseWhy(svcRo.body) === 'viewer:none' || releaseWhy(svcRo.body) === 'mode:unknown' || releaseWhy(svcRo.body) === 'mode:bypassPermissions', JSON.stringify(svcRo.body).slice(0, 90));
+  check('a second declined ask draws a second explanation', releaseWhy(svcRo.body) === 'mode:bypassPermissions', JSON.stringify(svcRo.body).slice(0, 90));
   const moved = service.send(sessionId, { requestId: 'svc-send', op: 'prompt', text: 'carry on', queuedAt: Date.now() });
   check('a prompt retires the explanation card too', moved.ok === true && conn.resolved.some((r) => isCardFor(r.requestId, 'svc-ro2')), JSON.stringify(conn.resolved.slice(-2)));
 
@@ -428,6 +439,8 @@ try {
   // The count alone said "somebody is watching" and the hold parked the terminal's prompt against an
   // app that had no way to tap it. An Observe connection refuses
   // every mutation, so watching is not the gate; being able to answer is.
+  // The mode is read before the viewers, so this needs a mode that would hold.
+  writeTranscript('default');
   hubOverride = { clientCount: 2, conn: { clientCount: 2 } };
   const readOnlyReply = await post('hold', { sessionId, requestId: 'svc-ro', tool: 'Bash', decision: 'ask' }, sessionId);
   check('a read-only viewer does not hold the prompt', releaseWhy(readOnlyReply.body) === 'viewer:none', JSON.stringify(readOnlyReply.body).slice(0, 110));
@@ -438,16 +451,60 @@ try {
   writeTranscript(undefined);
   const unknownReply = await post('hold', { sessionId, requestId: 'svc-4', tool: 'Bash', decision: 'ask' }, sessionId);
   check('a session with no permission-mode row is not held', releaseWhy(unknownReply.body) === 'mode:unknown', JSON.stringify(unknownReply.body).slice(0, 110));
+  // UM1: with no mode to read, a call auto mode's classifier settles and a call whose dialog is open
+  // look the same at the gate, and drawing a note for each filled the app after a plan approval.
+  // Claude says when its own dialog is open, and the note waits for that.
+  await sleep(120);
+  check('UM1: the note is not drawn while Claude has no dialog open', !conn.published.some((p) => isCardFor(p.requestId, 'svc-4')));
+  dialogOpen = false;
+  await sleep(80);
+  check('UM1: nor while Claude says its dialog is shut', !conn.published.some((p) => isCardFor(p.requestId, 'svc-4')));
+  dialogOpen = true;
+  check('UM1: it is drawn once Claude says its dialog is open',
+    await until(() => conn.published.some((p) => isCardFor(p.requestId, 'svc-4') && p.readOnly === true && p.releaseReason === 'mode:unknown'), 2_000),
+    JSON.stringify(conn.published.find((p) => isCardFor(p.requestId, 'svc-4')) ?? {}).slice(0, 140));
+  dialogOpen = false;
+  const settledByItself = await post('hold', { sessionId, requestId: 'svc-4b', tool: 'Bash', decision: 'ask' }, sessionId);
+  await sleep(450);
+  dialogOpen = true;
+  await sleep(120);
+  check('UM1: a note that saw no dialog in its wait is dropped, not drawn by a later dialog',
+    releaseWhy(settledByItself.body) === 'mode:unknown' && !conn.published.some((p) => isCardFor(p.requestId, 'svc-4b')));
+  dialogOpen = false;
+  await post('hold', { sessionId, requestId: 'svc-4c', tool: 'Bash', decision: 'ask' }, sessionId);
+  service.noteModEvent({ sessionId, kind: 'turn.complete' });
+  dialogOpen = true;
+  await sleep(120);
+  check('UM1: and so is one whose turn ended first', !conn.published.some((p) => isCardFor(p.requestId, 'svc-4c')));
+  dialogOpen = undefined;
   writeTranscript('default');
 
   // ── viewers, kill switch ──
   conn.clientCount = 0;
   const noViewer = await post('hold', { sessionId, requestId: 'svc-5', tool: 'Bash', decision: 'ask' }, sessionId);
   check('no viewer releases the hold', releaseWhy(noViewer.body) === 'viewer:none');
+  // CF1: the release is drawn for nobody. A seat with no client on it still takes cards, and a card
+  // per unwatched call is what filled the app when somebody did open the session.
+  check('CF1: and draws no card on the seat nobody is on', !conn.published.some((p) => isCardFor(p.requestId, 'svc-5')),
+    JSON.stringify(conn.published.find((p) => isCardFor(p.requestId, 'svc-5')) ?? {}).slice(0, 120));
+  writeTranscript('auto');
+  const unwatchedAuto = await post('hold', { sessionId, requestId: 'svc-5a', tool: 'Bash', decision: 'ask' }, sessionId);
+  check('CF1: an auto-mode call nobody is watching is released for its mode, not its viewers', releaseWhy(unwatchedAuto.body) === 'mode:auto', JSON.stringify(unwatchedAuto.body).slice(0, 110));
+  check('CF1: and draws no card either', !conn.published.some((p) => isCardFor(p.requestId, 'svc-5a')));
+  writeTranscript('default');
   conn.clientCount = 1;
   killSwitch = true;
   const switched = await post('hold', { sessionId, requestId: 'svc-6', tool: 'Bash', decision: 'ask' }, sessionId);
   check('the kill switch releases the hold and outranks everything', releaseWhy(switched.body) === 'killSwitch');
+  check('and in a mode that asks, the release is explained at once', conn.published.some((p) => isCardFor(p.requestId, 'svc-6') && p.readOnly === true),
+    JSON.stringify(conn.published.find((p) => isCardFor(p.requestId, 'svc-6')) ?? {}).slice(0, 120));
+  // UM2: switched off in auto mode, a call is settled by the classifier with nobody asked, as it would
+  // be with the switch on: there is no dialog to explain.
+  writeTranscript('auto');
+  const switchedAuto = await post('hold', { sessionId, requestId: 'svc-6a', tool: 'Bash', decision: 'ask' }, sessionId);
+  check('UM2: switched off in auto mode, the release draws no card',
+    releaseWhy(switchedAuto.body) === 'killSwitch' && !conn.published.some((p) => isCardFor(p.requestId, 'svc-6a')), JSON.stringify(switchedAuto.body).slice(0, 110));
+  writeTranscript('default');
   const switchedPoll = await post('poll', { sessionId, wait: 10 }, sessionId);
   check('the switch reaches the mod on the next poll', (switchedPoll.body.state as { killSwitch?: boolean } | undefined)?.killSwitch === true, JSON.stringify(switchedPoll.body.state));
   killSwitch = false;
@@ -490,6 +547,8 @@ try {
   check("a subagent's turn.complete does not clear the main turn", childTurn.ok === true, JSON.stringify(childTurn));
   const childStop = (await post('poll', { sessionId, wait: 10 }, sessionId)).body.command as { turnId?: string } | undefined;
   check('and Stop still names the parent turn', childStop?.turnId === 'turn-88', JSON.stringify(childStop));
+  await post('event', { sessionId, kind: 'turn.complete', detail: { turnId: 'turn-88' } }, sessionId);
+  await post('event', { sessionId, kind: 'turn.start', detail: { turnId: 'turn-questions' } }, sessionId);
 
   const trail = service.auditTrail(sessionId);
   check('the audit trail records the decisions and the releases', trail.length >= 6, `${trail.length} rows`);
@@ -539,6 +598,43 @@ try {
   check('with the hold still open for the human', service.isHeld(sessionId, cardId('svc-q2')), JSON.stringify(lateAsk.body).slice(0, 80));
   await post('event', { sessionId, kind: 'user-cancel', requestId: 'svc-q2' }, sessionId);
   await sleep(60);
+
+  // ── QR1/QR2: a question races Claude's own picker ──
+  // The mod opens the picker at once and offers the question beside it, so the question is held
+  // whether or not anybody is watching, and the terminal may settle it before the app does. A
+  // question's card keeps Claude's call id, which the transcript draws the same question under.
+  writeTranscript('auto');
+  conn.clientCount = 0;
+  const unwatchedAck = await post('hold', { sessionId, requestId: 'svc-q3', tool: 'AskUserQuestion', toolUseId: 'tu-q3', decision: 'ask', questions }, sessionId);
+  check('QR1: an auto-mode question nobody is watching is held', unwatchedAck.body.held === true && service.isHeld(sessionId, 'tu-q3'), JSON.stringify(unwatchedAck.body).slice(0, 90));
+  check('QR1: and drawn on a seat nobody is on yet, for whoever opens it', conn.published.some((p) => p.requestId === 'tu-q3' && p.kind === 'question'));
+  const openNow = service.openCards(sessionId);
+  check('QR1: a seat that attaches now is handed the open question', openNow?.cards.some((c) => c.requestId === 'tu-q3') === true,
+    JSON.stringify(openNow?.cards.map((c) => c.requestId)));
+  check('QR1: under the registration it belongs to', openNow?.generation !== undefined && openNow.generation > 0, String(openNow?.generation));
+  check('QR1: the open cards are found by row id too', service.openCards(rowId)?.cards.some((c) => c.requestId === 'tu-q3') === true);
+  check('QR1: a session with no registration has none', service.openCards(randomUUID()) === undefined);
+  await post('event', { sessionId, kind: 'question.settled', requestId: 'svc-q3', detail: { toolUseId: 'tu-q3', answers: { 'Which report?': 'Weekly' } } }, sessionId);
+  await sleep(60);
+  check('QR2: an answer in the picker closes the hold', !service.isHeld(sessionId, 'tu-q3'));
+  check("QR2: and the card, with the picker's answer and the terminal as who gave it",
+    conn.answered.some((a) => a.requestId === 'tu-q3' && a.answers[0]?.[0] === 'Weekly' && a.answers[1]?.length === 0 && a.decidedBy === 'band'),
+    JSON.stringify(conn.answered.filter((a) => a.requestId === 'tu-q3')));
+  check('QR2: an app answer after it is refused', service.answerQuestion({ sessionId, requestId: 'tu-q3', answers: [['Monthly'], []] }) === false);
+  check('QR2: and a seat attaching afterwards is not handed it', !service.openCards(sessionId)?.cards.some((c) => c.requestId === 'tu-q3'));
+  const reoffered = await post('hold', { sessionId, requestId: 'svc-q3', tool: 'AskUserQuestion', toolUseId: 'tu-q3', decision: 'ask', questions }, sessionId);
+  check('QR2: the mod offering it again is told it is over', reoffered.body.held !== true && reoffered.body.answer === undefined, JSON.stringify(reoffered.body).slice(0, 110));
+
+  await post('hold', { sessionId, requestId: 'svc-q4', tool: 'AskUserQuestion', toolUseId: 'tu-q4', decision: 'ask', questions }, sessionId);
+  await post('event', { sessionId, kind: 'question.settled', requestId: 'svc-q4', detail: { toolUseId: 'tu-q4' } }, sessionId);
+  await sleep(60);
+  check('QR2: a picker closed with no answer closes the hold', !service.isHeld(sessionId, 'tu-q4'));
+  check('QR2: and the card as a question, closed in the terminal with nothing picked',
+    conn.closedQuestions.some((c) => c.requestId === 'tu-q4' && c.releaseReason === 'band')
+      && conn.resolved.every((r) => r.requestId !== 'tu-q4') && !conn.answered.some((a) => a.requestId === 'tu-q4'),
+    JSON.stringify(conn.closedQuestions.slice(-2)));
+  conn.clientCount = 1;
+  writeTranscript('default');
 
   // A command the mod took and then could not carry out. The app was told it was delivered, so
   // the terminal's refusal has to reach the seat that is watching or "sent" is a lie.

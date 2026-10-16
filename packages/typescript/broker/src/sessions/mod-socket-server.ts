@@ -45,6 +45,7 @@ import {
   MOD_REFUSAL_STATUS,
   modInstanceIsOlder,
   modSessionId,
+  modTerminalAnswers,
   parseModEvent,
   parseModHold,
   parseModPoll,
@@ -555,6 +556,11 @@ export class ModSocketServer {
 
   /** Route a turn event in, from the socket or from anywhere else the broker learns of one. */
   noteTurnEvent(sessionId: string, kind: string, requestId?: string, detail?: Record<string, unknown>): void {
+    // Claude's own picker answered (or closed) a question before the app did. The mod has already
+    // returned the picker's result; this only closes the hold, and with it every seat's card.
+    if (kind === 'question.settled' && requestId) {
+      this.holds.settleInTerminal(sessionId, requestId, modTerminalAnswers(detail?.answers));
+    }
     const applied = this.registry.noteTurnEvent({ kind, sessionId, ...(requestId ? { requestId } : {}), ...(detail ? { detail } : {}) });
     const via = kind === 'user-cancel' ? modCancelVia(detail?.via) : undefined;
     for (const id of applied.resolved) {

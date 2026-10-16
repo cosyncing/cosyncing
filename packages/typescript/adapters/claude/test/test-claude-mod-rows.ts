@@ -328,6 +328,85 @@ await withBridge.discoverSessions();
 check('a closed connection is not re-written', dying.info.attachMode === afterClose, dying.info.attachMode);
 fresh(UUID);
 
+// ── 4c. a plain attach of a synced session is a seat in the sync ─────────────
+//
+// QR3: a tab opened without asking for a mode -- a resident or background one -- used to get a
+// read-only mirror that nevertheless carried the synced control: a composer whose prompts it
+// refused, and no way for a card the mod raised to reach it. A question asked while it was the only
+// tab open was never answerable from the app. It is a seat now, one no permission is held for.
+{
+  const openQuestion = {
+    requestId: 'toolu_open_q',
+    kind: 'question' as const,
+    toolName: 'AskUserQuestion',
+    questions: [{ question: 'Which colour?', header: 'Colour', multiple: false, options: [{ label: 'Amber' }, { label: 'Teal' }] }],
+  };
+  let open: { generation: number; cards: (typeof openQuestion)[] } | undefined = { generation: 4, cards: [openQuestion] };
+  const seats = new ClaudeAdapter({ modBridge: { ...bridge, openCards: (sessionId: string) => (sessionId === UUID ? open : undefined) } });
+  stale(UUID);
+  const mirror = await seats.attach(enc(transcriptPath));
+  check('QR3: a plain attach of a session whose mod is not live is still a read-only mirror',
+    typeof (mirror as Partial<ClaudeModConnection>).ingestRequest !== 'function' && mirror.info.attachMode === 'observe', mirror.info.attachMode);
+  await mirror.close();
+
+  fresh(UUID);
+  const plain = await seats.attach(enc(transcriptPath)) as ClaudeModConnection;
+  check('QR3: a plain attach of a synced session is a seat that draws the mod\'s cards, and takes no holds',
+    typeof plain.ingestRequest === 'function' && plain.takesHolds === false, `takesHolds=${String(plain.takesHolds)}`);
+  check('QR3: it keeps observe as its attach mode, so the Hub never joins it to a live seat', plain.info.attachMode === 'observe', plain.info.attachMode);
+  check('QR3: and carries the synced control with full input',
+    plain.info.control?.terminalSync?.active === true && plain.info.control.terminalSync.input === 'full', JSON.stringify(plain.info.control?.terminalSync));
+  const openNow = () => plain.getPending().filter((m) => m.type === 'question-request') as unknown as { requestId: string; readOnly?: boolean }[];
+  check('QR3: it is handed the question the broker is still holding open, answerable',
+    openNow().length === 1 && openNow()[0]?.requestId === 'toolu_open_q' && openNow()[0]?.readOnly !== true, JSON.stringify(openNow()));
+  check('QR3: once, however often it is asked', openNow().length === 1, JSON.stringify(openNow()));
+  open = undefined;
+  check('QR3: a broker with nothing open hands it nothing new, and takes nothing away', openNow().length === 1, JSON.stringify(openNow()));
+
+  const sentBeforePlain = sent.length;
+  await plain.sendPrompt({ text: 'from the plain tab' } as never);
+  check('QR3: a prompt from the plain seat goes to the terminal, as a live seat\'s does',
+    sent.length === sentBeforePlain + 1 && sent.at(-1)?.command.op === 'prompt' && sent.at(-1)?.command.text === 'from the plain tab' && sent.at(-1)?.sessionId === UUID,
+    JSON.stringify(sent.at(-1)));
+
+  // A question the app could not answer is drawn read-only. Only the broker saying that Claude's own
+  // picker answered it closes it with an answer.
+  const settledFrames: Record<string, unknown>[] = [];
+  plain.subscribe((m: Record<string, unknown>) => { if (m.type === 'question-resolved') settledFrames.push(m); });
+  plain.ingestRequest({ requestId: 'toolu_ro_q', kind: 'question', toolName: 'AskUserQuestion', questions: openQuestion.questions, readOnly: true, answerInTerminal: true });
+  await plain.answerQuestion('toolu_ro_q', [['Amber']]);
+  await plain.answerQuestion('toolu_ro_q', [['Amber']], { decidedBy: 'app' });
+  check('QR2: a read-only question takes no answer from a seat', settledFrames.length === 0, JSON.stringify(settledFrames));
+  await plain.answerQuestion('toolu_ro_q', [['Teal']], { decidedBy: 'band' });
+  check('QR2: it closes with the answer Claude\'s picker took, saying the terminal gave it',
+    settledFrames.length === 1 && settledFrames[0]?.decidedBy === 'band' && JSON.stringify(settledFrames[0]?.answers) === JSON.stringify([['Teal']]),
+    JSON.stringify(settledFrames));
+
+  // Both seats of one session are restated when the mod goes and comes back, each keeping its kind.
+  const coWriter = await seats.attach(enc(transcriptPath), 'live') as ClaudeModConnection;
+  check('QR3: a live attach beside it is a live seat, the one a permission is held for',
+    coWriter.info.attachMode === 'live' && coWriter.takesHolds === true, `${coWriter.info.attachMode} takesHolds=${String(coWriter.takesHolds)}`);
+  stale(UUID);
+  await seats.discoverSessions();
+  check('QR3: a mod that stops reporting demotes both seats',
+    plain.info.control?.terminalSync?.active === false && coWriter.info.control?.terminalSync?.active === false && coWriter.info.attachMode === 'observe',
+    `${String(plain.info.control?.terminalSync?.active)} ${String(coWriter.info.control?.terminalSync?.active)} ${coWriter.info.attachMode}`);
+  fresh(UUID);
+  await seats.discoverSessions();
+  check('QR3: and its return restores both, the plain seat still observe and the live one live',
+    plain.info.control?.terminalSync?.active === true && plain.info.attachMode === 'observe'
+      && coWriter.info.control?.terminalSync?.active === true && coWriter.info.attachMode === 'live',
+    `${plain.info.attachMode} ${coWriter.info.attachMode}`);
+  // Closing one seat leaves the other restated: the adapter keeps a set per session, not one seat.
+  await plain.close();
+  stale(UUID);
+  await seats.discoverSessions();
+  check('QR3: closing one seat leaves the other one followed', coWriter.info.control?.terminalSync?.active === false,
+    String(coWriter.info.control?.terminalSync?.active));
+  await coWriter.close();
+  fresh(UUID);
+}
+
 // ── 5. the row the mod inserted is steering; every other isMeta row is not ───
 const callMeta = new Map();
 const mapped: Record<string, unknown>[] = [];
@@ -561,6 +640,37 @@ check(
   check('PR-5 turnRunning raise: the mod makes an attach Working before the transcript catches up',
     raised.info.status === 'working', String(raised.info.status));
   await raised.close();
+}
+
+// ── UM1: Claude's own word that its permission dialog is open ─────────────────
+// With no mode on disk after a plan approval, the broker draws a note only once this says a dialog is
+// open. The record's shape is the one 2.1.299 writes under `<configDir>/sessions/<pid>.json`.
+{
+  const { claudePermissionDialogOpen } = await import('../src/implementation.ts');
+  const store = join(ROOT, 'dialog-store');
+  mkdirSync(join(store, 'projects', '-work'), { recursive: true });
+  mkdirSync(join(store, 'sessions'), { recursive: true });
+  const transcriptAt = join(store, 'projects', '-work', `${UUID}.jsonl`);
+  const recordAt = join(store, 'sessions', '4242.json');
+  const record = (fields: Record<string, unknown>): void =>
+    writeFileSync(recordAt, JSON.stringify({ pid: 4242, sessionId: UUID, kind: 'interactive', status: 'busy', ...fields }));
+  check('UM1 reader: no record is nothing to tell, not a shut dialog', claudePermissionDialogOpen(transcriptAt, 4242, UUID) === undefined);
+  record({ status: 'waiting', waitingFor: 'permission prompt' });
+  check('UM1 reader: a process waiting on a permission prompt has its dialog open', claudePermissionDialogOpen(transcriptAt, 4242, UUID) === true);
+  record({ status: 'waiting', waitingFor: 'input needed' });
+  check('UM1 reader: one waiting on a question picker has no permission dialog open', claudePermissionDialogOpen(transcriptAt, 4242, UUID) === false);
+  record({ status: 'busy' });
+  check('UM1 reader: nor does a busy one, whose call auto mode is settling', claudePermissionDialogOpen(transcriptAt, 4242, UUID) === false);
+  record({ sessionId: '22222222-2222-4222-8222-222222222222', status: 'waiting', waitingFor: 'permission prompt' });
+  check("UM1 reader: a record of another session, a reused pid's, tells nothing", claudePermissionDialogOpen(transcriptAt, 4242, UUID) === undefined);
+  record({ pid: 4243, status: 'waiting', waitingFor: 'permission prompt' });
+  check('UM1 reader: nor does one that names another process', claudePermissionDialogOpen(transcriptAt, 4242, UUID) === undefined);
+  writeFileSync(recordAt, '{"pid": 4242, "sessionId"');
+  check('UM1 reader: nor does one that does not parse', claudePermissionDialogOpen(transcriptAt, 4242, UUID) === undefined);
+  record({ status: 'waiting', waitingFor: 'permission prompt' });
+  check('UM1 reader: a transcript outside a projects folder has no store to read',
+    claudePermissionDialogOpen(join(store, 'loose', `${UUID}.jsonl`), 4242, UUID) === undefined);
+  check('UM1 reader: nor does a pid that is not one', claudePermissionDialogOpen(transcriptAt, 0, UUID) === undefined);
 }
 
 rmSync(ROOT, { recursive: true, force: true });

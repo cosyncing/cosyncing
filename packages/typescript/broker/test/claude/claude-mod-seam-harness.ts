@@ -9,8 +9,9 @@
  * "terminals", or a terminal and its reloaded self, are two real module instances here too.
  *
  * What is faked, and only because a test cannot have it: the Claude engine behind `next(e)`, the
- * TUI that would draw a band, and the host timer behind `$.clock.after` (a plain `setTimeout` that
- * this harness can cancel, which is what a hot reload does to the old module's waits).
+ * TUI that would draw a band, the person at Claude's own question picker (see `openPicker`), and the
+ * host timer behind `$.clock.after` (a plain `setTimeout` that this harness can cancel, which is what
+ * a hot reload does to the old module's waits).
  *
  * This is not a suite. It is imported by `test-claude-mod-lifecycle-seam.ts`,
  * `test-claude-mod-hold-seam.ts` and the terminal fixture they spawn.
@@ -80,15 +81,54 @@ export interface LoadModOptions {
   clockThrows?: () => boolean;
   /** The engine's own `tool.check` verdict beneath the mod. */
   engineVerdict?: () => unknown;
-  /** The tool's own `tool.call` result beneath the mod: the picker the human would get. */
+  /**
+   * The tool's own `tool.call` result beneath the mod, at once: a picker answered the moment it
+   * opened. Unused for a question while `openPicker` is set.
+   */
   toolResult?: () => unknown;
+  /**
+   * Claude's own picker beneath a question's `tool.call`, held open the way a person at the terminal
+   * holds it. `next(e)` stays pending until the suite settles the picker through `pickers`, and a
+   * hook that returns its own `{ result }` closes it, as the engine does. The mod races the picker
+   * against the app's card, so a picker that answers at once -- the default, `toolResult` -- wins
+   * every race before the broker has even drawn the card.
+   */
+  openPicker?: boolean;
 }
+
+/**
+ * Claude's picker for one question call, open beneath the mod's hook. The suite plays the person at
+ * the terminal: it answers, escapes, or leaves it open for the app to win.
+ */
+export interface Picker {
+  /** The call it was opened for. */
+  readonly toolUseId: string;
+  /** The questions the engine was given, the tool's own (previews and all). */
+  readonly questions: unknown;
+  readonly openedAt: number;
+  /** Settled from the terminal's side: answered, escaped or failed. */
+  readonly settled: boolean;
+  /** Closed by the engine because the hook answered the call itself: the app won the race. */
+  readonly closedByHook: boolean;
+  /** Picked in the terminal: `next(e)` resolves with the tool's result, as Claude's picker writes it. */
+  answer(answers: Record<string, string>): unknown;
+  /** Escape at the picker: `next(e)` resolves as an errored call, the way an interrupt reads. */
+  escape(): unknown;
+  /** The dispatch itself throws. */
+  fail(error?: Error): void;
+}
+/** A picker as the harness keeps it: the two readings it sets. */
+type OpenPicker = { -readonly [K in keyof Picker]: Picker[K] };
 
 export interface ModInstance {
   readonly label: string;
   readonly record: ModRecord;
   /** The module's own exports: `tuneForTest`, `validateAnswers`, and the rest. */
   readonly exports: Record<string, unknown>;
+  /** Every picker `openPicker` opened, oldest first. */
+  readonly pickers: Picker[];
+  /** The newest picker opened for a call, if any. */
+  picker(toolUseId: string): Picker | undefined;
   /** Drive one hook the way the engine would, matcher and all. */
   /**
    * Run the mod's hook for `event`. `signal` is the engine's `next.signal`, the abort it raises on
@@ -162,21 +202,71 @@ export async function loadMod(label: string, options: LoadModOptions): Promise<M
   let sessionId = options.sessionId;
   /** Every open fetch, so `kill` can abort them the way a closed process would. */
   const inflight = new Set<AbortController>();
+  const pickers: OpenPicker[] = [];
+
+  /** Open Claude's picker for one question call, and hand back the result it will settle with. */
+  const openPicker = (ev: Record<string, unknown>, opened: OpenPicker[]): Promise<unknown> => {
+    let resolve!: (value: unknown) => void;
+    let reject!: (error: Error) => void;
+    const result = new Promise<unknown>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    const settle = (): boolean => {
+      if (picker.settled || picker.closedByHook) return false;
+      picker.settled = true;
+      return true;
+    };
+    const picker: OpenPicker = {
+      toolUseId: typeof ev.tool_use_id === 'string' ? ev.tool_use_id : '',
+      questions: ev.questions,
+      openedAt: Date.now(),
+      settled: false,
+      closedByHook: false,
+      answer: (answers: Record<string, string>) => {
+        const value = { result: { questions: ev.questions, answers }, text: 'User has answered your questions.', ref: pickers.length };
+        if (settle()) resolve(value);
+        return value;
+      },
+      escape: () => {
+        const value = { isError: true as const, result: "The user doesn't want to proceed with this tool use.", text: 'Interrupted by user' };
+        if (settle()) resolve(value);
+        return value;
+      },
+      fail: (error = new Error('the dispatch failed')) => {
+        if (settle()) reject(error);
+      },
+    };
+    pickers.push(picker);
+    opened.push(picker);
+    return result;
+  };
 
   const fire = async (event: string, e: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
     const handler = handlers.get(event);
     if (!handler) throw new Error(`the mod registered no ${event} hook`);
     const matcher = matchers.get(event);
     if (matcher && !Object.entries(matcher).every(([key, value]) => e[key] === value)) return undefined;
+    /** The pickers this one hook opened, which its own `{ result }` closes. */
+    const opened: OpenPicker[] = [];
     const next = async (ev: Record<string, unknown>) => {
       nextTimes.set(event, Date.now());
       if (event === 'tool.check') return options.engineVerdict ? options.engineVerdict() : { decision: 'ask' };
-      if (event === 'tool.call') return options.toolResult ? options.toolResult() : { ranItself: true };
+      if (event === 'tool.call') {
+        if (options.openPicker && ev.tool === 'AskUserQuestion') return openPicker(ev, opened);
+        return options.toolResult ? options.toolResult() : { ranItself: true };
+      }
       if (event === 'ui.render') return { engineDrew: true };
       return ev;
     };
     if (signal) (next as unknown as { signal: AbortSignal }).signal = signal;
-    return handler(dollar, e, next);
+    try {
+      return await handler(dollar, e, next);
+    } finally {
+      // The hook is done with the call. A picker still open beneath it is one the engine closes now:
+      // the hook's own answer stood, and what the picker would have said is nobody's answer.
+      for (const picker of opened) if (!picker.settled) picker.closedByHook = true;
+    }
   };
   const fireIfHooked = async (event: string, e: Record<string, unknown>): Promise<unknown> => {
     const handler = handlers.get(event);
@@ -302,6 +392,8 @@ export async function loadMod(label: string, options: LoadModOptions): Promise<M
     label,
     record,
     exports: module,
+    pickers,
+    picker: (toolUseId) => [...pickers].reverse().find((p) => p.toolUseId === toolUseId),
     fire,
     fireIfHooked,
     nextAt: (event) => nextTimes.get(event),

@@ -55,19 +55,23 @@ export const STALE_AFTER_MS = 3 * MAX_POLL_WAIT_MS;
  */
 export const HOLDABLE_PERMISSION_MODES: readonly string[] = ['default', 'acceptEdits', 'plan'];
 /**
- * The modes a question is held in: the ones where Claude puts AskUserQuestion's picker in front of
- * a person, which is a different question from who approves a tool call. Measured on 2.1.292: the
- * picker opens in auto mode, and `dontAsk` refuses the question outright, so the app must not
- * answer one there either. `bypassPermissions` is left to the terminal because it is unmeasured.
+ * The modes a question is NOT offered to the app in. A question no longer waits on the app: the mod
+ * opens Claude's own picker at once and races it against the app's answer, so whichever side answers
+ * first is the answer, and nobody has to be watching for the app to be offered one. The one mode
+ * left out is `dontAsk`: measured on 2.1.292, it refuses the question outright, so the app must not
+ * answer one there either. Every other mode opens the picker, or settles the call itself, which
+ * ends the race from the terminal's side.
  */
-export const HOLDABLE_QUESTION_MODES: readonly string[] = ['default', 'acceptEdits', 'plan', 'auto'];
+export const QUESTION_REFUSED_MODES: readonly string[] = ['dontAsk'];
 /**
  * Release reasons that draw nothing in the app. In auto mode the classifier settles the call and in
  * `dontAsk` Claude refuses it, both without showing anyone a dialog, so a card saying the prompt
  * was left to the terminal described a prompt that did not exist -- once for nearly every tool call
- * of an auto-mode turn. The release is still audited.
+ * of an auto-mode turn. `viewer:none` is drawn for nobody by construction: no seat could answer when
+ * it was released, and the card was only ever seen by a seat that arrived later, as one more row per
+ * call in a session nobody was watching. The release is still audited.
  */
-export const UNCARDED_RELEASE_REASONS: readonly string[] = ['mode:auto', 'mode:dontAsk'];
+export const UNCARDED_RELEASE_REASONS: readonly string[] = ['mode:auto', 'mode:dontAsk', 'viewer:none'];
 /** The tool whose approval also chooses how Claude continues: only Claude's own dialog offers that. */
 export const PLAN_APPROVAL_TOOL = 'ExitPlanMode';
 
@@ -197,7 +201,7 @@ export type ModReleaseReason =
  * The mode that decided a hold was not taken, as the reason that names it.
  *
  * The rule is short -- cosyncing holds only where Claude asks a person (HOLDABLE_PERMISSION_MODES,
- * HOLDABLE_QUESTION_MODES) -- but the card has to say which mode it read, because "not held" is
+ * QUESTION_REFUSED_MODES) -- but the card has to say which mode it read, because "not held" is
  * not information and "you were bypassing permissions" is. A mode name it does not know is
  * `mode:unknown`, never another mode's sentence.
  *
@@ -875,4 +879,25 @@ export function modAnswerMap(questions: unknown, rows: unknown): Record<string, 
  */
 export function modAnswerRows(questions: unknown, answers: unknown): string[][] | undefined {
   return claudeAnswerRows(modQuestionViews(questions), answers);
+}
+
+/**
+ * The answers Claude's own picker took, as the mod reported them with `question.settled`, or
+ * undefined when it reported none (Escape, an interrupt, an error) or something that is not a map.
+ *
+ * Only ever drawn: the terminal has already used them, so nothing here can change what Claude was
+ * told. They are bounded the way an app answer is, so a card cannot be made to carry more than one.
+ * The picker may leave a question unanswered, so fewer answers than questions is fine.
+ */
+export function modTerminalAnswers(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const answers: Record<string, string> = {};
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > 4) return undefined;
+  for (const [question, answer] of entries) {
+    if (!question || question.length > 4 * 1024) return undefined;
+    if (typeof answer !== 'string' || answer.length > MOD_ANSWER_MAX_CHARS) return undefined;
+    answers[question] = answer;
+  }
+  return answers;
 }

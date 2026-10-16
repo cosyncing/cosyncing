@@ -332,6 +332,35 @@ try {
   check('with no viewer the hold releases at once', released.status === 200 && (released.body as { release?: { why?: string } }).release?.why === 'viewer:none', JSON.stringify(released.body).slice(0, 120));
   check('and the mod is told which request the release is about', (released.body as { release?: { requestId?: string } }).release?.requestId === 'h-1');
 
+  // QR1/QR2: a question races Claude's own picker. It is held with nobody watching, for a seat that
+  // opens later, and the picker answering first closes it over the event leg.
+  const colour = [{ question: 'Which colour?', header: 'Colour', multiSelect: false, options: [{ label: 'Amber' }, { label: 'Teal' }] }];
+  const question = (requestId: string, toolUseId: string) =>
+    ({ sessionId: S('ses-question'), requestId, tool: 'AskUserQuestion', decision: 'ask', input: '', toolUseId, questions: colour });
+  await post(unwatched.socketPath, 'register', registerBody(S('ses-question')), { sid: S('ses-question') });
+  const offered = await post(unwatched.socketPath, 'hold', question('q-1', 'toolu_q1'), { sid: S('ses-question') });
+  check('QR1: a question with nobody watching is held, not released', offered.status === 200 && (offered.body as { held?: boolean }).held === true,
+    JSON.stringify(offered.body).slice(0, 120));
+  check('QR1: and its hold stays open for a seat that opens later', unwatched.holds.isOpen(S('ses-question'), 'q-1'));
+  const pickedFirst = await post(unwatched.socketPath, 'event', {
+    sessionId: S('ses-question'), kind: 'question.settled', requestId: 'q-1', detail: { toolUseId: 'toolu_q1', answers: { 'Which colour?': 'Teal' } },
+  }, { sid: S('ses-question') });
+  check("QR2: Claude's picker answering first closes the hold, over the event leg",
+    pickedFirst.status === 200 && !unwatched.holds.isOpen(S('ses-question'), 'q-1'), JSON.stringify(pickedFirst.body));
+  check('QR2: the audit names the terminal as the one who answered',
+    unwatched.audit.list().some((row) => row.requestId === 'q-1' && row.answeredBy === 'band'), JSON.stringify(unwatched.audit.list()).slice(0, 160));
+  check('QR2: and the event still reaches the hub mirror',
+    unwatched.events.some((e) => e.kind === 'question.settled' && e.sessionId === S('ses-question')), JSON.stringify(unwatched.events));
+  const reoffered = await post(unwatched.socketPath, 'hold', question('q-1', 'toolu_q1'), { sid: S('ses-question') });
+  check('QR2: the mod offering it again is told it is over, and nothing is held again',
+    (reoffered.body as { held?: boolean; settledElsewhere?: unknown }).held !== true && (reoffered.body as { settledElsewhere?: unknown }).settledElsewhere !== undefined
+      && !unwatched.holds.isOpen(S('ses-question'), 'q-1'), JSON.stringify(reoffered.body).slice(0, 120));
+  // The picker can close before the offer itself lands: the offer that follows draws nothing.
+  await post(unwatched.socketPath, 'event', { sessionId: S('ses-question'), kind: 'question.settled', requestId: 'q-2', detail: { toolUseId: 'toolu_q2' } }, { sid: S('ses-question') });
+  const lateOffer = await post(unwatched.socketPath, 'hold', question('q-2', 'toolu_q2'), { sid: S('ses-question') });
+  check('QR2: a picker closed before its offer landed leaves that offer nothing to hold',
+    (lateOffer.body as { held?: boolean }).held !== true && !unwatched.holds.isOpen(S('ses-question'), 'q-2'), JSON.stringify(lateOffer.body).slice(0, 120));
+
   const watched = opened(await harness({ gate: { mode: 'default', viewers: 1 }, holdPollWaitMs: 5_000 }));
   await post(watched.socketPath, 'register', registerBody(S('ses-held')), { sid: S('ses-held') });
   // The broker answers the first `hold` for a call with an ack, before the wait for the

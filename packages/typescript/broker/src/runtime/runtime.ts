@@ -1129,6 +1129,9 @@ registry.register(new ClaudeAdapter({
     turnEndedAt: (sessionId) => claudeModService.turnEndedAt(sessionId),
     // What a card showed that the transcript does not record, so a reload draws it the same way.
     cardNote: (sessionId, requestId) => claudeModService.cardNote(sessionId, requestId),
+    // The cards still open for the session, for a seat that attaches after they were drawn: a
+    // question is offered whether or not a seat is open yet.
+    openCards: (sessionId) => claudeModService.openCards(sessionId),
   } : undefined,
 })); // Claude Code — observe (transcript-JSONL tail); resume is Take over; live is the cosyncing mod
 // Kimi Code — observe for every session (kimi web HTTP + WS), plus Drive for
@@ -1922,11 +1925,24 @@ const claudeModService: ClaudeModService = new ClaudeModService({
   onRegister: (sessionId, info) => {
     console.log(`${LOG_PREFIX} claude-mod registered ${sessionId} pid=${info.peerPid} version=${info.claudeVersion} surface=${info.surface} interactive=${info.isInteractive}`);
   },
+  // A tab opened before its terminal's mod registered -- a new session, or every tab after a broker
+  // restart -- is re-attached through the adapter, which now answers it with a seat in the sync.
+  // Its sockets stay open; only the connection under them changes.
+  upgradeSeats: (hubId) => {
+    void hub.reattachUpgradedSeats('claude', hubId, isClaudeModSeat).catch((error: unknown) => {
+      console.warn(`${LOG_PREFIX} claude-mod seat upgrade failed: ${String((error as Error)?.message ?? error).slice(0, 160)}`);
+    });
+  },
   log: {
     warn: (message) => console.warn(`${LOG_PREFIX} claude-mod ${message}`),
     info: (message) => console.log(`${LOG_PREFIX} claude-mod ${message}`),
   },
 });
+/** Whether a Claude connection is a seat in a mod sync: one that can draw the mod's cards. */
+function isClaudeModSeat(conn: SessionConnection): boolean {
+  return typeof (conn as { ingestRequest?: unknown }).ingestRequest === 'function';
+}
+
 /**
  * One mod event that the broker can only route from here: the pid behind a registration stopped
  * being provable, once per session.

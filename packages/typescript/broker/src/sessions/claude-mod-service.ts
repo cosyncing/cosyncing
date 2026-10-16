@@ -23,7 +23,14 @@
  * which is the product's fail-open shape.
  */
 
-import { claudeSessionId, claudeTranscriptPath, readLatestPermissionMode, type ClaudeModCardNote } from '@cosyncing/adapter-claude';
+import {
+  claudeAnswerRows,
+  claudePermissionDialogOpen,
+  claudeSessionId,
+  claudeTranscriptPath,
+  readLatestPermissionMode,
+  type ClaudeModCardNote,
+} from '@cosyncing/adapter-claude';
 import { ModAuditStore, type ModAuditRow } from './mod-audit.ts';
 import { ModHoldStore, type ModHoldRecord } from './mod-holds.ts';
 import { ModRegistry, type ModRowStatus } from './mod-registry.ts';
@@ -36,9 +43,13 @@ import type {
 import {
   UNCARDED_RELEASE_REASONS,
   modAnswerMap,
+  modModeReleaseReason,
   modAnswerRows,
   modQuestionViews,
+  modTerminalAnswers,
+  modWireId,
   type ModDecisionSource,
+  type ModQuestionView,
 } from './mod-protocol.ts';
 import type { ModHoldOutcome } from './mod-holds.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
@@ -70,9 +81,6 @@ export interface ModHubConnection {
     blocking?: boolean;
     /** On a question card: open in the terminal and answerable only there. Drawn read-only. */
     answerInTerminal?: boolean;
-    /** Replace the card already drawn under this id instead of leaving it. Only ever sent with
-     *  `readOnly`: a restatement takes a card's controls away, it never gives them back. */
-    restate?: boolean;
   }) => void;
   respondPermission?: (
     requestId: string,
@@ -98,7 +106,16 @@ export interface ModHubConnection {
   noteModTurnEnded?: (ended: { turnId: string; aborted: boolean; endedAt?: number }) => void;
   /** The terminal's main turn started; publish Working before its transcript catches up. */
   noteModTurnStarted?: () => void;
+  /**
+   * Whether this seat is one a permission is held for. A seat the app opened as a live co-writer is;
+   * a plain tab of the same session (a resident or background one) shows and answers every card but
+   * does not by itself move the terminal's permission dialog into a band. Absent means it is.
+   */
+  takesHolds?: boolean;
 }
+
+/** One card as a seat draws it: what {@link ModHubConnection.ingestRequest} takes. */
+export type ModCardRequest = Parameters<NonNullable<ModHubConnection['ingestRequest']>>[0];
 
 /** Who closed a card, as the broker can say it. Absent fields are things it cannot say. */
 export interface ModSettledBy {
@@ -142,6 +159,12 @@ export interface ClaudeModServiceOptions {
   /** A registration appeared or changed, which is what flips a row to `live` in the adapter. */
   /** A mod registration was accepted or replaced, with what the kernel said about the peer. */
   onRegister?: (sessionId: string, info: { cwd: string; claudeVersion: string; model?: string; isInteractive: boolean; surface: string; peerPid: number }) => void;
+  /**
+   * Re-attach the session's read-only seats through the adapter, by the Hub's row id, so a seat
+   * opened before its mod registered becomes one that can draw and answer the mod's cards. Called
+   * when a registration lands and when a card finds a seat that cannot draw it. Never throws.
+   */
+  upgradeSeats?: (hubId: string) => void;
   log?: { warn: (message: string) => void; info?: (message: string) => void };
   /** Passed straight to the socket. A suite shortens it; production leaves it at the default. */
   holdPollWaitMs?: number;
@@ -169,6 +192,15 @@ export interface ClaudeModServiceOptions {
    * number.
    */
   holdSleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * Whether Claude's own permission dialog is open in the session's terminal, or undefined when that
+   * cannot be told. Production reads the terminal process's own status record; a suite answers it.
+   */
+  permissionDialogOpen?: (sessionId: string) => boolean | undefined;
+  /** How often a note that waits on Claude's dialog looks for it. A suite shortens it. */
+  dialogPollMs?: number;
+  /** How long a note waits on Claude's dialog before it is dropped undrawn. A suite shortens it. */
+  dialogWaitMs?: number;
 }
 
 /** How many sessions' last turn ends are remembered at once. */
@@ -185,6 +217,23 @@ const CARD_NOTE_SESSIONS = 512;
  * synced.
  */
 const SWEEP_INTERVAL_MS = 5_000;
+
+/** How often a note that waits on Claude's own dialog looks for it. */
+const DIALOG_POLL_MS = 500;
+/**
+ * How long such a note waits. Claude says its dialog is open about a second after it opens; auto
+ * mode's classifier settles a call in a few seconds without ever opening one. Long enough for the
+ * first, and short enough that a later dialog does not draw a note for a call settled long before.
+ */
+const DIALOG_WAIT_MS = 15_000;
+
+/** A permission note that is drawn only once Claude's own dialog is seen open: see `awaitDialog`. */
+interface DialogWait {
+  cardId: string;
+  why: string;
+  request: ModCardRequest;
+  until: number;
+}
 
 export interface ModApproval {
   sessionId: string;
@@ -207,7 +256,7 @@ export class ClaudeModService {
    * turn is over is history, and history belongs to the transcript rather than to the pending set
    * that every new socket is replayed from.
    */
-  private readonly released = new Map<string, { requestId: string; why: string; question?: true }[]>();
+  private readonly released = new Map<string, { requestId: string; why: string; question?: true; card?: ModCardRequest }[]>();
   /**
    * What each session's cards showed that the transcript does not record, by card id, newest last
    * and bounded. A reload is drawn from the transcript; this is how it is drawn the same way.
@@ -224,6 +273,9 @@ export class ClaudeModService {
    * started before this: the mod's word that it ended. The mod knowing of no turn is not that word.
    */
   private readonly turnEnds = new Map<string, number>();
+  /** Permission notes waiting on Claude's own dialog, per session. */
+  private readonly awaitingDialog = new Map<string, DialogWait[]>();
+  private dialogTimer: ReturnType<typeof setInterval> | undefined;
   private started = false;
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
   /** Bumped by `close()`, so a start that is still binding when the broker stops comes to nothing. */
@@ -260,6 +312,10 @@ export class ClaudeModService {
         this.registrations.set(sessionId, info);
         this.noteRegisteredTurnEnd(sessionId, info);
         this.options.onRegister?.(sessionId, info);
+        // A tab opened before this registration -- a new session, or every tab after a broker
+        // restart, which reconnects before the terminals re-register -- is read-only and stays so
+        // until something re-attaches it. This is that something.
+        this.upgradeSeats(sessionId);
       },
     });
   }
@@ -292,8 +348,9 @@ export class ClaudeModService {
     const dialogChosen = event.kind === 'user-cancel' && event.detail?.via === 'dialog';
     if (event.kind === 'turn.start' || event.kind === 'turn.complete' || (event.kind === 'user-cancel' && !dialogChosen) || event.kind === 'session.end') {
       // A turn boundary, from whichever side reported it: the explanations of the turn that just
-      // ended are done explaining.
+      // ended are done explaining, and the ones still waiting on a dialog are never drawn.
       this.retireReleased(this.sessionKeyFor(event.sessionId));
+      this.awaitingDialog.delete(this.sessionKeyFor(event.sessionId));
     }
     const child = typeof event.detail?.agentId === 'string' && event.detail.agentId.length > 0;
     if (event.kind === 'turn.start' && !child) {
@@ -318,6 +375,12 @@ export class ClaudeModService {
     if (event.kind === 'command.refused' && event.detail?.op === 'abort') {
       this.appAborts.delete(this.sessionKeyFor(event.sessionId));
     }
+    if (event.kind === 'question.settled') {
+      // A held question's card was closed with the hold, by the socket. A question the app could not
+      // answer was never held: it was drawn read-only under Claude's call id, and this closes it too.
+      const toolUseId = modWireId(event.detail?.toolUseId);
+      if (toolUseId) this.settleReleasedQuestion(this.sessionKeyFor(event.sessionId), toolUseId, modTerminalAnswers(event.detail?.answers));
+    }
     if (event.kind === 'command.refused') {
       // Both words come from the terminal and go into a sentence on the app, so each is held to the
       // set of things it can be: an op the broker sends, and a reason code. Anything else is named
@@ -327,10 +390,12 @@ export class ClaudeModService {
       const message = reason === 'no_active_turn'
         ? 'Nothing was running in your terminal when the stop arrived, so nothing was stopped.'
         : `The cosyncing mod in your terminal could not carry out that ${op} (${reason}).`;
-      try {
-        this.connection(event.sessionId)?.noteModNotice?.(message);
-      } catch {
-        /* a notice nobody could take is not worth a stack trace */
+      for (const row of this.seats(event.sessionId)) {
+        try {
+          (row.conn as ModHubConnection).noteModNotice?.(message);
+        } catch {
+          /* a notice nobody could take is not worth a stack trace */
+        }
       }
     }
     this.options.onEvent?.(event);
@@ -460,6 +525,9 @@ export class ClaudeModService {
 
   close(): void {
     this.epoch += 1;
+    if (this.dialogTimer) clearInterval(this.dialogTimer);
+    this.dialogTimer = undefined;
+    this.awaitingDialog.clear();
     if (!this.started) {
       // A start still binding is told to stop; nothing else is running yet.
       this.socket.close();
@@ -493,7 +561,7 @@ export class ClaudeModService {
   status(sessionId: string): ModRowStatus {
     const status = this.registry.status(sessionId);
     // Somebody in the app who could answer is watching this session now: it is being followed.
-    if (status.registration && !status.registration.followed && this.viewers(sessionId) > 0) {
+    if (status.registration && !status.registration.followed && this.watchers(sessionId) > 0) {
       this.registry.noteFollowed(sessionId);
     }
     const carried = status.present && status.fresh && status.pidAlive && status.state === 'live';
@@ -731,24 +799,56 @@ export class ClaudeModService {
     }
   }
 
-  private connection(sessionId: string): ModHubConnection | undefined {
-    return this.row(sessionId)?.conn as ModHubConnection | undefined;
+  /**
+   * Every connection the Hub holds for this session, once each.
+   *
+   * One session can have several: the tab a person opened as a live co-writer, and the plain tab of
+   * a resident or background view. A card is the session's, not one tab's, so each of them is drawn
+   * it and each of them is told when it closes. Only the first used to be, which is how a question
+   * asked while the only seat was a plain tab never reached the app at all.
+   */
+  private seats(sessionId: string): ModHubRow[] {
+    const rows = this.options.hubAll ? this.safeRows(sessionId) : [];
+    const all = rows.length > 0 ? rows : [this.row(sessionId)].filter((row): row is ModHubRow => row !== undefined);
+    const seen = new Set<unknown>();
+    return all.filter((row) => {
+      if (!row.conn || seen.has(row.conn)) return false;
+      seen.add(row.conn);
+      return true;
+    });
+  }
+
+  /** The seats that can draw a mod card, as their connections. */
+  private cardSeats(sessionId: string): ModHubConnection[] {
+    return this.seats(sessionId)
+      .map((row) => row.conn as ModHubConnection)
+      .filter((conn) => typeof conn.ingestRequest === 'function');
   }
 
   /**
-   * App viewers that could actually answer. Zero is not a failure but a rule: with nobody able
+   * App viewers a permission may be held for. Zero is not a failure but a rule: with nobody able
    * to answer, the terminal keeps the prompt, which is the measured fail-open shape.
    *
-   * A raw client count is not that number. A resident or background tab attaches Claude in plain
-   * Observe, and an Observe connection has no card channel and refuses every mutation, so a hold
-   * taken for it parked the terminal's prompt against a seat that could never tap it -- for a
-   * minute when holds had a deadline, and for as long as the person waited once they did not.
-   * Watching is not the gate; being able to answer is.
+   * A raw client count is not that number. A seat that cannot draw a card or answer one would park
+   * the terminal's prompt against a seat that could never tap it. And a plain tab of a synced session
+   * (a resident or background one) can answer, but holding the terminal's dialog for it moved the
+   * prompt into a band whenever the app merely had the session open somewhere; only a seat the app
+   * opened as a live co-writer takes holds.
    */
   private viewers(sessionId: string): number {
-    const row = this.row(sessionId);
-    if (!row) return 0;
-    return this.canAnswer(row.conn) ? row.clientCount : 0;
+    let viewers = 0;
+    for (const row of this.seats(sessionId)) {
+      const conn = row.conn as ModHubConnection | undefined;
+      if (this.canAnswer(conn) && conn?.takesHolds !== false) viewers += row.clientCount;
+    }
+    return viewers;
+  }
+
+  /** App clients on any seat that can answer a card: who is following this session. */
+  private watchers(sessionId: string): number {
+    let watchers = 0;
+    for (const row of this.seats(sessionId)) if (this.canAnswer(row.conn)) watchers += row.clientCount;
+    return watchers;
   }
 
   /** Whether a connection can be shown a permission card and answered back. */
@@ -758,43 +858,105 @@ export class ClaudeModService {
       && typeof candidate?.respondPermission === 'function';
   }
 
-  private publishCard(sessionId: string, hold: { appRequestId: string; tool: string; questions?: unknown; modeSeen: string; inputPreview?: string; inputDetail?: string }): void {
-    const conn = this.connection(sessionId);
-    if (!conn?.ingestRequest) return;
-    conn.noteModGeneration?.(this.registry.generation(sessionId));
+  /**
+   * Ask for the session's read-only seats to be re-attached, when it has one: a seat that cannot draw
+   * a card is a tab opened before the mod registered.
+   */
+  private upgradeSeats(sessionId: string): void {
+    if (!this.options.upgradeSeats) return;
+    const hubId = this.hubId(sessionId);
+    if (!hubId) return;
+    if (!this.seats(sessionId).some((row) => typeof (row.conn as ModHubConnection | undefined)?.ingestRequest !== 'function')) return;
     try {
-      // Keyed by the Hub's row id: the roster cache is filed under what discovery published.
-      const title = this.options.sessionTitle?.(this.hubId(sessionId) ?? sessionId);
-      if (hold.questions) {
-        // Claude's `multiSelect` becomes the contract's `multiple` here, which is the only place
-        // the two names meet. Without it a multi-select card draws radio buttons and the app
-        // sends one label for a question that takes several.
-        conn.ingestRequest({
-          requestId: hold.appRequestId,
-          kind: 'question',
-          toolName: hold.tool,
-          questions: modQuestionViews(hold.questions),
-          ...(title ? { title } : {}),
-        });
-        return;
-      }
-      conn.ingestRequest({
+      this.options.upgradeSeats(hubId);
+    } catch (error) {
+      this.options.log?.warn(`mod seat upgrade failed for ${sessionId}: ${String((error as Error)?.message ?? error).slice(0, 120)}`);
+    }
+  }
+
+  /** The card a held call draws, as every seat draws it. */
+  private cardRequest(sessionId: string, hold: { appRequestId: string; tool: string; questions?: unknown; modeSeen: string; inputPreview?: string; inputDetail?: string }): ModCardRequest {
+    // Keyed by the Hub's row id: the roster cache is filed under what discovery published.
+    const title = this.options.sessionTitle?.(this.hubId(sessionId) ?? sessionId);
+    if (hold.questions) {
+      // Claude's `multiSelect` becomes the contract's `multiple` here, which is the only place
+      // the two names meet. Without it a multi-select card draws radio buttons and the app
+      // sends one label for a question that takes several.
+      return {
         requestId: hold.appRequestId,
-        kind: 'permission',
+        kind: 'question',
         toolName: hold.tool,
+        questions: modQuestionViews(hold.questions),
         ...(title ? { title } : {}),
-        permissionMode: modPermissionMode(hold.modeSeen),
-        // The preview is the card. A tap that cannot see the command is not an approval, and the
-        // sentence this used to send was English in a five-locale app.
-        ...(modCardPreview(hold.inputPreview) ? { inputPreview: modCardPreview(hold.inputPreview) } : {}),
-        // The whole call, behind the card's "Show details": the preview is enough to recognise a
-        // call and not always enough to decide one. A client that predates `inputPreview` draws
-        // only this, so it is never left with less than the preview.
-        ...(modCardFullDetail(hold.tool, hold.inputPreview, hold.inputDetail) ? { detail: modCardFullDetail(hold.tool, hold.inputPreview, hold.inputDetail) } : {}),
-      });
+      };
+    }
+    return {
+      requestId: hold.appRequestId,
+      kind: 'permission',
+      toolName: hold.tool,
+      ...(title ? { title } : {}),
+      permissionMode: modPermissionMode(hold.modeSeen),
+      // The preview is the card. A tap that cannot see the command is not an approval, and the
+      // sentence this used to send was English in a five-locale app.
+      ...(modCardPreview(hold.inputPreview) ? { inputPreview: modCardPreview(hold.inputPreview) } : {}),
+      // The whole call, behind the card's "Show details": the preview is enough to recognise a
+      // call and not always enough to decide one. A client that predates `inputPreview` draws
+      // only this, so it is never left with less than the preview.
+      ...(modCardFullDetail(hold.tool, hold.inputPreview, hold.inputDetail) ? { detail: modCardFullDetail(hold.tool, hold.inputPreview, hold.inputDetail) } : {}),
+    };
+  }
+
+  private publishCard(sessionId: string, hold: { appRequestId: string; tool: string; questions?: unknown; modeSeen: string; inputPreview?: string; inputDetail?: string }): void {
+    // A seat that cannot draw the card yet is re-attached, and draws it from `openCards` then.
+    this.upgradeSeats(sessionId);
+    const seats = this.cardSeats(sessionId);
+    if (seats.length === 0) return;
+    let request: ModCardRequest;
+    try {
+      request = this.cardRequest(sessionId, hold);
     } catch (error) {
       this.options.log?.warn(`mod card publish failed for ${sessionId}/${hold.appRequestId}: ${String((error as Error)?.message ?? error).slice(0, 120)}`);
+      return;
     }
+    for (const conn of seats) {
+      try {
+        conn.noteModGeneration?.(this.registry.generation(sessionId));
+        conn.ingestRequest!(request);
+      } catch (error) {
+        this.options.log?.warn(`mod card publish failed for ${sessionId}/${hold.appRequestId}: ${String((error as Error)?.message ?? error).slice(0, 120)}`);
+      }
+    }
+  }
+
+  /**
+   * The cards this session is holding open right now, for a seat that is attaching after they were
+   * drawn: a tab opened mid-question, or one re-attached once its mod registered.
+   *
+   * A question no longer waits for a seat before it is offered, so the seat that answers it is often
+   * one that did not exist when it was asked. `generation` is the registration they belong to, which
+   * the seat needs before it takes them: see {@link ModHubConnection.noteModGeneration}.
+   */
+  openCards(sessionId: string): { generation: number; cards: ModCardRequest[] } | undefined {
+    const key = this.sessionKeyFor(sessionId);
+    if (!this.registry.get(key)) return undefined;
+    const generation = this.registry.generation(key);
+    const cards: ModCardRequest[] = [];
+    for (const hold of this.holdStore.openHolds()) {
+      if (hold.sessionId !== key || hold.generation !== generation) continue;
+      // Still answerable: open under this registration, and its terminal still asking about it.
+      if (this.holdStore.byCard(key, hold.appRequestId) !== hold) continue;
+      try {
+        cards.push(this.cardRequest(key, hold));
+      } catch {
+        /* a card that cannot be built is one the seat does not draw */
+      }
+    }
+    // A question the app could not answer is still open in the terminal's picker, and saying so is
+    // what keeps a seat that opens now from reading the session as Working.
+    for (const entry of this.released.get(key) ?? []) {
+      if (entry.question && entry.card) cards.push(entry.card);
+    }
+    return { generation, cards };
   }
 
   /**
@@ -803,62 +965,143 @@ export class ClaudeModService {
    * terminal owns the dialog, and the reason says which of the four rules let the call go.
    */
   private publishRelease(sessionId: string, hold: ModHoldMessage, why: string, mode: string | undefined): void {
-    // Nobody is shown a dialog for these, so there is nothing for a card to say: see the list.
+    // Nobody is shown a dialog for these, or nobody could see it: see the list.
     if (UNCARDED_RELEASE_REASONS.includes(why)) return;
-    const conn = this.connection(sessionId);
-    if (!conn?.ingestRequest) return;
-    conn.noteModGeneration?.(this.registry.generation(sessionId));
+    const seats = this.cardSeats(sessionId);
     const { tool, input: preview, detail } = hold;
+    const question = hold.questions !== undefined || hold.questionsUnreadable === true;
+    // Switched off in a mode where Claude puts a tool call to nobody: as with that mode's own release,
+    // there is no dialog to explain. A question is put to a person in every mode but one.
+    if (!question && why === 'killSwitch' && mode !== undefined && UNCARDED_RELEASE_REASONS.includes(modModeReleaseReason(mode))) return;
+    // A question is kept for a seat that opens later, so it is drawn with no seat open too; an
+    // explanation of a permission is only worth drawing for a seat that is there.
+    if (seats.length === 0 && !question) return;
     // A card of its own, like a held call's: the mod's id repeats in the next process. A question
     // keeps Claude's call id, which the transcript draws the same question under.
     const cardId = this.holdStore.cardIdFor(sessionId, hold);
-    const question = hold.questions !== undefined || hold.questionsUnreadable === true;
+    let request: ModCardRequest;
     try {
-      if (question) {
+      request = question
         // A question stays a question. Drawn as a permission card it said a dialog was open and
         // offered nothing to do about it, in auto-mode words for a question the person had to
         // answer; this is the question, with no controls, and the sentence that says where.
         //
         // And it blocks. Claude's picker is open in the terminal and the session is waiting on a
-        // person, which is what Needs input says. The transcript's own copy of the question would
-        // have said it, but it has this card's id and is dropped for it. The card cannot stick: the
-        // transcript's answer closes it under the same id, and the turn's end retires it.
-        conn.ingestRequest({
+        // person, which is what Needs input says. The card cannot stick: the mod says when the
+        // picker closes, the transcript's answer closes it under the same id, and the turn's end
+        // retires it.
+        ? {
           requestId: cardId,
           kind: 'question',
           toolName: tool,
           questions: hold.questions !== undefined ? modQuestionViews(hold.questions) : [],
           readOnly: true,
           answerInTerminal: true,
-        });
-        this.noteCard(sessionId, cardId, { inTerminal: true });
-      } else conn.ingestRequest({
-        requestId: cardId,
-        kind: 'permission',
-        toolName: tool,
-        // No buttons on this card. The hold is already closed and the terminal owns the dialog,
-        // so an actionable card here would offer the app a decision it can no longer make.
-        readOnly: true,
-        // ...and nobody is waiting on it either. This is the second half of what a read-only card
-        // is: it used to sit in the pending set with a plain permission-request's status, which put
-        // the row at `needs-input` for the rest of the session, replayed the explanation to every
-        // socket that opened, and made every later prompt read as mid-turn.
-        blocking: false,
-        releaseReason: modReleaseReason(why),
-        ...(mode ? { permissionMode: modPermissionMode(mode) } : {}),
-        ...(modCardPreview(preview) ? { inputPreview: modCardPreview(preview) } : {}),
-        ...(modCardFullDetail(tool, preview, detail) ? { detail: modCardFullDetail(tool, preview, detail) } : {}),
-      });
-      const seen = this.released.get(sessionId) ?? [];
-      // One entry per request id, and a ceiling: a mod that re-offers the same declined call would
-      // otherwise grow this for the life of the broker. Retiring a card nobody can see any more is
-      // cheap, so the oldest is dropped rather than the newest.
-      if (!seen.some((entry) => entry.requestId === cardId)) {
-        seen.push({ requestId: cardId, why, ...(question ? { question: true } : {}) });
-        this.released.set(sessionId, seen.slice(-20));
-      }
+        }
+        : {
+          requestId: cardId,
+          kind: 'permission',
+          toolName: tool,
+          // No buttons on this card. The hold is already closed and the terminal owns the dialog,
+          // so an actionable card here would offer the app a decision it can no longer make.
+          readOnly: true,
+          // ...and nobody is waiting on it either. This is the second half of what a read-only card
+          // is: it used to sit in the pending set with a plain permission-request's status, which put
+          // the row at `needs-input` for the rest of the session, replayed the explanation to every
+          // socket that opened, and made every later prompt read as mid-turn.
+          blocking: false,
+          releaseReason: modReleaseReason(why),
+          ...(mode ? { permissionMode: modPermissionMode(mode) } : {}),
+          ...(modCardPreview(preview) ? { inputPreview: modCardPreview(preview) } : {}),
+          ...(modCardFullDetail(tool, preview, detail) ? { detail: modCardFullDetail(tool, preview, detail) } : {}),
+        };
     } catch {
       // A card we could not draw is not worth a stack trace.
+      return;
+    }
+    // With no mode to read, the broker cannot tell an auto-mode call, which Claude's classifier
+    // settles with nobody asked, from one whose dialog is open in the terminal. Drawn at once, the
+    // first kind filled the app with a note per call for the rest of a turn after a plan approval,
+    // which records no mode. Claude says when its dialog is open, so the note waits to be true.
+    if (!question && (why === 'mode:unknown' || (why === 'killSwitch' && mode === undefined))) {
+      this.awaitDialog(sessionId, { cardId, why, request });
+      return;
+    }
+    this.drawRelease(sessionId, cardId, why, request, question);
+  }
+
+  /** Draw a released call's card in every seat, and file it to be retired with its turn. */
+  private drawRelease(sessionId: string, cardId: string, why: string, request: ModCardRequest, question: boolean): void {
+    for (const conn of this.cardSeats(sessionId)) {
+      try {
+        conn.noteModGeneration?.(this.registry.generation(sessionId));
+        conn.ingestRequest!(request);
+      } catch {
+        /* a seat that could not draw it is left to the transcript */
+      }
+    }
+    if (question) this.noteCard(sessionId, cardId, { inTerminal: true });
+    const seen = this.released.get(sessionId) ?? [];
+    // One entry per request id, and a ceiling: a mod that re-offers the same declined call would
+    // otherwise grow this for the life of the broker. Retiring a card nobody can see any more is
+    // cheap, so the oldest is dropped rather than the newest.
+    if (!seen.some((entry) => entry.requestId === cardId)) {
+      seen.push({ requestId: cardId, why, ...(question ? { question: true, card: request } : {}) });
+      this.released.set(sessionId, seen.slice(-20));
+    }
+  }
+
+  /**
+   * Hold a permission note until Claude's own dialog for it is seen open, and draw it then.
+   *
+   * Seen open means the terminal's Claude process says it is waiting on a permission prompt, which it
+   * does about a second after the dialog opens and never while auto mode's classifier settles the
+   * call. A note that sees no dialog within the wait, or whose turn ends first, is dropped undrawn.
+   * Claude puts one dialog up at a time, and its record does not say for which call, so a dialog seen
+   * draws every note still waiting: they are calls of the same moment, each with a dialog to come.
+   */
+  private awaitDialog(sessionId: string, wait: Omit<DialogWait, 'until'>): void {
+    const waiting = this.awaitingDialog.get(sessionId) ?? [];
+    if (waiting.some((entry) => entry.cardId === wait.cardId)) return;
+    waiting.push({ ...wait, until: Date.now() + (this.options.dialogWaitMs ?? DIALOG_WAIT_MS) });
+    this.awaitingDialog.set(sessionId, waiting.slice(-20));
+    if (this.dialogTimer) return;
+    const timer = setInterval(() => this.lookForDialogs(), Math.max(10, this.options.dialogPollMs ?? DIALOG_POLL_MS));
+    timer.unref?.();
+    this.dialogTimer = timer;
+    this.lookForDialogs();
+  }
+
+  private lookForDialogs(): void {
+    const now = Date.now();
+    for (const [sessionId, waiting] of [...this.awaitingDialog]) {
+      const live = waiting.filter((entry) => entry.until > now);
+      if (live.length === 0 || !this.registry.get(sessionId)) {
+        this.awaitingDialog.delete(sessionId);
+        continue;
+      }
+      if (this.permissionDialogOpen(sessionId) !== true) {
+        this.awaitingDialog.set(sessionId, live);
+        continue;
+      }
+      this.awaitingDialog.delete(sessionId);
+      for (const entry of live) this.drawRelease(sessionId, entry.cardId, entry.why, entry.request, false);
+    }
+    if (this.awaitingDialog.size === 0 && this.dialogTimer) {
+      clearInterval(this.dialogTimer);
+      this.dialogTimer = undefined;
+    }
+  }
+
+  /** Whether Claude's own permission dialog is open in this session's terminal, if that can be told. */
+  private permissionDialogOpen(sessionId: string): boolean | undefined {
+    try {
+      if (this.options.permissionDialogOpen) return this.options.permissionDialogOpen(sessionId);
+      const pid = this.registrations.get(sessionId)?.peerPid;
+      const transcript = this.transcriptFor(sessionId);
+      return pid !== undefined && transcript ? claudePermissionDialogOpen(transcript, pid, sessionId) : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -878,20 +1121,37 @@ export class ClaudeModService {
     if (kept.length > 0) this.released.set(sessionId, kept);
     else this.released.delete(sessionId);
     if (entries.length === 0) return;
-    const conn = this.connection(sessionId);
-    if (!conn?.respondPermission) return;
-    for (const entry of entries) {
-      try {
+    for (const conn of this.cardSeats(sessionId)) {
+      if (!conn.respondPermission) continue;
+      for (const entry of entries) {
         // A question card retires as a question, or its row stays a permission the client never drew.
-        const settled = entry.question
+        settleQuietly(() => entry.question
           ? conn.rejectQuestion?.(entry.requestId)
-          : conn.respondPermission(entry.requestId, 'external', { releaseReason: modReleaseReason(entry.why) });
-        if (settled && typeof (settled as Promise<void>).catch === 'function') {
-          (settled as Promise<void>).catch(() => undefined);
-        }
-      } catch {
-        /* the card closes on its own when the overlay rolls forward */
+          : conn.respondPermission!(entry.requestId, 'external', { releaseReason: modReleaseReason(entry.why) }));
       }
+    }
+  }
+
+  /**
+   * Claude's picker closed on a question the app was shown read-only, because the app could not
+   * have answered it the way the tool takes it. Close the card in every seat, with the picker's
+   * answers when it took some, rather than leaving it to the transcript or the turn's end.
+   */
+  private settleReleasedQuestion(sessionId: string, toolUseId: string, answers: Record<string, string> | undefined): void {
+    const all = this.released.get(sessionId);
+    const entry = all?.find((candidate) => candidate.question && candidate.requestId === toolUseId);
+    if (!all || !entry) return;
+    const rest = all.filter((candidate) => candidate !== entry);
+    if (rest.length > 0) this.released.set(sessionId, rest);
+    else this.released.delete(sessionId);
+    const views = (entry.card?.questions as ModQuestionView[] | undefined) ?? [];
+    const rows = answers ? claudeAnswerRows(views, answers) : undefined;
+    const by: ModSettledBy = rows && rows.some((row) => row.length > 0) ? { decidedBy: 'band' } : { releaseReason: 'band' };
+    this.noteCard(sessionId, toolUseId, by);
+    for (const conn of this.cardSeats(sessionId)) {
+      settleQuietly(() => by.decidedBy && rows
+        ? conn.answerQuestion?.(toolUseId, rows, by)
+        : conn.rejectQuestion?.(toolUseId, by));
     }
   }
 
@@ -945,7 +1205,7 @@ export class ClaudeModService {
     answeredBy?: ModDecisionSource | 'cancel',
     record?: { tool?: string; questions?: unknown },
   ): void {
-    const conn = this.connection(sessionId);
+    const seats = this.cardSeats(sessionId);
     const decidedBy: PermissionDecidedBy | undefined = answeredBy === 'app'
       || answeredBy === 'band'
       || answeredBy === 'expired'
@@ -962,35 +1222,20 @@ export class ClaudeModService {
     const cancelled = outcome?.kind === 'cancelled' ? modCancelAttribution(outcome, this.appAborts.has(sessionId)) : {};
     // A question hold closes as an answered question, not as a permission decision. The answers
     // ride along so every seat shows the same answer the one that was tapped, and so does who gave
-    // it: without it the seat that sent the answer read "settled in your terminal or another app"
-    // as soon as it rebuilt the card. The transcript records the answer and not the seat, so the
-    // seat is remembered here for a reload.
+    // it -- the app, or Claude's own picker in the terminal: without it the seat that sent the
+    // answer read "settled in your terminal or another app" as soon as it rebuilt the card. The
+    // transcript records the answer and not the seat, so the seat is remembered here for a reload.
     if (outcome?.kind === 'answered') {
       const rows = modAnswerRows(record?.questions, outcome.answers);
       const by: ModSettledBy = decidedBy ? { decidedBy } : {};
       this.noteCard(sessionId, requestId, by);
-      try {
-        const answered = conn?.answerQuestion?.(requestId, rows ?? [], by);
-        if (answered && typeof (answered as Promise<void>).catch === 'function') {
-          (answered as Promise<void>).catch(() => undefined);
-        }
-      } catch {
-        /* the card closes on its own when the session's live overlay rolls forward */
-      }
+      for (const conn of seats) settleQuietly(() => conn.answerQuestion?.(requestId, rows ?? [], by));
       return;
     }
-    // A question handed to Claude's own picker from the band is not over: the picker is open in the
-    // terminal, waiting on a person. Closed here, it settled with nothing picked while the session
-    // read Working, and the transcript's own copy of the question, which shares this card's id, was
-    // dropped for a card already settled. The card stays, read-only, saying where to answer.
-    if (record?.questions !== undefined && outcome?.kind === 'cancelled' && outcome.why === 'user-cancel' && outcome.via === 'dialog') {
-      this.restateInTerminal(sessionId, requestId, record);
-      return;
-    }
-    // A question that ends any other way -- expired, dismissed, its turn over, or its process
-    // replaced -- still closes as a question. Closed as a permission it left the card's
-    // `question-required` inbox item open for good: only `question-resolved` resolves one. It says
-    // who closed it the way a permission card does, from the same three readings.
+    // A question that ends any other way -- closed in the terminal, expired, dismissed, its turn
+    // over, or its process replaced -- still closes as a question. Closed as a permission it left
+    // the card's `question-required` inbox item open for good: only `question-resolved` resolves one.
+    // It says who closed it the way a permission card does, from the same three readings.
     if (record?.questions !== undefined) {
       const by: ModSettledBy = {
         ...(decidedBy ? { decidedBy } : {}),
@@ -998,66 +1243,37 @@ export class ClaudeModService {
         ...cancelled,
       };
       if (by.decidedBy || by.releaseReason) this.noteCard(sessionId, requestId, by);
-      try {
-        const closed = conn?.rejectQuestion?.(requestId, by);
-        if (closed && typeof (closed as Promise<void>).catch === 'function') {
-          (closed as Promise<void>).catch(() => undefined);
-        }
-      } catch {
-        /* the card closes on its own when the session's live overlay rolls forward */
-      }
+      for (const conn of seats) settleQuietly(() => conn.rejectQuestion?.(requestId, by));
       return;
     }
     const decision: 'approve' | 'reject' | 'external' = outcome?.kind === 'verdict'
       ? (outcome.behavior === 'allow' ? 'approve' : 'reject')
       : 'external';
-    try {
-      // Settled, not just called: the observe connection REJECTS a resolution rather than
-      // throwing it, and a floating rejection is an unhandled one. Either way the card closes on
-      // its own when the session's live overlay rolls forward.
-      const settled = conn?.respondPermission?.(requestId, decision, {
+    // Settled, not just called: a connection may REJECT a resolution rather than throw it, and a
+    // floating rejection is an unhandled one. Either way the card closes on its own when the
+    // session's live overlay rolls forward.
+    for (const conn of seats) {
+      settleQuietly(() => conn.respondPermission?.(requestId, decision, {
         ...(decidedBy ? { decidedBy } : {}),
         ...(releaseReason ? { releaseReason } : {}),
         ...cancelled,
-      });
-      if (settled && typeof (settled as Promise<void>).catch === 'function') {
-        (settled as Promise<void>).catch(() => undefined);
-      }
-    } catch {
-      // The card closes on its own when the session's live overlay rolls forward.
+      }));
     }
   }
+}
 
-  /**
-   * Draw a held question again under its own id, as a question open in the terminal.
-   *
-   * Blocking, because the session is waiting on a person at Claude's picker. It is filed with the
-   * read-only cards so the turn's end retires it, and the transcript's answer, which carries this
-   * id since the card took Claude's call id, closes it before that with the answer given.
-   */
-  private restateInTerminal(sessionId: string, requestId: string, record: { tool?: string; questions?: unknown }): void {
-    const conn = this.connection(sessionId);
-    if (!conn?.ingestRequest) return;
-    try {
-      conn.ingestRequest({
-        requestId,
-        kind: 'question',
-        ...(record.tool ? { toolName: record.tool } : {}),
-        questions: modQuestionViews(record.questions),
-        readOnly: true,
-        answerInTerminal: true,
-        restate: true,
-      });
-    } catch (error) {
-      this.options.log?.warn(`mod question restate failed for ${sessionId}/${requestId}: ${String((error as Error)?.message ?? error).slice(0, 120)}`);
-      return;
+/**
+ * Run one seat's close and swallow what it says back: a throw, or a rejected promise. A seat that
+ * could not close a card has the card closed by the transcript, or by its turn's end.
+ */
+function settleQuietly(close: () => Promise<void> | void | undefined): void {
+  try {
+    const settled = close();
+    if (settled && typeof (settled as Promise<void>).catch === 'function') {
+      (settled as Promise<void>).catch(() => undefined);
     }
-    this.noteCard(sessionId, requestId, { inTerminal: true });
-    const seen = this.released.get(sessionId) ?? [];
-    if (!seen.some((entry) => entry.requestId === requestId)) {
-      seen.push({ requestId, why: 'band', question: true });
-      this.released.set(sessionId, seen.slice(-20));
-    }
+  } catch {
+    /* the card closes on its own when the session's live overlay rolls forward */
   }
 }
 
@@ -1130,7 +1346,8 @@ export function modCardFullDetail(tool: string, preview: string | undefined, det
  * - The person chose Claude's dialog from the band: they are answering in the terminal (`band`).
  * - The turn was interrupted while this broker's Stop for it was outstanding: the app stopped it,
  *   whether the interrupt or the turn's end reached the broker first.
- * - Any other interrupt is Escape at the keyboard: the terminal again.
+ * - Any other interrupt is Escape at the keyboard: the terminal again. So is Claude's own picker
+ *   closing with no answer, which an interrupt also does, from either side.
  * - A mod that does not say how (one older than `via`) gets nothing, as before.
  */
 export function modCancelAttribution(
@@ -1138,7 +1355,7 @@ export function modCancelAttribution(
   appStopPending: boolean,
 ): { decidedBy?: PermissionDecidedBy; releaseReason?: PermissionReleaseReason } {
   if (outcome.why === 'user-cancel' && outcome.via === 'dialog') return { releaseReason: 'band' };
-  if (outcome.why === 'user-cancel' && outcome.via === 'interrupt') {
+  if (outcome.why === 'user-cancel' && (outcome.via === 'interrupt' || outcome.via === 'terminal')) {
     return appStopPending ? { decidedBy: 'app' } : { releaseReason: 'band' };
   }
   if (outcome.why === 'turn-complete' && appStopPending) return { decidedBy: 'app' };

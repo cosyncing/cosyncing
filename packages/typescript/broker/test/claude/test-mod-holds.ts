@@ -120,7 +120,7 @@ try {
   check('PM2 unit: and the release reaches the app, where it is drawn read-only',
     planning.released.some((r) => r.requestId === 'r-plan' && r.why === 'plan:terminal-only'), JSON.stringify(planning.released));
   const viewerless = harness({ mode: 'plan', viewers: 0 });
-  check('PM2 unit: with nobody watching the plan says that, not the plan rule',
+  check('PM2 unit: with nobody watching the plan says that, not the plan rule (and so draws no card)',
     (viewerless.holds.accept(hold('r-plan-nobody', { tool: 'ExitPlanMode' })) as { why?: string }).why === 'viewer:none');
 
   // ── AM1: a question is held in auto mode, where the picker is a person's; a tool call is not ──
@@ -131,6 +131,42 @@ try {
   const dontAskQuestion = harness({ mode: 'dontAsk' });
   check('AM1 unit: a dontAsk question is released, because Claude refuses it there',
     (dontAskQuestion.holds.accept(hold('q-dont', { tool: 'AskUserQuestion', input: '', questions: [{ question: 'Which?', options: [{ label: 'A' }, { label: 'B' }] }] })) as { why?: string }).why === 'mode:dontAsk');
+
+  // ── QR1: a question races Claude's picker, so it is held with nobody watching ──
+  const which = { tool: 'AskUserQuestion', input: '', questions: [{ question: 'Which?', options: [{ label: 'A' }, { label: 'B' }] }] };
+  const unwatched = harness({ mode: 'auto', viewers: 0 });
+  check('QR1 unit: an auto-mode question nobody is watching is held, for a seat that opens later',
+    unwatched.holds.accept(hold('q-unwatched', which)).kind === 'held' && unwatched.accepted.includes('q-unwatched'));
+  check('QR1 unit: while an auto-mode tool call nobody is watching is released for its mode, not its viewers',
+    (unwatched.holds.accept(hold('r-unwatched')) as { why?: string }).why === 'mode:auto');
+  const unread = harness({ mode: null, viewers: 0 });
+  check('QR1 unit: a question is held when the mode cannot be read', unread.holds.accept(hold('q-unread', which)).kind === 'held');
+  const bypassing = harness({ mode: 'bypassPermissions' });
+  check('QR1 unit: a question is held in bypassPermissions, where the picker still opens', bypassing.holds.accept(hold('q-bypass', which)).kind === 'held');
+
+  // ── QR2: Claude's own picker settles a held question first ──
+  const pickedInTerminal = harness({ mode: 'auto', viewers: 0 });
+  pickedInTerminal.holds.accept(hold('q-picked', which));
+  check('QR2 unit: a terminal answer closes the hold', pickedInTerminal.holds.settleInTerminal('s', 'q-picked', { 'Which?': 'B' }) === true
+    && !pickedInTerminal.holds.isOpen('s', 'q-picked'));
+  check('QR2 unit: and says so, as answered from the terminal, so every card closes with it',
+    pickedInTerminal.resolved.some((r) => r.requestId === 'q-picked' && r.outcome === 'answered'), JSON.stringify(pickedInTerminal.resolved));
+  check('QR2 unit: the audit names the terminal as the one who answered',
+    pickedInTerminal.audit.list().some((row) => row.requestId === 'q-picked' && row.answeredBy === 'band'), JSON.stringify(pickedInTerminal.audit.list()));
+  check('QR2 unit: an app answer after it is refused, not applied', pickedInTerminal.holds.answerQuestion('s', 'q-picked', { 'Which?': 'A' }) === false);
+  check('QR2 unit: and the mod offering it again is told it is over',
+    pickedInTerminal.holds.accept(hold('q-picked', which)).kind === 'settled-elsewhere');
+
+  const pickerEscaped = harness({ mode: 'default' });
+  pickerEscaped.holds.accept(hold('q-pickerEscaped', which));
+  check('QR2 unit: a picker closed with no answer closes the hold as a cancel',
+    pickerEscaped.holds.settleInTerminal('s', 'q-pickerEscaped', undefined) === true
+      && pickerEscaped.resolved.some((r) => r.requestId === 'q-pickerEscaped' && r.outcome === 'cancelled'), JSON.stringify(pickerEscaped.resolved));
+
+  const early = harness({ mode: 'default' });
+  check('QR2 unit: a picker that settles before its offer lands opens nothing', early.holds.settleInTerminal('s', 'q-early', undefined) === false);
+  check('QR2 unit: and the offer arriving after it is told the call is over, so no card is drawn',
+    early.holds.accept(hold('q-early', which)).kind === 'settled-elsewhere' && !early.accepted.includes('q-early'));
 
   // ── Held, then answered ──
   const held = harness({ mode: 'default', viewers: 2 });

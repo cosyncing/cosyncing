@@ -15,7 +15,11 @@
  *   `default`, `acceptEdits` and `plan`; `auto`, `dontAsk`, `bypassPermissions` and an unreadable
  *   mode release at once. In auto mode Claude has its own classifier and a mod `allow` there would
  *   replace its answer outright, so refusing to hold is what keeps us out of the classifier's seat.
- *   A question is held in auto mode too, because there the picker does open for a person.
+ *   The mode is read before the viewers: an auto-mode `ask` that nobody was watching used to be
+ *   released as `viewer:none`, which drew a card, once for nearly every tool call of the turn.
+ * - **A question never waits on the app.** The mod opens Claude's own picker at once and races it
+ *   against this hold, so a question is offered to the app in every mode but `dontAsk`, whether or
+ *   not anybody is watching yet. Whichever side answers first is the answer.
  * - **Every answer is request-scoped and consumed exactly once.** Once a hold resolves, the
  *   row is gone; a second answer, from whichever seat was slower, is dropped *and logged*.
  *   Phase 0 measured an unread verdict deciding the next call in 14 milliseconds with nobody
@@ -34,8 +38,8 @@
 import {
   HOLD_LEASE_MS,
   HOLDABLE_PERMISSION_MODES,
-  HOLDABLE_QUESTION_MODES,
   PLAN_APPROVAL_TOOL,
+  QUESTION_REFUSED_MODES,
   type ModDecisionSource,
   type ModHoldMessage,
   type ModHoldCancelReason,
@@ -52,7 +56,7 @@ export interface ModGateInputs {
   /** Broker's freshest transcript read. `undefined` means no mode on record yet, or a plan approved
    *  since the last one, which changes the mode without writing it. */
   mode: string | undefined;
-  /** Connected app viewers for that session, from the hub. */
+  /** App seats that can answer a held permission, from the hub. A question does not read it. */
   viewers: number;
   /** cosyncing's own setting, never Claude's. */
   killSwitch: boolean;
@@ -63,22 +67,34 @@ export type ModGateDecision =
   | { hold: false; why: ModReleaseReason; mode: string | undefined };
 
 /**
- * The hold gate, as a pure function: hold only when the kill switch is off, somebody is
- * watching, and the recorded mode is one where Claude puts this kind of call to a person -- its
- * permission dialog for a tool call, its picker for a question. The two sets differ in auto mode,
- * where a classifier answers tool calls and a person still answers questions.
+ * The hold gate, as a pure function.
+ *
+ * A permission is held only when the kill switch is off, the recorded mode is one where Claude puts
+ * the call to a person in its own dialog, and somebody who could answer is watching -- in that
+ * order. The mode comes before the viewers because it is the reason that decides whether there is a
+ * dialog at all: read the other way round, every auto-mode `ask` with nobody watching (the
+ * classifier's, before it runs) was released as `viewer:none`, and that reason drew a card.
+ *
+ * A question is offered whenever the kill switch is off and the mode is not one that refuses it.
+ * It needs no viewer: Claude's picker is open in the terminal the whole time, so offering it costs
+ * the terminal nothing, and a seat that opens later can still answer it.
  */
 export function decideModHold(inputs: ModGateInputs, subject: 'permission' | 'question' = 'permission'): ModGateDecision {
   const { mode, viewers, killSwitch } = inputs;
   if (killSwitch) return { hold: false, why: 'killSwitch', mode };
-  if (viewers <= 0) return { hold: false, why: 'viewer:none', mode };
+  if (subject === 'question') {
+    if (mode !== undefined && QUESTION_REFUSED_MODES.includes(mode)) {
+      return { hold: false, why: modModeReleaseReason(mode), mode };
+    }
+    return { hold: true, mode };
+  }
   if (mode === undefined) return { hold: false, why: 'mode:unknown', mode };
   // The mode names itself. `mode:auto` used to stand in for every non-holdable mode, which told a
   // person in plan mode that they were sitting in auto mode.
-  const holdable = subject === 'question' ? HOLDABLE_QUESTION_MODES : HOLDABLE_PERMISSION_MODES;
-  if (!holdable.includes(mode)) {
+  if (!HOLDABLE_PERMISSION_MODES.includes(mode)) {
     return { hold: false, why: modModeReleaseReason(mode), mode };
   }
+  if (viewers <= 0) return { hold: false, why: 'viewer:none', mode };
   return { hold: true, mode };
 }
 
@@ -150,9 +166,9 @@ export type ModHoldOutcome =
   | { kind: 'answered'; answers: unknown; source: ModDecisionSource }
   | { kind: 'expired' }
   /**
-   * `via` is the terminal's account of a `user-cancel`: the person chose Claude's own dialog, or the
-   * turn was interrupted. It stays in the broker, where it decides what the app's card says; the
-   * mod is told only `why`.
+   * `via` is the terminal's account of a `user-cancel`: the person chose Claude's own dialog, the
+   * turn was interrupted, or Claude's picker closed with no answer. It stays in the broker, where it
+   * decides what the app's card says; the mod is told only `why`.
    */
   | { kind: 'cancelled'; why: ModHoldCancelReason; via?: ModCancelVia }
   /**
@@ -209,12 +225,15 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener('abort', done, { once: true });
   });
 }
-/** How the terminal cancelled a held call itself: Claude's own dialog chosen, or the turn interrupted. */
-export type ModCancelVia = 'dialog' | 'interrupt';
+/**
+ * How the terminal ended a held call itself: Claude's own dialog chosen from the band, the turn
+ * interrupted, or Claude's own picker closed first with no answer in it.
+ */
+export type ModCancelVia = 'dialog' | 'interrupt' | 'terminal';
 
 /** A `user-cancel` event's `via`, or nothing for a mod that predates it or sent something else. */
 export function modCancelVia(value: unknown): ModCancelVia | undefined {
-  return value === 'dialog' || value === 'interrupt' ? value : undefined;
+  return value === 'dialog' || value === 'interrupt' || value === 'terminal' ? value : undefined;
 }
 
 /** How many card ids a session remembers. More than any one session's open and recent cards. */
@@ -620,6 +639,33 @@ export class ModHoldStore {
     }
     if (this.refusedAsLate(record, 'question')) return false;
     this.stop(sessionId, requestId, { kind: 'answered', answers, source: 'app' }, 'app', true, record);
+    return true;
+  }
+
+  /**
+   * Close a question hold because Claude's own picker settled it first, in the terminal.
+   *
+   * The mod races the picker against this hold, and the terminal winning is an ordinary ending: the
+   * card closes with the answers the picker took, or with none when it was closed unanswered. The
+   * outcome is the terminal's own, so it is recorded as handed over at once: no leg has anything to
+   * carry back to a mod that already returned the picker's result.
+   */
+  settleInTerminal(sessionId: string, requestId: string, answers: Record<string, string> | undefined): boolean {
+    const key = this.keyNow(sessionId, requestId);
+    const record = this.holds.get(key);
+    if (!record) {
+      // Settled before its offer landed: a picker that closes at once can beat the offer's own
+      // request here. Recorded as handed over, so the offer arriving next is told the call is over
+      // instead of drawing a card for a question the terminal has already finished with.
+      if (!this.resolved.has(key)) this.markDelivered(key);
+      return false;
+    }
+    const outcome: ModHoldOutcome = answers
+      ? { kind: 'answered', answers, source: 'band' }
+      : { kind: 'cancelled', why: 'user-cancel', via: 'terminal' };
+    this.stop(sessionId, requestId, outcome, answers ? 'band' : 'cancel', true, record, answers ? undefined : 'user-cancel');
+    this.resolved.delete(key);
+    this.markDelivered(key);
     return true;
   }
 

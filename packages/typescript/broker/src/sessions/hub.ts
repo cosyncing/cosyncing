@@ -2944,6 +2944,54 @@ export class Hub {
     return old;
   }
 
+  /**
+   * Re-attach a session's seats through the adapter when a fresh attach would give them more, and
+   * keep their sockets.
+   *
+   * An adapter decides at attach time what a seat may do, and a seat opened a moment too early keeps
+   * that answer: a tab opened before a terminal's sync registered -- a new session, or every tab after
+   * a broker restart, which reconnects before the terminals do -- stays a read-only mirror of a
+   * session that is in fact shared. The bare seat and the `#live` seat are each attached again in
+   * their own mode, and the new connection replaces the old one only when `upgraded` says it is the
+   * better seat and the old one was not. A Drive (`#resume`) owner is never touched, and neither is
+   * a pinned bridge. Returns how many seats were replaced.
+   */
+  async reattachUpgradedSeats(tool: string, id: string, upgraded: (conn: SessionConnection) => boolean): Promise<number> {
+    if (this.disposed) return 0;
+    const backend = this.registry.get(tool);
+    if (!backend) return 0;
+    let replaced = 0;
+    for (const mode of [undefined, 'live'] as const) {
+      const key = this.key(tool, id, mode);
+      const mc = this.conns.get(key);
+      if (!mc || this.pinned.has(key) || upgraded(mc.conn)) continue;
+      // The same fence a mutable attach has: nothing re-acquires authority while handoff is closing
+      // the native owner.
+      if (this.terminalHandoffs.has(this.key(tool, id))) continue;
+      const generation = this.generationOf(key);
+      const before: SessionInfo = structuredClone(mc.conn.info);
+      let conn: SessionConnection;
+      try {
+        conn = await backend.attach(id, mode);
+      } catch {
+        // The seat keeps the connection it has; an attach that cannot be made now changes nothing.
+        continue;
+      }
+      // Generation fence, as in refreshExternalSession: the owner may have been replaced, retired,
+      // or adopted as a pinned bridge while the attach was in flight.
+      if (this.disposed || this.conns.get(key) !== mc || this.pinned.has(key)
+        || this.generationOf(key) !== generation || upgraded(mc.conn) || !upgraded(conn)) {
+        void conn.close().catch(() => {});
+        continue;
+      }
+      mc.replaceConnection(conn);
+      this.emitControlTransitions(before, mc.conn.info, 'unknown');
+      this.reconcileSessionOwner(tool, id, mc.conn.info);
+      replaced += 1;
+    }
+    return replaced;
+  }
+
   /** Adapter-reported metadata/control change for an externally-owned session. If a bare Observe
    *  connection is open and the adapter now says terminal sync is active, reattach the bare owner
    *  through the adapter's default path so the same websocket becomes mutable. If sync disappears,

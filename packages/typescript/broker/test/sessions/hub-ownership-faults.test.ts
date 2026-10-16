@@ -1780,3 +1780,83 @@ test('C35: a refused fresh attach leaves the ended wrapper and its clients as th
   const next = await hub.ensure('kilo', 's35', 'live');
   check('C35d a later attach the adapter accepts replaces it', next !== first && next.conn.info.control?.drive?.state === 'driving');
 });
+
+// ── Test E: reattachUpgradedSeats re-attaches a seat opened too early, and only that ─────────────
+// A Claude tab opened before its terminal's mod registered (a new session, or every tab after a
+// broker restart) keeps the read-only connection it was attached with. The broker re-attaches it
+// once the adapter can give it more -- a seat that draws the mod's cards -- keeping its sockets. The
+// fences are the same as a refresh's: a pinned bridge is never touched, and an owner replaced while
+// the attach was out keeps what replaced it.
+test('mod registration upgrades an early seat and preserves pinned or replaced owners', async () => {
+  const observeInfo = (id: string) => controlledInfo('claude', id, 'observe', 'observing');
+  const syncedInfo = (id: string) => controlledInfo('claude', id, 'live', 'observing');
+  let ready = false;
+  let gate: Promise<void> | undefined;
+  const attached: { mode?: string; seat: boolean }[] = [];
+  const closed: SessionConnection[] = [];
+  const registry = new AgentRegistry();
+  registry.register({
+    id: 'claude',
+    displayName: 'Claude',
+    capabilities: {} as any,
+    isAvailable: async () => true,
+    discoverSessions: async () => [],
+    attach: async (id: string, mode?: string) => {
+      const seat = ready;
+      attached.push({ mode, seat });
+      if (gate) await gate;
+      const conn = fakeConn({ ...observeInfo(id), attachMode: mode === 'live' && seat ? 'live' : 'observe' }) as SessionConnection & { ingestRequest?: () => void };
+      // What makes a Claude connection a seat in a mod sync: it can draw the mod's cards.
+      if (seat) conn.ingestRequest = () => {};
+      conn.close = async () => { closed.push(conn); };
+      return conn;
+    },
+  } as any);
+  const isSeat = (conn: SessionConnection): boolean => typeof (conn as { ingestRequest?: unknown }).ingestRequest === 'function';
+  const hub = track(new Hub(registry, 15000));
+
+  const bare = await hub.ensure('claude', 's-e');
+  const early = bare.conn;
+  const nothingBetter = await hub.reattachUpgradedSeats('claude', 's-e', isSeat);
+  check('E1 with nothing better to attach, the seat keeps its connection and the spare attach is closed',
+    nothingBetter === 0 && bare.conn === early && closed.length === 1 && attached.length === 2,
+    `replaced=${nothingBetter} closed=${closed.length} attached=${attached.length}`);
+
+  ready = true;
+  const upgraded = await hub.reattachUpgradedSeats('claude', 's-e', isSeat);
+  check('E2 once the adapter gives a seat, the read-only one is re-attached as it',
+    upgraded === 1 && isSeat(bare.conn) && bare.conn !== early, `replaced=${upgraded}`);
+  check('E3 in place: the same managed connection, so its sockets stay open', hub.getConn('claude', 's-e') === bare);
+  check('E4 and the connection it replaced is closed', closed.includes(early));
+
+  const attachesBefore = attached.length;
+  const again = await hub.reattachUpgradedSeats('claude', 's-e', isSeat);
+  check('E5 a seat that is already one is not attached again', again === 0 && attached.length === attachesBefore,
+    `replaced=${again} attaches=${attached.length - attachesBefore}`);
+
+  const pinnedConn = fakeConn(syncedInfo('s-p'));
+  hub.adopt('claude', 's-p', pinnedConn);
+  const pinnedAttaches = attached.length;
+  const pinnedReplaced = await hub.reattachUpgradedSeats('claude', 's-p', isSeat);
+  check('E6 a pinned bridge is never re-attached', pinnedReplaced === 0 && attached.length === pinnedAttaches
+    && hub.getConn('claude', 's-p')?.conn === pinnedConn, `replaced=${pinnedReplaced}`);
+
+  // The owner changes while the attach is out: a terminal bridge is adopted for the session.
+  ready = false;
+  const racing = await hub.ensure('claude', 's-r');
+  void racing;
+  ready = true;
+  let release!: () => void;
+  gate = new Promise<void>((resolve) => { release = resolve; });
+  const pending = hub.reattachUpgradedSeats('claude', 's-r', isSeat);
+  const bridge = fakeConn(syncedInfo('s-r'));
+  hub.adopt('claude', 's-r', bridge);
+  const closedBefore = closed.length;
+  release();
+  const raced = await pending;
+  gate = undefined;
+  check('E7 an owner replaced while the attach was out keeps what replaced it, and the late attach is closed',
+    raced === 0 && hub.getConn('claude', 's-r')?.conn === bridge && closed.length === closedBefore + 1 && isSeat(closed.at(-1)!),
+    `replaced=${raced} closed=${closed.length - closedBefore}`);
+  await hub.dispose();
+});

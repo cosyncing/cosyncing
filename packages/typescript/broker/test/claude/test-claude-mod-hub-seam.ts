@@ -5,12 +5,15 @@
  * Everything on the broker side is real: `ClaudeModService` bound in a mkdtemp directory, with its
  * `ModSocketServer`, registry and hold store; the real `Hub`, which is what decides Working or Idle
  * for the roster and what a socket that joins later is replayed; and the real `ClaudeModConnection`
- * (a synced attach) and `ClaudeObserveConnection` (a resident tab's Observe attach) tailing a real
- * transcript file. The adapter in the Hub's registry only hands those two out, the way the Claude
- * adapter does for `live` and for a bare attach. The mod side is the shipped `register.js` behind a
- * `$` whose `http.fetch` is a real fetch over the socket. What a test cannot have is faked: the
- * engine beneath `next(e)`, and Claude writing its transcript, which this suite does by hand in the
- * shapes Claude writes.
+ * (a synced attach, `live` or `plain`) and `ClaudeObserveConnection` (a tab's Observe attach)
+ * tailing a real transcript file. The adapter in the Hub's registry hands those out the way the
+ * Claude adapter does: a mod seat for `live`, and for a bare attach a plain mod seat while the
+ * session's mod is live and an Observe mirror otherwise. A suite can also force the mirror, which is
+ * what a tab opened before the mod registered still holds. The mod side is the shipped `register.js`
+ * behind a `$` whose `http.fetch` is a real fetch over the socket. What a test cannot have is faked:
+ * the engine beneath `next(e)` -- Claude's own question picker included, which stays open until a
+ * test answers it the way a person at the keyboard would -- and Claude writing its transcript, which
+ * this suite does by hand in the shapes Claude writes.
  *
  *   bun run packages/typescript/broker/test/claude/test-claude-mod-hub-seam.ts   (exit 0 = all pass)
  */
@@ -58,14 +61,26 @@ interface HubStack {
   detachLive(): void;
   /** A new synced attach, primed, as a reload makes one. */
   attachLive(): Promise<{ managed: ManagedConn; frames: Received[] }>;
-  /** Attach a resident tab's plain Observe row on the same session, primed as an attach primes it. */
+  /**
+   * Attach a tab's Observe mirror on the same session, primed as an attach primes it, whatever the
+   * mod's state: what a tab opened before the mod registered still holds.
+   */
   attachObserve(): Promise<{ managed: ManagedConn; frames: Received[] }>;
+  /** Attach a tab without asking for a mode, as a resident or background tab does: the adapter's choice. */
+  attachPlain(): Promise<{ managed: ManagedConn; frames: Received[] }>;
+  /**
+   * Hold the mod's registrations at the socket's door until the returned function is called, the
+   * way a terminal that has not reconnected yet holds them.
+   */
+  holdRegistrations(): () => void;
   /** The terminal's environment, for a second module on the same session. */
   env: Record<string, string>;
   /** Append transcript rows the way Claude does: whole lines, in order. */
   write(...rows: Record<string, unknown>[]): void;
   /** Flip cosyncing's true-sync switch. The mod hears of it on its next poll reply; the gate, at once. */
   setKillSwitch(on: boolean): void;
+  /** What the terminal's Claude says of its own permission dialog: open, shut, or nothing to read. */
+  setDialogOpen(open: boolean | undefined): void;
   /**
    * Restart the broker half: the service and the Hub close, and new ones bind the same socket, as a
    * restarted broker does. Nothing in memory survives; the mod is the same one, and it registers
@@ -85,7 +100,15 @@ interface HubStackOptions {
   /** How long a hold outlives its terminal's last request, and how often the sweep looks. */
   holdLeaseMs?: number;
   sweepIntervalMs?: number;
+  /**
+   * Wire the service's seat upgrade to the Hub the way the runtime does: a tab that cannot draw the
+   * mod's cards is re-attached through the adapter on a registration and on a card it cannot draw.
+   */
+  upgradeSeats?: boolean;
 }
+
+/** Whether a connection is a seat in a mod sync: one that can draw the mod's cards. The runtime's test. */
+const isModSeat = (conn: unknown): boolean => typeof (conn as { ingestRequest?: unknown } | undefined)?.ingestRequest === 'function';
 
 /** Transcript rows in the shapes Claude writes them. */
 const rows = {
@@ -143,28 +166,39 @@ async function hubStack(label: string, options: HubStackOptions = {}): Promise<H
   let service!: ClaudeModService;
   // cosyncing's own true-sync switch, read on every gate check and on every poll reply.
   let killSwitch = false;
+  // Claude's own word on its permission dialog, as its process status record would say it.
+  let dialogOpen: boolean | undefined;
+  /** What a bare attach is answered with: the adapter's choice, or the Observe mirror an early tab holds. */
+  let bareSeat: 'adapter' | 'observe' = 'adapter';
+  const modSeat = (seat: 'live' | 'plain'): ClaudeModConnection => new ClaudeModConnection({
+    info: { ...info(), attachMode: seat === 'live' ? 'live' : 'observe' } as SessionInfo,
+    transcriptPath: transcript,
+    nativeSessionId: sessionId,
+    seat,
+    send: (command: unknown): { ok: boolean; code?: string } => service.send(sessionId, command as never),
+    steeringEnabled: () => true,
+    turnRunning: () => service.currentTurn(sessionId) !== '',
+    cardNote: (requestId: string) => service.cardNote(sessionId, requestId),
+    turnEndedAt: () => service.turnEndedAt(sessionId),
+    // The cards still open, for a seat that opens after they were drawn: the runtime's bridge.
+    openCards: () => service.openCards(sessionId),
+    ...(options.turnEndGraceMs !== undefined ? { turnEndGraceMs: options.turnEndGraceMs } : {}),
+  });
   const registry = new AgentRegistry();
   registry.register({
     id: 'claude', displayName: 'Claude', capabilities: {} as never,
     isAvailable: async () => true, discoverSessions: async () => [],
-    // What the Claude adapter hands out: a synced attach writes through the mod, a bare one observes.
-    attach: async (_id: string, mode?: string) => mode === 'live'
-      ? new ClaudeModConnection({
-        info: { ...info(), attachMode: 'live' } as SessionInfo,
-        transcriptPath: transcript,
-        nativeSessionId: sessionId,
-        send: (command: unknown): { ok: boolean; code?: string } => service.send(sessionId, command as never),
-        steeringEnabled: () => true,
-        turnRunning: () => service.currentTurn(sessionId) !== '',
-        cardNote: (requestId: string) => service.cardNote(sessionId, requestId),
-        turnEndedAt: () => service.turnEndedAt(sessionId),
-        ...(options.turnEndGraceMs !== undefined ? { turnEndGraceMs: options.turnEndGraceMs } : {}),
-      })
-      : new ClaudeObserveConnection(transcript, info(), undefined, {
+    // What the Claude adapter hands out: a synced attach writes through the mod, and so does a bare
+    // one while the mod is live, as a plain seat. Otherwise a bare one observes.
+    attach: async (_id: string, mode?: string) => {
+      if (mode === 'live') return modSeat('live');
+      if (bareSeat === 'adapter' && service.status(sessionId).state === 'live') return modSeat('plain');
+      return new ClaudeObserveConnection(transcript, info(), undefined, {
         ...(options.turnEndGraceMs !== undefined ? { turnEndGraceMs: options.turnEndGraceMs } : {}),
         // The adapter's `observeModTurn`: what an Observe attach of a registered session reads.
         modTurn: { turnRunning: () => service.currentTurn(sessionId) !== '', turnEndedAt: () => service.turnEndedAt(sessionId) },
-      }),
+      });
+    },
   } as never);
   let hub = new Hub(registry, options.hubGraceMs ?? 60_000);
   const newService = (): ClaudeModService => new ClaudeModService({
@@ -177,23 +211,44 @@ async function hubStack(label: string, options: HubStackOptions = {}): Promise<H
     hubAll: (id) => hub.getConns('claude', id).map((mc) => ({ clientCount: mc.clientCount, conn: mc.conn })),
     transcriptPath: () => transcript,
     killSwitch: () => killSwitch,
+    permissionDialogOpen: () => dialogOpen,
+    dialogPollMs: 50,
     holdPollWaitMs: 20_000,
     ...(options.holdLeaseMs !== undefined ? { holdLeaseMs: options.holdLeaseMs } : {}),
     ...(options.sweepIntervalMs !== undefined ? { sweepIntervalMs: options.sweepIntervalMs } : {}),
+    // The runtime's wiring, against the real Hub.
+    ...(options.upgradeSeats
+      ? { upgradeSeats: (hubId: string) => void hub.reattachUpgradedSeats('claude', hubId, isModSeat).catch(() => undefined) }
+      : {}),
   });
   service = newService();
   await service.start();
 
   const env = { COSYNCING_CLAUDE_SOCK: service.socketPath, HOME: temp.root };
-  const mod = await loadMod(label, { sessionId, env });
+  let registrationGate: Promise<void> = Promise.resolve();
+  const mod = await loadMod(label, {
+    sessionId,
+    env,
+    // Claude's own picker stays open beneath a question until a test answers it at the "keyboard".
+    openPicker: true,
+    beforeFetch: async (sent) => {
+      if (sent.route === 'register') await registrationGate;
+    },
+  });
   (mod.exports.tuneForTest as (o: Record<string, unknown>) => void)({ backoffMs: [100, 200, 300], pollWaitMs: 300 });
   await mod.fire('session.start', { cwd: '/work', surface: 'terminal', isInteractive: true });
   await until(() => service.status(sessionId).present);
   await until(() => mod.record.requests.some((r) => r.route === 'poll'));
 
   const clients = new Map<ManagedConn, unknown>();
-  const attach = async (mode?: string): Promise<{ managed: ManagedConn; frames: Received[]; sessions: SessionInfo[] }> => {
-    const managed = await hub.ensure('claude', hubId, mode);
+  const attach = async (mode?: string, bare: 'adapter' | 'observe' = 'adapter'): Promise<{ managed: ManagedConn; frames: Received[]; sessions: SessionInfo[] }> => {
+    bareSeat = bare;
+    let managed: ManagedConn;
+    try {
+      managed = await hub.ensure('claude', hubId, mode);
+    } finally {
+      bareSeat = 'adapter';
+    }
     const frames: Received[] = [];
     const sessions: SessionInfo[] = [];
     const client = ((event: { kind?: string; message?: AgentMessage; info?: SessionInfo }) => {
@@ -241,10 +296,24 @@ async function hubStack(label: string, options: HubStackOptions = {}): Promise<H
       hub.releaseAttached('claude', hubId, 'live', live);
     },
     attachLive: () => attach('live'),
-    attachObserve: () => attach(undefined),
+    attachObserve: () => attach(undefined, 'observe'),
+    attachPlain: () => attach(undefined),
+    holdRegistrations: () => {
+      let release!: () => void;
+      registrationGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        release();
+        registrationGate = Promise.resolve();
+      };
+    },
     write: (...lines) => appendFileSync(transcript, lines.map((row) => JSON.stringify(row)).join('\n') + '\n'),
     setKillSwitch: (on) => {
       killSwitch = on;
+    },
+    setDialogOpen: (open) => {
+      dialogOpen = open;
     },
     frameDeps,
     notices,
@@ -585,6 +654,8 @@ async function questionIdentitySection(): Promise<void> {
     const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
     check(`P-3a seam (${order}): the app's answer by that id answers the call`, routed && result?.result?.answers?.['Which colour?'] === 'Amber',
       JSON.stringify(result));
+    check(`QR seam (${order}): and Claude's picker, open beneath it the whole time, is closed by that answer`,
+      s.mod.picker(toolUseId)?.closedByHook === true && s.mod.picker(toolUseId)?.settled === false, JSON.stringify(s.mod.picker(toolUseId) ?? null));
     s.write(rows.questionAnswered('u-q-r', toolUseId, [COLOUR], { 'Which colour?': 'Amber' }));
     await until(() => s.liveFrames.filter((f) => f.message.type === 'question-resolved' && f.message.requestId === toolUseId).length >= 1);
     await until(() => false, 300);
@@ -609,27 +680,46 @@ async function questionIdentitySection(): Promise<void> {
   }
 }
 
-// ── P-3c: a question answered in the terminal settles every seat's card with that answer ──────
+// ── P-3c: a question answered in Claude's picker settles every seat's card with that answer ───
 async function terminalAnswerSection(): Promise<void> {
   const s = await hubStack('p3c-terminal');
+  // A plain tab of the same session, beside the live one: both are seats.
+  const plain = await s.attachPlain();
   const toolUseId = 'toolu_p3c_terminal';
   await s.mod.fire('turn.start', { turnId: 'turn-t' });
   s.write(rows.user('u-t', 'ask me a colour'));
   s.write(rows.askUserQuestion('a-t', 'msg_t', toolUseId, [COLOUR]));
   const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] });
-  await until(() => questionFrames(s.liveFrames, toolUseId).some((m) => m.readOnly !== true)
-    && s.mod.record.bands.some((b) => b.label === "Answer in Claude's dialog"));
-  // The person at the keyboard opens Claude's own picker and answers there.
-  s.mod.tapBand("Answer in Claude's dialog");
-  await within(call);
+  const drawn = await until(() => questionFrames(s.liveFrames, toolUseId).some((m) => m.readOnly !== true)
+    && questionFrames(plain.frames, toolUseId).some((m) => m.readOnly !== true));
+  check('P-3c seam: the live tab and the plain tab are both drawn the question, answerable', drawn,
+    JSON.stringify({ live: questionFrames(s.liveFrames, toolUseId), plain: questionFrames(plain.frames, toolUseId) }));
+  // The person at the keyboard answers in Claude's own picker, which has been open the whole time.
+  s.mod.picker(toolUseId)?.answer({ 'Which colour?': 'Teal' });
+  const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+  check("P-3c seam: the call ends with what the picker took", result?.result?.answers?.['Which colour?'] === 'Teal', JSON.stringify(result));
+  await until(() => resolvedFrames(s.liveFrames, toolUseId).length >= 1 && resolvedFrames(plain.frames, toolUseId).length >= 1);
+  for (const [seat, frames] of [['live', s.liveFrames], ['plain', plain.frames]] as const) {
+    const first = resolvedFrames(frames, toolUseId)[0] as SettledFrame | undefined;
+    check(`P-3c seam: the ${seat} tab's card closes before the transcript says so, with that answer, as the terminal's`,
+      JSON.stringify(first?.answers) === JSON.stringify([['Teal']]) && first?.decidedBy === 'band', JSON.stringify(resolvedFrames(frames, toolUseId)));
+  }
+  check('P-3c seam: and the question is no longer held for the app', !s.service.isHeld(s.sessionId, toolUseId));
   s.write(rows.questionAnswered('u-t-r', toolUseId, [COLOUR], { 'Which colour?': 'Teal' }));
-  await until(() => resolvedFrames(s.liveFrames, toolUseId).some((m) => m.answers !== undefined));
+  await until(() => false, 300);
   const resolutions = resolvedFrames(s.liveFrames, toolUseId);
   check('P-3c seam: a question answered in the terminal ends, for every seat, on the answer given there',
-    JSON.stringify(resolutions.at(-1)?.answers) === JSON.stringify([['Teal']]), JSON.stringify(resolutions));
+    resolutions.length >= 1 && resolutions.every((m) => JSON.stringify(m.answers) === JSON.stringify([['Teal']])), JSON.stringify(resolutions));
+  check('P-3c seam: with neither tab left waiting', s.live.status !== 'needs-input' && plain.managed.status !== 'needs-input',
+    `${s.live.status} ${plain.managed.status}`);
   const history = await s.live.conn.getHistory();
-  const replayed = history.find((m) => m.type === 'question-resolved' && (m as { requestId?: string }).requestId === toolUseId) as { answers?: string[][] } | undefined;
-  check('P-3c seam: and a reload settles it with that answer', JSON.stringify(replayed?.answers) === JSON.stringify([['Teal']]), JSON.stringify(replayed));
+  const replayed = history.find((m) => m.type === 'question-resolved' && (m as { requestId?: string }).requestId === toolUseId) as SettledFrame | undefined;
+  check('P-3c seam: and a reload settles it with that answer, as the terminal\'s',
+    JSON.stringify(replayed?.answers) === JSON.stringify([['Teal']]) && replayed?.decidedBy === 'band', JSON.stringify(replayed));
+  const before = s.notices.length;
+  const late = routeModAnswer(s.frameDeps, { requestId: toolUseId, answers: [['Amber']] });
+  check("P-3c seam: an app answer after the picker's is refused out loud", late && /already been answered/.test(s.notices[before] ?? ''),
+    JSON.stringify(s.notices.slice(before)));
   await s.close();
 }
 
@@ -644,7 +734,7 @@ async function resumedAskSection(): Promise<void> {
   await within(first);
   // `kill -9`, then `claude --resume` asks the same call again.
   s.mod.kill();
-  const resumed = await loadMod('p3a-resumed-2', { sessionId: s.sessionId, env: s.env });
+  const resumed = await loadMod('p3a-resumed-2', { sessionId: s.sessionId, env: s.env, openPicker: true });
   cleanups.push(() => resumed.kill());
   (resumed.exports.tuneForTest as (o: Record<string, unknown>) => void)({ backoffMs: [100, 200, 300], pollWaitMs: 300 });
   await resumed.fire('session.start', { cwd: '/work', surface: 'terminal', isInteractive: true });
@@ -662,61 +752,67 @@ async function resumedAskSection(): Promise<void> {
   await s.close();
 }
 
-// ── R5-A: a question handed to Claude's picker is still waiting, and the row says so ───────────
+// ── QR: a question is open in Claude's picker and on the app's card at once, and the row says so ──
 type CardFrame = { type: string; requestId: string; readOnly?: boolean; answerInTerminal?: boolean; blocking?: boolean };
 /** The cards the Hub holds pending for the row: what decides Needs input, and what a joiner is drawn. */
 const pendingCards = (s: HubStack) => s.live.liveSnapshot()
   .map((m) => m as unknown as CardFrame)
   .filter((m) => m.type === 'question-request' || m.type === 'permission-request');
 const inTerminal = (card: CardFrame | undefined) => card?.readOnly === true && card.answerInTerminal === true && card.blocking !== false;
+/** The cards a managed row would replay to a socket that joins it now. */
+const cardsOn = (managed: ManagedConn, id: string) => managed.liveSnapshot()
+  .map((m) => m as unknown as CardFrame)
+  .filter((m) => m.type === 'question-request' && m.requestId === id);
 
-async function bandOneSection(): Promise<void> {
-  for (const end of ['answered in the picker', 'the turn ends with the picker dismissed'] as const) {
-    const s = await hubStack(`r5a-${end.length}`, { hubGraceMs: 50 });
-    const toolUseId = `toolu_r5a${end.length}`;
+async function pickerRaceSection(): Promise<void> {
+  for (const end of ['answered in the picker', 'the turn is interrupted with the picker open'] as const) {
+    const s = await hubStack(`qr-race-${end.length}`, { hubGraceMs: 50 });
+    const toolUseId = `toolu_qrrace${end.length}`;
     await s.mod.fire('turn.start', { turnId: 'turn-b1' });
     s.write(rows.user('u-b1', 'ask me a colour'), rows.askUserQuestion('a-b1', 'msg_b1', toolUseId, [COLOUR]));
-    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] });
-    await until(() => questionFrames(s.liveFrames, toolUseId).some((m) => m.readOnly !== true)
-      && s.mod.record.bands.some((b) => b.label === "Answer in Claude's dialog"));
-    // Band 1: the person at the keyboard has Claude ask there. Claude's picker opens; nobody has
-    // answered anything yet.
-    s.mod.tapBand("Answer in Claude's dialog");
-    await within(call);
-    await until(() => inTerminal(pendingCards(s).find((m) => m.requestId === toolUseId)));
-    // Long enough for anything else the cancel was going to fan to have fanned.
+    const abort = new AbortController();
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] }, abort.signal);
+    await until(() => questionFrames(s.liveFrames, toolUseId).some((m) => m.readOnly !== true));
+    // Long enough for anything else the offer was going to fan to have fanned.
     await until(() => false, 300);
     const pending = pendingCards(s);
-    check(`R5-A seam (${end}): after band 1 the row still reads Needs input`, s.live.status === 'needs-input', s.live.status);
-    check(`R5-A seam (${end}): with one pending card, under the call's tool_use id, read-only and open in the terminal`,
-      pending.length === 1 && pending[0]?.requestId === toolUseId && inTerminal(pending[0]), JSON.stringify(pending));
-    check(`R5-A seam (${end}): and nothing has settled it`, resolvedFrames(s.liveFrames, toolUseId).length === 0,
-      JSON.stringify(resolvedFrames(s.liveFrames, toolUseId)));
+    check(`QR seam (${end}): Claude's picker opened at once, and the terminal draws no band for the question`,
+      s.mod.pickers.length === 1 && s.mod.picker(toolUseId)?.settled === false && s.mod.record.bands.length === 0, JSON.stringify(s.mod.record.bands));
+    check(`QR seam (${end}): the row reads Needs input`, s.live.status === 'needs-input', s.live.status);
+    check(`QR seam (${end}): with one pending card, under the call's tool_use id, that the app can answer`,
+      pending.length === 1 && pending[0]?.requestId === toolUseId && pending[0]?.readOnly !== true, JSON.stringify(pending));
     const joiner = drawnToJoiner(s, toolUseId) as CardFrame[];
-    check(`R5-A seam (${end}): a socket that joins now is drawn that card read-only, open in the terminal`,
-      joiner.length === 1 && inTerminal(joiner[0]), JSON.stringify(joiner));
+    check(`QR seam (${end}): a socket that joins now is drawn that card, answerable`,
+      joiner.length === 1 && joiner[0]?.readOnly !== true, JSON.stringify(joiner));
 
     if (end === 'answered in the picker') {
-      // The app says something while the picker is open. The picker is still open.
+      // The app says something while the picker is open. The question is still open on both sides.
       await s.live.conn.sendPrompt({ text: 'and make it bold' } as never);
       await until(() => false, 200);
-      check('R5-A seam: a prompt from the app while the picker is open leaves the card open, and Needs input',
-        s.live.status === 'needs-input' && inTerminal(pendingCards(s).find((m) => m.requestId === toolUseId))
+      check('QR seam: a prompt from the app while the picker is open leaves the card open, and Needs input',
+        s.live.status === 'needs-input' && pendingCards(s).some((m) => m.requestId === toolUseId && m.readOnly !== true)
           && resolvedFrames(s.liveFrames, toolUseId).length === 0,
         `${s.live.status} ${JSON.stringify(pendingCards(s))}`);
-      s.write(rows.questionAnswered('u-b1-r', toolUseId, [COLOUR], { 'Which colour?': 'Teal' }));
+      s.mod.picker(toolUseId)?.answer({ 'Which colour?': 'Teal' });
+      const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+      check("QR seam: the picker's answer is the call's", result?.result?.answers?.['Which colour?'] === 'Teal', JSON.stringify(result));
       await until(() => resolvedFrames(s.liveFrames, toolUseId).length >= 1);
+      const first = resolvedFrames(s.liveFrames, toolUseId)[0] as SettledFrame | undefined;
+      check('QR seam: the card closes from the mod\'s word, before the transcript says anything, carrying the answer',
+        JSON.stringify(first?.answers) === JSON.stringify([['Teal']]) && first?.decidedBy === 'band', JSON.stringify(resolvedFrames(s.liveFrames, toolUseId)));
+      s.write(rows.questionAnswered('u-b1-r', toolUseId, [COLOUR], { 'Which colour?': 'Teal' }));
       await until(() => false, 300);
       const resolutions = resolvedFrames(s.liveFrames, toolUseId);
-      check('R5-A seam: when the transcript records the picker\'s answer, one resolution arrives, carrying it',
-        resolutions.length === 1 && JSON.stringify(resolutions[0]?.answers) === JSON.stringify([['Teal']]), JSON.stringify(resolutions));
-      check('R5-A seam: and the row leaves Needs input', s.live.status !== 'needs-input' && pendingCards(s).length === 0,
+      check('QR seam: when the transcript records the answer too, every resolution carries it',
+        resolutions.length >= 1 && resolutions.every((m) => JSON.stringify(m.answers) === JSON.stringify([['Teal']])), JSON.stringify(resolutions));
+      check('QR seam: and the row leaves Needs input', s.live.status !== 'needs-input' && pendingCards(s).length === 0,
         `${s.live.status} ${JSON.stringify(pendingCards(s))}`);
       const ids = new Set(s.liveFrames.filter((f) => f.message.type === 'question-request').map((f) => f.message.requestId));
-      check('R5-A seam: and no second card appeared', ids.size === 1 && ids.has(toolUseId), JSON.stringify([...ids]));
+      check('QR seam: and no second card appeared', ids.size === 1 && ids.has(toolUseId), JSON.stringify([...ids]));
+      const settledCount = resolutions.length;
       await s.mod.fire('turn.complete', { turnId: 'turn-b1', answer: 'Teal it is', durationMs: 900, isAborted: false });
       await until(() => false, 300);
-      check('R5-A seam: the turn\'s end after that settles nothing a second time', resolvedFrames(s.liveFrames, toolUseId).length === 1,
+      check('QR seam: the turn\'s end after that settles nothing a second time', resolvedFrames(s.liveFrames, toolUseId).length === settledCount,
         JSON.stringify(resolvedFrames(s.liveFrames, toolUseId)));
       // A reload is drawn from the transcript, and the transcript does not say where the question
       // was answered. The broker does.
@@ -724,24 +820,31 @@ async function bandOneSection(): Promise<void> {
       await until(() => !s.hub.getConns('claude', s.hubId).includes(s.live), 2000);
       const reloaded = await s.attachLive();
       const history = (await reloaded.managed.conn.getHistory())
-        .filter((m) => (m.type === 'question-request' || m.type === 'question-resolved') && (m as { requestId?: string }).requestId === toolUseId) as unknown as (CardFrame & { answers?: string[][] })[];
-      check('R5-A seam: a reload draws the question as one answered in the terminal, with the answer given there',
-        reloaded.managed !== s.live && history.length === 2 && inTerminal(history[0])
-          && history[1]?.type === 'question-resolved' && JSON.stringify(history[1]?.answers) === JSON.stringify([['Teal']]),
+        .filter((m) => (m.type === 'question-request' || m.type === 'question-resolved') && (m as { requestId?: string }).requestId === toolUseId) as unknown as (CardFrame & SettledFrame)[];
+      check('QR seam: a reload draws the question answered in the terminal, with the answer given there',
+        reloaded.managed !== s.live && history.length === 2 && history[1]?.type === 'question-resolved'
+          && history[1]?.decidedBy === 'band' && JSON.stringify(history[1]?.answers) === JSON.stringify([['Teal']]),
         JSON.stringify(history));
     } else {
+      // Escape: the engine aborts the hook, and the picker it had open comes back as an error.
+      abort.abort();
+      s.mod.picker(toolUseId)?.escape();
+      const result = await within(call) as { isError?: boolean } | undefined;
+      check('QR seam: an interrupted picker ends the call as the engine ended it', result?.isError === true, JSON.stringify(result));
       await s.mod.fire('turn.complete', { turnId: 'turn-b1', answer: '', durationMs: 900, isAborted: true });
       await until(() => resolvedFrames(s.liveFrames, toolUseId).length >= 1);
-      check('R5-A seam: a turn that ends with the picker dismissed closes the card',
-        resolvedFrames(s.liveFrames, toolUseId).length === 1, JSON.stringify(resolvedFrames(s.liveFrames, toolUseId)));
-      check('R5-A seam: with no Needs input left', s.live.status !== 'needs-input' && pendingCards(s).length === 0,
+      await until(() => false, 300);
+      const resolutions = resolvedFrames(s.liveFrames, toolUseId) as SettledFrame[];
+      check('QR seam: an interrupt with the picker open closes the card once, as the terminal\'s, with no answer',
+        resolutions.length === 1 && resolutions[0]?.releaseReason === 'band' && resolutions[0]?.answers === undefined, JSON.stringify(resolutions));
+      check('QR seam: with no Needs input left', s.live.status !== 'needs-input' && pendingCards(s).length === 0,
         `${s.live.status} ${JSON.stringify(pendingCards(s))}`);
     }
     await s.close();
   }
 }
 
-// ── P-10: the band's report reaches the broker after the picker's answer reached the transcript ──
+// ── P-10: the mod's word on the picker reaches the broker after the transcript's answer did ───
 async function lateBandSection(): Promise<void> {
   const s = await hubStack('p10-late-band', { hubGraceMs: 50 });
   const toolUseId = 'toolu_p10late';
@@ -750,32 +853,40 @@ async function lateBandSection(): Promise<void> {
   await s.mod.fire('turn.start', { turnId: 'turn-late' });
   s.write(rows.user('u-late', 'ask me a colour'), rows.askUserQuestion('a-late', 'msg_late', toolUseId, [COLOUR]));
   const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] });
-  await until(() => questionFrames(s.liveFrames, toolUseId).some((m) => m.readOnly !== true)
-    && s.mod.record.bands.some((b) => b.label === "Answer in Claude's dialog"));
+  await until(() => questionFrames(s.liveFrames, toolUseId).some((m) => m.readOnly !== true));
   // The picker was answered at the keyboard, and the transcript's line for it was read before the
-  // band's report reached the broker.
+  // mod's report of it reached the broker.
   s.write(rows.questionAnswered('u-late-r', toolUseId, [COLOUR], { 'Which colour?': 'Amber' }));
   await until(() => resolutions().length >= 1);
   check('P-10 seam: the transcript closes the card first, with the answer and no word on who gave it',
     resolutions().length === 1 && JSON.stringify(resolutions()[0]?.answers) === JSON.stringify([['Amber']])
       && !resolutions()[0]?.decidedBy && !resolutions()[0]?.releaseReason, JSON.stringify(resolutions()));
-  const framesBeforeBand = s.liveFrames.length;
-  s.mod.tapBand("Answer in Claude's dialog");
-  await within(call);
-  await until(() => resolutions().length >= 2, 3000);
-  check('P-10 seam: when the band\'s report arrives, the card is closed again as answered in the terminal, with the same answer',
-    resolutions().length === 2 && resolutions()[1]?.releaseReason === 'band'
-      && JSON.stringify(resolutions()[1]?.answers) === JSON.stringify([['Amber']]), JSON.stringify(resolutions()));
+  const framesBeforeReport = s.liveFrames.length;
+  s.mod.picker(toolUseId)?.answer({ 'Which colour?': 'Amber' });
+  const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+  check("P-10 seam: the call still ends with the picker's answer", result?.result?.answers?.['Which colour?'] === 'Amber', JSON.stringify(result));
+  check('P-10 seam: and the report closes the hold', await until(() => !s.service.isHeld(s.sessionId, toolUseId), 3000));
   await until(() => false, 300);
+  check('P-10 seam: every resolution any seat was sent carries the same answer',
+    resolutions().length >= 1 && resolutions().every((r) => JSON.stringify(r.answers) === JSON.stringify([['Amber']])), JSON.stringify(resolutions()));
+  // The broker's word lands on a card that is already closed, and corrects it in place: an open tab
+  // says who answered without waiting for a reload.
+  check('P-10 seam: the report corrects the closed card once, to answered in the terminal',
+    resolutions().length === 2 && resolutions()[1]?.decidedBy === 'band' && !resolutions()[1]?.releaseReason, JSON.stringify(resolutions()));
   // The transcript's own copy of the card may have been drawn before the held one, under the same id;
-  // what must not happen is a card drawn again after the band's report.
-  const redrawn = questionFrames(s.liveFrames.slice(framesBeforeBand), toolUseId);
+  // what must not happen is a card drawn again after the mod's report.
+  const redrawn = questionFrames(s.liveFrames.slice(framesBeforeReport), toolUseId);
   check('P-10 seam: and nothing re-opens: no card drawn again, none pending, the row not waiting',
     redrawn.length === 0 && pendingCards(s).length === 0 && s.live.status !== 'needs-input',
     `${redrawn.length} cards redrawn, ${JSON.stringify(pendingCards(s))}, ${s.live.status}`);
+  const history = await s.live.conn.getHistory();
+  const replayed = history.find((m) => m.type === 'question-resolved' && (m as { requestId?: string }).requestId === toolUseId) as Resolution | undefined;
+  check('P-10 seam: a reload says the terminal answered it, with that answer',
+    replayed?.decidedBy === 'band' && JSON.stringify(replayed?.answers) === JSON.stringify([['Amber']]), JSON.stringify(replayed));
+  const settledCount = resolutions().length;
   await s.mod.fire('turn.complete', { turnId: 'turn-late', answer: 'Amber', durationMs: 900, isAborted: false });
   await until(() => false, 300);
-  check('P-10 seam: the turn\'s end corrects nothing a second time', resolutions().length === 2, JSON.stringify(resolutions()));
+  check('P-10 seam: the turn\'s end corrects nothing a second time', resolutions().length === settledCount, JSON.stringify(resolutions()));
   await s.close();
 }
 
@@ -792,9 +903,13 @@ async function forkCallSection(): Promise<void> {
   await s.mod.fire('turn.complete', { turnId: 'turn-before-fork', answer: 'Done.', durationMs: 300, isAborted: false });
   const holdsBefore = holdsSent();
   const cardsBefore = cards();
-  const question = await within(s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'toolu_fork_q', questions: [COLOUR] }), 3000);
+  const forkQuestion = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'toolu_fork_q', questions: [COLOUR] });
+  // Claude's own picker is what takes it; whatever it settles with is the call's result, untouched.
+  const opened = await until(() => s.mod.picker('toolu_fork_q') !== undefined, 3000);
+  const picked = s.mod.picker('toolu_fork_q')?.answer({ 'Which colour?': 'Teal' });
+  const question = await within(forkQuestion, 3000);
   check('P-10 fork seam: a question called after the turn ended, by no subagent, goes to the engine at once',
-    JSON.stringify(question) === JSON.stringify({ ranItself: true }), JSON.stringify(question ?? null));
+    opened && picked !== undefined && JSON.stringify(question) === JSON.stringify(picked), JSON.stringify(question ?? null));
   const permission = await within(s.mod.fire('tool.check', { tool: 'Write', tool_use_id: 'toolu_fork_w', input: { file_path: '/tmp/fork.txt', content: 'x' } }), 3000) as { decision?: string } | undefined;
   check('P-10 fork seam: so does a permission check in that window, with the engine\'s own verdict',
     permission?.decision === 'ask', JSON.stringify(permission ?? null));
@@ -812,7 +927,7 @@ async function forkCallSection(): Promise<void> {
   const main = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'toolu_main_q', questions: [COLOUR] });
   check('P-10 fork seam: once the next turn starts, its question is held for the app',
     await until(() => questionFrames(s.liveFrames, 'toolu_main_q').some((m) => m.readOnly !== true), 3000));
-  s.mod.tapBand("Answer in Claude's dialog");
+  s.mod.picker('toolu_main_q')?.answer({ 'Which colour?': 'Amber' });
   await within(main);
   // A hot reload or recovered loop may learn the main turn from a step, without turn.start.
   // The step must close the between-turns fork window as well as learn the new turn id (MA).
@@ -821,45 +936,191 @@ async function forkCallSection(): Promise<void> {
   const recovered = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: 'toolu_step_q', questions: [COLOUR] });
   check('P-10 fork seam: a main turn.step closes the fork window and its next question is held',
     await until(() => questionFrames(s.liveFrames, 'toolu_step_q').some((m) => m.readOnly !== true), 3000));
-  s.mod.tapBand("Answer in Claude's dialog");
+  s.mod.picker('toolu_step_q')?.answer({ 'Which colour?': 'Teal' });
   await within(recovered);
   await s.close();
 }
 
-// ── R5-A: a question the broker released is waiting in the terminal too ─────────────────────────
-async function releasedQuestionSection(): Promise<void> {
-  for (const why of ['viewer:none', 'killSwitch'] as const) {
-    const s = await hubStack(`r5a-released-${why.length}`);
-    const toolUseId = `toolu_r5arel${why.length}`;
+// ── QR1: a question nobody is watching is still offered; one the switch released waits in the terminal ──
+async function unwatchedQuestionSection(): Promise<void> {
+  for (const why of ['nobody watching', 'killSwitch'] as const) {
+    const s = await hubStack(`qr-unwatched-${why.length}`);
+    const toolUseId = `toolu_qrun${why.length}`;
     // Nobody who could answer is watching: the app went away, and its row lingers in its grace.
-    if (why === 'viewer:none') s.detachLive();
+    if (why === 'nobody watching') s.detachLive();
     await s.mod.fire('turn.start', { turnId: 'turn-rel' });
     s.write(rows.user('u-rel', 'ask me a colour'), rows.askUserQuestion('a-rel', 'msg_rel', toolUseId, [COLOUR]));
     // Switched off between the mod's last poll and this call: the mod still offers the hold, and the
     // broker's gate, which reads the switch when the hold arrives, releases it. (A mod that has
     // already heard holds nothing, and the transcript's own copy of the question is the card.)
     if (why === 'killSwitch') s.setKillSwitch(true);
-    // Released: Claude's own picker takes the question at once.
-    await within(s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] }));
-    await until(() => pendingCards(s).some((m) => m.requestId === toolUseId));
+    const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] });
+    await until(() => pendingCards(s).some((m) => m.requestId === toolUseId && (why === 'killSwitch' || m.readOnly !== true)));
     await until(() => false, 300);
-    check(`R5-A seam (released, ${why}): the question was not held`,
-      s.service.auditTrail(s.sessionId).some((row) => row.released === why), JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => row.released)));
-    check(`R5-A seam (released, ${why}): the row reads Needs input while Claude's picker is open`, s.live.status === 'needs-input', s.live.status);
-    if (why === 'viewer:none') {
+    check(`QR seam (${why}): the row reads Needs input while Claude's picker is open`, s.live.status === 'needs-input', s.live.status);
+    if (why === 'nobody watching') {
+      // QR1: no viewer is needed. The question is held, and the seat that opens answers it.
+      check('QR1 seam (nobody watching): the question is held for the app, not released',
+        s.service.isHeld(s.sessionId, toolUseId) && !s.service.auditTrail(s.sessionId).some((row) => row.released),
+        JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => row.released)));
       const joined = await s.attachLive();
       const joiner = drawnToJoiner(s, toolUseId) as CardFrame[];
-      check('R5-A seam (released, viewer:none): a viewer who joins is drawn the question, read-only and open in the terminal',
-        joined.managed === s.live && joiner.length === 1 && inTerminal(joiner[0]), JSON.stringify(joiner));
-      check('R5-A seam (released, viewer:none): and the row it joined reads Needs input', joined.managed.status === 'needs-input', joined.managed.status);
+      check('QR1 seam (nobody watching): a viewer who joins is drawn the question, answerable',
+        joined.managed === s.live && joiner.length === 1 && joiner[0]?.readOnly !== true, JSON.stringify(joiner));
+      const routed = routeModAnswer(s.frameDeps, { requestId: toolUseId, answers: [['Amber']] });
+      const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+      check('QR1 seam (nobody watching): and its answer is the call\'s', routed && result?.result?.answers?.['Which colour?'] === 'Amber',
+        JSON.stringify(result));
+      check('QR1 seam (nobody watching): the card the joiner tapped closes as the app\'s',
+        await until(() => (resolvedFrames(joined.frames, toolUseId) as SettledFrame[]).some((m) => m.decidedBy === 'app'), 3000),
+        JSON.stringify(resolvedFrames(joined.frames, toolUseId)));
+    } else {
+      check('QR seam (released, killSwitch): the question was not held',
+        s.service.auditTrail(s.sessionId).some((row) => row.released === why), JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => row.released)));
+      const card = pendingCards(s).find((m) => m.requestId === toolUseId);
+      check('QR seam (released, killSwitch): its card is read-only and open in the terminal', inTerminal(card), JSON.stringify(card));
+      // The person answers in Claude's picker. The mod says so, and the read-only card closes with it.
+      s.mod.picker(toolUseId)?.answer({ 'Which colour?': 'Amber' });
+      const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+      check("QR seam (released, killSwitch): the call ends with the picker's answer", result?.result?.answers?.['Which colour?'] === 'Amber',
+        JSON.stringify(result));
+      await until(() => resolvedFrames(s.liveFrames, toolUseId).length >= 1);
+      const first = resolvedFrames(s.liveFrames, toolUseId)[0] as SettledFrame | undefined;
+      check('QR2 seam (released, killSwitch): the read-only card closes from the mod\'s word, with the answer, as the terminal\'s',
+        JSON.stringify(first?.answers) === JSON.stringify([['Amber']]) && first?.decidedBy === 'band', JSON.stringify(resolvedFrames(s.liveFrames, toolUseId)));
     }
     s.write(rows.questionAnswered('u-rel-r', toolUseId, [COLOUR], { 'Which colour?': 'Amber' }));
-    await until(() => resolvedFrames(s.liveFrames, toolUseId).length >= 1 || s.live.status !== 'needs-input');
+    await until(() => s.live.status !== 'needs-input');
     await until(() => false, 300);
-    check(`R5-A seam (released, ${why}): the transcript's answer closes it, and the row leaves Needs input`,
+    check(`QR seam (${why}): once answered the row leaves Needs input`,
       s.live.status !== 'needs-input' && pendingCards(s).length === 0, `${s.live.status} ${JSON.stringify(pendingCards(s))}`);
     await s.close();
   }
+}
+
+// ── QR3: a plain tab of a synced session is a seat ──────────────────────────────────────────────
+async function plainSeatSection(): Promise<void> {
+  const s = await hubStack('qr-plain', { hubGraceMs: 50 });
+  // The only tab open is a plain one, as a resident or background view opens it: the live tab went.
+  s.detachLive();
+  await until(() => !s.hub.getConns('claude', s.hubId).includes(s.live), 2000);
+  const plain = await s.attachPlain();
+  check('QR3 seam: a plain tab of a synced session is a seat in the sync, not a read-only mirror',
+    isModSeat(plain.managed.conn) && (plain.managed.conn as ClaudeModConnection).takesHolds === false && plain.managed.conn.info.attachMode === 'observe',
+    `${plain.managed.conn.constructor.name} ${plain.managed.conn.info.attachMode}`);
+  await s.mod.fire('turn.start', { turnId: 'turn-plain' });
+  // A permission is not held for a plain tab: Claude's own dialog stays the answer, and the release
+  // draws nothing that nobody there could act on.
+  const asked = await within(s.mod.fire('tool.check', { tool: 'Bash', tool_use_id: 'tu-plain-bash', input: { command: 'make' } }), 3000) as { decision?: string } | undefined;
+  await until(() => false, 200);
+  check("QR3 seam: a permission with only a plain tab open is left to Claude's dialog",
+    asked?.decision === 'ask' && s.service.auditTrail(s.sessionId).some((row) => row.tool === 'Bash' && row.released === 'viewer:none'),
+    JSON.stringify({ asked, audit: s.service.auditTrail(s.sessionId).map((row) => [row.tool, row.released]) }));
+  check('QR3 seam: and draws no card on that tab', !plain.frames.some((f) => f.message.type === 'permission-request')
+    && !plain.managed.liveSnapshot().some((m) => m.type === 'permission-request') && s.mod.record.bands.length === 0,
+    JSON.stringify(plain.frames.filter((f) => f.message.type === 'permission-request').map((f) => f.message)));
+  // A question is offered to it, and answered from it.
+  const toolUseId = 'toolu_qr_plain';
+  s.write(rows.user('u-plain', 'ask me a colour'), rows.askUserQuestion('a-plain', 'msg_plain', toolUseId, [COLOUR]));
+  const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] });
+  check('QR3 seam: a question is drawn on the plain tab, answerable',
+    await until(() => questionFrames(plain.frames, toolUseId).some((m) => m.readOnly !== true), 3000), JSON.stringify(questionFrames(plain.frames, toolUseId)));
+  check('QR3 seam: and its row reads Needs input', await until(() => plain.managed.status === 'needs-input', 2000), plain.managed.status);
+  const routed = routeModAnswer(s.frameDeps, { requestId: toolUseId, answers: [['Amber']] });
+  const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+  check('QR3 seam: answered from the plain tab, the call takes that answer', routed && result?.result?.answers?.['Which colour?'] === 'Amber',
+    JSON.stringify(result));
+  check('QR3 seam: and the plain tab\'s card closes as the app\'s', await until(() => (resolvedFrames(plain.frames, toolUseId) as SettledFrame[])
+    .some((m) => m.decidedBy === 'app' && JSON.stringify(m.answers) === JSON.stringify([['Amber']])), 3000), JSON.stringify(resolvedFrames(plain.frames, toolUseId)));
+  // The turn is over, and a prompt from the plain tab goes to the terminal like a live tab's.
+  await s.mod.fire('turn.complete', { turnId: 'turn-plain', answer: 'Amber', durationMs: 300, isAborted: false });
+  await plain.managed.conn.sendPrompt({ text: 'from the plain tab' } as never);
+  check('QR3 seam: a prompt from the plain tab reaches the terminal',
+    await until(() => s.mod.record.prompts.some((p) => p.text === 'from the plain tab'), 3000), JSON.stringify(s.mod.record.prompts));
+  await s.close();
+}
+
+// ── QR1: a tab that opens while a question is open is drawn it ──────────────────────────────────
+async function openCardsSection(): Promise<void> {
+  const s = await hubStack('qr-open-cards', { hubGraceMs: 50 });
+  const toolUseId = 'toolu_qr_open';
+  // Nobody has the session open anywhere: the app's tab went away and its row is gone.
+  s.detachLive();
+  await until(() => s.hub.getConns('claude', s.hubId).length === 0, 2000);
+  await s.mod.fire('turn.start', { turnId: 'turn-open' });
+  s.write(rows.user('u-open', 'ask me a colour'), rows.askUserQuestion('a-open', 'msg_open', toolUseId, [COLOUR]));
+  const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] });
+  check('QR1 seam: a question asked with no tab open anywhere is still held for the app',
+    await until(() => s.service.isHeld(s.sessionId, toolUseId), 3000) && !s.service.auditTrail(s.sessionId).some((row) => row.released),
+    JSON.stringify(s.service.auditTrail(s.sessionId).map((row) => row.released)));
+  check("QR1 seam: while Claude's picker is open in the terminal, with no band drawn beside it",
+    s.mod.picker(toolUseId)?.settled === false && s.mod.record.bands.length === 0, JSON.stringify(s.mod.record.bands));
+  // A plain tab opens, as a resident or background view opens it.
+  const plain = await s.attachPlain();
+  check('QR1 seam: the tab that opens now is drawn the open question, answerable',
+    await until(() => cardsOn(plain.managed, toolUseId).length === 1 && cardsOn(plain.managed, toolUseId)[0]?.readOnly !== true, 3000),
+    JSON.stringify(cardsOn(plain.managed, toolUseId)));
+  check('QR1 seam: and its row reads Needs input', await until(() => plain.managed.status === 'needs-input', 2000), plain.managed.status);
+  // A live tab opened after it is drawn the same card.
+  const live = await s.attachLive();
+  check('QR1 seam: so is a live tab opened after it',
+    await until(() => cardsOn(live.managed, toolUseId).length === 1 && cardsOn(live.managed, toolUseId)[0]?.readOnly !== true, 3000),
+    JSON.stringify(cardsOn(live.managed, toolUseId)));
+  const routed = routeModAnswer(s.frameDeps, { requestId: toolUseId, answers: [['Teal']] });
+  const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+  check('QR1 seam: answering it from the app answers the call', routed && result?.result?.answers?.['Which colour?'] === 'Teal', JSON.stringify(result));
+  check('QR1 seam: and closes the card on both tabs',
+    await until(() => resolvedFrames(plain.frames, toolUseId).length >= 1 && resolvedFrames(live.frames, toolUseId).length >= 1, 3000)
+      && cardsOn(plain.managed, toolUseId).length === 0 && cardsOn(live.managed, toolUseId).length === 0,
+    JSON.stringify({ plain: resolvedFrames(plain.frames, toolUseId), live: resolvedFrames(live.frames, toolUseId) }));
+  check('QR1 seam: a tab that opens after it closed is not drawn it again', s.service.openCards(s.sessionId)?.cards.length === 0,
+    JSON.stringify(s.service.openCards(s.sessionId)));
+  await s.close();
+}
+
+// ── QR4: a tab opened before the mod registered becomes a seat, in place ────────────────────────
+async function seatUpgradeSection(): Promise<void> {
+  const s = await hubStack('qr-upgrade', { upgradeSeats: true });
+  // What a tab opened a moment too early holds: an Observe mirror.
+  const resident = await s.attachObserve();
+  check('QR4 seam: the early tab is a read-only mirror', !isModSeat(resident.managed.conn), resident.managed.conn.constructor.name);
+  const toolUseId = 'toolu_qr_upgrade';
+  await s.mod.fire('turn.start', { turnId: 'turn-up' });
+  s.write(rows.user('u-up', 'ask me a colour'), rows.askUserQuestion('a-up', 'msg_up', toolUseId, [COLOUR]));
+  const call = s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: toolUseId, questions: [COLOUR] });
+  check('QR4 seam: a card that finds a seat it cannot draw on has that seat re-attached through the adapter',
+    await until(() => isModSeat(resident.managed.conn), 3000), resident.managed.conn.constructor.name);
+  check('QR4 seam: in place, so the tab keeps its socket',
+    s.hub.getConns('claude', s.hubId).includes(resident.managed) && resident.managed.clientCount === 1, String(resident.managed.clientCount));
+  check('QR4 seam: as a plain seat, which no permission is held for',
+    (resident.managed.conn as ClaudeModConnection).takesHolds === false && resident.managed.conn.info.attachMode === 'observe',
+    resident.managed.conn.info.attachMode);
+  const upgradedConn = resident.managed.conn;
+  check('QR4 seam: and a later upgrade pass leaves both seats as they are',
+    await s.hub.reattachUpgradedSeats('claude', s.hubId, isModSeat) === 0 && resident.managed.conn === upgradedConn && isModSeat(s.live.conn));
+  check('QR4 seam: and the re-attached tab is drawn the open question, answerable',
+    await until(() => cardsOn(resident.managed, toolUseId).length === 1 && cardsOn(resident.managed, toolUseId)[0]?.readOnly !== true, 3000),
+    JSON.stringify(cardsOn(resident.managed, toolUseId)));
+  const routed = routeModAnswer(s.frameDeps, { requestId: toolUseId, answers: [['Amber']] });
+  const result = await within(call) as { result?: { answers?: Record<string, string> } } | undefined;
+  check('QR4 seam: and its answer reaches the call', routed && result?.result?.answers?.['Which colour?'] === 'Amber', JSON.stringify(result));
+  check('QR4 seam: the tab that was a mirror is sent the resolution',
+    await until(() => resolvedFrames(resident.frames, toolUseId).length >= 1, 3000), JSON.stringify(resolvedFrames(resident.frames, toolUseId)));
+  await s.mod.fire('turn.complete', { turnId: 'turn-up', answer: 'Amber', durationMs: 300, isAborted: false });
+
+  // A broker restart: every tab reconnects before its terminal registers again, so each is a mirror
+  // until the registration lands. The registration is what re-attaches it.
+  const release = s.holdRegistrations();
+  await s.restartBroker();
+  const reopened = await s.attachObserve();
+  check('QR4 seam: after a broker restart, a tab that reconnects before its terminal does is a mirror',
+    !isModSeat(reopened.managed.conn) && s.service.status(s.sessionId).present === false, reopened.managed.conn.constructor.name);
+  release();
+  check('QR4 seam: and once the terminal registers again that tab is a seat, in place',
+    await until(() => s.service.status(s.sessionId).present && isModSeat(reopened.managed.conn), 6000)
+      && s.hub.getConns('claude', s.hubId).includes(reopened.managed),
+    `${reopened.managed.conn.constructor.name} present=${s.service.status(s.sessionId).present}`);
+  await s.close();
 }
 
 // ── P-8(a): a closed question card says who closed it, in every seat and after a reload ────────
@@ -878,14 +1139,29 @@ async function questionAttributionSection(): Promise<void> {
       end: async (s, id) => void routeModAnswer(s.frameDeps, { requestId: id, answers: [['Amber']] }),
       expect: { decidedBy: 'app' },
     },
-    // Escape: the engine aborts the parked hook, and the mod says the turn was interrupted.
-    { label: 'Escape at the keyboard', end: async (_s, _id, abort) => abort.abort(), expect: { releaseReason: 'band' } },
+    // QR2: the person answers in Claude's own picker, which was open beside the card the whole time.
+    {
+      label: "answered in Claude's picker",
+      end: async (s, id) => void s.mod.picker(id)?.answer({ 'Which colour?': 'Amber' }),
+      expect: { decidedBy: 'band' },
+    },
+    // Escape: the engine aborts the parked hook, the mod says the turn was interrupted, and the
+    // picker beneath it comes back as an error.
+    {
+      label: 'Escape at the keyboard',
+      end: async (s, id, abort) => {
+        abort.abort();
+        s.mod.picker(id)?.escape();
+      },
+      expect: { releaseReason: 'band' },
+    },
     {
       label: 'a Stop from the app with the hold open',
-      end: async (s, _id, abort) => {
+      end: async (s, id, abort) => {
         await s.live.conn.runCommand?.('stop');
         await until(() => s.mod.record.aborts.length > 0);
         abort.abort();
+        s.mod.picker(id)?.escape();
         await until(() => false, 100);
         await s.mod.fire('turn.complete', { turnId: 'turn-p8a', answer: '', durationMs: 50, isAborted: true });
       },
@@ -906,8 +1182,7 @@ async function questionAttributionSection(): Promise<void> {
     s.write(rows.user('u-p8a', 'ask me a colour'), rows.askUserQuestion('a-p8a', 'msg_p8a', id, [COLOUR]));
     const abort = new AbortController();
     void s.mod.fire('tool.call', { tool: 'AskUserQuestion', tool_use_id: id, questions: [COLOUR] }, abort.signal).catch(() => undefined);
-    await until(() => questionFrames(s.liveFrames, id).some((m) => m.readOnly !== true)
-      && s.mod.record.bands.some((b) => b.label === "Answer in Claude's dialog"));
+    await until(() => questionFrames(s.liveFrames, id).some((m) => m.readOnly !== true));
     await end(s, id, abort);
     await until(() => resolvedFrames(s.liveFrames, id).length >= 1, 4000);
     const first = resolvedFrames(s.liveFrames, id)[0] as SettledFrame | undefined;
@@ -1014,8 +1289,19 @@ async function modeGateSection(): Promise<void> {
         JSON.stringify({ card, audit: audited().map((r) => [r.released, r.modeSeen]) }));
     }
     if (released === 'mode:unknown') {
+      // Auto mode's classifier settles a call with no dialog, and nothing on disk says which mode the
+      // plan was approved into: the note waits for Claude to say its own dialog is open.
+      check('P-9 seam (a plan approved earlier in the turn): no note while Claude has no dialog open',
+        !cards().some((c) => c.readOnly === true), JSON.stringify(cards()));
+      s.setDialogOpen(false);
+      await until(() => false, 200);
+      check('P-9 seam (a plan approved earlier in the turn): nor while Claude says its dialog is shut',
+        !cards().some((c) => c.readOnly === true), JSON.stringify(cards()));
+      s.setDialogOpen(true);
+      await until(() => cards().some((c) => c.readOnly === true), 2000);
       const card = cards().find((c) => c.readOnly === true);
-      check('P-9 seam (a plan approved earlier in the turn): the card claims no mode', card !== undefined && card.permissionMode === undefined && card.releaseReason === 'mode:unknown',
+      check('P-9 seam (a plan approved earlier in the turn): the note is drawn once the dialog opens, and claims no mode',
+        card !== undefined && card.permissionMode === undefined && card.releaseReason === 'mode:unknown',
         JSON.stringify(card));
       check('P-9 seam (a plan approved earlier in the turn): the chip names no mode either',
         (s.live.conn.info as SessionInfo).currentMode === undefined && s.liveSessions.length > 0 && s.liveSessions.at(-1)?.currentMode === undefined,
@@ -1103,8 +1389,11 @@ try {
     await terminalCancelSection();
     await questionIdentitySection();
     await terminalAnswerSection();
-    await bandOneSection();
-    await releasedQuestionSection();
+    await pickerRaceSection();
+    await unwatchedQuestionSection();
+    await plainSeatSection();
+    await openCardsSection();
+    await seatUpgradeSection();
     await questionAttributionSection();
     await modeGateSection();
     await resumedAskSection();
