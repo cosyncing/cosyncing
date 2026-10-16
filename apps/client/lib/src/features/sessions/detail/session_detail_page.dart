@@ -86,6 +86,7 @@ import 'package:cosyncing_client/src/features/voice/controller/voice_input_contr
 import 'package:cosyncing_client/src/features/voice/model/voice_transcript_insertion.dart';
 import 'package:cosyncing_client/src/features/voice/view/read_aloud_action.dart';
 import 'package:cosyncing_client/src/features/voice/view/voice_input_panel.dart';
+import 'package:cosyncing_client/src/formatting/file_size.dart';
 import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input_state.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_output_state.dart';

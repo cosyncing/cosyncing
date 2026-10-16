@@ -17,6 +17,7 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_transc
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/transcript_file_resolution.dart';
+import 'package:cosyncing_client/src/formatting/file_size.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';

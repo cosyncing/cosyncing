@@ -94,6 +94,7 @@ import {
   readSessionStat,
 } from '../artifacts/fs-browse.ts';
 import { searchSessionFiles } from '../artifacts/fs-search.ts';
+import { attachmentContentDisposition } from '../artifacts/download-headers.ts';
 import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../artifacts/fs-browse.ts';
 import { PiBridgeRegistry } from '@cosyncing/adapter-pi';
 import { ClaudeHooksRegistry } from '@cosyncing/adapter-claude';
@@ -5052,11 +5053,6 @@ function scheduleInvalid(error: string, code: 'SCHEDULE_INVALID' | 'SCHEDULE_CRO
   return json({ ok: false, error, code }, 400);
 }
 
-function attachmentFilename(name: string): string {
-  const cleaned = name.replace(/[\0\r\n"]/g, '_').trim();
-  return cleaned || 'download';
-}
-
 /**
  * Best-effort content type for a workspace path.
  *
@@ -6469,7 +6465,7 @@ server = Bun.serve<WsData>({
       } catch (err) {
         return sessionBrowseErrorResponse(err);
       }
-      const filename = attachmentFilename(download.path.split('/').pop() || 'download');
+      const filename = download.path.split('/').pop() || 'download';
       const mimeType = mimeTypeForPath(download.path);
       const commonHeaders: Record<string, string> = {
         'accept-ranges': 'bytes',
@@ -6477,7 +6473,7 @@ server = Bun.serve<WsData>({
         'last-modified': new Date(download.mtimeMs).toUTCString(),
         'content-type': mimeType,
         'x-cosyncing-mime-type': mimeType,
-        'content-disposition': `attachment; filename=\"${filename}\"`,
+        'content-disposition': attachmentContentDisposition(filename),
         'cache-control': 'private, no-store',
         'referrer-policy': 'no-referrer',
         'cross-origin-resource-policy': 'same-origin',

@@ -573,20 +573,11 @@ String _sessionDetailTransferStatusLabel(
 String _sessionDetailTransferProgressLabel(
   AppLocalizations l10n,
   SessionArtifactTransfer transfer,
-) {
-  final transferred = transfer.bytesTransferred;
-  final total = transfer.totalBytes;
-  if (transferred == null && total == null) {
-    return '';
-  }
-  if (transferred != null && total != null) {
-    return l10n.transferProgressBytes(transferred, total);
-  }
-  if (transferred != null) {
-    return l10n.transferProgressTransferredBytes(transferred);
-  }
-  return l10n.transferProgressBytes(0, total!);
-}
+) => formatFileProgress(
+  l10n,
+  transferred: transfer.bytesTransferred,
+  total: transfer.totalBytes,
+);
 
 SessionArtifactTransfer? _sessionDetailTransferForArtifactSummary(
   SessionArtifactDescriptor descriptor,
@@ -758,8 +749,6 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
     final name =
         descriptor.name ?? descriptor.path ?? l10n.sessionArtifactUntitled;
     final path = descriptor.path ?? '';
-    final artifactKey = descriptor.artifactKey ?? '';
-    final contentHash = descriptor.contentHash ?? '';
     final size = descriptor.size;
     final hasDownloadOrFetch = descriptor.isDownloadable;
     final hasPreview = descriptor.isTextPreviewCandidate;
@@ -803,7 +792,7 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
 
     return Padding(
       key: ValueKey('session-detail-artifact-summary-item-$sourceId'),
-      padding: const EdgeInsets.symmetric(vertical: 10),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -819,20 +808,6 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
           if (path.isNotEmpty)
             SelectableText(
               path,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          if (artifactKey.isNotEmpty)
-            SelectableText(
-              '${l10n.artifactKeyLabel}: $artifactKey',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          if (contentHash.isNotEmpty)
-            SelectableText(
-              '${l10n.hashLabel}: $contentHash',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -864,12 +839,12 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
           ],
           if (size != null)
             SelectableText(
-              '${l10n.sizeLabel}: ${l10n.bytesCount(size)}',
+              l10n.sessionArtifactSize(formatFileSize(l10n, size)),
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           if (localPathLabel != null && localTransfer != null) ...[
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -886,7 +861,7 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
                 IconButton(
                   key: ValueKey(
                     'session-detail-artifact-local-copy-$sourceId',

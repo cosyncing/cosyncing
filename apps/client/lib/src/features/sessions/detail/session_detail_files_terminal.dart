@@ -707,7 +707,7 @@ String _sessionFileEntrySubtitle(
     'symlink' => l10n.sessionFileTypeSymlink,
     _ => l10n.sessionFileTypeOther,
   };
-  return l10n.sessionFileMetadata(type, entry.size);
+  return l10n.sessionFileMetadata(type, formatFileSize(l10n, entry.size));
 }
 
 class _DebugPanel extends StatelessWidget {

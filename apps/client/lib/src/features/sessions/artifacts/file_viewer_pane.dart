@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers_builtin.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_source_body.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
+import 'package:cosyncing_client/src/formatting/file_size.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -485,7 +486,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                 ],
                 if (preview != null) ...[
                   const SizedBox(width: 8),
-                  MetadataChip(label: l10n.bytesCount(preview.size)),
+                  MetadataChip(label: formatFileSize(l10n, preview.size)),
                 ],
                 const SizedBox(width: 8),
                 Text(
@@ -528,7 +529,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           noticeKey: const Key('file-viewer-highlighting-off'),
           tokens: tokens,
           message: l10n.fileViewerHighlightingOff(
-            l10n.bytesCount(preview.size),
+            formatFileSize(l10n, preview.size),
           ),
         ),
       // Placement is the host's, and it is per-face: preparation runs once per
@@ -630,7 +631,10 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           panelKey: const Key('file-viewer-unsupported'),
           tokens: tokens,
           title: l10n.fileViewerNoPreview,
-          body: l10n.fileViewerBinaryBody(typeLabel, l10n.bytesCount(size)),
+          body: l10n.fileViewerBinaryBody(
+            typeLabel,
+            formatFileSize(l10n, size),
+          ),
           path: content.path,
           actions: [
             if (widget.onBrowseFiles case final browse?)

@@ -23,6 +23,83 @@ BrokerException _error(String code) => BrokerException(
 );
 
 void main() {
+  test(
+    'generated Chinese filenames resolve beside known source files',
+    () async {
+      const name = 'rc120_长图_2160px.jpg';
+      final calls = <String>[];
+      final found = await resolveTranscriptFile(
+        reference: transcriptFileReference(name)!,
+        knownReferences: const [
+          SessionFileReference(rawPath: '/workspace/listing/index.html'),
+          SessionFileReference(rawPath: '/workspace/listing/prep.py'),
+        ],
+        stat: (path) async {
+          calls.add(path);
+          if (path == '/workspace/listing/$name') {
+            return _file('listing/$name');
+          }
+          throw _error('NOT_FOUND');
+        },
+        search: (_) async =>
+            throw StateError('whole workspace search is unnecessary'),
+      );
+      expect(found.matches.single.path, 'listing/$name');
+      expect(found.truncated, isFalse);
+      expect(calls, [name, '/workspace/listing/$name']);
+      expect(
+        transcriptMarkdownFileReference(Uri.encodeComponent(name))!.rawPath,
+        name,
+      );
+    },
+  );
+
+  test('directory hints preserve ambiguity and reject unsafe paths', () async {
+    final found = await resolveTranscriptFile(
+      reference: const SessionFileReference(rawPath: 'out/长图.png'),
+      knownReferences: const [
+        SessionFileReference(rawPath: '/outside/index.html'),
+        SessionFileReference(rawPath: 'linked/index.html'),
+        SessionFileReference(rawPath: 'first/index.html'),
+        SessionFileReference(
+          rawPath: 'second',
+          kind: SessionFileReferenceKind.directory,
+        ),
+      ],
+      stat: (path) async {
+        if (path.startsWith('/outside/')) throw _error('PATH_ESCAPE');
+        if (path.startsWith('linked/')) throw _error('PATH_SYMLINK');
+        if (path == 'out/长图.png') throw _error('NOT_FOUND');
+        return _file(path);
+      },
+      search: (_) async => throw StateError('unexpected search'),
+    );
+    expect(found.matches.map((match) => match.path), [
+      'first/out/长图.png',
+      'second/out/长图.png',
+    ]);
+  });
+
+  test('too many directory hints return partial results', () async {
+    var calls = 0;
+    final found = await resolveTranscriptFile(
+      reference: const SessionFileReference(rawPath: '长图.png'),
+      knownReferences: [
+        for (var index = 0; index < 65; index++)
+          SessionFileReference(rawPath: 'dir$index/source.py'),
+      ],
+      stat: (path) async {
+        calls++;
+        if (path == 'dir0/长图.png') return _file(path);
+        throw _error('NOT_FOUND');
+      },
+      search: (_) async => throw StateError('unexpected search'),
+    );
+    expect(found.matches.single.path, 'dir0/长图.png');
+    expect(found.truncated, isTrue);
+    expect(calls, 65);
+  });
+
   test('report references preserve spaces, host paths and source anchors', () {
     final uri = transcriptFileReference(
       'file:///workspace/my%20notes.md#L12C4',

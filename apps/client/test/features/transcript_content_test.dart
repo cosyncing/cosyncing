@@ -536,7 +536,7 @@ void main() {
         greaterThan(width / 2),
       );
       expect(find.text('spec.pdf'), findsOneWidget);
-      expect(find.textContaining('2048'), findsOneWidget);
+      expect(find.text('2 KB'), findsOneWidget);
       expect(find.text('only.pdf'), findsOneWidget);
       expect(inside(app.transcriptView, find.text('')), findsNothing);
     });

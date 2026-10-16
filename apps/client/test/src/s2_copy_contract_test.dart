@@ -228,12 +228,6 @@ const _reviewedLiteralByLocation = <String>{
       r'${l10n.pathLabel}: ${preview.path}',
   'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.mimeTypeLabel}: ${preview.mimeType}',
-  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
-      r'${l10n.artifactKeyLabel}: $artifactKey',
-  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
-      r'${l10n.hashLabel}: $contentHash',
-  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
-      r'${l10n.sizeLabel}: ${l10n.bytesCount(size)}',
   'lib/src/features/sessions/detail/session_detail_view_menu.dart::'
       r'$count',
   'lib/src/features/sessions/list/session_list_pane.dart::'

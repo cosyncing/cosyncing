@@ -225,7 +225,7 @@ class _UserAttachmentChip extends StatelessWidget {
             if (size case final size?) ...[
               const SizedBox(width: 8),
               Text(
-                l10n.bytesCount(size),
+                formatFileSize(l10n, size),
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: tokens.textTertiary,
                 ),
