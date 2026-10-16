@@ -3124,6 +3124,11 @@ export interface SessionConnection {
     | HistorySnapshotCapture
     | HistorySnapshotRefusal
     | undefined;
+  /** A rebuildable disk-backed snapshot. Opening an unchanged source must not
+   * replay its transcript. Locations are normalized row ordinals, and only the
+   * requested rows are decoded. This is an internal adapter capability; wire
+   * paging and its opaque cursors are unchanged. */
+  openHistorySnapshot?(): Promise<StoredHistorySnapshot | undefined>;
   /**
    * True when a row this connection streams live is keyed differently from the same row in
    * {@link getHistory} (for example streamed text keyed by a live turn counter, while history keys
@@ -3319,6 +3324,20 @@ export interface HistorySnapshotPageReader {
     | HistorySnapshotPageRead
     | HistorySnapshotRefusal
     | undefined;
+}
+
+/** Immutable view of an adapter's persisted normalized history. A successor
+ * may reuse exactly `unchangedPrefix` rows of `previousVersion`; all other
+ * version transitions require rebuilding the derived cursor index. */
+export interface StoredHistorySnapshot {
+  identity: HistorySourceIdentity;
+  version: string;
+  previousVersion?: string;
+  unchangedPrefix: number;
+  /** Persisted rows before mutable overlays; overlays replay even within the same version. */
+  stableCount: number;
+  count: number;
+  reader: HistorySnapshotPageReader;
 }
 
 /** Identity of the exact prefix a capture wrote into the sink. */

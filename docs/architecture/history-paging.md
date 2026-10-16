@@ -38,6 +38,11 @@ frame budgets. Stored rows do not mutate as a turn streams, so active-turn
 attach does not scan back through the whole running turn. Live tailing and
 managed resync use the same stored mapping.
 
+Drive seeds its runtime tracker from the bounded replay checkpoint. Its task
+ledger uses a separate file-backed SQLite temporary table, so live updates
+preserve earlier tasks without changing the persisted replay state. Refreshing
+history does not replace the tracker for a currently streaming turn.
+
 Text and tool-result bodies larger than 128 Ki UTF-16 code units receive a
 marked preview plus a file artifact containing the complete body. A single
 native JSONL record above 64 MiB is still refused explicitly. The total-history

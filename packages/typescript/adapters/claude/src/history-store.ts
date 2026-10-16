@@ -61,6 +61,7 @@ export class ClaudeHistoryStore {
       try {
         chmodSync(this.path, 0o600);
         db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2048;
+      PRAGMA temp_store=FILE; PRAGMA temp.cache_size=-512;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS state (space TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(space,key));
       CREATE TABLE IF NOT EXISTS messages (position INTEGER PRIMARY KEY, json TEXT NOT NULL);
@@ -95,6 +96,37 @@ export class ClaudeHistoryStore {
     return map as Map<string, T>;
   }
   setOf(space: string): Set<string> { return new StoredSet(this.map<boolean>(space)); }
+  /** A Drive ledger starts from the replay checkpoint but owns its mutations.
+   * SQLite's file-backed TEMP table keeps the copy out of the JS heap and
+   * automatically discards it when the connection closes, including a crash. */
+  forkState(spaces: readonly string[], keys: readonly string[]): { state: ClaudeHistoryState; close(): void } {
+    this.db.exec('CREATE TEMP TABLE IF NOT EXISTS live_state (space TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(space,key))');
+    const prefix = `${randomUUID()}:`;
+    const maps = new Map<string, Map<string, unknown>>();
+    for (const space of spaces) {
+      this.db.query('INSERT INTO live_state SELECT ?,key,value FROM state WHERE space=? ORDER BY rowid').run(prefix + space, space);
+      maps.set(space, new StoredMap(this.db, prefix + space, 'live_state'));
+    }
+    const values = new Map(keys.map((key) => [key, this.get(key)]));
+    let closed = false;
+    return {
+      state: {
+        get: <T>(key: string) => values.get(key) as T | undefined,
+        set: (key, value) => { values.set(key, value); },
+        map: <T>(space: string) => {
+          const map = maps.get(space);
+          if (!map) throw new Error(`Unknown live history state: ${space}`);
+          return map as Map<string, T>;
+        },
+      },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        for (const space of spaces) this.db.query('DELETE FROM live_state WHERE space=?').run(prefix + space);
+        maps.clear();
+      },
+    };
+  }
   resetMapping(): void {
     this.db.exec("DELETE FROM state WHERE space != 'calls'; DELETE FROM messages; DELETE FROM dependencies;");
     this.set('mapper', undefined);
@@ -146,7 +178,7 @@ export class ClaudeHistoryStore {
       stableCount: count,
       count: count + overlays.length,
       reader: {
-        retainedBytes: 2 * 1024 * 1024 + overlays.reduce((bytes, message) => bytes + 2 * Buffer.byteLength(JSON.stringify(message)) + 256, 0),
+        retainedBytes: (2048 + 512) * 1024 + overlays.reduce((bytes, message) => bytes + 2 * Buffer.byteLength(JSON.stringify(message)) + 256, 0),
         read: (locations) => {
           const db = new Database(this.path, { readonly: true });
           db.exec('PRAGMA cache_size=-1024');
@@ -183,13 +215,15 @@ export class ClaudeHistoryStore {
   }
 }
 
+export type ClaudeHistoryState = Pick<ClaudeHistoryStore, 'get' | 'set' | 'map'>;
+
 /** Map-compatible state whose size does not determine JS heap retention. */
 class StoredMap<T> extends Map<string, T> {
-  constructor(private readonly db: Database, private readonly space: string) { super(); }
-  override get size(): number { return (this.db.query('SELECT count(*) AS n FROM state WHERE space=?').get(this.space) as { n: number }).n; }
-  override has(key: string): boolean { return !!this.db.query('SELECT 1 FROM state WHERE space=? AND key=?').get(this.space, key); }
+  constructor(private readonly db: Database, private readonly space: string, private readonly table: 'state' | 'live_state' = 'state') { super(); }
+  override get size(): number { return (this.db.query(`SELECT count(*) AS n FROM ${this.table} WHERE space=?`).get(this.space) as { n: number }).n; }
+  override has(key: string): boolean { return !!this.db.query(`SELECT 1 FROM ${this.table} WHERE space=? AND key=?`).get(this.space, key); }
   override get(key: string): T | undefined {
-    const row = this.db.query('SELECT value FROM state WHERE space=? AND key=?').get(this.space, key) as { value: string } | null;
+    const row = this.db.query(`SELECT value FROM ${this.table} WHERE space=? AND key=?`).get(this.space, key) as { value: string } | null;
     if (!row) return undefined;
     return this.mutable(key, JSON.parse(row.value));
   }
@@ -203,14 +237,14 @@ class StoredMap<T> extends Map<string, T> {
     }) : object;
     return wrap(value);
   }
-  override set(key: string, value: T): this { this.db.query('INSERT INTO state VALUES (?,?,?) ON CONFLICT(space,key) DO UPDATE SET value=excluded.value').run(this.space, key, JSON.stringify(value)); return this; }
-  override delete(key: string): boolean { return this.db.query('DELETE FROM state WHERE space=? AND key=?').run(this.space, key).changes > 0; }
-  override clear(): void { this.db.query('DELETE FROM state WHERE space=?').run(this.space); }
+  override set(key: string, value: T): this { this.db.query(`INSERT INTO ${this.table} VALUES (?,?,?) ON CONFLICT(space,key) DO UPDATE SET value=excluded.value`).run(this.space, key, JSON.stringify(value)); return this; }
+  override delete(key: string): boolean { return this.db.query(`DELETE FROM ${this.table} WHERE space=? AND key=?`).run(this.space, key).changes > 0; }
+  override clear(): void { this.db.query(`DELETE FROM ${this.table} WHERE space=?`).run(this.space); }
   override *entries(): MapIterator<[string, T]> {
-    for (const row of this.db.query('SELECT key,value FROM state WHERE space=? ORDER BY rowid').iterate(this.space) as Iterable<{ key: string; value: string }>) yield [row.key, this.mutable(row.key, JSON.parse(row.value))];
+    for (const row of this.db.query(`SELECT key,value FROM ${this.table} WHERE space=? ORDER BY rowid`).iterate(this.space) as Iterable<{ key: string; value: string }>) yield [row.key, this.mutable(row.key, JSON.parse(row.value))];
   }
   override *keys(): MapIterator<string> {
-    for (const row of this.db.query('SELECT key FROM state WHERE space=? ORDER BY rowid').iterate(this.space) as Iterable<{ key: string }>) yield row.key;
+    for (const row of this.db.query(`SELECT key FROM ${this.table} WHERE space=? ORDER BY rowid`).iterate(this.space) as Iterable<{ key: string }>) yield row.key;
   }
   override *values(): MapIterator<T> { for (const [, value] of this.entries()) yield value; }
   override [Symbol.iterator](): MapIterator<[string, T]> { return this.entries(); }

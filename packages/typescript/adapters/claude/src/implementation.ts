@@ -126,7 +126,7 @@ import {
 import { ClaudeModConnection } from './mod-connection.ts';
 import { diagnoseClaudeSetup } from './diagnostics.ts';
 import { JsonlHistorySource } from './history-source.ts';
-import { ClaudeHistoryStore, acquireClaudeHistoryStore, historyRecords, historyGuards } from './history-store.ts';
+import { ClaudeHistoryStore, type ClaudeHistoryState, acquireClaudeHistoryStore, historyRecords, historyGuards } from './history-store.ts';
 import { claudeAnswerRows } from './question-answers.ts';
 import {
   CLAUDE_MOD_LIVE_CONFLICT,
@@ -1994,6 +1994,11 @@ export class ClaudeObserveConnection implements SessionConnection {
   private storedLiveGeneration?: string;
   /** Content-free counters for direct acceptance tests and local profiling. */
   get historyReadWork(): Readonly<ClaudeHistoryStore['lastWork']> | undefined { return this.storedHistory && { ...this.storedHistory.lastWork }; }
+  forkRuntime(): ClaudeRuntimeTracker | undefined { return this.runtime?.fork(); }
+  forkTasks(): { ledger: ClaudeTaskLedger; close(): void } | undefined {
+    const fork = this.storedHistory?.forkState(['tasks', 'taskCreates', 'taskUpdates'], ['taskFallback']);
+    return fork && { ledger: new ClaudeTaskLedger(fork.state), close: fork.close };
+  }
   get storedActivityState(): { resolved: Set<string>; parent: ParentActivityState } | undefined {
     return this.storedHistory && { resolved: this.storedHistory.setOf('activityResolved'), parent: storedParentActivity(this.storedHistory) };
   }
@@ -3184,6 +3189,7 @@ function collectMdCommands(base: string, dir: string, out: Map<string, SlashComm
 let resumeConnSeq = 0; // process-monotonic; seeds each ClaudeResumeConnection.connNonce so live-turn run-summary keys are globally unique across grace-eviction reconnect rebuilds
 export class ClaudeResumeConnection implements SessionConnection {
   private storedObserver?: { path: string; connection: ClaudeObserveConnection; activityAttached?: boolean };
+  private storedTasks?: { ledger: ClaudeTaskLedger; close(): void };
   private readonly handlers = new Set<AgentMessageHandler>();
   private proc?: ChildProcessWithoutNullStreams;
   private stdoutBuf = '';
@@ -3673,6 +3679,8 @@ export class ClaudeResumeConnection implements SessionConnection {
     const path = this.liveTranscriptPath();
     if (!existsSync(path)) return undefined;
     if (this.storedObserver?.path !== path) {
+      this.storedTasks?.close();
+      this.storedTasks = undefined;
       await this.storedObserver?.connection.close();
       const connection = new ClaudeObserveConnection(path, this.info, undefined, {
         replayQueued: () => this.queuedSends.pending.flatMap((entry): ClaudeQueuedSendEntry[] => {
@@ -3689,6 +3697,14 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
     const snapshot = await this.storedObserver.connection.openHistorySnapshot();
     if (!snapshot) return undefined;
+    // A disk-backed attach does not call getHistory(), which used to seed the
+    // Drive tracker. Copy its bounded checkpoint once; refreshing history must
+    // not replace the tracker of a turn already streaming through stdout.
+    this.runtime ??= this.storedObserver.connection.forkRuntime();
+    if (!this.storedTasks) {
+      this.storedTasks = this.storedObserver.connection.forkTasks();
+      if (this.storedTasks) this.taskLedger = this.storedTasks.ledger;
+    }
     if (!this.storedObserver.activityAttached) {
       this.storedObserver.activityAttached = true;
       this.activity?.close();
@@ -3798,7 +3814,8 @@ export class ClaudeResumeConnection implements SessionConnection {
     this.emit({ type: 'status', status: 'running' });
     // Live driven turn starts now (stream events carry no native ts → broker wall clock). A turn = this user
     // send through the next `result`; message_start fires per assistant message so it is NOT the turn boundary.
-    if (this.runtime) this.emit(this.runtime.startLive(`live${this.connNonce}.${++this.liveTurnSeq}`, Date.now()));
+    this.runtime ??= new ClaudeRuntimeTracker(this.liveUuid, 'claude-transcript');
+    this.emit(this.runtime.startLive(`live${this.connNonce}.${++this.liveTurnSeq}`, Date.now()));
     // The child rewrites this send as a transcript user line with no id we control, so the echo
     // stays unstamped (clientMessageId unused); the client's narrow legacy reconcile converges it.
     // Record the exact text FIRST so the echo tail's foreign-write detection exonerates our own echo
@@ -4484,6 +4501,8 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   async close(): Promise<void> {
     this.killProc();
+    this.storedTasks?.close();
+    this.storedTasks = undefined;
     await this.storedObserver?.connection.close();
     this.storedObserver = undefined;
     if (this.echoTailTimer) {
@@ -5066,7 +5085,7 @@ export class ClaudeTaskLedger {
   private readonly pendingUpdates: Map<string, { taskId: string; status?: string; subject?: string }>;
   private fallbackId = 0;
 
-  constructor(private readonly store?: ClaudeHistoryStore) {
+  constructor(private readonly store?: ClaudeHistoryState) {
     this.tasks = store?.map('tasks') ?? new Map();
     this.pendingCreates = store?.map('taskCreates') ?? new Map();
     this.pendingUpdates = store?.map('taskUpdates') ?? new Map();
@@ -5863,6 +5882,17 @@ export class ClaudeRuntimeTracker {
   }
   checkpoint(): void {
     this.store?.set('runtime', { current: this.current, lastClosed: this.lastClosed, totalRuntimeMs: this.totalRuntimeMs, turnCount: this.turnCount, updatedAt: this.updatedAt });
+  }
+
+  /** Live Drive owns a separate tracker; historical token dedup stays on disk. */
+  fork(): ClaudeRuntimeTracker {
+    const copy = new ClaudeRuntimeTracker(this.sessionId, this.source);
+    copy.current = structuredClone(this.current);
+    copy.lastClosed = structuredClone(this.lastClosed);
+    copy.totalRuntimeMs = this.totalRuntimeMs;
+    copy.turnCount = this.turnCount;
+    copy.updatedAt = this.updatedAt;
+    return copy;
   }
 
   feed(ln: any, mapped: AgentMessage[]): AgentMessage[] {
