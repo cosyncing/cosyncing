@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { strict as assert } from 'node:assert';
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionInfo } from '../../../adapter-api/src/index.ts';
@@ -89,7 +89,17 @@ const previous = {
   interval: process.env.COSYNCING_CODEX_SYNC_WATCH_MS,
   grace: process.env.COSYNCING_CODEX_SYNC_DROP_GRACE_POLLS,
   sock: process.env.COSYNCING_CODEX_APP_SERVER_SOCK,
+  bin: process.env.COSYNCING_CODEX_BIN,
 };
+// A row no daemon holds is `observing` only where a Codex CLI resolves (Drive can resume it);
+// without one it is `unavailable`. Pin a CLI this test owns so the expected drive state never
+// depends on the host's PATH: a hosted runner has no `codex`, a developer box does. Only its
+// existence is ever checked here; it exits non-zero if anything runs it.
+const fakeCodexBin = join(home, 'bin', 'codex');
+mkdirSync(join(home, 'bin'));
+writeFileSync(fakeCodexBin, '#!/bin/sh\nexit 1\n');
+chmodSync(fakeCodexBin, 0o755);
+process.env.COSYNCING_CODEX_BIN = fakeCodexBin;
 process.env.CODEX_HOME = home;
 process.env.COSYNCING_CODEX_SYNC_SERVER = '1';
 process.env.COSYNCING_CODEX_SYNC_WATCH_MS = '250';
@@ -188,6 +198,7 @@ try {
   if (previous.interval == null) delete process.env.COSYNCING_CODEX_SYNC_WATCH_MS; else process.env.COSYNCING_CODEX_SYNC_WATCH_MS = previous.interval;
   if (previous.grace == null) delete process.env.COSYNCING_CODEX_SYNC_DROP_GRACE_POLLS; else process.env.COSYNCING_CODEX_SYNC_DROP_GRACE_POLLS = previous.grace;
   if (previous.sock == null) delete process.env.COSYNCING_CODEX_APP_SERVER_SOCK; else process.env.COSYNCING_CODEX_APP_SERVER_SOCK = previous.sock;
+  if (previous.bin == null) delete process.env.COSYNCING_CODEX_BIN; else process.env.COSYNCING_CODEX_BIN = previous.bin;
   rmSync(home, { recursive: true, force: true });
 }
 
