@@ -2244,8 +2244,9 @@ try {
       }
     }
 
-    if (process.getuid?.() !== 0) {
-      // A runtime that cannot be removed: the others still go, and the run says which one is left.
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      // POSIX directory permissions make this runtime unremovable for a non-root user.
+      // Windows does not enforce these mode bits; its running-runtime preservation is covered above.
       const m = machine({ binaryHash: true }); cleanup.push(m.root);
       const { runtime } = withRuntimes(m);
       runtime('1.3.9');
