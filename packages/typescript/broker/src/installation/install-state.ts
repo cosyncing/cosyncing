@@ -9,6 +9,7 @@ import {
   LEGACY_TAILSCALE_RESOURCE_ID,
 } from './legacy-connectivity-migration.ts';
 import { CLAUDE_MOD_RESOURCE_ID } from './claude-mod-ownership.ts';
+import { BUN_RUNTIMES_RESOURCE_ID } from './bun-runtime-receipt.ts';
 
 /** Every receipt id emitted by setup and handled by uninstall. */
 export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
@@ -27,6 +28,9 @@ export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
   'service-systemd-linger',
   'pi-bridge',
   'omp-bridge',
+  // `<home>/runtime`, where installers and `cosy update` place Bun. Uninstall removes only the versioned
+  // runtimes in it, and never the one COSYNCING_BUN_BIN names.
+  BUN_RUNTIMES_RESOURCE_ID,
   LEGACY_TAILSCALE_RESOURCE_ID,
   // One receipt for the Claude mod's marketplace directory. The two Claude settings keys the install
   // writes are NOT receipts: they belong to Claude, and uninstall reverses them with Claude's own CLI.

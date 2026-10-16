@@ -7,7 +7,8 @@
 //   2. Desktop: the build pointer, the General update row, the dot on the
 //      Settings button, and who owns the guidance (pointer or compatibility
 //      advice) for a broker behind, equal, ahead or unreadable.
-//   3. The broker's own release status and health, honestly worded.
+//   3. The broker's own release status and health, honestly worded, including
+//      a release that needs a newer Bun than this install can place.
 //   4. Web: no app-update controls; a draft in the composer defers a web
 //      handoff, and the commit window refuses typing.
 //
@@ -500,12 +501,21 @@ void main() {
     final unchecked = key('settings-broker-status-unchecked');
     final packageManaged = key('settings-broker-status-package-managed');
     final guidance = key('settings-broker-package-managed-body');
-    void snapshot(String status, String detail) => desk.brokerUpdate = {
-      'status': status,
-      'currentVersion': '0.6.0',
-      'checkedAt': '2026-08-05T00:00:00Z',
-      'detailCode': detail,
-    };
+    final runtimeUpgrade = key(
+      'settings-broker-status-runtime-upgrade-required',
+    );
+    final runtimeGuidance = key(
+      'settings-broker-runtime-upgrade-required-body',
+    );
+    final updateButton = key('settings-update-broker');
+    void snapshot(String status, String detail, {String? latest}) =>
+        desk.brokerUpdate = {
+          'status': status,
+          'currentVersion': '0.6.0',
+          'latestVersion': ?latest,
+          'checkedAt': '2026-08-05T00:00:00Z',
+          'detailCode': detail,
+        };
 
     // An npm broker never consults the release channel: reporting it as
     // current is a claim the app has no evidence for.
@@ -539,11 +549,16 @@ void main() {
     await reopen();
     expect(unchecked, findsOneWidget);
     expect(find.text('Not checked'), findsOneWidget);
-    expect([current, packageManaged, guidance].map((k) => k.evaluate()), [
-      isEmpty,
-      isEmpty,
-      isEmpty,
-    ]);
+    expect(
+      [
+        current,
+        packageManaged,
+        guidance,
+        runtimeUpgrade,
+        runtimeGuidance,
+      ].map((k) => k.evaluate()),
+      everyElement(isEmpty),
+    );
 
     // The one state that supports the claim still makes it.
     snapshot('current', 'current');
@@ -555,10 +570,54 @@ void main() {
     // An available release offers its button.
     snapshot('update-available', 'update-available');
     await reopen();
-    expect(key('settings-update-broker'), findsOneWidget);
+    expect(updateButton, findsOneWidget);
     expect(current, findsNothing);
     expect(unchecked, findsNothing);
     expect(packageManaged, findsNothing);
+    expect(runtimeUpgrade, findsNothing);
+
+    // A newer release whose Bun this install cannot place itself (a Bun
+    // chosen with COSYNCING_BUN_BIN, or no pinned build for the host): `cosy
+    // update` would refuse it, so no button, and "Not checked" would hide the
+    // release. The pill says so; the guidance names the release and the
+    // command to run once the runtime has moved.
+    snapshot(
+      'unknown',
+      'release-runtime-upgrade-required',
+      latest: '0.7.0',
+    );
+    for (final (language, pill) in const [
+      (Locale('en'), 'Needs newer Bun'),
+      (Locale('zh'), '需要更新 Bun'),
+      (Locale('ja'), '新しい Bun が必要'),
+      (Locale('ko'), '새 Bun 필요'),
+      (Locale('es'), 'Requiere Bun nuevo'),
+    ]) {
+      await app.container
+          .read(localeControllerProvider.notifier)
+          .setLocale(language);
+      await reopen();
+      expect(runtimeUpgrade, findsOneWidget, reason: '$language');
+      expect(find.text(pill), findsOneWidget, reason: '$language');
+      final body = f.tester.widget<SelectableText>(runtimeGuidance).data!;
+      expect(body, contains('0.7.0'), reason: '$language');
+      expect(body, contains('cosy update'), reason: '$language');
+      expect(body, contains('Bun'), reason: '$language');
+      expect(
+        [
+          updateButton,
+          current,
+          unchecked,
+          packageManaged,
+          guidance,
+        ].map((k) => k.evaluate()),
+        everyElement(isEmpty),
+        reason: '$language',
+      );
+    }
+    await app.container
+        .read(localeControllerProvider.notifier)
+        .setLocale(const Locale('en'));
 
     // Persistence health is named without presenting severity as it, and an
     // unrecognized status is never printed raw.

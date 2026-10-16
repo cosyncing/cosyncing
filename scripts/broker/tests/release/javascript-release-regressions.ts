@@ -7,6 +7,10 @@ import {
   assembleRelease, sha256, type ReleaseAssemblyOptions,
 } from '../../release/release-files.ts';
 import { stagingAssetBlockers } from '../../release/verify-staging-assets.ts';
+import {
+  bunVersionAtLeast,
+  PINNED_BUN_RUNTIME_VERSION,
+} from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import { promotionAssetBlockers } from '../../release/verify-promotion-assets.ts';
 import {
   releaseManifestSigningPayload, verifySignedManifest, verifyReleaseManifest,
@@ -52,6 +56,15 @@ export function javaScriptReleaseRegressions(options: ReleaseAssemblyOptions): v
     (m: any) => { m.jsApp.sha256 = 'invalid'; },
     (m: any) => { m.jsApp.minimumBunVersion = 'latest'; },
     (m: any) => { m.jsApp.target = 'linux-x64'; },
+    // The signed Bun table `cosy update` installs from: it must name a Bun that meets the floor it travels
+    // with, and every row must be exactly an official asset, digest and size.
+    (m: any) => { m.jsApp.bunRuntime.version = '1.0.0'; },
+    (m: any) => { m.jsApp.bunRuntime.archives = {}; },
+    (m: any) => { Object.values<any>(m.jsApp.bunRuntime.archives)[0][0].sha256 = 'invalid'; },
+    (m: any) => { Object.values<any>(m.jsApp.bunRuntime.archives)[0][0].size = 0; },
+    (m: any) => { Object.values<any>(m.jsApp.bunRuntime.archives)[0][0].asset = '../bun.zip'; },
+    (m: any) => { Object.values<any>(m.jsApp.bunRuntime.archives)[0][0].url = 'https://elsewhere.example/bun.zip'; },
+    (m: any) => { m.jsApp.bunRuntime.extra = true; },
     (m: any) => { m.webApp.size = -1; },
     (m: any) => { m.webApp.sha256 = 'invalid'; },
     (m: any) => { m.webApp.url = 'http://releases.example/web.tar.gz'; },
@@ -64,6 +77,16 @@ export function javaScriptReleaseRegressions(options: ReleaseAssemblyOptions): v
     mutate(malformed);
     assert.throws(() => verifySignedManifest(signed(malformed), trusted), /release-manifest-invalid/);
   }
+  // Every release signs the Bun table its installers carry, so the updater that meets a raised floor can
+  // install that runtime itself. Manifests from before the field remain valid: older updaters ignore it.
+  // The table is the pinned version, which may sit above the floor the release declares, never below it.
+  assert.ok(manifest.jsApp?.bunRuntime && manifest.jsApp.bunRuntime.version === PINNED_BUN_RUNTIME_VERSION
+    && bunVersionAtLeast(manifest.jsApp.bunRuntime.version, manifest.jsApp.minimumBunVersion ?? ''),
+    'release manifest signs the pinned Bun runtime table');
+  assert.equal(Object.keys(manifest.jsApp).at(-1), 'bunRuntime', 'bunRuntime is the last jsApp key');
+  const withoutRuntime = structuredClone(manifest);
+  delete withoutRuntime.jsApp!.bunRuntime;
+  assert.equal(verifySignedManifest(signed(withoutRuntime), trusted).jsApp?.bunRuntime, undefined);
   console.log('PASS  signed native-free manifests require complete valid metadata, trusted keys and valid signatures');
 
   const staging = join(root, 'staging');

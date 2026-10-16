@@ -290,7 +290,7 @@ Report vulnerabilities through GitHub private vulnerability reporting, per [SECU
 
 ## Development
 
-The repository pins Flutter 3.44.3 in `.fvmrc` and Bun 1.3.8 in `package.json`. Run commands from
+The repository pins Flutter 3.44.3 in `.fvmrc` and Bun 1.3.14 in `package.json`. Run commands from
 the repository root.
 
 ```bash

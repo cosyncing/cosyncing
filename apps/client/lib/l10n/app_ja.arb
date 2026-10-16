@@ -495,6 +495,8 @@
   "settingsBrokerStatusNotChecked": "未確認",
   "settingsBrokerStatusPackageManaged": "npm が管理",
   "settingsBrokerPackageManagedBody": "このサーバーは npm パッケージとしてインストールされているため、自動では更新されません。{updateCommand}（インストールに使ったマネージャーの同等コマンド）を実行してから、{setupCommand} を実行してください。",
+  "settingsBrokerStatusRuntimeUpgradeRequired": "新しい Bun が必要",
+  "settingsBrokerRuntimeUpgradeRequiredBody": "新しい cosyncing リリース（{version}）には、より新しい Bun ランタイムが必要ですが、このインストールでは自動でインストールできません。サーバーで Bun を更新するか cosyncing のインストーラーを再実行してから、{updateCommand} を実行してください。",
   "settingsDesktopBuildUpdateTitle": "新しいデスクトップビルドがあります",
   "settingsDesktopBuildUpdateBody": "このサーバーは {version} で動作しています。デスクトップビルドは自動更新されないため、対応するビルドをダウンロードしてください。",
   "settingsDesktopBuildUpdateAction": "ダウンロード",

@@ -367,6 +367,31 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   that changed is rebuilt, and the open session ignores other sessions. In a
   300-message session a streamed chunk rebuilds less than half as much as
   before.
+- New installs use Bun 1.3.14: the one-command installers place it unless the
+  host already has Bun 1.3.14 or newer, including when they are re-run over an
+  older Bun. Bun 1.3.8 could occasionally stall while starting. The minimum
+  stays 1.3.8, so servers already running 1.3.8 keep working and update as
+  before.
+- When a later release needs a newer Bun, `cosy update` on an installer-owned
+  server now installs that release's pinned Bun itself. It verifies the download,
+  places it next to the current runtime, and moves the service and the `cosy`
+  commands to it together with the new broker. If the new broker fails its
+  health check, both the broker and the runtime are rolled back. A Bun chosen
+  with `COSYNCING_BUN_BIN` is never replaced: the update stops and names the Bun
+  version to install. npm installations still upgrade Bun themselves.
+- The installers now place Bun in `~/.cosyncing/runtime/bun-<version>` instead
+  of `~/.bun`. Re-running an installer therefore no longer replaces a Bun that
+  the running broker is using; on Windows this used to fail. An existing Bun in
+  `~/.bun` at 1.3.14 or newer is still used.
+- When a newer release needs a newer Bun that the server cannot install
+  itself, the client's settings page now says **Needs newer Bun** and explains
+  what to do: upgrade Bun or re-run the installer, then run `cosy update`. It
+  used to show "Not checked".
+- `cosyncing uninstall` without `--purge-data` now removes the Bun runtimes
+  that the installers and `cosy update` placed in `~/.cosyncing/runtime`. A Bun
+  that `COSYNCING_BUN_BIN` points to and any Bun outside that directory are
+  kept. On Windows the Bun running the uninstall is kept too, and the uninstall
+  names its folder so you can delete it afterwards, also with `--purge-data`.
 - For contributors: `bun run check` runs the tests as feature suites (`policy`,
   `broker`, `adapters`, `packaging`, `client`, `web`, `windows`) in parallel,
   and the same command runs in CI. A failed test file is retried once; a pass

@@ -575,6 +575,20 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
   }
 
   async reloadDefinition(): Promise<void> { await this.installDefinition(); }
+  /**
+   * Point the existing task at this provider's runtime without restaging any version root. Used by an
+   * upgrade that installs a new Bun, and by its rollback. The task's enabled state is read first and kept:
+   * a runtime switch is not a reason to re-enable a task the operator disabled.
+   */
+  async reconcileDefinition(): Promise<void> {
+    const snapshot = this.backend.inspect(this.identity);
+    this.backend.reconcile({
+      identity: this.identity,
+      definition: { ...this.definition, enabled: snapshot.task?.enabled !== 'disabled' },
+      expectedSddl: this.expectedSddl,
+      sidFolderOwned: this.receiptOwnership.sidFolderOwned || this.sidFolderCreatedDuringInstall,
+    });
+  }
   async setEnabled(enabled: boolean): Promise<void> {
     this.backend.reconcile({
       identity: this.identity,

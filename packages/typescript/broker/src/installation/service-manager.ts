@@ -130,6 +130,12 @@ export interface DurableServiceVersionRecord {
   installationId: string;
   fromVersionKey: string;
   toVersionKey: string;
+  /**
+   * Present, both or neither, when the activation also moves the service to a new Bun runtime. The Windows
+   * Scheduled Task names the runtime it starts, so moving it and moving it back both need the exact paths.
+   */
+  fromRuntimePath?: string;
+  toRuntimePath?: string;
 }
 
 export interface DurableServiceVersionActivation {
@@ -152,7 +158,10 @@ export interface DurableServiceVersions {
    * install to move. Computed before anything is written, so the journal can carry it into the phase in
    * which the pointer may have moved.
    */
-  plan(build: Readonly<DurableServiceVersionBuild>): DurableServiceVersionActivation | undefined;
+  plan(
+    build: Readonly<DurableServiceVersionBuild>,
+    runtime?: { fromRuntimePath: string; toRuntimePath: string },
+  ): DurableServiceVersionActivation | undefined;
   /** Point the service back at `fromVersionKey` and drop the candidate's root. Idempotent. */
   restore(record: Readonly<DurableServiceVersionRecord>): Promise<void>;
   /** Drop the superseded root, only once the new receipt and the health gate have committed. */
@@ -208,6 +217,15 @@ export interface DurableServiceProvider {
    * there is no root to write.
    */
   stageVersion?(): Promise<void>;
+  /**
+   * Re-register the service manager's own definition with this provider's launch command, touching no
+   * files and keeping the current enabled state.
+   *
+   * Implemented where the definition is not a file and names the runtime: the Windows Scheduled Task's
+   * action is `bun.exe service-bootstrap.mjs`, so an upgrade that moves the service to a new Bun moves the
+   * task with it, and a rollback moves it back.
+   */
+  reconcileDefinition?(): Promise<void>;
   inspect(): Promise<DurableServiceStatus>;
   installDefinition(): Promise<void>;
   reloadDefinition(): Promise<void>;
@@ -432,7 +450,7 @@ function cleanHostPath(value: string, label: string, platform: string): string {
  *
  * `EnvironmentFile=` is NOT one of them: it takes one bare path and is rendered by `systemdBarePath` below.
  */
-function systemdQuote(value: string): string {
+export function systemdQuote(value: string): string {
   if (/[\0\r\n]/.test(value)) throw new Error('invalid systemd value');
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
@@ -453,7 +471,7 @@ function systemdBarePath(value: string): string {
   return value;
 }
 
-function environmentLine(name: string, value: string): string {
+export function environmentLine(name: string, value: string): string {
   if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new Error('invalid service environment name');
   return `${name}=${systemdQuote(value)}`;
 }

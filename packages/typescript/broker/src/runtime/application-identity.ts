@@ -127,16 +127,26 @@ function assertExecutableFile(path: string, label: string, detailCode: string): 
  *
  * Kept equal to the `engines.bun` floor the npm package publishes, and asserted equal by the application
  * identity suite. Publishing one number and enforcing another would make the manifest a suggestion: npm
- * warns and installs anyway, so this is the only place the floor is actually load-bearing.
+ * warns and installs anyway, so this is the only place the floor is actually load-bearing. It is also the
+ * `minimumBunVersion` every release manifest declares.
  *
- * 1.3.8 is the Bun every build and every gate run actually executes the bundle under. A lower floor would
- * advertise support for runtimes nothing ever tests; loosening it requires running the built application
- * under that older Bun, not just editing this constant.
+ * Held at 1.3.8 for one bridge release. A release's floor is judged by the PREVIOUS build's updater, and
+ * updaters up to 0.6.5 cannot install a runtime: a release declaring a higher floor is declined on every
+ * host they manage that still runs 1.3.8. This release carries the updater that installs the release's
+ * pinned Bun itself, so the floor can rise to {@link PINNED_BUN_RUNTIME_VERSION} in a later release.
+ * Until then new installs already get that version, because 1.3.8 can stall silently while loading modules
+ * (13 of 18,500 processes measured, none on 1.3.14).
  */
 export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.8';
 
 /**
- * The official Bun release archives for exactly {@link MINIMUM_BUN_RUNTIME_VERSION}, by installer host.
+ * The Bun version every build in {@link PINNED_BUN_RUNTIME_ARCHIVES} is: what the installers place, and what
+ * a release signs into its manifest for `cosy update` to install. Never below the floor, and asserted so.
+ */
+export const PINNED_BUN_RUNTIME_VERSION = '1.3.14';
+
+/**
+ * The official Bun release archives for exactly {@link PINNED_BUN_RUNTIME_VERSION}, by installer host.
  *
  * The curl installer digest-pins every cosyncing artifact it places, so the runtime that executes them
  * cannot be the one link resting on TLS alone. Piping `bun.sh/install` to a shell would do exactly that:
@@ -144,15 +154,20 @@ export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.8';
  * These digests come from Bun's own published `SHASUMS256.txt` beside the tagged release, are baked into
  * the installer at assembly time, and are enforced before anything is unpacked.
  *
- * They live next to the floor because they are one fact with it: these are the checksums OF that version,
- * and a release that raises the floor without replacing them would pin the wrong bytes. Nothing offline can
+ * They live next to the pinned version because they are one fact with it: these are the checksums OF that
+ * version, and changing the version without replacing them would pin the wrong bytes. Nothing offline can
  * prove that binding — Bun's asset names carry no version, the tag alone does — so adjacency is the whole
- * guard, and moving the floor means replacing this table from the new tag's `SHASUMS256.txt`.
+ * guard, and moving the pinned version means replacing this table from the new tag's `SHASUMS256.txt`.
  *
  * Several builds per host, most likely first, because one host target is not one binary: glibc and musl
  * need different builds, and pre-AVX2 x64 needs the baseline one. The installer reorders on what it can
  * detect and then PROVES the choice by running `--revision` — a build that cannot run on this machine is
  * simply the wrong candidate, and the next one is tried. Detection is an optimization; the probe decides.
+ *
+ * The same table is carried, signed, inside every release manifest (`jsApp.bunRuntime`), because the
+ * updater that has to install a newer Bun is always the OLDER build: its own compiled pins describe the
+ * runtime it was built for, never the one a later release needs. `cosy update` therefore installs the
+ * runtime the RELEASE pins, from exactly this table as that release's source carried it.
  *
  * Keyed by INSTALLER host, which is not the same set as the release's compiled targets: `windows-x64` has
  * no compiled artifact and never will, and it is here because the PowerShell installer places the same
@@ -163,31 +178,38 @@ export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.8';
 export const PINNED_BUN_RUNTIME_ARCHIVES: Readonly<Record<string, readonly BunRuntimeArchive[]>> =
   Object.freeze({
     'linux-x64': Object.freeze([
-      { asset: 'bun-linux-x64.zip', sha256: '0322b17f0722da76a64298aad498225aedcbf6df1008a1dee45e16ecb226a3f1' },
-      { asset: 'bun-linux-x64-baseline.zip', sha256: 'bbe4632ac03d7495177d542ecefa8f21f9849273106525f6bb13172ec8e4ab2c' },
-      { asset: 'bun-linux-x64-musl.zip', sha256: 'a810b5083a830596cff3715402371917a200940efdeed6189bcde191e79d4633' },
-      { asset: 'bun-linux-x64-musl-baseline.zip', sha256: 'f05311fc12304ff8eaca136fc934eede6728055ba3d00cdb7e7dac394853f159' },
+      { asset: 'bun-linux-x64.zip', sha256: '951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f', size: 35969274 },
+      { asset: 'bun-linux-x64-baseline.zip', sha256: 'a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7', size: 35595658 },
+      { asset: 'bun-linux-x64-musl.zip', sha256: '14bd9aedeebf1dba67e8def9531c89bc989ecfdf1de42e5bfcaf1b8cd9294719', size: 34669122 },
+      { asset: 'bun-linux-x64-musl-baseline.zip', sha256: '56a7d6806cf155536c0178f0ea5fbd098e684fa509ebdb4fc0a7e19fb65382dc', size: 34384861 },
     ]),
     'linux-arm64': Object.freeze([
-      { asset: 'bun-linux-aarch64.zip', sha256: '4e9deb6814a7ec7f68725ddd97d0d7b4065bcda9a850f69d497567e995a7fa33' },
-      { asset: 'bun-linux-aarch64-musl.zip', sha256: '76dddebfd8c011c8b774991eb8ba47da770e4ce06ddc2b045aa0d659ef5fbe44' },
+      { asset: 'bun-linux-aarch64.zip', sha256: 'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b', size: 35700603 },
+      { asset: 'bun-linux-aarch64-musl.zip', sha256: 'b98e0ad3625c5c00d1d5b5ff55605c7adddbfae151861e68ade57b2d3b8703bb', size: 34304457 },
     ]),
     'darwin-arm64': Object.freeze([
-      { asset: 'bun-darwin-aarch64.zip', sha256: '672a0a9a7b744d085a1d2219ca907e3e26f5579fca9e783a9510a4f98a36212f' },
+      { asset: 'bun-darwin-aarch64.zip', sha256: 'd8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620', size: 23586433 },
     ]),
     'windows-x64': Object.freeze([
-      { asset: 'bun-windows-x64.zip', sha256: '4c0a82866424e23d1bdaa9517307ec2f143ed513c15546dba0b859c6c55c47c7' },
-      { asset: 'bun-windows-x64-baseline.zip', sha256: '74f4dad7b4873ee70f63add9918400334e31acab9ba3fce9ef9906d96646e231' },
+      { asset: 'bun-windows-x64.zip', sha256: '0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922', size: 38366737 },
+      { asset: 'bun-windows-x64-baseline.zip', sha256: '538f9c846355d9e847b2671bc00c47da4229a0befb24df3282b739770f3b475f', size: 38023440 },
     ]),
   });
 
 /** Where Bun publishes the tagged archives these digests describe. */
 export const BUN_RELEASE_DOWNLOAD_BASE = 'https://github.com/oven-sh/bun/releases/download';
 
-/** One official Bun build: the release asset name and the sha256 Bun published for it. */
+/**
+ * One official Bun build: the release asset name, the sha256 Bun published for it, and its byte size.
+ *
+ * The size is the one GitHub reports for that release asset. It is not a second integrity claim -- the
+ * digest is -- but it lets `cosy update` refuse an oversized or truncated download before reading a byte
+ * past it, and before anything is extracted.
+ */
 export interface BunRuntimeArchive {
   asset: string;
   sha256: string;
+  size: number;
 }
 
 /** Bounded because it runs during setup, repair, and doctor on a path an operator may have typed wrong. */
@@ -223,7 +245,7 @@ export function bunVersionAtLeast(reported: string, minimum: string): boolean {
  * rejects the flag, a shell rejects it, and `/bin/true` exits cleanly with no version to report, which is
  * why an empty answer is a failure rather than a pass.
  */
-function probeBunRuntimeBySpawn(path: string): string {
+export function probeBunRuntimeBySpawn(path: string): string {
   const result = spawnSync(path, ['--revision'], {
     timeout: RUNTIME_PROBE_TIMEOUT_MS,
     maxBuffer: RUNTIME_PROBE_MAX_BYTES,

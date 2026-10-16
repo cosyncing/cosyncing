@@ -117,6 +117,16 @@ import {
 } from '@cosyncing/adapter-opencode';
 import { KNOWN_INSTALL_RESOURCE_IDS } from './install-state.ts';
 import {
+  BUN_RUNTIMES_RESOURCE_ID,
+  OWNED_BUN_RUNTIME_DIRECTORY,
+  inspectOwnedBunRuntimes,
+  ownedBunRuntimeEntryOf,
+  ownedBunRuntimeRoot,
+  removeOwnedBunRuntimes,
+  validBunRuntimesReceipt,
+} from './bun-runtime-receipt.ts';
+import { BUN_RUNTIME_OVERRIDE_VARIABLE } from '../runtime/application-identity.ts';
+import {
   TOKDASH_PACKAGE,
   reverseTokdashProvisioning,
   type TokdashCommandRunner,
@@ -562,7 +572,7 @@ export function createLifecycleServiceVersions(
         return { ...resource, ownership: { ...resource.ownership, installedSha256: sha256(readFileSync(resource.target)) } };
       });
     },
-    plan(build: Readonly<DurableServiceVersionBuild>) {
+    plan(build: Readonly<DurableServiceVersionBuild>, runtime?: { fromRuntimePath: string; toRuntimePath: string }) {
       const pointer = inspectWindowsActiveInstall(windowsServiceActiveManifestPath(home));
       // No pointer, no versioned install to move: this host runs the broker in the foreground, or its
       // service was never installed. An upgrade there is exactly the binary swap it already was.
@@ -580,6 +590,7 @@ export function createLifecycleServiceVersions(
         installationId: pointer.manifest.installationId,
         fromVersionKey: pointer.manifest.versionKey,
         toVersionKey: windowsServiceVersionKey(build),
+        ...(runtime ? { fromRuntimePath: runtime.fromRuntimePath, toRuntimePath: runtime.toRuntimePath } : {}),
       };
       return {
         record,
@@ -588,15 +599,23 @@ export function createLifecycleServiceVersions(
           // web root its signed sidecar was installed at. Everything else -- the environment the root
           // carries, the paths inside it, the key it is filed under -- follows from that build, exactly as
           // it will when the candidate itself next runs `status`.
+          //
+          // With a runtime switch the root is built for the NEW runtime too: its environment's PATH names
+          // that runtime's directory, and the Scheduled Task, which execs the runtime, is moved to it.
           const provider = createLifecycleDurableServiceProvider({
             ...options,
             home,
             context: { ...context, env: { ...context.env, COSYNCING_WEB_DIR: customPin } },
             buildInfo: { ...options.buildInfo, ...build, packaged: build.distribution !== 'source' },
             executablePath: installedBinaryPath(home),
+            ...(runtime ? { runtimePath: runtime.toRuntimePath } : {}),
           });
           if (!provider.stageVersion) throw new Error('durable service provider stages no version root');
           await provider.stageVersion();
+          if (runtime) {
+            if (!provider.reconcileDefinition) throw new Error('durable service provider cannot move its runtime');
+            await provider.reconcileDefinition();
+          }
         },
       };
     },
@@ -609,6 +628,17 @@ export function createLifecycleServiceVersions(
           manifestPath,
           windowsActiveInstallManifest(record.installationId, record.fromVersionKey),
         );
+      }
+      // The task goes back to the runtime it ran before, which the switch never touched. The task's
+      // identity is the installation's, not a version's, so any provider for this home addresses it.
+      if (record.fromRuntimePath) {
+        const provider = createLifecycleDurableServiceProvider({
+          ...options,
+          home,
+          context,
+          runtimePath: record.fromRuntimePath,
+        });
+        await provider.reconcileDefinition?.();
       }
       supersede(record.toVersionKey, record.fromVersionKey);
     },
@@ -2221,15 +2251,104 @@ function removeEmptyOwnedDirectory(directory: string): void {
   }
 }
 
-function safePurgeRoot(path: string): void {
+/**
+ * Purge one durable root, optionally sparing one directory inside it and the path down to it.
+ *
+ * The spared directory exists for one case: on Windows the Bun running this uninstall lives in the state home
+ * (`runtime/bun-<version>`), and Windows refuses to delete a running program. A plain recursive delete there
+ * removed most of the home and then failed on `bun.exe`, leaving a broken half-home and `purge-data-incomplete`.
+ * The spared chain is validated BEFORE anything is deleted; when it is not a real directory chain inside the
+ * root, nothing is spared and the root goes whole. Returns whether something was spared.
+ */
+function safePurgeRoot(
+  path: string,
+  spare?: { components: readonly string[]; caseInsensitive: boolean },
+): boolean {
   const absolute = resolve(path);
   if (!isAbsolute(absolute) || absolute === parse(absolute).root || absolute.length < 8) throw new Error('purge-root-unsafe');
-  if (!existsSync(absolute)) return;
+  if (!existsSync(absolute)) return false;
   assertNoSymlinkComponents(absolute, false);
   const stat = lstatSync(absolute);
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   if (stat.isSymbolicLink() || !stat.isDirectory() || (uid !== undefined && stat.uid !== uid)) throw new Error('purge-root-unsafe');
-  rmSync(absolute, { recursive: true, force: false });
+  const spared = spare !== undefined && spare.components.length > 0 && spare.components.every((_component, index) => {
+    try {
+      const entry = lstatSync(join(absolute, ...spare.components.slice(0, index + 1)));
+      return !entry.isSymbolicLink() && entry.isDirectory() && (uid === undefined || entry.uid === uid);
+    } catch {
+      return false;
+    }
+  });
+  if (!spared) {
+    rmSync(absolute, { recursive: true, force: false });
+    return false;
+  }
+  const fold = (name: string): string => spare.caseInsensitive ? name.toLowerCase() : name;
+  let directory = absolute;
+  for (const component of spare.components) {
+    for (const entry of readdirSync(directory)) {
+      if (fold(entry) !== fold(component)) rmSync(join(directory, entry), { recursive: true, force: false });
+    }
+    directory = join(directory, component);
+  }
+  return true;
+}
+
+/**
+ * The owned Bun runtimes a non-purge uninstall leaves where they are, and why. Computed identically when the
+ * plan is shown and when it runs, so the confirmed plan and the executed one cannot disagree.
+ *
+ * - The one `COSYNCING_BUN_BIN` names: the operator chose it, so it is theirs to remove.
+ * - On Windows, the one executing this uninstall: Windows refuses to delete a running program, so trying
+ *   would only turn a finished uninstall into a failed one. POSIX unlinks a running executable safely.
+ */
+function keptBunRuntimes(
+  env: LifecycleEnvironment,
+  options: LifecycleBaseOptions,
+  purgeData: boolean,
+): Array<{ entry: string; detailCode: string; summary: string }> {
+  const windows = env.context.platform === 'win32';
+  const root = ownedBunRuntimeRoot(env.home);
+  const kept: Array<{ entry: string; detailCode: string; summary: string }> = [];
+  // A purge removes the whole confirmed state root, the operator's chosen runtime inside it included.
+  const override = purgeData
+    ? undefined
+    : ownedBunRuntimeEntryOf(env.home, env.context.env[BUN_RUNTIME_OVERRIDE_VARIABLE], { caseInsensitive: windows });
+  if (override) {
+    kept.push({
+      entry: override,
+      detailCode: 'bun-runtime-override-preserved',
+      summary: `The Bun runtime in ${join(root, override)} stays: ${BUN_RUNTIME_OVERRIDE_VARIABLE} names it, so it is yours to remove.`,
+    });
+  }
+  const running = runningOwnedBunRuntime(env, options);
+  if (running && running !== override) kept.push(runningBunRuntimeNotice(env.home, running));
+  return kept;
+}
+
+/**
+ * On Windows, the owned runtime directory holding the Bun that executes this uninstall. Undefined elsewhere:
+ * POSIX unlinks a running executable safely, so there it is removed like any other.
+ */
+function runningOwnedBunRuntime(env: LifecycleEnvironment, options: LifecycleBaseOptions): string | undefined {
+  if (env.context.platform !== 'win32') return undefined;
+  return [options.runtimePath, process.execPath]
+    .map((path) => ownedBunRuntimeEntryOf(env.home, path, { caseInsensitive: true }))
+    .find((entry) => entry !== undefined);
+}
+
+function runningBunRuntimeNotice(home: string, entry: string): { entry: string; detailCode: string; summary: string } {
+  return {
+    entry,
+    detailCode: 'bun-runtime-in-use-preserved',
+    summary: `The Bun runtime in ${join(ownedBunRuntimeRoot(home), entry)} is running this uninstall, and Windows cannot `
+      + 'delete a running program; delete that folder after this command exits.',
+  };
+}
+
+function runningBunRuntimeLeftBehind(home: string, entry: string): string {
+  return `the Bun runtime in ${join(ownedBunRuntimeRoot(home), entry)}, which is running this uninstall; `
+    + 'delete that folder once this command exits';
 }
 
 export async function inspectUninstall(options: LifecycleBaseOptions & { purgeData: boolean }): Promise<UninstallPlan> {
@@ -2610,6 +2729,39 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
     });
   }
 
+  // Bun runtimes: the versioned runtimes installers and `cosy update` placed in `<home>/runtime`, and only
+  // those. Planned LAST, so every step above still has the runtime it may run under. A Bun anywhere else --
+  // `$BUN_INSTALL/bin/bun` from older installers, or the operator's own -- has no receipt and is never named.
+  const runtimesReceipt = env.install.committed ? resource(env.install.state, BUN_RUNTIMES_RESOURCE_ID) : undefined;
+  if (runtimesReceipt) {
+    const root = ownedBunRuntimeRoot(env.home);
+    const runtimes = inspectOwnedBunRuntimes(env.home);
+    if (!validBunRuntimesReceipt(env.home, runtimesReceipt)) {
+      warnings.push({ detailCode: 'bun-runtimes-receipt-invalid', summary: 'An invalid Bun runtime receipt will be preserved.' });
+    } else if (runtimes.status === 'unsafe') {
+      warnings.push({
+        detailCode: 'bun-runtimes-unsafe-preserved',
+        summary: `${root} is not a plain directory this user owns, so the Bun runtimes in it will be preserved.`,
+      });
+    } else {
+      actions.push({ id: 'bun-runtimes.remove', target: root, legacy: false });
+      for (const kept of keptBunRuntimes(env, options, options.purgeData)) advisories.push({ detailCode: kept.detailCode, summary: kept.summary });
+      if (runtimes.status === 'present' && runtimes.foreign.length > 0) {
+        advisories.push({
+          detailCode: 'bun-runtimes-foreign-preserved',
+          summary: `${root} also holds ${runtimes.foreign.join(', ')}, which cosyncing did not place; ${runtimes.foreign.length === 1 ? 'it stays' : 'they stay'}.`,
+        });
+      }
+    }
+  }
+
+  // A purge spares the Windows runtime running it whether or not a receipt names the directory it sits in.
+  const runningRuntime = options.purgeData ? runningOwnedBunRuntime(env, options) : undefined;
+  if (runningRuntime && !advisories.some((item) => item.detailCode === 'bun-runtime-in-use-preserved')) {
+    const notice = runningBunRuntimeNotice(env.home, runningRuntime);
+    advisories.push({ detailCode: notice.detailCode, summary: notice.summary });
+  }
+
   return {
     schemaVersion: 1,
     actions: actions.filter((item, index) => actions.findIndex((candidate) => candidate.id === item.id && candidate.target === item.target) === index),
@@ -2823,6 +2975,25 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           const receipt = resource(env.install.committed ? env.install.state : undefined, id);
           if (!receipt || !safeRemoveRegular(action.target, receipt.ownership.installedSha256)) throw new Error('binary-drift');
           retainedResources = retainedResources.filter((item) => item.id !== id);
+        } else if (action.id === 'bun-runtimes.remove') {
+          const receipt = retainedResources.find((item) => item.id === BUN_RUNTIMES_RESOURCE_ID);
+          if (!receipt || !validBunRuntimesReceipt(env.home, receipt)
+              || resolve(action.target) !== resolve(ownedBunRuntimeRoot(env.home))) {
+            throw new Error('bun-runtimes-drift');
+          }
+          const kept = keptBunRuntimes(env, options, options.purgeData);
+          const { failed } = removeOwnedBunRuntimes(env.home, new Set(kept.map((item) => item.entry)));
+          for (const item of kept) {
+            const line = runningBunRuntimeLeftBehind(env.home, item.entry);
+            if (item.detailCode === 'bun-runtime-in-use-preserved' && !leftBehind.includes(line)) leftBehind.push(line);
+          }
+          if (failed.length > 0) {
+            leftBehind.push(`the Bun runtime${failed.length === 1 ? '' : 's'} ${failed.map((entry) => join(action.target, entry)).join(', ')}, `
+              + 'which could not be removed (something may still be running it); delete '
+              + `${failed.length === 1 ? 'it' : 'them'} once nothing does`);
+            throw new Error('bun-runtimes-in-use');
+          }
+          retainedResources = retainedResources.filter((item) => item !== receipt);
         } else if (action.id === 'opencode-shim.remove') {
           // Re-verify under the lock: the receipt must still be the R1 id at the resolved shim path, and the
           // on-disk script must still hash to what the RECEIPT records installing (possibly a previous package
@@ -3017,7 +3188,12 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
         // Keep the shared mutation lock through both exact-root deletions; releasing after the state root is
         // gone is intentionally a no-op.
         safePurgeRoot(env.cacheRoot);
-        safePurgeRoot(env.home);
+        const running = runningOwnedBunRuntime(env, options);
+        const spared = safePurgeRoot(env.home, running
+          ? { components: [OWNED_BUN_RUNTIME_DIRECTORY, running], caseInsensitive: true }
+          : undefined);
+        const line = running ? runningBunRuntimeLeftBehind(env.home, running) : undefined;
+        if (spared && line && !leftBehind.includes(line)) leftBehind.push(line);
       } catch {
         return commandResult('cleanup-required', 4, 'purge-data-incomplete', 'Owned integrations were removed, but one durable root could not be purged safely.', { actions: completed });
       }

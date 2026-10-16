@@ -3,6 +3,7 @@ import { parseBrokerServiceEnvironment } from '../../src/installation/service-ma
 /** Deterministic lifecycle, repair, signed upgrade/rollback, and owned-uninstall acceptance. */
 import { runDurablePermissionChecks } from '../helpers/durable-permission-checks.ts';
 import { runDesktopClientChecks } from '../helpers/desktop-client-checks.ts';
+import { runRuntimeUpgradeChecks } from '../helpers/runtime-upgrade-checks.ts';
 import type { AgentSetupDiagnosis, SetupCheck } from '@cosyncing/adapter-api';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
@@ -66,7 +67,7 @@ import {
   ZH_STATUS_VALUES,
   type CliStatusValue,
 } from '../../src/cli/cli-i18n.ts';
-import { defaultBrokerConfig, writeBrokerConfig, type BrokerConfig } from '../../src/runtime/configuration.ts';
+import { brokerConfigPath, defaultBrokerConfig, writeBrokerConfig, type BrokerConfig } from '../../src/runtime/configuration.ts';
 import {
   ensureInstallationCredentials,
   readBrokerToken,
@@ -112,6 +113,11 @@ import {
 import { decideCodexDaemonOwnership } from '../../../adapters/codex/src/index.ts';
 import type { CodexDaemonStatus } from '../../src/installation/broker-lifecycle.ts';
 import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
+import {
+  BUN_RUNTIMES_RESOURCE_ID,
+  bunRuntimesReceipt,
+  ownedBunRuntimeEntryOf,
+} from '../../src/installation/bun-runtime-receipt.ts';
 import {
   captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
@@ -488,6 +494,7 @@ const cleanup: string[] = [];
 try {
   await runDurablePermissionChecks(check);
   await runDesktopClientChecks(check);
+  await runRuntimeUpgradeChecks(check);
   {
     const relocationRoot = mkdtempSync(join(tmpdir(), 'cosyncing-lifecycle-cache-'));
     cleanup.push(relocationRoot);
@@ -2036,6 +2043,231 @@ try {
   }
 
 
+  // Bun runtimes: a non-purge uninstall takes back the versioned runtimes installers and `cosy update` placed
+  // under `<home>/runtime`, and nothing else -- not a Bun outside it, not an entry in it cosyncing did not
+  // write, and not the runtime COSYNCING_BUN_BIN names.
+  {
+    const withRuntimes = (m: Machine, receipt: InstalledResourceRecord = bunRuntimesReceipt(m.home)) => {
+      const install = inspectInstallState(m.home);
+      if (!install.committed) throw new Error('fixture install missing');
+      install.state.resources.push(receipt);
+      writeInstallState(install.state, m.home);
+      // The older installers' layout, in Bun's own prefix. Never cosyncing's to remove.
+      const outside = join(m.userHome, '.bun', 'bin', 'bun');
+      mkdirSync(dirname(outside), { recursive: true });
+      writeFileSync(outside, 'operator-bun\n', { mode: 0o755 });
+      const runtime = (version: string): string => {
+        const directory = join(m.home, 'runtime', `bun-${version}`);
+        ensureOwnerOnlyDirectory(directory);
+        atomicWriteOwnerOnly(join(directory, 'bun'), `fixture-bun ${version}\n`, { mode: 0o700 });
+        return join(directory, 'bun');
+      };
+      return { outside, runtime };
+    };
+    const confirmed = { confirmed: true, allowLegacyIntegrations: false, purgeData: false, purgeConfirmed: false };
+    // A removed file reads as undefined, so a regression fails its check instead of ending the suite.
+    const contents = (path: string): string | undefined => {
+      try { return readFileSync(path, 'utf8'); } catch { return undefined; }
+    };
+    const listing = (path: string): string => {
+      try { return JSON.stringify(readdirSync(path).sort()); } catch { return '<missing>'; }
+    };
+    const receiptLeft = (m: Machine): boolean => {
+      const after = inspectInstallState(m.home);
+      return after.committed && after.state.resources.some((item) => item.id === BUN_RUNTIMES_RESOURCE_ID);
+    };
+    const runtimeCodes = (items: Array<{ detailCode: string }>): string[] =>
+      items.map((item) => item.detailCode).filter((code) => code.startsWith('bun-runtime'));
+
+    {
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      const { outside, runtime } = withRuntimes(m);
+      runtime('1.3.9');
+      runtime('1.3.14');
+      ensureOwnerOnlyDirectory(join(m.home, 'runtime', '.bun-1.3.14.staging-fixture'));
+      const plan = await inspectUninstall({ ...baseOptions(m), purgeData: false });
+      check('uninstall plans the receipted runtime directory as its last step, with nothing to warn about',
+        plan.actions.at(-1)?.id === 'bun-runtimes.remove' && plan.actions.at(-1)?.target === join(m.home, 'runtime')
+          && runtimeCodes(plan.warnings).length === 0 && runtimeCodes(plan.advisories).length === 0,
+        `${plan.actions.map((action) => action.id).join(',')} ${JSON.stringify(plan.warnings)}`);
+      const removed = await runUninstall({ ...baseOptions(m), ...confirmed, expectedPlan: plan });
+      check('a non-purge uninstall removes every runtime cosyncing placed, the staging debris, the directory and the receipt',
+        removed.exitCode === 0 && removed.detailCode === 'uninstall-complete'
+          && removed.actions?.includes('bun-runtimes.remove') === true
+          && !existsSync(join(m.home, 'runtime')) && !receiptLeft(m) && existsSync(brokerConfigPath(m.home)),
+        `${removed.exitCode}/${removed.detailCode}: ${removed.summary}`);
+      check('uninstall never touches a Bun outside the runtime directory',
+        contents(outside) === 'operator-bun\n');
+    }
+
+    {
+      // Named through a symlink on the operator's PATH, as `COSYNCING_BUN_BIN=~/bin/bun` would be.
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      const { outside, runtime } = withRuntimes(m);
+      runtime('1.3.9');
+      const pinned = runtime('1.3.14');
+      writeFileSync(join(m.home, 'runtime', 'notes.txt'), 'mine\n');
+      ensureOwnerOnlyDirectory(join(m.home, 'runtime', 'bun-canary'));
+      const link = join(m.userHome, 'bin', 'bun');
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(pinned, link);
+      const context = { ...m.context, env: { ...m.context.env, COSYNCING_BUN_BIN: link } };
+      const plan = await inspectUninstall({ ...baseOptions(m), context, purgeData: false });
+      const override = plan.advisories.find((item) => item.detailCode === 'bun-runtime-override-preserved');
+      const foreign = plan.advisories.find((item) => item.detailCode === 'bun-runtimes-foreign-preserved');
+      check('the plan says the runtime COSYNCING_BUN_BIN names stays, and so does what cosyncing did not place',
+        plan.actions.some((action) => action.id === 'bun-runtimes.remove')
+          && runtimeCodes(plan.warnings).length === 0
+          && override?.summary.includes(join(m.home, 'runtime', 'bun-1.3.14')) === true
+          && foreign?.summary.includes('bun-canary, notes.txt') === true,
+        JSON.stringify(plan.advisories));
+      const removed = await runUninstall({ ...baseOptions(m), context, ...confirmed, expectedPlan: plan });
+      check('uninstall keeps the COSYNCING_BUN_BIN runtime and foreign entries byte-identical and removes the rest',
+        removed.exitCode === 0 && !existsSync(join(m.home, 'runtime', 'bun-1.3.9'))
+          && contents(pinned) === 'fixture-bun 1.3.14\n'
+          && contents(join(m.home, 'runtime', 'notes.txt')) === 'mine\n'
+          && existsSync(join(m.home, 'runtime', 'bun-canary'))
+          && contents(outside) === 'operator-bun\n' && !receiptLeft(m),
+        `${removed.exitCode}/${removed.detailCode}: ${removed.summary}`);
+    }
+
+    {
+      const home = join(tmpdir(), 'fixture-state-home');
+      check('a path names an owned runtime only from inside `<home>/runtime/bun-<version>`',
+        ownedBunRuntimeEntryOf(home, join(home, 'runtime', 'bun-1.3.14', 'bun')) === 'bun-1.3.14'
+          && ownedBunRuntimeEntryOf(home, join(home, 'Runtime', 'BUN-1.3.14', 'bun.exe'), { caseInsensitive: true }) === 'bun-1.3.14'
+          && ownedBunRuntimeEntryOf(home, join(home, 'Runtime', 'BUN-1.3.14', 'bun.exe')) === undefined
+          && ownedBunRuntimeEntryOf(home, join(home, 'runtime', 'bun-1.3.14', '..', '..', 'bin', 'bun')) === undefined
+          && ownedBunRuntimeEntryOf(home, join(home, 'runtime', 'bun-canary', 'bun')) === undefined
+          && ownedBunRuntimeEntryOf(home, join(home, 'runtime')) === undefined
+          && ownedBunRuntimeEntryOf(home, '/usr/local/bin/bun') === undefined
+          && ownedBunRuntimeEntryOf(home, '  ') === undefined);
+    }
+
+    for (const platform of ['win32', 'linux'] as const) {
+      // The runtime executing the uninstall: Windows cannot delete it, POSIX can.
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      const { runtime } = withRuntimes(m);
+      runtime('1.3.9');
+      runtime('1.3.14');
+      const running = join(m.home, 'runtime', 'bun-1.3.14', platform === 'win32' ? 'bun.exe' : 'bun');
+      const options = { ...baseOptions(m), context: { ...m.context, platform }, runtimePath: running };
+      const plan = await inspectUninstall({ ...options, purgeData: false });
+      const removed = await runUninstall({ ...options, ...confirmed, expectedPlan: plan });
+      if (platform === 'win32') {
+        check('on Windows the runtime running the uninstall is kept, said before confirmation and named after',
+          plan.advisories.some((item) => item.detailCode === 'bun-runtime-in-use-preserved')
+            && removed.exitCode === 0 && removed.detailCode === 'uninstall-complete'
+            && !existsSync(join(m.home, 'runtime', 'bun-1.3.9')) && existsSync(join(m.home, 'runtime', 'bun-1.3.14'))
+            && removed.leftBehind?.some((line) => line.includes(join(m.home, 'runtime', 'bun-1.3.14'))) === true
+            && removed.summary.includes('Left behind') && !receiptLeft(m),
+          `${JSON.stringify(plan.advisories)} ${removed.exitCode}/${removed.detailCode}: ${removed.summary}`);
+      } else {
+        check('on POSIX the runtime running the uninstall goes with the rest',
+          runtimeCodes(plan.advisories).length === 0 && removed.exitCode === 0
+            && !existsSync(join(m.home, 'runtime')) && removed.leftBehind === undefined,
+          `${removed.exitCode}/${removed.detailCode}: ${removed.summary}`);
+      }
+    }
+
+    {
+      // A receipt naming anything but `<home>/runtime` is not one this build wrote.
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      const { outside, runtime } = withRuntimes(m, { ...bunRuntimesReceipt(m.home), target: join(m.userHome, '.bun') });
+      runtime('1.3.14');
+      const plan = await inspectUninstall({ ...baseOptions(m), purgeData: false });
+      const removed = await runUninstall({ ...baseOptions(m), ...confirmed, expectedPlan: plan });
+      check('a runtime receipt naming another directory is preserved with a warning, and nothing is removed for it',
+        runtimeCodes(plan.warnings).join(',') === 'bun-runtimes-receipt-invalid'
+          && !plan.actions.some((action) => action.id === 'bun-runtimes.remove')
+          && removed.exitCode === 4 && contents(outside) === 'operator-bun\n'
+          && existsSync(join(m.home, 'runtime', 'bun-1.3.14', 'bun')) && receiptLeft(m),
+        `${JSON.stringify(plan.warnings)} ${removed.exitCode}/${removed.detailCode}`);
+    }
+
+    {
+      // `<home>/runtime` swapped for a symlink: what it points at is not cosyncing's.
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      withRuntimes(m);
+      const elsewhere = join(m.userHome, 'elsewhere');
+      ensureOwnerOnlyDirectory(join(elsewhere, 'bun-1.3.14'));
+      writeFileSync(join(elsewhere, 'bun-1.3.14', 'bun'), 'elsewhere-bun\n');
+      symlinkSync(elsewhere, join(m.home, 'runtime'));
+      const plan = await inspectUninstall({ ...baseOptions(m), purgeData: false });
+      const removed = await runUninstall({ ...baseOptions(m), ...confirmed, expectedPlan: plan });
+      check('a symlinked runtime directory is preserved with a warning, and its target is never followed',
+        runtimeCodes(plan.warnings).join(',') === 'bun-runtimes-unsafe-preserved'
+          && !plan.actions.some((action) => action.id === 'bun-runtimes.remove')
+          && removed.exitCode === 4
+          && contents(join(elsewhere, 'bun-1.3.14', 'bun')) === 'elsewhere-bun\n' && receiptLeft(m),
+        `${JSON.stringify(plan.warnings)} ${removed.exitCode}/${removed.detailCode}`);
+    }
+
+    for (const [platform, receipted] of [['win32', true], ['win32', false], ['linux', true]] as const) {
+      // A purge run by a Bun inside the state home. Windows cannot delete it while it runs: the purge used to
+      // remove most of the home, fail on `bun.exe`, and report purge-data-incomplete over a broken half-home.
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      atomicWriteOwnerOnly(join(m.cache, 'artifact'), 'private');
+      const { outside, runtime } = receipted ? withRuntimes(m) : { outside: undefined, runtime: (version: string) => {
+        ensureOwnerOnlyDirectory(join(m.home, 'runtime', `bun-${version}`));
+        atomicWriteOwnerOnly(join(m.home, 'runtime', `bun-${version}`, 'bun.exe'), `fixture-bun ${version}\n`, { mode: 0o700 });
+        return join(m.home, 'runtime', `bun-${version}`, 'bun.exe');
+      } };
+      runtime('1.3.9');
+      const running = runtime('1.3.14');
+      // An override is the operator's choice, but a purge takes the whole confirmed root.
+      const context = { ...m.context, platform, env: { ...m.context.env, COSYNCING_BUN_BIN: join(m.home, 'runtime', 'bun-1.3.9', 'bun') } };
+      const options = { ...baseOptions(m), context, runtimePath: running };
+      const plan = await inspectUninstall({ ...options, purgeData: true });
+      const purged = await runUninstall({ ...options, ...confirmed, purgeData: true, purgeConfirmed: true, expectedPlan: plan });
+      const label = `${platform}, ${receipted ? 'receipted' : 'unreceipted'} runtime`;
+      if (platform === 'win32') {
+        const runtimeDirectory = join(m.home, 'runtime', 'bun-1.3.14');
+        check(`purge (${label}): everything but the running runtime's directory goes, and the purge completes naming it once`,
+          purged.exitCode === 0 && purged.detailCode === 'uninstall-complete'
+            && listing(m.home) === '["runtime"]'
+            && listing(join(m.home, 'runtime')) === '["bun-1.3.14"]'
+            && contents(running) === 'fixture-bun 1.3.14\n' && !existsSync(m.cache)
+            && purged.leftBehind?.filter((line) => line.includes(runtimeDirectory)).length === 1
+            && purged.summary.includes('Left behind'),
+          `${purged.exitCode}/${purged.detailCode} home=${listing(m.home)} ${JSON.stringify(purged.leftBehind)}`);
+        check(`purge (${label}): the plan says before confirmation which runtime stays, and keeps no override under a purge`,
+          plan.advisories.filter((item) => item.detailCode === 'bun-runtime-in-use-preserved').length === 1
+            && !plan.advisories.some((item) => item.detailCode === 'bun-runtime-override-preserved'),
+          JSON.stringify(plan.advisories));
+      } else {
+        check(`purge (${label}): POSIX removes the whole state root, the running runtime with it`,
+          purged.exitCode === 0 && purged.detailCode === 'uninstall-complete'
+            && !existsSync(m.home) && !existsSync(m.cache) && purged.leftBehind === undefined
+            && contents(outside!) === 'operator-bun\n',
+          `${purged.exitCode}/${purged.detailCode}: ${purged.summary}`);
+      }
+    }
+
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      // POSIX directory permissions make this runtime unremovable for a non-root user.
+      // Windows does not enforce these mode bits; its running-runtime preservation is covered above.
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      const { runtime } = withRuntimes(m);
+      runtime('1.3.9');
+      runtime('1.3.14');
+      const stuck = join(m.home, 'runtime', 'bun-1.3.9');
+      chmodSync(stuck, 0o500);
+      try {
+        const removed = await runUninstall({ ...baseOptions(m), ...confirmed });
+        check('a runtime that cannot be removed leaves the receipt, names the directory, and does not stop the others',
+          removed.exitCode === 4 && removed.remaining?.includes('bun-runtimes.remove-preserved') === true
+            && removed.leftBehind?.some((line) => line.includes(stuck)) === true
+            && existsSync(join(stuck, 'bun')) && !existsSync(join(m.home, 'runtime', 'bun-1.3.14'))
+            && receiptLeft(m),
+          `${removed.exitCode}/${removed.detailCode}: ${removed.summary}`);
+      } finally {
+        chmodSync(stuck, 0o700);
+      }
+    }
+  }
+
+
   // Codex daemon ownership: pure decision logic used at broker startup to record ownership evidence.
   {
     const running = decideCodexDaemonOwnership('running', false);
@@ -2872,7 +3104,7 @@ try {
       sha256: hash(jsBundle),
       url: 'https://releases.example/cosyncing-app.js',
       provenanceUrl: 'https://releases.example/cosyncing-app.js.intoto.jsonl',
-      minimumBunVersion: '1.3.8',
+      minimumBunVersion: '1.3.14',
     };
     const jsManifest = (override: Partial<ReleaseJavaScriptApp> | null = {}): ReleaseManifest =>
       releaseManifestForTests({
@@ -3142,13 +3374,57 @@ try {
 
     {
       // A JavaScript release may raise the Bun it needs. Installing one this host cannot run would report
-      // success and take the service down, so the floor is checked against the runtime's proven version.
+      // success and take the service down, so the floor is checked against the runtime's proven version --
+      // and where neither the release nor this build pins a Bun that meets it, nothing is downloaded and
+      // the refusal names the version needed rather than reading as a failed verification.
       const fixture = upgradeMachine();
-      const refused = await runUpgrade(jsUpgradeOptions(fixture, jsManifest({ minimumBunVersion: '9.9.9' })));
-      check('an upgrade whose signed Bun floor this host cannot meet is refused before anything changes',
-        refused.detailCode === 'release-runtime-too-old'
+      const requested: string[] = [];
+      const fetcher = jsFetcher(jsManifest({ minimumBunVersion: '9.9.9' }));
+      const refused = await runUpgrade({
+        ...jsUpgradeOptions(fixture, jsManifest({ minimumBunVersion: '9.9.9' })),
+        fetch: (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          requested.push(String(input));
+          return fetcher(input, init);
+        }) as typeof fetch,
+      });
+      check('an upgrade whose signed Bun floor no pinned build meets is refused by name before anything changes',
+        refused.status === 'blocked' && refused.detailCode === 'release-runtime-upgrade-required'
+          && refused.summary.includes('needs Bun 9.9.9 or newer')
+          && refused.summary.includes('https://bun.sh')
+          && requested.length === 1 && requested[0]!.endsWith('manifest.json')
           && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
-          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0')));
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0'))
+          && !existsSync(join(fixture.m.home, 'runtime', 'bun-9.9.9')),
+        `${refused.detailCode}: ${refused.summary}`);
+    }
+
+    {
+      // A release declaring a 1.3.14 floor (this fixture's, not the build's) offered to a host that still
+      // runs 1.3.8. `cosy update` installs the pinned Bun itself:
+      // from the manifest's signed table, or -- for a manifest published before it carried one -- this
+      // build's own compiled pins, fetched from Bun's release and held to the pinned size and digest. The
+      // fixture serves other bytes at that URL, so the install must stop there, before anything changes.
+      const fixture = upgradeMachine();
+      const requested: string[] = [];
+      const fetcher = jsFetcher(jsManifest());
+      const refused = await runUpgrade({
+        ...jsUpgradeOptions(fixture),
+        runtimeVersion: '1.3.8',
+        runtimeHost: 'linux-x64',
+        fetch: (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          requested.push(String(input));
+          return fetcher(input, init);
+        }) as typeof fetch,
+      });
+      check('a host still on Bun 1.3.8 fetches the compiled pinned 1.3.14 and refuses substituted bytes before anything changes',
+        refused.status === 'failed' && refused.detailCode === 'release-runtime-size-mismatch'
+          && requested.includes('https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip')
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0'))
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing.staging-2.0.0'))
+          && !existsSync(join(fixture.m.home, 'runtime', 'bun-1.3.14'))
+          && fixture.active(),
+        `${refused.detailCode} ${JSON.stringify(requested)}`);
     }
 
     {

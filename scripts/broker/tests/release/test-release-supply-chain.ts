@@ -36,7 +36,10 @@ import {
   verifyUpgradeCandidate,
   verifyReleasePairing,
 } from '../../../../packages/typescript/broker/src/updates/release-upgrade.ts';
-import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
+import {
+  MINIMUM_BUN_RUNTIME_VERSION,
+  PINNED_BUN_RUNTIME_VERSION,
+} from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
   BROKER_CONTRACT,
   CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
@@ -723,7 +726,8 @@ try {
       && singleQuoted(powerShellInstaller, '\\$KEY_ID = ') === 'test-2026'
       && singleQuoted(powerShellInstaller, '\\$BASE_URL = ')
         === `https://releases.example/cosyncing/v${version}`
-      && singleQuoted(powerShellInstaller, '\\$MINIMUM_BUN = ') === MINIMUM_BUN_RUNTIME_VERSION,
+      && singleQuoted(powerShellInstaller, '\\$MINIMUM_BUN = ') === MINIMUM_BUN_RUNTIME_VERSION
+      && singleQuoted(powerShellInstaller, '\\$PINNED_BUN = ') === PINNED_BUN_RUNTIME_VERSION,
     /@[A-Z0-9_]+@/.exec(powerShellInstaller)?.[0] ?? 'no unrendered token');
   // Windows CNG exposes no Ed25519 algorithm identifier, so the Ed25519 key in this installer would be a
   // trust anchor it cannot use and a reader could believe it had been checked. Its absence is the claim.
@@ -748,6 +752,8 @@ try {
     singleQuoted(powerShellInstaller, '\\$ARTIFACT_TABLE = ')
         === singleQuoted(shellInstaller, 'ARTIFACT_TABLE=')
       && singleQuoted(powerShellInstaller, '\\$BUN_TABLE = ') === singleQuoted(shellInstaller, 'BUN_TABLE=')
+      && singleQuoted(shellInstaller, 'MINIMUM_BUN=') === MINIMUM_BUN_RUNTIME_VERSION
+      && singleQuoted(shellInstaller, 'PINNED_BUN=') === PINNED_BUN_RUNTIME_VERSION
       && singleQuoted(powerShellInstaller, '\\$APP_ASSET = ') === RELEASE_JAVASCRIPT_APP_NAME
       && singleQuoted(powerShellInstaller, '\\$WEB_ASSET = ') === WEB_SIDECAR_NAME
       && singleQuoted(powerShellInstaller, '\\$ARTIFACT_TABLE = ').split('\n').length === 2,
@@ -1042,7 +1048,7 @@ try {
       && inventory.externalRuntime.bundled === false
       && inventory.releaseArtifacts.length === 6
       && thirdPartyNotices.includes('Bun is installed separately')
-      && !thirdPartyNotices.includes('Bun 1.3.8 runtime')
+      && !/^Bun \d+\.\d+\.\d+ runtime$/m.test(thirdPartyNotices)
       && thirdPartyNotices.includes('app/assets/NOTICES')
       && inventory.packages.filter((item: any) => !item.internal)
         .every((item: any) => thirdPartyNotices.includes(`${item.name}@${item.version}`)));
@@ -1833,14 +1839,16 @@ exec /usr/bin/openssl "$@"
   const staleBunBin = join(root, 'stale-bun-bin');
   mkdirSync(staleBunBin);
   writeFakeCurl(join(staleBunBin, 'curl'));
-  writeFakeBun(join(staleBunBin, 'bun'), '1.2.99');
+  // 1.3.8 rather than an arbitrary old Bun: a host an earlier installer provisioned still carries exactly
+  // that. It is below the pinned Bun, so a re-run places the pinned one beside it instead of reusing it.
+  writeFakeBun(join(staleBunBin, 'bun'), '1.3.8');
 
   // The runtime that executes every verified artifact is held to the artifacts' own rule. A rendered
   // installer carries Bun's real published digests for the pinned tag, so a substituted archive is refused
   // with nothing repointed: the fixture zip simply is not the bytes Bun published.
   const bunTamperRelease = join(root, 'bun-tamper-release');
   cpSync(releaseDirectory, bunTamperRelease, { recursive: true });
-  writeFakeBunArchive(bunTamperRelease, 'bun-linux-x64.zip', { version: MINIMUM_BUN_RUNTIME_VERSION });
+  writeFakeBunArchive(bunTamperRelease, 'bun-linux-x64.zip', { version: PINNED_BUN_RUNTIME_VERSION });
   const bunTamperHome = join(root, 'bun-tamper-home');
   mkdirSync(bunTamperHome);
   const bunTamper = await run(['bash', join(bunTamperRelease, 'install.sh')], {
@@ -1855,6 +1863,7 @@ exec /usr/bin/openssl "$@"
     bunTamper.exitCode !== 0
       && /does not match the checksum embedded in this installer/.test(bunTamper.stderr)
       && !existsSync(join(bunTamperHome, '.bun', 'bin', 'bun'))
+      && !existsSync(join(bunTamperHome, '.cosyncing', 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`))
       && !existsSync(join(bunTamperHome, '.cosyncing', 'bin', 'cosyncing')),
     bunTamper.stderr.trim().slice(0, 200));
 
@@ -1864,7 +1873,7 @@ exec /usr/bin/openssl "$@"
   const bunInstallRelease = join(root, 'bun-install-release');
   cpSync(releaseDirectory, bunInstallRelease, { recursive: true });
   const workingArchive = writeFakeBunArchive(bunInstallRelease, 'bun-linux-x64.zip', {
-    version: MINIMUM_BUN_RUNTIME_VERSION,
+    version: PINNED_BUN_RUNTIME_VERSION,
   });
   repinBunTable(bunInstallRelease, [`linux-x64 bun-linux-x64.zip ${workingArchive.sha256}`]);
   const bunInstallHome = join(root, 'bun-install-home');
@@ -1877,15 +1886,85 @@ exec /usr/bin/openssl "$@"
       LANG: 'C.UTF-8',
     },
   });
-  const installedBun = join(bunInstallHome, '.bun', 'bin', 'bun');
-  check('a host whose Bun is below the floor gets the pinned archive, not the stale runtime',
+  // The versioned layout `cosy update` also writes: `<state home>/runtime/bun-<version>/bun`, owner-only,
+  // staged and renamed into place. Bun's own prefix (`~/.bun`) is never written any more.
+  const runtimeRoot = join(bunInstallHome, '.cosyncing', 'runtime');
+  const installedBun = join(runtimeRoot, `bun-${PINNED_BUN_RUNTIME_VERSION}`, 'bun');
+  const launcherNames = (home: string) => ['cosyncing', 'cosy'].map((name) => join(home, '.cosyncing', 'shell-bin', name));
+  const launcherRuntime = (path: string) => /^exec '((?:[^']|'\\'')*)' /m.exec(readFileSync(path, 'utf8'))?.[1]
+    ?.replaceAll("'\\''", "'");
+  check('a host whose Bun is below the pinned version gets the pinned archive in the versioned runtime layout',
     bunInstall.exitCode === 0
       && existsSync(installedBun)
+      && (statSync(installedBun).mode & 0o777) === 0o700
+      && (statSync(join(runtimeRoot, `bun-${PINNED_BUN_RUNTIME_VERSION}`)).mode & 0o777) === 0o700
+      && (statSync(runtimeRoot).mode & 0o777) === 0o700
+      && JSON.stringify(readdirSync(runtimeRoot)) === JSON.stringify([`bun-${PINNED_BUN_RUNTIME_VERSION}`])
+      && !existsSync(join(bunInstallHome, '.bun'))
       && readFileSync(join(bunInstallHome, '.cosyncing', 'bootstrap-receipt'), 'utf8')
         .includes(`runtime=${installedBun}\n`)
+      && launcherNames(bunInstallHome).every((path) => launcherRuntime(path) === installedBun)
       && bunInstall.stdout.includes('Installing the pinned Bun')
-      && bunInstall.stdout.includes(`Bun runtime: installed by this script (${MINIMUM_BUN_RUNTIME_VERSION}`),
+      && bunInstall.stdout.includes(`Bun runtime: installed by this script (${PINNED_BUN_RUNTIME_VERSION}`),
     `${bunInstall.exitCode}: ${bunInstall.stdout.trim().split('\n').slice(-4).join(' | ')} ${bunInstall.stderr.trim().slice(0, 160)}`);
+
+  // Re-running the installer while the broker runs from that runtime must not replace it: the versioned
+  // runtime is the pinned version, so it is reused -- same file, same inode, nothing downloaded. A held
+  // process stands in for the running service.
+  {
+    const before = statSync(installedBun);
+    const bytes = readFileSync(installedBun);
+    const held = Bun.spawn([installedBun, '-e', 'await Bun.sleep(60_000)'], { stdout: 'ignore', stderr: 'ignore' });
+    try {
+      const rerun = await run(['bash', join(bunInstallRelease, 'install-server.sh')], {
+        env: {
+          PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+          HOME: bunInstallHome,
+          FAKE_RELEASE_ROOT: bunInstallRelease,
+          LANG: 'C.UTF-8',
+        },
+      });
+      const after = statSync(installedBun);
+      check('an installer re-run reuses the in-use versioned runtime instead of replacing it',
+        rerun.exitCode === 0 && !rerun.stdout.includes('Installing the pinned Bun')
+          && held.exitCode === null
+          && after.ino === before.ino && after.mtimeMs === before.mtimeMs
+          && Buffer.compare(readFileSync(installedBun), bytes) === 0
+          && JSON.stringify(readdirSync(runtimeRoot)) === JSON.stringify([`bun-${PINNED_BUN_RUNTIME_VERSION}`])
+          && readFileSync(join(bunInstallHome, '.cosyncing', 'bootstrap-receipt'), 'utf8').includes(`runtime=${installedBun}\n`),
+        `${rerun.exitCode}: ${rerun.stdout.trim().split('\n').slice(-3).join(' | ')} ${rerun.stderr.trim().slice(0, 160)}`);
+    } finally {
+      held.kill();
+      await held.exited;
+    }
+  }
+
+  // An install made by an earlier installer keeps Bun in Bun's own prefix. Below the pinned version (1.3.8,
+  // what earlier installers placed), a re-run installs the versioned runtime beside it and leaves that file
+  // exactly as it was; at the pinned version, it is simply used.
+  for (const [label, version] of [['below', '1.3.8'], ['at', PINNED_BUN_RUNTIME_VERSION]] as const) {
+    const legacyHome = join(root, `legacy-layout-${label}-floor-home`);
+    const legacyBun = join(legacyHome, '.bun', 'bin', 'bun');
+    mkdirSync(join(legacyHome, '.bun', 'bin'), { recursive: true });
+    writeFakeBun(legacyBun, version);
+    const legacyBytes = readFileSync(legacyBun);
+    const curlOnly = join(root, `legacy-layout-${label}-floor-bin`);
+    mkdirSync(curlOnly);
+    writeFakeCurl(join(curlOnly, 'curl'));
+    const legacy = await run(['bash', join(bunInstallRelease, 'install-server.sh')], {
+      env: { PATH: pathWithoutBun(curlOnly), HOME: legacyHome, FAKE_RELEASE_ROOT: bunInstallRelease, LANG: 'C.UTF-8' },
+    });
+    const owned = join(legacyHome, '.cosyncing', 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`, 'bun');
+    const expected = label === 'below' ? owned : legacyBun;
+    check(`an install whose old-layout ~/.bun Bun is ${label} the pinned version ${label === 'below' ? 'gets the versioned runtime beside it' : 'keeps using it'}`,
+      legacy.exitCode === 0
+        && Buffer.compare(readFileSync(legacyBun), legacyBytes) === 0
+        && existsSync(owned) === (label === 'below')
+        && legacy.stdout.includes('Installing the pinned Bun') === (label === 'below')
+        && readFileSync(join(legacyHome, '.cosyncing', 'bootstrap-receipt'), 'utf8').includes(`runtime=${expected}\n`)
+        && launcherNames(legacyHome).every((path) => launcherRuntime(path) === expected),
+      `${legacy.exitCode}: ${legacy.stdout.trim().split('\n').slice(-3).join(' | ')} ${legacy.stderr.trim().slice(0, 160)}`);
+  }
 
   // A fresh shell has no Bun command at all. Execute the printed command unchanged, under both POSIX sh
   // and bash, with spaces and apostrophes in the runtime and application paths.
@@ -1948,7 +2027,7 @@ exec /usr/bin/openssl "$@"
   cpSync(releaseDirectory, bunFallbackRelease, { recursive: true });
   const unrunnable = writeFakeBunArchive(bunFallbackRelease, 'bun-linux-x64.zip');
   const fallback = writeFakeBunArchive(bunFallbackRelease, 'bun-linux-x64-musl.zip', {
-    version: MINIMUM_BUN_RUNTIME_VERSION,
+    version: PINNED_BUN_RUNTIME_VERSION,
   });
   repinBunTable(bunFallbackRelease, [
     `linux-x64 bun-linux-x64.zip ${unrunnable.sha256}`,
@@ -1966,17 +2045,22 @@ exec /usr/bin/openssl "$@"
   });
   check('a pinned build that cannot run on this host advances to the next pinned build',
     bunFallback.exitCode === 0
-      && existsSync(join(bunFallbackHome, '.bun', 'bin', 'bun'))
+      && existsSync(join(bunFallbackHome, '.cosyncing', 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`, 'bun'))
+      && readdirSync(join(bunFallbackHome, '.cosyncing', 'runtime')).length === 1
       && /does not run on this host; trying the next pinned build/.test(bunFallback.stdout),
     `${bunFallback.exitCode}: ${bunFallback.stdout.trim().split('\n').slice(-5).join(' | ')} ${bunFallback.stderr.trim().slice(0, 160)}`);
 
   // An operator who does not want this script installing a runtime gets a refusal that names the floor,
   // rather than a silent install of a bundle nothing on the host can execute.
+  const belowFloorBunBin = join(root, 'below-floor-bun-bin');
+  mkdirSync(belowFloorBunBin);
+  writeFakeCurl(join(belowFloorBunBin, 'curl'));
+  writeFakeBun(join(belowFloorBunBin, 'bun'), '1.2.99');
   const optOutHome = join(root, 'bun-opt-out-home');
   mkdirSync(optOutHome);
   const optOut = await run(['bash', join(bunInstallRelease, 'install.sh')], {
     env: {
-      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      PATH: `${belowFloorBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: optOutHome,
       FAKE_RELEASE_ROOT: bunInstallRelease,
       COSYNCING_SKIP_BUN_INSTALL: '1',
@@ -1988,8 +2072,40 @@ exec /usr/bin/openssl "$@"
       && optOut.stderr.includes(`Bun ${MINIMUM_BUN_RUNTIME_VERSION} or newer is required`)
       && optOut.stderr.includes('COSYNCING_SKIP_BUN_INSTALL=1')
       && !existsSync(join(optOutHome, '.bun'))
+      && !existsSync(join(optOutHome, '.cosyncing', 'runtime'))
       && !existsSync(join(optOutHome, '.cosyncing', 'bin', 'cosyncing')),
     optOut.stderr.trim().slice(0, 200));
+
+  // Told not to install a runtime, a Bun that meets the floor is enough even below the pinned version; and
+  // a COSYNCING_BUN_BIN at the floor is the operator's choice, used as it is. Neither downloads anything.
+  {
+    const floorBunBin = join(root, 'floor-bun-bin');
+    mkdirSync(floorBunBin);
+    writeFakeCurl(join(floorBunBin, 'curl'));
+    const floorBun = join(floorBunBin, 'bun');
+    writeFakeBun(floorBun, MINIMUM_BUN_RUNTIME_VERSION);
+    for (const [label, extra] of [
+      ['COSYNCING_SKIP_BUN_INSTALL=1', { COSYNCING_SKIP_BUN_INSTALL: '1' }],
+      ['COSYNCING_BUN_BIN', { COSYNCING_BUN_BIN: floorBun }],
+    ] as const) {
+      const home = join(root, `floor-bun-${label.replace(/\W+/g, '-')}-home`);
+      mkdirSync(home);
+      const floorRun = await run(['bash', join(bunInstallRelease, 'install-server.sh')], {
+        env: {
+          PATH: `${floorBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+          HOME: home,
+          FAKE_RELEASE_ROOT: bunInstallRelease,
+          LANG: 'C.UTF-8',
+          ...extra,
+        },
+      });
+      check(`with ${label}, a Bun at the floor is used and no runtime is placed`,
+        floorRun.exitCode === 0 && !floorRun.stdout.includes('Installing the pinned Bun')
+          && !existsSync(join(home, '.cosyncing', 'runtime'))
+          && readFileSync(join(home, '.cosyncing', 'bootstrap-receipt'), 'utf8').includes(`runtime=${floorBun}\n`),
+        `${floorRun.exitCode}: ${floorRun.stdout.trim().split('\n').slice(-3).join(' | ')} ${floorRun.stderr.trim().slice(0, 160)}`);
+    }
+  }
 
   // A host with no Bun at all and no reachable release archive must fail loudly. The release copy used here
   // carries no Bun archive, so the stub curl fails the fetch exactly as an offline host would.

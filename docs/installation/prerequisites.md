@@ -10,8 +10,10 @@ after completing the local installation.
 
 ## Required on the broker host: Bun
 
-cosyncing requires Bun 1.3.8 or newer. The npm package contains JavaScript and
-the web client; it does not embed the Bun runtime.
+cosyncing requires Bun 1.3.8 or newer. Use 1.3.14 or newer where you can:
+1.3.8 can occasionally stall while starting, and the one-command installers
+place 1.3.14. The npm package contains JavaScript and the web client; it does
+not embed the Bun runtime.
 
 The official installer works on Linux and macOS:
 
@@ -31,8 +33,12 @@ x64, so the broker asks Windows what the underlying machine is.
 
 You can skip preinstalling Bun when using the signed-release
 [cosyncing installers](script-install.md). Both shell and PowerShell templates
-reuse a suitable Bun or download a digest-pinned runtime directly from upstream.
-Bun is installed separately; its runtime is not a cosyncing release asset.
+reuse a suitable Bun or download a digest-pinned runtime directly from upstream
+into `$COSYNCING_HOME/runtime/bun-<version>`. Bun is installed separately; its
+runtime is not a cosyncing release asset. When a later release needs a newer
+Bun, `cosy update` on such an installation installs it the same way; see
+[the Bun runtime](script-install.md#the-bun-runtime). With the npm installation
+path, upgrade Bun yourself before updating the package.
 
 Open a new login shell, then verify the selected executable:
 

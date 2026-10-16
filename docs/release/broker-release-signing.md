@@ -95,6 +95,15 @@ component. Installers reuse a suitable Bun or fetch the pinned upstream archive
 directly; users do not need to preinstall Bun. cosyncing does not mirror that
 archive into its release.
 
+The signed manifest carries the same pinned table as `jsApp.bunRuntime`: the
+Bun version and, for each installer host, the upstream asset name, SHA-256
+digest and size. That version can be newer than `jsApp.minimumBunVersion`: the
+installers place it, while hosts already above the minimum keep their Bun. An
+installed broker's `cosy update` reads the table when a release raises
+`jsApp.minimumBunVersion` above the host's Bun, because the updater is always
+the older build and its own compiled pins describe the runtime it was built
+with. Readers that predate the field ignore it.
+
 ## Manifest and installed-version compatibility
 
 `schemaVersion: 1` and the Ed25519 signing payload encoding stay unchanged.

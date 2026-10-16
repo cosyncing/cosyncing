@@ -28,9 +28,14 @@ Future migrations must be forward-only, tested from the previously supported
 release, and documented before a tag is created. Installer-owned JavaScript
 brokers (`bootstrap-js`) use the signed manifest, isolated installer, health
 check, and rollback process in the
-[release documentation](../release/broker-release-signing.md). npm-owned
-installations (`bun-js`) update through the global npm package, followed by
-`cosyncing setup`; they do not switch ownership to the signed installer channel.
+[release documentation](../release/broker-release-signing.md). When a release
+raises the minimum Bun version, the same transaction installs that release's
+pinned Bun beside the current one and switches the service, launchers and
+receipt to it; a rollback restores both
+([details](../installation/script-install.md#when-a-release-needs-a-newer-bun)).
+npm-owned installations (`bun-js`) update through the global npm package,
+followed by `cosyncing setup`; they do not switch ownership to the signed
+installer channel.
 
 `cosy update` also reconciles an installer-recorded desktop client from the
 signed release manifest after the broker is healthy. Close the client before

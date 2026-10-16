@@ -258,9 +258,17 @@ class _DesktopBuildUpdateRow extends ConsumerWidget {
 /// install, so the broker declines to probe it.
 const String _packageManagerOwnedDetail = 'upgrade-package-manager-owned';
 
+/// Reported when a newer release needs a newer Bun runtime than the broker
+/// runs, and this installation cannot install that runtime itself: the Bun was
+/// chosen with `COSYNCING_BUN_BIN`, or the release pins no Bun build for this
+/// host. Also a `status: unknown` snapshot, but one that carries the release it
+/// found in `latestVersion`.
+const String _runtimeUpgradeRequiredDetail = 'release-runtime-upgrade-required';
+
 /// Update commands, worded as the broker's own guidance words them.
 const String _packageManagerUpdateCommand = 'npm update --global cosyncing';
 const String _packageManagerSetupCommand = 'cosyncing setup';
+const String _brokerUpdateCommand = 'cosy update';
 
 class _BrokerVersionRow extends StatelessWidget {
   const _BrokerVersionRow({
@@ -283,6 +291,10 @@ class _BrokerVersionRow extends StatelessWidget {
     // Calling either one "Current" tells the operator they are up to date on
     // the strength of no evidence whatsoever.
     final packageManaged = snapshot?.detailCode == _packageManagerOwnedDetail;
+    // A newer release exists, but `cosy update` would refuse it until the Bun
+    // runtime moves. Neither "Not checked" nor an update button is true here.
+    final runtimeUpgradeRequired =
+        snapshot?.detailCode == _runtimeUpgradeRequiredDetail;
     final checked = snapshot?.status == 'current';
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
@@ -305,6 +317,14 @@ class _BrokerVersionRow extends StatelessWidget {
           label: l10n.settingsBrokerStatusPackageManaged,
           color: tokens.statusIdle,
           icon: Icons.inventory_2_outlined,
+        );
+      }
+      if (runtimeUpgradeRequired) {
+        return StatusPill(
+          key: const Key('settings-broker-status-runtime-upgrade-required'),
+          label: l10n.settingsBrokerStatusRuntimeUpgradeRequired,
+          color: tokens.statusNeedsInput,
+          icon: Icons.upgrade,
         );
       }
       if (checked) {
@@ -348,6 +368,21 @@ class _BrokerVersionRow extends StatelessWidget {
               l10n.settingsBrokerPackageManagedBody(
                 _packageManagerUpdateCommand,
                 _packageManagerSetupCommand,
+              ),
+              style: Theme.of(
+                context,
+              ).textTheme.labelMedium?.copyWith(color: tokens.textSecondary),
+            ),
+          ),
+        if (runtimeUpgradeRequired)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: SelectableText(
+              key: const Key('settings-broker-runtime-upgrade-required-body'),
+              l10n.settingsBrokerRuntimeUpgradeRequiredBody(
+                snapshot?.latestVersion ??
+                    l10n.settingsUpdateBrokerLatestFallback,
+                _brokerUpdateCommand,
               ),
               style: Theme.of(
                 context,

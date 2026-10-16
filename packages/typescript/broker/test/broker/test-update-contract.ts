@@ -262,7 +262,7 @@ const jsOnlyManifest = releaseManifestForTests({
   keyId, sign: (payload) => sign(null, payload, privateKey), contract: BROKER_CONTRACT,
   jsApp: { name: 'cosyncing-app.js', target: 'universal', size: artifact.size,
     sha256: artifact.sha256, url: 'https://releases.example/cosyncing-app.js',
-    provenanceUrl: 'https://releases.example/cosyncing-app.js.intoto.jsonl', minimumBunVersion: '1.3.8' },
+    provenanceUrl: 'https://releases.example/cosyncing-app.js.intoto.jsonl', minimumBunVersion: '1.3.14' },
   webApp: { name: 'cosyncing-web-app.tar.gz', mount: '/cosy/', size: 100,
     sha256: '1'.repeat(64), url: 'https://releases.example/cosyncing-web-app.tar.gz',
     buildId: '1'.repeat(16), cacheManifestSha256: '2'.repeat(64), mainDartSha256: '3'.repeat(64),
