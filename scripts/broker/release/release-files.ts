@@ -23,9 +23,11 @@ import {
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
   BUN_RELEASE_DOWNLOAD_BASE,
-  MINIMUM_BUN_RUNTIME_VERSION,
+  bunVersionAtLeast,
   PINNED_BUN_RUNTIME_ARCHIVES,
+  PINNED_BUN_RUNTIME_VERSION,
 } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
+import { pinnedReleaseBunRuntime } from '../../../packages/typescript/broker/src/updates/bun-runtime-upgrade.ts';
 import {
   PUBLISHED_SCHEMA_VERSIONS,
   type PublishedBrokerContract,
@@ -593,6 +595,7 @@ function renderBootstraps(options: {
     options.baseUrl,
     options.keyId,
     options.minimumBunVersion,
+    PINNED_BUN_RUNTIME_VERSION,
     options.application.name,
     options.webApp.name,
   ].join('\n');
@@ -603,6 +606,12 @@ function renderBootstraps(options: {
   if (/['\\]/.test(embedded)) throw new Error('bootstrap substitution is not safe to embed');
   if (!/^\d+\.\d+\.\d+$/.test(options.minimumBunVersion)) {
     throw new Error('minimum Bun version is not a release version');
+  }
+  // The Bun the installers place is the one the BUN_TABLE rows are builds of. Below the floor the release
+  // declares, an installer would place a runtime the application it just verified refuses to run under.
+  if (!/^\d+\.\d+\.\d+$/.test(PINNED_BUN_RUNTIME_VERSION)
+      || !bunVersionAtLeast(PINNED_BUN_RUNTIME_VERSION, options.minimumBunVersion)) {
+    throw new Error('pinned Bun version is not a release version at or above the floor');
   }
   // ONE table, both installers. `@PUBLIC_KEY_B64@` is in it and appears only in the shell template:
   // Windows CNG has no Ed25519 algorithm identifier and .NET Framework no implementation, so the
@@ -617,6 +626,7 @@ function renderBootstraps(options: {
     ['@APP_ASSET@', options.application.name],
     ['@WEB_ASSET@', options.webApp.name],
     ['@MINIMUM_BUN@', options.minimumBunVersion],
+    ['@PINNED_BUN@', PINNED_BUN_RUNTIME_VERSION],
     ['@ARTIFACT_TABLE@', artifactTable],
     ['@CLIENT_TABLE@', clientTable],
     ['@BUN_TABLE@', bunTable],
@@ -947,6 +957,11 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
       url: `${releaseBase}/${RELEASE_JAVASCRIPT_APP_NAME}`,
       provenanceUrl: `${releaseBase}/${jsProvenanceName}`,
       minimumBunVersion: jsEvidence.minimumBunVersion,
+      // The pinned Bun table the installers below are rendered from, signed with the release, so an
+      // already-installed broker's `cosy update` can install the runtime THIS release needs. Last in the
+      // object, after `sha256`, and keyed by `asset` rather than `name`, because both installers locate
+      // the application's digest by walking from its `name` to the next `sha256`.
+      bunRuntime: pinnedReleaseBunRuntime(),
     },
     webApp: {
       name: WEB_SIDECAR_NAME,

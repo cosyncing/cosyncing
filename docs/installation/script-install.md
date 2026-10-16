@@ -28,6 +28,76 @@ separate Bun installation.
 0.5.3 is the first release published this way, and the first broker release of
 any kind. Before it the one-liner below had no release to resolve against.
 
+## The Bun runtime
+
+The installers place the release's pinned Bun (1.3.14) inside the state home,
+one directory per Bun version:
+
+| Host | Path |
+| --- | --- |
+| Linux, macOS | `$COSYNCING_HOME/runtime/bun-<version>/bun` |
+| Windows | `%COSYNCING_HOME%\runtime\bun-<version>\bun.exe` |
+
+The archive comes from Bun's own GitHub release and must match the size and
+SHA-256 digest pinned in the installer before it is unpacked. The directory is
+owner-only.
+
+A Bun that is already at the pinned version or newer is reused instead: one on
+`PATH`, or one in `$BUN_INSTALL/bin` (default `~/.bun/bin`), which is where
+earlier installers placed Bun. An older Bun there is left alone, and the pinned
+one is placed beside it. A Bun named by `COSYNCING_BUN_BIN` only has to meet the
+release's minimum (1.3.8), and so does any Bun found when
+`COSYNCING_SKIP_BUN_INSTALL=1` forbids installing one. Nothing is written to
+`$BUN_INSTALL` any more, so re-running an installer never replaces a Bun that a
+running broker is using.
+
+### When a release needs a newer Bun
+
+`cosy update` installs the new release's pinned Bun itself. It downloads the
+archive the signed release manifest names for this host, checks its size and
+SHA-256 digest before unpacking it, and places it next to the runtime in use,
+in the layout above. In the same transaction as the new broker files, it then
+moves the service definition (the systemd unit, the launchd agent or the
+Scheduled Task), the `cosy` and `cosyncing` launchers, and the installer
+receipt to the new runtime. If the new broker fails its health check, the
+update restores the previous broker and the previous runtime together.
+
+The previous runtime stays on disk for that rollback. Older runtimes under
+`runtime/` are removed after a successful update. A Bun outside `runtime/`,
+such as one in `~/.bun`, is never removed.
+
+`cosy update` changes nothing, and reports `release-runtime-upgrade-required`
+with the Bun version it needs, in two cases:
+
+- **The Bun was chosen with `COSYNCING_BUN_BIN`.** `cosy update` does not
+  replace a runtime you selected. Upgrade that Bun, or unset
+  `COSYNCING_BUN_BIN` so the update can install the pinned one. Then run
+  `cosy update` again.
+- **The release has no pinned Bun build for this host.** Install a new-enough
+  Bun from <https://bun.sh>. Then re-run the installer, or run `cosy setup`, so
+  the service uses it.
+
+The broker's update check reports the same state in place of "update
+available", and the client's settings page shows it as **Needs newer Bun**.
+
+### Uninstalling
+
+`cosyncing uninstall` without `--purge-data` removes the runtimes the installer
+and `cosy update` placed under `runtime/`, then the directory itself if nothing
+else is in it. It leaves these in place:
+
+- the runtime `COSYNCING_BUN_BIN` points into;
+- anything in `runtime/` that cosyncing did not place;
+- any Bun outside `runtime/`, such as one in `~/.bun`;
+- on Windows, the runtime running the uninstall, because Windows cannot delete a
+  running program. The uninstall names that folder so you can delete it after
+  the command exits.
+
+With `--purge-data`, the whole state home is removed, including runtimes that
+`COSYNCING_BUN_BIN` points into. On Windows the runtime running the uninstall is
+still left in place and named, so the purge completes instead of failing
+partway.
+
 ## The one-liner
 
 ```bash
@@ -277,13 +347,14 @@ verified.
 | `%USERPROFILE%\.cosyncing\bin\cosyncing-web-<version>` | the web client the broker serves |
 | `%USERPROFILE%\.cosyncing\bin\cosy.cmd` | a shim for typing `cosy` by hand |
 | `%USERPROFILE%\.cosyncing\bootstrap-receipt` | what was installed, and which runtime runs it |
-| `%USERPROFILE%\.bun\bin\bun.exe` | only if the installer had to install Bun |
+| `%USERPROFILE%\.cosyncing\runtime\bun-<version>\bun.exe` | only if the installer had to install Bun; see [the Bun runtime](#the-bun-runtime) |
 | `%LOCALAPPDATA%\cosyncing\client` | the desktop client, `install.ps1` only |
 | `%USERPROFILE%\.cosyncing\client-pairing.json` | the one-use pairing the client reads once, `install.ps1` only |
 | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\cosyncing.lnk` | the Start Menu entry that opens the client, `install.ps1` only |
 
-`COSYNCING_HOME` relocates all of it and must be an absolute path. `BUN_INSTALL` relocates the Bun
-prefix. `COSYNCING_BUN_BIN` names a Bun to use instead of searching. `COSYNCING_SKIP_BUN_INSTALL=1`
+`COSYNCING_HOME` relocates all of it and must be an absolute path. `BUN_INSTALL` names the Bun
+prefix searched for an existing `bin\bun.exe`; the installer never writes there. `COSYNCING_BUN_BIN`
+names a Bun to use instead of searching. `COSYNCING_SKIP_BUN_INSTALL=1`
 forbids installing a runtime, and the installer then refuses rather than placing a bundle the host
 cannot execute.
 
@@ -297,8 +368,10 @@ neither does an `install.ps1` whose input is redirected; `PATH` is not changed, 
 absolute command to run next:
 
 ```powershell
-& "$env:USERPROFILE\.bun\bin\bun.exe" "$env:USERPROFILE\.cosyncing\bin\cosyncing" setup
+& "$env:USERPROFILE\.cosyncing\runtime\bun-1.3.14\bun.exe" "$env:USERPROFILE\.cosyncing\bin\cosyncing" setup
 ```
+
+The first path is the Bun the installer selected, so it differs when an existing Bun was reused.
 
 `setup` registers the per-user Scheduled Task, copies the application into its own versioned service
 root, and prints the broker URL. After that, `cosy.cmd` is the shorthand:
@@ -317,7 +390,8 @@ cosyncing rather than by a package manager, so npm's update path does not apply 
 
 `cosyncing upgrade` is the other way, on Windows as everywhere else. It downloads the next signed
 release, verifies it, switches the application and health-checks the result, restoring the previous
-build if that check fails.
+build if that check fails. When the release needs a newer Bun, it installs that runtime and moves the
+Scheduled Task to it in the same step; see [the Bun runtime](#when-a-release-needs-a-newer-bun).
 
 Windows takes one extra step inside that sequence, because the Scheduled Task does not run
 `%COSYNCING_HOME%\bin\cosyncing` — it runs a versioned copy under

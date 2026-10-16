@@ -13,8 +13,10 @@ export function installerShellPathRegressions(check: Check): void {
   const end = template.indexOf('[ "$(id -u)"');
   if (start < 0 || end <= start) throw new Error('shell registration fixture boundary is missing');
   const ownedStart = template.indexOf('ensure_owned_directory() {');
-  const ownedEnd = template.indexOf('\nensure_owned_directory "$STATE_HOME"', ownedStart);
-  if (ownedStart < 0 || ownedEnd <= ownedStart) throw new Error('owned directory fixture boundary is missing');
+  // The function alone, up to its own closing brace: the installer defines it before the Bun runtime is
+  // placed (that directory is owner-only too), so whatever follows it is installer flow, not registration.
+  const ownedEnd = template.indexOf('\n}\n', ownedStart) + 2;
+  if (ownedStart < 0 || ownedEnd <= ownedStart + 2) throw new Error('owned directory fixture boundary is missing');
   const root = mkdtempSync(join(tmpdir(), 'cosyncing-shell-path-'));
   const originalPath = '/usr/bin:/bin';
   try {

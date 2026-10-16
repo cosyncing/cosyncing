@@ -119,6 +119,7 @@ import {
   type ClaudeModCopyInspection,
   type ClaudeModOutcomeRecord,
 } from './claude-mod-ownership.ts';
+import { bunRuntimesReceipt, ownedBunRuntimesPresent } from './bun-runtime-receipt.ts';
 
 interface FileSnapshot {
   target: string;
@@ -1070,6 +1071,10 @@ function receiptResources(inputs: SetupActionInputs): InstalledResourceRecord[] 
       ownership: { proof: 'receipt' },
     });
   }
+  // The Bun runtime the installer placed before running setup. Only the installers and `cosy update` write
+  // `<home>/runtime/bun-<version>`, so a runtime there is theirs; one the operator chose elsewhere leaves
+  // the directory absent and records nothing.
+  if (ownedBunRuntimesPresent(inputs.home)) resources.push(bunRuntimesReceipt(inputs.home));
   return resources;
 }
 

@@ -253,7 +253,7 @@ import {
 } from '@cosyncing/protocol';
 import { BUILD_INFO, buildFingerprint } from './build-info.ts';
 import { createBrokerClock } from './test-clock.ts';
-import { currentApplicationIdentity } from './application-identity.ts';
+import { BUN_RUNTIME_OVERRIDE_VARIABLE, currentApplicationIdentity } from './application-identity.ts';
 import { serveWebHandoff, WEB_HANDOFF_PATH } from '../artifacts/web-handoff.ts';
 import { controlRefusalCode, driveAttachRefusalCode } from '../sessions/client-message-policy.ts';
 import { canMutateSession, canPromptSession } from '../sessions/session-owner.ts';
@@ -1295,7 +1295,14 @@ const BROKER_DESCRIPTOR = Object.freeze({
   version: BUILD_INFO.version,
   contract: Object.freeze({ ...BROKER_CONTRACT }),
 });
-const brokerUpdateChecker = new BrokerUpdateChecker({ buildInfo: BUILD_INFO });
+// The runtime this broker runs under decides whether a release that raises the Bun floor is an ordinary
+// update (`cosy update` installs the pinned Bun) or one this install must be told it cannot apply itself.
+const brokerUpdateChecker = new BrokerUpdateChecker({
+  buildInfo: BUILD_INFO,
+  ...(APPLICATION_IDENTITY.runtimeVersion ? { runtimeVersion: APPLICATION_IDENTITY.runtimeVersion } : {}),
+  ...(APPLICATION_IDENTITY.runtimePath ? { runtimePath: APPLICATION_IDENTITY.runtimePath } : {}),
+  ...(process.env[BUN_RUNTIME_OVERRIDE_VARIABLE]?.trim() ? { runtimeOverridden: true } : {}),
+});
 const transportPairings = new TransportPairingRegistry({
   broker: BROKER_DESCRIPTOR,
   ttlMs: TRANSPORT_PAIRING_TTL_MS,

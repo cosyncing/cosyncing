@@ -54,7 +54,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: 1.3.8
+  BUN_VERSION: 1.3.14
   FLUTTER_VERSION: 3.44.3
   # Trusted publishing requires npm >= 11.5.1, but `npm stage publish` requires >= 11.15.0; the higher floor
   # is the operative one. Node 22.14.0 is the documented floor for both.

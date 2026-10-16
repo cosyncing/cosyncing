@@ -488,6 +488,8 @@
   "settingsBrokerStatusNotChecked": "未检查",
   "settingsBrokerStatusPackageManaged": "由 npm 管理",
   "settingsBrokerPackageManagedBody": "该服务器以 npm 包的形式安装，不会自行更新。请运行 {updateCommand}（或你所用包管理器的对应命令），然后运行 {setupCommand}。",
+  "settingsBrokerStatusRuntimeUpgradeRequired": "需要更新 Bun",
+  "settingsBrokerRuntimeUpgradeRequiredBody": "有新的 cosyncing 版本（{version}），但它需要更新的 Bun 运行时，而此安装无法自行安装。请在服务器上升级 Bun 或重新运行 cosyncing 安装脚本，然后运行 {updateCommand}。",
   "settingsDesktopBuildUpdateTitle": "有新的桌面版可用",
   "settingsDesktopBuildUpdateBody": "该服务器运行的是 {version}。桌面版不会自动更新，请下载对应的版本。",
   "settingsDesktopBuildUpdateAction": "下载",

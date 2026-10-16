@@ -49,7 +49,8 @@ import {
   inspectPiBridgeOwnership,
   piBridgeOwnershipPrecondition,
 } from '../../src/installation/pi-bridge-ownership.ts';
-import { atomicWriteOwnerOnly } from '../../src/security/secure-files.ts';
+import { atomicWriteOwnerOnly, ensureOwnerOnlyDirectory } from '../../src/security/secure-files.ts';
+import { BUN_RUNTIMES_RESOURCE_ID, bunRuntimesReceipt } from '../../src/installation/bun-runtime-receipt.ts';
 import { readSetupState, writeSetupState } from '../../src/installation/setup-state.ts';
 import { createClackSetupPresenter } from '../../src/installation/setup-presenter.ts';
 import type { SetupTransactionContext } from '../../src/installation/setup-transaction.ts';
@@ -222,6 +223,9 @@ try {
     const zshrc = join(userHome, '.zshrc');
     writeFileSync(bashrc, 'export EDITOR=vim\n', { mode: 0o644 });
     writeFileSync(zshrc, '# zsh\nsetopt AUTO_CD\n', { mode: 0o644 });
+    // The Bun runtime an installer places before it runs setup.
+    ensureOwnerOnlyDirectory(join(m.home, 'runtime', 'bun-1.3.14'));
+    atomicWriteOwnerOnly(join(m.home, 'runtime', 'bun-1.3.14', 'bun'), 'fixture-bun 1.3.14\n', { mode: 0o700 });
 
     const catalog = createSetupActionCatalog(fullActionInputsFor(m));
     const emittedResources: InstalledResourceRecord[] = [];
@@ -248,6 +252,11 @@ try {
         && emittedIds.includes(OPENCODE_SHIM_RC_RESOURCE_IDS.bash)
         && emittedIds.includes(OPENCODE_SHIM_RC_RESOURCE_IDS.zsh),
       emittedIds.join(','));
+    const runtimesReceipt = committed.state.resources.find((resource) => resource.id === BUN_RUNTIMES_RESOURCE_ID);
+    check('setup receipts the runtime directory an installer placed Bun in, and nothing narrower or wider',
+      JSON.stringify(runtimesReceipt) === JSON.stringify(bunRuntimesReceipt(m.home))
+        && runtimesReceipt?.target === join(m.home, 'runtime'),
+      JSON.stringify(runtimesReceipt));
 
     const plan = await inspectUninstall({ ...baseOptions(m), purgeData: false });
     const unhandled = emittedIds.filter((id) => plan.warnings.some((warning) => warning.detailCode === `resource-${id}-preserved`));
@@ -261,6 +270,7 @@ try {
       'pi-bridge', 'omp-bridge', LEGACY_TAILSCALE_RESOURCE_ID,
       ...Object.values(AGENT_SKILL_RESOURCE_IDS),
       OPENCODE_SHIM_RESOURCE_ID, ...Object.values(OPENCODE_SHIM_RC_RESOURCE_IDS),
+      BUN_RUNTIMES_RESOURCE_ID,
     ];
     check('KNOWN_INSTALL_RESOURCE_IDS covers every known resource id constant',
       knownConstants.every((id) => KNOWN_INSTALL_RESOURCE_IDS.has(id)));

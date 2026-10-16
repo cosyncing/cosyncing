@@ -19,6 +19,7 @@ import {
   isDistributionKind,
   MINIMUM_BUN_RUNTIME_VERSION,
   PINNED_BUN_RUNTIME_ARCHIVES,
+  PINNED_BUN_RUNTIME_VERSION,
   requireRuntimePath,
   resolveApplicationIdentity,
   resolveBunRuntime,
@@ -56,7 +57,7 @@ try {
   // global bin symlinks npm creates for both command names, and a separately installed Bun.
   const npmPackageBin = join(root, 'prefix', 'lib', 'node_modules', 'cosyncing', 'bin');
   const globalBin = join(root, 'prefix', 'bin');
-  const bunBin = join(root, 'runtimes', 'bun-1.3.8', 'bin');
+  const bunBin = join(root, 'runtimes', 'bun-1.3.14', 'bin');
   const stateHome = join(root, 'state');
   mkdirSync(npmPackageBin, { recursive: true });
   mkdirSync(globalBin, { recursive: true });
@@ -75,9 +76,14 @@ try {
     writeFileSync(path, `#!/bin/sh\n${script}\n`, { mode: 0o755 });
     return path;
   }
-  const bunRuntime = fakeRuntime(join(bunBin, 'bun'), 'echo 1.3.8+aaaaaaaaaa');
-  // One patch below the floor: the refusal must hold at the boundary, not only for an ancient Bun.
-  const outdatedBun = fakeRuntime(join(root, 'runtimes', 'outdated-bun'), 'echo 1.3.7+aaaaaaaaaa');
+  const bunRuntime = fakeRuntime(join(bunBin, 'bun'), 'echo 1.3.14+aaaaaaaaaa');
+  // One patch below the floor, derived from it: the refusal must hold at the boundary, not only for an
+  // ancient Bun, and must keep holding wherever the floor sits.
+  const [floorMajor, floorMinor, floorPatch] = MINIMUM_BUN_RUNTIME_VERSION.split('.').map(Number) as [number, number, number];
+  if (floorPatch === 0) throw new Error('the floor fixture assumes a nonzero patch version');
+  const belowFloor = `${floorMajor}.${floorMinor}.${floorPatch - 1}`;
+  const outdatedBun = fakeRuntime(join(root, 'runtimes', 'outdated-bun'), `echo ${belowFloor}+aaaaaaaaaa`);
+  const floorBun = fakeRuntime(join(root, 'runtimes', 'floor-bun'), `echo ${MINIMUM_BUN_RUNTIME_VERSION}+aaaaaaaaaa`);
   const silentExecutable = fakeRuntime(join(root, 'runtimes', 'not-bun'), 'exit 0');
   const failingExecutable = fakeRuntime(join(root, 'runtimes', 'broken'), 'exit 3');
   symlinkSync(applicationBundle, join(globalBin, 'cosyncing'));
@@ -248,6 +254,14 @@ try {
     `${overrideProblem(silentExecutable)} / ${overrideProblem(failingExecutable)}`);
   check('a Bun older than the published engines floor is refused rather than warned about',
     overrideProblem(outdatedBun) === 'bun-runtime-outdated', overrideProblem(outdatedBun));
+  check('a Bun exactly at the floor is accepted',
+    overrideProblem(floorBun) === undefined, overrideProblem(floorBun));
+  // The installers place, and releases sign, the pinned version; below the floor it would be a runtime the
+  // application refuses to run under.
+  check('the pinned Bun version is a release version at or above the floor',
+    /^\d+\.\d+\.\d+$/.test(PINNED_BUN_RUNTIME_VERSION)
+      && bunVersionAtLeast(PINNED_BUN_RUNTIME_VERSION, MINIMUM_BUN_RUNTIME_VERSION),
+    `${PINNED_BUN_RUNTIME_VERSION} vs ${MINIMUM_BUN_RUNTIME_VERSION}`);
 
   // The floor is published in `engines.bun` and enforced here. npm only WARNS on an unsatisfied engine and
   // installs anyway, so a manifest number that nothing enforces is documentation, not a requirement.
@@ -266,17 +280,17 @@ try {
   let probes = 0;
   const selfEvident = resolveBunRuntime({
     execPath: bunRuntime,
-    runningVersion: '1.3.8',
-    probe: () => { probes += 1; return '1.3.8'; },
+    runningVersion: '1.3.14',
+    probe: () => { probes += 1; return '1.3.14'; },
   });
   const overrideProbed = resolveBunRuntime({
     execPath: bunRuntime,
     override: outdatedBun,
-    runningVersion: '1.3.8',
-    probe: () => { probes += 1; return '1.3.8'; },
+    runningVersion: '1.3.14',
+    probe: () => { probes += 1; return '1.3.14'; },
   });
   check('the running runtime is trusted without a subprocess, and any other candidate is still probed',
-    probes === 1 && selfEvident.version === '1.3.8' && overrideProbed.path === outdatedBun,
+    probes === 1 && selfEvident.version === '1.3.14' && overrideProbed.path === outdatedBun,
     `${probes} probe(s)`);
 
   // Identity rejects only cross-platform control characters. Provider serializers own their narrower
@@ -288,11 +302,11 @@ try {
   }));
   const colonDirectory = join(root, 'runtimes', 'a:b');
   mkdirSync(colonDirectory, { recursive: true });
-  const colonRuntime = fakeRuntime(join(colonDirectory, 'bun'), 'echo 1.3.8+aaaaaaaaaa');
+  const colonRuntime = fakeRuntime(join(colonDirectory, 'bun'), 'echo 1.3.14+aaaaaaaaaa');
   const colonIdentity = resolveBunRuntime({ execPath: bunRuntime, override: colonRuntime });
   const percentDirectory = join(root, 'runtimes', 'a%b');
   mkdirSync(percentDirectory, { recursive: true });
-  const percentRuntime = fakeRuntime(join(percentDirectory, 'bun'), 'echo 1.3.8+aaaaaaaaaa');
+  const percentRuntime = fakeRuntime(join(percentDirectory, 'bun'), 'echo 1.3.14+aaaaaaaaaa');
   const percentIdentity = resolveBunRuntime({ execPath: bunRuntime, override: percentRuntime });
   check('identity refuses control characters but preserves provider-specific path characters',
     !!unsafeCharacters && colonIdentity.path === colonRuntime && percentIdentity.path === percentRuntime,
@@ -411,7 +425,7 @@ try {
       })));
   // The installers digest-pin every artifact they place; the runtime that executes them is held to the same
   // rule, so the table they render from has to be complete and well-formed for every host they support.
-  // Nothing offline can prove these digests belong to MINIMUM_BUN_RUNTIME_VERSION — Bun's asset names carry
+  // Nothing offline can prove these digests belong to PINNED_BUN_RUNTIME_VERSION — Bun's asset names carry
   // no version — so what is checkable is asserted, and the binding stays a review obligation. Deliberately
   // NOT a comparison against digests restated in this file: a fixture authored from the same keystrokes as
   // the value under test proves only that both were typed the same way. The pins are diffed against Bun's

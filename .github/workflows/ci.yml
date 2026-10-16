@@ -14,9 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Tests run on a newer Bun than the 1.3.8 floor: 1.3.8 intermittently livelocks while loading a
-  # module graph or bundling (13 stalls in 18,500 fresh processes, 0 on 1.3.14), which was the cause
-  # of the zero-output timeouts. Release workflows still build and verify on the floor.
+  # The pinned Bun the installers place, and what every workflow builds, tests and releases on. The
+  # floor stays 1.3.8 for the updater bridge release, but 1.3.8 intermittently livelocks while loading
+  # a module graph or bundling (13 stalls in 18,500 fresh processes, 0 on 1.3.14), which was the
+  # cause of the zero-output timeouts.
   BUN_VERSION: 1.3.14
   FLUTTER_VERSION: 3.44.3
   NODE_VERSION: 22.14.0

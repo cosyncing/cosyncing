@@ -37,7 +37,25 @@ import {
 } from '../installation/install-state.ts';
 import { acquireInstallationLock, type InstallationLockHandle } from '../installation/installation-lock.ts';
 import { claudeModRefreshEnvironment } from '../installation/claude-mod-ownership.ts';
-import { planServiceWebEnvironment, ServiceWebEnvironmentError, validServiceWebChanges, writeServiceWebEnvironment, type ServiceWebEnvironmentChange } from '../installation/service-web-environment.ts';
+import { bunRuntimesReceipt, ownedBunRuntimesPresent } from '../installation/bun-runtime-receipt.ts';
+import { planServiceRuntimeEnvironment, planServiceWebEnvironment, ServiceWebEnvironmentError, validServiceWebChanges, writeServiceWebEnvironment, type ServiceWebEnvironmentChange } from '../installation/service-web-environment.ts';
+import {
+  bunRuntimeHost,
+  installBunRuntime,
+  ownedBunRuntimePath,
+  planBunRuntimeUpgrade,
+  planLauncherRuntimeChanges,
+  pruneOwnedBunRuntimes,
+  removeAbandonedBunRuntime,
+  validLauncherChanges,
+  validReleaseBunRuntime,
+  writeLauncherChanges,
+  type BunRuntimeUpgradePlan,
+  type InstalledBunRuntime,
+  type LauncherRuntimeChange,
+  type ReleaseBunRuntime,
+} from './bun-runtime-upgrade.ts';
+import type { BunRuntimeProbe } from '../runtime/application-identity.ts';
 import { readSetupState } from '../installation/setup-state.ts';
 import { windowsServiceInstallPaths } from '../installation/windows-service-install.ts';
 import type {
@@ -66,6 +84,8 @@ export const RELEASE_MANIFEST_SCHEMA_VERSION = 1 as const;
 export const UPGRADE_JOURNAL_SCHEMA_VERSION = 1 as const;
 export const MAX_RELEASE_MANIFEST_BYTES = 256 * 1024;
 export const MAX_RELEASE_ARTIFACT_BYTES = 256 * 1024 * 1024;
+/** A pinned Bun archive is ~35 MB, so it gets far longer than the 30 s a manifest or bundle does. */
+const BUN_RUNTIME_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * Ceiling on the delegated Claude mod refresh. Longer than the 15 s a version probe gets: this child
@@ -137,6 +157,15 @@ export interface ReleaseJavaScriptApp {
    * down. Carried inside the SIGNED manifest so the floor cannot be lowered by whoever serves the download.
    */
   minimumBunVersion: string;
+  /**
+   * The official Bun archives, per installer host, for a Bun that meets {@link minimumBunVersion}: the same
+   * pinned table the release's installers carry, signed with the release.
+   *
+   * It has to travel WITH the release because the updater that needs it is always the older build: its own
+   * compiled pins describe the runtime it was built for, not the one this release requires. Absent from
+   * manifests published before `cosy update` could install a runtime; old updaters ignore it.
+   */
+  bunRuntime?: ReleaseBunRuntime;
 }
 
 /** Accepted Android client carried by the stable release channel.
@@ -187,6 +216,11 @@ export interface VerifiedRelease {
 
 export interface ReleaseUpdateCheckResult {
   schemaVersion: 1;
+  /**
+   * `unknown` with `detailCode: release-runtime-upgrade-required` (and `latestVersion` set) is a newer
+   * release this install cannot apply until its Bun is upgraded by hand -- reported as that, never as a
+   * plain `update-available` that would only fail when tried.
+   */
   status: 'current' | 'update-available' | 'unknown';
   currentVersion: string;
   latestVersion?: string;
@@ -201,6 +235,13 @@ export interface ReleaseUpdateCheckDependencies {
   trustedKeys?: Readonly<Record<string, string>>;
   fetch?: typeof fetch;
   now?: () => Date;
+  /** The Bun executing this build, as it reported itself; compared against a release's signed floor. */
+  runtimeVersion?: string;
+  runtimePath?: string;
+  /** True when that runtime was chosen with COSYNCING_BUN_BIN, which `cosy update` never replaces. */
+  runtimeOverridden?: boolean;
+  /** Installer host key for the pinned runtime table. Defaults to this process's platform and arch. */
+  runtimeHost?: string;
 }
 
 export interface UpgradeServiceController {
@@ -215,7 +256,10 @@ export interface UpgradeServiceController {
    * whose unit execs the installed binary directly.
    */
   versions?: DurableServiceVersions;
-  /** Reload a launchd definition after its journaled environment changed. */
+  /**
+   * Make the service manager re-read a definition file the transaction just rewrote: launchd's plist after
+   * its environment or program arguments changed, systemd's unit after its `ExecStart=` runtime moved.
+   */
   reloadDefinition?: (wasActive: boolean) => Promise<void>;
 }
 
@@ -268,8 +312,48 @@ interface UpgradeJournal {
   authorizationFenceWasActive?: boolean;
   /** Absent on a host that keeps no versioned service root, and on every journal written before it did. */
   serviceVersion?: DurableServiceVersionRecord;
+  /**
+   * Service files rewritten through journaled before/after pairs: the web pin and, with a runtime switch,
+   * the runtime the definition and its PATH name. The field kept its original name so a journal written by
+   * an earlier build still recovers.
+   */
   serviceWebEnvironment?: ServiceWebEnvironmentChange[];
+  /** Present when this upgrade also moves the service and launchers to a newly installed Bun runtime. */
+  runtime?: UpgradeRuntimeSwitch;
   updatedAt: string;
+}
+
+/** Everything needed to undo a runtime switch from a later process. */
+interface UpgradeRuntimeSwitch {
+  /** The runtime the service named before the switch. Never touched by the switch, so always restorable. */
+  fromPath: string;
+  /** The owned runtime the switch moves to: exactly `<home>/runtime/bun-<toVersion>/bun`. */
+  toPath: string;
+  toVersion: string;
+  /** True when this transaction created `toPath`'s directory, so abandoning the switch removes it. */
+  installed: boolean;
+  /** The bootstrap receipt's `runtime=` before the switch, when the install has that receipt. */
+  receiptRuntime?: string;
+  /** The installer's command launchers, before and after. */
+  launchers: LauncherRuntimeChange[];
+}
+
+function validAbsoluteRuntimePath(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\0\r\n]/.test(value)
+    && (isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value));
+}
+
+function validRuntimeSwitch(value: unknown, home: string): value is UpgradeRuntimeSwitch {
+  if (!plainObject(value)) return false;
+  const keys = ['fromPath', 'toPath', 'toVersion', 'installed', 'receiptRuntime', 'launchers'];
+  return Object.keys(value).every((key) => keys.includes(key))
+    && validAbsoluteRuntimePath(value.fromPath)
+    && typeof value.toVersion === 'string' && /^\d+\.\d+\.\d+$/.test(value.toVersion)
+    && typeof value.toPath === 'string'
+    && resolve(value.toPath) === resolve(ownedBunRuntimePath(home, value.toVersion))
+    && typeof value.installed === 'boolean'
+    && (value.receiptRuntime === undefined || validAbsoluteRuntimePath(value.receiptRuntime))
+    && validLauncherChanges(value.launchers, home);
 }
 
 interface BootstrapReceipt {
@@ -295,6 +379,17 @@ export interface UpgradeDependencies {
    */
   runtimePath?: string;
   runtimeVersion?: string;
+  /**
+   * True when that runtime was chosen with COSYNCING_BUN_BIN. An operator-pinned runtime is never replaced:
+   * a release whose floor it does not meet is refused with instructions instead.
+   */
+  runtimeOverridden?: boolean;
+  /** Installer host key for the pinned runtime table; defaults to the bootstrap receipt's, then this process's. */
+  runtimeHost?: string;
+  /** How a newly installed runtime proves it runs here. Defaults to spawning `--revision`. Tests inject it. */
+  runtimeProbe?: BunRuntimeProbe;
+  /** Host facts that order the pinned builds (musl, AVX2). Defaults to probing this host. */
+  runtimeFacts?: { musl?: boolean; avx2?: boolean };
   manifestUrl?: string;
   trustedKeys?: Readonly<Record<string, string>>;
   fetch?: typeof fetch;
@@ -417,7 +512,11 @@ function validReleaseJavaScriptApp(value: unknown): value is ReleaseJavaScriptAp
     && safeHttpsUrl(value.url)
     && safeHttpsUrl(value.provenanceUrl)
     && typeof value.minimumBunVersion === 'string'
-    && /^\d+\.\d+\.\d+$/.test(value.minimumBunVersion);
+    && /^\d+\.\d+\.\d+$/.test(value.minimumBunVersion)
+    // Pins that could not satisfy the floor they travel with are a malformed release, not a fallback.
+    && (value.bunRuntime === undefined
+      || (validReleaseBunRuntime(value.bunRuntime)
+        && bunVersionAtLeast(value.bunRuntime.version, value.minimumBunVersion)));
 }
 
 function validReleaseAndroidApp(value: unknown): value is ReleaseAndroidApp {
@@ -541,7 +640,12 @@ function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-async function boundedDownload(fetcher: typeof fetch, url: string, maximum: number): Promise<Uint8Array> {
+async function boundedDownload(
+  fetcher: typeof fetch,
+  url: string,
+  maximum: number,
+  timeoutMs = 30_000,
+): Promise<Uint8Array> {
   if (!safeHttpsUrl(url)) throw new Error('release-url-invalid');
   let response: Response;
   try {
@@ -550,7 +654,7 @@ async function boundedDownload(fetcher: typeof fetch, url: string, maximum: numb
       // GitHub release assets, including /releases/latest/download, redirect to an immutable HTTPS
       // asset URL. No credentials are sent, and the manifest signature/artifact hash remain authoritative.
       redirect: 'follow',
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
     throw new Error('release-download-unavailable');
@@ -607,6 +711,8 @@ export interface UpgradeCandidate {
   expectedDistribution: DistributionKind;
   /** Present only for a JavaScript candidate, whose interpreter is external and can be too old. */
   minimumBunVersion?: string;
+  /** The release's own signed runtime pins, when it carries them. */
+  bunRuntime?: ReleaseBunRuntime;
 }
 
 /**
@@ -635,6 +741,7 @@ export function verifyUpgradeCandidate(options: {
       url: jsApp.url,
       expectedDistribution: 'bootstrap-js',
       minimumBunVersion: jsApp.minimumBunVersion,
+      ...(jsApp.bunRuntime ? { bunRuntime: jsApp.bunRuntime } : {}),
     };
   }
   const verified = verifyReleaseManifest({
@@ -849,6 +956,11 @@ function compareVersions(left: string, right: string): number {
   return 0;
 }
 
+/** The installer host whose pinned runtime this machine would install: an explicit one, else this process's. */
+function runtimeHostFor(explicit?: string): string | undefined {
+  return explicit ?? bunRuntimeHost();
+}
+
 /**
  * Metadata-only stable-channel probe. It verifies the same signed manifest and target binding as
  * upgrade, but never downloads an artifact and never throws for channel/network failures.
@@ -894,6 +1006,31 @@ export async function checkReleaseUpdate(
       trustedKeys,
     });
     const comparison = compareVersions(verified.manifest.version, currentVersion);
+    // A newer release that needs a newer Bun is still an ordinary update where `cosy update` installs that
+    // Bun itself. Where it cannot -- the operator pinned the runtime -- offering the update would only
+    // produce a refusal, so the check says which state this is instead.
+    if (comparison > 0) {
+      const runtime = planBunRuntimeUpgrade({
+        ...(verified.minimumBunVersion ? { minimumBunVersion: verified.minimumBunVersion } : {}),
+        ...(dependencies.runtimeVersion ? { runtimeVersion: dependencies.runtimeVersion } : {}),
+        ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
+        runtimeOverridden: dependencies.runtimeOverridden === true,
+        ...(verified.bunRuntime ? { releaseRuntime: verified.bunRuntime } : {}),
+        ...(runtimeHostFor(dependencies.runtimeHost) ? { host: runtimeHostFor(dependencies.runtimeHost)! } : {}),
+        toVersion: verified.manifest.version,
+      });
+      if (runtime.kind === 'refused') {
+        return {
+          schemaVersion: 1,
+          status: 'unknown',
+          currentVersion,
+          latestVersion: verified.manifest.version,
+          publishedAt: verified.manifest.publishedAt,
+          checkedAt,
+          detailCode: runtime.detailCode,
+        };
+      }
+    }
     return {
       schemaVersion: 1,
       status: comparison > 0 ? 'update-available' : 'current',
@@ -1049,6 +1186,7 @@ function writeBootstrapReceipt(
   targetPath: string,
   version: string,
   installedSha256: string,
+  runtime: string = receipt?.runtime ?? '',
 ): void {
   if (!receipt) return;
   const webRoot = join(dirname(targetPath), `cosyncing-web-${version}`);
@@ -1061,7 +1199,7 @@ function writeBootstrapReceipt(
     `host=${receipt.host}`,
     `application=${receipt.application}`,
     `webRoot=${webRoot}`,
-    `runtime=${receipt.runtime}`,
+    `runtime=${runtime}`,
     `sha256=${installedSha256}`,
     '',
   ].join('\n'), { mode: 0o600 });
@@ -1078,8 +1216,12 @@ function validServiceVersionRecord(value: unknown): boolean {
   if (!plainObject(value)) return false;
   const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
   const identifiers = ['installationId', 'fromVersionKey', 'toVersionKey'] as const;
+  const runtimes = ['fromRuntimePath', 'toRuntimePath'] as const;
   return identifiers.every((key) => typeof value[key] === 'string' && safeId.test(value[key] as string))
-    && Object.keys(value).every((key) => (identifiers as readonly string[]).includes(key));
+    // A runtime switch names both ends or neither: restoring needs the runtime to move the task back to.
+    && ((value.fromRuntimePath === undefined) === (value.toRuntimePath === undefined))
+    && runtimes.every((key) => value[key] === undefined || validAbsoluteRuntimePath(value[key]))
+    && Object.keys(value).every((key) => ([...identifiers, ...runtimes] as readonly string[]).includes(key));
 }
 
 /**
@@ -1139,6 +1281,7 @@ function parseJournal(home: string, targetPath: string): UpgradeJournal | undefi
       || (value.authorizationFenceWasActive !== undefined
         && typeof value.authorizationFenceWasActive !== 'boolean')
       || (value.serviceVersion !== undefined && !validServiceVersionRecord(value.serviceVersion))
+      || (value.runtime !== undefined && !validRuntimeSwitch(value.runtime, home))
       || (value.serviceWebEnvironment !== undefined && (() => {
         const install = inspectInstallState(home);
         return !install.committed || !validServiceWebChanges(value.serviceWebEnvironment, install.state);
@@ -1147,6 +1290,11 @@ function parseJournal(home: string, targetPath: string): UpgradeJournal | undefi
     throw new Error('upgrade-journal-malformed');
   }
   return value as unknown as UpgradeJournal;
+}
+
+/** A rewritten definition the service manager must be told to re-read before the next start. */
+function definitionReloadNeeded(change: ServiceWebEnvironmentChange): boolean {
+  return change.resource.id === 'service-launchd' || change.resource.id === 'service-systemd';
 }
 
 function unlinkRegular(path: string): void {
@@ -1222,7 +1370,13 @@ async function recoverUpgrade(options: {
   }
   if (journal.serviceWebEnvironment) {
     for (const record of writeServiceWebEnvironment(journal.serviceWebEnvironment, true)) resources.set(record.id, record);
-    if (journal.serviceWebEnvironment.some((change) => change.resource.id === 'service-launchd')) await options.service?.reloadDefinition?.(journal.serviceWasActive);
+    if (journal.serviceWebEnvironment.some((change) => definitionReloadNeeded(change))) await options.service?.reloadDefinition?.(journal.serviceWasActive);
+  }
+  // The launchers go back to the runtime they named. Best effort: a launcher an operator has since edited
+  // is theirs, and the runtime it names is kept below so it still starts.
+  let launchersRestored = true;
+  if (journal.runtime) {
+    try { writeLauncherChanges(journal.runtime.launchers, true); } catch { launchersRestored = false; }
   }
   const installer = plainObject(install.state.installer) ? install.state.installer : {};
   writeInstallState({
@@ -1235,8 +1389,14 @@ async function recoverUpgrade(options: {
     journal.targetPath,
     journal.fromVersion,
     journal.previousSha256,
+    journal.runtime?.receiptRuntime ?? bootstrapReceipt?.runtime,
   );
   if (journal.serviceWasActive && options.service) await options.service.start();
+  // Nothing names the abandoned runtime any more. Removing it can fail on Windows when the process running
+  // this recovery is executing from it; an unreferenced runtime is inert and the next update reuses it.
+  if (journal.runtime?.installed && launchersRestored) {
+    try { removeAbandonedBunRuntime(options.home, journal.runtime.toPath); } catch { /* inert */ }
+  }
   unlinkRegular(journal.stagingPath);
   // The journal goes before the rollback copy it names. Removing the copy first would leave a journal
   // whose recovery source is missing, and the NEXT run reads that as a failed recovery needing manual
@@ -1565,6 +1725,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     }
     let candidate: UpgradeCandidate;
     let artifactBytes: Uint8Array;
+    let runtimePlan: BunRuntimeUpgradePlan = { kind: 'satisfied' };
     try {
       const manifestBytes = await boundedDownload(dependencies.fetch ?? fetch, manifestUrl, MAX_RELEASE_MANIFEST_BYTES);
       let manifestValue: unknown;
@@ -1582,11 +1743,24 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       }
       if (compareVersions(candidate.manifest.version, fromVersion) < 0) throw new Error('release-downgrade-refused');
       // The interpreter floor is checked BEFORE the download, and against the version the running runtime
-      // reported. A JavaScript release may raise the Bun it needs; installing one whose floor this host
-      // cannot meet would swap in a bundle that fails at exec, after the service has already been stopped.
-      if (candidate.minimumBunVersion
-          && !bunVersionAtLeast(dependencies.runtimeVersion ?? '', candidate.minimumBunVersion)) {
-        throw new Error('release-runtime-too-old');
+      // reported. A JavaScript release may raise the Bun it needs; swapping in a bundle whose floor this
+      // host cannot meet would fail at exec, after the service has already been stopped. So either this
+      // update installs the release's pinned Bun as part of the same transaction, or -- where the runtime is
+      // not cosyncing's to replace -- it stops here and says exactly what to do.
+      runtimePlan = javaScriptCandidate
+        ? planBunRuntimeUpgrade({
+          ...(candidate.minimumBunVersion ? { minimumBunVersion: candidate.minimumBunVersion } : {}),
+          ...(dependencies.runtimeVersion ? { runtimeVersion: dependencies.runtimeVersion } : {}),
+          ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
+          runtimeOverridden: dependencies.runtimeOverridden === true,
+          ...(candidate.bunRuntime ? { releaseRuntime: candidate.bunRuntime } : {}),
+          ...(runtimeHostFor(dependencies.runtimeHost ?? bootstrapReceipt?.host)
+            ? { host: runtimeHostFor(dependencies.runtimeHost ?? bootstrapReceipt?.host)! } : {}),
+          toVersion: candidate.manifest.version,
+        })
+        : { kind: 'satisfied' };
+      if (runtimePlan.kind === 'refused') {
+        return result('blocked', 1, runtimePlan.detailCode, runtimePlan.summary, fromVersion, recovered, candidate.manifest.version);
       }
       artifactBytes = await boundedDownload(dependencies.fetch ?? fetch, candidate.url, MAX_RELEASE_ARTIFACT_BYTES);
       if (artifactBytes.byteLength !== candidate.size) throw new Error('release-artifact-size-mismatch');
@@ -1597,6 +1771,34 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     }
 
     const toVersion = candidate.manifest.version;
+    // The release's pinned Bun, placed next to the runtime in use and verified before it is unpacked.
+    // Still before the journal: a failure here leaves the service, the broker and every launcher exactly
+    // as they were, and removes the directory this run created.
+    let runtimeInstall: InstalledBunRuntime | undefined;
+    if (runtimePlan.kind === 'install') {
+      try {
+        runtimeInstall = await installBunRuntime({
+          home: dependencies.home,
+          version: runtimePlan.version,
+          archives: runtimePlan.archives,
+          download: (url, maximum) => boundedDownload(dependencies.fetch ?? fetch, url, maximum, BUN_RUNTIME_DOWNLOAD_TIMEOUT_MS),
+          ...(dependencies.runtimeProbe ? { probe: dependencies.runtimeProbe } : {}),
+          ...(dependencies.runtimeFacts ? { facts: dependencies.runtimeFacts } : {}),
+          ...(dependencies.runtimePath ? { currentRuntimePath: dependencies.runtimePath } : {}),
+        });
+      } catch (error) {
+        return result('failed', 1, error instanceof Error ? error.message : 'release-runtime-install-failed',
+          `The Bun ${runtimePlan.version} runtime this release needs could not be downloaded, verified or run here; `
+            + 'nothing was changed.', fromVersion, recovered, toVersion);
+      }
+    }
+    // The runtime the candidate is exercised with and, after the switch, the one the service runs.
+    const effectiveRuntimePath = runtimeInstall?.path ?? dependencies.runtimePath;
+    /** Undo the runtime install of a transaction that never reached its journal. */
+    const abandonRuntime = (): void => {
+      if (!runtimeInstall?.installed) return;
+      try { removeAbandonedBunRuntime(dependencies.home, runtimeInstall.path); } catch { /* inert, reused next time */ }
+    };
     const binDirectory = dirname(targetPath);
     const stagingPath = join(binDirectory, `${PRODUCT_IDENTITY.primaryBinary}.staging-${toVersion}`);
     const previousPath = join(binDirectory, `${PRODUCT_IDENTITY.primaryBinary}.previous`);
@@ -1609,8 +1811,8 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       // install records and the service runs under. Hand it to that exact runtime instead, so the check
       // proves the pair that will actually run rather than the bundle alone.
       const runCandidate = dependencies.runBinary ?? defaultRunBinary;
-      const selfCheck = javaScriptCandidate && dependencies.runtimePath
-        ? await runCandidate(dependencies.runtimePath, [stagingPath, 'version', '--json'])
+      const selfCheck = javaScriptCandidate && effectiveRuntimePath
+        ? await runCandidate(effectiveRuntimePath, [stagingPath, 'version', '--json'])
         : await runCandidate(stagingPath, ['version', '--json']);
       let selfCheckBuild: Record<string, unknown> | undefined;
       try { selfCheckBuild = JSON.parse(selfCheck.stdout) as Record<string, unknown>; } catch { /* handled below */ }
@@ -1631,6 +1833,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       }
     } catch (error) {
       try { unlinkRegular(stagingPath); } catch { /* report original pre-switch failure */ }
+      abandonRuntime();
       return result('failed', 1, error instanceof Error ? error.message : 'release-offline-self-check-failed', 'The candidate failed its offline self-check; the installed binary was not changed.', fromVersion, recovered, toVersion);
     }
 
@@ -1639,9 +1842,14 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     // the switch would turn an unreadable pointer into a rollback rather than a refusal.
     let activation: DurableServiceVersionActivation | undefined;
     try {
-      activation = candidateBuild ? dependencies.service?.versions?.plan(candidateBuild) : undefined;
+      activation = candidateBuild
+        ? dependencies.service?.versions?.plan(candidateBuild, runtimeInstall && dependencies.runtimePath
+          ? { fromRuntimePath: dependencies.runtimePath, toRuntimePath: runtimeInstall.path }
+          : undefined)
+        : undefined;
     } catch (error) {
       try { unlinkRegular(stagingPath); } catch { /* report the original pre-switch failure */ }
+      abandonRuntime();
       return result(
         'blocked',
         1,
@@ -1654,6 +1862,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     }
 
     let webPlan: ReturnType<typeof planServiceWebEnvironment>;
+    let runtimeSwitch: UpgradeRuntimeSwitch | undefined;
     try {
       webPlan = planServiceWebEnvironment({
         state: installState,
@@ -1662,8 +1871,32 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         versionedService: !!activation,
         ...(activation ? { versionedInstallerRoot: windowsServiceInstallPaths(dependencies.home, activation.record.fromVersionKey).webRoot } : {}),
       });
+      // The runtime moves in the same files, composed onto the web pin so each file has ONE before/after.
+      if (runtimeInstall) {
+        const serviceRuntime = planServiceRuntimeEnvironment({
+          state: installState,
+          changes: webPlan.changes,
+          executablePath: targetPath,
+          toRuntime: runtimeInstall.path,
+        });
+        webPlan = { ...webPlan, changes: serviceRuntime.changes };
+        const launchers = planLauncherRuntimeChanges({
+          home: dependencies.home,
+          applicationPath: targetPath,
+          toRuntime: runtimeInstall.path,
+        });
+        runtimeSwitch = {
+          fromPath: serviceRuntime.fromRuntime ?? bootstrapReceipt?.runtime ?? dependencies.runtimePath ?? runtimeInstall.path,
+          toPath: runtimeInstall.path,
+          toVersion: runtimeInstall.version,
+          installed: runtimeInstall.installed,
+          ...(bootstrapReceipt ? { receiptRuntime: bootstrapReceipt.runtime } : {}),
+          launchers,
+        };
+      }
     } catch (error) {
       unlinkRegular(stagingPath);
+      abandonRuntime();
       return result('blocked', 1, error instanceof Error ? error.message : 'upgrade-service-environment-invalid',
         error instanceof ServiceWebEnvironmentError
           ? `The service file "${error.target}" could not be safely updated. Run cosy setup to reconcile it.`
@@ -1683,6 +1916,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         });
       } catch (error) {
         try { unlinkRegular(stagingPath); } catch { /* report the original pre-switch failure */ }
+        abandonRuntime();
         return result('failed', 1, error instanceof Error ? error.message : 'release-web-sidecar-failed', 'The paired web client failed verification or could not be installed; the installed build was not changed.', fromVersion, recovered, toVersion);
       }
     }
@@ -1715,6 +1949,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       authorizationFenceWasActive,
       ...(serviceVersion ? { serviceVersion } : {}),
       ...(webPlan.changes.length ? { serviceWebEnvironment: webPlan.changes } : {}),
+      ...(runtimeSwitch ? { runtime: runtimeSwitch } : {}),
       updatedAt: now(),
     });
     try {
@@ -1728,7 +1963,8 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       journalAt('switching');
       atomicWriteOwnerOnly(targetPath, readFileSync(stagingPath), { mode: 0o700 });
       writeServiceWebEnvironment(webPlan.changes);
-      if (webPlan.changes.some((change) => change.resource.id === 'service-launchd')) await dependencies.service?.reloadDefinition?.(serviceWasActive);
+      if (runtimeSwitch) writeLauncherChanges(runtimeSwitch.launchers);
+      if (webPlan.changes.some(definitionReloadNeeded)) await dependencies.service?.reloadDefinition?.(serviceWasActive);
       journalAt('switched');
       if (dependencies.faultAfter === 'binary-switched') throw new Error('upgrade-fixture-interrupted');
       // Replacing the binary is the whole of a version change only where the service execs it. On Windows
@@ -1774,12 +2010,23 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         // The version root and its environment file move with the binary, in the same write. A root left
         // on disk without its receipt is the same defect a rollback used to leave behind, in a new place.
         [...(serviceVersion ? dependencies.service?.versions?.resources(serviceVersion.toVersionKey) ?? [] : []),
-          ...webPlan.changes.map(({ resource, after }) => ({ ...resource, ownership: { ...resource.ownership, installedSha256: sha256(Buffer.from(after)) } }))],
+          ...webPlan.changes.map(({ resource, after }) => ({ ...resource, ownership: { ...resource.ownership, installedSha256: sha256(Buffer.from(after)) } })),
+          // The runtime directory joins the receipt in the same write that commits the switch to it, so a
+          // non-purge uninstall takes back a runtime an update placed exactly as one the installer placed.
+          ...(ownedBunRuntimesPresent(dependencies.home) ? [bunRuntimesReceipt(dependencies.home)] : [])],
       ), dependencies.home);
-      writeBootstrapReceipt(bootstrapReceipt, targetPath, toVersion, candidate.sha256);
+      writeBootstrapReceipt(bootstrapReceipt, targetPath, toVersion, candidate.sha256, runtimeSwitch?.toPath ?? bootstrapReceipt?.runtime);
       if (dependencies.faultAfter === 'receipt-committed') throw new Error('upgrade-fixture-interrupted');
       unlinkRegular(stagingPath);
       unlinkRegular(upgradeJournalPath(dependencies.home));
+      // Committed: the runtime now in use and the one it replaced stay -- as does the one running this
+      // command, if that is yet another -- and any older owned runtime goes.
+      if (runtimeSwitch) {
+        try {
+          pruneOwnedBunRuntimes(dependencies.home, [runtimeSwitch.toPath, runtimeSwitch.fromPath,
+            ...(dependencies.runtimePath ? [dependencies.runtimePath] : [])]);
+        } catch { /* inert */ }
+      }
       // Only once the upgrade is committed, and only web roots no version in play still needs.
       if (javaScriptCandidate) pruneReleaseWebRoots(targetPath, [toVersion, fromVersion], webPlan.pinnedRoot);
       // Strictly after the journal is gone: until that moment the superseded root is what a recovery
@@ -1805,7 +2052,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         targetPath,
         toVersion,
         javaScriptCandidate,
-        ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
+        ...(effectiveRuntimePath ? { runtimePath: effectiveRuntimePath } : {}),
         runBinary: dependencies.runBinary ?? defaultRunBinary,
         env: dependencies.env ?? process.env,
       });
@@ -1851,6 +2098,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         if (serviceWasActive && dependencies.service) await dependencies.service.stop();
       } catch { /* the restore below is still the best available outcome */ }
       let rollbackComplete = false;
+      let launchersRestored = true;
       try {
         if (sha256(previousBytes) !== previousSha256) throw new Error('rollback-binary-mismatch');
         atomicWriteOwnerOnly(targetPath, previousBytes, { mode: 0o700 });
@@ -1861,7 +2109,12 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           await dependencies.service.versions.restore(serviceVersion);
         }
         writeServiceWebEnvironment(webPlan.changes, true);
-        if (webPlan.changes.some((change) => change.resource.id === 'service-launchd')) await dependencies.service?.reloadDefinition?.(serviceWasActive);
+        if (webPlan.changes.some(definitionReloadNeeded)) await dependencies.service?.reloadDefinition?.(serviceWasActive);
+        // Best effort, like recovery: a launcher an operator edited since is theirs, and the runtime it
+        // names is then kept so it still starts.
+        if (runtimeSwitch) {
+          try { writeLauncherChanges(runtimeSwitch.launchers, true); } catch { launchersRestored = false; }
+        }
         // The pre-upgrade state, minus the rollback copy this run overwrote and removes below. Restoring
         // it unchanged would republish a receipt that measures bytes the copy no longer holds: after one
         // successful upgrade `broker-binary-previous` names the build before THAT one, and this run wrote
@@ -1870,7 +2123,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           previousWritten ? withoutPreviousBinaryReceipt(installState) : installState,
           dependencies.home,
         );
-        writeBootstrapReceipt(bootstrapReceipt, targetPath, fromVersion, previousSha256);
+        writeBootstrapReceipt(bootstrapReceipt, targetPath, fromVersion, previousSha256, runtimeSwitch?.receiptRuntime ?? bootstrapReceipt?.runtime);
         if (serviceWasActive && dependencies.service) await dependencies.service.start();
         unlinkRegular(stagingPath);
         // The journal goes before the rollback copy it names, for the same reason it does in recovery.
@@ -1882,6 +2135,8 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         try {
           removeOwnedDirectory(abandonedCandidateWebRoot(targetPath, toVersion));
         } catch { /* an unreferenced web root is inert; never fail a completed rollback for one */ }
+        // The service and launchers run the previous runtime again; the one this run installed is unowned.
+        if (launchersRestored) abandonRuntime();
         rollbackComplete = true;
       } catch {
         rollbackComplete = false;

@@ -286,7 +286,7 @@ Broker는 여러분의 컴퓨터에서, 여러분의 계정 권한으로 실행�
 
 ## 개발
 
-저장소는 `.fvmrc`에 Flutter 3.44.3을, `package.json`에 Bun 1.3.8을 고정합니다. 명령은 저장소
+저장소는 `.fvmrc`에 Flutter 3.44.3을, `package.json`에 Bun 1.3.14을 고정합니다. 명령은 저장소
 루트에서 실행하세요.
 
 ```bash

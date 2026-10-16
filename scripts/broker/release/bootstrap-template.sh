@@ -11,11 +11,13 @@ P256_PUBLIC_KEY_B64='@P256_PUBLIC_KEY_B64@'
 # The JavaScript application bundle and the web client sidecar this release publishes.
 APP_ASSET='@APP_ASSET@'
 WEB_ASSET='@WEB_ASSET@'
-# The oldest Bun this release's bundle was built and tested against.
+# The oldest Bun this release's bundle runs under: the floor the broker itself enforces.
 MINIMUM_BUN='@MINIMUM_BUN@'
+# The Bun this installer places, which every BUN_TABLE build is. Never below MINIMUM_BUN.
+PINNED_BUN='@PINNED_BUN@'
 # One row per artifact this installer places: "<name> <sha256> <size>".
 ARTIFACT_TABLE='@ARTIFACT_TABLE@'
-# Official Bun builds for MINIMUM_BUN, most likely first: "<host> <asset> <sha256>".
+# Official Bun builds for PINNED_BUN, most likely first: "<host> <asset> <sha256>".
 BUN_TABLE='@BUN_TABLE@'
 BUN_RELEASE_BASE='@BUN_RELEASE_BASE@'
 # What this installer installs. `all` places the desktop GUI client too, runs setup, and hands the client
@@ -306,8 +308,10 @@ CLIENT_PLACED=''
 CLIENT_RECEIPT_COMMITTED=''
 STAGED_DESKTOP=''
 STAGED_PAIRING=''
+STAGED_RUNTIME=''
 cleanup() {
   rm -rf "$WORK"
+  [ -z "$STAGED_RUNTIME" ] || rm -rf "$STAGED_RUNTIME"
   [ -z "$STAGED_APPLICATION" ] || rm -f "$STAGED_APPLICATION"
   [ -z "$STAGED_RECEIPT" ] || rm -f "$STAGED_RECEIPT"
   [ -z "$STAGED_SHELL_ENV" ] || rm -f "$STAGED_SHELL_ENV"
@@ -489,26 +493,66 @@ fetch_verified() {
 fetch_verified "$APP_ASSET" "$APP_EXPECTED" "$APP_EXPECTED_SIZE" "$WORK/$APP_ASSET"
 fetch_verified "$WEB_ASSET" "$WEB_EXPECTED" "$WEB_EXPECTED_SIZE" "$WORK/$WEB_ASSET"
 
+ensure_owned_directory() {
+  path="$1"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -d "$path" ] && [ ! -L "$path" ] || fail "unsafe directory: $path"
+    [ "$(stat_owner "$path")" = "$(id -u)" ] || fail "directory is not owned by the current user: $path"
+    mode="$(stat_mode "$path")"
+    # POSIX arithmetic; the leading 0 forces octal in $(( )) without bash's 8#nn syntax.
+    [ $(( 0$mode & 077 )) -eq 0 ] || fail "directory is accessible to another user: $path"
+  else
+    mkdir "$path" || fail "could not create directory: $path"
+  fi
+}
+
 # The bundle carries no interpreter, so a Bun that can run it is a hard prerequisite rather than a nicety.
 # COSYNCING_BUN_BIN is honoured first because it is the same override the broker itself reads.
 bun_version_of() {
   "$1" --revision 2>/dev/null | sed -n '1s/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*$/\1/p'
 }
-bun_meets_floor() {
+# bun_at_least <path> <version>: the Bun at <path> answers --revision with <version> or newer.
+bun_at_least() {
   reported="$(bun_version_of "$1")"
   [ -n "$reported" ] || return 1
-  printf '%s\n%s\n' "$MINIMUM_BUN" "$reported" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1 | grep -Fxq "$MINIMUM_BUN"
+  printf '%s\n%s\n' "$2" "$reported" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1 | grep -Fxq "$2"
 }
-# Bun's own installer puts its prefix at $BUN_INSTALL, defaulting to ~/.bun. Honour an existing setting so
-# a host that already directs Bun elsewhere is not given a second copy in a directory it never reads.
+bun_meets_floor() { bun_at_least "$1" "$MINIMUM_BUN"; }
+# The runtime this installer places, and the one `cosy update` places when a later release raises the floor:
+# one versioned directory per Bun inside the state home. A newer runtime is installed NEXT TO the one a
+# running service executes rather than over it -- replacing an in-use Bun is impossible on Windows and
+# leaves nothing to roll back to anywhere -- and the broker's own updater writes exactly this layout.
+RUNTIME_ROOT="$STATE_HOME/runtime"
+OWNED_BUN="$RUNTIME_ROOT/bun-$PINNED_BUN/bun"
+# Bun's own installer puts its prefix at $BUN_INSTALL, defaulting to ~/.bun. Earlier installers placed the
+# pinned Bun there; it is still READ, so an install made by one of them keeps a Bun that meets the floor,
+# but nothing is written there any more: that prefix belongs to Bun, and may be the operator's own Bun.
 BUN_PREFIX="${BUN_INSTALL:-$HOME/.bun}"
 case "$BUN_PREFIX" in
   /*) ;;
   *) fail 'BUN_INSTALL must be absolute when set' ;;
 esac
 
+# Which Bun this install runs under. An operator's explicit COSYNCING_BUN_BIN needs only the floor: it is
+# their choice, and `cosy update` never replaces it. Any other Bun found on the host is reused only at the
+# pinned version or newer; below it, the pinned Bun is placed in the versioned layout beside it, so a new
+# install or a re-run never settles on a Bun this release would not have chosen. Told not to install one
+# (COSYNCING_SKIP_BUN_INSTALL=1), a Bun that meets the floor is still enough.
 resolve_bun() {
-  for candidate in "${COSYNCING_BUN_BIN:-}" "$(command -v bun 2>/dev/null || true)" "$BUN_PREFIX/bin/bun"; do
+  if [ -n "${COSYNCING_BUN_BIN:-}" ] && [ -x "$COSYNCING_BUN_BIN" ] && bun_meets_floor "$COSYNCING_BUN_BIN"; then
+    BUN_BIN="$COSYNCING_BUN_BIN"
+    return 0
+  fi
+  for candidate in "$OWNED_BUN" "$(command -v bun 2>/dev/null || true)" "$BUN_PREFIX/bin/bun"; do
+    [ -n "$candidate" ] || continue
+    [ -x "$candidate" ] || continue
+    if bun_at_least "$candidate" "$PINNED_BUN"; then
+      BUN_BIN="$candidate"
+      return 0
+    fi
+  done
+  [ "${COSYNCING_SKIP_BUN_INSTALL:-}" = 1 ] || return 1
+  for candidate in "$(command -v bun 2>/dev/null || true)" "$BUN_PREFIX/bin/bun"; do
     [ -n "$candidate" ] || continue
     [ -x "$candidate" ] || continue
     if bun_meets_floor "$candidate"; then
@@ -564,13 +608,13 @@ $(printf '%s\n' "$rows" | awk '!/-baseline/')"
 install_bun() {
   [ "${COSYNCING_SKIP_BUN_INSTALL:-}" != 1 ] || fail \
     "Bun $MINIMUM_BUN or newer is required to run cosyncing and COSYNCING_SKIP_BUN_INSTALL=1 forbids installing it; install it from https://bun.sh and rerun this installer"
-  printf 'Bun %s or newer is required and was not found. Installing the pinned Bun %s.\n' \
-    "$MINIMUM_BUN" "$MINIMUM_BUN"
+  printf 'No Bun %s or newer was found. Installing the pinned Bun %s.\n' \
+    "$PINNED_BUN" "$PINNED_BUN"
   bun_candidates "$TARGET" > "$WORK/bun-candidates"
   while read -r bun_asset bun_digest; do
     [ -n "$bun_asset" ] || continue
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-      --output "$WORK/$bun_asset" "$BUN_RELEASE_BASE/bun-v$MINIMUM_BUN/$bun_asset" \
+      --output "$WORK/$bun_asset" "$BUN_RELEASE_BASE/bun-v$PINNED_BUN/$bun_asset" \
       || fail "could not download $bun_asset from $BUN_RELEASE_BASE"
     # A mismatch is fatal, never "try the next one": these are the bytes Bun published for this tag, so
     # different bytes mean the download was substituted, not that this build is wrong for this host.
@@ -582,16 +626,30 @@ install_bun() {
     # Bun packs one directory named after the asset, holding the binary.
     unpacked="$WORK/bun-unpack/${bun_asset%.zip}/bun"
     [ -f "$unpacked" ] || fail "$bun_asset did not contain a bun binary"
-    chmod 755 "$unpacked"
-    if bun_meets_floor "$unpacked"; then
-      mkdir -p "$BUN_PREFIX/bin" || fail "could not create the Bun prefix: $BUN_PREFIX"
-      mv "$unpacked" "$BUN_PREFIX/bin/bun" || fail "could not install Bun into $BUN_PREFIX/bin"
-      chmod 755 "$BUN_PREFIX/bin/bun"
+    chmod 700 "$unpacked"
+    if bun_at_least "$unpacked" "$PINNED_BUN"; then
+      # Staged beside its destination and renamed into place, so the versioned directory either holds a
+      # complete, probed runtime or does not exist. A directory already there that did not answer the
+      # probe above is debris from an interrupted install, not a runtime anything executes.
+      ensure_owned_directory "$STATE_HOME"
+      ensure_owned_directory "$RUNTIME_ROOT"
+      STAGED_RUNTIME="$(mktemp -d "$RUNTIME_ROOT/.bun-$PINNED_BUN.staging.XXXXXXXX")" \
+        || fail "could not stage Bun in $RUNTIME_ROOT"
+      chmod 700 "$STAGED_RUNTIME"
+      mv "$unpacked" "$STAGED_RUNTIME/bun" || fail "could not stage Bun in $RUNTIME_ROOT"
+      if [ -e "$RUNTIME_ROOT/bun-$PINNED_BUN" ] || [ -L "$RUNTIME_ROOT/bun-$PINNED_BUN" ]; then
+        [ -d "$RUNTIME_ROOT/bun-$PINNED_BUN" ] && [ ! -L "$RUNTIME_ROOT/bun-$PINNED_BUN" ] \
+          && [ "$(stat_owner "$RUNTIME_ROOT/bun-$PINNED_BUN")" = "$(id -u)" ] \
+          || fail "unsafe runtime directory: $RUNTIME_ROOT/bun-$PINNED_BUN"
+        rm -rf "$RUNTIME_ROOT/bun-$PINNED_BUN"
+      fi
+      mv "$STAGED_RUNTIME" "$RUNTIME_ROOT/bun-$PINNED_BUN" || fail "could not install Bun into $RUNTIME_ROOT"
+      STAGED_RUNTIME=''
       return 0
     fi
     printf '  %s does not run on this host; trying the next pinned build\n' "$bun_asset"
   done < "$WORK/bun-candidates"
-  fail "no pinned Bun $MINIMUM_BUN build runs on this host ($TARGET); install Bun from https://bun.sh and rerun this installer"
+  fail "no pinned Bun $PINNED_BUN build runs on this host ($TARGET); install Bun from https://bun.sh and rerun this installer"
 }
 
 BUN_BIN=''
@@ -603,7 +661,7 @@ else
   # Re-probe rather than trusting the installer's exit status: it reports success for an install this script
   # would still refuse, and a Bun below the floor must never reach the receipt.
   resolve_bun || fail \
-    "Bun $MINIMUM_BUN or newer is still not runnable after installing it into $BUN_PREFIX; install it from https://bun.sh and rerun this installer"
+    "the pinned Bun $PINNED_BUN is still not runnable after installing it into $RUNTIME_ROOT; install it from https://bun.sh and rerun this installer"
   BUN_STATE="installed by this script ($(bun_version_of "$BUN_BIN") at $BUN_BIN)"
 fi
 case "$BUN_BIN" in
@@ -702,19 +760,6 @@ setup_receipt_owns_application() {
       process.exit(owned ? 0 : 1);
     } catch { process.exit(1); }
   ' "$install_state" "$APPLICATION" "$actual_sha" >/dev/null 2>&1
-}
-
-ensure_owned_directory() {
-  path="$1"
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -d "$path" ] && [ ! -L "$path" ] || fail "unsafe directory: $path"
-    [ "$(stat_owner "$path")" = "$(id -u)" ] || fail "directory is not owned by the current user: $path"
-    mode="$(stat_mode "$path")"
-    # POSIX arithmetic; the leading 0 forces octal in $(( )) without bash's 8#nn syntax.
-    [ $(( 0$mode & 077 )) -eq 0 ] || fail "directory is accessible to another user: $path"
-  else
-    mkdir "$path" || fail "could not create directory: $path"
-  fi
 }
 
 ensure_owned_directory "$STATE_HOME"

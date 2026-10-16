@@ -1341,6 +1341,74 @@ if (process.platform === 'win32') {
     `staged=${stagedAlone}->${staged} scheduler=${operations.join(',')}`);
 }
 
+{
+  // `cosy update` moving the service to a newer Bun: the Scheduled Task's action is the runtime, so the
+  // task is reconciled to name the new one -- and nothing else. No version root is staged by this call (the
+  // activation stages it first), and a task the operator disabled stays disabled.
+  const sid = 'S-1-5-21-7-8-9-1001';
+  const oldRuntime = 'C:\\Users\\Fixture\\.bun\\bin\\bun.exe';
+  const newRuntime = 'C:\\Users\\Fixture\\.cosyncing\\runtime\\bun-1.3.20\\bun.exe';
+  for (const startEnabled of [true, false]) {
+    const operations: string[] = [];
+    const reconciled: Array<{ definition?: { executable?: string; enabled?: boolean; arguments?: string } }> = [];
+    let staged = 0;
+    let snapshot: Record<string, unknown> = { currentUserSid: sid };
+    const backend = new WindowsTaskSchedulerPowerShellBackend({
+      execute(operation, input) {
+        operations.push(operation);
+        if (operation === 'current-user') return { currentUserSid: sid };
+        if (operation === 'reconcile') {
+          reconciled.push(structuredClone(input) as never);
+          const definition = structuredClone(input.definition) as { enabled?: boolean };
+          snapshot = {
+            currentUserSid: sid,
+            shared: { path: input.sharedPath, sddl: input.expectedSddl, childFolders: [sid], tasks: [] },
+            sidFolder: {
+              path: input.sidFolderPath, sddl: input.expectedSddl, childFolders: [],
+              tasks: [{ name: 'Broker', ownershipMarker: input.ownershipMarker }],
+            },
+            task: {
+              path: input.taskPath, ownershipMarker: input.ownershipMarker,
+              definition, taskSddl: input.expectedSddl,
+              enabled: definition.enabled === false ? 'disabled' : 'enabled', active: 'inactive', lastResult: 0, xml: '<Task/>',
+            },
+          };
+        }
+        return structuredClone(snapshot);
+      },
+    });
+    const provider = (runtimePath: string) => new WindowsTaskSchedulerServiceProvider({
+      context: { platform: 'win32' } as never,
+      homeDir: 'C:\\Users\\Fixture',
+      stateHome: 'C:\\Users\\Fixture\\.cosyncing',
+      installationId: 'install-runtime-switch',
+      versionKey: 'version-2',
+      cacheRoot: 'C:\\Users\\Fixture\\AppData\\Local\\cosyncing-cache',
+      executablePath: 'C:\\Users\\Fixture\\.cosyncing\\bin\\cosyncing',
+      acquisitionExecutablePath: 'C:\\Users\\Fixture\\.cosyncing\\bin\\cosyncing',
+      distribution: 'bootstrap-js',
+      runtimePath,
+      webDir: 'C:\\Users\\Fixture\\.cosyncing\\bin\\cosyncing-web-2.0.0',
+      environmentEntries: [['COSYNCING_HOME', 'C:\\Users\\Fixture\\.cosyncing']],
+      backend,
+      environmentState: () => 'current',
+      stageFiles: () => { staged += 1; },
+      filesystemState: () => 'current',
+    });
+    await provider(oldRuntime).setEnabled(startEnabled);
+    const before = reconciled.at(-1)?.definition;
+    reconciled.length = 0;
+    operations.length = 0;
+    await provider(newRuntime).reconcileDefinition();
+    const after = reconciled[0]?.definition;
+    check(`a runtime switch reconciles only the task action to the new Bun (task ${startEnabled ? 'enabled' : 'disabled'})`,
+      staged === 0 && reconciled.length === 1 && operations.includes('inspect')
+        && before?.executable === oldRuntime && after?.executable === newRuntime
+        && after?.enabled === startEnabled && after?.arguments === before?.arguments,
+      `staged=${staged} ops=${operations.join(',')} ${JSON.stringify({ before, after })}`);
+  }
+}
+
 const failed = results.filter((result) => !result.ok);
 if (failed.length > 0) {
   console.error(`\nFAIL: ${failed.length}/${results.length} Windows service installation checks failed.`);

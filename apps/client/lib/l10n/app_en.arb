@@ -1903,6 +1903,24 @@
       }
     }
   },
+  "settingsBrokerStatusRuntimeUpgradeRequired": "Needs newer Bun",
+  "@settingsBrokerStatusRuntimeUpgradeRequired": {
+    "description": "Status pill on the broker version row when a newer release needs a newer Bun runtime that this installation cannot install itself."
+  },
+  "settingsBrokerRuntimeUpgradeRequiredBody": "A newer cosyncing release ({version}) needs a newer Bun runtime, and this installation cannot install it by itself. On the server, upgrade Bun or re-run the cosyncing installer, then run {updateCommand}.",
+  "@settingsBrokerRuntimeUpgradeRequiredBody": {
+    "description": "Guidance shown under the broker version row when a newer release needs a newer Bun runtime that this installation cannot install itself. The command is shown verbatim and is not translated.",
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "0.7.0"
+      },
+      "updateCommand": {
+        "type": "String",
+        "example": "cosy update"
+      }
+    }
+  },
   "settingsDesktopBuildUpdateTitle": "New desktop build available",
   "@settingsDesktopBuildUpdateTitle": {
     "description": "Title of the row shown on Windows, Linux, and macOS when the broker runs a newer release than the installed desktop app."

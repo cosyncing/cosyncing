@@ -966,7 +966,7 @@ try {
     const userHome = join(machine, 'home');
     const stateHome = join(userHome, '.cosyncing');
     // A version-manager layout: Bun lives outside every fixed entry the restricted PATH already carries.
-    const versionManagerBin = join(userHome, '.local', 'share', 'mise', 'installs', 'bun', '1.3.8', 'bin');
+    const versionManagerBin = join(userHome, '.local', 'share', 'mise', 'installs', 'bun', '1.3.14', 'bin');
     for (const directory of [join(stateHome, 'bin'), versionManagerBin]) mkdirSync(directory, { recursive: true });
     const bunRuntime = join(versionManagerBin, 'bun');
     writeFileSync(bunRuntime, '#!/bin/sh\nexit 0\n', { mode: 0o755 });

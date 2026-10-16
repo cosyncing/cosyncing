@@ -495,6 +495,8 @@
   "settingsBrokerStatusNotChecked": "확인 안 함",
   "settingsBrokerStatusPackageManaged": "npm으로 관리",
   "settingsBrokerPackageManagedBody": "이 서버는 npm 패키지로 설치되어 스스로 업데이트하지 않습니다. {updateCommand}(설치에 사용한 관리자에 해당하는 명령)를 실행한 다음 {setupCommand}를 실행하세요.",
+  "settingsBrokerStatusRuntimeUpgradeRequired": "새 Bun 필요",
+  "settingsBrokerRuntimeUpgradeRequiredBody": "새 cosyncing 릴리스({version})에는 더 새로운 Bun 런타임이 필요하지만, 이 설치에서는 직접 설치할 수 없습니다. 서버에서 Bun을 업그레이드하거나 cosyncing 설치 프로그램을 다시 실행한 다음 {updateCommand}를 실행하세요.",
   "settingsDesktopBuildUpdateTitle": "새 데스크톱 빌드가 있습니다",
   "settingsDesktopBuildUpdateBody": "이 서버는 {version}에서 실행 중입니다. 데스크톱 빌드는 자동으로 업데이트되지 않으니 해당 빌드를 내려받으세요.",
   "settingsDesktopBuildUpdateAction": "다운로드",

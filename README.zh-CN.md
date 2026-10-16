@@ -262,7 +262,7 @@ Broker 由你运行，跑在你自己的机器和账号下。Broker 状态存储
 
 ## 开发
 
-仓库在 `.fvmrc` 固定 Flutter 3.44.3，在 `package.json` 固定 Bun 1.3.8。命令一律在仓库根
+仓库在 `.fvmrc` 固定 Flutter 3.44.3，在 `package.json` 固定 Bun 1.3.14。命令一律在仓库根
 目录执行。
 
 ```bash

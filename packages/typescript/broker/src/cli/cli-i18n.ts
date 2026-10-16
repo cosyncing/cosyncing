@@ -596,6 +596,12 @@ function zhUninstallAdvisory(item: UninstallPlan['advisories'][number]): string 
       return `将移除 ${PRODUCT_IDENTITY.primaryBinary} 状态目录中的已安装副本，但保留其来源软件包；请另行移除该软件包（例如 \`npm uninstall -g ${PRODUCT_IDENTITY.productName}\`），否则 \`${PRODUCT_IDENTITY.primaryBinary}\` 仍会留在 PATH 中。`;
     case 'pi-bridge-sessions-disconnect':
       return '移除 Pi bridge 会断开所有实时桥接会话与应用的连接，但终端会话本身不会中断。';
+    case 'bun-runtime-override-preserved':
+      return 'COSYNCING_BUN_BIN 指向的 Bun 运行时（位于状态目录的 runtime 文件夹中）会保留；它由你指定，需要时请自行移除。';
+    case 'bun-runtime-in-use-preserved':
+      return '状态目录 runtime 文件夹中正在运行此次卸载的 Bun 运行时会保留：Windows 无法删除正在运行的程序，请在命令结束后删除该文件夹。';
+    case 'bun-runtimes-foreign-preserved':
+      return '状态目录的 runtime 文件夹中还有并非 cosyncing 放置的内容，这些内容会保留。';
     default:
       return `卸载提示（${item.detailCode}）。`;
   }

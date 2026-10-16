@@ -4,7 +4,7 @@ import type { OpencodeShimSignal } from '../installation/setup-presenter.ts';
 import type { SetupDependencies } from '../installation/setup.ts';
 import { BUILD_INFO, type BuildInfo } from '../runtime/build-info.ts';
 import { exitAfterDiagnostics } from '../runtime/fatal-start.ts';
-import { currentApplicationIdentity, type ApplicationIdentity } from '../runtime/application-identity.ts';
+import { BUN_RUNTIME_OVERRIDE_VARIABLE, currentApplicationIdentity, type ApplicationIdentity } from '../runtime/application-identity.ts';
 import { inspectInstallState, type InstallStateInspection } from '../installation/install-state.ts';
 // Type-only, so the seam below names the command's real options instead of restating them. The restated
 // copy had already fallen behind: it could not see the pairing-report fields, which meant a test double for
@@ -387,9 +387,15 @@ async function defaultRunDevicesRevoke(options: {
  * interpreter floor. It is kept out of {@link applicationLaunchInputs} because every other caller only
  * needs the pair of paths it launches with; upgrade alone has a floor to check.
  */
-function upgradeRuntimeVersion(buildInfo: Readonly<BuildInfo>): { runtimeVersion?: string } {
+function upgradeRuntimeVersion(buildInfo: Readonly<BuildInfo>): { runtimeVersion?: string; runtimeOverridden?: boolean } {
   const identity = applicationIdentity(buildInfo);
-  return identity.runtimeVersion ? { runtimeVersion: identity.runtimeVersion } : {};
+  // A runtime the operator chose with COSYNCING_BUN_BIN is theirs: upgrade never replaces it, so it has to
+  // know when the runtime it is running under came from that override.
+  const overridden = !!process.env[BUN_RUNTIME_OVERRIDE_VARIABLE]?.trim();
+  return {
+    ...(identity.runtimeVersion ? { runtimeVersion: identity.runtimeVersion } : {}),
+    ...(overridden ? { runtimeOverridden: true } : {}),
+  };
 }
 
 function applicationLaunchInputs(
@@ -593,6 +599,9 @@ async function defaultRunUpgrade(options: {
           inspect: async () => ({ active: (await provider.inspect()).active === 'active' }),
           stop: () => provider.stop(),
           start: () => provider.start(),
+          // systemd re-reads a rewritten unit only after daemon-reload; an upgrade that moves the runtime
+          // rewrites `ExecStart=`, and a start without the reload would run the unit systemd cached.
+          ...(provider.id === 'systemd' ? { reloadDefinition: async () => { await provider.reloadDefinition(); } } : {}),
           ...(provider.id === 'launchd' ? { reloadDefinition: async (wasActive: boolean) => {
             // RunAtLoad starts an enabled launchd job on bootstrap. Preserve an inactive service.
             const before = await provider.inspect();

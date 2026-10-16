@@ -42,6 +42,7 @@ import {
 import {
   MINIMUM_BUN_RUNTIME_VERSION,
   PINNED_BUN_RUNTIME_ARCHIVES,
+  PINNED_BUN_RUNTIME_VERSION,
 } from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
   enforceOwnerOnlyFile,
@@ -50,6 +51,7 @@ import {
   inspectOwnerOnlyFile,
 } from '../../../../packages/typescript/broker/src/security/secure-files.ts';
 import { inspectDesktopClient } from '../../../../packages/typescript/broker/src/updates/desktop-client.ts';
+import { windowsLauncherText } from '../../../../packages/typescript/broker/src/updates/bun-runtime-upgrade.ts';
 import { windowsPowerShellChildEnvironment } from '../../../../packages/typescript/adapter-api/src/host-process.ts';
 import {
   BROKER_CONTRACT,
@@ -194,6 +196,11 @@ try {
    * `--revision`, and run the verified bundle's `version --json`. It extracts the identity object from the
    * JavaScript fixture and every other property under test — digests,
    * signatures, the receipt — stays real.
+   *
+   * Two more modes stand in for a runtime that is IN USE: `--hold <seconds>` keeps the executable running
+   * (and so locked by Windows) like a broker the Scheduled Task started, and `<app> --rewrite-shim <file>`
+   * replaces the `cosy.cmd` beside `<app>` while that shim is the batch file running it, as `cosy update`
+   * does when it moves the shim to a new Bun.
    */
   function buildFakeBun(name: string, revision: string): string {
     const source = join(fixtures, `${name}.cs`);
@@ -204,6 +211,15 @@ public static class FakeBun {
   public static int Main(string[] args) {
     if (args.Length == 1 && args[0] == "--revision") {
       Console.Out.Write("${revision}+fixturebuild\\n");
+      return 0;
+    }
+    if (args.Length == 2 && args[0] == "--hold") {
+      System.Threading.Thread.Sleep(int.Parse(args[1]) * 1000);
+      return 0;
+    }
+    if (args.Length == 3 && args[1] == "--rewrite-shim") {
+      File.Copy(args[2], Path.Combine(Path.GetDirectoryName(args[0]), "cosy.cmd"), true);
+      Console.Out.Write("shim rewritten\\n");
       return 0;
     }
     if (args.Length == 3 && args[1] == "version" && args[2] == "--json" && File.Exists(args[0])) {
@@ -223,14 +239,17 @@ public static class FakeBun {
       stderr: 'pipe',
     });
     if (!compiled.success || !existsSync(output)) {
-      throw new Error(`fake bun.exe could not be compiled: ${compiled.stderr.toString()}`);
+      throw new Error(`fake bun.exe could not be compiled: ${compiled.stdout.toString()}${compiled.stderr.toString()}`);
     }
     return output;
   }
 
   const currentBun = buildFakeBun('bun-current', '1.3.14');
   const staleBun = buildFakeBun('bun-stale', '1.2.99');
-  const pinnedBun = buildFakeBun('bun-pinned', MINIMUM_BUN_RUNTIME_VERSION);
+  const pinnedBun = buildFakeBun('bun-pinned', PINNED_BUN_RUNTIME_VERSION);
+  // What earlier installers placed: below the pinned version, whatever the floor.
+  const previousBun = buildFakeBun('bun-previous', '1.3.8');
+  const floorBun = buildFakeBun('bun-floor', MINIMUM_BUN_RUNTIME_VERSION);
   // A build that cannot run on this host at all: the case the installer must survive by advancing to the
   // next pinned candidate rather than failing the install.
   const unrunnableBun = join(fixtures, 'bun-unrunnable.exe');
@@ -842,6 +861,45 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
         && reported.distribution === 'bootstrap-js'
         && shimText.includes('%~dp0cosyncing'),
       `${shimRun.exitCode}: ${shimText.trim()}`);
+    // The same shape `cosy update` writes, so either one can later rewrite the other safely.
+    check('the cosy.cmd shim has the shape cosy update rewrites in place',
+      shimText === windowsLauncherText(currentBun), JSON.stringify(shimText));
+  }
+
+  // cmd.exe re-reads a RUNNING batch file at the byte offset after the line it last executed. `cosy update`
+  // is typically started through this shim and rewrites it to name the new Bun before it exits, so the
+  // rewrite must leave `@exit /b` at exactly that offset. Run for real: the fake runtime replaces the shim
+  // that is executing it, and cmd.exe must then exit cleanly with the runtime's own status. The unpadded
+  // rewrite is the control that shows this check can see the hazard at all.
+  {
+    const shimBun = buildFakeBun('bun-shim-rewrite', PINNED_BUN_RUNTIME_VERSION);
+    const nextRuntime = join(root, 'shim-rewrite', 'state', 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`, 'bun.exe');
+    const outcomes: Record<string, { exitCode: number; stdout: string; stderr: string }> = {};
+    for (const [label, before, padded] of [
+      ['legacy one-line shim', `@"${shimBun}" "%~dp0cosyncing" %*\r\n`, true],
+      ['current shim', windowsLauncherText(shimBun), true],
+      ['legacy shim, unpadded rewrite (control)', `@"${shimBun}" "%~dp0cosyncing" %*\r\n`, false],
+    ] as const) {
+      const directory = join(root, 'shim-rewrite', label.replace(/\W+/g, '-'));
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, 'cosyncing'), '// application fixture\n');
+      writeFileSync(join(directory, 'cosy.cmd'), before);
+      const firstLine = Buffer.byteLength(before.slice(0, before.indexOf('\n') + 1), 'utf8');
+      const replacement = join(directory, 'next-shim.txt');
+      writeFileSync(replacement, windowsLauncherText(nextRuntime, padded ? firstLine : 0));
+      const ran = await runSupervised(
+        [join(SYSTEM_ROOT, 'System32', 'cmd.exe'), '/d', '/c', join(directory, 'cosy.cmd'), '--rewrite-shim', replacement],
+        { cwd: SYSTEM_ROOT, env: process.env, timeoutMs: 30_000, maxBufferBytes: 1 << 20,
+          isolateProcessGroup: !insideSupervisedProcessGroup() },
+      );
+      outcomes[label] = { exitCode: ran.exitCode, stdout: ran.stdout.trim(), stderr: ran.stderr.trim() };
+    }
+    const clean = (outcome?: { exitCode: number; stdout: string; stderr: string }) =>
+      outcome?.exitCode === 0 && outcome.stdout === 'shim rewritten' && outcome.stderr === '';
+    check('a shim rewritten while it runs resumes at @exit /b, from the legacy one-line shape and the current one',
+      clean(outcomes['legacy one-line shim']) && clean(outcomes['current shim'])
+        && !clean(outcomes['legacy shim, unpadded rewrite (control)']),
+      JSON.stringify(outcomes));
   }
 
   // ---- A second run over a valid install ----------------------------------------------------------
@@ -1131,33 +1189,167 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
       run.exitCode !== 0
         && /does not match the checksum embedded in this installer/.test(run.stderr)
         && !existsSync(join(bunInstall, 'bin', 'bun.exe'))
+        && !existsSync(join(run.home, 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`))
         && !existsSync(join(run.home, 'bin', 'cosyncing')),
       `${run.exitCode}: ${run.stderr.trim().slice(0, 250)}`);
   }
 
-  // A host whose Bun is below the floor gets the pinned archive, and the receipt records THAT runtime
-  // rather than the stale one the host already had.
+  // A host whose Bun is below the pinned version gets the pinned archive, and the receipt records THAT runtime
+  // rather than the stale one the host already had. It lands in the versioned layout `cosy update` also
+  // writes -- `<state home>\runtime\bun-<version>\bun.exe` -- and never in Bun's own prefix.
+  const bunInstallRelease = releaseCopy('bun-install');
   {
-    const release = releaseCopy('bun-install');
-    const digest = await writeBunArchive(release, 'bun-windows-x64.zip', pinnedBun);
-    rewriteAssignment(join(release, SERVER_INSTALLER), 'BUN_TABLE',
+    const digest = await writeBunArchive(bunInstallRelease, 'bun-windows-x64.zip', pinnedBun);
+    rewriteAssignment(join(bunInstallRelease, SERVER_INSTALLER), 'BUN_TABLE',
       `windows-x64 bun-windows-x64.zip ${digest}`);
+  }
+  const ownedRuntime = (home: string) => join(home, 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`, 'bun.exe');
+  {
     const bunInstall = join(root, 'bun-prefix-install');
     const run = await install({
-      release,
+      release: bunInstallRelease,
       stage: 'pinned Bun install',
       bun: staleBun,
       bunInstall,
       hideBun: true,
     });
-    const installedBun = join(bunInstall, 'bin', 'bun.exe');
-    check('a host whose Bun is below the floor gets the pinned archive, not the stale runtime',
+    const installedBun = ownedRuntime(run.home);
+    const shimText = existsSync(join(run.home, 'bin', 'cosy.cmd')) ? readFileSync(join(run.home, 'bin', 'cosy.cmd'), 'utf8') : '';
+    check('a host whose Bun is below the pinned version gets the pinned archive in the versioned runtime layout',
       run.exitCode === 0 && existsSync(installedBun)
+        && !existsSync(join(bunInstall, 'bin', 'bun.exe'))
+        && inspectOwnerOnlyDirectory(join(run.home, 'runtime')).status === 'ok'
+        && inspectOwnerOnlyDirectory(join(run.home, 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`)).status === 'ok'
+        && inspectOwnerOnlyFile(installedBun).status === 'ok'
+        && readdirSync(join(run.home, 'runtime')).join(',') === `bun-${PINNED_BUN_RUNTIME_VERSION}`
         && readFileSync(join(run.home, 'bootstrap-receipt'), 'utf8')
           .includes(`runtime=${installedBun}\n`)
+        && shimText.includes(`@"${installedBun}" "%~dp0cosyncing"`)
         && run.stdout.includes('Installing the pinned Bun')
-        && run.stdout.includes(`Bun runtime: installed by this script (${MINIMUM_BUN_RUNTIME_VERSION}`),
+        && run.stdout.includes(`Bun runtime: installed by this script (${PINNED_BUN_RUNTIME_VERSION}`),
       `${run.exitCode}: ${run.stdout.trim().split('\n').slice(-4).join(' | ')} ${run.stderr.trim().slice(0, 250)}`);
+
+    // Defect 34: a re-run while the broker runs from that runtime. Windows will not replace an executable
+    // that is running, and the old installer tried to. The versioned runtime is the pinned version, so it is
+    // reused -- nothing downloaded, nothing replaced. The re-run starts over a LEGACY one-line shim, which
+    // it rewrites with a first line exactly as long as the old one.
+    const legacyShim = `@"${installedBun}" "%~dp0cosyncing" %*\r\n`;
+    writeFileSync(join(run.home, 'bin', 'cosy.cmd'), legacyShim);
+    enforceOwnerOnlyFile(join(run.home, 'bin', 'cosy.cmd'));
+    const runtimeBytes = readFileSync(installedBun);
+    const held = Bun.spawn([installedBun, '--hold', '120'], { stdout: 'ignore', stderr: 'ignore' });
+    try {
+      const rerun = await install({
+        release: bunInstallRelease,
+        stage: 'rerun with the runtime in use',
+        home: run.home,
+        bunInstall,
+        hideBun: true,
+      });
+      const rewritten = readFileSync(join(run.home, 'bin', 'cosy.cmd'), 'utf8');
+      check('an installer re-run with the versioned runtime in use reuses it instead of replacing it',
+        rerun.exitCode === 0 && held.exitCode === null
+          && !rerun.stdout.includes('Installing the pinned Bun')
+          && Buffer.compare(readFileSync(installedBun), runtimeBytes) === 0
+          && readdirSync(join(run.home, 'runtime')).join(',') === `bun-${PINNED_BUN_RUNTIME_VERSION}`
+          && rewritten === windowsLauncherText(installedBun, Buffer.byteLength(legacyShim, 'utf8')),
+        `${rerun.exitCode}: ${rerun.stdout.trim().split('\n').slice(-3).join(' | ')} ${rerun.stderr.trim().slice(0, 250)} shim=${JSON.stringify(rewritten)}`);
+    } finally {
+      held.kill();
+      await held.exited;
+    }
+  }
+
+  // An install made by an earlier installer runs `$BUN_INSTALL\bin\bun.exe`. When a release raises the floor
+  // above it, a re-run installs the versioned runtime BESIDE it while the service still runs the old one,
+  // and leaves that file -- locked by the running process -- exactly as it was.
+  {
+    const bunInstall = join(root, 'bun-prefix-legacy-held');
+    mkdirSync(join(bunInstall, 'bin'), { recursive: true });
+    const legacyBun = join(bunInstall, 'bin', 'bun.exe');
+    cpSync(staleBun, legacyBun);
+    const legacyBytes = readFileSync(legacyBun);
+    const held = Bun.spawn([legacyBun, '--hold', '120'], { stdout: 'ignore', stderr: 'ignore' });
+    try {
+      const run = await install({
+        release: bunInstallRelease,
+        stage: 'old layout below the floor, in use',
+        bunInstall,
+        hideBun: true,
+      });
+      check('an old-layout bun.exe below the floor, in use, gets the versioned runtime beside it and is left alone',
+        run.exitCode === 0 && held.exitCode === null
+          && existsSync(ownedRuntime(run.home))
+          && Buffer.compare(readFileSync(legacyBun), legacyBytes) === 0
+          && readFileSync(join(run.home, 'bootstrap-receipt'), 'utf8').includes(`runtime=${ownedRuntime(run.home)}\n`),
+        `${run.exitCode}: ${run.stdout.trim().split('\n').slice(-3).join(' | ')} ${run.stderr.trim().slice(0, 250)}`);
+    } finally {
+      held.kill();
+      await held.exited;
+    }
+  }
+
+  // An old-layout bun.exe already at the pinned version keeps being used: nothing is installed beside it.
+  {
+    const bunInstall = join(root, 'bun-prefix-legacy-current');
+    mkdirSync(join(bunInstall, 'bin'), { recursive: true });
+    const legacyBun = join(bunInstall, 'bin', 'bun.exe');
+    cpSync(pinnedBun, legacyBun);
+    const run = await install({
+      release: bunInstallRelease,
+      stage: 'old layout at the pinned version',
+      bunInstall,
+      hideBun: true,
+    });
+    check('an old-layout bun.exe at the pinned version keeps being used and nothing is installed beside it',
+      run.exitCode === 0 && !run.stdout.includes('Installing the pinned Bun')
+        && !existsSync(join(run.home, 'runtime'))
+        && readFileSync(join(run.home, 'bootstrap-receipt'), 'utf8').includes(`runtime=${legacyBun}\n`),
+      `${run.exitCode}: ${run.stdout.trim().split('\n').slice(-3).join(' | ')} ${run.stderr.trim().slice(0, 250)}`);
+  }
+
+  // An old-layout bun.exe at 1.3.8, what earlier installers placed, is below the pinned version: a re-run
+  // installs the pinned runtime beside it rather than settling on it, and leaves that file as it was.
+  {
+    const bunInstall = join(root, 'bun-prefix-legacy-previous');
+    mkdirSync(join(bunInstall, 'bin'), { recursive: true });
+    const legacyBun = join(bunInstall, 'bin', 'bun.exe');
+    cpSync(previousBun, legacyBun);
+    const legacyBytes = readFileSync(legacyBun);
+    const run = await install({
+      release: bunInstallRelease,
+      stage: 'old layout at 1.3.8',
+      bunInstall,
+      hideBun: true,
+    });
+    check('an old-layout bun.exe at 1.3.8 gets the pinned runtime beside it and is left alone',
+      run.exitCode === 0 && run.stdout.includes('Installing the pinned Bun')
+        && existsSync(ownedRuntime(run.home))
+        && Buffer.compare(readFileSync(legacyBun), legacyBytes) === 0
+        && readFileSync(join(run.home, 'bootstrap-receipt'), 'utf8').includes(`runtime=${ownedRuntime(run.home)}\n`),
+      `${run.exitCode}: ${run.stdout.trim().split('\n').slice(-3).join(' | ')} ${run.stderr.trim().slice(0, 250)}`);
+  }
+
+  // Told not to install a runtime, a Bun that meets the floor is enough even below the pinned version; and
+  // a COSYNCING_BUN_BIN at the floor is the operator's choice, used as it is. Neither downloads anything.
+  for (const [label, useOverride] of [['COSYNCING_SKIP_BUN_INSTALL=1', false], ['COSYNCING_BUN_BIN', true]] as const) {
+    const bunInstall = join(root, `bun-prefix-floor-${useOverride ? 'override' : 'skip'}`);
+    mkdirSync(join(bunInstall, 'bin'), { recursive: true });
+    const prefixBun = join(bunInstall, 'bin', 'bun.exe');
+    cpSync(floorBun, prefixBun);
+    const run = await install({
+      release: bunInstallRelease,
+      stage: `floor Bun with ${label}`,
+      bunInstall,
+      hideBun: true,
+      ...(useOverride ? { bun: floorBun } : { env: { COSYNCING_SKIP_BUN_INSTALL: '1' } }),
+    });
+    const expected = useOverride ? floorBun : prefixBun;
+    check(`with ${label}, a Bun at the floor is used and no runtime is placed`,
+      run.exitCode === 0 && !run.stdout.includes('Installing the pinned Bun')
+        && !existsSync(join(run.home, 'runtime'))
+        && readFileSync(join(run.home, 'bootstrap-receipt'), 'utf8').includes(`runtime=${expected}\n`),
+      `${run.exitCode}: ${run.stdout.trim().split('\n').slice(-3).join(' | ')} ${run.stderr.trim().slice(0, 250)}`);
   }
 
   // One host target is not one binary: a pre-AVX2 x64 needs the baseline build. A pinned build that
@@ -1180,7 +1372,9 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
       hideBun: true,
     });
     check('a pinned build that cannot run on this host advances to the next pinned build',
-      run.exitCode === 0 && existsSync(join(bunInstall, 'bin', 'bun.exe'))
+      run.exitCode === 0 && existsSync(ownedRuntime(run.home))
+        && !existsSync(join(bunInstall, 'bin', 'bun.exe'))
+        && readdirSync(join(run.home, 'runtime')).join(',') === `bun-${PINNED_BUN_RUNTIME_VERSION}`
         && /does not run on this host; trying the next pinned build/.test(run.stdout),
       `${run.exitCode}: ${run.stdout.trim().split('\n').slice(-5).join(' | ')} ${run.stderr.trim().slice(0, 250)}`);
   }
@@ -1199,6 +1393,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
       run.exitCode !== 0
         && run.stderr.includes(`Bun ${MINIMUM_BUN_RUNTIME_VERSION} or newer is required`)
         && run.stderr.includes('COSYNCING_SKIP_BUN_INSTALL=1')
+        && !existsSync(join(run.home, 'runtime'))
         && !existsSync(join(run.home, 'bin', 'cosyncing')),
       `${run.exitCode}: ${run.stderr.trim().slice(0, 250)}`);
   }

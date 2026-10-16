@@ -6,7 +6,7 @@ Sign each commit with `git commit -s`.
 
 ## Setup
 
-Install Flutter 3.44.3 and Bun 1.3.8, then run from the repository root:
+Install Flutter 3.44.3 and Bun 1.3.14, then run from the repository root:
 
 ```bash
 bun install --frozen-lockfile
