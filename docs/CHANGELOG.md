@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- A question card that asks several questions now numbers them. Each header
+  starts with its number, in bold and aligned with its question, so it is clear
+  where one question ends and the next begins.
+
 ## 0.6.6 — 2026-10-17
 
 ### Security
