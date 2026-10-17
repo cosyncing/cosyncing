@@ -7,7 +7,7 @@
  * e2e/broker/composer-drafts.test.ts.
  */
 import { expect, test } from 'bun:test';
-import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -17,12 +17,17 @@ import {
   SharedDraftStore,
 } from '../../src/sessions/draft-store.ts';
 
-function withStore(run: (store: SharedDraftStore, directory: string, tick: () => void) => void): void {
+function withStore(
+  run: (store: SharedDraftStore, directory: string, tick: () => void, reopen: () => SharedDraftStore) => void,
+  seed: (directory: string) => void = () => {},
+): void {
   const root = mkdtempSync(join(tmpdir(), 'cosyncing-draft-bounds-'));
   const directory = join(root, 'drafts');
   let now = 1_000_000;
+  const open = (): SharedDraftStore => new SharedDraftStore({ directory, now: () => now });
   try {
-    run(new SharedDraftStore({ directory, now: () => now }), directory, () => { now += 1; });
+    seed(directory);
+    run(open(), directory, () => { now += 1; }, open);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -31,16 +36,47 @@ function withStore(run: (store: SharedDraftStore, directory: string, tick: () =>
 const shards = (directory: string): string[] =>
   readdirSync(directory).filter((name) => name.endsWith('.json') && name !== REVISION_CLOCK_FILE);
 
+/**
+ * The store directory a restart finds when an earlier run already holds `count` clear tombstones,
+ * `flood-0` oldest, with the revision clock that covers them. Written as plain files: reaching the
+ * backstop through `write()` costs two thousand durable writes of two fsyncs each, about 13 ms apiece
+ * on a quiet host and over 60 ms in a full check, which spent minutes on setup alone.
+ */
+function seedClearTombstones(directory: string, count: number): void {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (let index = 0; index < count; index += 1) {
+    writeFileSync(join(directory, `seed-${index}.json`), JSON.stringify({
+      version: 1,
+      tool: 'claude',
+      sessionId: `flood-${index}`,
+      text: '',
+      revision: index + 1,
+      updatedAt: index + 1,
+      lastUpdateId: `flood-${index}`,
+    }), { mode: 0o600 });
+  }
+  writeFileSync(join(directory, REVISION_CLOCK_FILE), JSON.stringify({ version: 1, reservedThrough: count }), { mode: 0o600 });
+}
+
 test('clear tombstones have their own backstop cap, oldest out first', () => {
-  withStore((store, _directory, tick) => {
-    for (let index = 0; index < MAX_SHARED_DRAFT_CLEAR_TOMBSTONES + 25; index += 1) {
+  const overflow = 25;
+  const flood = MAX_SHARED_DRAFT_CLEAR_TOMBSTONES + overflow;
+  // Which flood sessions still hold their tombstone.
+  const kept = (store: SharedDraftStore): number[] =>
+    Array.from({ length: flood }, (_, index) => index).filter((index) => store.get('claude', `flood-${index}`)?.text === '');
+  const newest = Array.from({ length: MAX_SHARED_DRAFT_CLEAR_TOMBSTONES }, (_, index) => index + overflow);
+  withStore((store, directory, tick, reopen) => {
+    expect(store.size()).toBe(MAX_SHARED_DRAFT_CLEAR_TOMBSTONES);
+    for (let index = MAX_SHARED_DRAFT_CLEAR_TOMBSTONES; index < flood; index += 1) {
       tick();
-      store.write('claude', `flood-${index}`, '', { updateId: `flood-${index}` });
+      expect(store.write('claude', `flood-${index}`, '', { updateId: `flood-${index}` }).status).toBe('applied');
     }
     expect(store.size()).toBe(MAX_SHARED_DRAFT_CLEAR_TOMBSTONES);
-    expect(store.get('claude', 'flood-0')).toBeUndefined();
-    expect(store.get('claude', `flood-${MAX_SHARED_DRAFT_CLEAR_TOMBSTONES + 24}`)?.text).toBe('');
-  });
+    expect(kept(store)).toEqual(newest);
+    // Evicted tombstones leave the disk too, so the backstop bounds the shard count across a restart.
+    expect(shards(directory)).toHaveLength(MAX_SHARED_DRAFT_CLEAR_TOMBSTONES);
+    expect(kept(reopen())).toEqual(newest);
+  }, (directory) => seedClearTombstones(directory, MAX_SHARED_DRAFT_CLEAR_TOMBSTONES));
 });
 
 test('one edit rewrites only its own session’s shard', () => {
