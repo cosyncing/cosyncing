@@ -8,7 +8,7 @@
  *   bun packages/typescript/adapters/claude/test/test-claude-recency.ts
  */
 export {};
-import { chmodSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,8 +18,9 @@ function check(name: string, ok: boolean, detail = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' - ' + detail : ''}`);
 }
 
-const ROOT = join(tmpdir(), 'ca-claude-recency');
-rmSync(ROOT, { recursive: true, force: true });
+// Own temp root per invocation. 'bun run check --repeat N' overlaps repetitions of the same task,
+// so a fixed name let a sibling repetition wipe this fixture out from under a running one.
+const ROOT = mkdtempSync(join(tmpdir(), 'ca-claude-recency-'));
 const configDir = join(ROOT, 'claude');
 const projectDir = join(configDir, 'projects', '-tmp-ca-recency');
 const cwd = join(ROOT, 'workspace');
@@ -190,4 +191,5 @@ console.log(`\n${results.length - failed} passed, ${failed} failed`);
 // process dies leaves an orphaned child behind. `14645766` closed it in one
 // suite of four; these are the other three.
 await drainClaudeLiveStatusProbes();
+rmSync(ROOT, { recursive: true, force: true }); // this invocation's root only
 process.exit(failed ? 1 : 0);

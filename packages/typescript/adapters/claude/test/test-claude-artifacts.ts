@@ -10,7 +10,7 @@
  *   bun run packages/typescript/adapters/claude/test/test-claude-artifacts.ts      (exit 0 = all pass)
  */
 export {};
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mapTranscript } from '../src/index.ts';
@@ -22,9 +22,9 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 // A real on-disk file so SendUserFile inlining can read+encode it (mime comes from the attachment, not sniffed).
-const DIR = join(tmpdir(), 'ca-claude-artifacts');
-rmSync(DIR, { recursive: true, force: true });
-mkdirSync(DIR, { recursive: true });
+// Own temp root per invocation: 'bun run check --repeat N' overlaps repetitions of the same task, and
+// a fixed name let a sibling repetition delete these bytes before this one inlined them.
+const DIR = mkdtempSync(join(tmpdir(), 'ca-claude-artifacts-'));
 const shot = join(DIR, 'shot.png');
 writeFileSync(shot, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4])); // 8 bytes, enough to base64
 const requested = join(DIR, 'requested.png');
@@ -96,7 +96,7 @@ check('assistant inline image → file-artifact', !!aimg && aimg.mimeType === 'i
 const arts2 = mapTranscript(lines).filter((m: any) => m.type === 'file-artifact').map((a: any) => a.path).sort();
 check('artifact paths are stable across re-map (history replay dedupe)', JSON.stringify(arts2) === JSON.stringify(arts.map((a: any) => a.path).sort()));
 
-rmSync(DIR, { recursive: true, force: true });
+rmSync(DIR, { recursive: true, force: true }); // this invocation's root only
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

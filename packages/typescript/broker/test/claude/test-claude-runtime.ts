@@ -31,6 +31,31 @@ const waitFor = async (predicate: () => boolean, timeoutMs: number): Promise<boo
   }
   return predicate();
 };
+// A transcript authority scan's time budget is read through its `now` seam, so no resource-bound
+// check here depends on how fast the host is: a frozen clock leaves only the source or record budget
+// to bound a scan, and a stepping one runs the time budget out after a fixed number of chunks.
+const frozenClock = (): number => 0;
+function steppingClock(): () => number {
+  let now = 0;
+  return () => ++now;
+}
+/** Run `work`, counting event-loop turns that pass meanwhile: any at all prove it yielded. */
+async function countingTurns<T>(work: () => Promise<T>): Promise<{ result: T; turns: number }> {
+  let turns = 0;
+  let running = true;
+  const spin = (): void => {
+    if (!running) return;
+    turns += 1;
+    setImmediate(spin);
+  };
+  setImmediate(spin);
+  try {
+    const result = await work();
+    return { result, turns };
+  } finally {
+    running = false;
+  }
+}
 const T0 = '2026-06-18T17:46:28.834Z';
 const T1 = '2026-06-18T17:46:31.361Z'; // assistant a1 (turn 1)
 const T2 = '2026-06-18T17:46:33.834Z'; // assistant a2 (turn 1, same message.id → no double-count)
@@ -213,32 +238,28 @@ const lines = [
       writeSync(markerFreeFd, newline, 0, 1, at);
     }
     closeSync(markerFreeFd);
-    let ticks = 0;
-    const heartbeat = setInterval(() => { ticks += 1; }, 10);
-    const boundedStarted = performance.now();
-    const bounded = await claudeTranscriptTurnAuthorityResult(markerFree);
-    const boundedElapsedMs = performance.now() - boundedStarted;
-    clearInterval(heartbeat);
+    const { result: bounded, turns } = await countingTurns(() => claudeTranscriptTurnAuthorityResult(markerFree, { now: frozenClock }));
     check(
       'cold marker-free 256 MiB recovery yields and returns a typed admission fallback',
       bounded.kind === 'fallback'
-        && (bounded.reason === 'source-limit' || bounded.reason === 'time-limit')
-        && bounded.scannedBytes <= 64 * 1024 * 1024
-        && ticks > 0
-        && boundedElapsedMs < 1000,
-      JSON.stringify({ bounded, ticks, elapsedMs: Math.round(boundedElapsedMs) }),
+        && bounded.reason === 'source-limit'
+        && bounded.scannedBytes === 64 * 1024 * 1024
+        && turns > 0,
+      JSON.stringify({ bounded, turns }),
     );
 
     const timeLimited = join(dir, 'marker-free-time-limit.jsonl');
     linkSync(markerFree, timeLimited);
     const timed = await claudeTranscriptTurnAuthorityResult(timeLimited, {
       maxSourceBytes: sourceBytes,
-      maxElapsedMs: 1,
+      maxElapsedMs: 4,
+      now: steppingClock(),
     });
     check(
       'cold Claude recovery has a distinct typed wall-clock fallback',
       timed.kind === 'fallback'
         && timed.reason === 'time-limit'
+        && timed.scannedBytes > 0
         && timed.scannedBytes < sourceBytes,
       JSON.stringify(timed),
     );
@@ -287,37 +308,34 @@ const lines = [
       JSON.stringify(warmSeeded),
     );
 
+    // Catching up across calls is a property of passes, not of the production budget's size, which the
+    // cold and beyond-budget checks pin at exactly 64 MiB. So this append is eight passes of a 4 MiB
+    // budget rather than eight of 64 MiB: the same proof for a sixteenth of the reads.
+    const warmPass = { maxSourceBytes: 4 * 1024 * 1024, now: frozenClock };
     const warmSeedSize = statSync(warmBoundedFile).size;
-    const warmAppendBytes = 512 * 1024 * 1024;
+    const warmAppendBytes = 8 * warmPass.maxSourceBytes;
     const warmFd = openSync(warmBoundedFile, 'r+');
     const incompleteStart = Buffer.from('{');
     writeSync(warmFd, incompleteStart, 0, incompleteStart.length, warmSeedSize);
     ftruncateSync(warmFd, warmSeedSize + warmAppendBytes);
     closeSync(warmFd);
 
-    let warmTicks = 0;
-    const warmHeartbeat = setInterval(() => { warmTicks += 1; }, 10);
-    const warmStartedAt = performance.now();
-    const warmBounded = await claudeTranscriptTurnAuthorityResult(warmBoundedFile, { maxElapsedMs: 1000 });
-    const warmElapsedMs = performance.now() - warmStartedAt;
-    clearInterval(warmHeartbeat);
+    const { result: warmBounded, turns: warmTurns } = await countingTurns(() => claudeTranscriptTurnAuthorityResult(warmBoundedFile, warmPass));
     check(
-      'warm Claude 512 MiB incomplete append yields and reports bounded source work',
+      'warm Claude incomplete append beyond the source budget yields and reports bounded source work',
       warmBounded.kind === 'fallback'
         && warmBounded.authority === 'active'
         && warmBounded.reason === 'source-limit'
-        && warmBounded.scannedBytes > 0
-        && warmBounded.scannedBytes <= 64 * 1024 * 1024
-        && warmTicks > 0
-        && warmElapsedMs < 1000,
-      JSON.stringify({ warmBounded, ticks: warmTicks, elapsedMs: Math.round(warmElapsedMs) }),
+        && warmBounded.scannedBytes === warmPass.maxSourceBytes
+        && warmTurns > 0,
+      JSON.stringify({ warmBounded, turns: warmTurns }),
     );
 
     let warmCaughtUpBytes = warmBounded.scannedBytes;
     let warmCatchupPasses = 1;
     let warmCatchup = warmBounded;
     while (warmCaughtUpBytes < warmAppendBytes && warmCatchupPasses < 16) {
-      warmCatchup = await claudeTranscriptTurnAuthorityResult(warmBoundedFile, { maxElapsedMs: 1000 });
+      warmCatchup = await claudeTranscriptTurnAuthorityResult(warmBoundedFile, warmPass);
       warmCaughtUpBytes += warmCatchup.scannedBytes;
       warmCatchupPasses += 1;
       if (warmCatchup.scannedBytes === 0) break;
@@ -328,7 +346,7 @@ const lines = [
         && warmCatchup.authority === 'active'
         && warmCatchup.reason === 'record-limit'
         && warmCaughtUpBytes === warmAppendBytes
-        && warmCatchupPasses === warmAppendBytes / (64 * 1024 * 1024),
+        && warmCatchupPasses === warmAppendBytes / warmPass.maxSourceBytes,
       JSON.stringify({ warmCatchup, warmCaughtUpBytes, warmCatchupPasses }),
     );
 
@@ -385,8 +403,8 @@ const lines = [
     writeSync(warmBeyondBudgetFd, warmExactCompletion);
     closeSync(warmBeyondBudgetFd);
 
-    const warmFirstBudget = await claudeTranscriptTurnAuthorityResult(warmBeyondBudgetFile, { maxElapsedMs: 1000 });
-    const warmSecondBudget = await claudeTranscriptTurnAuthorityResult(warmBeyondBudgetFile, { maxElapsedMs: 1000 });
+    const warmFirstBudget = await claudeTranscriptTurnAuthorityResult(warmBeyondBudgetFile, { now: frozenClock });
+    const warmSecondBudget = await claudeTranscriptTurnAuthorityResult(warmBeyondBudgetFile, { now: frozenClock });
     check(
       'warm Claude scan resumes beyond 64 MiB and publishes an already-present exact completion',
       warmFirstBudget.kind === 'fallback'
@@ -408,7 +426,7 @@ const lines = [
     writeSync(warmRecordFd, incompleteStart, 0, incompleteStart.length, warmRecordSeedSize);
     ftruncateSync(warmRecordFd, warmRecordSeedSize + 2 * 1024 * 1024);
     closeSync(warmRecordFd);
-    const warmRecordBounded = await claudeTranscriptTurnAuthorityResult(warmRecordLimitedFile);
+    const warmRecordBounded = await claudeTranscriptTurnAuthorityResult(warmRecordLimitedFile, { now: frozenClock });
     check(
       'warm Claude oversized record has a distinct typed record fallback',
       warmRecordBounded.kind === 'fallback'
@@ -428,7 +446,8 @@ const lines = [
     closeSync(warmTimeFd);
     const warmTimeBounded = await claudeTranscriptTurnAuthorityResult(warmTimeLimitedFile, {
       maxSourceBytes: 256 * 1024 * 1024,
-      maxElapsedMs: 1,
+      maxElapsedMs: 4,
+      now: steppingClock(),
     });
     check(
       'warm Claude append has a distinct typed wall-clock fallback',

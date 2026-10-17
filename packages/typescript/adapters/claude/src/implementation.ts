@@ -7804,6 +7804,8 @@ export type ClaudeTurnAuthorityInference =
 export interface ClaudeTurnAuthorityScanOptions {
   maxSourceBytes?: number;
   maxElapsedMs?: number;
+  /** The clock {@link maxElapsedMs} is measured on (default `Date.now`). */
+  now?: () => number;
   beforeValidation?: () => void;
 }
 
@@ -7956,7 +7958,8 @@ async function scanClaudeAuthorityCold(
     CLAUDE_TURN_AUTHORITY_CHUNK_BYTES,
     options.maxSourceBytes ?? CLAUDE_TURN_AUTHORITY_MAX_SOURCE_BYTES,
   );
-  const deadline = Date.now()
+  const now = options.now ?? Date.now;
+  const deadline = now()
     + Math.max(1, options.maxElapsedMs ?? CLAUDE_TURN_AUTHORITY_MAX_ELAPSED_MS);
   let fd: number | undefined;
   let scannedBytes = 0;
@@ -8017,7 +8020,7 @@ async function scanClaudeAuthorityCold(
         result = boundedResult('source-limit');
         break;
       }
-      if (Date.now() > deadline) {
+      if (now() > deadline) {
         result = boundedResult('time-limit');
         break;
       }
@@ -8148,7 +8151,8 @@ async function scanClaudeAuthorityRange(
     CLAUDE_TURN_AUTHORITY_CHUNK_BYTES,
     options.maxSourceBytes ?? CLAUDE_TURN_AUTHORITY_MAX_SOURCE_BYTES,
   );
-  const deadline = Date.now()
+  const now = options.now ?? Date.now;
+  const deadline = now()
     + Math.max(1, options.maxElapsedMs ?? CLAUDE_TURN_AUTHORITY_MAX_ELAPSED_MS);
   const initialAuthority = cached.authority;
   let candidateAuthority = cached.candidateAuthority;
@@ -8191,7 +8195,7 @@ async function scanClaudeAuthorityRange(
         boundedReason = 'source-limit';
         break;
       }
-      if (Date.now() > deadline) {
+      if (now() > deadline) {
         boundedReason = 'time-limit';
         break;
       }
