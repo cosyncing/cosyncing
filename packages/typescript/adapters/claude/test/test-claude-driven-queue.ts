@@ -519,10 +519,10 @@ async function main(): Promise<void> {
 
   // ── Drive context usage comes from init model + authoritative result usage ─────────────────────
   for (const fixture of [
-    { label: '200K', model: 'claude-opus-5', used: 175_010, max: 200_000, history: [] },
+    { label: '200K', model: 'claude-opus-4-6', used: 175_010, max: 200_000, history: [] },
     {
       label: '1M',
-      model: 'claude-opus-5[1m]',
+      model: 'claude-opus-4-6[1m]',
       used: 175_010,
       max: 1_000_000,
       history: [
@@ -532,12 +532,12 @@ async function main(): Promise<void> {
           message: {
             id: 'old-context-message',
             role: 'assistant',
-            model: 'claude-sonnet-5',
+            model: 'claude-sonnet-4-6',
             content: [{ type: 'text', text: 'historical answer' }],
             usage: { input_tokens: 20, cache_read_input_tokens: 10 },
           },
         },
-        { type: 'cost-state', modelUsage: { 'claude-sonnet-5': { inputTokens: 30 } } },
+        { type: 'cost-state', modelUsage: { 'claude-sonnet-4-6': { inputTokens: 30 } } },
       ],
     },
   ]) {
@@ -591,13 +591,13 @@ async function main(): Promise<void> {
     };
 
     (h.conn as any).ingestInit({
-      model: 'claude-opus-5[1m]',
+      model: 'claude-opus-4-6[1m]',
       permissionMode: 'default',
       slash_commands: [],
     });
     const extended = await emitResult('1M');
     (h.conn as any).ingestInit({
-      model: 'claude-opus-5',
+      model: 'claude-opus-4-6',
       permissionMode: 'default',
       slash_commands: [],
     });

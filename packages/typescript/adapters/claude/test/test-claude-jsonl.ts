@@ -54,7 +54,7 @@ function check(name: string, ok: boolean, detail = ''): void {
     // a real user prompt
     { type: 'user', uuid: 'u1', cwd: '/tmp/x', message: { role: 'user', content: 'Please edit the file and run ls.' } },
     // ONE turn (message.id m1) split across 4 lines, usage on EVERY line → exactly ONE token-count
-    { type: 'assistant', uuid: 'a1', message: { id: 'm1', model: 'claude-opus-4-8', stop_reason: 'tool_use', content: [{ type: 'thinking', thinking: 'Let me think', signature: 'sig' }], usage: u } },
+    { type: 'assistant', uuid: 'a1', message: { id: 'm1', model: 'claude-opus-4-6', stop_reason: 'tool_use', content: [{ type: 'thinking', thinking: 'Let me think', signature: 'sig' }], usage: u } },
     { type: 'assistant', uuid: 'a2', message: { id: 'm1', stop_reason: 'tool_use', content: [{ type: 'text', text: 'I will edit it.' }], usage: u } },
     { type: 'assistant', uuid: 'a3', message: { id: 'm1', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_edit', name: 'Edit', input: { file_path: '/tmp/x/a.ts' } }], usage: u } },
     { type: 'assistant', uuid: 'a4', message: { id: 'm1', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_bash', name: 'Bash', input: { command: 'ls' } }], usage: u } },
@@ -221,8 +221,8 @@ function check(name: string, ok: boolean, detail = ''): void {
 {
   const usage = { input_tokens: 10, output_tokens: 99, cache_read_input_tokens: 150_000, cache_creation_input_tokens: 25_000 };
   const lines = [
-    { type: 'assistant', uuid: 'ctx-a', message: { id: 'ctx-m1', model: 'claude-opus-5', content: [{ type: 'text', text: 'before marker' }], usage } },
-    { type: 'cost-state', modelUsage: { 'claude-opus-5[1m]': { inputTokens: 999_999_999 } } },
+    { type: 'assistant', uuid: 'ctx-a', message: { id: 'ctx-m1', model: 'claude-opus-4-6', content: [{ type: 'text', text: 'before marker' }], usage } },
+    { type: 'cost-state', modelUsage: { 'claude-opus-4-6[1m]': { inputTokens: 999_999_999 } } },
   ];
   const out = mapTranscript(lines) as any[];
   const contexts = out.filter((m) => m.type === 'metadata-update' && m.key === 'contextUsage');
@@ -233,7 +233,7 @@ function check(name: string, ok: boolean, detail = ''): void {
     out.filter((m) => m.type === 'token-count').length === 1, JSON.stringify(out.filter((m) => m.type === 'token-count')));
 
   const selfCorrected = mapTranscript([
-    { type: 'assistant', uuid: 'ctx-b', message: { id: 'ctx-m2', model: 'claude-sonnet-5', content: [], usage: { input_tokens: 250_001 } } },
+    { type: 'assistant', uuid: 'ctx-b', message: { id: 'ctx-m2', model: 'claude-sonnet-4-6', content: [], usage: { input_tokens: 250_001 } } },
   ]) as any[];
   check('a resident reading above 200k self-corrects to the 1M window',
     selfCorrected.some((m) => m.type === 'metadata-update' && m.key === 'contextUsage' && m.value?.used === 250_001 && m.value?.max === 1_000_000));
