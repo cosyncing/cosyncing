@@ -2,6 +2,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
@@ -25,19 +26,20 @@ SessionRef _ref(
 void main() {
   // The strip labels unnamed tabs through `AppLocalizations` (U3), so its host
   // needs the app's delegates like any other localized surface.
-  Widget host(Widget child, {Locale? locale}) => ProviderScope(
-    overrides: [activeBrokerProfileProvider.overrideWith((ref) => null)],
-    child: MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      locale: locale,
-      theme: buildAppTheme(
-        themeSpecById(kDefaultThemeId).light,
-        Brightness.light,
-      ),
-      home: Scaffold(body: child),
-    ),
-  );
+  Widget host(Widget child, {Locale? locale, BrokerProfile? profile}) =>
+      ProviderScope(
+        overrides: [activeBrokerProfileProvider.overrideWith((ref) => profile)],
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: locale,
+          theme: buildAppTheme(
+            themeSpecById(kDefaultThemeId).light,
+            Brightness.light,
+          ),
+          home: Scaffold(body: child),
+        ),
+      );
 
   group('OpenSessionsTabStrip', () {
     testWidgets('the labelled Overview tab is its own tappable button', (
@@ -119,7 +121,7 @@ void main() {
     });
 
     for (final kind in [PointerDeviceKind.touch, PointerDeviceKind.mouse]) {
-      testWidgets('$kind uses drag for reorder and hold for the menu', (
+      testWidgets('$kind uses drag for reorder and hold for rename', (
         tester,
       ) async {
         tester.view
@@ -141,6 +143,12 @@ void main() {
               onClose: closed.add,
               onReorder: (oldIndex, newIndex) =>
                   moves.add((oldIndex, newIndex)),
+            ),
+            profile: BrokerProfile(
+              id: 'studio',
+              displayName: 'Studio',
+              baseUri: Uri.parse('http://studio.test:7734'),
+              createdAt: DateTime.utc(2026),
             ),
           ),
         );
@@ -170,7 +178,11 @@ void main() {
           expect(moves, [(1, 0)]);
         } else {
           expect(moves, isEmpty);
-          expect(find.text('Rename session'), findsOneWidget);
+          expect(find.byType(AlertDialog), findsOneWidget);
+          expect(
+            find.byKey(const Key('session-rename-dialog-input')),
+            findsOneWidget,
+          );
         }
         expect(closed, isEmpty);
       });
