@@ -16,6 +16,7 @@ import { PiBridgeSession } from '../harness/fakes/pi-bridge-driver.ts';
 import { pairDevice } from '../harness/pairing.ts';
 
 const POSIX = process.platform !== 'win32';
+const DOWNLOAD_CAP = 4096;
 // Windows strips a trailing space from a file name and refuses a double quote in one.
 const SPACED = POSIX ? ' spaced name.txt ' : ' spaced name.txt';
 
@@ -34,7 +35,7 @@ describe('with workspace browsing enabled in the broker configuration', () => {
     installed = await startInstalledBroker({
       name: 'workspace-files',
       features: { httpWorkspaceBrowsing: true },
-      env: { COSYNCING_FS_READ_MAX_BYTES: '8', COSYNCING_FS_DOWNLOAD_MAX_BYTES: '16' },
+      env: { COSYNCING_FS_READ_MAX_BYTES: '8', COSYNCING_FS_DOWNLOAD_MAX_BYTES: String(DOWNLOAD_CAP) },
     });
     owner = installed.owner;
     // One level under the broker's HOME, so `~/<workspace>/…` resolves inside and `~` alone does not.
@@ -45,7 +46,7 @@ describe('with workspace browsing enabled in the broker configuration', () => {
     mkdirSync(join(cwd, 'nested'));
     writeFileSync(join(cwd, 'nested', 'note.txt'), 'nested-note');
     writeFileSync(join(cwd, 'binary.bin'), new Uint8Array([0xff, 0x00, 0x10, 0x80, 0x41]));
-    writeFileSync(join(cwd, 'too-large.txt'), 'x'.repeat(17));
+    writeFileSync(join(cwd, 'too-large.txt'), 'x'.repeat(DOWNLOAD_CAP + 1));
     secret = join(installed.paths.root, 'outside', 'secret.txt');
     mkdirSync(join(installed.paths.root, 'outside'));
     writeFileSync(secret, 'do not serve this');
@@ -147,6 +148,27 @@ describe('with workspace browsing enabled in the broker configuration', () => {
 
     const tooLarge = await owner.get(route('/fs/download', { path: 'too-large.txt' }));
     expect([tooLarge.status, tooLarge.body.code]).toEqual([413, 'FS_DOWNLOAD_TOO_LARGE']);
+    // JSON file bytes are a ranged download, not a JSON API representation.
+    // Negotiating API gzip must not change their length or validator semantics.
+    const jsonFile = JSON.stringify({ text: 'download bytes '.repeat(100) });
+    writeFileSync(join(cwd, 'data.json'), jsonFile);
+    const jsonUrl = `${installed.broker.url}${route('/fs/download', { path: 'data.json' })}`;
+    const identityDownload = await fetch(jsonUrl, {
+      headers: { ...owner.credentialHeaders(), 'accept-encoding': 'identity' },
+    });
+    expect(await identityDownload.text()).toBe(jsonFile);
+    const jsonDownload = await fetch(jsonUrl, {
+      headers: { ...owner.credentialHeaders(), 'accept-encoding': 'gzip' },
+      decompress: false,
+    } as RequestInit);
+    expect(jsonDownload.status).toBe(200);
+    expect(jsonDownload.headers.get('content-type')).toBe('application/json');
+    expect(jsonDownload.headers.get('content-encoding')).toBeNull();
+    // The file transport may stream with chunked transfer; preserve
+    // its identity framing rather than requiring a new Content-Length header.
+    expect(jsonDownload.headers.get('content-length')).toBe(identityDownload.headers.get('content-length'));
+    expect(jsonDownload.headers.get('etag')).toBe(identityDownload.headers.get('etag'));
+    expect(await jsonDownload.text()).toBe(jsonFile);
     if (POSIX) {
       const quoted = await fetch(`${installed.broker.url}${route('/fs/download', { path: 'bad"name.txt' })}`, { headers: owner.credentialHeaders() });
       expect(quoted.status).toBe(200);

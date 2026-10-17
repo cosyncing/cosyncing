@@ -50,6 +50,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- Large session-stream frames and JSON responses use negotiated compression
+  to reduce mobile data transfer.
+
 - Home reuses the session roster for active counts instead of downloading
   every session again when the roster changes.
 

@@ -224,6 +224,42 @@ describe('the session roster', () => {
     expect(JSON.parse(await refused.text()).sessions).toEqual(body.sessions);
   });
 
+  test('JSON feed and capability responses negotiate gzip without changing identity or error semantics', async () => {
+    for (const path of [
+      `/api/agents?${rosterQuery()}`,
+      `/api/session-roster-deltas?${rosterQuery({ after: '0' })}`,
+    ]) {
+      const get = (encoding: string) => fetch(broker.url + path, {
+        headers: { 'accept-encoding': encoding }, decompress: false,
+      } as RequestInit);
+      const plain = await get('identity');
+      const body = await plain.text();
+      expect(Buffer.byteLength(body)).toBeGreaterThanOrEqual(1024);
+      expect(plain.headers.get('content-encoding')).toBeNull();
+      expect(plain.headers.get('vary')?.toLowerCase()).toContain('accept-encoding');
+      for (const encoding of ['gzip;q=0', 'gzip;q=0, *;q=1']) {
+        const refused = await get(encoding);
+        expect(refused.headers.get('content-encoding')).toBeNull();
+        expect(JSON.parse(await refused.text())).toEqual(JSON.parse(body));
+      }
+      const compressed = await Promise.all([get('gzip'), get('gzip'), get('*;q=0.5')]);
+      for (const response of compressed) {
+        expect(response.headers.get('content-encoding')).toBe('gzip');
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        expect(bytes.length).toBeLessThan(Buffer.byteLength(body));
+        expect(JSON.parse(Buffer.from(Bun.gunzipSync(bytes)).toString())).toEqual(JSON.parse(body));
+        console.log(JSON.stringify({ probe: 'json-compression', path, identityBytes: Buffer.byteLength(body), gzipBytes: bytes.length }));
+      }
+    }
+    const small = await client.get('/api/schedules', { 'accept-encoding': 'gzip' });
+    expect(small.status).toBe(200);
+    expect(small.headers.get('content-encoding')).toBeNull();
+    expect(small.headers.get('vary')?.toLowerCase()).toContain('accept-encoding');
+    const invalid = await client.get('/api/session-roster-deltas?after=bad', { 'accept-encoding': 'gzip' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.headers.get('content-encoding')).toBeNull();
+  });
+
   test('each window lists what was active in it; a waiting terminal is never hidden; an undated row lives only in all time', async () => {
     // A live session whose transcript does not exist yet: the broker has no date for it.
     const undatedPath = join(claudeDir, 'projects', 'watched', '0e0c1000-0000-4000-8000-0000000000ff.jsonl');

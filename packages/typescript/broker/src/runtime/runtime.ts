@@ -99,6 +99,7 @@ import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../artif
 import { PiBridgeRegistry } from '@cosyncing/adapter-pi';
 import { ClaudeHooksRegistry } from '@cosyncing/adapter-claude';
 import { HISTORY_WEBSOCKET_OPTIONS } from '../transport/http-contracts.ts';
+import { sendJson, withJsonCompression } from '../transport/json-egress.ts';
 import {
   acceptsGzip,
   filterSessionsByWindow,
@@ -3901,7 +3902,7 @@ function handleProtocolReceipt(ws: ServerWebSocket<WsData>, msg: any): void {
   const attachTicket = ticketFromClientMessage(msg);
   const parsedClientMessageId = parseClientMessageId(msg?.clientMessageId);
   const clientMessageId = parsedClientMessageId || undefined;
-  const send = (event: WireEvent) => ws.send(JSON.stringify(event));
+  const send = (event: WireEvent) => sendJson(ws, event);
   if (!attachTicket || parsedClientMessageId === '') {
     send({
       kind: 'nack',
@@ -4074,17 +4075,17 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
   if (peerLacksRole(ws.data.principal, 'files')
     && (msg?.kind === 'file' || msg?.kind === 'artifact-interaction')) {
     const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
-    ws.send(JSON.stringify({
+    sendJson(ws, {
       kind: 'nack',
       code: 'CLIENT_MESSAGE_FAILED',
       message: 'files role required',
       ...(clientMessageId ? { clientMessageId } : {}),
-    } satisfies WireEvent));
+    } satisfies WireEvent);
     return;
   }
   if (ws.data.compatibility.readOnly && isMutatingClientMessage(msg?.kind)) {
     const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
-    ws.send(JSON.stringify({
+    sendJson(ws, {
       kind: 'nack',
       code: 'CLIENT_MESSAGE_FAILED',
       // A genuine incompatibility OUTRANKS the declaration. Both can be true at
@@ -4096,17 +4097,17 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
         ? `read-only session: ${ws.data.compatibility.reason}`
         : `read-only compatibility mode: ${ws.data.compatibility.reason}`,
       ...(clientMessageId ? { clientMessageId } : {}),
-    } satisfies WireEvent));
+    } satisfies WireEvent);
     return;
   }
   if (ws.data.observeRequested && isMutatingClientMessage(msg?.kind)) {
     const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
-    ws.send(JSON.stringify({
+    sendJson(ws, {
       kind: 'nack',
       code: 'CLIENT_MESSAGE_FAILED',
       message: 'read-only observe session: this client attached for Observe; attach to Drive before sending input',
       ...(clientMessageId ? { clientMessageId } : {}),
-    } satisfies WireEvent));
+    } satisfies WireEvent);
     return;
   }
   const sequencer = ws.data.handoffSequencer ??= new ClientHandoffSequencer();
@@ -4150,7 +4151,7 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
   if (!mc) return;
   const readMark = pooledHistoryReadMark();
   const clientMessageId = parseClientMessageId(msg?.clientMessageId);
-  const send = (event: WireEvent) => ws.send(JSON.stringify(event));
+  const send = (event: WireEvent) => sendJson(ws, event);
   if (clientMessageId === '') {
     send({ kind: 'nack', code: 'BAD_CLIENT_MESSAGE_ID', message: 'clientMessageId must be a short ASCII token' });
     return;
@@ -4439,7 +4440,7 @@ async function handleHistoryRefresh(ws: ServerWebSocket<WsData>, msg: any): Prom
   const mc = ws.data.mc;
   const client = ws.data.client;
   if (!mc || !client) return;
-  const send = (event: WireEvent) => ws.send(JSON.stringify(event));
+  const send = (event: WireEvent) => sendJson(ws, event);
   const clientMessageId = parseClientMessageId(msg?.clientMessageId);
   if (!clientMessageId) {
     send({
@@ -4631,7 +4632,7 @@ async function handleClientMessage(
 ): Promise<void> {
   const mc = ws.data.mc;
   if (!mc || !msg) return;
-  await handleManagedClientMessage(mc, msg, (event) => ws.send(JSON.stringify(event)), {
+  await handleManagedClientMessage(mc, msg, (event) => sendJson(ws, event), {
     lastPromptAt: () => ws.data.lastPromptAt ?? 0,
     setLastPromptAt: (value) => { ws.data.lastPromptAt = value; },
     journalScope: { identity: ws.data.identity, tool: ws.data.tool, sessionId: ws.data.id },
@@ -5985,7 +5986,7 @@ server = Bun.serve<WsData>({
   hostname: LISTEN_HOST,
   idleTimeout: 240,
   development: false,
-  async fetch(req, srv) {
+  fetch: withJsonCompression<WsData>(async (req, srv) => {
     const url = new URL(req.url);
     const path = url.pathname;
     const principal = authenticatedPrincipal(req, path);
@@ -8420,7 +8421,7 @@ server = Bun.serve<WsData>({
     // See docs/architecture/monorepo.md.
     if (path === '/') return new Response(null, { status: 302, headers: { location: APP_MOUNT_PATH } });
     return new Response('Not found', { status: 404 });
-  },
+  }),
   error(error) {
     // Bun's default development response includes source context. Keep unexpected request failures
     // content-free on the wire and in the ordinary log stream.
@@ -8523,7 +8524,7 @@ server = Bun.serve<WsData>({
                     compatibility.readOnly || ws.data.observeRequested === true,
                   )
                 : ev;
-          const status = ws.send(JSON.stringify(prepared));
+          const status = sendJson(ws, prepared);
           if (status === 0) {
             try {
               ws.close(1011, 'websocket send dropped');
