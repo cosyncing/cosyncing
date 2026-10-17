@@ -4821,6 +4821,21 @@ export function newClaudeContextWindowState(): ClaudeContextWindowState {
 const CLAUDE_DEFAULT_CONTEXT_MAX = 200_000;
 const CLAUDE_EXTENDED_CONTEXT_MAX = 1_000_000;
 
+/** Models whose window is 1M natively, as Claude Code's own model registry declares them
+ *  (`context: { window: 1e6, native_1m: true }`, read from the 2.1.296 and 2.1.302 builds). From
+ *  2.1.300 Claude sends no 1M beta for these and writes no `[1m]` suffix into cost-state, so the
+ *  transcript carries no other evidence of the window until a reading passes 200k. */
+const CLAUDE_NATIVE_1M_MODELS: ReadonlySet<string> = new Set([
+  'claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5',
+  'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-haiku-5-5',
+  'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5', 'claude-mythos-5-1',
+]);
+
+/** A dated id (`claude-opus-4-8-20260101`) has its base id's window. */
+function claudeNative1M(model: string): boolean {
+  return CLAUDE_NATIVE_1M_MODELS.has(model.replace(/-\d{8}$/, ''));
+}
+
 function claudeContextModel(model: unknown): string | undefined {
   if (typeof model !== 'string') return undefined;
   const clean = model.replace(/\[1m\]$/, '');
@@ -4856,7 +4871,7 @@ function claudeContextUsageMessage(
   if (!cleanModel) return undefined;
   // A resident reading above 200k is itself proof that this session is on the
   // 1M window even when the durable cost-state marker has not landed yet.
-  const max = state.oneMillionModels.has(cleanModel) || used > CLAUDE_DEFAULT_CONTEXT_MAX
+  const max = claudeNative1M(cleanModel) || state.oneMillionModels.has(cleanModel) || used > CLAUDE_DEFAULT_CONTEXT_MAX
     ? CLAUDE_EXTENDED_CONTEXT_MAX
     : CLAUDE_DEFAULT_CONTEXT_MAX;
   const boundedUsed = Math.min(used, max);

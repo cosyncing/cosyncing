@@ -297,6 +297,8 @@ export interface ManagedConnAttentionHooks {
   onPendingWithdrawn?: (info: SessionInfo, requestIds: string[]) => void;
   /** Transcript-free live roster metadata/status projection. */
   onSessionInfo?: (info: SessionInfo) => void;
+  /** The row discovery last published for this exact session, when the broker still holds it. */
+  discoveredSession?: (tool: string, id: string) => SessionInfo | undefined;
 }
 
 export interface HubAttentionHooks {
@@ -308,6 +310,8 @@ export interface HubAttentionHooks {
   onPendingWithdrawn?: (info: SessionInfo, requestIds: string[]) => void;
   /** Transcript-free live roster metadata/status projection. */
   onSessionInfo?: (info: SessionInfo) => void;
+  /** The row discovery last published for this exact session (see {@link ManagedConn.adoptLineage}). */
+  discoveredSession?: (tool: string, id: string) => SessionInfo | undefined;
   maxZeroClientLeases?: number;
 }
 
@@ -381,6 +385,10 @@ function discoveryRefresh(current: SessionInfo, discovered: SessionInfo, status:
   }
   return next;
 }
+
+/** The roster lineage identity: what a child's `parentThreadId` joins on, and what makes a row a child. */
+const LINEAGE_KEYS = ['nativeId', 'origin', 'parentThreadId'] as const;
+type LineageKey = (typeof LINEAGE_KEYS)[number];
 
 /** Two SessionInfos that would put the same `session` frame on the wire. */
 function sameWireInfo(a: SessionInfo, b: SessionInfo): boolean {
@@ -644,6 +652,8 @@ export class ManagedConn {
    *  or a resync broadcast). A `history-refresh` computed across a move describes history the
    *  clients no longer hold, so it is not sent (contract revision 28). */
   private historyEpoch = 0;
+  /** Lineage fields this wrapper filled from discovery rather than the adapter's connection. */
+  private readonly adoptedLineage = new Set<LineageKey>();
 
   constructor(
     public conn: SessionConnection,
@@ -659,6 +669,7 @@ export class ManagedConn {
     this.liveRunning = conn.info.status !== 'idle';
     this.liveNeedsInput = conn.info.status === 'needs-input';
     this.observedConnStatus = conn.info.status;
+    this.adoptDiscoveredLineage();
     // Hydrate the fan-out cache from the durable shared draft so a reconstructed
     // owner (zero-client eviction) and a restarted broker both keep the draft.
     const persisted = this.draftStore?.get(conn.info.tool, conn.info.id);
@@ -687,6 +698,37 @@ export class ManagedConn {
       /* roster observation never changes the session stream */
     }
     this.broadcastSessionProjection(info);
+  }
+
+  /**
+   * Take the roster lineage identity discovery published for this session. Identity only: run
+   * state, control and attach class are untouched.
+   *
+   * Every frame this connection publishes journals its SessionInfo whole, so an attach-time info
+   * without the identity discovery publishes would un-nest the session's children on each frame,
+   * until the next sweep restored it. Claude and Kimi give a parent its `nativeId` only once it has
+   * children, which an attached connection never learns of by itself. Discovery fills a field the
+   * adapter's connection left unset and keeps what it filled current; a value the adapter set is
+   * never overwritten, and nothing is removed. Returns whether anything changed.
+   */
+  adoptLineage(discovered: SessionInfo): boolean {
+    const info = this.conn.info as Partial<Record<LineageKey, unknown>>;
+    let changed = false;
+    for (const key of LINEAGE_KEYS) {
+      const value = discovered[key];
+      if (value === undefined || value === info[key]) continue;
+      if (info[key] !== undefined && !this.adoptedLineage.has(key)) continue;
+      info[key] = value;
+      this.adoptedLineage.add(key);
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** {@link adoptLineage} from the last discovered row, without publishing: callers broadcast next. */
+  private adoptDiscoveredLineage(): void {
+    const discovered = this.attentionHooks.discoveredSession?.(this.conn.info.tool, this.conn.info.id);
+    if (discovered) this.adoptLineage(discovered);
   }
 
   /** Re-publish session-level projection changes without feeding them back as adapter evidence. */
@@ -882,6 +924,8 @@ export class ManagedConn {
     this.pendingQueuedRevision += 1;
     this.currentPlans.clear();
     this.clearLiveAttentionEvidence();
+    this.adoptedLineage.clear();
+    this.adoptDiscoveredLineage();
     this.updateInfo(conn.info);
     void this.refreshPendingQueuedUsers();
     // A transport swap can hide turns that went through the OTHER owner before the swap: the new
@@ -2285,8 +2329,22 @@ export class Hub {
       onObservationLost: (info) => this.attentionHooks.onObservationLost?.(info),
       onPendingWithdrawn: (info, requestIds) => this.attentionHooks.onPendingWithdrawn?.(info, requestIds),
       onSessionInfo: (info) => this.handleSessionInfo(managed, info),
+      discoveredSession: (tool, id) => this.attentionHooks.discoveredSession?.(tool, id),
     }, this.draftStore);
     return managed;
+  }
+
+  /**
+   * Bring every live connection's lineage identity up to the rows a discovery sweep is about to
+   * journal ({@link ManagedConn.adoptLineage}). A connection that changes publishes once, so its
+   * sockets and the roster journal read the same identity as the sweep. A lookup per connection and
+   * no I/O: a frame is sent only when a session first gains its lineage.
+   */
+  adoptDiscoveredLineage(discovered: (tool: string, id: string) => SessionInfo | undefined): void {
+    for (const managed of this.conns.values()) {
+      const row = discovered(managed.conn.info.tool, managed.conn.info.id);
+      if (row && managed.adoptLineage(row)) managed.broadcastSession(managed.conn.info);
+    }
   }
 
   private matchingConnections(

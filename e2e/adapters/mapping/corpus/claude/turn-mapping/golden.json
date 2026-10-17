@@ -7,7 +7,7 @@
     {"type":"run-summary","key":"64a4b950-9d21-467a-867a-64a4b9509d21:run:u1","turnId":"u1","userMessageKey":"u1","status":"running","startedAt":1782900000000,"source":"claude-transcript"},
     {"type":"thinking","text":"Let me think","key":"claude:m1:0:r"},
     {"type":"token-count","input":100,"output":20,"cacheRead":5,"cacheWrite":2},
-    {"type":"metadata-update","key":"contextUsage","value":{"used":107,"max":200000}},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":107,"max":1000000}},
     {"type":"model-output","text":"I will edit it.","final":true,"key":"claude:m1:1:t"},
     {"type":"tool-call","callId":"toolu_edit","toolName":"Edit","toolClass":"edit","args":{"file_path":"/tmp/x/a.ts"}},
     {"type":"tool-call","callId":"toolu_bash","toolName":"Bash","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}}
@@ -43,7 +43,7 @@
     {"type":"run-summary","key":"64a4b950-9d21-467a-867a-64a4b9509d21:run:u1","turnId":"u1","userMessageKey":"u1","status":"running","startedAt":1782900000000,"source":"claude-transcript"},
     {"type":"thinking","text":"Let me think","key":"claude:m1:0:r"},
     {"type":"token-count","input":100,"output":20,"cacheRead":5,"cacheWrite":2},
-    {"type":"metadata-update","key":"contextUsage","value":{"used":107,"max":200000}},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":107,"max":1000000}},
     {"type":"model-output","text":"I will edit it.","final":true,"key":"claude:m1:1:t"},
     {"type":"tool-call","callId":"toolu_edit","toolName":"Edit","toolClass":"edit","args":{"file_path":"/tmp/x/a.ts"}},
     {"type":"tool-call","callId":"toolu_bash","toolName":"Bash","toolClass":"execute","args":{"command":"ls"},"semantic":{"kind":"command","command":"ls","state":"running"}},

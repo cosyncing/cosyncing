@@ -1,6 +1,6 @@
 {
   "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
-  "description": "context usage from input plus disjoint cache buckets at the 200k default, cost-state [1m] corrects to a 1M window without feeding token-count, a >200k reading self-corrects, an unknown model draws no guess",
+  "description": "context usage from input plus disjoint cache buckets at the 200k default, cost-state [1m] corrects to a 1M window without feeding token-count, a >200k reading self-corrects, a natively 1M model reads 1M with no [1m] evidence (Claude 2.1.300+ writes none), an unknown model draws no guess",
   "userTexts": [
     "meter"
   ],

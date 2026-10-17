@@ -297,9 +297,24 @@ export function conformanceSuite(kit: ConformanceKit): void {
       // Reading the roster and attaching to Observe change no store byte.
       const observer = await client.attach(agent, root.id);
       await observer.waitForKind('history');
+      // Every frame a live connection publishes is journalled as the roster row, so it carries the
+      // lineage the roster joins children on, from its first frame.
+      if (child) expect(observer.frames.find((frame) => frame.kind === 'session')?.info?.nativeId).toBe(lineage);
       await client.sessions({ refresh: true });
       observer.close();
       expect(ownFiles()).toEqual(before);
+      if (!child) return;
+      // A parent already watched when its subagent starts takes the lineage too. Without it, each
+      // frame the parent sends drops the child out of the tree until the next sweep restores it.
+      const watched = fake.seedSession({ title: 'Watched root' });
+      await client.waitForSession((candidate) => candidate.id === watched.id);
+      const watcher = await client.attach(agent, watched.id);
+      await watcher.waitForKind('history');
+      const lateChild = fake.seedSession({ title: 'Late child', childOf: watched });
+      const watchedLineage = watched.rosterNativeId ?? nativeOf(watched);
+      await client.waitForSession((candidate) => candidate.id === lateChild.id && candidate.parentThreadId === watchedLineage);
+      await watcher.waitForFrame((frame) => frame.kind === 'session' && frame.info?.nativeId === watchedLineage);
+      watcher.close();
     });
 
     // ------------------------------------------------------------------ C03

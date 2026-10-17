@@ -1374,6 +1374,11 @@ const draftStore = new SharedDraftStore({
   onPersistenceError: (error) =>
     console.error(`${LOG_PREFIX} shared draft store persistence failed: ${error instanceof Error ? error.message : String(error)}`),
 });
+// The latest roster row seen for each session, from sweeps and watcher snapshots. Declared before
+// the Hub, whose connections read their lineage from it as they are created.
+const latestSessionInfoByKey = new Map<string, SessionInfo>();
+const MAX_LATEST_SESSION_INFO = 1024;
+const latestSessionKey = (tool: string, id: string): string => `${tool}\0${id}`;
 // Test hook (source runs only): a short zero-client eviction grace makes eviction and restore observable in a suite.
 const HUB_EVICT_GRACE_MS = BUILD_INFO.packaged ? 15000 : envNumber('COSYNCING_TEST_HUB_EVICT_GRACE_MS', 0) || 15000;
 const hub = new Hub(registry, HUB_EVICT_GRACE_MS, artifactStore, {
@@ -1410,6 +1415,12 @@ const hub = new Hub(registry, HUB_EVICT_GRACE_MS, artifactStore, {
   },
   onSessionInfo: (info) => {
     rosterPublication.publishOwnerFrame(info);
+  },
+  // A new connection starts from the lineage the roster already shows for it. The cache is keyed by
+  // id and by nativeId, so only a row that IS this session answers.
+  discoveredSession: (tool, id) => {
+    const row = latestSessionInfoByKey.get(latestSessionKey(tool, id));
+    return row?.tool === tool && row.id === id ? row : undefined;
   },
 }, draftStore);
 // R0c.1: the ONE qualified roster-publication boundary. Exact managed-connection frames and adapter
@@ -1996,10 +2007,6 @@ async function startClaudeModSocket(): Promise<void> {
     console.warn(`${LOG_PREFIX} claude-mod socket unavailable, true sync off: ${String((error as Error)?.message ?? error).slice(0, 200)}`);
   }
 }
-
-const latestSessionInfoByKey = new Map<string, SessionInfo>();
-const MAX_LATEST_SESSION_INFO = 1024;
-const latestSessionKey = (tool: string, id: string): string => `${tool}\0${id}`;
 
 function rememberLatestSessionInfo(info: SessionInfo): void {
   const keys = [
@@ -2653,6 +2660,14 @@ async function discoverLocalRoster(
   // 'working' while a turn runs — otherwise a live-bridged Pi shows idle/resume from disk alone.
   // Capability-driven (reads each owned connection's SessionInfo), never a per-tool branch.
   const byKey = new Map(sessions.map((s) => [`${s.tool}:${s.id}`, s]));
+  // Every live connection publishes its own SessionInfo on each frame, so it has to carry the
+  // lineage identity this sweep is about to journal, or a parent whose children appeared after it
+  // was attached drops them out of its tree on every frame until the next sweep. Only rows this
+  // sweep will journal: a mid-sweep snapshot is not reconciled, and a withheld leg is a carry.
+  if (swept.coverage.kind !== 'sweeping') {
+    const withheld = new Set(withheldTools);
+    hub.adoptDiscoveredLineage((tool, id) => (withheld.has(tool) ? undefined : byKey.get(`${tool}:${id}`)));
+  }
   // Reduce every live owner of a session to ONE authoritative owner BEFORE applying anything.
   // Otherwise a read-only Observe wrapper and a Drive wrapper both write, and Map iteration order
   // decides whether the roster ends up 'working' or 'idle' (R0b).
