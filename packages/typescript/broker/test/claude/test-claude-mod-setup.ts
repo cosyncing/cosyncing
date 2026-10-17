@@ -143,7 +143,10 @@ function check(name: string, ok: boolean, detail = ''): void {
 
 // macOS reports os.tmpdir() behind the /var -> /private/var symlink, which the state-dir
   // guard refuses; canonicalize the root first, the way security/r2-export.ts does.
-const root = realpathSync(mkdtempSync(join(tmpdir(), 'cosyncing-claude-mod-setup-')));
+// Short on purpose: MB7 and R4-9 stamp a socket path under this root, and setup stamps '' for any path
+// over the mod's 100-byte socket ceiling. The old 27-character prefix fitted only TMPDIR=/tmp, so every
+// run under a private TMPDIR failed them; this one leaves room for a TMPDIR of up to 37 characters.
+const root = realpathSync(mkdtempSync(join(tmpdir(), 'cms-')));
 const FIXED_DATE = new Date('2026-10-05T12:00:00.000Z');
 const now = (): Date => new Date(FIXED_DATE);
 const VERSION = '0.6.4';
@@ -2566,12 +2569,13 @@ async function wizardSetup(
 
 {
   // MB7, end to end: the copy setup installed carries this state home's socket.
-  const fixture = modFixture('mb7-installed-stamp');
+  const fixture = modFixture('mb7-stamp');
   await fixture.run();
   const installed = readFileSync(join(fixture.marketplaceDir, 'cosyncing-claude/hooks/register.js'), 'utf8');
+  const socket = join(fixture.home, 'claude-mod.sock');
   check('MB7 the installed register.js carries the socket under this installation\'s state home',
-    installed.includes(`const STAMPED_SOCKET_PATH = ${JSON.stringify(join(fixture.home, 'claude-mod.sock'))};`),
-    installed.split('\n').find((text) => text.includes('STAMPED_SOCKET_PATH =')) ?? 'none');
+    installed.includes(`const STAMPED_SOCKET_PATH = ${JSON.stringify(socket)};`),
+    `${installed.split('\n').find((text) => text.includes('STAMPED_SOCKET_PATH =')) ?? 'none'} (socket path ${Buffer.byteLength(socket)} bytes)`);
 
   // The mod's order: an absolute override, then the stamp, then COSYNCING_HOME, then ~/.cosyncing. A
   // relative override is refused outright; it does not fall through to the (usually production) stamp.
