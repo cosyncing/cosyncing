@@ -17,6 +17,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   dialog directly, removing the offset one-item menu.
 - Composer attachments show readable file sizes, matching file lists and
   previews, including their screen-reader labels.
+- Subagents started by a Claude Code or Kimi Code session that is already open
+  (in the app, through the Claude mod, or watched for notifications) stay nested
+  under that session in the session list. Before, they briefly showed as
+  separate top-level sessions each time the parent session updated.
 - The context meter for a Claude Code session on a model with a native 1M
   window (Opus 5.5, Opus 5, Opus 4.7 and 4.8, Sonnet 5 and 5.5, Haiku 5.5,
   Fable and Mythos) shows a 1M limit. Claude Code 2.1.300 and later no longer
