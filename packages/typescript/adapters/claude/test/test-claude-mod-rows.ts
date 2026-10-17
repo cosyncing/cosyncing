@@ -20,7 +20,7 @@
  *   bun run packages/typescript/adapters/claude/test/test-claude-mod-rows.ts
  */
 export {};
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ClaudeModConnection } from '../src/mod-connection.ts';
@@ -31,8 +31,9 @@ function check(name: string, ok: boolean, detail = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
 }
 
-const ROOT = join(tmpdir(), 'ca-claude-mod-rows');
-rmSync(ROOT, { recursive: true, force: true });
+// Own temp root per invocation. 'bun run check --repeat N' overlaps repetitions of the same task,
+// so a fixed name let a sibling repetition wipe this fixture out from under a running one.
+const ROOT = mkdtempSync(join(tmpdir(), 'ca-claude-mod-rows-'));
 
 const configDir = join(ROOT, 'claude-config');
 const fakeBin = join(ROOT, 'fake-claude');

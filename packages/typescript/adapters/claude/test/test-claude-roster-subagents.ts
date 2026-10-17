@@ -31,7 +31,7 @@
  *   bun run packages/typescript/adapters/claude/test/test-claude-roster-subagents.ts   (exit 0 = pass)
  */
 export {};
-import { chmodSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -45,8 +45,9 @@ const enc = (s: string): string => Buffer.from(s, 'utf8').toString('base64url');
 const dec = (s: string): string => Buffer.from(s, 'base64url').toString('utf8');
 
 // ── fixture store ───────────────────────────────────────────────────────────────────────────────
-const ROOT = join(tmpdir(), 'ca-claude-roster-subagents');
-rmSync(ROOT, { recursive: true, force: true });
+// Own temp root per invocation. 'bun run check --repeat N' overlaps repetitions of the same task,
+// so a fixed name let a sibling repetition wipe this fixture out from under a running one.
+const ROOT = mkdtempSync(join(tmpdir(), 'ca-claude-roster-subagents-'));
 const configDir = join(ROOT, 'claude');
 const slugDir = join(configDir, 'projects', '-tmp-ca-subagents');
 const cwd = join(ROOT, 'workspace');
@@ -629,4 +630,5 @@ console.log(`\n${results.length - failed} passed, ${failed} failed`);
 // process dies leaves an orphaned child behind. `14645766` closed it in one
 // suite of four; these are the other three.
 await drainClaudeLiveStatusProbes();
+rmSync(ROOT, { recursive: true, force: true }); // this invocation's root only
 process.exit(failed ? 1 : 0);
