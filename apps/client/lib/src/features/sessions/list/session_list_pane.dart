@@ -1592,7 +1592,7 @@ class _SessionRow extends StatelessWidget {
                     Expanded(
                       child: Tooltip(
                         // Hover still reveals the full title. A touch hold
-                        // belongs to the row's rename menu.
+                        // opens the row's rename dialog.
                         triggerMode: TooltipTriggerMode.manual,
                         message: [
                           title,

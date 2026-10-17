@@ -443,46 +443,42 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    for (final secondary in [false, true]) {
-      testWidgets(
-        'a roster ${secondary ? "right click" : "long press"} '
-        'exposes rename without opening the row',
-        (
-          tester,
-        ) async {
-          final container = await openSession(tester);
-          final before = container
-              .read(openSessionsControllerProvider)
-              .requireValue
-              .activeKey;
-          final row = find.byKey(const Key('session-row-codex/b'));
-          if (secondary) {
-            await tester.tap(
-              row,
-              buttons: kSecondaryMouseButton,
-              kind: PointerDeviceKind.mouse,
-            );
-          } else {
-            await tester.longPress(row);
-          }
-          await tester.pumpAndSettle();
-          await tester.tap(find.text('Rename session'));
-          await tester.pumpAndSettle();
-          expect(
-            find.byKey(const Key('session-rename-dialog-input')),
-            findsOneWidget,
+    for (final gesture in ['long press', 'long click', 'right click']) {
+      testWidgets('a roster $gesture opens the rename dialog directly '
+          'without opening the row', (tester) async {
+        final container = await openSession(tester);
+        final before = container
+            .read(openSessionsControllerProvider)
+            .requireValue
+            .activeKey;
+        final row = find.byKey(const Key('session-row-codex/b'));
+        if (gesture == 'right click') {
+          await tester.tap(
+            row,
+            buttons: kSecondaryMouseButton,
+            kind: PointerDeviceKind.mouse,
           );
-          expect(
-            container
-                .read(openSessionsControllerProvider)
-                .requireValue
-                .activeKey,
-            before,
+        } else {
+          await tester.longPress(
+            row,
+            kind: gesture == 'long click'
+                ? PointerDeviceKind.mouse
+                : PointerDeviceKind.touch,
           );
-          await tester.tap(find.text('Cancel'));
-          await tester.pumpAndSettle();
-        },
-      );
+        }
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsOneWidget);
+        expect(
+          find.byKey(const Key('session-rename-dialog-input')),
+          findsOneWidget,
+        );
+        expect(
+          container.read(openSessionsControllerProvider).requireValue.activeKey,
+          before,
+        );
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+      });
     }
 
     testWidgets('the file pane can grow beyond the former 720 pixel cap', (

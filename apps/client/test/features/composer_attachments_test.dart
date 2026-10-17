@@ -55,21 +55,26 @@ void main() {
     featureTest(
       'files are staged as chips in order without sending; a chip can be '
       'replaced or removed; the prompt then carries what is left, and the '
-      'chips stay until the broker acknowledges it',
+      'chips show readable sizes and stay until the broker acknowledges it',
       (f) async {
         final (app, _, desk, picker) = await openWithFiles(
           f,
           setup: (desk) => desk.answer = PromptAnswer.hold,
         );
         picker.next = [
-          textFile('notes.txt', 'hello'),
+          textFile('notes.txt', 'x' * 1500),
           textFile('diagram.svg', '<svg/>'),
         ];
         await app.pressAttach();
         expect(picker.picks, [true]);
         expect(chip('notes.txt'), findsOneWidget);
         expect(chip('diagram.svg'), findsOneWidget);
-        expect(find.text('5 bytes · Ready to send'), findsOneWidget);
+        expect(find.text('1.5 KB · Ready to send'), findsOneWidget);
+        expect(find.text('6 bytes · Ready to send'), findsOneWidget);
+        expect(
+          find.bySemanticsLabel(RegExp(r'^notes\.txt, 1\.5 KB, Ready to send')),
+          findsOneWidget,
+        );
         expect(desk.prompts, isEmpty);
 
         picker.next = [textFile('revised.txt', 'revised')];
@@ -77,6 +82,7 @@ void main() {
         expect(picker.picks, [true, false]);
         expect(chip('notes.txt'), findsNothing);
         expect(chip('revised.txt'), findsOneWidget);
+        expect(find.text('7 bytes · Ready to send'), findsOneWidget);
 
         await app.tapKey('session-detail-attachment-remove-attachment-2');
         expect(chip('diagram.svg'), findsNothing);
@@ -94,6 +100,7 @@ void main() {
         expect(chip('revised.txt'), findsNothing);
         expect(app.composerText, isEmpty);
       },
+      semantics: true,
     );
 
     featureTest(

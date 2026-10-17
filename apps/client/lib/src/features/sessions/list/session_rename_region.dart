@@ -14,7 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Shared context menu for session tabs and roster rows.
+/// Opens the rename dialog for session tabs and roster rows.
 class SessionRenameRegion extends StatelessWidget {
   /// Adds right-click, long-press and accessible rename to [child].
   const SessionRenameRegion({
@@ -37,40 +37,14 @@ class SessionRenameRegion extends StatelessWidget {
   /// Navigation surface whose normal tap remains unchanged.
   final Widget child;
 
-  Future<void> _menu(
-    BuildContext context,
-    Offset position,
-  ) async {
-    final container = ProviderScope.containerOf(context, listen: false);
-    final source = RosterSource.of(container.read(activeBrokerProfileProvider));
-    final overlay =
-        Overlay.of(context).context.findRenderObject()! as RenderBox;
-    final selected = await showMenu<bool>(
-      context: context,
-      position: RelativeRect.fromRect(
-        position & Size.zero,
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        PopupMenuItem(
-          value: true,
-          child: Text(AppLocalizations.of(context).sessionDetailRenameTooltip),
-        ),
-      ],
-    );
-    if ((selected ?? false) && context.mounted) await _rename(context, source);
-  }
-
-  Future<void> _rename(BuildContext context, RosterSource? source) async {
+  Future<void> _rename(BuildContext context) async {
     final ref = ProviderScope.containerOf(context, listen: false);
+    final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
     final l10n = AppLocalizations.of(context);
     if (source == null) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(l10n.sessionRenameRequiresServer)));
-      return;
-    }
-    if (RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
       return;
     }
     bool current() =>
@@ -133,24 +107,13 @@ class SessionRenameRegion extends StatelessWidget {
     customSemanticsActions: {
       CustomSemanticsAction(
         label: AppLocalizations.of(context).sessionDetailRenameTooltip,
-      ): () => unawaited(
-        _rename(
-          context,
-          RosterSource.of(
-            ProviderScope.containerOf(
-              context,
-              listen: false,
-            ).read(activeBrokerProfileProvider),
-          ),
-        ),
-      ),
+      ): () =>
+          unawaited(_rename(context)),
     },
     child: GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onSecondaryTapUp: (event) =>
-          unawaited(_menu(context, event.globalPosition)),
-      onLongPressStart: (event) =>
-          unawaited(_menu(context, event.globalPosition)),
+      onSecondaryTap: () => unawaited(_rename(context)),
+      onLongPress: () => unawaited(_rename(context)),
       child: child,
     ),
   );
