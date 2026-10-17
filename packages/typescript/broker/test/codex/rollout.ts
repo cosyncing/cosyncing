@@ -1626,7 +1626,11 @@ await (async () => {
   const dir = codexTestRolloutDir('cosyncing-codex-authority-warm-bound-');
   const path = join(dir, 'rollout-warm-large-append.jsonl');
   const taskStarted = JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'warm-large' } }) + '\n';
-  const appendBytes = 512 * 1024 * 1024;
+  // Catching up across calls is a property of passes, not of the production budget's size, which the
+  // cold and beyond-budget checks pin at exactly 64 MiB. So this append is eight passes of a 4 MiB
+  // budget rather than eight of 64 MiB: the same proof for a sixteenth of the reads.
+  const pass = { maxSourceBytes: 4 * 1024 * 1024, now: frozenClock };
+  const appendBytes = 8 * pass.maxSourceBytes;
   let fd: number | undefined;
   try {
     writeFileSync(path, taskStarted);
@@ -1645,13 +1649,13 @@ await (async () => {
     closeSync(fd);
     fd = undefined;
 
-    const { result: bounded, turns } = await countingTurns(() => inferRolloutStatusResult(path, { now: frozenClock }));
+    const { result: bounded, turns } = await countingTurns(() => inferRolloutStatusResult(path, pass));
     check(
-      'warm Codex 512 MiB incomplete append yields and reports bounded source work',
+      'warm Codex incomplete append beyond the source budget yields and reports bounded source work',
       bounded.kind === 'fallback'
         && bounded.status === 'working'
         && bounded.reason === 'source-limit'
-        && bounded.scannedBytes === 64 * 1024 * 1024
+        && bounded.scannedBytes === pass.maxSourceBytes
         && turns > 0,
       JSON.stringify({ bounded, turns }),
     );
@@ -1660,7 +1664,7 @@ await (async () => {
     let catchupPasses = 1;
     let catchup = bounded;
     while (caughtUpBytes < appendBytes && catchupPasses < 16) {
-      catchup = await inferRolloutStatusResult(path, { now: frozenClock });
+      catchup = await inferRolloutStatusResult(path, pass);
       caughtUpBytes += catchup.scannedBytes;
       catchupPasses += 1;
       if (catchup.scannedBytes === 0) break;
@@ -1671,7 +1675,7 @@ await (async () => {
         && catchup.status === 'working'
         && catchup.reason === 'record-limit'
         && caughtUpBytes === appendBytes
-        && catchupPasses === appendBytes / (64 * 1024 * 1024),
+        && catchupPasses === appendBytes / pass.maxSourceBytes,
       JSON.stringify({ catchup, caughtUpBytes, catchupPasses }),
     );
 
