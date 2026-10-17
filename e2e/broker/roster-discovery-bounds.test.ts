@@ -17,6 +17,7 @@
  * external-host budget, so each abandonment costs two seconds.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { TestClock } from '../harness/fakes/test-clock.ts';
 import { Database } from 'bun:sqlite';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -266,5 +267,92 @@ describe('roster discovery with a wedged external host', () => {
     const removed = await feed.waitFor((delta) => delta.sessionId === 'ses_kilo_b' && delta.removed === true, { from });
     expect(removed.session).toBeUndefined();
     expect(feed.of('ses_kilo_live', from).map((delta) => delta.removed)).toEqual([true]);
+  });
+});
+
+
+describe('deliberate roster freshness without an attached session', () => {
+  let broker: Broker;
+  let kilo: FakeKiloHost;
+  let clock: TestClock;
+  beforeAll(async () => {
+    kilo = new FakeKiloHost({
+      id: 'ses_unwatched', title: 'Old active terminal', status: 'busy',
+      time: { created: Date.now() - 30 * DAY },
+    });
+    kilo.mode = 'live';
+    broker = await startBroker({
+      name: 'roster-cadence',
+      setup: (paths) => {
+        clock = new TestClock(paths.root);
+        // Availability is proved by a native store; the only listed session
+        // comes from the controlled external host and has no broker owner.
+        const database = join(paths.root, 'kilo-data', 'kilo.db');
+        createKiloDatabase(database);
+        deleteKiloSession(database, 'ses_kilo_fixture_parent');
+      },
+      env: () => ({
+        ...clock.env, KILO_URL: kilo.url, COSYNCING_CODEX_SYNC_SERVER: '0',
+        COSYNCING_ROSTER_SAFETY_RECONCILE_MS: String(HOUR),
+        COSYNCING_ROSTER_COLD_PARTIAL_MS: '120000',
+      }),
+    });
+  });
+  afterAll(async () => { await broker?.stop(); kilo?.stop(); });
+
+  test('two windows share one cadence, stop on cancellation, and preserve old active status', async () => {
+    const client = broker.client();
+    const week = await rosterSnapshot(client, { window: '7d', refresh: true });
+    const all = await rosterSnapshot(client, { refresh: true });
+    for (const snapshot of [week, all]) {
+      expect(snapshot.body.sessions.find((row: any) => row.id === 'ses_unwatched')?.status).toBe('working');
+    }
+    let weekAfter = week.body.revision;
+    let allAfter = all.body.revision;
+    const reads = () => kilo.requests.filter((r) => r.path === '/session').length;
+    const initial = reads();
+    const pending = (window: string, after: number, signal: AbortSignal) => fetch(
+      `${broker.url}/api/session-roster-deltas?window=${window}&after=${after}&waitMs=25000`, { signal },
+    ).then((response) => response.json());
+    const abort = new AbortController();
+    const weekPoll = pending('7d', weekAfter, abort.signal);
+    const allPoll = pending('all', allAfter, abort.signal);
+    // A barrier request runs after the long polls were dispatched, then the
+    // file clock fires the shared timer. No full-roster GET triggers freshness.
+    await client.get('/api/health');
+    kilo.liveSession.status = 'idle';
+    clock.advance(15_001);
+    const [weekChange, allChange] = await Promise.all([weekPoll, allPoll]);
+    expect(weekChange.deltas).toMatchObject([{ sessionId: 'ses_unwatched', removed: true }]);
+    expect(allChange.deltas.some((delta: any) => delta.sessionId === 'ses_unwatched' && delta.session?.status === 'idle')).toBe(true);
+    expect(reads() - initial).toBe(1);
+    weekAfter = weekChange.revision;
+    allAfter = allChange.revision;
+
+    // Sixty seconds of controlled no-change time requires one due sweep,
+    // without replaying missed ticks or answering unchanged polls early.
+    let settled = 0;
+    const waitingWeek = pending('7d', weekAfter, abort.signal).then(() => { settled++; }, () => {});
+    const waitingAll = pending('all', allAfter, abort.signal).then(() => { settled++; }, () => {});
+    await client.get('/api/health');
+    clock.advance(60_000);
+    await eventually(() => reads() === initial + 2, { what: 'one due cadence sweep without catch-up scans' });
+    expect(settled).toBe(0);
+    abort.abort();
+    await Promise.all([waitingWeek, waitingAll]);
+    await client.get('/api/health');
+    clock.advance(60_000);
+    await client.get('/api/health');
+    expect(reads()).toBe(initial + 2);
+
+    // A fresh connection still receives a native status change at the cadence.
+    const reconnect = new AbortController();
+    const changed = pending('7d', weekAfter, reconnect.signal);
+    await client.get('/api/health');
+    kilo.liveSession.status = 'busy';
+    clock.advance(15_001);
+    const batch = await changed;
+    expect(batch.deltas.some((delta: any) => delta.sessionId === 'ses_unwatched' && delta.session?.status === 'working')).toBe(true);
+    reconnect.abort();
   });
 });

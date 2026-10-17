@@ -479,6 +479,27 @@ void main() {
         expect(find.text('Fix login'), findsNothing);
         expect(find.text('Tidy styles'), findsNothing);
 
+        // A server deadline answers an empty batch at the same revision.
+        // Following it must preserve the published roster object and its order.
+        await app.lifecycle(AppLifecycleState.paused);
+        final before = app.container.read(sessionListControllerProvider);
+        studio.respondNextWhere(
+          (r) => r.path == '/api/session-roster-deltas',
+          FakeBrokerResponse(200, {
+            'revision': studio.rosterRevision,
+            'deltas': <Object>[],
+          }),
+        );
+        final polls = studio.requestsTo('/api/session-roster-deltas').length;
+        await app.lifecycle(AppLifecycleState.resumed);
+        await app.pumpUntil(
+          () =>
+              studio.requestsTo('/api/session-roster-deltas').length >=
+              polls + 2,
+          reason: 'the empty heartbeat is consumed and the next poll waits',
+        );
+        expect(app.container.read(sessionListControllerProvider), same(before));
+
         // Minutes pass: the workspace's own poll timer fires, and asks nothing.
         await app.elapse(const Duration(minutes: 3));
         expect(app.rosterReads(studio, window: '7d'), hasLength(reads));

@@ -888,6 +888,7 @@ const UPLOAD_CHUNK_MAX_BYTES = envNumber('COSYNCING_UPLOAD_CHUNK_MAX_BYTES', UPL
 // every agent (measured ~30-40s of mostly-synchronous I/O on a real machine) while the app polls
 // /api/sessions every 6s per tab — without this cache, polls pile up and starve the event loop.
 const ROSTER_TTL_MS = envNumber('COSYNCING_ROSTER_TTL_MS', 4000);
+const ROSTER_REFRESH_MS = Math.max(1, envNumber('COSYNCING_ROSTER_REFRESH_MS', 15_000));
 // Past the TTL the previous rows are served while a fresh sweep runs, but only this far past it.
 // The bound is what separates "revalidating" from "the sweep has been failing for an hour and every
 // caller is being handed rows from before it started failing, with nothing said". Set well clear of
@@ -1457,14 +1458,14 @@ function rosterRevisionForWindow(windowMs: number | undefined): RosterRevisionSt
 function observeRosterViews(info: SessionInfo): void {
   const decorated = decorateSession({ ...info, machine: MACHINE });
   rosterRevision.observe(decorated, MACHINE);
-  const now = Date.now();
+  const now = attentionClock.now();
   for (const [windowMs, store] of rosterWindowRevisions) {
     if (filterSessionsByWindow([decorated], windowMs, now).length > 0) {
       store.observe(decorated, MACHINE);
       if (decorated.status === 'idle') {
         const timestamp = decorated.updatedAt ?? decorated.createdAt;
         if (timestamp !== undefined) {
-          const expiry = timestamp + windowMs;
+          const expiry = timestamp + windowMs + 1;
           rosterWindowExpiresAt.set(
             windowMs,
             Math.min(rosterWindowExpiresAt.get(windowMs) ?? expiry, expiry),
@@ -2465,6 +2466,7 @@ const rosterSweeps = new RosterSweepCache<SessionInfo>({
   ttlMs: ROSTER_TTL_MS,
   staleServeMaxMs: ROSTER_STALE_SERVE_MAX_MS,
   coldPartialMs: ROSTER_COLD_PARTIAL_MS,
+  now: attentionClock.now,
 });
 type RosterRepresentation = {
   revision: number;
@@ -2481,17 +2483,102 @@ function rosterWindowKey(raw: string | null): string {
   return raw === '1d' || raw === '7d' || raw === '1m' || raw === '2m' || raw === '6m' ? raw : 'all';
 }
 
-async function safetyReconcileRoster(windowMs: number | undefined, now: number): Promise<boolean> {
-  const key = windowMs === undefined ? 'all' : String(windowMs);
-  const reconciledAt = rosterSafetyReconciledAt.get(key) ?? 0;
-  const cutoffExpired =
-    windowMs !== undefined &&
-    (rosterWindowExpiresAt.get(windowMs) ?? Number.POSITIVE_INFINITY) <= now;
-  if (!cutoffExpired && now - reconciledAt < ROSTER_SAFETY_RECONCILE_MS) return false;
-  rosterSafetyReconciledAt.set(key, now);
-  await discoverLocalSessions(true, windowMs, now);
-  return true;
+/** Age known rows locally; a wall-clock cutoff is not a reason to read native stores. */
+function ageRosterWindow(windowMs: number | undefined, now: number): void {
+  if (windowMs === undefined) return;
+  const store = rosterRevisionForWindow(windowMs);
+  const current = store.snapshot();
+  const included = filterSessionsByWindow(current, windowMs, now);
+  // Filtering only removes rows. An unchanged window needs no journal clones
+  // or field comparisons on each long-poll heartbeat or live publication.
+  if (included.length !== current.length) store.reconcile(included, MACHINE);
+  const expiresAt = sessionWindowRepresentationExpiry(included, windowMs);
+  if (expiresAt === undefined) rosterWindowExpiresAt.delete(windowMs);
+  else rosterWindowExpiresAt.set(windowMs, expiresAt);
 }
+
+const rosterPollClients = new Map<number | undefined, number>();
+let rosterRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let rosterRefreshInflight: Promise<void> | undefined;
+let rosterRefreshDue: number | undefined;
+
+function scheduleRosterRefresh(): void {
+  clearTimeout(rosterRefreshTimer);
+  rosterRefreshTimer = undefined;
+  if (rosterPollClients.size === 0 || rosterRefreshInflight) return;
+  const now = attentionClock.now();
+  // Also recover from a backwards wall-clock correction.
+  rosterRefreshDue = Math.min(rosterRefreshDue ?? now + ROSTER_REFRESH_MS, now + ROSTER_REFRESH_MS);
+  rosterRefreshTimer = setTimeout(() => { void refreshPollingRosters(); }, Math.max(0, rosterRefreshDue - now));
+  rosterRefreshTimer.unref?.();
+}
+
+/** One discovery for every connected feed, using the widest requested window.
+ * Unattached/unwatched status is discovered within 15 s (configurable) plus
+ * discovery time after a completed sweep. A change missed by an in-flight
+ * sweep can additionally wait for that sweep's remaining time. Failed or
+ * abandoned adapter reads cannot promise freshness. No idle-client sweeps.
+ * The cadence is independent of the five-minute safety-reconcile limit. */
+function refreshPollingRosters(): Promise<void> {
+  if (rosterRefreshInflight) return rosterRefreshInflight;
+  if (rosterPollClients.size === 0) return Promise.resolve();
+  clearTimeout(rosterRefreshTimer);
+  const windows = [...rosterPollClients.keys()];
+  const widest = windows.includes(undefined) ? undefined : Math.max(...windows as number[]);
+  rosterRefreshInflight = (async () => {
+    const roster = await discoverLocalRoster(true, widest, attentionClock.now());
+    const now = attentionClock.now();
+    // A wider sweep has removal authority for narrower views, never vice versa.
+    // Carry the adapter coverage with the rows to preserve unconfirmed sessions.
+    for (const windowMs of rosterPollClients.keys()) {
+      if (windowMs === widest || (widest !== undefined && (windowMs === undefined || windowMs > widest))) continue;
+      const store = rosterRevisionForWindow(windowMs);
+      store.reconcile(filterSessionsByWindow(roster.rows, windowMs, now), MACHINE, {
+        withheldTools: withheldBackends(roster.coverage),
+      });
+      const key = windowMs === undefined ? 'all' : String(windowMs);
+      rosterSafetyReconciledAt.set(key, now);
+      // Keep subsequent snapshots from re-publishing the older narrow cache.
+      rosterSweeps.publish(key, { rows: store.snapshot(), coverage: roster.coverage }, now);
+      ageRosterWindow(windowMs, now);
+    }
+  })().catch((error: unknown) => {
+    console.warn(`${LOG_PREFIX} roster feed refresh failed: ${String(error)}`);
+  }).finally(() => {
+    rosterRefreshInflight = undefined;
+    // Space completed sweeps, so a slow store never creates back-to-back scans.
+    rosterRefreshDue = attentionClock.now() + ROSTER_REFRESH_MS;
+    scheduleRosterRefresh();
+  });
+  return rosterRefreshInflight;
+}
+
+function connectRosterPoll(windowMs: number | undefined): () => void {
+  rosterPollClients.set(windowMs, (rosterPollClients.get(windowMs) ?? 0) + 1);
+  scheduleRosterRefresh();
+  return () => {
+    const remaining = (rosterPollClients.get(windowMs) ?? 1) - 1;
+    if (remaining === 0) rosterPollClients.delete(windowMs);
+    else rosterPollClients.set(windowMs, remaining);
+    scheduleRosterRefresh();
+  };
+}
+
+function safetyReconcileRoster(windowMs: number | undefined, now: number, shortPoll: boolean): Promise<void> {
+  const key = windowMs === undefined ? 'all' : String(windowMs);
+  const reconciledAt = rosterSafetyReconciledAt.get(key);
+  if (reconciledAt !== undefined && now - reconciledAt < ROSTER_SAFETY_RECONCILE_MS) return Promise.resolve();
+  rosterSafetyReconciledAt.set(key, now);
+  // A zero-wait reader may start without a snapshot. Preserve its initial
+  // reading and five-minute safety refresh, without enrolling it in the cadence.
+  if (shortPoll) return discoverLocalSessions(true, windowMs, now).then(() => {});
+  return refreshPollingRosters();
+}
+
+attentionClock.onMove(() => {
+  for (const windowMs of rosterPollClients.keys()) ageRosterWindow(windowMs, attentionClock.now());
+  scheduleRosterRefresh();
+});
 
 /** A sweep slower than this logs which leg the time went to. Above a couple of
  *  seconds the roster is visibly late and every other request is queued behind
@@ -2591,7 +2678,7 @@ function startRosterSweep(
       return sessions;
     })
     .then((sessions) => {
-      rosterSafetyReconciledAt.set(key, Date.now());
+      rosterSafetyReconciledAt.set(key, attentionClock.now());
       for (const session of sessions) rememberLatestSessionInfo(session);
       // A finished sweep is not automatically a COMPLETE one. A leg that
       // overran its budget or threw did not read its adapter, and what it
@@ -2667,7 +2754,7 @@ function startRosterSweep(
 function discoverAllCached(
   force = false,
   windowMs?: number,
-  now = Date.now(),
+  now = attentionClock.now(),
   allowSweeping = true,
 ): Promise<RosterSweepAnswer<SessionInfo>> {
   const key = windowMs === undefined ? 'all' : String(windowMs);
@@ -2728,7 +2815,7 @@ async function discoverSession(tool: string, id: string): Promise<SessionInfo | 
 async function discoverLocalSessions(
   force = false,
   windowMs?: number,
-  now = Date.now(),
+  now = attentionClock.now(),
 ): Promise<SessionInfo[]> {
   return (await discoverLocalRoster(force, windowMs, now)).rows;
 }
@@ -2736,7 +2823,7 @@ async function discoverLocalSessions(
 async function discoverLocalRoster(
   force = false,
   windowMs?: number,
-  now = Date.now(),
+  now = attentionClock.now(),
   allowSweeping = true,
 ): Promise<RosterSweepAnswer<SessionInfo>> {
   piBridgeIds.canonicalizeAll();
@@ -2850,8 +2937,9 @@ async function discoverLocalRoster(
       // Each bounded representation owns an independent journal. Absence here
       // means deletion or age-out from THIS view only; it must never remove the
       // row from the authoritative all-time journal.
-      rosterRevisionForWindow(windowMs).reconcile(decorated, MACHINE, { withheldTools });
-      const expiresAt = sessionWindowRepresentationExpiry(decorated, windowMs);
+      const included = filterSessionsByWindow(decorated, windowMs, attentionClock.now());
+      rosterRevisionForWindow(windowMs).reconcile(included, MACHINE, { withheldTools });
+      const expiresAt = sessionWindowRepresentationExpiry(rosterRevisionForWindow(windowMs).snapshot(), windowMs);
       if (expiresAt === undefined) rosterWindowExpiresAt.delete(windowMs);
       else rosterWindowExpiresAt.set(windowMs, expiresAt);
     }
@@ -8164,27 +8252,27 @@ server = Bun.serve<WsData>({
         // would be handed one by the next delta that mentioned a Kimi session,
         // and from then on hold a row for an agent it was told does not exist.
         const deltaVisibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
-        const now = Date.now();
+        const deadline = performance.now() + Math.min(requestedWaitMs, 25_000);
         const revisionStore = rosterRevisionForWindow(windowMs);
-        // A slow safety scan is itself this request's wait. Return immediately
-        // afterwards rather than adding another 25-second hold.
-        const reconciled = await safetyReconcileRoster(windowMs, now);
-        let waitMs = reconciled ? 0 : Math.min(requestedWaitMs, 25_000);
-        const expiresAt = windowMs === undefined ? undefined : rosterWindowExpiresAt.get(windowMs);
-        if (expiresAt !== undefined) {
-          waitMs = Math.min(waitMs, Math.max(0, expiresAt - now));
-        }
-        let batch = await revisionStore.waitAfter(after, waitMs);
-        // Wall-clock aging has no native mutation to wake the journal. Bound
-        // the wait to the next cutoff, then reconcile the same source-bounded
-        // adapter query and return its removal in this response.
-        if (
-          windowMs !== undefined &&
-          !batch.resetRequired &&
-          batch.deltas.length === 0 &&
-          await safetyReconcileRoster(windowMs, Date.now())
-        ) {
-          batch = revisionStore.eventsAfter(after);
+        const disconnect = requestedWaitMs > 0 ? connectRosterPoll(windowMs) : () => {};
+        let batch;
+        try {
+          // Discovery may outlive this request. Its shared work cannot hold a
+          // cancelled client, and an unchanged reconcile consumes only the
+          // original deadline rather than answering an empty poll immediately.
+          const reconcile = safetyReconcileRoster(windowMs, attentionClock.now(), requestedWaitMs === 0);
+          if (requestedWaitMs === 0) await reconcile;
+          for (;;) {
+            const now = attentionClock.now();
+            ageRosterWindow(windowMs, now);
+            batch = revisionStore.eventsAfter(after);
+            const remaining = deadline - performance.now();
+            if (batch.resetRequired || batch.deltas.length > 0 || remaining <= 0 || req.signal.aborted) break;
+            const expiresAt = windowMs === undefined ? undefined : rosterWindowExpiresAt.get(windowMs);
+            await revisionStore.waitAfter(after, Math.min(remaining, expiresAt === undefined ? remaining : Math.max(0, expiresAt - now)), req.signal);
+          }
+        } finally {
+          disconnect();
         }
         // The batch REVISION is deliberately not rewritten when deltas are
         // dropped. It is the roster's own counter, shared by every client, and
@@ -8219,7 +8307,7 @@ server = Bun.serve<WsData>({
       const visibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
       const windowKey = rosterRepresentationKey(rosterWindowKey(rawWindow), visibility);
       const windowMs = parseSessionWindowMs(rawWindow);
-      const requestNow = Date.now();
+      const requestNow = attentionClock.now();
       const force = url.searchParams.get('refresh') === '1';
       const cached = rosterRepresentations.get(windowKey);
       const revisionStore = rosterRevisionForWindow(windowMs);
@@ -8248,16 +8336,21 @@ server = Bun.serve<WsData>({
       // authoritative replacement, so serving it a mid-sweep partial would show
       // the sessions a slow adapter has not reported yet as deleted ones. It
       // waits for the sweep, which is what it did before any of this existed.
-      const roster = await discoverLocalRoster(
-        force || cutoffExpired,
-        windowMs,
-        requestNow,
-        parseAgentRosterClientRevision(url.searchParams) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
-      );
+      ageRosterWindow(windowMs, requestNow);
+      const roster = cutoffExpired && cached?.complete && !force
+        ? { rows: revisionStore.snapshot(), coverage: ROSTER_COVERAGE_COMPLETE }
+        : await discoverLocalRoster(
+          force,
+          windowMs,
+          requestNow,
+          parseAgentRosterClientRevision(url.searchParams) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
+        );
+      const responseNow = attentionClock.now();
+      ageRosterWindow(windowMs, responseNow);
       const sessions = filterSessionsByWindow(
         visibleSessions(roster.rows, visibility),
         windowMs,
-        requestNow,
+        responseNow,
       );
       const data: LocalRosterResponse = {
         machine: MACHINE,
@@ -9294,6 +9387,8 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
     clearInterval(piBridgeSweepTimer);
     clearInterval(uploadGcTimer);
     clearTimeout(startupSweepTimer);
+    clearTimeout(rosterRefreshTimer);
+    rosterPollClients.clear();
     for (const timer of scheduledConnectionReleaseTimers) clearInterval(timer);
     scheduledConnectionReleaseTimers.clear();
     for (const unsubscribe of sessionInfoWatchers) {

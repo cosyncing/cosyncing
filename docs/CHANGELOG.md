@@ -50,6 +50,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- The session roster avoids repeated expiry scans and refreshes unattached
+  sessions on a shared 15-second cadence while the app follows the roster.
+
 - A question card that asks several questions now numbers them. Each header
   starts with its number, in bold and aligned with its question, so it is clear
   where one question ends and the next begins.

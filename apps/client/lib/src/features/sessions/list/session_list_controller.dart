@@ -857,6 +857,8 @@ class SessionListController extends Notifier<SessionListState> {
 
   bool _applyDeltaBatch(SessionRosterDeltaBatch batch) {
     if (batch.revision < state.revision) return true;
+    // The running feed is healthy. An unchanged heartbeat has no roster work.
+    if (batch.deltas.isEmpty && batch.revision == state.revision) return true;
     final ordered = [...batch.deltas]
       ..sort((a, b) => a.revision.compareTo(b.revision));
     var expected = state.revision + 1;

@@ -145,6 +145,16 @@ describe('the session roster', () => {
         watchedPath = join(watched, `${WATCHED_UUID}.jsonl`);
         writeFileSync(watchedPath, claudeUser(WATCHED_UUID, 1, paths.home) + claudeEndTurn(WATCHED_UUID, 1));
 
+        // Recent filesystem mtimes with old conversation/child timestamps are
+        // precisely the rows that used to leave the 7d expiry in the past.
+        const oldAt = new Date(Date.now() - 8 * DAY);
+        const oldUuid = '0e0c1000-0000-4000-8000-000000000003';
+        writeFileSync(join(watched, `${oldUuid}.jsonl`), claudeUser(oldUuid, 1, paths.home, oldAt) + claudeEndTurn(oldUuid, 1, oldAt));
+        const children = join(watched, WATCHED_UUID, 'subagents');
+        mkdirSync(children, { recursive: true });
+        writeFileSync(join(children, 'agent-old.meta.json'), line({ toolUseId: 'old-child-tool' }));
+        writeFileSync(join(children, 'agent-old.jsonl'), claudeUser('agent-old', 1, paths.home, oldAt) + claudeEndTurn('agent-old', 1, oldAt));
+
         const waiting = join(claudeDir, 'projects', 'waiting');
         mkdirSync(waiting, { recursive: true });
         waitingPath = join(waiting, `${WAITING_UUID}.jsonl`);
@@ -375,6 +385,20 @@ describe('the session roster', () => {
     const deleted = await feed.waitFor((delta) => delta.sessionId === pi.doomed!.id && delta.removed === true);
     expect(deleted.session).toBeUndefined();
     expect(deleted.revision).toBeGreaterThan(aged.revision);
+  });
+
+  test('excluded old children and conversations leave an unchanged poll waiting to its deadline', async () => {
+    const snapshot = await rosterSnapshot(client, { window: '7d', refresh: true });
+    const feed = new RosterFeed(client, '7d');
+    const started = performance.now();
+    const batch = await feed.request(snapshot.body.revision, 200);
+    expect(batch).toEqual({ revision: snapshot.body.revision, deltas: [] });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(180);
+    const abort = new AbortController();
+    const pending = fetch(`${broker.url}/api/session-roster-deltas?window=7d&after=${batch.revision}&waitMs=25000`, { signal: abort.signal });
+    await client.get('/api/health');
+    abort.abort();
+    await expect(pending).rejects.toThrow();
   });
 
   test('a cursor from the future, or one the bounded journal no longer holds, asks the client to reset', async () => {

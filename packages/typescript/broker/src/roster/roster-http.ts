@@ -93,7 +93,8 @@ export function sessionWindowRepresentationExpiry<
     if (session.status !== 'idle') continue;
     const timestamp = session.updatedAt ?? session.createdAt;
     if (timestamp === undefined) continue;
-    const expiry = timestamp + windowMs;
+    // The cutoff is inclusive: membership changes one millisecond later.
+    const expiry = timestamp + windowMs + 1;
     earliest = earliest === undefined ? expiry : Math.min(earliest, expiry);
   }
   return earliest;
