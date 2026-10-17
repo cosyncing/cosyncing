@@ -4372,27 +4372,27 @@
   "@sessionAttachmentDeliveryError": {
     "description": "Session composer error after the broker NACKs or cannot confirm an attachment prompt."
   },
-  "sessionAttachmentSizeAndStatus": "{byteCount, plural, =1{1 byte · {status}} other{{byteCount} bytes · {status}}}",
+  "sessionAttachmentSizeAndStatus": "{size} · {status}",
   "@sessionAttachmentSizeAndStatus": {
-    "description": "Byte size and current status shown in a prompt attachment chip.",
+    "description": "Formatted file size and current status shown in a prompt attachment chip.",
     "placeholders": {
-      "byteCount": {
-        "type": "int"
+      "size": {
+        "type": "String"
       },
       "status": {
         "type": "String"
       }
     }
   },
-  "sessionAttachmentSemanticLabel": "{fileName}, {byteCount, plural, =1{1 byte} other{{byteCount} bytes}}, {status}",
+  "sessionAttachmentSemanticLabel": "{fileName}, {size}, {status}",
   "@sessionAttachmentSemanticLabel": {
     "description": "Screen-reader label for one prompt attachment chip.",
     "placeholders": {
       "fileName": {
         "type": "String"
       },
-      "byteCount": {
-        "type": "int"
+      "size": {
+        "type": "String"
       },
       "status": {
         "type": "String"

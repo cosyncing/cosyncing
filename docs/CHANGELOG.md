@@ -11,6 +11,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Long-pressing or right-clicking a session tab or roster row opens the rename
+  dialog directly, removing the offset one-item menu.
+- Composer attachments show readable file sizes, matching file lists and
+  previews, including their screen-reader labels.
+
 ### Changed
 
 - A question card that asks several questions now numbers them. Each header

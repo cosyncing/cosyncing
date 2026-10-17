@@ -1822,9 +1822,10 @@ class _AttachmentChip extends StatelessWidget {
     };
     final statusColor = isError ? tokens.statusError : tokens.textSecondary;
     final target = touch ? 40.0 : 28.0;
+    final size = formatFileSize(l10n, attachment.attachment.byteLength);
     final semanticLabel = l10n.sessionAttachmentSemanticLabel(
       attachment.attachment.name,
-      attachment.attachment.byteLength,
+      size,
       status,
     );
 
@@ -1865,7 +1866,7 @@ class _AttachmentChip extends StatelessWidget {
                       ),
                       Text(
                         l10n.sessionAttachmentSizeAndStatus(
-                          attachment.attachment.byteLength,
+                          size,
                           status,
                         ),
                         maxLines: 1,

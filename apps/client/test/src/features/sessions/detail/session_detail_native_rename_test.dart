@@ -22,7 +22,8 @@ import 'package:cosyncing_client/src/platform/speech/speech_capabilities.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input_state.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_recognition_policy.dart';
-import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -44,9 +45,9 @@ void main() {
       }),
     );
 
-    for (final secondary in [false, true]) {
+    for (final gesture in ['long press', 'long click', 'right click']) {
       testWidgets(
-        '${secondary ? "right click" : "long press"} renames a session tab',
+        '$gesture opens the rename dialog directly and renames a session tab',
         (tester) async {
           final client = FakeBrokerClient();
           final tabs = InMemoryOpenSessionsStore(
@@ -75,14 +76,22 @@ void main() {
           final tab = find.byKey(
             const Key('open-session-tab-claude/session-1'),
           );
-          if (secondary) {
-            await tester.tap(tab, buttons: kSecondaryMouseButton);
+          if (gesture == 'right click') {
+            await tester.tap(
+              tab,
+              buttons: kSecondaryMouseButton,
+              kind: PointerDeviceKind.mouse,
+            );
           } else {
-            await tester.longPress(tab);
+            await tester.longPress(
+              tab,
+              kind: gesture == 'long click'
+                  ? PointerDeviceKind.mouse
+                  : PointerDeviceKind.touch,
+            );
           }
           await tester.pumpAndSettle();
-          await tester.tap(find.text('Rename session'));
-          await tester.pumpAndSettle();
+          expect(find.byType(AlertDialog), findsOneWidget);
           await tester.enterText(
             find.byKey(const Key('session-rename-dialog-input')),
             'From tab',
