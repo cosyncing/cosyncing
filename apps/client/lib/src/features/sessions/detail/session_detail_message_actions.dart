@@ -784,6 +784,36 @@ class _RequestOutcomeBadge extends StatelessWidget {
   }
 }
 
+/// The position of one question on a card that asks several: a disc on the
+/// accent that grows with the text scale rather than clipping the digit.
+class _QuestionNumber extends StatelessWidget {
+  const _QuestionNumber(this.number);
+
+  final int number;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      alignment: Alignment.center,
+      decoration: ShapeDecoration(
+        color: tokens.accent,
+        shape: const StadiumBorder(),
+      ),
+      child: Text(
+        '$number',
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: tokens.accentInk,
+          fontWeight: FontWeight.w700,
+          height: 1,
+        ),
+      ),
+    );
+  }
+}
+
 double _transcriptActionTargetExtent(BuildContext context) {
   final platform = Theme.of(context).platform;
   return platform == TargetPlatform.android || platform == TargetPlatform.iOS
@@ -1511,7 +1541,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
             _buildAnswerField(context, index: 0, legacy: true),
         ] else
           for (var index = 0; index < widget.questions.length; index++) ...[
-            if (index > 0) const SizedBox(height: 16),
+            if (index > 0) const SizedBox(height: 24),
             _buildStructuredQuestion(context, index),
           ],
         // Nothing to send from here: the answer is the terminal's to give.
@@ -1583,11 +1613,31 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
     final settled = _settledRow(index);
     final theme = Theme.of(context);
     final tokens = context.tokens;
+    // On a card that asks several questions, a number opens each one, so
+    // where one question ends and the next begins does not rest on the
+    // header alone; the agent may send none.
+    final numbered = widget.questions.length > 1;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (question.header != null) ...[
-          SectionHeader(question.header!),
+        if (numbered || question.header != null) ...[
+          Row(
+            children: [
+              if (numbered) ...[
+                _QuestionNumber(index + 1),
+                const SizedBox(width: 8),
+              ],
+              if (question.header != null)
+                Flexible(
+                  child: SectionHeader(
+                    question.header!,
+                    padding: EdgeInsets.zero,
+                    color: tokens.textPrimary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+            ],
+          ),
           const SizedBox(height: 8),
         ],
         Text(
