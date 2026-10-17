@@ -196,6 +196,39 @@ void main() {
     );
   });
 
+  testWidgets('a partial roster never claims a missing active count is zero', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      host(
+        roster: () async => ListSessionsResponse(
+          sessions: [_session('known', SessionStatus.working)],
+          complete: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('workspace-overview-count-running')),
+        matching: find.text('1'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('workspace-overview-count-waiting')),
+        matching: find.text('—'),
+      ),
+      findsOneWidget,
+    );
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(WorkspaceOverview)),
+    );
+    expect(find.text(l10n.workspacePartialRoster), findsOneWidget);
+    expect(find.text(l10n.workspaceNothingHere), findsNothing);
+  });
+
   testWidgets('daily usage preserves partial and estimate disclosures', (
     tester,
   ) async {
@@ -247,7 +280,7 @@ void main() {
   });
 
   test(
-    'overview fetches complete roster independent of sidebar window',
+    'overview reuses the source roster without fetching another window',
     () async {
       final repository = InMemorySessionListRepository(sessions: sessions);
       final container = ProviderContainer(
@@ -262,13 +295,19 @@ void main() {
         workspaceOverviewRosterProvider.future,
       );
       expect(response!.sessions.length, 2);
-      expect(repository.fetchCount, 1);
+      expect(repository.fetchCount, 0);
     },
   );
 }
 
 class _LoadedList extends SessionListController {
   @override
-  SessionListState build() =>
-      const SessionListState(status: SessionListStatus.loaded);
+  SessionListState build() => SessionListState(
+    status: SessionListStatus.loaded,
+    source: RosterSource.ofProfile(_profile('machine-a')),
+    sessions: [
+      _session('parent', SessionStatus.working),
+      _session('child', SessionStatus.needsInput, parent: 'parent'),
+    ],
+  );
 }

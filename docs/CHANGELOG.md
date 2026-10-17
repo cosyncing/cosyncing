@@ -50,6 +50,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- Home reuses the session roster for active counts instead of downloading
+  every session again when the roster changes.
+
 - The session roster avoids repeated expiry scans and refreshes unattached
   sessions on a shared 15-second cadence while the app follows the roster.
 

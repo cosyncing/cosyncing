@@ -23,36 +23,30 @@ import 'package:flutter/rendering.dart' show OverflowBoxFit;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-/// Global counts deliberately fetch the complete roster. Changing the sidebar's
-/// activity window must not silently change the meaning of "running now".
-///
-/// Refetched only when the sidebar roster actually changed — its revision or
-/// any session's status — never on a poll that returned the same rows, and
-/// never for the loading/refreshing flicker around one.
+/// Running and waiting use the source-qualified roster before sidebar filters.
+/// Every broker window includes old active sessions; the delta feed supplies
+/// freshness even when no session is attached. Overview adds no roster request.
 final AutoDisposeFutureProvider<ListSessionsResponse?>
 workspaceOverviewRosterProvider =
     FutureProvider.autoDispose<ListSessionsResponse?>((ref) async {
-      ref.watch(activeBrokerProfileProvider.select(RosterSource.of));
-      final state = ref.watch(
-        sessionListControllerProvider.select(
-          (state) => (
-            unavailable:
-                state.cachedRoster != null ||
-                state.status == SessionListStatus.error ||
-                state.status == SessionListStatus.loading,
-            revision: state.revision,
-            statuses: Object.hashAll(
-              state.sessions.map(
-                (session) =>
-                    Object.hash(session.tool, session.id, session.status),
-              ),
-            ),
-          ),
-        ),
+      final source = RosterSource.of(ref.watch(activeBrokerProfileProvider));
+      final state = ref.watch(sessionListControllerProvider);
+      if (source == null ||
+          state.source != source ||
+          state.cachedRoster != null ||
+          state.status == SessionListStatus.error ||
+          state.status == SessionListStatus.loading) {
+        return null;
+      }
+      final statuses = ref.watch(sessionStatusRegistryProvider);
+      return ListSessionsResponse(
+        sessions: statuses.source == source
+            ? statuses.apply(state.sessions)
+            : state.sessions,
+        machine: state.machine,
+        revision: state.revision,
+        complete: state.rosterComplete,
       );
-      if (state.unavailable) return null;
-      final repository = await ref.watch(sessionListRepositoryProvider.future);
-      return repository.fetchSessions();
     });
 
 /// Unread completion cues use the durable inbox scoped to the exact broker.
@@ -124,9 +118,7 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
         roster.hasError || (roster.isLoading && _settledSource != source)
         ? null
         : roster.valueOrNull;
-    final sessions = response == null
-        ? null
-        : ref.watch(sessionStatusRegistryProvider).apply(response.sessions);
+    final sessions = response?.sessions;
     final inbox = ref.watch(attentionInboxProvider);
     final completions = inbox.isLoading || inbox.hasError
         ? null
@@ -140,12 +132,19 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
                     entry.event.dismissedAt == null,
               )
               .toList();
-    final running = sessions
+    final knownRunning = sessions
         ?.where((session) => session.status == SessionStatus.working)
         .length;
-    final waiting = sessions
+    final knownWaiting = sessions
         ?.where((session) => session.status == SessionStatus.needsInput)
         .length;
+    // A partial inventory can prove a positive count, but not an empty one.
+    final running = response?.complete == false && knownRunning == 0
+        ? null
+        : knownRunning;
+    final waiting = response?.complete == false && knownWaiting == 0
+        ? null
+        : knownWaiting;
     final rows =
         sessions
             ?.where(
@@ -391,6 +390,7 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
                           ),
                   ),
               if (sessions != null &&
+                  (response?.complete ?? true) &&
                   rows.isEmpty &&
                   (!showCompletions ||
                       (completions != null && completions.isEmpty)))

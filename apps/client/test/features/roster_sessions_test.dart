@@ -89,6 +89,82 @@ void main() {
     );
   });
 
+  featureTest(
+    'Home counts old active sessions before filters and never fetches all time',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession(
+          'old',
+          'Old active work',
+          status: SessionStatus.working,
+          updatedAt: daysAgo(30),
+        )
+        ..addSession(
+          'background',
+          'Background approval',
+          origin: 'exec',
+          status: SessionStatus.needsInput,
+          updatedAt: daysAgo(30),
+        );
+      final lab = f.network.add('http://lab.test:7734', machine: 'lab')
+        ..addSession('lab', 'Lab task', status: SessionStatus.needsInput);
+      await f.storage.seedServer(studio);
+      await f.storage.seedServer(lab, active: false);
+      var app = await f.launch();
+      Finder count(String kind, String value) => find.descendant(
+        of: find.byKey(Key('workspace-overview-count-$kind')),
+        matching: find.text(value),
+      );
+      void noOverviewFetches() {
+        for (final broker in [studio, lab]) {
+          expect(
+            app
+                .rosterReads(broker)
+                .where(
+                  (request) =>
+                      windowOf(request) == null || windowOf(request) == 'all',
+                ),
+            isEmpty,
+          );
+        }
+      }
+
+      expect(count('running', '1'), findsOneWidget);
+      expect(count('waiting', '1'), findsOneWidget);
+      noOverviewFetches();
+      await app.search('no matching sidebar row');
+      expect(count('running', '1'), findsOneWidget);
+      expect(count('waiting', '1'), findsOneWidget);
+      studio.updateSession('old', {'status': 'needs-input'});
+      await app.pumpUntil(
+        () => count('waiting', '2').evaluate().isNotEmpty,
+        reason: 'Home follows a status change through the roster feed',
+      );
+      noOverviewFetches();
+      await app.search('');
+      await app.tapKey('session-roster-filter-button');
+      await app.tapKey('session-roster-filter-activity-today');
+      expect(count('waiting', '2'), findsOneWidget);
+      noOverviewFetches();
+      // Close the filter popover before changing the source.
+      await app.tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await app.settle();
+      await app.switchServer('http://lab.test:7734');
+      await app.pumpUntil(
+        () => count('waiting', '1').evaluate().isNotEmpty,
+        reason: 'Home uses only the new source',
+      );
+      noOverviewFetches();
+      await app.lifecycle(AppLifecycleState.paused);
+      await app.lifecycle(AppLifecycleState.resumed);
+      expect(count('waiting', '1'), findsOneWidget);
+      noOverviewFetches();
+      app = await f.restart();
+      expect(count('waiting', '1'), findsOneWidget);
+      noOverviewFetches();
+    },
+  );
+
   group('rows and projects', () {
     featureTest(
       'rows show titles and never a raw id; projects group by directory, '
@@ -687,11 +763,20 @@ void main() {
           ..sessions.removeWhere((s) => s['id'] == 'a2')
           ..bumpRosterRevision();
         await app.pumpUntil(
-          () => app.rosterReads(studio).length >= 3,
+          () =>
+              !app.container.read(sessionListControllerProvider).rosterComplete,
           reason: 'the client reads the partial roster',
         );
         // Let the partial answer cross the request pipeline and be applied.
         await app.elapse(const Duration(seconds: 5));
+        expect(find.text(en.workspacePartialRoster), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('workspace-overview-count-running')),
+            matching: find.text('—'),
+          ),
+          findsOneWidget,
+        );
         expect(find.text('Tidy styles'), findsOneWidget, reason: 'not deleted');
         expect(find.text('Fix login'), findsOneWidget);
 
@@ -784,6 +869,13 @@ void main() {
         app = await f.restart();
         expect(find.byKey(const Key('cached-roster-pane')), findsOneWidget);
         expect(find.text(en.sessionRosterCachedReconnecting), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('workspace-overview-count-running')),
+            matching: find.text('—'),
+          ),
+          findsOneWidget,
+        );
         await app.tester.tap(
           find.byKey(const Key('cached-project-header-/work/studio')),
         );
