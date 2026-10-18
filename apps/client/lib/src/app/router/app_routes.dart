@@ -63,3 +63,6 @@ const String keyboardShortcutsRoute = '$settingsRoute/keyboard-shortcuts';
 
 /// Broker pairing flow.
 const String pairingRoute = '$settingsRoute/pairing';
+
+/// Local storage management.
+const String storageSettingsRoute = '$generalSettingsRoute/storage';

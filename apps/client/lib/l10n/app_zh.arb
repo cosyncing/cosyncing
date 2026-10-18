@@ -2681,5 +2681,11 @@
   "fileMediaOpenExternally": "使用“打开方式”在其他应用中播放此视频。",
   "filePdfPreviousPage": "上一页",
   "filePdfNextPage": "下一页",
-  "filePdfPage": "第 {page} 页，共 {count} 页"
+  "filePdfPage": "第 {page} 页，共 {count} 页",
+  "storageTitle": "存储",
+  "storageSubtitle": "管理本地会话缓存",
+  "storageCacheTitle": "会话缓存",
+  "storageDataTitle": "应用数据",
+  "storageDataDescription": "清除缓存时会保留草稿、待发送消息、连接和偏好设置。",
+  "storageCacheScope": "此设备 · 所有连接"
 }

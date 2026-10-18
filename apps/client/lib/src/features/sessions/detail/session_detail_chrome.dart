@@ -543,6 +543,8 @@ String _controlPillStateName({
 class _StatusTabPanel extends ConsumerStatefulWidget {
   const _StatusTabPanel({
     required this.sessionKey,
+    required this.archivedIdentities,
+    required this.onArchive,
     required this.draftController,
     required this.hasActiveBrokerClient,
     required this.onAttach,
@@ -554,6 +556,8 @@ class _StatusTabPanel extends ConsumerStatefulWidget {
   });
 
   final SessionDetailKey sessionKey;
+  final Map<String, String> archivedIdentities;
+  final ValueChanged<List<_LiveStateItem>> onArchive;
   final TextEditingController? draftController;
   final bool hasActiveBrokerClient;
   final VoidCallback onAttach;
@@ -1213,6 +1217,8 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
             )
           else
             _FullLiveStatePanel(
+              archivedIdentities: widget.archivedIdentities,
+              onArchive: widget.onArchive,
               liveState: state.liveState,
               commandProgress: state.commandProgress,
               commands: state.commands,

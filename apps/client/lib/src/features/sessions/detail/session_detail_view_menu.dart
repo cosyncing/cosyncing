@@ -8,7 +8,6 @@ enum _SessionViewMenuAction {
   files,
   debug,
   reportView,
-  expandTools,
 }
 
 /// Row height for every entry in the ⋮ menu.
@@ -40,10 +39,8 @@ class _SessionViewMenu extends StatelessWidget {
     required this.terminalFresh,
     required this.backgroundCommandCount,
     required this.reportView,
-    required this.toolsExpanded,
     required this.onSelectView,
     required this.onReportViewChanged,
-    required this.onToolsExpandedChanged,
   });
 
   final _SessionDetailView view;
@@ -57,10 +54,8 @@ class _SessionViewMenu extends StatelessWidget {
   /// Background shell commands still running, counted for the attention dot.
   final int backgroundCommandCount;
   final bool reportView;
-  final bool toolsExpanded;
   final ValueChanged<_SessionDetailView> onSelectView;
   final ValueChanged<bool> onReportViewChanged;
-  final ValueChanged<bool> onToolsExpandedChanged;
 
   /// Unseen signals from views the user is not currently looking at.
   ///
@@ -85,10 +80,11 @@ class _SessionViewMenu extends StatelessWidget {
     final pending = _pendingSignals(l10n);
 
     return SizedBox(
-      width: 32,
-      height: 32,
+      width: MediaQuery.sizeOf(context).width < 600 ? 40 : 32,
+      height: MediaQuery.sizeOf(context).width < 600 ? 40 : 32,
       child: PopupMenuButton<_SessionViewMenuAction>(
         key: const Key('session-detail-view-menu'),
+        popUpAnimationStyle: AnimationStyle.noAnimation,
         tooltip: pending.isEmpty
             ? l10n.sessionViewMenuTooltip
             : pending.join(' · '),
@@ -96,9 +92,6 @@ class _SessionViewMenu extends StatelessWidget {
         // read as one icon family rather than two weights in a 36dp row.
         iconSize: scale.scale(16),
         padding: EdgeInsets.zero,
-        // 184, not the spec's 220: the widest row ("Expand all tools") needs
-        // 18 icon + 12 gap + ~92 label + 12 badge gutter, so 220 left ~90dp of
-        // dead width on every row. Measured at 1440 and 420.
         constraints: const BoxConstraints(minWidth: 184),
         // Halves the menu's own top/bottom inset (Material default is 8).
         menuPadding: const EdgeInsets.symmetric(vertical: 4),
@@ -140,8 +133,6 @@ class _SessionViewMenu extends StatelessWidget {
               onSelectView(_SessionDetailView.debug);
             case _SessionViewMenuAction.reportView:
               onReportViewChanged(!reportView);
-            case _SessionViewMenuAction.expandTools:
-              onToolsExpandedChanged(!toolsExpanded);
           }
         },
         itemBuilder: (context) => [
@@ -196,13 +187,6 @@ class _SessionViewMenu extends StatelessWidget {
             label: l10n.sessionComposerMenuReportView,
             checked: reportView,
           ),
-          _toggle(
-            context,
-            action: _SessionViewMenuAction.expandTools,
-            name: 'expand',
-            label: l10n.sessionComposerMenuExpandTools,
-            checked: toolsExpanded,
-          ),
         ],
       ),
     );
@@ -223,30 +207,32 @@ class _SessionViewMenu extends StatelessWidget {
     return PopupMenuItem<_SessionViewMenuAction>(
       key: Key('session-detail-view-item-$name'),
       value: action,
-      height: _menuItemHeight,
+      height: MediaQuery.sizeOf(context).width < 600 ? 40 : _menuItemHeight,
       padding: _menuItemPadding,
-      child: Row(
-        children: [
-          SizedBox.square(
-            dimension: 18,
-            child: active
-                ? Icon(Icons.check, size: 16, color: tokens.accent)
-                : null,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontWeight: active ? FontWeight.w600 : null,
+      child: _SessionMenuFade(
+        child: Row(
+          children: [
+            SizedBox.square(
+              dimension: 18,
+              child: active
+                  ? Icon(Icons.check, size: 16, color: tokens.accent)
+                  : null,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                label,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  fontWeight: active ? FontWeight.w600 : null,
+                ),
               ),
             ),
-          ),
-          if (badgeCount > 0 || showDot) ...[
-            const SizedBox(width: 12),
-            _MenuSignalBadge(name: name, count: badgeCount),
+            if (badgeCount > 0 || showDot) ...[
+              const SizedBox(width: 12),
+              _MenuSignalBadge(name: name, count: badgeCount),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -263,20 +249,24 @@ class _SessionViewMenu extends StatelessWidget {
     return PopupMenuItem<_SessionViewMenuAction>(
       key: Key('session-detail-view-item-$name'),
       value: action,
-      height: _menuItemHeight,
+      height: MediaQuery.sizeOf(context).width < 600 ? 40 : _menuItemHeight,
       padding: _menuItemPadding,
-      child: Row(
-        children: [
-          Icon(
-            checked ? Icons.check_box_outlined : Icons.check_box_outline_blank,
-            size: 18,
-            color: checked ? tokens.accent : tokens.textTertiary,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(label, style: theme.textTheme.bodySmall),
-          ),
-        ],
+      child: _SessionMenuFade(
+        child: Row(
+          children: [
+            Icon(
+              checked
+                  ? Icons.check_box_outlined
+                  : Icons.check_box_outline_blank,
+              size: 18,
+              color: checked ? tokens.accent : tokens.textTertiary,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(label, style: theme.textTheme.bodySmall),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -315,6 +305,25 @@ class _MenuSignalBadge extends StatelessWidget {
               ),
             )
           : null,
+    );
+  }
+}
+
+/// Fade content into a stable menu surface without a height/slide reveal.
+class _SessionMenuFade extends StatelessWidget {
+  const _SessionMenuFade({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.disableAnimationsOf(context)) return child;
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOutCubic,
+      builder: (context, opacity, child) =>
+          Opacity(opacity: opacity, child: child),
+      child: child,
     );
   }
 }

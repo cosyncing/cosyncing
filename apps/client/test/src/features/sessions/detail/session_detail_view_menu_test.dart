@@ -324,7 +324,7 @@ void main() {
             tester
                 .getSize(find.byKey(const Key('session-detail-view-menu')))
                 .height,
-            lessThanOrEqualTo(32),
+            width < 600 ? 40 : 32,
             reason:
                 'menu button must fit the strip at ${width}px in $brightness',
           );

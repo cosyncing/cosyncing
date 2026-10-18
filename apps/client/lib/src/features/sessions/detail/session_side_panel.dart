@@ -5,6 +5,8 @@ part of 'session_detail_page.dart';
 class _SidePanelBinding {
   const _SidePanelBinding({
     required this.source,
+    required this.archivedIdentities,
+    required this.onArchive,
     required this.draft,
     required this.onExport,
     required this.onFork,
@@ -15,6 +17,8 @@ class _SidePanelBinding {
     required this.onDownloadFile,
   });
   final RosterSource? source;
+  final Map<String, String> archivedIdentities;
+  final ValueChanged<List<_LiveStateItem>> onArchive;
   final TextEditingController draft;
   final VoidCallback onExport;
   final VoidCallback onFork;
@@ -58,6 +62,8 @@ class SessionSidePanel extends ConsumerWidget {
         padding: const EdgeInsets.all(12),
         child: _StatusTabPanel(
           sessionKey: pane.session,
+          archivedIdentities: binding.archivedIdentities,
+          onArchive: binding.onArchive,
           draftController: binding.draft,
           hasActiveBrokerClient: hasClient,
           onAttach: () => unawaited(controller.attach()),

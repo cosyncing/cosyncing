@@ -241,46 +241,58 @@ class _SessionTopStrip extends StatelessWidget {
                     padding: EdgeInsets.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  onPressed: () => showModalBottomSheet<void>(
+                  onPressed: () => showDialog<void>(
                     context: context,
-                    isScrollControlled: true,
-                    showDragHandle: true,
                     builder: (context) => Consumer(
                       builder: (context, ref, _) {
                         final current = ref.watch(
                           sessionDetailControllerProvider(sessionKey),
                         );
-                        return SafeArea(
-                          child: SingleChildScrollView(
-                            padding: const EdgeInsets.all(24),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                _SessionTitleEditor(
-                                  title: current.sessionInfo == null
-                                      ? title
-                                      : current.sessionInfo!.title
-                                            .trim()
-                                            .isEmpty
-                                      ? l10n.sessionDetailTitleUntitled
-                                      : current.sessionInfo!.title,
-                                  editableTitle:
-                                      current.sessionInfo?.title ??
-                                      editableTitle,
-                                  tool: tool,
-                                  canRename: canRename,
-                                  busy: current.renameSessionActionState.isBusy,
-                                  onRename: onRename,
-                                ),
-                                const SizedBox(height: 12),
-                                Text(contextLabel),
-                                if (machine != null) ...[
-                                  const SizedBox(height: 8),
-                                  Text(machine!),
+                        return Dialog(
+                          insetPadding: const EdgeInsets.all(24),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 560),
+                            child: SingleChildScrollView(
+                              padding: const EdgeInsets.all(24),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Align(
+                                    alignment: AlignmentDirectional.centerEnd,
+                                    child: IconButton(
+                                      tooltip: l10n.close,
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(),
+                                      icon: const Icon(Icons.close),
+                                    ),
+                                  ),
+                                  _SessionTitleEditor(
+                                    title: current.sessionInfo == null
+                                        ? title
+                                        : current.sessionInfo!.title
+                                              .trim()
+                                              .isEmpty
+                                        ? l10n.sessionDetailTitleUntitled
+                                        : current.sessionInfo!.title,
+                                    editableTitle:
+                                        current.sessionInfo?.title ??
+                                        editableTitle,
+                                    tool: tool,
+                                    canRename: canRename,
+                                    busy:
+                                        current.renameSessionActionState.isBusy,
+                                    onRename: onRename,
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Text(contextLabel),
+                                  if (machine != null) ...[
+                                    const SizedBox(height: 8),
+                                    Text(machine!),
+                                  ],
+                                  const SizedBox(height: 12),
+                                  _TelemetryPanel(telemetry: current.telemetry),
                                 ],
-                                const SizedBox(height: 12),
-                                _TelemetryPanel(telemetry: current.telemetry),
-                              ],
+                              ),
                             ),
                           ),
                         );
@@ -525,7 +537,8 @@ class _SessionTitleEditorState extends State<_SessionTitleEditor>
               color: tokens.textTertiary,
             ),
           ),
-          Flexible(
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 96),
             child: Text(
               widget.tool,
               key: const Key('session-detail-strip-tool'),
