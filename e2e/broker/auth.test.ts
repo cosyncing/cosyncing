@@ -43,7 +43,13 @@ import { pairDevice, type PairedDevice } from '../harness/pairing.ts';
 
 // ── The authorization table ────────────────────────────────────────────────
 
-type Rule = 'public' | 'owner' | 'observe' | 'drive' | 'files' | 'observe+files' | 'pi' | 'omp';
+/**
+ * `update` is not a role. It is the narrow, revocable `broker:update` grant the owner issues
+ * to one peer, held in an owner-only file the peer cannot write. No principal seeded below
+ * holds one, which is exactly what the matrix then proves: `drive` does not buy it, and a
+ * paired device cannot hand it to itself.
+ */
+type Rule = 'public' | 'owner' | 'observe' | 'drive' | 'files' | 'observe+files' | 'update' | 'pi' | 'omp';
 type Method = 'GET' | 'HEAD' | 'POST' | 'PATCH' | 'DELETE';
 
 /**
@@ -68,6 +74,18 @@ const AUTHORIZATION: Record<string, Partial<Record<Method, Rule>>> = {
   '/api/broker/restart': { POST: 'owner' },
   '/api/broker/restart-all': { POST: 'owner' },
   '/api/broker/update': { GET: 'owner', POST: 'owner' },
+  // The in-app update surface: discovery for whoever may watch, commit only with the grant.
+  '/api/broker/updates': { GET: 'observe' },
+  '/api/broker/updates/check': { GET: 'observe' },
+  '/api/broker/updates/history': { GET: 'observe' },
+  '/api/broker/updates/plans': { POST: 'update' },
+  '/api/broker/updates/jobs': { POST: 'update' },
+  '/api/broker/updates/jobs/{id}': { GET: 'observe' },
+  '/api/broker/updates/jobs/{id}/apply': { POST: 'update' },
+  '/api/broker/updates/jobs/{id}/cancel': { POST: 'update' },
+  '/api/broker/update-grants': { GET: 'owner', POST: 'owner' },
+  '/api/broker/update-grants/{id}': { DELETE: 'owner' },
+  '/api/broker/update-grants/request': { POST: 'observe' },
   '/api/machines': { GET: 'observe' },
   '/api/machines/resolve': { GET: 'observe' },
   '/api/projects/rename': { PATCH: 'drive', POST: 'drive' },
@@ -158,7 +176,7 @@ const PEER_ROLES: Record<string, readonly string[]> = {
 };
 
 /** The refusals the route policy itself produces. Anything else came from a handler. */
-const POLICY_REFUSAL = /^(owner credential required|[a-z+ ]+ roles? required|peer credential is not authorized for this route|integration credential is not authorized for this route|authenticated credential required)$/;
+const POLICY_REFUSAL = /^(owner credential required|broker:update grant required|[a-z+ ]+ roles? required|peer credential is not authorized for this route|integration credential is not authorized for this route|authenticated credential required)$/;
 
 type Verdict = 'allowed' | 'unauthenticated' | 'forbidden';
 
@@ -172,7 +190,7 @@ function expectedVerdict(rule: Rule | undefined, principal: PrincipalName, path:
     return rule === (principal === 'Pi credential' ? 'pi' : 'omp') ? 'allowed' : 'forbidden';
   }
   const roles = PEER_ROLES[principal]!;
-  if (!rule || rule === 'owner' || rule === 'pi' || rule === 'omp') return 'forbidden';
+  if (!rule || rule === 'owner' || rule === 'update' || rule === 'pi' || rule === 'omp') return 'forbidden';
   return rule.split('+').every((role) => roles.includes(role)) ? 'allowed' : 'forbidden';
 }
 

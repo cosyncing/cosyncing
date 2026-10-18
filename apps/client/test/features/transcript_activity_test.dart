@@ -571,8 +571,24 @@ void main() {
     });
 
     featureTest('a running card reports the measured duration', (f) async {
+      // A running card floors its duration at the wall clock, and with no
+      // start time in the fixture that clock is back-derived from this
+      // elapsedMs against the real host clock. The figure on screen is
+      // therefore the measured 5s plus whatever real time has passed since
+      // the card was built, and a widget test cannot freeze DateTime.now():
+      // asserting the exact second failed whenever a loaded machine spent one
+      // between the first frame and this check. What has to hold is that the
+      // measured figure reached the card, and that nothing inflated it beyond
+      // the time this test itself has taken.
+      final openedAt = DateTime.now();
       final app = await openCard(f, agent('running', elapsedMs: 5000));
-      expect(summary(app), contains('5s'));
+      final spentMs = DateTime.now().difference(openedAt).inMilliseconds;
+      final rendered = RegExp(r' · (\d+)s$').firstMatch(summary(app));
+      expect(rendered, isNotNull, reason: summary(app));
+      expect(
+        int.parse(rendered!.group(1)!),
+        inInclusiveRange(5, (5_000 + spentMs) ~/ 1_000),
+      );
     });
 
     featureTest('a finished command that wrote nothing says so, not that '

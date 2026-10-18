@@ -11,6 +11,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Broker update APIs for reviewing and staging a pinned release, tracking update
+  recovery, and granting or revoking a paired device's update permission.
+  `cosy update --components broker` updates only the broker. The in-app update
+  screen and automatic desktop client replacement are still in development.
+
 ### Fixed
 
 - Long-pressing or right-clicking a session tab or roster row opens the rename

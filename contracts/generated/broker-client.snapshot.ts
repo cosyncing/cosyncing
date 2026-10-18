@@ -1585,6 +1585,17 @@ export const BROKER_ROUTES = [
   '/api/broker/restart',
   '/api/broker/restart-all',
   '/api/broker/update',
+  '/api/broker/update-grants',
+  '/api/broker/update-grants/request',
+  '/api/broker/update-grants/{id}',
+  '/api/broker/updates',
+  '/api/broker/updates/check',
+  '/api/broker/updates/history',
+  '/api/broker/updates/jobs',
+  '/api/broker/updates/jobs/{id}',
+  '/api/broker/updates/jobs/{id}/apply',
+  '/api/broker/updates/jobs/{id}/cancel',
+  '/api/broker/updates/plans',
   '/api/health',
   '/api/machines',
   '/api/machines/resolve',
@@ -2131,7 +2142,7 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  */
 /** Revision 30 adds bounded, on-demand workspace filename search. Existing
  * browsing permissions and minimum client revision are unchanged. */
-export const BROKER_CONTRACT_REVISION = 30 as const;
+export const BROKER_CONTRACT_REVISION = 31 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -3375,3 +3386,430 @@ export function isHistorySnapshotRefusal(
 ): value is HistorySnapshotRefusal {
   return !!value && 'refusal' in value;
 }
+
+/* --------------------------------------------------------------------------
+ * In-app updates
+ *
+ * One Updates screen drives two independent facts: this client installation and
+ * each saved server. They are never one version, and an unequal pair is only a
+ * problem when the shared contract policy says it is. Everything below keeps
+ * three identities apart:
+ *
+ *   1. product/build identity  -- what is installed and what is running
+ *   2. session contract identity -- revision, minima, surface, overlap window
+ *   3. updater formats        -- management contract, helper, job schema
+ *
+ * Nothing here may branch on a particular product version. Release examples in
+ * the specification (R0/R1/R2) are illustrative; the planner consumes typed
+ * identities and the accepted signed release metadata instead.
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Version of the update-management surface, deliberately separate from
+ * {@link BROKER_CONTRACT_REVISION}.
+ *
+ * The recovery surface has to stay reachable when ordinary session drive is
+ * incompatible -- that is the whole point of being able to fix a server you can
+ * no longer drive -- so its shapes may not move with the session overlap window.
+ * A server that predates this number entirely reports
+ * {@link UpdateCapabilityState.unsupported}, never a permission or connectivity
+ * failure the user would waste time retrying.
+ */
+export const UPDATE_MANAGEMENT_CONTRACT_VERSION = 1 as const;
+
+/** Default lifetime of a reviewed plan. Apply revalidates inside it as well. */
+export const UPDATE_PLAN_DEFAULT_TTL_MS = 15 * 60 * 1000;
+
+/** Bounded default for concurrent saved-server discovery probes. */
+export const UPDATE_DISCOVERY_DEFAULT_CONCURRENCY = 3;
+
+/** Components a coordinated operation can commit. Kept tiny on purpose. */
+export const UPDATE_COMPONENTS = ['client', 'broker'] as const;
+export type UpdateComponent = (typeof UPDATE_COMPONENTS)[number];
+
+/**
+ * Who owns the files a component is installed from.
+ *
+ * Acquisition, not location: an npm broker and an installer broker can sit in the
+ * same home directory and mean completely different things. Replacing files a
+ * package manager owns makes that manager's record of the machine permanently
+ * false, so `package-manager` gets guidance and never an in-app commit. `unknown`
+ * is the honest default when ownership cannot be proven, and it blocks the
+ * component rather than the whole operation.
+ */
+export const UPDATE_INSTALL_OWNERSHIPS = [
+  'cosyncing-installer',
+  'package-manager',
+  'source',
+  'store-managed',
+  'unknown',
+] as const;
+export type UpdateInstallOwnership = (typeof UPDATE_INSTALL_OWNERSHIPS)[number];
+
+/** Job schema and runner/helper formats evolve apart from product semver. */
+export const UPDATE_JOB_SCHEMA_VERSION = 1 as const;
+
+/** Durable host job state machine. `partial` is an aggregate result, never a host phase. */
+export const UPDATE_JOB_PHASES = [
+  'accepted',
+  'preparing',
+  'ready',
+  'applying',
+  'verifying',
+  'succeeded',
+  'failed',
+  'rolled_back',
+  'needs_attention',
+  'cancelled',
+] as const;
+export type UpdateJobPhase = (typeof UPDATE_JOB_PHASES)[number];
+
+/** Terminal phases. A job in one of these is never resumed, only reported. */
+export const UPDATE_JOB_TERMINAL_PHASES: readonly UpdateJobPhase[] = Object.freeze([
+  'succeeded',
+  'failed',
+  'rolled_back',
+  'needs_attention',
+  'cancelled',
+]);
+
+export function isUpdateJobTerminal(phase: UpdateJobPhase): boolean {
+  return UPDATE_JOB_TERMINAL_PHASES.includes(phase);
+}
+
+/** What a component went through, reported per component rather than as one percentage. */
+export const UPDATE_COMPONENT_OUTCOMES = [
+  'pending',
+  'prepared',
+  'committed',
+  'verified',
+  'current',
+  'skipped',
+  'failed',
+  'cancelled',
+  'needs_attention',
+] as const;
+export type UpdateComponentOutcome = (typeof UPDATE_COMPONENT_OUTCOMES)[number];
+
+/** Progress stages the coordinator may show. No stage implies a percentage. */
+export const UPDATE_STAGES = [
+  'discovering',
+  'downloading',
+  'verifying',
+  'waiting-for-exit',
+  'replacing',
+  'restarting',
+  'reconnecting',
+  'opening-app',
+] as const;
+export type UpdateStage = (typeof UPDATE_STAGES)[number];
+
+/** Why a component cannot be checked, planned, or applied. Distinct on purpose. */
+export const UPDATE_BLOCKER_CODES = [
+  'unsupported-platform',
+  'ownership-unproven',
+  'package-manager-owned',
+  'source-build',
+  'store-managed',
+  'helper-missing',
+  'helper-too-old',
+  'management-contract-too-old',
+  'runtime-below-floor',
+  'insufficient-space',
+  'permission-required',
+  'grant-revoked',
+  'identity-mismatch',
+  'target-moved',
+  'release-metadata-absent',
+  'contract-metadata-absent',
+  'no-safe-intermediate',
+  'bridge-release-required',
+  'compatibility-unconfirmed',
+  'in-progress',
+  'plan-stale',
+  'busy-state-unknown',
+  'desktop-out-of-scope',
+  'unknown-future-schema',
+] as const;
+export type UpdateBlockerCode = (typeof UPDATE_BLOCKER_CODES)[number];
+
+/** Extra acknowledgement a plan needs before it may run. Never inferred silently. */
+export const UPDATE_ACKNOWLEDGEMENTS = [
+  'app-will-close',
+  'server-will-disconnect',
+  'unselected-servers-unusable',
+  'compatibility-unconfirmed',
+  'other-clients-will-be-excluded',
+  'interruption-during-work',
+] as const;
+export type UpdateAcknowledgement = (typeof UPDATE_ACKNOWLEDGEMENTS)[number];
+
+/**
+ * The narrow update authority a paired device may hold.
+ *
+ * Ordinary pairing grants `observe`, `drive` and `files`. None of them means
+ * "may replace this machine's installed software", and the existing (unused)
+ * `admin` label must not become that by accident. A grant is bound to a peer
+ * identity and this broker installation, is revocable, and is re-checked
+ * immediately before a disruptive commit.
+ */
+export const UPDATE_GRANT_SCOPE = 'broker:update' as const;
+export type UpdateGrantScope = typeof UPDATE_GRANT_SCOPE;
+
+export interface UpdateGrantRecord {
+  scope: UpdateGrantScope;
+  /** Peer the grant is bound to. Owner authority never needs one. */
+  peerId: string;
+  /** Bound to this broker installation so a copy cannot follow the peer elsewhere. */
+  installationId: string;
+  grantedAt: string;
+  /** Auditable initiator; never a credential. */
+  grantedBy: 'owner' | 'local-management';
+  revokedAt?: string;
+}
+
+/** Whether a peer may currently use the grant. Revocation is not a cache entry. */
+export function updateGrantIsActive(
+  grant: UpdateGrantRecord | undefined,
+  at: Date = new Date(),
+): boolean {
+  if (!grant || grant.scope !== UPDATE_GRANT_SCOPE) return false;
+  if (grant.revokedAt === undefined) return true;
+  const revokedAt = Date.parse(grant.revokedAt);
+  return !Number.isFinite(revokedAt) || revokedAt > at.getTime();
+}
+
+/** A build identity as observed, with installed and running kept apart. */
+export interface UpdateBuildIdentity {
+  /** Product version, e.g. the release stamp. Absent when the build is unstamped. */
+  version?: string;
+  /** Release/build identity from build metadata; distinguishes two same-version builds. */
+  buildId?: string;
+  /** Release/tag identity this build came from, when it can prove one. */
+  releaseId?: string;
+}
+
+export interface UpdateContractAdvert {
+  revision: number;
+  /** Client advert: oldest broker it may drive. Broker advert: newest client minimum. */
+  minimumPeerRevision: number;
+  surfaceHash?: string;
+}
+
+/** Sanitized per-component inventory row. Safe to show a remote peer. */
+export interface UpdateComponentInventory {
+  component: UpdateComponent;
+  platform: string;
+  arch: string;
+  ownership: UpdateInstallOwnership;
+  running: UpdateBuildIdentity;
+  /** Present only when the on-disk build differs from the running one. */
+  installed?: UpdateBuildIdentity;
+  contract?: UpdateContractAdvert;
+  /** Absent on a server that predates the management surface entirely. */
+  updateManagementVersion?: number;
+  /** Signed candidate already cached from the last channel check, if any. */
+  available?: UpdateBuildIdentity;
+  /** When this host last completed a successful channel check. */
+  lastChannelCheckAt?: string;
+  requiresRestart: boolean;
+  canCheck: boolean;
+  canPlan: boolean;
+  canApply: boolean;
+  canCancel: boolean;
+  /** Typed reasons for every false flag above; never a bare boolean mystery. */
+  blockers: UpdateBlocker[];
+  /** Job currently owning this component, when there is one. */
+  activeJobId?: string;
+}
+
+export interface UpdateBlocker {
+  code: UpdateBlockerCode;
+  /** Stable, user-presentable detail naming the affected component. */
+  detail: string;
+  component?: UpdateComponent;
+  /** Guidance text for the specific supported manual path. */
+  guidance?: string;
+}
+
+/** Sanitized host inventory as served by `GET /api/broker/updates`. */
+export interface UpdateInventory {
+  schemaVersion: typeof UPDATE_JOB_SCHEMA_VERSION;
+  installationId: string;
+  /** Monotonic installation generation; a plan bound to an older one is stale. */
+  installationGeneration: number;
+  updateManagementVersion?: number;
+  components: UpdateComponentInventory[];
+  /** Running agent turns, launches and approvals the caller must weigh. */
+  busy: UpdateBusyState;
+  checkedAt: string;
+}
+
+/** Narrow maintenance readiness. Unknown defaults to keeping work running. */
+export interface UpdateBusyState {
+  state: 'idle' | 'busy' | 'unknown';
+  activeTurns: number;
+  activeLaunches: number;
+  pendingApprovals: number;
+  observedAt: string;
+}
+
+export interface UpdateCheckResponse {
+  schemaVersion: typeof UPDATE_JOB_SCHEMA_VERSION;
+  status: 'current' | 'update-available' | 'unknown';
+  detailCode: string;
+  components: Array<{
+    component: UpdateComponent;
+    running: UpdateBuildIdentity;
+    available?: UpdateBuildIdentity;
+    /** Channel check time. A fresh feed never makes an old server observation current. */
+    releaseCheckedAt: string;
+    /** When this host's own running version was last proven, if ever. */
+    versionObservedAt?: string;
+  }>;
+}
+
+/** Explicit component selection. A request names components, never a path, URL or command. */
+export interface UpdatePlanRequest {
+  /** Immutable release the caller discovered; the broker resolves and validates its own. */
+  releaseId: string;
+  components: UpdateComponent[];
+  /** Expected broker build identity, so a moved target is a conflict rather than a surprise. */
+  expected: UpdateBuildIdentity;
+  /** Compatibility identity of the client that is asking, when it is one of the components. */
+  clientContract?: UpdateContractAdvert;
+  /** Acknowledgements the user has already given in this review. */
+  acknowledgements?: UpdateAcknowledgement[];
+}
+
+export interface UpdatePlannedComponent {
+  component: UpdateComponent;
+  from: UpdateBuildIdentity;
+  to: UpdateBuildIdentity;
+  /** Position in the commit order. Lower runs first. */
+  order: number;
+  impacts: UpdateAcknowledgement[];
+  /** Bytes the prepared download needs, when the release metadata states it. */
+  downloadBytes?: number;
+  /** Set when this component will not change; it is reported, not hidden. */
+  noOp?: boolean;
+}
+
+export interface UpdatePlan {
+  schemaVersion: typeof UPDATE_JOB_SCHEMA_VERSION;
+  planId: string;
+  /** Immutable release every artifact identity in this plan was taken from. */
+  releaseId: string;
+  installationId: string;
+  installationGeneration: number;
+  expiresAt: string;
+  components: UpdatePlannedComponent[];
+  /** Commit order. The coordinator may not reorder it. */
+  order: UpdateComponent[];
+  requiredAcknowledgements: UpdateAcknowledgement[];
+  /** Acknowledgements still missing for this plan to be executable. */
+  outstandingAcknowledgements: UpdateAcknowledgement[];
+  blockers: UpdateBlocker[];
+  /** Components the caller selected that will not change, with the reason. */
+  excluded: Array<{ component: UpdateComponent; reason: UpdateBlocker }>;
+  /** Pairwise contract verdicts behind the ordering decision. Null when no
+   * actionable component carried enough contract identity to evaluate a pair. */
+  compatibility: UpdateCompatibilityReport | null;
+  updateManagementVersion: number;
+}
+
+/** One evaluated pair from the shared policy, kept as data so the UI can explain itself. */
+export interface UpdateCompatibilityPair {
+  client: UpdateContractAdvert;
+  broker: UpdateContractAdvert;
+  status: BrokerClientCompatibilityStatus;
+  readOnly: boolean;
+  reason: string;
+}
+
+export interface UpdateCompatibilityReport {
+  /** The pair the operation ends on. Must be usable or nothing may commit. */
+  final: UpdateCompatibilityPair;
+  /** Client updated against the still-current broker. Null when the client is not in scope. */
+  clientFirst: UpdateCompatibilityPair | null;
+  /** Current client against the updated broker. Null when the broker is not in scope. */
+  brokerFirst: UpdateCompatibilityPair | null;
+  /** Saved servers the user did not select, checked against the candidate client. */
+  unselectedServers: Array<{
+    installationId: string;
+    label: string;
+    status: BrokerClientCompatibilityStatus | 'unknown';
+    lastSeenAt?: string;
+  }>;
+}
+
+export interface UpdateJobSubmission {
+  planId: string;
+  /** Scoped to the authenticated principal and installation; reuse with other content conflicts. */
+  idempotencyKey: string;
+}
+
+export interface UpdateJobComponentState {
+  component: UpdateComponent;
+  outcome: UpdateComponentOutcome;
+  stage?: UpdateStage;
+  detailCode: string;
+  /** Independently true per component: an updated broker stays updated after a client failure. */
+  actual: UpdateBuildIdentity;
+}
+
+/** Durable host job. Readable after the broker restarted, from journal plus real state. */
+export interface UpdateJob {
+  schemaVersion: typeof UPDATE_JOB_SCHEMA_VERSION;
+  jobId: string;
+  planId: string;
+  releaseId: string;
+  installationId: string;
+  installationGeneration: number;
+  phase: UpdateJobPhase;
+  /** Monotonic per job; a client may detect a gap it has to re-read around. */
+  sequence: number;
+  createdAt: string;
+  updatedAt: string;
+  /** Accepted apply, recorded durably and independently idempotent. */
+  applyAcceptedAt?: string;
+  runner?: { identity: string; leaseExpiresAt?: string };
+  components: UpdateJobComponentState[];
+  /** Aggregate result: `partial` when components ended differently. */
+  result?: 'complete' | 'partial' | 'failed' | 'cancelled' | 'needs-attention';
+  events: Array<{ at: string; phase: UpdateJobPhase; detailCode: string }>;
+}
+
+export interface UpdateHistoryEntry {
+  jobId: string;
+  releaseId: string;
+  finishedAt: string;
+  result: NonNullable<UpdateJob['result']>;
+  components: Array<{ component: UpdateComponent; outcome: UpdateComponentOutcome; version?: string }>;
+  /** Sanitized detail codes only. No credentials, paths, or command lines. */
+  detailCodes: string[];
+}
+
+/** Apply-phase request. Idempotent, and bound to the same reviewed effects as the plan. */
+export interface UpdateApplyRequest {
+  idempotencyKey: string;
+}
+
+/** Typed failures every surface must be able to distinguish from one another. */
+export const UPDATE_ERROR_CODES = [
+  'UPDATE_PERMISSION_REQUIRED',
+  'UPDATE_GRANT_REVOKED',
+  'UPDATE_CAPABILITY_UNSUPPORTED',
+  'UPDATE_PLAN_INVALID',
+  'UPDATE_PLAN_STALE',
+  'UPDATE_PLAN_EXPIRED',
+  'UPDATE_TARGET_MOVED',
+  'UPDATE_IN_PROGRESS',
+  'UPDATE_JOB_NOT_FOUND',
+  'UPDATE_IDEMPOTENCY_CONFLICT',
+  'UPDATE_ACKNOWLEDGEMENT_REQUIRED',
+  'UPDATE_BRIDGE_REQUIRED',
+  'UPDATE_RUNTIME_PREREQUISITE_UNMET',
+  'UPDATE_UNKNOWN_JOB_SCHEMA',
+] as const;
+export type UpdateErrorCode = (typeof UPDATE_ERROR_CODES)[number];

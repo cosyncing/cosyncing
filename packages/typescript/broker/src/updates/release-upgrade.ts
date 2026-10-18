@@ -15,6 +15,12 @@ import { resolveFlutterWebRoot } from '../runtime/runtime-assets.ts';
 import type { BrokerConfig } from '../runtime/configuration.ts';
 import { validDesktopClients, type ReleaseDesktopClients, type DesktopClientOutcome } from './desktop-client-types.ts';
 import {
+  parseReleaseUpdaterMetadata,
+  compareReleaseVersions,
+  type ReleaseUpdaterBlock,
+  type ReleaseUpdaterMetadata,
+} from './updater-metadata.ts';
+import {
   assertDesktopClientStopped, assertDesktopClientUnchanged, inspectDesktopClient,
   DesktopClientRunningError, skippedDesktopClient,
   reconcileDesktopClient, type DesktopClientContext, type PreparedDesktopClient,
@@ -64,7 +70,7 @@ import type {
   DurableServiceVersionRecord,
   DurableServiceVersions,
 } from '../installation/service-manager.ts';
-import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
+import { PRODUCT_IDENTITY, type UpdateComponent } from '@cosyncing/protocol';
 import {
   assertNoSymlinkComponents,
   atomicWriteJsonOwnerOnly,
@@ -202,6 +208,14 @@ export interface ReleaseManifest {
   androidApp?: ReleaseAndroidApp;
   /** Optional installer-owned desktop archives, covered by the full manifest signature. */
   desktopClients?: ReleaseDesktopClients;
+  /**
+   * Optional in-app update engine metadata, covered by the full manifest signature.
+   *
+   * Absent means the release makes no internal-update promise; it is NOT a zero
+   * default. Readers that predate it ignore the key and verify the signature over
+   * the canonical payload unchanged, so this is additive in both directions.
+   */
+  updater?: ReleaseUpdaterBlock;
   signature: {
     algorithm: 'ed25519';
     keyId: string;
@@ -408,6 +422,28 @@ export interface UpgradeDependencies {
   env?: Readonly<Record<string, string | undefined>>;
   /** Native process/filesystem seams for installer-owned desktop acceptance. */
   desktop?: Pick<DesktopClientContext, 'isRunning' | 'rename' | 'writeReceipt' | 'remove'>;
+  /**
+   * Which components this run may touch, when the caller is not a human at a terminal.
+   *
+   * Absent preserves the historical behaviour: `cosyncing upgrade` reconciles the
+   * installer-owned desktop beside the broker, which is what a person typing that
+   * command expects. Anyone who is NOT that person has to say what they asked for.
+   * The app's update button means "update this server", and a phone has no claim on
+   * the desktop app installed on the machine it happens to be reaching -- so the
+   * scope has to be a fact of the run rather than a hope that the manifest carries no
+   * desktop archive for this host, or that no app happens to be running there.
+   */
+  components?: readonly UpdateComponent[];
+  /**
+   * An immutable release identity this run must install, when the caller is not a person.
+   *
+   * Absent means "install whatever the channel serves", which is what `cosyncing upgrade`
+   * has always meant. A caller acting on somebody's reviewed consent cannot mean that: the
+   * channel is mutable and may have promoted something else between the review and this
+   * process starting, and installing it would be a different action than the one approved.
+   * A pin that does not match the served release is a refusal, never a substitution.
+   */
+  pinnedReleaseId?: string;
   service?: UpgradeServiceController;
   verifyBrokerVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
   verifyWebVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
@@ -561,6 +597,10 @@ function parseManifest(value: unknown): ReleaseManifest {
   if (new Set(manifest.artifacts.map((artifact) => artifact.target)).size !== manifest.artifacts.length) {
     throw new Error('release-manifest-duplicate-target');
   }
+  // A block that is merely absent stays absent. A block that is present and malformed is a
+  // verification failure with its own code: degrading it to "no updater metadata" would let a
+  // truncated feed present a capable release as a legacy one mid-operation.
+  if (manifest.updater !== undefined) manifest.updater = parseReleaseUpdaterMetadata(manifest.updater);
   return manifest;
 }
 
@@ -621,13 +661,13 @@ export function verifyReleaseManifest(options: {
   return { manifest, artifact };
 }
 
-function releaseKeys(): Readonly<Record<string, string>> {
+export function releaseKeys(): Readonly<Record<string, string>> {
   const keyId = typeof COSYNCING_RELEASE_KEY_ID === 'undefined' ? '' : COSYNCING_RELEASE_KEY_ID?.trim();
   const key = typeof COSYNCING_RELEASE_PUBLIC_KEY_PEM === 'undefined' ? '' : COSYNCING_RELEASE_PUBLIC_KEY_PEM?.trim();
   return keyId && key ? { [keyId]: key } : {};
 }
 
-function defaultManifestUrl(): string | undefined {
+export function defaultManifestUrl(): string | undefined {
   const channel = typeof COSYNCING_RELEASE_CHANNEL_MANIFEST_URL === 'undefined'
     ? ''
     : COSYNCING_RELEASE_CHANNEL_MANIFEST_URL?.trim();
@@ -713,6 +753,48 @@ export interface UpgradeCandidate {
   minimumBunVersion?: string;
   /** The release's own signed runtime pins, when it carries them. */
   bunRuntime?: ReleaseBunRuntime;
+}
+
+/**
+ * The immutable handle for a verified manifest.
+ *
+ * Derived from the commit rather than the version, so a re-tagged version cannot masquerade
+ * as the release a person reviewed. Both the update-management surface and the installer
+ * compute it the same way: a pin that meant one thing where it was written and another where
+ * it is honoured is worse than no pin at all.
+ */
+export function releaseIdFromManifest(manifest: { version: string; sourceCommit: string }): string {
+  return `rel-${manifest.version}+${manifest.sourceCommit.slice(0, 7)}`;
+}
+
+/** The shape a release id may take on a command line, and nothing that looks like an argument. */
+const RELEASE_ID_PATTERN = /^rel-\d+\.\d+\.\d+\+[A-Za-z0-9]{7,40}$/;
+
+export function isReleaseId(value: string): boolean {
+  return RELEASE_ID_PATTERN.test(value);
+}
+
+/**
+ * `rel-1.2.3+abcdefa` back to `1.2.3`. Unparsable stays unknown rather than guessed.
+ *
+ * Here rather than beside the job that uses it because the release id is a channel identity
+ * before it is a job field: the handoff has to name the version to the upgrader it delegates to,
+ * and a launcher that parsed it independently would be a second, drift-prone reader of the format.
+ */
+export function releaseIdVersion(releaseId: string): string | undefined {
+  const match = /^rel-(\d+\.\d+\.\d+)\+/.exec(releaseId);
+  return match?.[1];
+}
+
+/**
+ * The commit a release id pins, shortened the way the id was built.
+ *
+ * Version alone cannot identify a build: two commits can carry the same version string, and only
+ * one of them is the release anybody reviewed. Settling a job therefore needs both.
+ */
+export function releaseIdCommit(releaseId: string): string | undefined {
+  const match = /^rel-\d+\.\d+\.\d+\+([A-Za-z0-9]{7,40})$/.exec(releaseId);
+  return match?.[1]?.slice(0, 7).toLowerCase();
 }
 
 /**
@@ -926,35 +1008,10 @@ export function packageManagerUpdateGuidance(
   };
 }
 
-function compareVersions(left: string, right: string): number {
-  const parse = (value: string): { core: number[]; prerelease?: string[] } => {
-    const [core, prerelease] = value.split('-', 2);
-    return { core: core!.split('.').map(Number), ...(prerelease ? { prerelease: prerelease.split('.') } : {}) };
-  };
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 0; index < 3; index += 1) {
-    const difference = (a.core[index] ?? 0) - (b.core[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  if (!a.prerelease && !b.prerelease) return 0;
-  if (!a.prerelease) return 1;
-  if (!b.prerelease) return -1;
-  const length = Math.max(a.prerelease.length, b.prerelease.length);
-  for (let index = 0; index < length; index += 1) {
-    const leftPart = a.prerelease[index];
-    const rightPart = b.prerelease[index];
-    if (leftPart === undefined) return -1;
-    if (rightPart === undefined) return 1;
-    if (leftPart === rightPart) continue;
-    const leftNumeric = /^\d+$/.test(leftPart);
-    const rightNumeric = /^\d+$/.test(rightPart);
-    if (leftNumeric && rightNumeric) return Number(leftPart) - Number(rightPart);
-    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
-    return leftPart.localeCompare(rightPart);
-  }
-  return 0;
-}
+// One semver ordering for the whole engine: the updater floors and the channel probe must
+// never disagree about which of two versions is newer.
+const compareVersions = compareReleaseVersions;
+
 
 /** The installer host whose pinned runtime this machine would install: an explicit one, else this process's. */
 function runtimeHostFor(explicit?: string): string | undefined {
@@ -1257,6 +1314,19 @@ function upgradeJournalPath(home: string): string {
 
 function writeJournal(home: string, journal: UpgradeJournal): void {
   atomicWriteJsonOwnerOnly(upgradeJournalPath(home), journal);
+}
+
+/**
+ * Whether this host is in the middle of an upgrade transaction it has not committed.
+ *
+ * The journal is written before the first byte moves and removed in the same path that commits
+ * the receipts naming the new build, so its presence is the installer's own "not yet" marker and
+ * its absence is the end of the transaction -- committed, or rolled back and restored. Nothing
+ * here parses it: a journal this build cannot read is still a journal, and still means somebody
+ * has unfinished work to look at.
+ */
+export function upgradeTransactionOpen(home: string): boolean {
+  return existsSync(upgradeJournalPath(home));
 }
 
 function parseJournal(home: string, targetPath: string): UpgradeJournal | undefined {
@@ -1608,6 +1678,16 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
   if (packageManagerOwned) {
     return result('blocked', 1, packageManagerOwned.detailCode, packageManagerOwned.summary, fromVersion, false);
   }
+
+  // A scope that excludes the broker is not this function's job, and the answer comes
+  // before any installation inspection: runUpgrade IS the broker installer, so quietly
+  // doing the broker half anyway would turn a client-only retry into an unrequested
+  // service restart of a server that is already healthy.
+  if (dependencies.components && !dependencies.components.includes('broker')) {
+    return result('blocked', 1, 'upgrade-component-scope-unsupported',
+      "A client-only update is installed by this machine's own updater, not by the broker upgrade path.",
+      fromVersion, false);
+  }
   const install = inspectInstallState(dependencies.home);
   if (!install.committed) {
     return result('blocked', 1, 'upgrade-installation-uncommitted', 'Run cosyncing setup before upgrading.', fromVersion, false);
@@ -1630,20 +1710,48 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     return result('blocked', 1, error instanceof Error ? error.message : 'installed-binary-invalid', 'The installed binary receipt is missing or unsafe.', fromVersion, false);
   }
 
+  // Absent scope keeps the historical implicit reconciliation.
+  const reconcilesDesktop = dependencies.components === undefined || dependencies.components.includes('client');
   const desktopContext: DesktopClientContext = { home: dependencies.home,
     ...(dependencies.env ? { env: dependencies.env } : {}), ...dependencies.desktop };
   let desktop: PreparedDesktopClient | undefined;
   let desktopProblem: DesktopClientOutcome | undefined;
-  try {
-    desktop = inspectDesktopClient(desktopContext);
-    assertDesktopClientStopped(desktop, desktopContext);
-  } catch (error) {
-    if (error instanceof DesktopClientRunningError) {
-      return result('blocked', 1, error.detailCode, error.message, fromVersion, false);
+  if (reconcilesDesktop) {
+    try {
+      desktop = inspectDesktopClient(desktopContext);
+      assertDesktopClientStopped(desktop, desktopContext);
+    } catch (error) {
+      if (error instanceof DesktopClientRunningError) {
+        return result('blocked', 1, error.detailCode, error.message, fromVersion, false);
+      }
+      desktopProblem = skippedDesktopClient(error);
+      desktop = undefined;
     }
-    desktopProblem = skippedDesktopClient(error);
-    desktop = undefined;
   }
+  /**
+   * The desktop half of the report, honouring the scope.
+   *
+   * Out of scope is a stated skip rather than silence: a caller that asked for a
+   * server-only update is entitled to be told the desktop was not part of it, in the
+   * same place the report says what happened to everything that WAS.
+   */
+  const desktopOutcomeFor = async (manifest: ReleaseManifest): Promise<DesktopClientOutcome> => {
+    if (!reconcilesDesktop) {
+      return {
+        status: 'skipped',
+        detailCode: 'desktop-client-out-of-scope',
+        clause: ' Desktop client: not part of this operation, so nothing here was inspected or replaced.',
+      };
+    }
+    if (desktopProblem) return desktopProblem;
+    return reconcileDesktopClient({
+      prepared: desktop,
+      context: desktopContext,
+      ...(desktop ? { row: manifest.desktopClients?.[desktop.receipt.host] } : {}),
+      download: (url, maximum) => boundedDownload(dependencies.fetch ?? fetch, url, maximum),
+      compareVersions,
+    });
+  };
 
   const acquire = dependencies.acquireLock ?? ((options) => acquireInstallationLock(options));
   let lock: InstallationLockHandle;
@@ -1653,7 +1761,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
   }
   let recovered = false;
   try {
-    try { if (!desktopProblem) assertDesktopClientUnchanged(desktop, desktopContext); }
+    try { if (reconcilesDesktop && !desktopProblem) assertDesktopClientUnchanged(desktop, desktopContext); }
     catch (error) {
       if (error instanceof DesktopClientRunningError) {
         return result('blocked', 1, error.detailCode, error.message, fromVersion, false);
@@ -1732,10 +1840,17 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       try { manifestValue = JSON.parse(Buffer.from(manifestBytes).toString('utf8')); }
       catch { throw new Error('release-manifest-malformed'); }
       candidate = verifyUpgradeCandidate({ value: manifestValue, buildInfo: dependencies.buildInfo, trustedKeys });
+      // A pinned run installs its pin or nothing, decided before any comparison against the
+      // running version: a channel that moved underneath this caller is a conflict to report,
+      // not a newer build to adopt and not an "already current" answer about something else.
+      const candidateReleaseId = releaseIdFromManifest(candidate.manifest);
+      if (dependencies.pinnedReleaseId !== undefined && dependencies.pinnedReleaseId !== candidateReleaseId) {
+        return result('blocked', 1, 'release-target-moved',
+          `The channel now serves ${candidateReleaseId}; the pinned ${dependencies.pinnedReleaseId} was not installed.`,
+          fromVersion, recovered);
+      }
       if (compareVersions(candidate.manifest.version, fromVersion) === 0) {
-        const client = desktopProblem ?? await reconcileDesktopClient({ prepared: desktop, context: desktopContext,
-          ...(desktop ? { row: candidate.manifest.desktopClients?.[desktop.receipt.host] } : {}),
-          download: (url, maximum) => boundedDownload(dependencies.fetch ?? fetch, url, maximum), compareVersions });
+        const client = await desktopOutcomeFor(candidate.manifest);
         return result(client.status === 'updated' ? 'complete' : 'already-current', 0,
           client.status === 'updated' ? 'desktop-client-only-updated' : 'release-already-current',
           `cosyncing ${fromVersion} is already current.${client.clause}`, fromVersion, recovered, fromVersion,
@@ -2037,9 +2152,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           await dependencies.service.versions.finalize(serviceVersion);
         } catch { /* leave it for repair */ }
       }
-      const clientOutcome = desktopProblem ?? await reconcileDesktopClient({ prepared: desktop, context: desktopContext,
-        ...(desktop ? { row: candidate.manifest.desktopClients?.[desktop.receipt.host] } : {}),
-        download: (url, maximum) => boundedDownload(dependencies.fetch ?? fetch, url, maximum), compareVersions });
+      const clientOutcome = await desktopOutcomeFor(candidate.manifest);
       // The upgrade is committed and healthy: journal gone, receipts written, candidate answering on its
       // own port. Release the installation lock BEFORE delegating the mod refresh so the child can take
       // its own -- one lock, one owner at a time -- and a refused refresh stays a note on a complete
@@ -2162,6 +2275,8 @@ export function releaseManifestForTests(options: {
   webApp?: ReleaseWebSidecar;
   jsApp?: ReleaseJavaScriptApp;
   desktopClients?: ReleaseDesktopClients;
+  /** Signed in-app update metadata. Absent reproduces the pre-feature feed byte for byte. */
+  updater?: ReleaseUpdaterMetadata;
 }): ReleaseManifest {
   const unsigned: Omit<ReleaseManifest, 'signature'> = {
     schemaVersion: RELEASE_MANIFEST_SCHEMA_VERSION,
@@ -2175,6 +2290,7 @@ export function releaseManifestForTests(options: {
     ...(options.webApp ? { webApp: options.webApp } : {}),
     ...(options.jsApp ? { jsApp: options.jsApp } : {}),
     ...(options.desktopClients ? { desktopClients: options.desktopClients } : {}),
+    ...(options.updater ? { updater: options.updater } : {}),
   };
   return {
     ...unsigned,

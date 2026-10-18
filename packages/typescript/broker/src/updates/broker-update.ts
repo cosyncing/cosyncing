@@ -6,6 +6,8 @@ import { settleWithDeadline } from '../installation/service-manager.ts';
 import {
   checkReleaseUpdate,
   packageManagerUpdateGuidance,
+  isReleaseId,
+  releaseIdVersion,
   type ReleaseUpdateCheckDependencies,
   type ReleaseUpdateCheckResult,
 } from './release-upgrade.ts';
@@ -70,6 +72,10 @@ export interface BrokerUpdateTriggerResult {
   toVersion?: string;
 }
 
+export type BrokerUpdateLaunchDecision =
+  | { allowed: true }
+  | { allowed: false; detailCode: 'grant-revoked' | 'installation-superseded' | 'launch-authority-consumed' };
+
 export interface BrokerUpdateTriggerDependencies {
   buildInfo: Readonly<BuildInfo>;
   service: Readonly<BrokerServiceBoundary>;
@@ -82,6 +88,23 @@ export interface BrokerUpdateTriggerDependencies {
   userHome?: string;
   systemdRunPath?: string;
   manifestUrl?: string;
+  /**
+   * The immutable release the caller reviewed, spelled into the handoff.
+   *
+   * Without it the delegated command resolves the mutable pointer when it runs, which is a
+   * different instruction from the one anybody approved: a release promoted between the
+   * review and this process being replaced would be installed under a job that never saw it.
+   */
+  pinnedReleaseId?: string;
+  /**
+   * The authority answer for the moment the updater is actually scheduled.
+   *
+   * Asked after the command exists and before anything is spawned, because everything the caller
+   * knew earlier was a fact about an earlier moment: an in-app commit re-reads the release
+   * channel on its way here, and a grant the owner withdrew during that wait is withdrawn now.
+   * Absent for an owner at a terminal, who has their own authority and nothing to re-ask.
+   */
+  authorizeLaunch?: () => BrokerUpdateLaunchDecision;
   run?: (argv: readonly string[]) => Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -98,6 +121,9 @@ export function brokerUpdateHandoffCommand(dependencies: BrokerUpdateTriggerDepe
   const systemdRun = dependencies.systemdRunPath ?? Bun.which('systemd-run') ?? undefined;
   if (!systemdRun || !isAbsolute(systemdRun) || !isAbsolute(dependencies.executablePath)
       || !isAbsolute(dependencies.stateHome)
+      // An identity this command cannot express as a pin is not a pin to guess at: there is
+      // no handoff, and the caller is told to run the upgrader itself.
+      || (dependencies.pinnedReleaseId !== undefined && !isReleaseId(dependencies.pinnedReleaseId))
       || (dependencies.manifestUrl && !isBrokerUpdateManifestUrl(dependencies.manifestUrl))) {
     return undefined;
   }
@@ -123,7 +149,14 @@ export function brokerUpdateHandoffCommand(dependencies: BrokerUpdateTriggerDepe
     if (!isAbsolute(dependencies.runtimePath)) return undefined;
     command.push(dependencies.runtimePath);
   }
-  command.push(dependencies.executablePath, 'upgrade', '--yes', '--json');
+  // Server-only, spelled out. The app's update button means "update this server", and
+  // an unscoped `upgrade` also reconciles the installer-owned desktop on this host --
+  // which is what a person at a terminal wants, and is not what a phone asked for.
+  command.push(dependencies.executablePath, 'upgrade', '--yes', '--json', '--components', 'broker');
+  // Ahead of the manifest flag and part of the same argv: the pin travels with the run that
+  // has to honour it, so a transient unit started in twenty seconds installs the reviewed
+  // build or refuses, whatever the channel is serving by then.
+  if (dependencies.pinnedReleaseId) command.push('--release', dependencies.pinnedReleaseId);
   if (dependencies.manifestUrl) command.push('--manifest', dependencies.manifestUrl);
   return command;
 }
@@ -197,6 +230,22 @@ export async function triggerBrokerUpdate(
         : `App-triggered updates are not available on ${dependencies.service.provider}; run \`${PRODUCT_IDENTITY.primaryBinary} upgrade\` instead.`,
     };
   }
+  // The last question before a process exists. What is scheduled here fires on its own in two
+  // seconds and nothing in this call can take it back, so an authority answer read anywhere
+  // earlier -- including a few milliseconds and one channel refresh earlier -- is not this answer.
+  const authority = dependencies.authorizeLaunch?.();
+  if (authority !== undefined && !authority.allowed) {
+    return {
+      ...base,
+      status: 'blocked',
+      detailCode: authority.detailCode,
+      message: authority.detailCode === 'installation-superseded'
+        ? 'The installation changed before the updater was scheduled. Review the update again.'
+        : authority.detailCode === 'grant-revoked'
+          ? 'The update grant was withdrawn before the updater was scheduled.'
+          : 'This launch authorization has already been used.',
+    };
+  }
   const launched = await (dependencies.run ?? defaultRun)(command);
   if (!launched.ok) {
     return { ...base, status: 'failed', detailCode: 'broker-update-handoff-failed', message: launched.detail || 'Could not queue the broker update.' };
@@ -207,4 +256,37 @@ export async function triggerBrokerUpdate(
     detailCode: 'broker-update-accepted',
     message: 'The signed broker update was queued; clients will reconnect after its health check.',
   };
+}
+
+/** What a handoff needs beyond the launch itself: this host's reader of the release channel. */
+export interface BrokerUpdateHandoffDependencies extends BrokerUpdateTriggerDependencies {
+  checker: { inspect(input?: { refresh?: boolean }): Promise<BrokerUpdateSnapshot> };
+}
+
+/**
+ * The handoff a confirmed in-app commit makes, kept as one function so its wait is a tested wait.
+ *
+ * It is in this shape for one reason: asking for authority and being answered are further apart
+ * in time than they look. The channel refresh below is a network call, the grant that let this
+ * commit start can be withdrawn during it, and the updater must not be scheduled on the strength
+ * of an answer given beforehand. So this function does the observation, then asks the launcher to
+ * ask, and the launcher asks at the only moment that means anything.
+ *
+ * `pinnedReleaseId` is the job's own reviewed release. The channel is re-read because a release
+ * that has moved on means nobody is asking for this one any more, not because the answer is what
+ * gets installed: the pin travels into the delegated command and is honoured, or refused, there.
+ */
+export async function handoffBrokerUpdate(
+  dependencies: BrokerUpdateHandoffDependencies,
+): Promise<{ accepted: boolean; detailCode: string }> {
+  const pinned = dependencies.pinnedReleaseId;
+  const version = pinned === undefined ? undefined : releaseIdVersion(pinned);
+  if (version === undefined) return { accepted: false, detailCode: 'release-candidate-unreadable' };
+  const update = await dependencies.checker.inspect({ refresh: true });
+  // Never hand off a target the reviewed job did not pin, whatever the channel says right now.
+  if (update.status !== 'update-available' || update.latestVersion !== version) {
+    return { accepted: false, detailCode: 'release-target-moved' };
+  }
+  const handoff = await triggerBrokerUpdate(dependencies, version);
+  return { accepted: handoff.status === 'accepted', detailCode: handoff.detailCode };
 }

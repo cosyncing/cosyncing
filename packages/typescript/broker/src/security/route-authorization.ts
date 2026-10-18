@@ -7,12 +7,22 @@ export type PeerRoutePolicy =
   | { kind: 'owner-only' }
   | { kind: 'peer'; allOf: readonly PeerRole[] }
   | { kind: 'peer'; anyOf: readonly PeerRole[] }
+  /**
+   * Owner, or a peer carrying its own live `broker:update` grant.
+   *
+   * Not a role, and deliberately so: `drive` already lets a peer create a session and
+   * send anything into it, which is nothing to do with replacing the binaries a machine
+   * runs. Update authority is issued per peer by the owner, is revocable, and stops
+   * working the moment it is revoked.
+   */
+  | { kind: 'update' }
   | { kind: 'integration'; integration: IntegrationId }
   | { kind: 'public' };
 
 export type RouteAuthorizationPrincipal =
   | { kind: 'owner' }
-  | { kind: 'peer'; roles: ReadonlySet<PeerRole> }
+  /** `updateGranted` reflects the grant store at request time, never a claim in the request. */
+  | { kind: 'peer'; roles: ReadonlySet<PeerRole>; updateGranted?: boolean }
   | { kind: 'integration'; integration: IntegrationId }
   | undefined;
 
@@ -36,6 +46,7 @@ const OBSERVE: PeerRoutePolicy = { kind: 'peer', allOf: ['observe'] };
 const DRIVE: PeerRoutePolicy = { kind: 'peer', allOf: ['drive'] };
 const FILES: PeerRoutePolicy = { kind: 'peer', allOf: ['files'] };
 const OBSERVE_FILES: PeerRoutePolicy = { kind: 'peer', allOf: ['observe', 'files'] };
+const UPDATE: PeerRoutePolicy = { kind: 'update' };
 const PI_INTEGRATION: PeerRoutePolicy = { kind: 'integration', integration: 'pi' };
 const OMP_INTEGRATION: PeerRoutePolicy = { kind: 'integration', integration: 'omp' };
 
@@ -64,6 +75,22 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/broker/restart', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/broker/restart-all', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/broker/update', methods: ['GET', 'POST'], policy: OWNER_ONLY },
+  // The management surface splits by verb. Discovery is sanitized and readable by anyone who may
+  // already watch this machine; committing something needs the grant. A peer that files a
+  // permission request only records that it wants one -- granting lives on the owner-only line.
+  { route: '/api/broker/updates', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/broker/updates/check', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/broker/updates/history', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/broker/updates/plans', methods: ['POST'], policy: UPDATE },
+  { route: '/api/broker/updates/jobs', methods: ['POST'], policy: UPDATE },
+  { route: '/api/broker/updates/jobs/{id}', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/broker/updates/jobs/{id}/apply', methods: ['POST'], policy: UPDATE },
+  { route: '/api/broker/updates/jobs/{id}/cancel', methods: ['POST'], policy: UPDATE },
+  { route: '/api/broker/update-grants', methods: ['GET', 'POST'], policy: OWNER_ONLY },
+  { route: '/api/broker/update-grants/{id}', methods: ['DELETE'], policy: OWNER_ONLY },
+  // Asking is not having. Any peer already allowed to watch may file a request the owner can
+  // approve or ignore; the grant itself is only ever issued from the owner-only route above.
+  { route: '/api/broker/update-grants/request', methods: ['POST'], policy: OBSERVE },
   { route: '/api/health', methods: ['GET', 'HEAD'], policy: PUBLIC },
   { route: '/api/machines', methods: ['GET'], policy: OBSERVE },
   { route: '/api/machines/resolve', methods: ['GET'], policy: OBSERVE },
@@ -162,6 +189,13 @@ export function authorizeBrokerRoute(
     return policy.kind === 'integration' && policy.integration === principal.integration
       ? { allowed: true }
       : { allowed: false, status: 403, error: 'integration credential is not authorized for this route' };
+  }
+  if (policy.kind === 'update') {
+    return principal.updateGranted
+      ? { allowed: true }
+      // 403 with the grant named, so a client can tell "not yet granted" from "this build
+      // does not have the route" and can show the owner what to approve.
+      : { allowed: false, status: 403, error: 'broker:update grant required' };
   }
   if (policy.kind !== 'peer') {
     return { allowed: false, status: 403, error: 'peer credential is not authorized for this route' };
