@@ -15,7 +15,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type Broker, type BrokerClient, eventually, startBroker } from '../harness/index.ts';
+import { type Broker, type BrokerClient, eventually, SOON_MS, startBroker } from '../harness/index.ts';
 import { type FakeClaudeAgents, installFakeClaudeAgents } from '../harness/fakes/claude-agents.ts';
 import {
   age,
@@ -398,20 +398,28 @@ describe('the session roster', () => {
 
   test('a 7-day client sees an idle row age out and a deleted file leave, as transcript-free removals', async () => {
     const window = '7d';
-    // Admitted now, outside the window a few seconds from now.
-    const margin = 4_000;
+    // Admitted now, outside the window a few seconds from now. Only a forced discovery reads the
+    // new mtime, and the snapshot applies the window when it answers, so the room before the
+    // cutoff must outlast that discovery: about twenty seconds on a Windows host. Each attempt
+    // re-ages the file with room for the discovery the previous attempt measured.
+    let discoveryMs = 0;
     const aging = writePiSession(broker.paths, 'aging');
     const admitted = await eventually(async () => {
-      age(aging.path, 7 * DAY - margin);
+      age(aging.path, 7 * DAY - (discoveryMs + 4_000));
+      const started = performance.now();
       const snapshot = await rosterSnapshot(client, { window, refresh: true });
+      discoveryMs = performance.now() - started;
       return ids(snapshot.body.sessions).includes(aging.id) ? snapshot.body : undefined;
-    }, { what: 'a 7-day snapshot that still admits the aging session' });
+    }, { what: 'a 7-day snapshot that still admits the aging session', timeoutMs: 3 * SOON_MS });
     expect(ids(admitted.sessions)).toContain(pi.doomed!.id);
 
     const feed = new RosterFeed(client, window);
     feed.cursor = admitted.revision;
-    // Nothing touches the file: wall-clock aging alone must remove it.
-    const aged = await feed.waitFor((delta) => delta.sessionId === aging.id && delta.removed === true);
+    // Nothing touches the file: wall-clock aging alone must remove it, within the room given above.
+    const aged = await feed.waitFor(
+      (delta) => delta.sessionId === aging.id && delta.removed === true,
+      { timeoutMs: SOON_MS + discoveryMs },
+    );
     expect(aged.session).toBeUndefined();
     expect(aged.revision).toBeGreaterThan(admitted.revision);
 
