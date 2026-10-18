@@ -23,7 +23,7 @@ $env:COSYNCING_WINDOWS_PHASE3_RUN_ID = $RunId
 $env:COSYNCING_WINDOWS_PHASE3_SOURCE_COMMIT = $SourceCommit
 $env:COSYNCING_WINDOWS_PHASE3_SOURCE_DIRTY = $SourceDirty
 $reports = @()
-foreach ($version in @('1.3.8', '1.4.0')) {
+foreach ($version in @('1.3.14', '1.4.0')) {
   $bun = Install-Bun $version
   $savedErrorActionPreference = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'

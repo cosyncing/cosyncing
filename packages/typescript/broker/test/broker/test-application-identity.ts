@@ -84,6 +84,9 @@ try {
   const belowFloor = `${floorMajor}.${floorMinor}.${floorPatch - 1}`;
   const outdatedBun = fakeRuntime(join(root, 'runtimes', 'outdated-bun'), `echo ${belowFloor}+aaaaaaaaaa`);
   const floorBun = fakeRuntime(join(root, 'runtimes', 'floor-bun'), `echo ${MINIMUM_BUN_RUNTIME_VERSION}+aaaaaaaaaa`);
+  // The previous floor, which can stall silently while loading modules. Hosts installed before the floor
+  // moved still carry it, so it is refused by name rather than only by being below some boundary.
+  const previousFloorBun = fakeRuntime(join(root, 'runtimes', 'previous-floor-bun'), 'echo 1.3.8+aaaaaaaaaa');
   const silentExecutable = fakeRuntime(join(root, 'runtimes', 'not-bun'), 'exit 0');
   const failingExecutable = fakeRuntime(join(root, 'runtimes', 'broken'), 'exit 3');
   symlinkSync(applicationBundle, join(globalBin, 'cosyncing'));
@@ -256,6 +259,8 @@ try {
     overrideProblem(outdatedBun) === 'bun-runtime-outdated', overrideProblem(outdatedBun));
   check('a Bun exactly at the floor is accepted',
     overrideProblem(floorBun) === undefined, overrideProblem(floorBun));
+  check('the previous 1.3.8 floor is refused, so an install still on it cannot be recorded as supported',
+    overrideProblem(previousFloorBun) === 'bun-runtime-outdated', overrideProblem(previousFloorBun));
   // The installers place, and releases sign, the pinned version; below the floor it would be a runtime the
   // application refuses to run under.
   check('the pinned Bun version is a release version at or above the floor',

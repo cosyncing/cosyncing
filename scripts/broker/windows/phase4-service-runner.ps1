@@ -24,7 +24,7 @@ $env:COSYNCING_WINDOWS_PHASE4_RUN_ID = $RunId
 $env:COSYNCING_WINDOWS_PHASE4_SOURCE_COMMIT = $SourceCommit
 $env:COSYNCING_WINDOWS_PHASE4_SOURCE_DIRTY = $SourceDirty
 $reports = @()
-$bootstrapBun = Install-Bun '1.3.8'
+$bootstrapBun = Install-Bun '1.3.14'
 Push-Location $CandidateRoot
 try {
   $installOutput = @(& $bootstrapBun install --frozen-lockfile 2>&1 | ForEach-Object { [string] $_ })
@@ -32,8 +32,8 @@ try {
 } finally {
   Pop-Location
 }
-foreach ($version in @('1.3.8', '1.4.0')) {
-  $bun = if ($version -eq '1.3.8') { $bootstrapBun } else { Install-Bun $version }
+foreach ($version in @('1.3.14', '1.4.0')) {
+  $bun = if ($version -eq '1.3.14') { $bootstrapBun } else { Install-Bun $version }
   $versionRoot = Join-Path $ProbeRoot $version
   $env:COSYNCING_WINDOWS_PHASE4_ROOT = $versionRoot
   $savedErrorActionPreference = $ErrorActionPreference

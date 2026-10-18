@@ -120,7 +120,7 @@ version-checked. See [supported-agent setup](docs/supported_agents/README.md) fo
 
 ## Prerequisites
 
-The server runs with [Bun](https://bun.sh) 1.3.8 or newer. The one-command installers acquire it
+The server runs with [Bun](https://bun.sh) 1.3.14 or newer. The one-command installers acquire it
 when needed; Node.js/npm are not required. The broker is local-only by
 default. Cross-device use requires a proxy, tunnel, VPN,
 mesh network, or another [operator-owned connectivity method](docs/connectivity/README.md).

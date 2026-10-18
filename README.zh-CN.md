@@ -107,7 +107,7 @@ SQLite 快照，并在 7.4.23 及更高版本上通过 Broker 托管的专用回
 
 ## 前置要求
 
-服务器使用 [Bun](https://bun.sh) 1.3.8 或更高版本运行。一键安装脚本会按需安装 Bun；
+服务器使用 [Bun](https://bun.sh) 1.3.14 或更高版本运行。一键安装脚本会按需安装 Bun；
 无需预装 Node.js/npm。Broker 默认只允许本机访问。跨设备使用需要由操作者单独
 配置代理、隧道、VPN、Mesh 网络或
 其他[连接方式](docs/connectivity/README.md)（英文）。

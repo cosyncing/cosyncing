@@ -121,7 +121,7 @@ Consulta la [configuración de agentes compatibles](docs/supported_agents/README
 
 ## Requisitos previos
 
-El servidor usa [Bun](https://bun.sh) 1.3.8 o posterior. Los instaladores de un solo comando lo
+El servidor usa [Bun](https://bun.sh) 1.3.14 o posterior. Los instaladores de un solo comando lo
 instalan cuando hace falta; no se requiere Node.js/npm.
 El broker es local por omisión. Para usarlo entre dispositivos hace
 falta un proxy, un túnel, una VPN, una red mallada u otro

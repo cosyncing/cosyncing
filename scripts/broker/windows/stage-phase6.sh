@@ -99,7 +99,7 @@ if [ -n "$probe_env" ] && [[ ! "$probe_env" =~ $probe_env_pattern ]]; then
   echo "COSYNCING_WINDOWS_PHASE6_PROBE_ENV accepts only NAME=value pairs separated by ';'." >&2
   exit 2
 fi
-lanes="${COSYNCING_WINDOWS_PHASE6_LANES:-1.3.8,1.4.0}"
+lanes="${COSYNCING_WINDOWS_PHASE6_LANES:-1.3.14,1.4.0}"
 if [[ ! "$lanes" =~ ^[0-9.]+(,[0-9.]+)*$ ]]; then
   echo "COSYNCING_WINDOWS_PHASE6_LANES must be a comma-separated list of Bun versions." >&2
   exit 2
