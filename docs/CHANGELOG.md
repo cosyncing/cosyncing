@@ -47,8 +47,21 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   question while the card had already closed. An answer or dismissal for a
   question that is no longer open, for example from a second device, is
   refused instead of being sent to Claude.
+- An observed Kilo Code session keeps showing new messages when a file-change
+  notification is missed; it catches up within about two seconds instead of
+  stopping until the next change.
 
 ### Changed
+
+- Large session-stream frames and JSON responses use negotiated compression
+  to reduce mobile data transfer.
+
+- Home reuses the session roster for active counts instead of downloading
+  every session again when the roster changes.
+
+- The session roster avoids repeated expiry scans and refreshes recent and
+  active sessions on a shared, bounded 15-second cadence while the app follows
+  the roster.
 
 - A question card that asks several questions now numbers them. Each header
   starts with its number, in bold and aligned with its question, so it is clear

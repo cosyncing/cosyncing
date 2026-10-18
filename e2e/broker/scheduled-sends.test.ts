@@ -171,6 +171,24 @@ describe('scheduled sends', () => {
     expect(told.map((event) => event.title)).toEqual(['Scheduled message delivered', 'Scheduled message delivered']);
   });
 
+  test('a large schedule list negotiates gzip while creation retains its 201 response', async () => {
+    const pi = await world.session('compressed-list');
+    const created = await world.client.post('/api/schedules', {
+      kind: 'message', tool: 'pi', sessionId: pi.id,
+      text: 'A scheduled prompt with repeated context. '.repeat(40), at: clock.now() + HOUR,
+    }, { 'accept-encoding': 'gzip' });
+    expect(created.status).toBe(201);
+    expect(created.headers.get('content-encoding')).toBeNull();
+    const identity = await world.client.get('/api/schedules', { 'accept-encoding': 'identity' });
+    expect(Buffer.byteLength(identity.text)).toBeGreaterThanOrEqual(1024);
+    expect(identity.headers.get('content-encoding')).toBeNull();
+    const compressed = await world.client.get('/api/schedules', { 'accept-encoding': 'gzip' });
+    expect(compressed.headers.get('content-encoding')).toBe('gzip');
+    expect(compressed.headers.get('vary')?.toLowerCase()).toContain('accept-encoding');
+    expect(compressed.body).toEqual(identity.body);
+    expect(compressed.body.schedules.some((row: any) => row.id === created.body.schedule.id)).toBe(true);
+  });
+
   test('a schedule due in a second fires on time by itself, with no clock moved', async () => {
     const pi = await world.session('real-time');
     // Creating it re-arms the runner's timer to the new nearest fire time, not the next minute's check.

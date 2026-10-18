@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
@@ -65,17 +63,19 @@ void main() {
     _session('child', SessionStatus.needsInput, parent: 'parent'),
   ];
   Widget host({
-    Future<ListSessionsResponse?> Function()? roster,
+    ListSessionsResponse? Function()? roster,
     UsageReportResponse? usage,
+    SessionListStatus status = SessionListStatus.loaded,
     List<AttentionInboxEntry> events = const [],
     ValueChanged<SessionRef>? onOpen,
   }) => ProviderScope(
     overrides: [
       activeBrokerProfileProvider.overrideWith((ref) => source),
+      sessionListControllerProvider.overrideWith(() => _LoadedList(status)),
       workspaceOverviewRosterProvider.overrideWith(
-        (ref) =>
-            roster?.call() ??
-            Future.value(ListSessionsResponse(sessions: sessions)),
+        (ref) => roster == null
+            ? ListSessionsResponse(sessions: sessions)
+            : roster(),
       ),
       attentionInboxProvider.overrideWith(
         (ref) async => AttentionInboxSections.fromEntries(events),
@@ -183,17 +183,55 @@ void main() {
   });
 
   testWidgets('loading current counts never invents zero', (tester) async {
-    final pending = Completer<ListSessionsResponse?>();
-    await tester.pumpWidget(host(roster: () => pending.future));
+    await tester.pumpWidget(
+      host(roster: () => null, status: SessionListStatus.loading),
+    );
     await tester.pump();
     expect(find.text('—'), findsNWidgets(4));
     expect(find.text('Loading current data…'), findsOneWidget);
-    pending.complete(null);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(WorkspaceOverview)),
+    );
+    (container.read(sessionListControllerProvider.notifier) as _LoadedList)
+        .setStatus(SessionListStatus.error);
     await tester.pumpAndSettle();
     expect(
       find.textContaining('Current activity is unavailable'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('a partial roster never claims a missing active count is zero', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      host(
+        roster: () => ListSessionsResponse(
+          sessions: [_session('known', SessionStatus.working)],
+          complete: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('workspace-overview-count-running')),
+        matching: find.text('1'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('workspace-overview-count-waiting')),
+        matching: find.text('—'),
+      ),
+      findsOneWidget,
+    );
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(WorkspaceOverview)),
+    );
+    expect(find.text(l10n.workspacePartialRoster), findsOneWidget);
+    expect(find.text(l10n.workspaceNothingHere), findsNothing);
   });
 
   testWidgets('daily usage preserves partial and estimate disclosures', (
@@ -247,7 +285,7 @@ void main() {
   });
 
   test(
-    'overview fetches complete roster independent of sidebar window',
+    'overview reuses the source roster without fetching another window',
     () async {
       final repository = InMemorySessionListRepository(sessions: sessions);
       final container = ProviderContainer(
@@ -258,17 +296,41 @@ void main() {
         ],
       );
       addTearDown(container.dispose);
-      final response = await container.read(
-        workspaceOverviewRosterProvider.future,
-      );
+      final response = container.read(workspaceOverviewRosterProvider);
       expect(response!.sessions.length, 2);
-      expect(repository.fetchCount, 1);
+      expect(repository.fetchCount, 0);
+      final subscription = container.listen(
+        workspaceOverviewRosterProvider,
+        (_, _) {},
+      );
+      addTearDown(subscription.close);
+      final controller =
+          (container.read(sessionListControllerProvider.notifier)
+                as _LoadedList)
+            ..republish();
+      expect(container.read(workspaceOverviewRosterProvider), same(response));
+      controller.setStatus(SessionListStatus.error);
+      // The projection changes in this frame, without a FutureProvider turn.
+      expect(container.read(workspaceOverviewRosterProvider), isNull);
     },
   );
 }
 
 class _LoadedList extends SessionListController {
+  _LoadedList([this.initialStatus = SessionListStatus.loaded]);
+  final SessionListStatus initialStatus;
+
+  void setStatus(SessionListStatus status) =>
+      state = state.copyWith(status: status);
+  void republish() => state = state.copyWith();
+
   @override
-  SessionListState build() =>
-      const SessionListState(status: SessionListStatus.loaded);
+  SessionListState build() => SessionListState(
+    status: initialStatus,
+    source: RosterSource.ofProfile(_profile('machine-a')),
+    sessions: [
+      _session('parent', SessionStatus.working),
+      _session('child', SessionStatus.needsInput, parent: 'parent'),
+    ],
+  );
 }

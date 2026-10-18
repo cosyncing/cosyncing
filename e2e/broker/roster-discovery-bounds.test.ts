@@ -17,6 +17,7 @@
  * external-host budget, so each abandonment costs two seconds.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { TestClock } from '../harness/fakes/test-clock.ts';
 import { Database } from 'bun:sqlite';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -33,7 +34,7 @@ type HostMode = 'down' | 'live' | 'wedged';
 /** A fake `kilo serve`. Every request is recorded, with whether it was ever answered. */
 class FakeKiloHost {
   mode: HostMode = 'down';
-  readonly requests: { mode: HostMode; path: string; answered: boolean; abandoned: boolean }[] = [];
+  readonly requests: { mode: HostMode; path: string; search: string; answered: boolean; abandoned: boolean }[] = [];
   readonly liveSession: Record<string, unknown>;
   readonly server: ReturnType<typeof Bun.serve>;
 
@@ -51,8 +52,8 @@ class FakeKiloHost {
   }
 
   private async answer(req: Request): Promise<Response> {
-    const path = new URL(req.url).pathname;
-    const record = { mode: this.mode, path, answered: false, abandoned: false };
+    const { pathname: path, search } = new URL(req.url);
+    const record = { mode: this.mode, path, search, answered: false, abandoned: false };
     this.requests.push(record);
     const reply = (response: Response): Response => {
       record.answered = true;
@@ -266,5 +267,139 @@ describe('roster discovery with a wedged external host', () => {
     const removed = await feed.waitFor((delta) => delta.sessionId === 'ses_kilo_b' && delta.removed === true, { from });
     expect(removed.session).toBeUndefined();
     expect(feed.of('ses_kilo_live', from).map((delta) => delta.removed)).toEqual([true]);
+  });
+});
+
+
+describe('deliberate roster freshness without an attached session', () => {
+  let broker: Broker;
+  let kilo: FakeKiloHost;
+  let clock: TestClock;
+  let database: string;
+  let allAfter: number;
+  const rename = (id: string, title: string) => {
+    const db = new Database(database);
+    try { db.query('update session set title = ? where id = ?').run(title, id); }
+    finally { db.close(); }
+  };
+  // One unscoped list per discovery; per-directory fan-out is separate work.
+  const reads = () => kilo.requests.filter((r) => r.path === '/session' && r.search === '').length;
+  const pending = (window: string, after: number, signal: AbortSignal) => fetch(
+    `${broker.url}/api/session-roster-deltas?window=${window}&after=${after}&waitMs=25000`, { signal },
+  ).then((response) => response.json());
+  const statusChange = (batch: any, status: string) => batch.deltas.some(
+    (delta: any) => delta.sessionId === 'ses_unwatched' && delta.session?.status === status,
+  );
+  beforeAll(async () => {
+    kilo = new FakeKiloHost({
+      id: 'ses_unwatched', title: 'Old active terminal', status: 'busy',
+      time: { created: Date.now() - 30 * DAY },
+    });
+    kilo.mode = 'live';
+    broker = await startBroker({
+      name: 'roster-cadence',
+      setup: (paths) => {
+        clock = new TestClock(paths.root);
+        database = join(paths.root, 'kilo-data', 'kilo.db');
+        createKiloDatabase(database, { id: 'ses_archive', title: 'Old archive', updatedAt: Date.now() - 30 * DAY });
+        addKiloSession(database, 'ses_midweek', 'Three-day archive', Date.now() - 3 * DAY);
+      },
+      env: () => ({
+        ...clock.env, KILO_URL: kilo.url, COSYNCING_CODEX_SYNC_SERVER: '0',
+        COSYNCING_ROSTER_COLD_PARTIAL_MS: '120000',
+      }),
+    });
+  });
+  afterAll(async () => { await broker?.stop(); kilo?.stop(); });
+
+  test('7d and all share one bounded cadence, preserve archives, and stop on cancellation', async () => {
+    const client = broker.client();
+    const week = await rosterSnapshot(client, { window: '7d', refresh: true });
+    const all = await rosterSnapshot(client, { refresh: true });
+    for (const snapshot of [week, all]) {
+      expect(snapshot.body.sessions.find((row: any) => row.id === 'ses_unwatched')?.status).toBe('working');
+    }
+    expect(ids(all.body.sessions)).toContain('ses_archive');
+    expect(ids(week.body.sessions)).not.toContain('ses_archive');
+    const initial = reads();
+    const abort = new AbortController();
+    const weekPoll = pending('7d', week.body.revision, abort.signal);
+    const allPoll = pending('all', all.body.revision, abort.signal);
+    await client.get('/api/health');
+    // Renaming without changing activity timestamps reveals which native rows
+    // discovery read. A seven-day sweep sees midweek, but not the old archive.
+    rename('ses_archive', 'Only a full read should see this');
+    rename('ses_midweek', 'Bounded reading sees this');
+    kilo.liveSession.status = 'idle';
+    kilo.liveSession.time = { created: Date.now() - 30 * DAY, updated: clock.now() };
+    clock.advance(15_001);
+    const [weekChange, allChange] = await Promise.all([weekPoll, allPoll]);
+    expect(statusChange(weekChange, 'idle')).toBe(true);
+    expect(statusChange(allChange, 'idle')).toBe(true);
+    for (const batch of [weekChange, allChange]) {
+      expect(batch.deltas.some((d: any) => d.session?.title === 'Bounded reading sees this')).toBe(true);
+      expect(batch.deltas.some((d: any) => d.sessionId === 'ses_archive')).toBe(false);
+    }
+    expect(allChange.deltas.some((d: any) => d.removed)).toBe(false);
+    expect(reads() - initial).toBe(1);
+    allAfter = allChange.revision;
+
+    let settled = 0;
+    const waitingWeek = pending('7d', weekChange.revision, abort.signal).then(() => { settled++; }, () => {});
+    const waitingAll = pending('all', allAfter, abort.signal).then(() => { settled++; }, () => {});
+    await client.get('/api/health');
+    clock.advance(60_000);
+    await eventually(() => reads() === initial + 2, { what: 'one due cadence sweep without catch-up scans' });
+    expect(settled).toBe(0);
+    abort.abort();
+    await Promise.all([waitingWeek, waitingAll]);
+    await client.get('/api/health');
+    clock.advance(60_000);
+    await client.get('/api/health');
+    expect(reads()).toBe(initial + 2);
+  });
+
+  test('all alone still uses seven days, while a one-day poller narrows the shared discovery', async () => {
+    const client = broker.client();
+    const abort = new AbortController();
+    let initial = reads();
+    // Reconnection may immediately start an already-due cadence sweep.
+    rename('ses_midweek', 'All-only bounded update');
+    kilo.liveSession.status = 'busy';
+    const allPoll = pending('all', allAfter, abort.signal);
+    await client.get('/api/health');
+    clock.advance(15_001);
+    const allChange = await allPoll;
+    expect(statusChange(allChange, 'working')).toBe(true);
+    expect(allChange.deltas.some((d: any) => d.session?.title === 'All-only bounded update')).toBe(true);
+    expect(allChange.deltas.some((d: any) => d.sessionId === 'ses_archive' || d.removed)).toBe(false);
+    expect(reads() - initial).toBe(1);
+    allAfter = allChange.revision;
+
+    const day = await rosterSnapshot(client, { window: '1d', refresh: true });
+    initial = reads();
+    const dayPoll = pending('1d', day.body.revision, abort.signal);
+    const widerPoll = pending('all', allAfter, abort.signal);
+    await client.get('/api/health');
+    rename('ses_midweek', 'Only wider reconciliation sees this');
+    kilo.liveSession.status = 'idle';
+    kilo.liveSession.time = { created: Date.now() - 30 * DAY, updated: clock.now() };
+    clock.advance(15_001);
+    const [dayChange, widerChange] = await Promise.all([dayPoll, widerPoll]);
+    expect(statusChange(dayChange, 'idle')).toBe(true);
+    expect(statusChange(widerChange, 'idle')).toBe(true);
+    expect(widerChange.deltas.some((d: any) => ['ses_archive', 'ses_midweek'].includes(d.sessionId) || d.removed)).toBe(false);
+    expect(reads() - initial).toBe(1);
+    allAfter = widerChange.revision;
+    abort.abort();
+  });
+
+  test('all-only safety reconciliation retains full removal authority after five minutes', async () => {
+    deleteKiloSession(database, 'ses_archive');
+    clock.advance(5 * 60_000 + 1);
+    const feed = new RosterFeed(broker.client());
+    feed.cursor = allAfter;
+    await feed.waitFor((delta) => delta.sessionId === 'ses_archive' && delta.removed === true);
+    expect(feed.seen.some((d) => d.session?.title === 'Only wider reconciliation sees this')).toBe(true);
   });
 });

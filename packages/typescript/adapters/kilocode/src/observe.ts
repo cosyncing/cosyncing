@@ -1,5 +1,5 @@
 /** Read-only Kilo SQLite replay and WAL-triggered re-snapshot tail. */
-import { watch, type FSWatcher } from 'node:fs';
+import { statSync, watch, type FSWatcher } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type {
   AgentMessage,
@@ -29,11 +29,15 @@ import {
 const DEBOUNCE_MS = 80;
 const RETRY_MS = 250;
 const MAX_RECOVERY_ATTEMPTS = 3;
+/** The watcher is only the fast path. A filesystem event it never delivers must not hide an append
+ *  for the life of the connection, so a cheap stat of the store bounds that gap. */
+const SAFETY_CHECK_MS = 2000;
 
 export interface KiloObserveOptions {
   session: KiloStoredSession;
   info: SessionInfo;
   watchFactory?: typeof watch;
+  safetyCheckMs?: number;
   trace?: (event: { op: 'observe'; detail: string }) => void;
 }
 
@@ -66,10 +70,14 @@ export class KiloObserveConnection implements SessionConnection {
   readonly info: SessionInfo;
   private readonly session: KiloStoredSession;
   private readonly watchFactory: typeof watch;
+  private readonly safetyCheckMs: number;
   private readonly trace?: KiloObserveOptions['trace'];
   private readonly handlers = new Set<AgentMessageHandler>();
   private watcher?: FSWatcher;
   private pending?: ReturnType<typeof setTimeout>;
+  private safetyTimer?: ReturnType<typeof setInterval>;
+  /** The store's stamp taken before the last read that advanced the cursor, including its info refresh. */
+  private readStamp?: string;
   private encodings: string[] = [];
   /** How many leading rows of {@link encodings} belong to messages Kilo had finished writing. */
   private settledRows = 0;
@@ -87,10 +95,12 @@ export class KiloObserveConnection implements SessionConnection {
     this.session = options.session;
     this.info = options.info;
     this.watchFactory = options.watchFactory ?? watch;
+    this.safetyCheckMs = options.safetyCheckMs ?? SAFETY_CHECK_MS;
     if (options.trace) this.trace = options.trace;
   }
 
   async getHistory(_query?: HistoryQuery): Promise<AgentMessage[]> {
+    this.readStamp = this.storeStamp();
     await this.refreshInfo();
     const snapshot = await readKiloHistory(this.session);
     if (!snapshot) throw new Error('Kilo SQLite snapshot is unavailable or unsupported.');
@@ -113,6 +123,7 @@ export class KiloObserveConnection implements SessionConnection {
     _query?: HistoryQuery,
   ): Promise<HistorySnapshotCapture | HistorySnapshotRefusal | undefined> {
     if (this.pagingInvalidated) return undefined;
+    this.readStamp = this.storeStamp();
     await this.refreshInfo();
     const snapshot = await readKiloHistory(this.session);
     if (!snapshot) return undefined;
@@ -135,6 +146,10 @@ export class KiloObserveConnection implements SessionConnection {
   subscribe(handler: AgentMessageHandler): Unsubscribe {
     this.handlers.add(handler);
     if (!this.watcher && !this.closed) this.startWatcher();
+    if (!this.safetyTimer && !this.closed) {
+      this.safetyTimer = setInterval(() => this.checkMissedChange(), this.safetyCheckMs);
+      this.safetyTimer.unref?.();
+    }
     return () => this.handlers.delete(handler);
   }
 
@@ -152,6 +167,7 @@ export class KiloObserveConnection implements SessionConnection {
     if (this.closed) return;
     this.closed = true;
     if (this.pending) clearTimeout(this.pending);
+    clearInterval(this.safetyTimer);
     this.watcher?.close();
     this.handlers.clear();
   }
@@ -207,6 +223,25 @@ export class KiloObserveConnection implements SessionConnection {
     if (this.session.currentAgent) this.info.currentAgent = this.session.currentAgent;
     else delete this.info.currentAgent;
     if (previous !== this.info.status) this.emit({ type: 'status', status: this.info.status === 'working' ? 'running' : 'idle' });
+  }
+
+  /** Inode, size and mtime of the database and its WAL: every commit changes at least one of them.
+   *  The shared-memory index is left out because a mere reader rewrites it. */
+  private storeStamp(): string {
+    return [this.session.databasePath, `${this.session.databasePath}-wal`].map((path) => {
+      try {
+        const stats = statSync(path, { throwIfNoEntry: false });
+        return stats ? `${stats.ino}:${stats.size}:${stats.mtimeMs}` : '-';
+      } catch {
+        return '?';
+      }
+    }).join('|');
+  }
+
+  /** Catch up when the store moved since the last read but no watcher event arrived to say so. */
+  private checkMissedChange(): void {
+    if (this.closed || !this.primed || this.handlers.size === 0) return;
+    if (this.storeStamp() !== this.readStamp) this.scheduleDrain();
   }
 
   private scheduleDrain(delay = DEBOUNCE_MS): void {
@@ -295,6 +330,7 @@ export class KiloObserveConnection implements SessionConnection {
     try {
       do {
         this.drainAgain = false;
+        this.readStamp = this.storeStamp();
         await this.refreshInfo();
         const snapshot = await readKiloHistory(this.session);
         if (!snapshot) {

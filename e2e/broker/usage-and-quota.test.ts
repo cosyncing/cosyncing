@@ -250,6 +250,14 @@ describe('quota', () => {
     const device = await pairDevice(owner, { peerId: 'quota-reader' });
     const phone = owner.as({ kind: 'peer', peerToken: device.peerToken });
     expect((await phone.get('/api/tokdash/quota')).body.data.providers.codex.buckets[0].remaining_percent).toBe(24);
+    // Transport negotiation must preserve the same authenticated quota card.
+    const identity = await phone.get('/api/tokdash/quota', { 'accept-encoding': 'gzip;q=0' });
+    expect(Buffer.byteLength(identity.text)).toBeGreaterThanOrEqual(1024);
+    expect(identity.headers.get('content-encoding')).toBeNull();
+    const gzip = await phone.get('/api/tokdash/quota', { 'accept-encoding': 'gzip' });
+    expect(gzip.headers.get('content-encoding')).toBe('gzip');
+    expect(gzip.headers.get('vary')?.toLowerCase()).toContain('accept-encoding');
+    expect(gzip.body).toEqual(identity.body);
     tokdash.reset();
   });
 

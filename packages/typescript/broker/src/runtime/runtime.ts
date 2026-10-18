@@ -99,6 +99,7 @@ import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../artif
 import { PiBridgeRegistry } from '@cosyncing/adapter-pi';
 import { ClaudeHooksRegistry } from '@cosyncing/adapter-claude';
 import { HISTORY_WEBSOCKET_OPTIONS } from '../transport/http-contracts.ts';
+import { sendJson, withJsonCompression } from '../transport/json-egress.ts';
 import {
   acceptsGzip,
   filterSessionsByWindow,
@@ -888,6 +889,7 @@ const UPLOAD_CHUNK_MAX_BYTES = envNumber('COSYNCING_UPLOAD_CHUNK_MAX_BYTES', UPL
 // every agent (measured ~30-40s of mostly-synchronous I/O on a real machine) while the app polls
 // /api/sessions every 6s per tab — without this cache, polls pile up and starve the event loop.
 const ROSTER_TTL_MS = envNumber('COSYNCING_ROSTER_TTL_MS', 4000);
+const ROSTER_REFRESH_MS = Math.max(1, envNumber('COSYNCING_ROSTER_REFRESH_MS', 15_000));
 // Past the TTL the previous rows are served while a fresh sweep runs, but only this far past it.
 // The bound is what separates "revalidating" from "the sweep has been failing for an hour and every
 // caller is being handed rows from before it started failing, with nothing said". Set well clear of
@@ -1457,14 +1459,14 @@ function rosterRevisionForWindow(windowMs: number | undefined): RosterRevisionSt
 function observeRosterViews(info: SessionInfo): void {
   const decorated = decorateSession({ ...info, machine: MACHINE });
   rosterRevision.observe(decorated, MACHINE);
-  const now = Date.now();
+  const now = attentionClock.now();
   for (const [windowMs, store] of rosterWindowRevisions) {
     if (filterSessionsByWindow([decorated], windowMs, now).length > 0) {
       store.observe(decorated, MACHINE);
       if (decorated.status === 'idle') {
         const timestamp = decorated.updatedAt ?? decorated.createdAt;
         if (timestamp !== undefined) {
-          const expiry = timestamp + windowMs;
+          const expiry = timestamp + windowMs + 1;
           rosterWindowExpiresAt.set(
             windowMs,
             Math.min(rosterWindowExpiresAt.get(windowMs) ?? expiry, expiry),
@@ -2465,6 +2467,7 @@ const rosterSweeps = new RosterSweepCache<SessionInfo>({
   ttlMs: ROSTER_TTL_MS,
   staleServeMaxMs: ROSTER_STALE_SERVE_MAX_MS,
   coldPartialMs: ROSTER_COLD_PARTIAL_MS,
+  now: attentionClock.now,
 });
 type RosterRepresentation = {
   revision: number;
@@ -2481,17 +2484,108 @@ function rosterWindowKey(raw: string | null): string {
   return raw === '1d' || raw === '7d' || raw === '1m' || raw === '2m' || raw === '6m' ? raw : 'all';
 }
 
-async function safetyReconcileRoster(windowMs: number | undefined, now: number): Promise<boolean> {
-  const key = windowMs === undefined ? 'all' : String(windowMs);
-  const reconciledAt = rosterSafetyReconciledAt.get(key) ?? 0;
-  const cutoffExpired =
-    windowMs !== undefined &&
-    (rosterWindowExpiresAt.get(windowMs) ?? Number.POSITIVE_INFINITY) <= now;
-  if (!cutoffExpired && now - reconciledAt < ROSTER_SAFETY_RECONCILE_MS) return false;
-  rosterSafetyReconciledAt.set(key, now);
-  await discoverLocalSessions(true, windowMs, now);
-  return true;
+/** Age known rows locally; a wall-clock cutoff is not a reason to read native stores. */
+function ageRosterWindow(windowMs: number | undefined, now: number): void {
+  if (windowMs === undefined) return;
+  const store = rosterRevisionForWindow(windowMs);
+  const current = store.snapshot();
+  const included = filterSessionsByWindow(current, windowMs, now);
+  // Filtering only removes rows. An unchanged window needs no journal clones
+  // or field comparisons on each long-poll heartbeat or live publication.
+  if (included.length !== current.length) store.reconcile(included, MACHINE);
+  const expiresAt = sessionWindowRepresentationExpiry(included, windowMs);
+  if (expiresAt === undefined) rosterWindowExpiresAt.delete(windowMs);
+  else rosterWindowExpiresAt.set(windowMs, expiresAt);
 }
+
+const rosterPollClients = new Map<number | undefined, number>();
+let rosterRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let rosterRefreshInflight: Promise<void> | undefined;
+let rosterRefreshDue: number | undefined;
+
+function scheduleRosterRefresh(): void {
+  clearTimeout(rosterRefreshTimer);
+  rosterRefreshTimer = undefined;
+  if (rosterPollClients.size === 0 || rosterRefreshInflight) return;
+  const now = attentionClock.now();
+  // Also recover from a backwards wall-clock correction.
+  rosterRefreshDue = Math.min(rosterRefreshDue ?? now + ROSTER_REFRESH_MS, now + ROSTER_REFRESH_MS);
+  rosterRefreshTimer = setTimeout(() => { void refreshPollingRosters(); }, Math.max(0, rosterRefreshDue - now));
+  rosterRefreshTimer.unref?.();
+}
+
+/** One bounded discovery for all connected feeds: the narrowest requested
+ * window, capped at seven days even for an all-only client. Returned native
+ * status reaches every feed within 15 s (configurable) plus bounded discovery
+ * time; a change missed in flight can also wait that sweep's remaining time.
+ * Rows absent from this recent reading have no removal authority in wider
+ * journals: their full reconciliation remains on the five-minute safety limit.
+ * Failed/abandoned reads cannot promise freshness. No idle-client sweeps. */
+function refreshPollingRosters(): Promise<void> {
+  if (rosterRefreshInflight) return rosterRefreshInflight;
+  if (rosterPollClients.size === 0) return Promise.resolve();
+  clearTimeout(rosterRefreshTimer);
+  const windows = [...rosterPollClients.keys()];
+  const recentWindow = Math.min(7 * 86_400_000, ...windows.filter((windowMs): windowMs is number => windowMs !== undefined));
+  rosterRefreshInflight = (async () => {
+    const roster = await discoverLocalRoster(true, recentWindow, attentionClock.now());
+    const now = attentionClock.now();
+    // Only equal/narrower views have removal authority. A bounded reading
+    // must never erase an all-time archive or postpone its full reconciliation.
+    for (const windowMs of rosterPollClients.keys()) {
+      if (windowMs === recentWindow) continue;
+      const store = rosterRevisionForWindow(windowMs);
+      const rows = filterSessionsByWindow(roster.rows, windowMs, now);
+      const key = windowMs === undefined ? 'all' : String(windowMs);
+      if (windowMs !== undefined && windowMs < recentWindow) {
+        store.reconcile(rows, MACHINE, { withheldTools: withheldBackends(roster.coverage) });
+        rosterSafetyReconciledAt.set(key, now);
+        rosterSweeps.publish(key, { rows: store.snapshot(), coverage: roster.coverage }, now);
+      } else {
+        for (const row of rows) store.observe(row, MACHINE);
+        const cached = rosterSweeps.snapshot(key);
+        // Preserve the wider snapshot's coverage and age. This prevents a
+        // cached GET from undoing upserts without claiming a new full reading.
+        if (cached) rosterSweeps.publish(key, { rows: store.snapshot(), coverage: cached.coverage }, cached.at);
+      }
+      ageRosterWindow(windowMs, now);
+    }
+  })().catch((error: unknown) => {
+    console.warn(`${LOG_PREFIX} roster feed refresh failed: ${String(error)}`);
+  }).finally(() => {
+    rosterRefreshInflight = undefined;
+    // Space completed sweeps, so a slow store never creates back-to-back scans.
+    rosterRefreshDue = attentionClock.now() + ROSTER_REFRESH_MS;
+    scheduleRosterRefresh();
+  });
+  return rosterRefreshInflight;
+}
+
+function connectRosterPoll(windowMs: number | undefined): () => void {
+  rosterPollClients.set(windowMs, (rosterPollClients.get(windowMs) ?? 0) + 1);
+  scheduleRosterRefresh();
+  return () => {
+    const remaining = (rosterPollClients.get(windowMs) ?? 1) - 1;
+    if (remaining === 0) rosterPollClients.delete(windowMs);
+    else rosterPollClients.set(windowMs, remaining);
+    scheduleRosterRefresh();
+  };
+}
+
+function safetyReconcileRoster(windowMs: number | undefined, now: number): Promise<void> {
+  const key = windowMs === undefined ? 'all' : String(windowMs);
+  const reconciledAt = rosterSafetyReconciledAt.get(key);
+  if (reconciledAt !== undefined && now - reconciledAt < ROSTER_SAFETY_RECONCILE_MS) return Promise.resolve();
+  rosterSafetyReconciledAt.set(key, now);
+  // Full removal authority belongs to this window's rate-limited safety read,
+  // including for zero-wait clients that have not fetched an initial snapshot.
+  return discoverLocalSessions(true, windowMs, now).then(() => {});
+}
+
+attentionClock.onMove(() => {
+  for (const windowMs of rosterPollClients.keys()) ageRosterWindow(windowMs, attentionClock.now());
+  scheduleRosterRefresh();
+});
 
 /** A sweep slower than this logs which leg the time went to. Above a couple of
  *  seconds the roster is visibly late and every other request is queued behind
@@ -2591,7 +2685,7 @@ function startRosterSweep(
       return sessions;
     })
     .then((sessions) => {
-      rosterSafetyReconciledAt.set(key, Date.now());
+      rosterSafetyReconciledAt.set(key, attentionClock.now());
       for (const session of sessions) rememberLatestSessionInfo(session);
       // A finished sweep is not automatically a COMPLETE one. A leg that
       // overran its budget or threw did not read its adapter, and what it
@@ -2667,7 +2761,7 @@ function startRosterSweep(
 function discoverAllCached(
   force = false,
   windowMs?: number,
-  now = Date.now(),
+  now = attentionClock.now(),
   allowSweeping = true,
 ): Promise<RosterSweepAnswer<SessionInfo>> {
   const key = windowMs === undefined ? 'all' : String(windowMs);
@@ -2728,7 +2822,7 @@ async function discoverSession(tool: string, id: string): Promise<SessionInfo | 
 async function discoverLocalSessions(
   force = false,
   windowMs?: number,
-  now = Date.now(),
+  now = attentionClock.now(),
 ): Promise<SessionInfo[]> {
   return (await discoverLocalRoster(force, windowMs, now)).rows;
 }
@@ -2736,7 +2830,7 @@ async function discoverLocalSessions(
 async function discoverLocalRoster(
   force = false,
   windowMs?: number,
-  now = Date.now(),
+  now = attentionClock.now(),
   allowSweeping = true,
 ): Promise<RosterSweepAnswer<SessionInfo>> {
   piBridgeIds.canonicalizeAll();
@@ -2850,8 +2944,9 @@ async function discoverLocalRoster(
       // Each bounded representation owns an independent journal. Absence here
       // means deletion or age-out from THIS view only; it must never remove the
       // row from the authoritative all-time journal.
-      rosterRevisionForWindow(windowMs).reconcile(decorated, MACHINE, { withheldTools });
-      const expiresAt = sessionWindowRepresentationExpiry(decorated, windowMs);
+      const included = filterSessionsByWindow(decorated, windowMs, attentionClock.now());
+      rosterRevisionForWindow(windowMs).reconcile(included, MACHINE, { withheldTools });
+      const expiresAt = sessionWindowRepresentationExpiry(rosterRevisionForWindow(windowMs).snapshot(), windowMs);
       if (expiresAt === undefined) rosterWindowExpiresAt.delete(windowMs);
       else rosterWindowExpiresAt.set(windowMs, expiresAt);
     }
@@ -3813,7 +3908,7 @@ function handleProtocolReceipt(ws: ServerWebSocket<WsData>, msg: any): void {
   const attachTicket = ticketFromClientMessage(msg);
   const parsedClientMessageId = parseClientMessageId(msg?.clientMessageId);
   const clientMessageId = parsedClientMessageId || undefined;
-  const send = (event: WireEvent) => ws.send(JSON.stringify(event));
+  const send = (event: WireEvent) => sendJson(ws, event);
   if (!attachTicket || parsedClientMessageId === '') {
     send({
       kind: 'nack',
@@ -3986,17 +4081,17 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
   if (peerLacksRole(ws.data.principal, 'files')
     && (msg?.kind === 'file' || msg?.kind === 'artifact-interaction')) {
     const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
-    ws.send(JSON.stringify({
+    sendJson(ws, {
       kind: 'nack',
       code: 'CLIENT_MESSAGE_FAILED',
       message: 'files role required',
       ...(clientMessageId ? { clientMessageId } : {}),
-    } satisfies WireEvent));
+    } satisfies WireEvent);
     return;
   }
   if (ws.data.compatibility.readOnly && isMutatingClientMessage(msg?.kind)) {
     const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
-    ws.send(JSON.stringify({
+    sendJson(ws, {
       kind: 'nack',
       code: 'CLIENT_MESSAGE_FAILED',
       // A genuine incompatibility OUTRANKS the declaration. Both can be true at
@@ -4008,17 +4103,17 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
         ? `read-only session: ${ws.data.compatibility.reason}`
         : `read-only compatibility mode: ${ws.data.compatibility.reason}`,
       ...(clientMessageId ? { clientMessageId } : {}),
-    } satisfies WireEvent));
+    } satisfies WireEvent);
     return;
   }
   if (ws.data.observeRequested && isMutatingClientMessage(msg?.kind)) {
     const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
-    ws.send(JSON.stringify({
+    sendJson(ws, {
       kind: 'nack',
       code: 'CLIENT_MESSAGE_FAILED',
       message: 'read-only observe session: this client attached for Observe; attach to Drive before sending input',
       ...(clientMessageId ? { clientMessageId } : {}),
-    } satisfies WireEvent));
+    } satisfies WireEvent);
     return;
   }
   const sequencer = ws.data.handoffSequencer ??= new ClientHandoffSequencer();
@@ -4062,7 +4157,7 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
   if (!mc) return;
   const readMark = pooledHistoryReadMark();
   const clientMessageId = parseClientMessageId(msg?.clientMessageId);
-  const send = (event: WireEvent) => ws.send(JSON.stringify(event));
+  const send = (event: WireEvent) => sendJson(ws, event);
   if (clientMessageId === '') {
     send({ kind: 'nack', code: 'BAD_CLIENT_MESSAGE_ID', message: 'clientMessageId must be a short ASCII token' });
     return;
@@ -4351,7 +4446,7 @@ async function handleHistoryRefresh(ws: ServerWebSocket<WsData>, msg: any): Prom
   const mc = ws.data.mc;
   const client = ws.data.client;
   if (!mc || !client) return;
-  const send = (event: WireEvent) => ws.send(JSON.stringify(event));
+  const send = (event: WireEvent) => sendJson(ws, event);
   const clientMessageId = parseClientMessageId(msg?.clientMessageId);
   if (!clientMessageId) {
     send({
@@ -4543,7 +4638,7 @@ async function handleClientMessage(
 ): Promise<void> {
   const mc = ws.data.mc;
   if (!mc || !msg) return;
-  await handleManagedClientMessage(mc, msg, (event) => ws.send(JSON.stringify(event)), {
+  await handleManagedClientMessage(mc, msg, (event) => sendJson(ws, event), {
     lastPromptAt: () => ws.data.lastPromptAt ?? 0,
     setLastPromptAt: (value) => { ws.data.lastPromptAt = value; },
     journalScope: { identity: ws.data.identity, tool: ws.data.tool, sessionId: ws.data.id },
@@ -5897,7 +5992,7 @@ server = Bun.serve<WsData>({
   hostname: LISTEN_HOST,
   idleTimeout: 240,
   development: false,
-  async fetch(req, srv) {
+  fetch: withJsonCompression<WsData>(async (req, srv) => {
     const url = new URL(req.url);
     const path = url.pathname;
     const principal = authenticatedPrincipal(req, path);
@@ -8164,27 +8259,30 @@ server = Bun.serve<WsData>({
         // would be handed one by the next delta that mentioned a Kimi session,
         // and from then on hold a row for an agent it was told does not exist.
         const deltaVisibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
-        const now = Date.now();
+        const deadline = performance.now() + Math.min(requestedWaitMs, 25_000);
         const revisionStore = rosterRevisionForWindow(windowMs);
-        // A slow safety scan is itself this request's wait. Return immediately
-        // afterwards rather than adding another 25-second hold.
-        const reconciled = await safetyReconcileRoster(windowMs, now);
-        let waitMs = reconciled ? 0 : Math.min(requestedWaitMs, 25_000);
-        const expiresAt = windowMs === undefined ? undefined : rosterWindowExpiresAt.get(windowMs);
-        if (expiresAt !== undefined) {
-          waitMs = Math.min(waitMs, Math.max(0, expiresAt - now));
-        }
-        let batch = await revisionStore.waitAfter(after, waitMs);
-        // Wall-clock aging has no native mutation to wake the journal. Bound
-        // the wait to the next cutoff, then reconcile the same source-bounded
-        // adapter query and return its removal in this response.
-        if (
-          windowMs !== undefined &&
-          !batch.resetRequired &&
-          batch.deltas.length === 0 &&
-          await safetyReconcileRoster(windowMs, Date.now())
-        ) {
-          batch = revisionStore.eventsAfter(after);
+        const disconnect = requestedWaitMs > 0 ? connectRosterPoll(windowMs) : () => {};
+        let batch;
+        try {
+          // Discovery may outlive this request. Its shared work cannot hold a
+          // cancelled client, and an unchanged reconcile consumes only the
+          // original deadline rather than answering an empty poll immediately.
+          const reconcile = safetyReconcileRoster(windowMs, attentionClock.now());
+          if (requestedWaitMs === 0) await reconcile;
+          else void reconcile.catch((error: unknown) => {
+            console.warn(`${LOG_PREFIX} roster safety reconciliation failed: ${String(error)}`);
+          });
+          for (;;) {
+            const now = attentionClock.now();
+            ageRosterWindow(windowMs, now);
+            batch = revisionStore.eventsAfter(after);
+            const remaining = deadline - performance.now();
+            if (batch.resetRequired || batch.deltas.length > 0 || remaining <= 0 || req.signal.aborted) break;
+            const expiresAt = windowMs === undefined ? undefined : rosterWindowExpiresAt.get(windowMs);
+            await revisionStore.waitAfter(after, Math.min(remaining, expiresAt === undefined ? remaining : Math.max(0, expiresAt - now)), req.signal);
+          }
+        } finally {
+          disconnect();
         }
         // The batch REVISION is deliberately not rewritten when deltas are
         // dropped. It is the roster's own counter, shared by every client, and
@@ -8219,7 +8317,7 @@ server = Bun.serve<WsData>({
       const visibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
       const windowKey = rosterRepresentationKey(rosterWindowKey(rawWindow), visibility);
       const windowMs = parseSessionWindowMs(rawWindow);
-      const requestNow = Date.now();
+      const requestNow = attentionClock.now();
       const force = url.searchParams.get('refresh') === '1';
       const cached = rosterRepresentations.get(windowKey);
       const revisionStore = rosterRevisionForWindow(windowMs);
@@ -8248,16 +8346,21 @@ server = Bun.serve<WsData>({
       // authoritative replacement, so serving it a mid-sweep partial would show
       // the sessions a slow adapter has not reported yet as deleted ones. It
       // waits for the sweep, which is what it did before any of this existed.
-      const roster = await discoverLocalRoster(
-        force || cutoffExpired,
-        windowMs,
-        requestNow,
-        parseAgentRosterClientRevision(url.searchParams) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
-      );
+      ageRosterWindow(windowMs, requestNow);
+      const roster = cutoffExpired && cached?.complete && !force
+        ? { rows: revisionStore.snapshot(), coverage: ROSTER_COVERAGE_COMPLETE }
+        : await discoverLocalRoster(
+          force,
+          windowMs,
+          requestNow,
+          parseAgentRosterClientRevision(url.searchParams) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
+        );
+      const responseNow = attentionClock.now();
+      ageRosterWindow(windowMs, responseNow);
       const sessions = filterSessionsByWindow(
         visibleSessions(roster.rows, visibility),
         windowMs,
-        requestNow,
+        responseNow,
       );
       const data: LocalRosterResponse = {
         machine: MACHINE,
@@ -8327,7 +8430,7 @@ server = Bun.serve<WsData>({
     // See docs/architecture/monorepo.md.
     if (path === '/') return new Response(null, { status: 302, headers: { location: APP_MOUNT_PATH } });
     return new Response('Not found', { status: 404 });
-  },
+  }),
   error(error) {
     // Bun's default development response includes source context. Keep unexpected request failures
     // content-free on the wire and in the ordinary log stream.
@@ -8430,7 +8533,7 @@ server = Bun.serve<WsData>({
                     compatibility.readOnly || ws.data.observeRequested === true,
                   )
                 : ev;
-          const status = ws.send(JSON.stringify(prepared));
+          const status = sendJson(ws, prepared);
           if (status === 0) {
             try {
               ws.close(1011, 'websocket send dropped');
@@ -9294,6 +9397,8 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
     clearInterval(piBridgeSweepTimer);
     clearInterval(uploadGcTimer);
     clearTimeout(startupSweepTimer);
+    clearTimeout(rosterRefreshTimer);
+    rosterPollClients.clear();
     for (const timer of scheduledConnectionReleaseTimers) clearInterval(timer);
     scheduledConnectionReleaseTimers.clear();
     for (const unsubscribe of sessionInfoWatchers) {

@@ -13,6 +13,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { Hub, type ManagedConn } from '../../src/sessions/hub.ts';
+import { filterSessionsByWindow, sessionWindowRepresentationExpiry } from '../../src/roster/roster-http.ts';
 import { RosterRevisionStore } from '../../src/roster/roster-revision.ts';
 import {
   createRosterPublicationBoundary,
@@ -306,4 +307,33 @@ describe('native incarnation selection', () => {
     expect([authority.acceptsWatcher(newInfo), authority.acceptsWatcher(oldInfo)]).toEqual([true, false]);
     await hub.dispose();
   });
+});
+
+// The exact millisecond and backwards clock are not reproducible over a real
+// socket. Exercise the same membership/expiry definition with a controlled clock.
+test('bounded publication expires at the first excluded millisecond, not the inclusive cutoff', () => {
+  const day = 86_400_000;
+  const now = 20 * day;
+  const rows = [
+    codexInfo('parent', { updatedAt: now - day }),
+    codexInfo('old-child', { updatedAt: now - 8 * day, parentThreadId: 'parent' }),
+    codexInfo('old-conversation', { updatedAt: now - 10 * day }),
+    codexInfo('old-active', { updatedAt: now - 30 * day, status: 'working' }),
+    codexInfo('cutoff', { updatedAt: now - 7 * day }),
+  ];
+  const journal = new RosterRevisionStore();
+  const publish = (at: number) => {
+    const included = filterSessionsByWindow(rows, 7 * day, at);
+    journal.reconcile(included, MACHINE);
+    return sessionWindowRepresentationExpiry(included, 7 * day);
+  };
+  expect(publish(now)).toBe(now + 1);
+  expect(journal.snapshot().map((row) => row.id)).toEqual(['parent', 'old-active', 'cutoff']);
+  const before = journal.revision;
+  expect(publish(now + 1)).toBe(now + 6 * day + 1);
+  expect(journal.eventsAfter(before).deltas).toMatchObject([{ sessionId: 'cutoff', removed: true }]);
+  expect(publish(now - 1)).toBe(now + 1);
+  rows[3]!.status = 'idle';
+  publish(now);
+  expect(journal.snapshot().map((row) => row.id)).not.toContain('old-active');
 });

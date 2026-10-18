@@ -15,7 +15,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type Broker, type BrokerClient, eventually, startBroker } from '../harness/index.ts';
+import { type Broker, type BrokerClient, eventually, SOON_MS, startBroker } from '../harness/index.ts';
 import { type FakeClaudeAgents, installFakeClaudeAgents } from '../harness/fakes/claude-agents.ts';
 import {
   age,
@@ -145,6 +145,16 @@ describe('the session roster', () => {
         watchedPath = join(watched, `${WATCHED_UUID}.jsonl`);
         writeFileSync(watchedPath, claudeUser(WATCHED_UUID, 1, paths.home) + claudeEndTurn(WATCHED_UUID, 1));
 
+        // Recent filesystem mtimes with old conversation/child timestamps are
+        // precisely the rows that used to leave the 7d expiry in the past.
+        const oldAt = new Date(Date.now() - 8 * DAY);
+        const oldUuid = '0e0c1000-0000-4000-8000-000000000003';
+        writeFileSync(join(watched, `${oldUuid}.jsonl`), claudeUser(oldUuid, 1, paths.home, oldAt) + claudeEndTurn(oldUuid, 1, oldAt));
+        const children = join(watched, WATCHED_UUID, 'subagents');
+        mkdirSync(children, { recursive: true });
+        writeFileSync(join(children, 'agent-old.meta.json'), line({ toolUseId: 'old-child-tool' }));
+        writeFileSync(join(children, 'agent-old.jsonl'), claudeUser('agent-old', 1, paths.home, oldAt) + claudeEndTurn('agent-old', 1, oldAt));
+
         const waiting = join(claudeDir, 'projects', 'waiting');
         mkdirSync(waiting, { recursive: true });
         waitingPath = join(waiting, `${WAITING_UUID}.jsonl`);
@@ -212,6 +222,42 @@ describe('the session roster', () => {
     const refused = await fetch(url, { headers: { 'accept-encoding': 'gzip;q=0' }, decompress: false } as RequestInit);
     expect(refused.headers.get('content-encoding')).toBeNull();
     expect(JSON.parse(await refused.text()).sessions).toEqual(body.sessions);
+  });
+
+  test('JSON feed and capability responses negotiate gzip without changing identity or error semantics', async () => {
+    for (const path of [
+      `/api/agents?${rosterQuery()}`,
+      `/api/session-roster-deltas?${rosterQuery({ after: '0' })}`,
+    ]) {
+      const get = (encoding: string) => fetch(broker.url + path, {
+        headers: { 'accept-encoding': encoding }, decompress: false,
+      } as RequestInit);
+      const plain = await get('identity');
+      const body = await plain.text();
+      expect(Buffer.byteLength(body)).toBeGreaterThanOrEqual(1024);
+      expect(plain.headers.get('content-encoding')).toBeNull();
+      expect(plain.headers.get('vary')?.toLowerCase()).toContain('accept-encoding');
+      for (const encoding of ['gzip;q=0', 'gzip;q=0, *;q=1']) {
+        const refused = await get(encoding);
+        expect(refused.headers.get('content-encoding')).toBeNull();
+        expect(JSON.parse(await refused.text())).toEqual(JSON.parse(body));
+      }
+      const compressed = await Promise.all([get('gzip'), get('gzip'), get('*;q=0.5')]);
+      for (const response of compressed) {
+        expect(response.headers.get('content-encoding')).toBe('gzip');
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        expect(bytes.length).toBeLessThan(Buffer.byteLength(body));
+        expect(JSON.parse(Buffer.from(Bun.gunzipSync(bytes)).toString())).toEqual(JSON.parse(body));
+        console.log(JSON.stringify({ probe: 'json-compression', path, identityBytes: Buffer.byteLength(body), gzipBytes: bytes.length }));
+      }
+    }
+    const small = await client.get('/api/schedules', { 'accept-encoding': 'gzip' });
+    expect(small.status).toBe(200);
+    expect(small.headers.get('content-encoding')).toBeNull();
+    expect(small.headers.get('vary')?.toLowerCase()).toContain('accept-encoding');
+    const invalid = await client.get('/api/session-roster-deltas?after=bad', { 'accept-encoding': 'gzip' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.headers.get('content-encoding')).toBeNull();
   });
 
   test('each window lists what was active in it; a waiting terminal is never hidden; an undated row lives only in all time', async () => {
@@ -352,20 +398,28 @@ describe('the session roster', () => {
 
   test('a 7-day client sees an idle row age out and a deleted file leave, as transcript-free removals', async () => {
     const window = '7d';
-    // Admitted now, outside the window a few seconds from now.
-    const margin = 4_000;
+    // Admitted now, outside the window a few seconds from now. Only a forced discovery reads the
+    // new mtime, and the snapshot applies the window when it answers, so the room before the
+    // cutoff must outlast that discovery: about twenty seconds on a Windows host. Each attempt
+    // re-ages the file with room for the discovery the previous attempt measured.
+    let discoveryMs = 0;
     const aging = writePiSession(broker.paths, 'aging');
     const admitted = await eventually(async () => {
-      age(aging.path, 7 * DAY - margin);
+      age(aging.path, 7 * DAY - (discoveryMs + 4_000));
+      const started = performance.now();
       const snapshot = await rosterSnapshot(client, { window, refresh: true });
+      discoveryMs = performance.now() - started;
       return ids(snapshot.body.sessions).includes(aging.id) ? snapshot.body : undefined;
-    }, { what: 'a 7-day snapshot that still admits the aging session' });
+    }, { what: 'a 7-day snapshot that still admits the aging session', timeoutMs: 3 * SOON_MS });
     expect(ids(admitted.sessions)).toContain(pi.doomed!.id);
 
     const feed = new RosterFeed(client, window);
     feed.cursor = admitted.revision;
-    // Nothing touches the file: wall-clock aging alone must remove it.
-    const aged = await feed.waitFor((delta) => delta.sessionId === aging.id && delta.removed === true);
+    // Nothing touches the file: wall-clock aging alone must remove it, within the room given above.
+    const aged = await feed.waitFor(
+      (delta) => delta.sessionId === aging.id && delta.removed === true,
+      { timeoutMs: SOON_MS + discoveryMs },
+    );
     expect(aged.session).toBeUndefined();
     expect(aged.revision).toBeGreaterThan(admitted.revision);
 
@@ -375,6 +429,20 @@ describe('the session roster', () => {
     const deleted = await feed.waitFor((delta) => delta.sessionId === pi.doomed!.id && delta.removed === true);
     expect(deleted.session).toBeUndefined();
     expect(deleted.revision).toBeGreaterThan(aged.revision);
+  });
+
+  test('excluded old children and conversations leave an unchanged poll waiting to its deadline', async () => {
+    const snapshot = await rosterSnapshot(client, { window: '7d', refresh: true });
+    const feed = new RosterFeed(client, '7d');
+    const started = performance.now();
+    const batch = await feed.request(snapshot.body.revision, 200);
+    expect(batch).toEqual({ revision: snapshot.body.revision, deltas: [] });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(180);
+    const abort = new AbortController();
+    const pending = fetch(`${broker.url}/api/session-roster-deltas?window=7d&after=${batch.revision}&waitMs=25000`, { signal: abort.signal });
+    await client.get('/api/health');
+    abort.abort();
+    await expect(pending).rejects.toThrow();
   });
 
   test('a cursor from the future, or one the bounded journal no longer holds, asks the client to reset', async () => {

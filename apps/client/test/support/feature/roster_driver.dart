@@ -180,8 +180,7 @@ extension RosterDriver on AppDriver {
   }
 
   /// Roster reads (`GET /api/sessions`) [broker] has seen, optionally only
-  /// those for one query [window] (the sidebar asks `7d` by default; the
-  /// overview page asks `all`).
+  /// those for one query [window] (the sidebar asks `7d` by default).
   List<FakeBrokerRequest> rosterReads(FakeBroker broker, {String? window}) => [
     for (final request in broker.requestsTo('/api/sessions', method: 'GET'))
       if (window == null || request.uri.queryParameters['window'] == window)

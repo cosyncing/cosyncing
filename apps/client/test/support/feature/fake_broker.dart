@@ -335,7 +335,9 @@ class FakeBroker {
     final cutoff = DateTime.now().subtract(span).millisecondsSinceEpoch;
     return [
       for (final row in sessions)
-        if (((row['updatedAt'] as num?) ?? 0) >= cutoff) row,
+        if (row['status'] != 'idle' ||
+            ((row['updatedAt'] as num?) ?? 0) >= cutoff)
+          row,
     ];
   }
 

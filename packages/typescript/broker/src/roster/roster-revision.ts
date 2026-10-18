@@ -179,6 +179,11 @@ export class RosterRevisionStore {
     for (const info of sessions) this.observe(info, machine);
   }
 
+  /** Current published rows, for local window aging without native discovery. */
+  snapshot(): SessionInfo[] {
+    return [...this.current.values()];
+  }
+
   eventsAfter(after: number): RosterDeltaBatch {
     if (after > this.revisionValue) {
       return { revision: this.revisionValue, deltas: [], resetRequired: true };
@@ -193,9 +198,9 @@ export class RosterRevisionStore {
     };
   }
 
-  async waitAfter(after: number, waitMs: number): Promise<RosterDeltaBatch> {
+  async waitAfter(after: number, waitMs: number, signal?: AbortSignal): Promise<RosterDeltaBatch> {
     const immediate = this.eventsAfter(after);
-    if (immediate.resetRequired || immediate.deltas.length > 0 || waitMs <= 0) return immediate;
+    if (immediate.resetRequired || immediate.deltas.length > 0 || waitMs <= 0 || signal?.aborted) return immediate;
     await new Promise<void>((resolve) => {
       let done = false;
       const finish = () => {
@@ -203,11 +208,14 @@ export class RosterRevisionStore {
         done = true;
         clearTimeout(timer);
         this.waiters.delete(finish);
+        signal?.removeEventListener('abort', finish);
         resolve();
       };
       const timer = setTimeout(finish, waitMs);
       timer.unref?.();
       this.waiters.add(finish);
+      signal?.addEventListener('abort', finish, { once: true });
+      if (signal?.aborted) finish();
     });
     return this.eventsAfter(after);
   }

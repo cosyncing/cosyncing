@@ -15,7 +15,10 @@
  * a refused page says why with a stable code.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { readdirSync } from 'node:fs';
+import { WebSocketWire } from '../harness/websocket-wire.ts';
+import { readdirSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { sendJson } from '../../packages/typescript/broker/src/transport/json-egress.ts';
 import { type Broker, type SessionStream, startBroker } from '../harness/index.ts';
 import { ask, attachFrame, historyReadLedgerEnv, sessionReads } from '../harness/history.ts';
 import { openPiBridgeSession, piFinalRows, piUserRows, type PiBridgeSession } from '../harness/fakes/pi-bridge.ts';
@@ -319,4 +322,94 @@ describe('a byte budget measures rows without storing them', () => {
     expect(blobs).toEqual([]);
     stream.close();
   });
+});
+
+
+describe('history and live frames on negotiated WebSocket transports', () => {
+  let broker: Broker;
+  let session: PiBridgeSession;
+  const sockets: WebSocketWire[] = [];
+  beforeAll(async () => {
+    broker = await startBroker({ name: 'history-compression' });
+    session = await openPiBridgeSession(broker, piUserRows('compressible history payload '.repeat(8), 100));
+  });
+  afterAll(async () => { for (const socket of sockets) socket.close(); await broker?.stop(); });
+
+  test('large frames set RSV1, identity peers decode the same rows, and reconnect/page/live sends agree', async () => {
+    const open = async (compressed: boolean) => {
+      const socket = await WebSocketWire.open(broker.client(), 'pi', session.id, compressed);
+      sockets.push(socket);
+      const history = await socket.waitFor((frame) => frame.value.kind === 'history');
+      return { socket, history };
+    };
+    const ticksPerSecond = process.platform === 'linux' ? Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim()) : undefined;
+    const cpuMs = () => {
+      if (!ticksPerSecond || !broker.pid) return undefined;
+      const stat = readFileSync(`/proc/${broker.pid}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      return (Number(fields[11]) + Number(fields[12])) * 1000 / ticksPerSecond;
+    };
+    // Warm both transport modes before comparing the same three-client payload.
+    (await open(false)).socket.close();
+    (await open(true)).socket.close();
+    const sample = async (compressed: boolean) => {
+      const before = cpuMs();
+      const started = performance.now();
+      const healthStarted = performance.now();
+      const health = broker.client().get('/api/health').then(() => performance.now() - healthStarted);
+      const peers = await Promise.all([open(compressed), open(compressed), open(compressed)]);
+      const after = cpuMs();
+      return { peers, metrics: { wallMs: Math.round(performance.now() - started),
+        brokerCpuMs: before === undefined || after === undefined ? undefined : after - before,
+        healthRoundTripMs: Math.round(await health),
+        historyWireBytes: peers.reduce((sum, peer) => sum + peer.history.wireBytes, 0) } };
+    };
+    const plainSample = await sample(false);
+    for (const peer of plainSample.peers) peer.socket.close();
+    const compressedSample = await sample(true);
+    const identity = plainSample.peers[0]!;
+    const [deflated, concurrent] = compressedSample.peers as [typeof identity, typeof identity, typeof identity];
+    expect(identity.socket.extension).toBe('');
+    expect(identity.socket.frames.every((frame) => !frame.compressed)).toBe(true);
+    for (const peer of [deflated, concurrent]) {
+      expect(peer.socket.extension).toContain('permessage-deflate');
+      expect(peer.history.compressed).toBe(true);
+      expect(peer.history.value.messages).toEqual(identity.history.value.messages);
+      expect(peer.history.wireBytes).toBeLessThan(identity.history.wireBytes / 2);
+      expect(peer.socket.frames.filter((frame) => frame.decodedBytes < 1024).every((frame) => !frame.compressed)).toBe(true);
+    }
+    deflated.socket.send({ kind: 'history-page', cursor: deflated.history.value.olderCursor, limit: 25, requestId: 'compressed-page' });
+    const page = await deflated.socket.waitFor((frame) => frame.value.kind === 'history-page');
+    expect(page.value.messages).toHaveLength(25);
+    expect(page.compressed).toBe(true);
+    await session.events([{ t: 'delta', key: 'compressed-live', delta: 'A large live update. '.repeat(200) }]);
+    const live = await deflated.socket.waitFor((frame) => frame.value.kind === 'message' && frame.value.message?.key === 'compressed-live');
+    expect(live.compressed).toBe(true);
+    deflated.socket.close();
+    const reconnect = await open(true);
+    expect(reconnect.history.compressed).toBe(true);
+    console.log(JSON.stringify({ probe: 'websocket-compression', identityHistoryWireBytes: identity.history.wireBytes,
+      compressedHistoryWireBytes: concurrent.history.wireBytes, decodedHistoryBytes: concurrent.history.decodedBytes,
+      frames: concurrent.socket.frames.length, compressedFrames: concurrent.socket.frames.filter((frame) => frame.compressed).length,
+      concurrentClients: 3, identity: plainSample.metrics, deflate: compressedSample.metrics }));
+  });
+});
+
+// Narrow exception: an OS socket cannot deterministically be put into Bun's
+// queued/dropped return states. Real negotiated delivery is covered above;
+// inject only these transport outcomes to preserve the caller's failure signal.
+test('egress retains queued and dropped send results and measures UTF-8 bytes', () => {
+  for (const outcome of [-1, 0, 123]) {
+    let serializations = 0;
+    let compression: boolean | undefined;
+    const socket = { send: (_body: unknown, compress?: boolean) => {
+      compression = compress;
+      return outcome;
+    } };
+    expect(sendJson(socket, { toJSON: () => { serializations++; return { text: '界'.repeat(400) }; } })).toBe(outcome);
+    expect(serializations).toBe(1);
+    expect(compression).toBe(true);
+    expect(sendJson(socket, { kind: 'ack' })).toBe(outcome);
+    expect(compression).toBe(false);
+  }
 });
