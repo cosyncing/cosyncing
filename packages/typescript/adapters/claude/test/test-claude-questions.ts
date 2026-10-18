@@ -119,28 +119,18 @@ async function main(): Promise<void> {
   const msgs: AgentMessage[] = [];
   conn.subscribe((m) => msgs.push(m));
 
-  // A live AskUserQuestion (drive turn) → actionable question-request (no readOnly) + getPending replay.
+  // A live AskUserQuestion tool_use alone draws no card: the CLI waits on nobody until the can_use_tool
+  // gate that blocks the tool arrives, and that gate draws the card (Part E).
   (conn as any).emitFinalAssistant({ message: ASK.message });
-  const q = msgs.find((m: any) => m.type === 'question-request') as any;
-  check('Drive AskUserQuestion → ACTIONABLE question-request (no readOnly)', !!q && q.readOnly === undefined && q.requestId === 'toolu_q1');
-  check('  pending question replayed by getPending() for a late tab', (conn.getPending() as any[]).some((p) => p.type === 'question-request' && p.requestId === 'toolu_q1'));
+  check('Drive AskUserQuestion tool_use alone → NO card yet (the gate draws it)', !msgs.some((m: any) => m.type === 'question-request') && (conn.getPending() as any[]).length === 0);
 
-  // answerQuestion writes a tool_result on stdin (native channel, NOT a prompt) + emits question-resolved.
+  // An answer or a dismissal nothing waits on is refused (nacked NOT_FOUND by the broker) and writes nothing:
+  // a tool_result on stdin was the dead channel the CLI never delivers.
   const stdinWrites: string[] = [];
   (conn as any).proc = { stdin: { write: (s: string) => { stdinWrites.push(s); return true; } } };
-  await conn.answerQuestion('toolu_q1', [['Risk first']]);
-  const sent = stdinWrites.map((s) => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean) as any[];
-  const tr = sent.find((o) => o?.message?.content?.[0]?.type === 'tool_result');
-  check('answerQuestion → native tool_result on stdin (not a text prompt)', !!tr && tr.message.content[0].tool_use_id === 'toolu_q1' && /Risk first/.test(String(tr.message.content[0].content)) && !sent.some((o) => o?.message?.content?.[0]?.type === 'text'));
-  check('answerQuestion emits question-resolved + clears getPending', msgs.some((m: any) => m.type === 'question-resolved' && m.requestId === 'toolu_q1') && !(conn.getPending() as any[]).some((p) => p.requestId === 'toolu_q1'));
-
-  // rejectQuestion writes an is_error tool_result + resolves.
-  (conn as any).pendingQuestionId = 'toolu_q2';
-  (conn as any).pendingQuestionCard = { type: 'question-request', requestId: 'toolu_q2', questions: [] };
-  const before = stdinWrites.length;
-  await conn.rejectQuestion('toolu_q2');
-  const rej = stdinWrites.slice(before).map((s) => JSON.parse(s)).find((o) => o?.message?.content?.[0]?.is_error === true);
-  check('rejectQuestion → is_error tool_result + question-resolved', !!rej && rej.message.content[0].tool_use_id === 'toolu_q2' && msgs.some((m: any) => m.type === 'question-resolved' && m.requestId === 'toolu_q2'));
+  const refusalOf = (act: Promise<void>) => act.then(() => undefined, (e: any) => e?.refusal);
+  check('answer before the gate → refused request-not-pending, nothing written', await refusalOf(conn.answerQuestion('toolu_q1', [['Risk first']])) === 'request-not-pending' && stdinWrites.length === 0 && !msgs.some((m: any) => m.type === 'question-resolved'));
+  check('dismissal of a question never asked → refused, nothing written', await refusalOf(conn.rejectQuestion('toolu_q2')) === 'request-not-pending' && stdinWrites.length === 0);
 
   await conn.close();
 
