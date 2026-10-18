@@ -68,6 +68,8 @@ export const legacyTasks: Record<LegacyJob, Task[]> = {
     { id: "claude-mod-socket", run: ["bun", "run", "packages/typescript/broker/test/claude/test-mod-socket-server.ts"], estimateMs: 3896 },
     { id: "claude-mod-static-inventory", run: ["bun", "run", "scripts/mod/check-mod-inventory.ts"], estimateMs: 498 },
     { id: "claude-mod-takeover-exclusion", run: ["bun", "run", "packages/typescript/broker/test/claude/test-mod-takeover-exclusion.ts"], estimateMs: 46 },
+    // Kept on purpose (a Drive question is drawn and answered only at its permission gate); never wired before.
+    { id: "claude-questions", run: ["bun", "run", "packages/typescript/adapters/claude/test/test-claude-questions.ts"] },
     { id: "claude-recency", run: ["bun", "run", "packages/typescript/adapters/claude/test/test-claude-recency.ts"], estimateMs: 60 },
     { id: "claude-roster-subagents", run: ["bun", "run", "packages/typescript/adapters/claude/test/test-claude-roster-subagents.ts"], estimateMs: 64 },
     { id: "claude-runtime", run: ["bun", "run", "packages/typescript/broker/test/claude/test-claude-runtime.ts"], estimateMs: 418 },

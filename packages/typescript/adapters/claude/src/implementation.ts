@@ -4120,9 +4120,9 @@ export class ClaudeResumeConnection implements SessionConnection {
         const req = o.request ?? {};
         if (id && (req.subtype === 'can_use_tool' || req.subtype === 'permission') && req.tool_name === 'AskUserQuestion') {
           // A question is NOT a permission ask — never show Allow/Deny for it. The CLI blocks the tool
-          // until our control_response; answerQuestion replies allow + updatedInput.answers. The card
-          // itself normally already streamed from the assistant tool_use event (keyed by tool_use_id,
-          // which this request echoes back) — emit one here only if that ordering ever inverts.
+          // until our control_response; answerQuestion replies allow + updatedInput.answers. The card is
+          // drawn here, keyed by the tool_use_id this request echoes back, so it is answerable exactly
+          // while the CLI waits on it (emitFinalAssistant draws none).
           this.pendingQuestionControlId = id;
           this.pendingQuestionControlInput = req.input;
           const toolUseId = String(req.tool_use_id ?? '') || id;
@@ -4252,14 +4252,12 @@ export class ClaudeResumeConnection implements SessionConnection {
     for (const b of content) {
       if (b?.type === 'tool_use') {
         this.callMeta.set(String(b.id ?? ''), { name: String(b.name ?? 'tool'), input: b.input });
-        // A live AskUserQuestion is ACTIONABLE under Drive: surface a question-request the app can answer
-        // (answerQuestion → a tool_result on stdin, the native channel) and track it for getPending replay.
+        // A live AskUserQuestion is drawn when Claude waits on it: at the can_use_tool control_request
+        // that gates it (handleEvent), not here. This tool_use streams first, and a card drawn from it
+        // could be answered before the CLI took answers: that answer went down the dead tool_result
+        // channel, and the gate then raised the same card again with the turn blocked on it.
         const q = b.name === 'AskUserQuestion' ? askUserQuestionCard(b, false) : null;
-        if (q) {
-          this.pendingQuestionId = q.requestId;
-          this.pendingQuestionCard = q;
-          this.emit(q);
-        } else {
+        if (!q) {
           if (b.name === 'TodoWrite') {
             const t = todoListState(b);
             if (t) this.emit(t);
@@ -4364,9 +4362,9 @@ export class ClaudeResumeConnection implements SessionConnection {
     this.emit({ type: 'permission-resolved', requestId, decision });
   }
 
-  /** Answer an AskUserQuestion through its NATIVE channel — a user-turn tool_result keyed to the
-   *  tool_use_id, NOT a new prompt (doc-12 Drive 'Question input'). `answers` is one array of selected
-   *  labels per question; we join them into the tool_result text the model reads back. */
+  /** Answer an AskUserQuestion through its NATIVE channel, NOT a new prompt (doc-12 Drive 'Question
+   *  input'): the control_response to the can_use_tool request gating it. `answers` is one array of
+   *  selected labels per question. A question Claude is not waiting on is refused, never written. */
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
     if (!requestId) return;
     const clearPending = () => {
@@ -4376,7 +4374,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       }
     };
     // No live child → the question's turn already ended; clear the card but DON'T fake a running turn
-    // against a dead stdin (the tool_result would be silently dropped).
+    // against a dead stdin (the answer would be silently dropped).
     if (!this.proc) {
       this.emit({ type: 'question-resolved', requestId });
       clearPending();
@@ -4413,47 +4411,30 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.emit({ type: 'status', status: 'running' });
       return;
     }
-    const text = (Array.isArray(answers) ? answers : [])
-      .map((a) => (Array.isArray(a) ? a.filter(Boolean).join(', ') : String(a ?? '')))
-      .filter(Boolean)
-      .join('\n');
-    this.writeLine({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: requestId, content: text || '(no selection)' }] },
-    });
-    this.emit({ type: 'question-resolved', requestId });
-    clearPending();
-    this.running = true;
-    this.emit({ type: 'status', status: 'running' });
+    // Answered already (by this seat or another), or never asked: nothing waits on it. A tool_result
+    // written here reached the CLI as a stray user frame and delivered nothing.
+    throw questionNotPending(requestId);
   }
 
-  /** Dismiss an open question without choosing — an is_error tool_result so the model moves on. A
-   *  control-gated question is instead released with a plain allow (no answers): the tool self-resolves
-   *  natively as "The user did not answer the questions." — the honest dismissal the model understands. */
+  /** Dismiss an open question without choosing: the gate is released with a plain allow (no answers),
+   *  and the tool self-resolves natively as "The user did not answer the questions." — the honest
+   *  dismissal the model understands. A question Claude is not waiting on is refused, as in answerQuestion. */
   async rejectQuestion(requestId: string): Promise<void> {
     if (!requestId) return;
-    if (this.pendingQuestionControlId && this.pendingQuestionId === requestId) {
-      this.writeLine({
-        type: 'control_response',
-        response: {
-          subtype: 'success',
-          request_id: this.pendingQuestionControlId,
-          response: { behavior: 'allow', updatedInput: this.pendingQuestionControlInput ?? {} },
-        },
-      });
-      this.pendingQuestionControlId = undefined;
-      this.pendingQuestionControlInput = undefined;
-    } else {
-      this.writeLine({
-        type: 'user',
-        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: requestId, content: '(question dismissed by the user)', is_error: true }] },
-      });
-    }
+    if (!this.pendingQuestionControlId || this.pendingQuestionId !== requestId) throw questionNotPending(requestId);
+    this.writeLine({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: this.pendingQuestionControlId,
+        response: { behavior: 'allow', updatedInput: this.pendingQuestionControlInput ?? {} },
+      },
+    });
+    this.pendingQuestionControlId = undefined;
+    this.pendingQuestionControlInput = undefined;
     this.emit({ type: 'question-resolved', requestId });
-    if (this.pendingQuestionId === requestId) {
-      this.pendingQuestionId = undefined;
-      this.pendingQuestionCard = undefined;
-    }
+    this.pendingQuestionId = undefined;
+    this.pendingQuestionCard = undefined;
   }
 
   getPending(): AgentMessage[] {
@@ -5009,9 +4990,13 @@ export function mapLine(
 
 type QuestionCard = Extract<AgentMessage, { type: 'question-request' }>;
 
+/** A decision on a Drive question the CLI is not waiting on; the broker nacks it as NOT_FOUND. */
+const questionNotPending = (requestId: string): ControlRefusedError =>
+  new ControlRefusedError(`Claude question ${requestId} is not pending.`, 'request-not-pending');
+
 /** Claude's first-party AskUserQuestion tool → the canonical question-request card. `readOnly` is true in
  *  Observe/history replay (the terminal owns the answer) and false on the live Drive turn (the app can
- *  answer via answerQuestion → a tool_result on the native channel). Returns null if there are no usable
+ *  answer via answerQuestion → the gate's control_response). Returns null if there are no usable
  *  questions, so the caller falls back to a generic tool-call. `multiSelect` → `multiple`. */
 function askUserQuestionCard(block: any, readOnly: boolean): QuestionCard | null {
   const requestId = String(block?.id ?? '');

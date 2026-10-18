@@ -33,6 +33,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   Fable and Mythos) shows a 1M limit. Claude Code 2.1.300 and later no longer
   marks these sessions as 1M, so the meter showed 200k until the context passed
   200k.
+- A question Claude asks in a session driven from the app becomes answerable
+  only once Claude is waiting for the answer. Previously, an answer given
+  before then never reached Claude, and the turn stayed blocked on the
+  question while the card had already closed. An answer or dismissal for a
+  question that is no longer open, for example from a second device, is
+  refused instead of being sent to Claude.
 
 ### Changed
 

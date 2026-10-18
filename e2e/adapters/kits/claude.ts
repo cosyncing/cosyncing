@@ -577,6 +577,8 @@ const claudeExtras: ConformanceExtra[] = [
       const answered = await owner.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Right']] });
       expect(answered.kind).toBe('ack');
       await owner.waitForMessage((message: any) => message.type === 'question-resolved' && message.requestId === card.requestId);
+      // A second answer to the settled card (a slower seat) is refused, and nothing reaches Claude.
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Left']] })).kind).toBe('nack');
       expect((await turn).kind).toBe('ack');
       // The agent received the answer in the control reply, and answered with it.
       await eventually(() => fake.ledger.replies('question-', mark).length === 1, { what: 'the control reply to the question' });

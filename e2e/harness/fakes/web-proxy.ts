@@ -36,11 +36,12 @@ export class WebProxy {
   #rewrites = new Map<string, Rewrite>();
   #offline = false;
   #sockets = new Set<import('node:net').Socket>();
+  #answering = new Set<{ path: string; since: number }>();
   port = 0;
 
   private constructor(upstream: string) {
     this.#upstream = upstream;
-    this.#server = createServer((req, res) => void this.#handle(req, res));
+    this.#server = createServer((req, res) => void this.#answer(req, res));
     this.#server.on('connection', (socket) => {
       this.#sockets.add(socket);
       socket.on('close', () => this.#sockets.delete(socket));
@@ -86,9 +87,29 @@ export class WebProxy {
     return this.requests.filter((entry) => entry === path).length;
   }
 
+  /** Requests this proxy has received and not yet finished answering, oldest first. */
+  unanswered(): { path: string; ms: number }[] {
+    const now = Date.now();
+    return [...this.#answering].map(({ path, since }) => ({ path, ms: now - since }));
+  }
+
   async stop(): Promise<void> {
     for (const socket of this.#sockets) socket.destroy();
     await new Promise<void>((resolve) => this.#server.close(() => resolve()));
+  }
+
+  /**
+   * Bookkeeping for `unanswered()`: an entry lives exactly as long as the handler. Bun emits no
+   * `close` on a response whose client has gone, so the handler's own end is the only signal.
+   */
+  async #answer(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const answering = { path: new URL(req.url ?? '/', 'http://x').pathname, since: Date.now() };
+    this.#answering.add(answering);
+    try {
+      await this.#handle(req, res);
+    } finally {
+      this.#answering.delete(answering);
+    }
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {

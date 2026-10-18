@@ -44,9 +44,18 @@ class TestDriveConnection extends ReasonixDriveConnection {
   private drainsStarted = 0;
   private drainsFinished = 0;
 
-  /** Resolves once a watcher drain that began after this call has finished (the subscriber must have started the watcher). */
-  async settleWatcher(timeoutMs = 10_000): Promise<void> {
-    const target = this.drainsStarted + 1;
+  /** The drain count before a write, for a {@link settleWatcher} call that something else is awaited before. */
+  watcherMark(): number {
+    return this.drainsStarted;
+  }
+
+  /**
+   * Resolves once a watcher drain that began after `since` has finished (the subscriber must have started the watcher).
+   * The default mark is this call, which is only right when nothing is awaited between the write and this call: the
+   * write's own debounced drain can otherwise start, or finish, first, and no later write would start the one awaited.
+   */
+  async settleWatcher(since = this.drainsStarted, timeoutMs = 10_000): Promise<void> {
+    const target = since + 1;
     if (!await waitFor(() => this.drainsFinished >= target, timeoutMs)) throw new Error('the watcher never drained after the write');
   }
 
@@ -663,6 +672,10 @@ try {
       && oversizedToolIdentity.title === 'Reasonix tool',
     JSON.stringify(oversizedToolIdentity));
 
+  // A created session holds no user row until Reasonix stores the first prompt: model that (a system-only snapshot)
+  // for both pending-create checks. The earlier fixture turn left on disk is a foreign first write, so any watcher
+  // drain in their window rightly demoted them, and Bun 1.3.8 delivers a write made before the watcher existed.
+  writeDurableRows([{ role: 'system', content: 'created-session system context' }], 98);
   const pendingIdentityTransport = new FakeTransport();
   const pendingIdentity = new TestDriveConnection(session, info, pendingIdentityTransport, {
     pendingCreate: { cwd: root, discover: async () => undefined },
@@ -721,6 +734,7 @@ try {
     `${JSON.stringify({ sessionId: id, status: { state: 'idle' } })}\n`);
   await postureIdentity.close();
   await postureTurn.catch(() => {});
+  restoreOriginalInitialRows();
 
   const transport = new FakeTransport();
   const correlationRegistry = new ReasonixCorrelationRegistry();
@@ -763,6 +777,8 @@ try {
 
   const delivered = JSON.stringify({ role: 'user', content: 'same text', raw_content: 'same text', createdAt: 2 });
   const deliveredOffset = Buffer.byteLength(`${lines.join('\n')}\n`);
+  // The replay below is awaited before the watcher check, so mark the drains before the write.
+  const beforeDeliveredWrite = connection.watcherMark();
   appendFileSync(transcriptPath, `${delivered}\n`);
   writeFileSync(displayIndexPath, `${JSON.stringify({ schema_version: 1, entries: [
     { index: 0, offset: offsets[0], length: Buffer.byteLength(`${lines[0]}\n`), role: 'user', authored_turn: 0 },
@@ -781,7 +797,7 @@ try {
       && replayedEchoes[0].queued === false
       && replayedEchoes[0].clientKey === 'client-1',
     JSON.stringify(replayedEchoes));
-  await connection.settleWatcher();
+  await connection.settleWatcher(beforeDeliveredWrite);
   check('the watcher cannot resurrect a prompt already reconciled by replay',
     connection.getPending().length === 0);
   const secondReplay = await connection.getHistory();
