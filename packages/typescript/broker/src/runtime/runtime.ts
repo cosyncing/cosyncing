@@ -2514,33 +2514,40 @@ function scheduleRosterRefresh(): void {
   rosterRefreshTimer.unref?.();
 }
 
-/** One discovery for every connected feed, using the widest requested window.
- * Unattached/unwatched status is discovered within 15 s (configurable) plus
- * discovery time after a completed sweep. A change missed by an in-flight
- * sweep can additionally wait for that sweep's remaining time. Failed or
- * abandoned adapter reads cannot promise freshness. No idle-client sweeps.
- * The cadence is independent of the five-minute safety-reconcile limit. */
+/** One bounded discovery for all connected feeds: the narrowest requested
+ * window, capped at seven days even for an all-only client. Returned native
+ * status reaches every feed within 15 s (configurable) plus bounded discovery
+ * time; a change missed in flight can also wait that sweep's remaining time.
+ * Rows absent from this recent reading have no removal authority in wider
+ * journals: their full reconciliation remains on the five-minute safety limit.
+ * Failed/abandoned reads cannot promise freshness. No idle-client sweeps. */
 function refreshPollingRosters(): Promise<void> {
   if (rosterRefreshInflight) return rosterRefreshInflight;
   if (rosterPollClients.size === 0) return Promise.resolve();
   clearTimeout(rosterRefreshTimer);
   const windows = [...rosterPollClients.keys()];
-  const widest = windows.includes(undefined) ? undefined : Math.max(...windows as number[]);
+  const recentWindow = Math.min(7 * 86_400_000, ...windows.filter((windowMs): windowMs is number => windowMs !== undefined));
   rosterRefreshInflight = (async () => {
-    const roster = await discoverLocalRoster(true, widest, attentionClock.now());
+    const roster = await discoverLocalRoster(true, recentWindow, attentionClock.now());
     const now = attentionClock.now();
-    // A wider sweep has removal authority for narrower views, never vice versa.
-    // Carry the adapter coverage with the rows to preserve unconfirmed sessions.
+    // Only equal/narrower views have removal authority. A bounded reading
+    // must never erase an all-time archive or postpone its full reconciliation.
     for (const windowMs of rosterPollClients.keys()) {
-      if (windowMs === widest || (widest !== undefined && (windowMs === undefined || windowMs > widest))) continue;
+      if (windowMs === recentWindow) continue;
       const store = rosterRevisionForWindow(windowMs);
-      store.reconcile(filterSessionsByWindow(roster.rows, windowMs, now), MACHINE, {
-        withheldTools: withheldBackends(roster.coverage),
-      });
+      const rows = filterSessionsByWindow(roster.rows, windowMs, now);
       const key = windowMs === undefined ? 'all' : String(windowMs);
-      rosterSafetyReconciledAt.set(key, now);
-      // Keep subsequent snapshots from re-publishing the older narrow cache.
-      rosterSweeps.publish(key, { rows: store.snapshot(), coverage: roster.coverage }, now);
+      if (windowMs !== undefined && windowMs < recentWindow) {
+        store.reconcile(rows, MACHINE, { withheldTools: withheldBackends(roster.coverage) });
+        rosterSafetyReconciledAt.set(key, now);
+        rosterSweeps.publish(key, { rows: store.snapshot(), coverage: roster.coverage }, now);
+      } else {
+        for (const row of rows) store.observe(row, MACHINE);
+        const cached = rosterSweeps.snapshot(key);
+        // Preserve the wider snapshot's coverage and age. This prevents a
+        // cached GET from undoing upserts without claiming a new full reading.
+        if (cached) rosterSweeps.publish(key, { rows: store.snapshot(), coverage: cached.coverage }, cached.at);
+      }
       ageRosterWindow(windowMs, now);
     }
   })().catch((error: unknown) => {
@@ -2565,15 +2572,14 @@ function connectRosterPoll(windowMs: number | undefined): () => void {
   };
 }
 
-function safetyReconcileRoster(windowMs: number | undefined, now: number, shortPoll: boolean): Promise<void> {
+function safetyReconcileRoster(windowMs: number | undefined, now: number): Promise<void> {
   const key = windowMs === undefined ? 'all' : String(windowMs);
   const reconciledAt = rosterSafetyReconciledAt.get(key);
   if (reconciledAt !== undefined && now - reconciledAt < ROSTER_SAFETY_RECONCILE_MS) return Promise.resolve();
   rosterSafetyReconciledAt.set(key, now);
-  // A zero-wait reader may start without a snapshot. Preserve its initial
-  // reading and five-minute safety refresh, without enrolling it in the cadence.
-  if (shortPoll) return discoverLocalSessions(true, windowMs, now).then(() => {});
-  return refreshPollingRosters();
+  // Full removal authority belongs to this window's rate-limited safety read,
+  // including for zero-wait clients that have not fetched an initial snapshot.
+  return discoverLocalSessions(true, windowMs, now).then(() => {});
 }
 
 attentionClock.onMove(() => {
@@ -8261,8 +8267,11 @@ server = Bun.serve<WsData>({
           // Discovery may outlive this request. Its shared work cannot hold a
           // cancelled client, and an unchanged reconcile consumes only the
           // original deadline rather than answering an empty poll immediately.
-          const reconcile = safetyReconcileRoster(windowMs, attentionClock.now(), requestedWaitMs === 0);
+          const reconcile = safetyReconcileRoster(windowMs, attentionClock.now());
           if (requestedWaitMs === 0) await reconcile;
+          else void reconcile.catch((error: unknown) => {
+            console.warn(`${LOG_PREFIX} roster safety reconciliation failed: ${String(error)}`);
+          });
           for (;;) {
             const now = attentionClock.now();
             ageRosterWindow(windowMs, now);
